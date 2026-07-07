@@ -119,16 +119,16 @@ pub struct PageTable<T> {
 
 **Цель**: звук — такой же компонент движка, как Position или Health. Spatial audio, DSP-конвейер, Desktop и Web.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 4.1 | Компоненты `AudioSource` и `AudioListener` | `ComponentStore<AudioSource>`, `ComponentStore<AudioListener>` | Сущность с `AudioSource` + `Position` издаёт звук, угасающий с расстоянием до `AudioListener` |
-| 4.2 | Бэкенд `cpal` (Desktop) | `cpal` crate | Поток `f32` сэмплов воспроизводится через CoreAudio/WASAPI/ALSA |
-| 4.3 | Декодинг аудиоформатов | `symphonia` | `.wav`, `.ogg`, `.mp3` загружаются в `AssetStorage<AudioClip>` |
-| 4.4 | Микшер в real-time потоке | `crossbeam-channel`, выделенный OS-тред (RT priority) | Микс N источников без щелчков и xruns; 48 кГц, буфер 512 сэмплов |
-| 4.5 | Spatial audio (3D) | Panning, distance rolloff, Doppler | Позиция звука читается из `Position` той же сущности; автоматический rolloff и панорамирование |
-| 4.6 | Web Audio API бэкенд | `wasm-bindgen`, Web Audio API | WASM-сборка использует нативный WebAudio браузера (нулевой оверхед) |
-| 4.7 | **DSP-эффекты на GPU** (future) | `#[kernel]`, wgpu compute | Реверберация (FFT-свёртка) и EQ работают на GPU с латентностью <10 мс |
-| 4.8 | **Процедурная генерация звука** (future) | `#[kernel]`, математический синтез | Звуки шагов, выстрелов, ветра — без файлов, через compute-шейдер |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 4.1 | Компоненты `AudioSource` и `AudioListener` | `ComponentStore<AudioSource>`, `ComponentStore<AudioListener>` | ✅ |
+| 4.2 | Бэкенд `cpal` (Desktop) | `cpal` crate | ✅ |
+| 4.3 | Декодинг аудиоформатов | `symphonia` | ✅ |
+| 4.4 | Микшер в real-time потоке | `crossbeam-channel`, выделенный OS-тред (RT priority) | ✅ |
+| 4.5 | Spatial audio (3D) | Panning, distance rolloff, Doppler | ✅ |
+| 4.6 | Web Audio API бэкенд | `wasm-bindgen`, Web Audio API | ❌ |
+| 4.7 | **DSP-эффекты на GPU** (future) | `#[kernel]`, wgpu compute | ⏳ |
+| 4.8 | **Процедурная генерация звука** (future) | `#[kernel]`, математический синтез | ⏳ |
 
 ---
 
