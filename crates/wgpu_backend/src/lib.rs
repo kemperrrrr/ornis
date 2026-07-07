@@ -1,1 +1,20 @@
+pub mod context;
+pub mod buffer;
+pub mod smart_buffer;
+pub mod dispatcher;
+pub mod profiler;
+pub mod router;
+pub mod command_sync;
+pub mod execute;
+pub mod pso_cache;
+pub mod leak;
 
+pub use context::WgpuContext;
+pub use buffer::{create_buffer_from_store, create_buffer_from_slice};
+pub use smart_buffer::{SmartBuffer, ResidencyFlags};
+pub use dispatcher::{ExecutionTarget, Platform, DispatchConfig, choose_platform};
+pub use profiler::{AutoProfiler, ProfilerConfig};
+pub use router::PipelineRouter;
+pub use execute::{CpuExecutor, GpuExecutor, ExecuteLane, dispatch_lane, dispatch_with};
+pub use pso_cache::PsoCache;
+pub use leak::{leak_wgsl, leak_wgsl_typed, LeakDispatch};

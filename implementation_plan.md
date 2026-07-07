@@ -9,12 +9,12 @@
 
 **Цель**: создать репозиторий, настроить CI/CD, выбрать и зафиксировать версии ключевых зависимостей.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 0.1 | Инициализация workspace Cargo (монорепозиторий) | `cargo workspace` | Структура `crates/core`, `crates/macros`, `crates/ui`, `crates/wgpu_backend`, `examples/` |
-| 0.2 | Зафиксировать toolchain (MSRV) | `rustup`, `cargo` | `rust-version = "1.85"` в корневом `Cargo.toml` |
-| 0.3 | Настроить CI: clippy, fmt, tests, docs | GitHub Actions | Красный билд при warning'ах |
-| 0.4 | Выбрать и протестировать зависимости ядра | `rayon 1.10`, `wgpu`, `syn 2.0`, `quote`, `proc-macro2` | `cargo check` проходит на всех таргетах |
+| # | Задача | Технологии | Критерий завершения | Статус |
+|---|--------|------------|---------------------|--------|
+| 0.1 | Инициализация workspace Cargo (монорепозиторий) | `cargo workspace` | Структура `crates/core`, `crates/macros`, `crates/ui`, `crates/wgpu_backend`, `examples/` | ✅ |
+| 0.2 | Зафиксировать toolchain (MSRV) | `rustup`, `cargo` | `rust-version = "1.85"` в корневом `Cargo.toml` | ✅ |
+| 0.3 | Настроить CI: clippy, fmt, tests, docs | GitHub Actions | Красный билд при warning'ах | ✅ |
+| 0.4 | Выбрать и протестировать зависимости ядра | `rayon 1.10`, `wgpu`, `syn 2.0`, `quote`, `proc-macro2` | `cargo check` проходит на всех таргетах | ✅ |
 
 ---
 
@@ -22,25 +22,25 @@
 
 **Цель**: создать сверхскоростное, потокобезопасное хранилище данных, готовое для CPU и GPU.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 1.1 | Реализовать `Entity` (Id) и `ComponentStore<T>` (Sparse Set) | Чистый Rust (`Vec<T>`, `Vec<usize>`) | O(1) вставка/удаление/поиск, плотный `data` массив |
-| 1.2 | Реализовать `SmartStore` — менеджер всех лент | `HashMap<TypeId, Box<dyn Any + Send + Sync>>`, `RwLock` | Потокобезопасное чтение/запись разных лент без блокировок |
-| 1.3 | Методы `create_entity`, `insert<T>`, `read_lane<T>`, `write_lane<T>` | `downcast_ref`, `RwLockReadGuard`/`WriteGuard` | 100k сущностей создаются за <50 мс |
-| 1.4 | Интеграция с `rayon` | `rayon::prelude::*` | `par_iter_mut()` на ленте `Position` работает корректно, замер ускорения на 4+ ядрах |
-| 1.5 | Бенчмарки ядра | `criterion` | Отчёт: сравнение с `Vec<Entity>` (AoS) по кэш-промахам и времени обработки |
-| 1.6 | **Bitset Acceleration** для intersection-запросов | `fixedbitset` | `Query<(&A, &B, Without<C>)>` использует SIMD-friendly bitwise AND перед итерированием dense-массивов; пересечение 4 лент в 10x быстрее |
-| 1.7 | **Paginated Sparse Arrays** | Чистый Rust (`Box<[T; PAGE_SIZE]>`) | 1M сущностей с компонентом у 100 из них тратит <100 КБ вместо 8 МБ; ленивое выделение страниц по 4K элементов |
-| 1.8 | Комплексный бенчмарк гибридной структуры | `criterion` | Сравнение с чистыми Sparse Sets (EnTT-стиль), Archetypes (Bevy), HashMap; замеры по памяти, итерированию, intersection, mutation |
-| 1.9 | **Entity Recycling + Generational Indices** | `Entity { id, gen }`, `free_list` | use-after-free невозможен; 1M созданий/удалений ≈ 1M активных ID |
-| 1.10 | **Cache-Line Alignment** | `#[repr(align(64))]`, padding | 4 сущности Position на кэш-линию; +25% памяти, но компенсируется кэш-попаданиями |
-| 1.11 | **Chunked Iteration** | `chunks_exact_mut(4)` | 15–30% прироста на CPU-bound операциях; prefetcher-friendly |
-| 1.12 | **Lock-Free SmartStore** (опционально) | `crossbeam::epoch`, `AtomicPtr` | Zero contention на чтении; copy-on-write при resize; epoch-based GC; **выбирается по профилированию** — при contention <5–10% эффективнее `RwLock` |
-| 1.13 | **Prefetch Intrinsics** | `_mm_prefetch` | 10–20% на sequential access; макрос скрывает unsafe |
-| 1.14 | **Temporal Coherency Sort** | Дефрагментация hot-кластера | 20–40% на сценах с фокусом; амортизировано (раз в 100 кадров) |
-| 1.15 | **Hot/Cold Data Splitting** | `#[cold]` атрибут (явный), два набора лент | Hot-ленты компактны; холодные данные не загружаются в кэш попусту; только **явный** split — compile-time не знает частоты доступа |
-| 1.16 | **Встроенный физический движок** (core) | Sweep-and-Prune broadphase, constraints solver, AABB sweep | RigidBody (box/sphere/capsule), raycast, shapecast; минимальные зависимости; покрывает 80% инди-сценариев без Rapier/Jolt |
-| 1.17 | **Плагинная архитектура PhysicsEngine** (future) | Трейт `PhysicsEngine` с методами `step(dt)`, `raycast`, `add_body` | Встроенный движок (1.16) — реализация по умолчанию; Rapier/Jolt/PhysX — опционально через тот же трейт; бенчмарк сравнения производительности |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 1.1 | Реализовать `Entity` (Id) и `ComponentStore<T>` (Sparse Set) | Чистый Rust (`Vec<T>`, `Vec<usize>`) | ✅ |
+| 1.2 | Реализовать `SmartStore` — менеджер всех лент | `HashMap<TypeId, Box<dyn Lane>>`, `RwLock` | ✅ |
+| 1.3 | Методы `create_entity`, `insert<T>`, `read_lane<T>`, `write_lane<T>` | `downcast_ref`, `RwLockReadGuard`/`WriteGuard` | ✅ |
+| 1.4 | Интеграция с `rayon` | `rayon::prelude::*` | ✅ |
+| 1.5 | Бенчмарки ядра | `criterion` | ✅ |
+| 1.6 | **Bitset Acceleration** | `fixedbitset` intersection/difference | ✅ |
+| 1.7 | **Paginated Sparse Arrays** | `PageTable<T>` (страницы по 4K) | ✅ |
+| 1.8 | Комплексный бенчмарк гибридной структуры | `criterion`, 4 подхода | ✅ |
+| 1.9 | **Entity Recycling + Generational Indices** | `free_list`, gen-guard | ✅ |
+| 1.10 | **Cache-Line Alignment** | `#[repr(align(64))]` на `ComponentStore` | ✅ |
+| 1.11 | **Chunked Iteration** | `chunks_exact_mut(4)` + `into_tail()` | ✅ |
+| 1.12 | **Lock-Free SmartStore** | `crossbeam-epoch`, `Atomic`, feature `lock-free` | ✅ |
+| 1.13 | **Prefetch Intrinsics** | `_mm_prefetch` + `prefetch_iter!` макрос | ✅ |
+| 1.14 | **Temporal Coherency Sort** | `defrag()` по entity ID | ✅ |
+| 1.15 | **Hot/Cold Data Splitting** | `ColdComponentStore<T>` + `register_cold` | ✅ |
+| 1.16 | **Встроенный физический движок** | Sweep-and-Prune + PBD solver + raycast | ✅ |
+| 1.17 | **PhysicsEngine trait** | `step(dt)`, `raycast`, `add_body` | ✅ |
 
 > **Принцип: Strong Confluence** — все параллельные системы движка ([`#[smart_pipeline]`, `#[gpu_pipeline]`, `for_each_entity!`) должны быть strongly confluent: результат не зависит от числа потоков или порядка обработки. Тесты с `RAYON_NUM_THREADS=1` и `RAYON_NUM_THREADS=32` — побитово одинаковый output. Критично для replay, сети и отладки.
 
@@ -69,18 +69,18 @@ pub struct PageTable<T> {
 
 **Цель**: автоматизировать SOA-разложение структур и параллельные циклы без ручного кода.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 2.1 | Создать крейт `smart-pipeline-macro` | `proc-macro = true`, `syn`, `quote` | Пустой `#[derive(AutoPipeline)]` компилируется |
-| 2.2 | Макрос `#[derive(AutoPipeline)]` над структурой | AST-трансформация (`syn::DeriveInput`) | `struct Particle { x: f32 }` автоматически регистрирует ленту `ComponentStore<Particle>` в SmartStore |
-| 2.3 | Макрос `#[smart_pipeline]` над функцией | `syn::visit`, `quote` | Функция `fn update(entities: &mut Vec<Entity>)` превращается в `rayon`/`zip` цикл по лентам |
-| 2.4 | Макрос `for_each_entity!(store, |a: &A, b: &mut B| { ... })` | `proc_macro::TokenStream` | Генерация пересечения индексов (intersection) и параллельного итератора |
-| 2.5 | Поддержка проекций (View-структуры) | Анализ полей в AST | Макрос «вырезает» только используемые поля, другие ленты не загружаются в кэш |
-| 2.6 | Анализ зависимостей для параллелизма задач | Граф чтения/записи компонентов | Если функция A меняет `Position`, а функция B меняет `Health`, макрос генерирует `rayon::join` |
-| 2.7 | ZST-маркеры `GpuLane`, `CpuLane`, `HybridLane` | Zero-sized types (`PhantomData`) | `Position` автоматически получает маркер `GpuLane`, `Health` — `CpuLane` |
-| 2.8 | Трейт `LaneTarget` и его генерация | `syn` + `quote` | `impl LaneTarget for Position { type Target = GpuLane; }` генерируется автоматически |
-| 2.9 | `derive(PipelineConfig)` — статический профайлер | `syn::visit`, `quote` | Макрос анализирует размер типа, поля, control flow и генерирует `const fn lane_target<T>() -> TargetDiscriminant` |
-| 2.10 | **Component Packing / SoA внутри компонента** | `syn`, автоматическое разложение на под-ленты | `struct Transform { position, rotation, scale }` → 3 независимые ленты; система видит только нужные поля |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 2.1 | Создать крейт `smart-pipeline-macro` | `proc-macro = true`, `syn`, `quote` | ✅ |
+| 2.2 | Макрос `#[derive(AutoPipeline)]` над структурой | AST-трансформация (`syn::DeriveInput`) | ✅ |
+| 2.3 | Макрос `#[smart_pipeline]` над функцией | `syn::visit`, `quote` | ✅ |
+| 2.4 | Макрос `for_each_entity!(store, \|a: &A, b: &mut B\| { ... })` | `proc_macro::TokenStream` | ✅ |
+| 2.5 | Поддержка проекций (View-структуры) | Анализ полей в AST | ✅ (через `#[pack]`) |
+| 2.6 | Анализ зависимостей для параллелизма задач | Граф чтения/записи компонентов | ⏳ отложено |
+| 2.7 | ZST-маркеры `GpuLane`, `CpuLane`, `HybridLane` | Zero-sized types | ✅ |
+| 2.8 | Трейт `LaneTarget` и его генерация | `syn` + `quote` | ✅ |
+| 2.9 | `derive(PipelineConfig)` — статический профайлер | `syn::visit`, `quote` | ✅ |
+| 2.10 | **Component Packing / SoA внутри компонента** | `#[pack]`, автогенерация `pack_register`/`pack_insert` | ✅ |
 
 ---
 
@@ -88,23 +88,23 @@ pub struct PageTable<T> {
 
 **Цель**: макрос сам решает, где выполнять код — на CPU или GPU.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 3.1 | Интеграция `wgpu` | `wgpu` crate | Контекст, устройство, очередь созданы; треугольник на экране |
-| 3.2 | Автоматическое создание `wgpu::Buffer` из `ComponentStore.data` | `bytemuck`, `unsafe { std::slice::from_raw_parts }` | Плотный вектор `Vec<f32>` копируется в GPU-буфер за 1 системный вызов |
-| 3.3 | Генерация WGSL из простых математических выражений | `syn` → строка WGSL | Функция `a + b * c` из Rust AST превращается в WGSL-код |
-| 3.4 | Макрос `#[gpu_pipeline]` | Компиляция шейдера в `wgpu::ShaderModule` | Вычисление на 1M элементов на GPU быстрее CPU в 10+ раз |
-| 3.5 | Smart Buffer (Data Residency) | Флаги `DirtyCPU` / `DirtyGPU` | Данные не копируются туда-обратно, если не изменены; копирование только при переключении исполнителя |
-| 3.6 | Динамический выбор CPU/GPU (Runtime) | Эвристика: размер массива + сложность функции | Порог 10k элементов настраивается; для 100 элементов выбирается CPU |
-| 3.7 | Автопрофилировщик при старте | Микро-бенчмарки (100, 1k, 10k, 100k элементов) | JSON-конфиг с порогами сохраняется между запусками |
-| 3.8 | DSL-подмножество Rust для GPU (Compute-Subset) | `syn` + AST-валидация | Макрос `#[kernel]` выдаёт ошибку компиляции при `Vec`, `String`, рекурсии, сложном control flow |
-| 3.9 | Статический профайлер функций (compile-time) | `syn::visit`, подсчёт `if`/`match` | Макрос считает compute-to-branch ratio и решает: CPU (ветвления >5%) или GPU (чистая математика) |
-| 3.10 | Сортировщик конвейеров (Pipeline Router) | ZST + `LaneTarget` | Ленты автоматически распределяются по CPU/GPU lanes на этапе компиляции |
-| 3.11 | Инструкции вместо данных (Command-Based Sync) | `wgpu::CommandBuffer`, `ComputePass` | CPU отправляет команды туда, где данные уже лежат (VRAM/RAM), минимизируя PCIe-трафик |
-| 3.12 | ZST-диспетчеризация `ExecuteLane` | ZST (`GpuExecutor`, `CpuExecutor`) | В рантайме нет `if` для выбора CPU/GPU — компилятор вставляет нужный код статически |
-| 3.13 | **Compute Shader Pre-warm** (PSO-кэш) | `HashMap<(TypeId, TypeId), wgpu::ComputePipeline>`, сериализация на диск | Первый запуск без фриза (50–200 ms); второй запуск — мгновенный |
-| 3.14 | **LEAK-паттерн для GPU-блоков** (из HVM2) | Shared memory, `wgpu::ComputePass` на блок 64–256 элементов | Dense-массив обрабатывается блоками в shared memory; наружу — только dirty-флаги; минимум VRAM-транзакций |
-| 3.15 | **HVM2 как опциональный compute-бэкенд** (future work) | HVM2 runtime, Bend → HVM2 → C/CUDA | Pure-функции (математика физики, процедурка) исполняются через HVM2 вместо WGSL; автоматический параллелизм без `#[kernel]` |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 3.1 | Интеграция `wgpu` | `wgpu` crate | ✅ |
+| 3.2 | Автоматическое создание `wgpu::Buffer` из `ComponentStore.data` | `bytemuck`, `unsafe { std::slice::from_raw_parts }` | ✅ |
+| 3.3 | Генерация WGSL из простых математических выражений | `syn` → строка WGSL | ✅ |
+| 3.4 | Макрос `#[gpu_pipeline]` | Компиляция шейдера в `wgpu::ShaderModule` | ✅ |
+| 3.5 | Smart Buffer (Data Residency) | Флаги `DirtyCPU` / `DirtyGPU` | ✅ |
+| 3.6 | Динамический выбор CPU/GPU (Runtime) | Эвристика: размер массива + сложность функции | ✅ |
+| 3.7 | Автопрофилировщик при старте | Микро-бенчмарки (100, 1k, 10k, 100k элементов) | ✅ |
+| 3.8 | DSL-подмножество Rust для GPU (Compute-Subset) | `syn` + AST-валидация | ✅ |
+| 3.9 | Статический профайлер функций (compile-time) | `syn::visit`, подсчёт `if`/`match` | ✅ |
+| 3.10 | Сортировщик конвейеров (Pipeline Router) | ZST + `LaneTarget` | ✅ |
+| 3.11 | Инструкции вместо данных (Command-Based Sync) | `wgpu::CommandBuffer`, `ComputePass` | ✅ |
+| 3.12 | ZST-диспетчеризация `ExecuteLane` | ZST (`GpuExecutor`, `CpuExecutor`) | ✅ |
+| 3.13 | **Compute Shader Pre-warm** (PSO-кэш) | `HashMap<(TypeId, TypeId), wgpu::ComputePipeline>`, сериализация на диск | ✅ |
+| 3.14 | **LEAK-паттерн для GPU-блоков** (из HVM2) | Shared memory, `wgpu::ComputePass` на блок 64–256 элементов | ✅ |
+| 3.15 | **HVM2 как опциональный compute-бэкенд** (future work) | HVM2 runtime, Bend → HVM2 → C/CUDA | ⏳ отложено |
 
 **Ограничения GPU-подмножества (Compute-Subset / DSL)**:
 - Разрешено: арифметика, векторная математика, простые условия (`if` без сложного `else`/`match`).

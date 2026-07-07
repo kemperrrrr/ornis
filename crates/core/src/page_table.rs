@@ -10,6 +10,20 @@ impl<T: Clone + Default> Default for PageTable<T> {
     }
 }
 
+impl<T: Clone + Default> Clone for PageTable<T> {
+    fn clone(&self) -> Self {
+        Self {
+            pages: self.pages.iter().map(|opt| {
+                opt.as_ref().map(|b| {
+                    let mut v: Vec<T> = Vec::with_capacity(PAGE_SIZE);
+                    v.extend_from_slice(&b[..]);
+                    v.into_boxed_slice().try_into().ok().unwrap()
+                })
+            }).collect(),
+        }
+    }
+}
+
 impl<T: Clone + Default> PageTable<T> {
     pub fn new() -> Self {
         Self::default()

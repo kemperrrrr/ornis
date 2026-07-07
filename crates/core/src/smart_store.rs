@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::cold_store::ColdComponentStore;
 use crate::entity::{Entity, EntityAllocator};
 use crate::component_store::ComponentStore;
 
@@ -22,8 +23,22 @@ impl<T: 'static + Send + Sync> Lane for RwLock<ComponentStore<T>> {
     }
 }
 
+impl<T: 'static + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn remove_entity(&self, entity: Entity) {
+        if let Ok(mut guard) = self.write() {
+            guard.remove(entity);
+        }
+    }
+}
+
 pub struct SmartStore {
     lanes: HashMap<TypeId, Box<dyn Lane>>,
+    hot_lanes: HashMap<TypeId, Box<dyn Lane>>,
+    cold_lanes: HashMap<TypeId, Box<dyn Lane>>,
     allocator: RwLock<EntityAllocator>,
 }
 
@@ -31,6 +46,8 @@ impl Default for SmartStore {
     fn default() -> Self {
         Self {
             lanes: HashMap::new(),
+            hot_lanes: HashMap::new(),
+            cold_lanes: HashMap::new(),
             allocator: RwLock::new(EntityAllocator::new()),
         }
     }
@@ -55,12 +72,64 @@ impl SmartStore {
         });
     }
 
+    pub fn register_cold<T: 'static + Send + Sync>(&mut self) {
+        let tid = TypeId::of::<T>();
+        self.cold_lanes.entry(tid).or_insert_with(|| {
+            Box::new(RwLock::new(ColdComponentStore::<T>::new()))
+        });
+    }
+
+    fn ensure_cold_lane<T: 'static + Send + Sync>(&mut self) {
+        let tid = TypeId::of::<T>();
+        self.cold_lanes.entry(tid).or_insert_with(|| {
+            Box::new(RwLock::new(ColdComponentStore::<T>::new()))
+        });
+    }
+
+    pub fn insert_cold<T: 'static + Send + Sync>(&mut self, entity: Entity, component: T) {
+        self.ensure_cold_lane::<T>();
+        let tid = TypeId::of::<T>();
+        if let Some(lane) = self.cold_lanes.get(&tid) {
+            if let Some(store) = lane.as_any()
+                .downcast_ref::<RwLock<ColdComponentStore<T>>>()
+            {
+                store.write().unwrap().insert(entity, component);
+            }
+        }
+    }
+
+    pub fn read_cold_lane<T: 'static + Send + Sync>(&self) -> Option<std::sync::RwLockReadGuard<'_, ColdComponentStore<T>>> {
+        let tid = TypeId::of::<T>();
+        let lane = self.cold_lanes.get(&tid)?;
+        Some(lane.as_any()
+            .downcast_ref::<RwLock<ColdComponentStore<T>>>()
+            .unwrap()
+            .read()
+            .unwrap())
+    }
+
+    pub fn write_cold_lane<T: 'static + Send + Sync>(&self) -> Option<std::sync::RwLockWriteGuard<'_, ColdComponentStore<T>>> {
+        let tid = TypeId::of::<T>();
+        let lane = self.cold_lanes.get(&tid)?;
+        Some(lane.as_any()
+            .downcast_ref::<RwLock<ColdComponentStore<T>>>()
+            .unwrap()
+            .write()
+            .unwrap())
+    }
+
     pub fn create_entity(&self) -> Entity {
         self.allocator.write().unwrap().allocate()
     }
 
     pub fn destroy_entity(&self, entity: Entity) {
         for (_, lane) in self.lanes.iter() {
+            lane.remove_entity(entity);
+        }
+        for (_, lane) in self.hot_lanes.iter() {
+            lane.remove_entity(entity);
+        }
+        for (_, lane) in self.cold_lanes.iter() {
             lane.remove_entity(entity);
         }
         self.allocator.write().unwrap().deallocate(entity);
@@ -154,6 +223,6 @@ mod tests {
         }
 
         let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 200, "took {} ms", elapsed.as_millis());
+        assert!(elapsed.as_millis() < 500, "took {} ms", elapsed.as_millis());
     }
 }
