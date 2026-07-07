@@ -1,0 +1,17 @@
+[package]
+name = "ornis-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rayon = "1.10"
+fixedbitset = "0.5"
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["rayon"] }
+
+[[bench]]
+name = "store_bench"
+harness = false
