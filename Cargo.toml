@@ -5,6 +5,7 @@ members = [
     "crates/macros",
     "crates/ui",
     "crates/wgpu_backend",
+    "crates/audio",
 ]
 
 [workspace.package]

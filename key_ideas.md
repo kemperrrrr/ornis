@@ -392,6 +392,17 @@ pub struct ComponentStore<T> {
 
 ---
 
+## 26. Аудиосистема — Sparse Sets для звука + DSP
+
+- **Звук как компонент**: `AudioSource { clip_id, volume, pitch, spatial, playing }` и `AudioListener { gain }` — обычные ленты в `SmartStore`. Сущность со звуком = `Entity { Position, AudioSource }`.
+- **Spatial audio**: система читает `Position` сущности + `Position` камеры (из `AudioListener`), считает rolloff и панораму — всё через `for_each_entity!` и `rayon`.
+- **Аудиограф**: микшер в реальном потоке (OS-тред с высоким приоритетом). DSP-эффекты (reverb, EQ, compression) — цепочка чистых функций, читающих из лент.
+- **GPU Audio (future)**: свёртка, FFT, спектральный анализ — через `#[kernel]` на wgpu. Латентность 5–10 мс приемлема для музыки и окружения.
+- **Бэкенды**: `cpal` (Desktop: ALSA/WASAPI/CoreAudio), Web Audio API (WASM), выделенный real-time поток.
+- **Ассеты**: `.wav`/`.ogg`/`.mp3` через `symphonia` → `AssetStorage`. Стриминг длинной музыки через кольцевой буфер.
+
+---
+
 ## Сводная таблица преимуществ
 
 | Критерий | Bevy (Архетипы) | Unity DOTS | Предлагаемый движок (Sparse Sets + Smart GPU/CPU) |

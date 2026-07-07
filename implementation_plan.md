@@ -115,129 +115,145 @@ pub struct PageTable<T> {
 
 ---
 
-## Фаза 4. UI-система + Материалы — Headless DOM + WGPU-рендеринг + OpenPBR/MaterialX
+## Фаза 4. Аудиосистема — Sparse Sets для звука + DSP
+
+**Цель**: звук — такой же компонент движка, как Position или Health. Spatial audio, DSP-конвейер, Desktop и Web.
+
+| # | Задача | Технологии | Критерий завершения |
+|---|--------|------------|---------------------|
+| 4.1 | Компоненты `AudioSource` и `AudioListener` | `ComponentStore<AudioSource>`, `ComponentStore<AudioListener>` | Сущность с `AudioSource` + `Position` издаёт звук, угасающий с расстоянием до `AudioListener` |
+| 4.2 | Бэкенд `cpal` (Desktop) | `cpal` crate | Поток `f32` сэмплов воспроизводится через CoreAudio/WASAPI/ALSA |
+| 4.3 | Декодинг аудиоформатов | `symphonia` | `.wav`, `.ogg`, `.mp3` загружаются в `AssetStorage<AudioClip>` |
+| 4.4 | Микшер в real-time потоке | `crossbeam-channel`, выделенный OS-тред (RT priority) | Микс N источников без щелчков и xruns; 48 кГц, буфер 512 сэмплов |
+| 4.5 | Spatial audio (3D) | Panning, distance rolloff, Doppler | Позиция звука читается из `Position` той же сущности; автоматический rolloff и панорамирование |
+| 4.6 | Web Audio API бэкенд | `wasm-bindgen`, Web Audio API | WASM-сборка использует нативный WebAudio браузера (нулевой оверхед) |
+| 4.7 | **DSP-эффекты на GPU** (future) | `#[kernel]`, wgpu compute | Реверберация (FFT-свёртка) и EQ работают на GPU с латентностью <10 мс |
+| 4.8 | **Процедурная генерация звука** (future) | `#[kernel]`, математический синтез | Звуки шагов, выстрелов, ветра — без файлов, через compute-шейдер |
+
+---
+
+## Фаза 5. UI-система + Материалы — Headless DOM + WGPU-рендеринг + OpenPBR/MaterialX
 
 **Цель**: рендерить HTML/CSS через GPU, а JS-логику выполнять внутри движка. Поддержка OpenPBR и MaterialX для материалов.
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 4.1 | Парсинг HTML/CSS в Rust + интеграция Servo | `html5ever`, `lightningcss`, `taffy`, `servo-core` (опционально) | Полноценный парсинг; либо через `html5ever`/`lightningcss` (легковесно), либо через `Servo` (полная совместимость) |
-| 4.1a | Интеграция Servo как библиотеки | `servo`, `webrender` | HTML/CSS/JS исполняется полноценно; layout-результаты попадают в Sparse Sets, а рендеринг — в `wgpu` |
-| 4.2 | Векторный рендеринг (SVG + UI) | `vello`, `usvg`, `resvg` | SVG-иконка и прямоугольник кнопки рисуются через `wgpu` в 144+ FPS |
-| 4.3 | Встроенный JS-интерпретатор | `boa_engine` или `rquickjs` | JS-скрипт выполняется внутри Rust-процесса, вызывает `globalThis.document.createElement` |
-| 4.4 | Headless DOM (шим для JS) | Реализация `VirtualElement`, `document`, `window` | React запускается без реального браузера, создавая виртуальные узлы |
-| 4.5 | Связь JS ↔ Rust (Sparse Sets) | FFI, бинарные вызовы, `crossbeam-channel` / `flume` | Движение ползунка в JS мгновенно обновляет `ComponentStore<UIStyle>` |
-| 4.6 | Двухсторонний IPC (UI-поток ↔ игровой поток) | Lock-free MPMC канал | UI не блокирует игровой цикл; 60+ FPS игры + 144 FPS UI |
-| 4.7 | In-Game Editor | Overlay Render Pass | По кнопке (например, `~`) открывается редактор повью игрового мира |
-| 4.8 | Удалённый редактор (Web) | WebSocket / HTTP | Игра на ПК, редактор на планшете/ноутбуке в браузере |
-| 4.9 | **Система материалов: OpenPBR Surface** | `naga`, WGSL-генерация | Поддержка OpenPBR (металличность, шероховатость, clearcoat, sheen, subsurface); материал → `ComponentStore<Material>` → `wgpu::BindGroup` |
-| 4.10 | **Поддержка MaterialX** | `materialx` crate или кастомный парсер `.mtlx` в WGSL | Импорт MaterialX-нод-графа; компиляция в шейдеры wgpu; совместимость с VFX-пайплайном |
-| 4.11 | **Рендер-пайплайн материалов** | Deferred + Forward hybrid | OpenPBR-шейдеры рендерятся одним compute pass на GPU; переключение между собственным рендером и внешним — через `RenderBackend` trait |
+| 5.1 | Парсинг HTML/CSS в Rust + интеграция Servo | `html5ever`, `lightningcss`, `taffy`, `servo-core` (опционально) | Полноценный парсинг; либо через `html5ever`/`lightningcss` (легковесно), либо через `Servo` (полная совместимость) |
+| 5.1a | Интеграция Servo как библиотеки | `servo`, `webrender` | HTML/CSS/JS исполняется полноценно; layout-результаты попадают в Sparse Sets, а рендеринг — в `wgpu` |
+| 5.2 | Векторный рендеринг (SVG + UI) | `vello`, `usvg`, `resvg` | SVG-иконка и прямоугольник кнопки рисуются через `wgpu` в 144+ FPS |
+| 5.3 | Встроенный JS-интерпретатор | `boa_engine` или `rquickjs` | JS-скрипт выполняется внутри Rust-процесса, вызывает `globalThis.document.createElement` |
+| 5.4 | Headless DOM (шим для JS) | Реализация `VirtualElement`, `document`, `window` | React запускается без реального браузера, создавая виртуальные узлы |
+| 5.5 | Связь JS ↔ Rust (Sparse Sets) | FFI, бинарные вызовы, `crossbeam-channel` / `flume` | Движение ползунка в JS мгновенно обновляет `ComponentStore<UIStyle>` |
+| 5.6 | Двухсторонний IPC (UI-поток ↔ игровой поток) | Lock-free MPMC канал | UI не блокирует игровой цикл; 60+ FPS игры + 144 FPS UI |
+| 5.7 | In-Game Editor | Overlay Render Pass | По кнопке (например, `~`) открывается редактор повью игрового мира |
+| 5.8 | Удалённый редактор (Web) | WebSocket / HTTP | Игра на ПК, редактор на планшете/ноутбуке в браузере |
+| 5.9 | **Система материалов: OpenPBR Surface** | `naga`, WGSL-генерация | Поддержка OpenPBR (металличность, шероховатость, clearcoat, sheen, subsurface); материал → `ComponentStore<Material>` → `wgpu::BindGroup` |
+| 5.10 | **Поддержка MaterialX** | `materialx` crate или кастомный парсер `.mtlx` в WGSL | Импорт MaterialX-нод-графа; компиляция в шейдеры wgpu; совместимость с VFX-пайплайном |
+| 5.11 | **Рендер-пайплайн материалов** | Deferred + Forward hybrid | OpenPBR-шейдеры рендерятся одним compute pass на GPU; переключение между собственным рендером и внешним — через `RenderBackend` trait |
 
 ---
 
-## Фаза 5. Скриптовые языки (мультискриптинг)
+## Фаза 6. Скриптовые языки (мультискриптинг)
 
 **Цель**: дать геймдизайнерам выбор языка без потери производительности.
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 5.1 | Интеграция `Rhai` | `rhai` crate | Скрипт `.rhai` может читать/писать `Position` из SmartStore |
-| 5.2 | Интеграция `Rune` | `rune` crate | Скрипт `.rn` с синтаксисом Rust компилируется в байт-код |
-| 5.3 | Интеграция Python (опционально) | `PyO3` или `rustpython` | Python-скрипт `entity.speed = 10` мгновенно записывается в Sparse Set |
-| 5.4 | FFI-оптимизация для скриптов | Прямые указатели на ячейки `ComponentStore.data` | Нет boxing'а; скриптовая переменная = обёртка над `&mut T` |
-| 5.5 | Hot Reload скриптов | Файловый вотчер (`notify`) | Изменение `.rhai` → перезагрузка без пересборки движка |
-| 5.6 | **Batch API для скриптов** | `engine.batch_add("Position", "x", 1.0)` | 1 FFI-вызов вместо 100k; внутри `rayon par_iter_mut` |
-| 5.7 | **Bend/HVM2 как скриптовый язык** (future work) | `hvm2` + `bend-lang` crates | Pure-функции на Bend автоматически параллелятся на CPU/GPU; требуется FFI в HVM2 (ожидается) |
+| 6.1 | Интеграция `Rhai` | `rhai` crate | Скрипт `.rhai` может читать/писать `Position` из SmartStore |
+| 6.2 | Интеграция `Rune` | `rune` crate | Скрипт `.rn` с синтаксисом Rust компилируется в байт-код |
+| 6.3 | Интеграция Python (опционально) | `PyO3` или `rustpython` | Python-скрипт `entity.speed = 10` мгновенно записывается в Sparse Set |
+| 6.4 | FFI-оптимизация для скриптов | Прямые указатели на ячейки `ComponentStore.data` | Нет boxing'а; скриптовая переменная = обёртка над `&mut T` |
+| 6.5 | Hot Reload скриптов | Файловый вотчер (`notify`) | Изменение `.rhai` → перезагрузка без пересборки движка |
+| 6.6 | **Batch API для скриптов** | `engine.batch_add("Position", "x", 1.0)` | 1 FFI-вызов вместо 100k; внутри `rayon par_iter_mut` |
+| 6.7 | **Bend/HVM2 как скриптовый язык** (future work) | `hvm2` + `bend-lang` crates | Pure-функции на Bend автоматически параллелятся на CPU/GPU; требуется FFI в HVM2 (ожидается) |
 
 ---
 
-## Фаза 6. Конвейер ресурсов (Asset Pipeline)
+## Фаза 7. Конвейер ресурсов (Asset Pipeline)
 
 **Цель**: автоматически глотать UI-ресурсы без ручных макросов.
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 6.1 | Скрипт сборки `build.rs` | `std::fs`, `walkdir` | При `cargo build` автоматически сканируется папка `assets/ui/` |
-| 6.2 | Компиляция CSS в структуры | `lightningcss` | `.css` → `ui_styles.rs` со структурами для `ComponentStore<UIStyle>` |
-| 6.3 | Компиляция SVG в геометрию | `usvg` | `.svg` → массив векторных путей для `Vello` |
-| 6.4 | Вшивание JS в бинарник | `include_bytes!` | `node_modules/react/index.js` доступен в рантайме как `&[u8]` |
-| 6.5 | Макрос одной папки `#[compile_frontend_pipeline!("ui/src/")]` | `proc_macro` + `std::fs` | Одна строка в `main.rs` загружает всё UI |
-| 6.6 | Hot Reload в dev-режиме | `notify` crate | Изменение `button.css` → мгновенное обновление `ComponentStore<UIStyle>` и перерисовка экрана |
+| 7.1 | Скрипт сборки `build.rs` | `std::fs`, `walkdir` | При `cargo build` автоматически сканируется папка `assets/ui/` |
+| 7.2 | Компиляция CSS в структуры | `lightningcss` | `.css` → `ui_styles.rs` со структурами для `ComponentStore<UIStyle>` |
+| 7.3 | Компиляция SVG в геометрию | `usvg` | `.svg` → массив векторных путей для `Vello` |
+| 7.4 | Вшивание JS в бинарник | `include_bytes!` | `node_modules/react/index.js` доступен в рантайме как `&[u8]` |
+| 7.5 | Макрос одной папки `#[compile_frontend_pipeline!("ui/src/")]` | `proc_macro` + `std::fs` | Одна строка в `main.rs` загружает всё UI |
+| 7.6 | Hot Reload в dev-режиме | `notify` crate | Изменение `button.css` → мгновенное обновление `ComponentStore<UIStyle>` и перерисовка экрана |
 
 ---
 
-## Фаза 7. Адаптер для сторонних библиотек
+## Фаза 8. Адаптер для сторонних библиотек
 
 **Цель**: использовать `crates.io` без модификации исходников.
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 7.1 | Auto-Generated Proxy Views | Временные стек-структуры в L1-кэше | Сторонняя функция `update_position(body: &RigidBody, vel: &mut Velocity)` получает данные из плотных массивов без cache miss |
-| 7.2 | SIMD/векторизация через макрос | `std::simd` (или `packed_simd`) | Макрос пакует 4/8/16 элементов в регистры AVX2/NEON перед вызовом |
-| 7.3 | Inlining-оптимизация | `#[inline]` + `rustc` LTO | Чужая функция «растворяется» в `zip`-цикле по Sparse Sets при `--release` |
-| 7.4 | Graceful degradation (CPU-fallback) | Эвристика ветвлений | Если сторонняя функция содержит сложные `if/else` → выполняется на CPU, но всё равно в Rayon-конвейере |
-| 7.5 | Паттерн «Границы данных» (Data Boundaries) | Borrow Checker | Чужая функция физически не может трогать данные вне выделенных лент |
-| 7.6 | **Трейт `PhysicsEngine`** — абстракция физики | `trait PhysicsEngine { fn step(&mut self, dt: f32); fn raycast(&self, ...) -> Option<Hit>; }` | Собственный движок (Sweep-and-Prune + constraints) — impl по умолчанию; Rapier, Jolt, PhysX — опциональные реализации |
-| 7.7 | **Трейт `RenderBackend`** — абстракция рендера | `trait RenderBackend { fn begin_frame(&mut self); fn draw_mesh(&mut self, ...); fn end_frame(&mut self); }` | `WgpuBackend` — impl по умолчанию; возможность подключить альтернативный рендер (консоли, HDRP) |
-| 7.8 | **Расширение физики для производительности** (future) | `#[cfg(feature = "physics-perf")]`, SIMD-солвер, IPC-связь с выделенным physics-тредом | Физика выносится в отдельный поток/процесс (IPC через shared memory); бенчмарк: 10k тел с коллизиями <1 ms |
+| 8.1 | Auto-Generated Proxy Views | Временные стек-структуры в L1-кэше | Сторонняя функция `update_position(body: &RigidBody, vel: &mut Velocity)` получает данные из плотных массивов без cache miss |
+| 8.2 | SIMD/векторизация через макрос | `std::simd` (или `packed_simd`) | Макрос пакует 4/8/16 элементов в регистры AVX2/NEON перед вызовом |
+| 8.3 | Inlining-оптимизация | `#[inline]` + `rustc` LTO | Чужая функция «растворяется» в `zip`-цикле по Sparse Sets при `--release` |
+| 8.4 | Graceful degradation (CPU-fallback) | Эвристика ветвлений | Если сторонняя функция содержит сложные `if/else` → выполняется на CPU, но всё равно в Rayon-конвейере |
+| 8.5 | Паттерн «Границы данных» (Data Boundaries) | Borrow Checker | Чужая функция физически не может трогать данные вне выделенных лент |
+| 8.6 | **Трейт `PhysicsEngine`** — абстракция физики | `trait PhysicsEngine { fn step(&mut self, dt: f32); fn raycast(&self, ...) -> Option<Hit>; }` | Собственный движок (Sweep-and-Prune + constraints) — impl по умолчанию; Rapier, Jolt, PhysX — опциональные реализации |
+| 8.7 | **Трейт `RenderBackend`** — абстракция рендера | `trait RenderBackend { fn begin_frame(&mut self); fn draw_mesh(&mut self, ...); fn end_frame(&mut self); }` | `WgpuBackend` — impl по умолчанию; возможность подключить альтернативный рендер (консоли, HDRP) |
+| 8.8 | **Расширение физики для производительности** (future) | `#[cfg(feature = "physics-perf")]`, SIMD-солвер, IPC-связь с выделенным physics-тредом | Физика выносится в отдельный поток/процесс (IPC через shared memory); бенчмарк: 10k тел с коллизиями <1 ms |
 
 ---
 
-## Фаза 8. Встроенный линтер (Compile-Time Warnings)
+## Фаза 9. Встроенный линтер (Compile-Time Warnings)
 
 **Цель**: обучать разработчика и предотвращать неэффективные паттерны.
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 8.1 | AST-Visitor для поиска медленных циклов | `syn::visit::Visit` | Макрос `#[smart_pipeline]` находит `for` с `store.get()` / `store.get_mut()` внутри |
-| 8.2 | Генерация `compile_warning!` | `#[deprecated]` trick | При сборке выводится яркое предупреждение с рекомендацией использовать `for_each_entity!` |
-| 8.3 | Интеграция с IDE | Rust Analyzer | Предупреждение подсвечивается в VS Code / Vim / Emacs |
-| 8.4 | Расширяемость линтера | Плагинная система | Новые правила добавляются как отдельные `Visitor`'s |
+| 9.1 | AST-Visitor для поиска медленных циклов | `syn::visit::Visit` | Макрос `#[smart_pipeline]` находит `for` с `store.get()` / `store.get_mut()` внутри |
+| 9.2 | Генерация `compile_warning!` | `#[deprecated]` trick | При сборке выводится яркое предупреждение с рекомендацией использовать `for_each_entity!` |
+| 9.3 | Интеграция с IDE | Rust Analyzer | Предупреждение подсвечивается в VS Code / Vim / Emacs |
+| 9.4 | Расширяемость линтера | Плагинная система | Новые правила добавляются как отдельные `Visitor`'s |
 
 ---
 
-## Фаза 9. Кроссплатформенность (Desktop + WebAssembly)
+## Фаза 10. Кроссплатформенность (Desktop + WebAssembly)
 
 **Цель**: один код — все платформы.
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 9.1 | Таргеты Desktop | `wgpu` (Vulkan/Metal/DX12) | `.exe` (Windows), `.app` (macOS), бинарник (Linux) |
-| 9.2 | Таргет WebAssembly | `wasm32-unknown-unknown`, `wasm-bindgen` | Браузер запускает `.wasm`, использует WebGPU через `<canvas>` |
-| 9.3 | Единый рендер-пасс (игра + UI) | `wgpu::RenderPass` | UI и мир рисуются в одном вызове, шейдеры могут накладываться друг на друга |
-| 9.4 | Условная компиляция платформ | `#[cfg(target_arch = "wasm32")]` | Desktop использует нативные потоки, WASM — Web Workers |
-| 9.5 | Размер бинарника | `strip`, `upx`, `wasm-opt` | Desktop: <20 МБ, WASM: <5 МБ (без текстур) |
-| 9.6 | **NUMA-Aware Allocation** | `libc::mbind`, `VirtualAllocExNuma` | `ComponentStore<T>::with_numa_affinity(node_id)`; критично для MMO-серверов на 32+ ядрах |
+| 10.1 | Таргеты Desktop | `wgpu` (Vulkan/Metal/DX12) | `.exe` (Windows), `.app` (macOS), бинарник (Linux) |
+| 10.2 | Таргет WebAssembly | `wasm32-unknown-unknown`, `wasm-bindgen` | Браузер запускает `.wasm`, использует WebGPU через `<canvas>` |
+| 10.3 | Единый рендер-пасс (игра + UI) | `wgpu::RenderPass` | UI и мир рисуются в одном вызове, шейдеры могут накладываться друг на друга |
+| 10.4 | Условная компиляция платформ | `#[cfg(target_arch = "wasm32")]` | Desktop использует нативные потоки, WASM — Web Workers |
+| 10.5 | Размер бинарника | `strip`, `upx`, `wasm-opt` | Desktop: <20 МБ, WASM: <5 МБ (без текстур) |
+| 10.6 | **NUMA-Aware Allocation** | `libc::mbind`, `VirtualAllocExNuma` | `ComponentStore<T>::with_numa_affinity(node_id)`; критично для MMO-серверов на 32+ ядрах |
 
 ---
 
-## Фаза 10. Полировка, документация, релиз
+## Фаза 11. Полировка, документация, релиз
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 10.1 | Полное покрытие тестами | `cargo test`, `miri` (для unsafe) | >80% покрытие ядра, все edge cases Sparse Set |
-| 10.2 | Документация (rustdoc + book) | `mdbook` | Пошаговый tutorial «Создай свою первую игру за 30 минут» |
-| 10.3 | Примеры и шаблоны | `cargo generate` | Шаблоны: 2D-шутер, 3D-платформер, UI-редактор |
-| 10.4 | Benchmark suite | `criterion`, custom harness | Сравнение с Bevy, Unity DOTS, bare metal на типовых сценариях |
-| 10.5 | Публикация на crates.io | `cargo publish` | `smart-engine = "0.1.0"` доступен для установки |
-
----
+| 11.1 | Полное покрытие тестами | `cargo test`, `miri` (для unsafe) | >80% покрытие ядра, все edge cases Sparse Set |
+| 11.2 | Документация (rustdoc + book) | `mdbook` | Пошаговый tutorial «Создай свою первую игру за 30 минут» |
+| 11.3 | Примеры и шаблоны | `cargo generate` | Шаблоны: 2D-шутер, 3D-платформер, UI-редактор |
+| 11.4 | Benchmark suite | `criterion`, custom harness | Сравнение с Bevy, Unity DOTS, bare metal на типовых сценариях |
+| 11.5 | Публикация на crates.io | `cargo publish` | `smart-engine = "0.1.0"` доступен для установки |
 
 ## Критический путь (Minimal Viable Product)
 
-Чтобы получить **работающий прототип**, достаточно фаз 1–3 + 4.1–4.3:
+Чтобы получить **работающий прототип**, достаточно фаз 1–3 + 4 (audio-база: 4.1–4.4) + 5.1–5.3 (UI-minimum):
 
 ```
-Фаза 0 (1 неделя) → Фаза 1 (2 недели) → Фаза 2 (3 недели) → Фаза 3 (4 недели) → Фаза 4.1–4.3 (2 недели)
+Фаза 0 (1 нед) → Фаза 1 (2 нед) → Фаза 2 (3 нед) → Фаза 3 (4 нед) → Фаза 4 (1 нед) → Фаза 5.1–5.3 (2 нед)
 ```
 
-**Итого MVP**: ~12 недель (3 месяца) для одного разработчика на полную ставку.
+**Итого MVP**: ~13 недель для одного разработчика на полную ставку.
 
 После MVP можно демонстрировать:
 - 100k частиц с физикой, автоматически улетевших на GPU.
 - Простой UI-инспектор, написанный на React, но рендерящийся через WGPU внутри игры.
 - Изменение ползунка в UI → мгновенное обновление данных в Sparse Set.
+- Spatial audio — звук шагов/взрывов, привязанный к позиции в 3D-мире.
 
 ---
 
@@ -275,6 +291,10 @@ pub struct PageTable<T> {
 | Файловый вотчер | `notify` | Hot Reload ресурсов |
 | Бенчмарки | `criterion` | Измерение производительности |
 | Биндинги | `wasm-bindgen` | Мост Rust ↔ JavaScript в WASM |
+| Аудио | `cpal` | Нативный аудиовыход (Desktop) |
+| Аудио | `symphonia` | Декодинг `.wav`/`.ogg`/`.mp3` |
+| Аудио | `crossbeam-channel` | Lock-free канал для real-time микшера |
+| Аудио | Web Audio API (через `wasm-bindgen`) | Аудиовыход в браузере (WASM) |
 
 ---
 

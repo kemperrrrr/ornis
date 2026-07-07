@@ -1,0 +1,19 @@
+[package]
+name = "ornis-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ornis-core = { path = "../core" }
+cpal = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["wav", "ogg", "mp3", "flac"] }
+crossbeam-channel = "0.5"
+glam = "0.30"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.15"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
