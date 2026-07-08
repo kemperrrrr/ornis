@@ -21,6 +21,7 @@ pub struct LayoutNode {
     pub rect: Rect,
     pub styles: HashMap<String, String>,
     pub children: Vec<LayoutNodeId>,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -45,7 +46,8 @@ impl LayoutTree {
         let mut taffy = TaffyTree::new();
         let mut arena = Vec::<LayoutNode>::new();
         let mut taffy_to_arena: HashMap<u64, LayoutNodeId> = HashMap::new();
-        let (root_tid, _root_aid) = Self::build_node(&mut taffy, &doc.root, stylesheets, &mut arena, &mut taffy_to_arena)?;
+        let inherited = HashMap::new();
+        let (root_tid, _root_aid) = Self::build_node(&mut taffy, &doc.root, stylesheets, &mut arena, &mut taffy_to_arena, &inherited)?;
         taffy.compute_layout(
             root_tid,
             Size {
@@ -65,15 +67,21 @@ impl LayoutTree {
         stylesheets: &[Stylesheet],
         arena: &mut Vec<LayoutNode>,
         taffy_to_arena: &mut HashMap<u64, LayoutNodeId>,
+        inherited: &HashMap<String, String>,
     ) -> TaffyResult<(taffy::NodeId, LayoutNodeId)> {
         match node {
             Node::Element(el) => {
-                let styles = crate::css::compute_style(el, stylesheets);
+                let mut styles = crate::css::compute_style(el, stylesheets);
+                for (k, v) in inherited {
+                    if ["color", "font-size", "font-family"].contains(&k.as_str()) {
+                        styles.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
                 let taffy_style = css_to_taffy_style(&styles);
                 let mut child_taffy_ids = Vec::new();
                 let mut child_arena_ids = Vec::new();
                 for child in &el.children {
-                    let (ct, ca) = Self::build_node(taffy, child, stylesheets, arena, taffy_to_arena)?;
+                    let (ct, ca) = Self::build_node(taffy, child, stylesheets, arena, taffy_to_arena, &styles)?;
                     child_taffy_ids.push(ct);
                     child_arena_ids.push(ca);
                 }
@@ -91,20 +99,22 @@ impl LayoutTree {
                     rect: Rect::default(),
                     styles,
                     children: child_arena_ids,
+                    text: None,
                 });
                 taffy_to_arena.insert(taffy_id.into(), id);
 
                 Ok((taffy_id, id))
             }
-            Node::Text(_) => {
+            Node::Text(text) => {
                 let taffy_id = taffy.new_leaf(Style::default())?;
                 let id = arena.len();
                 arena.push(LayoutNode {
                     id,
                     tag: "#text".into(),
                     rect: Rect::default(),
-                    styles: HashMap::new(),
+                    styles: inherited.clone(),
                     children: Vec::new(),
+                    text: Some(text.clone()),
                 });
                 taffy_to_arena.insert(taffy_id.into(), id);
                 Ok((taffy_id, id))

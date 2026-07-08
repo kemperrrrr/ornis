@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use vello::peniko::{self, Color};
+use vello::peniko::{self, Color, Fill, FontData};
 use vello::peniko::kurbo::{Affine, Circle, Rect, RoundedRect, Stroke};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 use wgpu::{util::TextureBlitter, Device, Queue, Surface, SurfaceConfiguration, Texture};
@@ -125,6 +125,19 @@ impl UIRenderer {
             None,
             &Circle::new((cx, cy), r),
         );
+    }
+
+    pub fn fill_text(&mut self, x: f64, y: f64, text: &str, font_size: f32, color: Color, font: &FontData) {
+        let glyphs = crate::text::layout_text(font, text, font_size);
+        if glyphs.is_empty() {
+            return;
+        }
+        self.brush = peniko::Brush::from(color);
+        self.scene.draw_glyphs(font)
+            .transform(Affine::translate((x, y)))
+            .font_size(font_size)
+            .brush(color)
+            .draw(Fill::NonZero, glyphs.into_iter());
     }
 
     pub fn end_frame(

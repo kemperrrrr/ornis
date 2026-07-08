@@ -9,6 +9,7 @@ html5ever = "0.27"
 lightningcss = "1.0.0-alpha.71"
 taffy = "0.5"
 vello = { version = "0.6", features = ["wgpu"] }
+skrifa = "0.37"
 wgpu = "26"
 winit = "0.30"
 ornis-wgpu-backend = { path = "../wgpu_backend" }

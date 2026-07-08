@@ -10,7 +10,7 @@ use ornis_ui::layout::LayoutTree;
 use ornis_ui::paint::paint_layout;
 use ornis_ui::render::UIRenderer;
 
-use vello::peniko::Color;
+use vello::peniko::{Color, FontData};
 
 const HTML: &str = r#"
 <div class="container">
@@ -68,6 +68,7 @@ struct DemoContext {
     surface_config: wgpu::SurfaceConfiguration,
     renderer: UIRenderer,
     layout_tree: Option<LayoutTree>,
+    font: FontData,
 }
 
 impl DemoApp {
@@ -129,6 +130,8 @@ impl ApplicationHandler for DemoApp {
 
         let renderer = UIRenderer::new(&device, &surface_config, surface_format).unwrap();
 
+        let font = load_demo_font();
+
         self.context = Some(DemoContext {
             window,
             device,
@@ -137,6 +140,7 @@ impl ApplicationHandler for DemoApp {
             surface_config,
             renderer,
             layout_tree: None,
+            font,
         });
 
         self.build_layout(size.width, size.height);
@@ -205,13 +209,29 @@ impl DemoApp {
 
         // Paint layout tree
         if let Some(ref tree) = ctx.layout_tree {
-            paint_layout(tree, &mut ctx.renderer);
+            paint_layout(tree, &mut ctx.renderer, &ctx.font);
         }
 
         if let Err(e) = ctx.renderer.end_frame(&ctx.device, &ctx.queue, &ctx.surface) {
             eprintln!("render error: {e:?}");
         }
     }
+}
+
+fn load_demo_font() -> FontData {
+    let paths = [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ];
+    for path in &paths {
+        if let Ok(data) = std::fs::read(path) {
+            return ornis_ui::text::load_font_from_bytes(&data);
+        }
+    }
+    eprintln!("warning: no system font found, text will be invisible");
+    FontData::new(vello::peniko::Blob::from(Vec::new()), 0)
 }
 
 fn main() {

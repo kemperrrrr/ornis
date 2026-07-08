@@ -2058,6 +2058,7 @@ dependencies = [
  "lightningcss",
  "ornis-wgpu-backend",
  "pollster 0.3.0",
+ "skrifa",
  "taffy",
  "vello",
  "wgpu",
