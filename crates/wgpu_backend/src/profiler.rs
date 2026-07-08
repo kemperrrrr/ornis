@@ -155,7 +155,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             cpass.dispatch_workgroups((count as u32 + 63) / 64, 1, 1);
         }
         queue.submit([cbe.finish()]);
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait).ok();
 
         // Timed run
         let start = Instant::now();
@@ -172,7 +172,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             queue.submit([cbe.finish()]);
         }
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait).ok();
 
         start.elapsed().as_nanos() as f64 / ITERS as f64
     }

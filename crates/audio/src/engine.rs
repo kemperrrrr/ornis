@@ -4,7 +4,7 @@ use glam::Vec3;
 use ornis_core::{Entity, SmartStore};
 
 use crate::backend::AudioBackend;
-use crate::source::{AudioClip, AudioListener, AudioSource, AudioState, MixInput, SpatialParams};
+use crate::source::{AudioClip, AudioSource, AudioState, MixInput, SpatialParams};
 
 pub struct AudioEngine {
     backend: AudioBackend,

@@ -93,10 +93,12 @@ pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<AudioClip, DecodeError> {
             Err(_) => continue,
         };
 
-        let num_samples = decoded.num_frames() * decoded.spec().channels.count();
-        let mut buf = SymphSampleBuffer::<f32>::new(decoded.spec().into(), decoded.frames());
+        let frames_count = decoded.frames();
+        let spec = *decoded.spec();
+        let mut buf = SymphSampleBuffer::<f32>::new(frames_count as u64, spec);
         buf.copy_interleaved_ref(decoded);
         let frames = buf.samples().to_vec();
+        let num_samples = frames_count * spec.channels.count();
         all_samples.extend_from_slice(&frames[..num_samples.min(frames.len())]);
     }
 
@@ -108,7 +110,8 @@ pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<AudioClip, DecodeError> {
 }
 
 pub fn decode_bytes(data: &[u8], extension: &str) -> Result<AudioClip, DecodeError> {
-    let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+    let owned = data.to_vec();
+    let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(owned)), Default::default());
 
     let mut hint = Hint::new();
     hint.with_extension(extension);
@@ -162,10 +165,12 @@ pub fn decode_bytes(data: &[u8], extension: &str) -> Result<AudioClip, DecodeErr
             Err(_) => continue,
         };
 
-        let num_samples = decoded.num_frames() * decoded.spec().channels.count();
-        let mut buf = SymphSampleBuffer::<f32>::new(decoded.spec().into(), decoded.frames());
+        let frames_count = decoded.frames();
+        let spec = *decoded.spec();
+        let mut buf = SymphSampleBuffer::<f32>::new(frames_count as u64, spec);
         buf.copy_interleaved_ref(decoded);
         let frames = buf.samples().to_vec();
+        let num_samples = frames_count * spec.channels.count();
         all_samples.extend_from_slice(&frames[..num_samples.min(frames.len())]);
     }
 

@@ -93,7 +93,7 @@ impl CommandSync {
 
         if !gpu_buffers.is_empty() {
             self.queue.submit(gpu_buffers);
-            self.device.poll(wgpu::Maintain::Wait);
+            self.device.poll(wgpu::PollType::Wait).ok();
         }
     }
 

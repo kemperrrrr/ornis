@@ -84,7 +84,7 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
             buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
-            device.poll(wgpu::Maintain::Wait);
+            device.poll(wgpu::PollType::Wait).ok();
             if let Ok(Ok(())) = receiver.recv() {
                 let view = buffer_slice.get_mapped_range();
                 let downloaded: &[T] = bytemuck::cast_slice(&view);

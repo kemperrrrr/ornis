@@ -2,11 +2,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::source::MixInput;
 
-const OUTPUT_CHANNELS: u16 = 2;
 const SAMPLE_RATE: u32 = 48000;
 const BUFFER_FRAMES: usize = 512;
 
@@ -82,14 +82,12 @@ fn run_audio_thread(
         .ok_or("no default output device")?;
 
     let config = device.default_output_config()?;
-    let output_sample_rate = config.sample_rate().0;
     let output_channels = config.channels() as u16;
 
     let mut active_sounds: Vec<MixInput> = Vec::new();
     let samples_arc = Arc::new(Mutex::new(Vec::new()));
 
     let stream_samples = samples_arc.clone();
-    let stream_running = running.clone();
 
     let err_fn = move |err| eprintln!("Audio stream error: {}", err);
 
@@ -143,7 +141,7 @@ fn run_audio_thread(
             }
         }
 
-        mix(&active_sounds, &mut temp_mix, output_sample_rate, output_channels);
+        mix(&mut active_sounds, &mut temp_mix, output_channels);
 
         if let Ok(mut guard) = samples_arc.lock() {
             *guard = temp_mix.clone();
@@ -175,7 +173,6 @@ fn distance_attenuation(distance: f32, rolloff: f32, reference: f32) -> f32 {
 fn mix(
     active_sounds: &mut Vec<MixInput>,
     output: &mut [f32],
-    output_sample_rate: u32,
     output_channels: u16,
 ) {
     for frame in output.chunks_exact_mut(output_channels as usize) {
