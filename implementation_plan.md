@@ -140,8 +140,8 @@ pub struct PageTable<T> {
 |---|--------|------------|---------------------|
 | 5.1 | Парсинг HTML/CSS в Rust + интеграция Servo | `html5ever`, `lightningcss`, `taffy`, `servo-core` (опционально) | ✅ через `html5ever` + `lightningcss` + `taffy` — парсинг HTML и CSS, flexbox layout |
 | 5.1a | Интеграция Servo как библиотеки | `servo`, `webrender` | HTML/CSS/JS исполняется полноценно; layout-результаты попадают в Sparse Sets, а рендеринг — в `wgpu` |
-| 5.2 | Векторный рендеринг (SVG + UI) | `vello`, `usvg`, `resvg` | ✅ HTML → CSS → layout → paint → render: `paint_layout()` обходит taffy-дерево и рисует через `UIRenderer`; демо загружает HTML/CSS |
-| 5.3 | Встроенный JS-интерпретатор | `boa_engine` или `rquickjs` | JS-скрипт выполняется внутри Rust-процесса, вызывает `globalThis.document.createElement` |
+| 5.2 | Векторный рендеринг + текст (SVG + UI) | `vello`, `skrifa`, `usvg`, `resvg` | ✅ HTML → CSS → layout → paint → render: `paint_layout()` обходит taffy-дерево и рисует через `UIRenderer`; текст рендерится через vello glyph API + skrifa (cmap + advance); демо загружает HTML/CSS + системный шрифт |
+| 5.3 | Встроенный JS-интерпретатор | `boa_engine` | ✅ `JsRuntime` — eval JS с `document.createElement/appendChild/setAttribute/createTextNode`; рустовая `Document` реконструируется из JS-дерева; 4 теста на манипуляции DOM; демо создаёт кнопку через JS |
 | 5.4 | Headless DOM (шим для JS) | Реализация `VirtualElement`, `document`, `window` | React запускается без реального браузера, создавая виртуальные узлы |
 | 5.5 | Связь JS ↔ Rust (Sparse Sets) | FFI, бинарные вызовы, `crossbeam-channel` / `flume` | Движение ползунка в JS мгновенно обновляет `ComponentStore<UIStyle>` |
 | 5.6 | Двухсторонний IPC (UI-поток ↔ игровой поток) | Lock-free MPMC канал | UI не блокирует игровой цикл; 60+ FPS игры + 144 FPS UI |

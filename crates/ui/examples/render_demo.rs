@@ -5,21 +5,32 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::WindowAttributes;
 
 use ornis_ui::css::Stylesheet;
-use ornis_ui::html::parse_html;
 use ornis_ui::layout::LayoutTree;
 use ornis_ui::paint::paint_layout;
 use ornis_ui::render::UIRenderer;
+use ornis_ui::js::JsRuntime;
 
 use vello::peniko::{Color, FontData};
 
-const HTML: &str = r#"
-<div class="container">
-  <div class="button">
-    <div class="icon-play"></div>
-    <span class="label">Play</span>
-  </div>
-</div>
-"#;
+const JS_CODE: &str = r##"
+var container = document.createElement("div");
+container.setAttribute("class", "container");
+
+var button = document.createElement("div");
+button.setAttribute("class", "button");
+
+var icon = document.createElement("div");
+icon.setAttribute("class", "icon-play");
+
+var label = document.createElement("span");
+label.setAttribute("class", "label");
+label.textContent = "Play";
+
+button.appendChild(icon);
+button.appendChild(label);
+container.appendChild(button);
+document.body.appendChild(container);
+"##;
 
 const CSS: &str = r#"
 .container {
@@ -67,6 +78,7 @@ struct DemoContext {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     renderer: UIRenderer,
+    js: JsRuntime,
     layout_tree: Option<LayoutTree>,
     font: FontData,
 }
@@ -131,6 +143,7 @@ impl ApplicationHandler for DemoApp {
         let renderer = UIRenderer::new(&device, &surface_config, surface_format).unwrap();
 
         let font = load_demo_font();
+        let js = JsRuntime::new();
 
         self.context = Some(DemoContext {
             window,
@@ -139,6 +152,7 @@ impl ApplicationHandler for DemoApp {
             surface,
             surface_config,
             renderer,
+            js,
             layout_tree: None,
             font,
         });
@@ -185,7 +199,11 @@ impl ApplicationHandler for DemoApp {
 
 impl DemoApp {
     fn build_layout(&mut self, viewport_width: u32, viewport_height: u32) {
-        let doc = parse_html(HTML);
+        let ctx = self.context();
+        let _ = ctx.js.eval(JS_CODE);
+
+        let root = ctx.js.document_node();
+        let doc = ornis_ui::dom::Document { root };
         let stylesheets = vec![Stylesheet::parse(CSS).unwrap()];
         let tree = LayoutTree::build_with_viewport(
             &doc,
@@ -193,7 +211,7 @@ impl DemoApp {
             viewport_width as f32,
             viewport_height as f32,
         ).unwrap();
-        self.context().layout_tree = Some(tree);
+        ctx.layout_tree = Some(tree);
     }
 
     fn render_frame(&mut self) {

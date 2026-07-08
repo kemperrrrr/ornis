@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+boa_engine = "0.21"
 html5ever = "0.27"
 lightningcss = "1.0.0-alpha.71"
 taffy = "0.5"
