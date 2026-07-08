@@ -126,7 +126,7 @@ pub struct PageTable<T> {
 | 4.3 | Декодинг аудиоформатов | `symphonia` | ✅ |
 | 4.4 | Микшер в real-time потоке | `crossbeam-channel`, выделенный OS-тред (RT priority) | ✅ |
 | 4.5 | Spatial audio (3D) | Panning, distance rolloff, Doppler | ✅ |
-| 4.6 | Web Audio API бэкенд | `wasm-bindgen`, Web Audio API | ❌ |
+| 4.6 | Web Audio API бэкенд | `wasm-bindgen`, Web Audio API | ✅ |
 | 4.7 | **DSP-эффекты на GPU** (future) | `#[kernel]`, wgpu compute | ⏳ |
 | 4.8 | **Процедурная генерация звука** (future) | `#[kernel]`, математический синтез | ⏳ |
 
@@ -138,9 +138,9 @@ pub struct PageTable<T> {
 
 | # | Задача | Технологии | Критерий завершения |
 |---|--------|------------|---------------------|
-| 5.1 | Парсинг HTML/CSS в Rust + интеграция Servo | `html5ever`, `lightningcss`, `taffy`, `servo-core` (опционально) | Полноценный парсинг; либо через `html5ever`/`lightningcss` (легковесно), либо через `Servo` (полная совместимость) |
+| 5.1 | Парсинг HTML/CSS в Rust + интеграция Servo | `html5ever`, `lightningcss`, `taffy`, `servo-core` (опционально) | ✅ через `html5ever` + `lightningcss` + `taffy` — парсинг HTML и CSS, flexbox layout |
 | 5.1a | Интеграция Servo как библиотеки | `servo`, `webrender` | HTML/CSS/JS исполняется полноценно; layout-результаты попадают в Sparse Sets, а рендеринг — в `wgpu` |
-| 5.2 | Векторный рендеринг (SVG + UI) | `vello`, `usvg`, `resvg` | SVG-иконка и прямоугольник кнопки рисуются через `wgpu` в 144+ FPS |
+| 5.2 | Векторный рендеринг (SVG + UI) | `vello`, `usvg`, `resvg` | ✅ HTML → CSS → layout → paint → render: `paint_layout()` обходит taffy-дерево и рисует через `UIRenderer`; демо загружает HTML/CSS |
 | 5.3 | Встроенный JS-интерпретатор | `boa_engine` или `rquickjs` | JS-скрипт выполняется внутри Rust-процесса, вызывает `globalThis.document.createElement` |
 | 5.4 | Headless DOM (шим для JS) | Реализация `VirtualElement`, `document`, `window` | React запускается без реального браузера, создавая виртуальные узлы |
 | 5.5 | Связь JS ↔ Rust (Sparse Sets) | FFI, бинарные вызовы, `crossbeam-channel` / `flume` | Движение ползунка в JS мгновенно обновляет `ComponentStore<UIStyle>` |

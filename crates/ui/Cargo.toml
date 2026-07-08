@@ -5,3 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+html5ever = "0.27"
+lightningcss = "1.0.0-alpha.71"
+taffy = "0.5"
+vello = { version = "0.6", features = ["wgpu"] }
+wgpu = "26"
+winit = "0.30"
+ornis-wgpu-backend = { path = "../wgpu_backend" }
+
+[dev-dependencies]
+pollster = "0.3"
