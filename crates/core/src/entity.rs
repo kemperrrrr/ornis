@@ -5,6 +5,14 @@ pub struct Entity {
 }
 
 impl Entity {
+    pub fn new(id: u32) -> Self {
+        Self { id, generation: 0 }
+    }
+
+    pub fn new_with_gen(id: u32, generation: u32) -> Self {
+        Self { id, generation }
+    }
+
     pub fn id(&self) -> u32 {
         self.id
     }

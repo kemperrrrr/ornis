@@ -6,6 +6,7 @@ use boa_engine::{
     property::PropertyKey,
 };
 
+use crate::components::EcsBridge;
 use crate::dom::{Element, Node};
 
 const INIT_SCRIPT: &str = r##"
@@ -250,10 +251,11 @@ console = _console;
 
 pub struct JsRuntime {
     ctx: Context,
+    pub bridge: EcsBridge,
 }
 
 impl JsRuntime {
-    pub fn new() -> Self {
+    pub fn new(bridge: EcsBridge) -> Self {
         let mut ctx = Context::default();
 
         ctx.register_global_callable(
@@ -267,9 +269,11 @@ impl JsRuntime {
             }),
         ).expect("register console_log");
 
+        bridge.register_js_functions(&mut ctx);
+
         let _ = ctx.eval(Source::from_bytes(INIT_SCRIPT));
 
-        JsRuntime { ctx }
+        JsRuntime { ctx, bridge }
     }
 
     pub fn eval(&mut self, code: &str) -> Result<(), String> {
@@ -381,9 +385,13 @@ mod tests {
     use super::*;
     use crate::dom::find_by_tag;
 
+    fn test_bridge() -> EcsBridge {
+        EcsBridge::new()
+    }
+
     #[test]
     fn test_js_document_create_element() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var el = document.createElement("div");
             el.setAttribute("class", "my-class");
@@ -399,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_js_document_empty() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         let node = js.document_node();
         let body = find_by_tag(&node, "body");
         assert_eq!(body.len(), 1);
@@ -408,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_js_create_text_node() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var text = document.createTextNode("hello");
             document.body.appendChild(text);
@@ -430,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_js_nested_elements() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var parent = document.createElement("ul");
             var child = document.createElement("li");
@@ -449,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_js_classlist() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var el = document.createElement("div");
             el.classList.add("foo");
@@ -470,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_js_remove_child() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var parent = document.createElement("div");
             var child = document.createElement("span");
@@ -487,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_js_insert_before() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var ul = document.createElement("ul");
             var li1 = document.createElement("li");
@@ -507,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_js_get_element_by_id() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var el = document.createElement("div");
             el.id = "my-id";
@@ -524,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_js_style_set_property() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"
             var el = document.createElement("div");
             el.style.setProperty("color", "red");
@@ -542,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_js_document_structure() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##""##).unwrap();
 
         let node = js.document_node();
@@ -553,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_js_console() {
-        let mut js = JsRuntime::new();
+        let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"console.log("hello from js");"##).unwrap();
         // just check it doesn't crash
     }

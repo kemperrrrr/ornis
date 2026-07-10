@@ -4,6 +4,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::WindowAttributes;
 
+use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
 use ornis_ui::layout::LayoutTree;
 use ornis_ui::paint::paint_layout;
@@ -143,7 +144,8 @@ impl ApplicationHandler for DemoApp {
         let renderer = UIRenderer::new(&device, &surface_config, surface_format).unwrap();
 
         let font = load_demo_font();
-        let js = JsRuntime::new();
+        let bridge = EcsBridge::new();
+        let js = JsRuntime::new(bridge);
 
         self.context = Some(DemoContext {
             window,

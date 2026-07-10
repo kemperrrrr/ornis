@@ -2539,6 +2539,7 @@ dependencies = [
  "boa_engine",
  "html5ever",
  "lightningcss",
+ "ornis-core",
  "ornis-wgpu-backend",
  "pollster 0.3.0",
  "skrifa",
