@@ -149,7 +149,7 @@ pub struct PageTable<T> {
 | 5.8 | Удалённый редактор (Web) | `tiny_http`, `serde_json`, REST API | Игра на ПК, редактор на планшете/ноутбуке в браузере | ✅ HTTP-сервер (tiny_http, порт 3420) + REST API + встроенная веб-страница; RemoteEditor в отдельном треде, общается с игрой через IPC (crossbeam-channel); entity_count, event-лог, create entity |
 | 5.9 | **Система материалов: OpenPBR Surface** ✅ | `wgpu`, WGSL, `glam`, `bytemuck` | Создан крейт `crates/render`: `Material` (OpenPBR params, bytemuck), `Mesh` (sphere), `Transform`; WGSL PBR (GGX microfacet, Smith-G, Fresnel-Schlick, multiple lights); `Renderer3D` (storage buffers, instanced rendering); `CompositePass` (Vello UI + 3D alpha blend); интеграция в main loop — 5 сфер с разными материалами |
 | 5.10 | **Поддержка MaterialX** | `materialx` crate / кастомный парсер `.mtlx` в WGSL | Импорт MaterialX-нод-графа; компиляция в шейдеры wgpu; совместимость с VFX-пайплайном | ✅
-| 5.11 | **Рендер-пайплайн материалов** | Deferred + Forward hybrid | OpenPBR-шейдеры рендерятся одним compute pass на GPU; переключение между собственным рендером и внешним — через `RenderBackend` trait | ✅
+| 5.11 | **Рендер-пайплайн материалов** | Deferred + Forward hybrid | OpenPBR-шейдеры рендерятся G-buffer pass + lighting pass + forward pass + composite pass; переключение между рендерами через `RenderBackend` trait | ✅
 
 ---
 

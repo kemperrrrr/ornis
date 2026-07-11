@@ -142,13 +142,21 @@ struct FragmentInput {
     @location(4) material_index: u32,
 };
 
+struct GBufferOutput {
+    @location(0) albedo: vec4<f32>,
+    @location(1) normal: vec2<f32>,
+    @location(2) material_id: u32,
+    @location(3) world_pos: vec2<f32>,
+    @location(4) mat_params: vec4<f32>,
+};
+
 fn octahedral_encode(n: vec3<f32>) -> vec2<f32> {
     let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
     return select(p, (1.0 - abs(p.yx)) * sign(p), n.z < 0.0);
 }
 
 @fragment
-fn fs_main(input: FragmentInput) -> @location(0) vec4<f32>, @location(1) vec2<f32>, @location(2) u32, @location(3) vec2<f32>, @location(4) vec4<f32> {
+fn fs_main(input: FragmentInput) -> GBufferOutput {
     let mat = materials[input.material_index];
     
     let N = normalize(input.world_normal);
@@ -176,7 +184,13 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32>, @location(1) vec2<f3
     
     let mat_params = vec4<f32>(roughness, metalness, specular_ior, coat_weight);
     
-    return (vec4<f32>(base_color, opacity), normal_enc, material_id, world_pos_enc, mat_params);
+    var output: GBufferOutput;
+    output.albedo = vec4<f32>(base_color, opacity);
+    output.normal = normal_enc;
+    output.material_id = material_id;
+    output.world_pos = world_pos_enc;
+    output.mat_params = mat_params;
+    return output;
 }
 "#;
 

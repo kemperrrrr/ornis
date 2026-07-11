@@ -521,11 +521,11 @@ impl Renderer3D {
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Uint,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
+Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::R32Uint,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
                     Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rg16Float,
                         blend: Some(wgpu::BlendState::REPLACE),
