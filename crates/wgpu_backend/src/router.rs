@@ -15,7 +15,7 @@ impl PipelineRouter {
         match lane_target_of::<T>() {
             TargetDiscriminant::Cpu => Platform::Cpu,
             TargetDiscriminant::Gpu => Platform::Gpu,
-            TargetDiscriminant::Hybrid | TargetDiscriminant::Auto => Platform::Gpu,
+            TargetDiscriminant::Hybrid | TargetDiscriminant::Auto(_) => Platform::Gpu,
         }
     }
 
@@ -24,7 +24,7 @@ impl PipelineRouter {
         match discriminant {
             TargetDiscriminant::Cpu => ExecutionTarget::Cpu,
             TargetDiscriminant::Gpu => ExecutionTarget::Gpu,
-            TargetDiscriminant::Hybrid | TargetDiscriminant::Auto => ExecutionTarget::Auto(10_000),
+            TargetDiscriminant::Hybrid | TargetDiscriminant::Auto(_) => ExecutionTarget::Auto(10_000),
         }
     }
 }

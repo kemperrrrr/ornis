@@ -11,3 +11,8 @@ proc-macro = true
 syn = { version = "2", features = ["full", "visit"] }
 quote = "1"
 proc-macro2 = "1"
+glam = { version = "0.28", optional = true }
+
+[dev-dependencies]
+ornis-core = { path = "../core" }
+glam = "0.28"

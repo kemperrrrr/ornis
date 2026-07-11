@@ -1378,6 +1378,12 @@ dependencies = [
 
 [[package]]
 name = "glam"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "779ae4bf7e8421cf91c0b3b64e7e8b40b862fba4d393f59150042de7c4965a94"
+
+[[package]]
+name = "glam"
 version = "0.30.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
@@ -2512,7 +2518,7 @@ name = "ornis"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
- "glam",
+ "glam 0.30.10",
  "ornis-core",
  "ornis-render",
  "ornis-ui",
@@ -2530,7 +2536,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
- "glam",
+ "glam 0.30.10",
  "js-sys",
  "ornis-core",
  "symphonia",
@@ -2546,7 +2552,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-epoch",
  "fixedbitset",
- "glam",
+ "glam 0.30.10",
  "ornis-macros",
  "rayon",
 ]
@@ -2555,6 +2561,8 @@ dependencies = [
 name = "ornis-macros"
 version = "0.1.0"
 dependencies = [
+ "glam 0.28.0",
+ "ornis-core",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -2565,7 +2573,7 @@ name = "ornis-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam",
+ "glam 0.30.10",
  "ornis-core",
  "wgpu",
 ]

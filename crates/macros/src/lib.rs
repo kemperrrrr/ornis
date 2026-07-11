@@ -24,7 +24,7 @@ pub fn smart_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
     smart_pipeline::attribute(attr, item)
 }
 
-#[proc_macro_derive(PipelineConfig, attributes(gpu, cpu))]
+#[proc_macro_derive(PipelineConfig, attributes(gpu, cpu, auto))]
 pub fn derive_pipeline_config(input: TokenStream) -> TokenStream {
     pipeline_config::derive(input)
 }
