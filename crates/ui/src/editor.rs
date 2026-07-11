@@ -31,7 +31,7 @@ impl EditorOverlay {
     }
 
     pub fn handle_key(&mut self, key: &str) -> bool {
-        if key == "`" || key == "Backtick" {
+        if key == "`" || key == "Backtick" || key == "F1" {
             self.toggle();
             true
         } else if key == "Escape" && self.visible {
@@ -84,7 +84,7 @@ impl EditorOverlay {
         // -- Help text at the bottom --
         let help_y = viewport_h - 30.0;
         renderer.fill_rect(panel_x + 12.0, help_y - 8.0, panel_w - 24.0, 1.0, Color::new([0.2, 0.2, 0.2, 1.0]));
-        renderer.fill_text(panel_x + 16.0, help_y, "~ toggle  ·  Esc close", 11.0, Color::new([0.4, 0.4, 0.4, 1.0]), font);
+        renderer.fill_text(panel_x + 16.0, help_y, "F1/~ toggle  ·  Esc close", 11.0, Color::new([0.4, 0.4, 0.4, 1.0]), font);
     }
 }
 

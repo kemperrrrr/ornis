@@ -264,7 +264,7 @@ impl JsRuntime {
     pub fn with_ipc(bridge: EcsBridge, ipc: Option<IpcChannel>) -> Self {
         let mut ctx = Context::default();
 
-        ctx.register_global_callable(
+        if let Err(e) = ctx.register_global_callable(
             js_string!("console_log"),
             1,
             NativeFunction::from_fn_ptr(|_, args, _| {
@@ -273,7 +273,9 @@ impl JsRuntime {
                 }
                 Ok(JsValue::undefined())
             }),
-        ).expect("register console_log");
+        ) {
+            eprintln!("ornis: failed to register console_log: {e}");
+        }
 
         let realm = ctx.realm().clone();
 

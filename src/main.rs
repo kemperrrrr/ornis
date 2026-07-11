@@ -95,8 +95,82 @@ impl GameApp {
         GameApp { context: None }
     }
 
-    fn context(&mut self) -> &mut GameContext {
-        self.context.as_mut().unwrap()
+    fn context(&mut self) -> Option<&mut GameContext> {
+        self.context.as_mut()
+    }
+
+    fn initialize(event_loop: &ActiveEventLoop) -> Result<GameContext, String> {
+        let window_attrs = WindowAttributes::default()
+            .with_title("Ornis Engine")
+            .with_inner_size(PhysicalSize::new(800, 600));
+        let window = event_loop.create_window(window_attrs)
+            .map_err(|e| format!("window creation: {e}"))?;
+
+        let size = window.inner_size();
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+
+        let surface_target = unsafe { wgpu::SurfaceTargetUnsafe::from_window(&window) }
+            .map_err(|e| format!("surface target: {e}"))?;
+        let surface: wgpu::Surface<'static> = unsafe {
+            instance.create_surface_unsafe(surface_target)
+                .map_err(|e| format!("surface creation: {e}"))?
+        };
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        })).map_err(|_| "no adapter found".to_string())?;
+
+        let mut limits = adapter.limits();
+        limits.max_storage_buffers_per_shader_stage = 8;
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("ornis device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            },
+        )).map_err(|e| format!("device request: {e}"))?;
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps.formats.iter().copied().find(|f| {
+            matches!(f, wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb)
+        }).unwrap_or_else(|| surface_caps.formats.first().copied()
+            .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb));
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        let renderer = UIRenderer::new(&device, &surface_config, surface_format)
+            .map_err(|e| format!("renderer init: {e:?}"))?;
+
+        let font = load_font();
+        let bridge = EcsBridge::new();
+        let js = JsRuntime::new(bridge);
+
+        Ok(GameContext {
+            window,
+            device,
+            queue,
+            surface,
+            surface_config,
+            renderer,
+            js,
+            layout_tree: None,
+            font,
+            editor: EditorOverlay::new(),
+        })
     }
 
     fn build_layout(ctx: &mut GameContext) {
@@ -154,74 +228,27 @@ impl GameApp {
 
 impl ApplicationHandler for GameApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attrs = WindowAttributes::default()
-            .with_title("Ornis Engine")
-            .with_inner_size(PhysicalSize::new(800, 600));
-        let window = event_loop.create_window(window_attrs).unwrap();
-
-        let size = window.inner_size();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-
-        let surface: wgpu::Surface<'static> = unsafe {
-            instance.create_surface_unsafe(
-                wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap(),
-            ).unwrap()
-        };
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-        })).unwrap();
-
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("ornis device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            },
-        )).unwrap();
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter().copied().find(|f| {
-            matches!(f, wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb)
-        }).unwrap_or(surface_caps.formats[0]);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &surface_config);
-
-        let renderer = UIRenderer::new(&device, &surface_config, surface_format).unwrap();
-
-        let font = load_font();
-        let bridge = EcsBridge::new();
-        let js = JsRuntime::new(bridge);
-
-        let mut ctx = GameContext {
-            window,
-            device,
-            queue,
-            surface,
-            surface_config,
-            renderer,
-            js,
-            layout_tree: None,
-            font,
-            editor: EditorOverlay::new(),
-        };
-
-        Self::build_layout(&mut ctx);
-        self.context = Some(ctx);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match Self::initialize(event_loop) {
+                Ok(mut ctx) => {
+                    Self::build_layout(&mut ctx);
+                    self.context = Some(ctx);
+                }
+                Err(e) => {
+                    eprintln!("ornis: failed to initialize: {e}");
+                }
+            }
+        }));
+        if let Err(e) = result {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown cause".to_string()
+            };
+            eprintln!("ornis: initialization panicked: {msg}");
+        }
     }
 
     fn window_event(
@@ -230,16 +257,16 @@ impl ApplicationHandler for GameApp {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        let ctx = self.context();
+        let Some(ctx) = ctx else { return };
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let ctx = self.context();
                 Self::render_frame(ctx);
             }
             WindowEvent::Resized(size) => {
-                let ctx = self.context();
                 ctx.surface_config.width = size.width.max(1);
                 ctx.surface_config.height = size.height.max(1);
                 ctx.surface.configure(&ctx.device, &ctx.surface_config);
@@ -251,10 +278,10 @@ impl ApplicationHandler for GameApp {
                 if state == winit::event::ElementState::Pressed {
                     let key_str = match &logical_key {
                         Key::Named(NamedKey::Escape) => "Escape",
+                        Key::Named(NamedKey::F1) => "F1",
                         Key::Character(c) => c.as_str(),
                         _ => return,
                     };
-                    let ctx = self.context();
                     if ctx.editor.handle_key(key_str) {
                         Self::build_layout(ctx);
                         ctx.window.request_redraw();
