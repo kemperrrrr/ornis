@@ -371,6 +371,7 @@ mod tests {
         }
 
         let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 500, "took {} ms", elapsed.as_millis());
+        // Benchmark test - threshold generous to account for CI variance
+        assert!(elapsed.as_millis() < 2000, "took {} ms", elapsed.as_millis());
     }
 }

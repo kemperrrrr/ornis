@@ -8,7 +8,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowAttributes;
 
-use ornis_render::{Renderer3D, CompositePass, OpenPBRMaterial, Mesh, create_sphere, InstanceData};
+use ornis_render::{Renderer3D, OpenPBRMaterial, Mesh, create_sphere, InstanceData};
 use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
 use ornis_ui::editor::EditorOverlay;
@@ -92,7 +92,6 @@ struct GameContext {
     surface_config: wgpu::SurfaceConfiguration,
     renderer: UIRenderer,
     renderer3d: Renderer3D,
-    composite: CompositePass,
     sphere_mesh: Mesh,
     materials: Vec<OpenPBRMaterial>,
     instance_data: Vec<InstanceData>,
@@ -173,7 +172,6 @@ impl GameApp {
             .map_err(|e| format!("renderer init: {e:?}"))?;
 
         let renderer3d = Renderer3D::new(&device, &surface_config, 1);
-        let composite = CompositePass::new(&device, surface_format);
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let materials = vec![
@@ -219,7 +217,6 @@ impl GameApp {
             surface_config,
             renderer,
             renderer3d,
-            composite,
             sphere_mesh,
             materials,
             instance_data,
@@ -324,8 +321,6 @@ impl GameApp {
             label: Some("ornis frame"),
         });
 
-        ctx.renderer3d.render_scene(&mut encoder, &ctx.sphere_mesh, ctx.instance_data.len() as u32);
-
         let frame = match ctx.surface.get_current_texture() {
             Ok(f) => f,
             Err(e) => {
@@ -335,13 +330,12 @@ impl GameApp {
         };
         let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        ctx.composite.compose(
+        ctx.renderer3d.render_scene(
             &ctx.device,
             &mut encoder,
             &frame_view,
-            ctx.renderer3d.pbr_view(),
-            // Vello output texture view
-            &ctx.renderer.get_internal_texture_view(),
+            &ctx.sphere_mesh,
+            ctx.instance_data.len() as u32,
         );
 
         ctx.queue.submit(Some(encoder.finish()));
