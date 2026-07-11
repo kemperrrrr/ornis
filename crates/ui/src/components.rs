@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use boa_engine::js_string;
@@ -107,11 +108,21 @@ impl UIStyle {
 }
 
 /// Bridge between JS and the ECS SmartStore.
-#[derive(Clone)]
 pub struct EcsBridge {
     store: Arc<Mutex<SmartStore>>,
     /// Cached generations for entity IDs (for creating valid Entity handles from JS).
     generations: Arc<Mutex<Vec<u32>>>,
+    entity_count: AtomicU32,
+}
+
+impl Clone for EcsBridge {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            generations: self.generations.clone(),
+            entity_count: AtomicU32::new(self.entity_count.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl EcsBridge {
@@ -121,6 +132,7 @@ impl EcsBridge {
         Self {
             store: Arc::new(Mutex::new(store)),
             generations: Arc::new(Mutex::new(Vec::new())),
+            entity_count: AtomicU32::new(0),
         }
     }
 
@@ -133,7 +145,12 @@ impl EcsBridge {
             gens.resize(id + 1, 0);
         }
         gens[id] = entity.generation();
+        self.entity_count.fetch_add(1, Ordering::Relaxed);
         entity.id()
+    }
+
+    pub fn entity_count(&self) -> u32 {
+        self.entity_count.load(Ordering::Relaxed)
     }
 
     pub fn destroy_entity(&self, id: u32) {
@@ -144,6 +161,7 @@ impl EcsBridge {
             (Entity::new_with_gen(id, generation), self.store.lock().unwrap())
         };
         store.destroy_entity(entity);
+        self.entity_count.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn make_entity(&self, id: u32) -> Entity {

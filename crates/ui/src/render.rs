@@ -140,11 +140,14 @@ impl UIRenderer {
             .draw(Fill::NonZero, glyphs.into_iter());
     }
 
-    pub fn end_frame(
+    pub fn get_internal_texture_view(&self) -> wgpu::TextureView {
+        self.output.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    pub fn render_scene(
         &mut self,
         device: &Device,
         queue: &Queue,
-        surface: &Surface,
     ) -> Result<(), vello::Error> {
         let output = self.output.take().unwrap();
         let view = output.create_view(&wgpu::TextureViewDescriptor::default());
@@ -155,12 +158,35 @@ impl UIRenderer {
             &self.scene,
             &view,
             &RenderParams {
-                base_color: Color::new([0.0, 0.0, 0.0, 1.0]),
+                base_color: Color::new([0.0, 0.0, 0.0, 0.0]),
                 width: self.width,
                 height: self.height,
                 antialiasing_method: AaConfig::Area,
             },
         )?;
+
+        self.output = Some(output);
+        Ok(())
+    }
+
+    pub fn blit_to_surface(
+        &mut self,
+        device: &Device,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_texture: &wgpu::TextureView,
+    ) {
+        let output = self.output.as_ref().unwrap();
+        let view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        self.blitter.copy(device, encoder, &view, surface_texture);
+    }
+
+    pub fn end_frame(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        surface: &Surface,
+    ) -> Result<(), vello::Error> {
+        self.render_scene(device, queue)?;
 
         let frame = surface.get_current_texture()
             .map_err(|_| vello::Error::UnsupportedSurfaceFormat)?;
@@ -169,12 +195,9 @@ impl UIRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ornis ui blit"),
         });
-        self.blitter.copy(device, &mut encoder, &view, &frame_view);
+        self.blit_to_surface(device, &mut encoder, &frame_view);
         queue.submit(Some(encoder.finish()));
         frame.present();
-
-        self.output = Some(output);
-        self.scene.reset();
 
         Ok(())
     }

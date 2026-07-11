@@ -1,0 +1,11 @@
+[package]
+name = "ornis-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wgpu = "26"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+ornis-core = { path = "../core" }

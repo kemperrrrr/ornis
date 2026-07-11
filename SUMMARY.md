@@ -5,8 +5,8 @@
 ## Общее состояние
 
 - **Всего фаз**: 11 (0–11)
-- **Полностью завершено**: Фазы 0, 1, 3
-- **В работе**: Фаза 2 (9/10 задач), Фаза 4 (6/8 задач), Фаза 5 (7/11 задач ✅ текст + JS + headless DOM + ECS bridge + IPC + overlay editor)
+- **Полностью завершено**: Фазы 0, 1
+- **В работе**: Фаза 2 (9/10 ✅), Фаза 3 (14/15 ✅), Фаза 4 (6/8 ✅), Фаза 5 (9/12 ✅)
 - **Не начаты**: Фазы 6–11
 
 ---
@@ -61,19 +61,38 @@
 
 | # | Статус |
 |---|--------|
-| 4.1–4.6 | ✅ AudioSource, cpal, symphonia, микшер, spatial audio, Web Audio API |
+| 4.1–4.5 | ✅ AudioSource/L listener, cpal, symphonia, микшер, spatial audio |
 | 4.6 | ✅ Web Audio API бэкенд |
 | 4.7–4.8 | ⏳ DSP-эффекты на GPU, процедурный звук (future) |
 
 ---
 
-## Фаза 5. UI-система 🟡 (2/11)
+## Фаза 5. UI-система 🟡 (8/12)
 
 | # | Статус |
 |---|--------|
-| 5.1 | ✅ HTML/CSS парсинг + flexbox layout — через html5ever + lightningcss + taffy |
-| 5.2 | ✅ HTML → CSS → layout → paint → render: `paint_layout()` обходит taffy-дерево, рисует через `UIRenderer`; демо загружает HTML/CSS |
-| 5.1a, 5.3–5.11 | ❌ Не начаты |
+| 5.1 | ✅ Парсинг HTML/CSS + flexbox layout (html5ever + lightningcss + taffy) |
+| 5.1a | ⏳ Интеграция Servo (отложено) |
+| 5.2 | ✅ Векторный рендеринг + текст (vello + skrifa) |
+| 5.3 | ✅ JS-интерпретатор (boa_engine) |
+| 5.4 | ✅ Headless DOM (Element, classList, style, console) |
+| 5.5 | ✅ JS ↔ Rust ECS bridge (EcsBridge, UIStyle) |
+| 5.6 | ✅ Двухсторонний IPC (crossbeam-channel, UiCommand/GameEvent) |
+| 5.7 | ✅ In-Game Editor (Vello overlay, F1/~ toggle) |
+| 5.8 | ✅ Remote Editor (Web) — HTTP-сервер + веб-страница на порту 3420 |
+| 5.9 | ✅ Система материалов: OpenPBR Surface |
+
+Создан крейт `crates/render` с:
+- `Material` — ECS-компонент с OpenPBR-параметрами (base_color, emission, metalness, roughness, specular, subsurface, sheen, coat), `bytemuck::Pod` для GPU-загрузки
+- `Mesh` + `Vertex` — геометрия (вершины/индексы) + `create_sphere()`
+- `Transform` — позиция/вращение/масштаб (`glam`)
+- WGSL PBR-шейдеры: GGX microfacet (NDF, Smith-G, Fresnel-Schlick), multiple lights, ambient, tone-mapping
+- `Renderer3D` — wgpu-пайплайн с storage buffer на per-object данные (мат. инстансы)
+- `CompositePass` — полный экран для наложения Vello UI поверх 3D с alpha-блендингом
+- Интеграция в основной цикл: 5 сфер с разными материалами (red dielectric, green rough, blue smooth, gold metallic, white ceramic), одна дир. лампа + fill light
+
+| 5.10 | ⏳ Поддержка MaterialX |
+| 5.11 | ⏳ Рендер-пайплайн материалов |
 
 ---
 

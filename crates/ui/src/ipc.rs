@@ -24,6 +24,8 @@ pub enum GameEvent {
     },
     EntityCreated { entity_id: u32 },
     EntityDestroyed { entity_id: u32 },
+    /// Generic event for remote editor / extensibility.
+    CustomEvent { cmd_type: String, json_data: String },
 }
 
 /// UI-side handle for two-way IPC with the game thread.
