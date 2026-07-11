@@ -197,6 +197,6 @@ mod tests {
 
         let buf = dispatch.record(&ctx.device);
         ctx.queue.submit([buf]);
-        ctx.device.poll(wgpu::Maintain::Wait);
+        ctx.device.poll(wgpu::PollType::Wait).ok();
     }
 }
