@@ -2494,6 +2494,11 @@ name = "ornis"
 version = "0.1.0"
 dependencies = [
  "ornis-core",
+ "ornis-ui",
+ "pollster 0.3.0",
+ "vello",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

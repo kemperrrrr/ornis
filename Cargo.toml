@@ -21,3 +21,8 @@ rust-version.workspace = true
 
 [dependencies]
 ornis-core = { path = "crates/core" }
+ornis-ui = { path = "crates/ui" }
+wgpu = "26"
+winit = "0.30"
+vello = { version = "0.6", features = ["wgpu"] }
+pollster = "0.3"
