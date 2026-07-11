@@ -1,6 +1,7 @@
 pub const PBR_VERTEX: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
 }
 
@@ -56,6 +57,7 @@ fn vs_main(
 pub const GBUFFER_VERTEX: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
 }
 
@@ -209,15 +211,21 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(1.0, 0.0),
 );
 
+struct LightingVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
 @vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32>, @location(0) vec2<f32> {
-    return (QUAD[idx], UVS[idx]);
+fn vs_main(@builtin(vertex_index) idx: u32) -> LightingVertexOutput {
+    return LightingVertexOutput(QUAD[idx], UVS[idx]);
 }
 "#;
 
 pub const LIGHTING_FRAGMENT: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
 };
 
@@ -264,7 +272,7 @@ struct OpenPBRMaterial {
 @group(0) @binding(6) var world_pos_tex: texture_2d<f32>;
 @group(0) @binding(7) var mat_params_tex: texture_2d<f32>;
 @group(0) @binding(8) var depth_tex: texture_depth_2d;
-@group(0) @binding(9) var sampler: sampler;
+@group(0) @binding(9) var lighting_sampler: sampler;
 
 const PI: f32 = 3.14159265359;
 const EPS: f32 = 1e-6;
@@ -438,16 +446,18 @@ fn luminance(c: vec3<f32>) -> f32 {
 }
 
 fn octahedral_decode(p: vec2<f32>) -> vec3<f32> {
-    let n = vec3<f32>(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
+    var n = vec3<f32>(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
     let t = max(-n.z, 0.0);
-    n.xy += select(-n.yx, n.yx, n.xy >= vec2<f32>(0.0)) * t;
+    let offset = select(-n.yx, n.yx, n.xy >= vec2<f32>(0.0)) * t;
+    n.x += offset.x;
+    n.y += offset.y;
     return normalize(n);
 }
 
 fn reconstruct_world_pos(uv: vec2<f32>, depth: f32, camera: Camera) -> vec3<f32> {
     let ndc = vec3<f32>(uv * 2.0 - 1.0, depth * 2.0 - 1.0);
     let clip = vec4<f32>(ndc, 1.0);
-    let view = inverse(camera.view_proj) * clip;
+    let view = camera.inv_view_proj * clip;
     return view.xyz / view.w;
 }
 
@@ -592,13 +602,13 @@ fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let depth = textureLoad(depth_tex, vec2<u32>(uv * textureDimensions(depth_tex)), 0).r;
+    let depth = textureLoad(depth_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(depth_tex))), 0);
     
-    let albedo = textureSampleLevel(albedo_tex, sampler, uv, 0.0);
-    let normal_enc = textureSampleLevel(normal_tex, sampler, uv, 0.0);
-    let material_id = textureLoad(material_id_tex, vec2<u32>(uv * textureDimensions(material_id_tex)), 0).r;
-    let world_pos_enc = textureSampleLevel(world_pos_tex, sampler, uv, 0.0);
-    let mat_params = textureSampleLevel(mat_params_tex, sampler, uv, 0.0);
+    let albedo = textureSampleLevel(albedo_tex, lighting_sampler, uv, 0.0);
+    let normal_enc = textureSampleLevel(normal_tex, lighting_sampler, uv, 0.0);
+    let material_id = textureLoad(material_id_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(material_id_tex))), 0).r;
+    let world_pos_enc = textureSampleLevel(world_pos_tex, lighting_sampler, uv, 0.0);
+    let mat_params = textureSampleLevel(mat_params_tex, lighting_sampler, uv, 0.0);
     
     let mat = materials[material_id];
     
@@ -730,12 +740,13 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 pub const COMPOSITE_FRAGMENT: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
 };
 
 @group(0) @binding(0) var deferred_tex: texture_2d<f32>;
 @group(0) @binding(1) var forward_tex: texture_2d<f32>;
-@group(0) @binding(2) var sampler: sampler;
+@group(0) @binding(2) var composite_sampler: sampler;
 
 const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
     vec4<f32>(-1.0, -1.0, 0.0, 1.0),
@@ -756,35 +767,32 @@ fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        select(12.92 * c.x, 1.055 * pow(c.x, 1.0 / 2.4) - 0.055, c.x > 0.0031308),
-        select(12.92 * c.y, 1.055 * pow(c.y, 1.0 / 2.4) - 0.055, c.y > 0.0031308),
-        select(12.92 * c.z, 1.055 * pow(c.z, 1.0 / 2.4) - 0.055, c.z > 0.0031308)
-    );
-}
+struct QuadVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
 
 @vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32>, @location(0) vec2<f32> {
-    return (QUAD[idx], UVS[idx]);
+fn vs_main(@builtin(vertex_index) idx: u32) -> QuadVertexOutput {
+    return QuadVertexOutput(QUAD[idx], UVS[idx]);
 }
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let deferred_color = textureSample(deferred_tex, sampler, uv).rgb;
-    let forward_color = textureSample(forward_tex, sampler, uv).rgba;
+    let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;
+    let forward_color = textureSample(forward_tex, composite_sampler, uv).rgba;
     
     let combined = deferred_color + forward_color.rgb * forward_color.a;
     let tonemapped = aces_tonemap(combined);
-    let srgb = srgb_encode(tonemapped);
     
-    return vec4<f32>(srgb, forward_color.a);
+    return vec4<f32>(tonemapped, forward_color.a);
 }
 "#;
 
 pub const PBR_FRAGMENT: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
 }
 
@@ -1307,8 +1315,13 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(1.0, 0.0),
 );
 
+struct CompositeVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
 @vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32>, @location(0) vec2<f32> {
-    return (QUAD[idx], UVS[idx]);
+fn vs_main(@builtin(vertex_index) idx: u32) -> CompositeVertexOutput {
+    return CompositeVertexOutput(QUAD[idx], UVS[idx]);
 }
 "#;
