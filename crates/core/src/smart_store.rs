@@ -246,6 +246,17 @@ impl SmartStore {
     }
 }
 
+pub trait Pack: Clone + Send + Sync + 'static {
+    type PackMut<'a>
+    where
+        Self: 'a;
+    
+    fn pack_register(store: &mut SmartStore);
+    fn pack_insert(&self, store: &mut SmartStore, entity: Entity);
+    fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self>;
+    fn pack_get_mut<'a>(store: &'a mut SmartStore, entity: Entity) -> Option<Self::PackMut<'a>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

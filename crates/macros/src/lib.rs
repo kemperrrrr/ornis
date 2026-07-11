@@ -1,4 +1,5 @@
 mod auto_pipeline;
+mod pack;
 mod for_each_entity;
 mod smart_pipeline;
 mod pipeline_config;
@@ -12,6 +13,11 @@ use proc_macro::TokenStream;
 #[proc_macro_derive(AutoPipeline, attributes(pack))]
 pub fn derive_auto_pipeline(input: TokenStream) -> TokenStream {
     auto_pipeline::derive(input)
+}
+
+#[proc_macro_derive(Pack, attributes(pack))]
+pub fn derive_pack(input: TokenStream) -> TokenStream {
+    pack::derive(input)
 }
 
 #[proc_macro]
