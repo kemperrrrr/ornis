@@ -16,6 +16,7 @@ default = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["rayon"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 ornis-macros = { path = "../macros" }
 
 [[bench]]
