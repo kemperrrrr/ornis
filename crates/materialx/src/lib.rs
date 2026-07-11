@@ -1,0 +1,48 @@
+//! MaterialX parser and OpenPBR material converter for Ornis Engine
+
+pub mod parser;
+pub mod nodes;
+pub mod graph;
+
+pub use parser::MaterialXParser;
+pub use graph::{load_materialx_file, parse_materialx, materialx_to_openpbr, CodegenError, MaterialXConverter, EvaluatedGraph, OutputValue, MaterialXError, OpenPBRGraph};
+pub use nodes::{MaterialXDocument, NodeGraph, NodeDef, Node, Input, Output};
+
+use ornis_render::OpenPBRMaterial;
+
+/// Load MaterialX from file and convert to OpenPBRMaterial
+pub fn load_materialx<P: AsRef<std::path::Path>>(path: P) -> Result<OpenPBRMaterial, MaterialXError> {
+    let content = std::fs::read_to_string(path)?;
+    materialx_to_openpbr(&content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    const SIMPLE_MTLX: &str = r#"
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="test">
+    <output name="out" type="color3" nodename="color" />
+    <constant name="color" type="color3">
+      <parameter name="value" type="color3" value="0.8, 0.2, 0.2" />
+    </constant>
+  </nodegraph>
+</materialx>
+"#;
+
+    #[test]
+    fn test_parse_simple_materialx() {
+        let parser = MaterialXParser::new();
+        let document = parser.parse(SIMPLE_MTLX);
+        assert!(document.is_ok());
+    }
+    
+    #[test]
+    fn test_load_from_string() {
+        let parser = MaterialXParser::new();
+        let document = parser.parse(SIMPLE_MTLX);
+        assert!(document.is_ok());
+    }
+}

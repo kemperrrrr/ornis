@@ -148,8 +148,8 @@ pub struct PageTable<T> {
 | 5.7 | In-Game Editor | Vello overlay, keyboard toggle | ✅ `EditorOverlay` с Vello-примитивами (панель, секции Scene Stats/UIStyle Editor, help); `~` открывает/закрывает, `Esc` закрывает; композитинг game scene + UI + editor в одном Vello-проходе; `GameApp` в `src/main.rs` (winit/wgpu, звезды, сетка) |
 | 5.8 | Удалённый редактор (Web) | `tiny_http`, `serde_json`, REST API | Игра на ПК, редактор на планшете/ноутбуке в браузере | ✅ HTTP-сервер (tiny_http, порт 3420) + REST API + встроенная веб-страница; RemoteEditor в отдельном треде, общается с игрой через IPC (crossbeam-channel); entity_count, event-лог, create entity |
 | 5.9 | **Система материалов: OpenPBR Surface** ✅ | `wgpu`, WGSL, `glam`, `bytemuck` | Создан крейт `crates/render`: `Material` (OpenPBR params, bytemuck), `Mesh` (sphere), `Transform`; WGSL PBR (GGX microfacet, Smith-G, Fresnel-Schlick, multiple lights); `Renderer3D` (storage buffers, instanced rendering); `CompositePass` (Vello UI + 3D alpha blend); интеграция в main loop — 5 сфер с разными материалами |
-| 5.10 | **Поддержка MaterialX** | `materialx` crate или кастомный парсер `.mtlx` в WGSL | Импорт MaterialX-нод-графа; компиляция в шейдеры wgpu; совместимость с VFX-пайплайном |
-| 5.11 | **Рендер-пайплайн материалов** | Deferred + Forward hybrid | OpenPBR-шейдеры рендерятся одним compute pass на GPU; переключение между собственным рендером и внешним — через `RenderBackend` trait |
+| 5.10 | **Поддержка MaterialX** | `materialx` crate / кастомный парсер `.mtlx` в WGSL | Импорт MaterialX-нод-графа; компиляция в шейдеры wgpu; совместимость с VFX-пайплайном | ✅
+| 5.11 | **Рендер-пайплайн материалов** | Deferred + Forward hybrid | OpenPBR-шейдеры рендерятся одним compute pass на GPU; переключение между собственным рендером и внешним — через `RenderBackend` trait | ✅
 
 ---
 
@@ -195,8 +195,8 @@ pub struct PageTable<T> {
 | 8.3 | Inlining-оптимизация | `#[inline]` + `rustc` LTO | Чужая функция «растворяется» в `zip`-цикле по Sparse Sets при `--release` |
 | 8.4 | Graceful degradation (CPU-fallback) | Эвристика ветвлений | Если сторонняя функция содержит сложные `if/else` → выполняется на CPU, но всё равно в Rayon-конвейере |
 | 8.5 | Паттерн «Границы данных» (Data Boundaries) | Borrow Checker | Чужая функция физически не может трогать данные вне выделенных лент |
-| 8.6 | **Трейт `PhysicsEngine`** — абстракция физики | `trait PhysicsEngine { fn step(&mut self, dt: f32); fn raycast(&self, ...) -> Option<Hit>; }` | Собственный движок (Sweep-and-Prune + constraints) — impl по умолчанию; Rapier, Jolt, PhysX — опциональные реализации |
-| 8.7 | **Трейт `RenderBackend`** — абстракция рендера | `trait RenderBackend { fn begin_frame(&mut self); fn draw_mesh(&mut self, ...); fn end_frame(&mut self); }` | `WgpuBackend` — impl по умолчанию; возможность подключить альтернативный рендер (консоли, HDRP) |
+| 8.6 | **Трейт `PhysicsEngine`** — абстракция физики | `trait PhysicsEngine { fn step(&mut self, dt: f32); fn raycast(&self, ...) -> Option<Hit>; }` | ✅ Собственный движок (Sweep-and-Prune + constraints) — impl в `core::physics`; Rapier, Jolt, PhysX — опциональные реализации |
+| 8.7 | **Трейт `RenderBackend`** — абстракция рендера | `trait RenderBackend { fn begin_frame(&mut self); fn draw_mesh(&mut self, ...); fn end_frame(&mut self); }` | ⚠️ Частично: `Renderer3D` в `crates/render` выполняет роль, но единый трейт не вынесен |
 | 8.8 | **Расширение физики для производительности** (future) | `#[cfg(feature = "physics-perf")]`, SIMD-солвер, IPC-связь с выделенным physics-тредом | Физика выносится в отдельный поток/процесс (IPC через shared memory); бенчмарк: 10k тел с коллизиями <1 ms |
 
 ---
@@ -205,12 +205,12 @@ pub struct PageTable<T> {
 
 **Цель**: обучать разработчика и предотвращать неэффективные паттерны.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 9.1 | AST-Visitor для поиска медленных циклов | `syn::visit::Visit` | Макрос `#[smart_pipeline]` находит `for` с `store.get()` / `store.get_mut()` внутри |
-| 9.2 | Генерация `compile_warning!` | `#[deprecated]` trick | При сборке выводится яркое предупреждение с рекомендацией использовать `for_each_entity!` |
-| 9.3 | Интеграция с IDE | Rust Analyzer | Предупреждение подсвечивается в VS Code / Vim / Emacs |
-| 9.4 | Расширяемость линтера | Плагинная система | Новые правила добавляются как отдельные `Visitor`'s |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 9.1 | AST-Visitor для поиска медленных циклов | `syn::visit::Visit` | ⚠️ Частично: `#[smart_pipeline]` делает базовый анализ, но `compile_warning!` не генерируется |
+| 9.2 | Генерация `compile_warning!` | `#[deprecated]` trick | ❌ |
+| 9.3 | Интеграция с IDE | Rust Analyzer | ❌ |
+| 9.4 | Расширяемость линтера | Плагинная система | ❌ |
 
 ---
 
@@ -218,26 +218,26 @@ pub struct PageTable<T> {
 
 **Цель**: один код — все платформы.
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 10.1 | Таргеты Desktop | `wgpu` (Vulkan/Metal/DX12) | `.exe` (Windows), `.app` (macOS), бинарник (Linux) |
-| 10.2 | Таргет WebAssembly | `wasm32-unknown-unknown`, `wasm-bindgen` | Браузер запускает `.wasm`, использует WebGPU через `<canvas>` |
-| 10.3 | Единый рендер-пасс (игра + UI) | `wgpu::RenderPass` | UI и мир рисуются в одном вызове, шейдеры могут накладываться друг на друга |
-| 10.4 | Условная компиляция платформ | `#[cfg(target_arch = "wasm32")]` | Desktop использует нативные потоки, WASM — Web Workers |
-| 10.5 | Размер бинарника | `strip`, `upx`, `wasm-opt` | Desktop: <20 МБ, WASM: <5 МБ (без текстур) |
-| 10.6 | **NUMA-Aware Allocation** | `libc::mbind`, `VirtualAllocExNuma` | `ComponentStore<T>::with_numa_affinity(node_id)`; критично для MMO-серверов на 32+ ядрах |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 10.1 | Таргеты Desktop | `wgpu` (Vulkan/Metal/DX12) | ✅ Код работает, бинарники собираются |
+| 10.2 | Таргет WebAssembly | `wasm32-unknown-unknown`, `wasm-bindgen` | ✅ Компилируется, WebGPU в браузере работает |
+| 10.3 | Единый рендер-пасс (игра + UI) | `wgpu::RenderPass` | ✅ CompositePass объединяет 3D + Vello UI |
+| 10.4 | Условная компиляция платформ | `#[cfg(target_arch = "wasm32")]` | ✅ Нативные потоки / Web Workers разделены |
+| 10.5 | Размер бинарника | `strip`, `upx`, `wasm-opt` | ⚠️ Не измерялся |
+| 10.6 | **NUMA-Aware Allocation** | `libc::mbind`, `VirtualAllocExNuma` | ❌ |
 
 ---
 
 ## Фаза 11. Полировка, документация, релиз
 
-| # | Задача | Технологии | Критерий завершения |
-|---|--------|------------|---------------------|
-| 11.1 | Полное покрытие тестами | `cargo test`, `miri` (для unsafe) | >80% покрытие ядра, все edge cases Sparse Set |
-| 11.2 | Документация (rustdoc + book) | `mdbook` | Пошаговый tutorial «Создай свою первую игру за 30 минут» |
-| 11.3 | Примеры и шаблоны | `cargo generate` | Шаблоны: 2D-шутер, 3D-платформер, UI-редактор |
-| 11.4 | Benchmark suite | `criterion`, custom harness | Сравнение с Bevy, Unity DOTS, bare metal на типовых сценариях |
-| 11.5 | Публикация на crates.io | `cargo publish` | `smart-engine = "0.1.0"` доступен для установки |
+| # | Задача | Технологии | Статус |
+|---|--------|------------|--------|
+| 11.1 | Полное покрытие тестами | `cargo test`, `miri` (для unsafe) | ✅ >80% ядро, Sparse Set edge cases покрыты; `miri` чист |
+| 11.2 | Документация (rustdoc + book) | `mdbook` | ❌ |
+| 11.3 | Примеры и шаблоны | `cargo generate` | ⚠️ Примеры в `src/main.rs` + integration tests |
+| 11.4 | Benchmark suite | `criterion`, custom harness | ⚠️ Бенчмарки есть (`store_bench`, `comparison_bench`), сравнение с Bevy/DOTS нет |
+| 11.5 | Публикация на crates.io | `cargo publish` | ❌ |
 
 ## Критический путь (Minimal Viable Product)
 

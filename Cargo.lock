@@ -2570,6 +2570,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-materialx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.30.10",
+ "ornis-core",
+ "ornis-render",
+ "quick-xml 0.31.0",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "ornis-render"
 version = "0.1.0"
 dependencies = [
@@ -3014,6 +3027,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -4271,7 +4294,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c324a910fd86ebdc364a3e61ec1f11737d3b1d6c273c0239ee8ff4bc0d24b4a"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.39.4",
  "quote",
 ]
 
