@@ -8,15 +8,11 @@ rust-version.workspace = true
 rayon = "1.10"
 fixedbitset = "0.5"
 crossbeam-channel = "0.5"
+crossbeam-epoch = "0.9"
 glam = "0.30"
-
-[dependencies.crossbeam-epoch]
-version = "0.9"
-optional = true
 
 [features]
 default = []
-lock-free = ["crossbeam-epoch"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["rayon"] }
