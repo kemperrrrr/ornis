@@ -1,5 +1,6 @@
 pub mod components;
 pub mod css;
+pub mod ipc;
 pub mod dom;
 pub mod html;
 pub mod js;

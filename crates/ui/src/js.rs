@@ -8,6 +8,7 @@ use boa_engine::{
 
 use crate::components::EcsBridge;
 use crate::dom::{Element, Node};
+use crate::ipc::{IpcChannel, UiCommand};
 
 const INIT_SCRIPT: &str = r##"
 (function() {
@@ -252,10 +253,15 @@ console = _console;
 pub struct JsRuntime {
     ctx: Context,
     pub bridge: EcsBridge,
+    pub ipc: Option<IpcChannel>,
 }
 
 impl JsRuntime {
     pub fn new(bridge: EcsBridge) -> Self {
+        Self::with_ipc(bridge, None)
+    }
+
+    pub fn with_ipc(bridge: EcsBridge, ipc: Option<IpcChannel>) -> Self {
         let mut ctx = Context::default();
 
         ctx.register_global_callable(
@@ -269,11 +275,39 @@ impl JsRuntime {
             }),
         ).expect("register console_log");
 
+        let realm = ctx.realm().clone();
+
+        // Register Ornis IPC functions if channel is provided
+        if let Some(channel) = &ipc {
+            let channel = channel.clone();
+            let send_ipc_fn = unsafe {
+                NativeFunction::from_closure(move |_, args, ctx| {
+                    if args.len() < 2 {
+                        return Err(boa_engine::JsNativeError::typ()
+                            .with_message("sendIpc: type, jsonData required")
+                            .into());
+                    }
+                    let cmd_type = args[0]
+                        .to_string(ctx)
+                        .map_err(|_| boa_engine::JsNativeError::typ().with_message("sendIpc: type must be a string"))?
+                        .to_std_string_escaped();
+                    let json_data = args[1]
+                        .to_string(ctx)
+                        .map_err(|_| boa_engine::JsNativeError::typ().with_message("sendIpc: jsonData must be a string"))?
+                        .to_std_string_escaped();
+                    channel.send(UiCommand::Custom { cmd_type, json_data });
+                    Ok(JsValue::undefined())
+                })
+            };
+            let global = ctx.global_object();
+            let _ = global.set(js_string!("Ornis_sendIpc"), JsValue::from(send_ipc_fn.to_js_function(&realm)), false, &mut ctx);
+        }
+
         bridge.register_js_functions(&mut ctx);
 
         let _ = ctx.eval(Source::from_bytes(INIT_SCRIPT));
 
-        JsRuntime { ctx, bridge }
+        JsRuntime { ctx, bridge, ipc }
     }
 
     pub fn eval(&mut self, code: &str) -> Result<(), String> {
@@ -384,6 +418,7 @@ impl JsRuntime {
 mod tests {
     use super::*;
     use crate::dom::find_by_tag;
+    use crate::ipc::GameEvent;
 
     fn test_bridge() -> EcsBridge {
         EcsBridge::new()
@@ -564,5 +599,58 @@ mod tests {
         let mut js = JsRuntime::new(test_bridge());
         js.eval(r##"console.log("hello from js");"##).unwrap();
         // just check it doesn't crash
+    }
+
+    #[test]
+    fn test_ipc_from_js() {
+        let (ipc, game) = IpcChannel::pair();
+        let mut js = JsRuntime::with_ipc(test_bridge(), Some(ipc));
+
+        js.eval(r##"
+            Ornis_sendIpc("SetVolume", JSON.stringify({ volume: 0.5 }));
+            Ornis_sendIpc("PlaySound", JSON.stringify({ name: "click" }));
+        "##).unwrap();
+
+        let cmd1 = game.poll().expect("should receive first command");
+        match cmd1 {
+            UiCommand::Custom { cmd_type, json_data } => {
+                assert_eq!(cmd_type, "SetVolume");
+                assert!(json_data.contains("\"volume\":0.5"));
+            }
+            _ => panic!("expected Custom command"),
+        }
+
+        let cmd2 = game.poll().expect("should receive second command");
+        match cmd2 {
+            UiCommand::Custom { cmd_type, json_data } => {
+                assert_eq!(cmd_type, "PlaySound");
+                assert!(json_data.contains("\"name\":\"click\""));
+            }
+            _ => panic!("expected Custom command"),
+        }
+
+        assert!(game.poll().is_none(), "no more commands");
+    }
+
+    #[test]
+    fn test_ipc_from_game_to_js() {
+        let (ipc, game) = IpcChannel::pair();
+        let mut js = JsRuntime::with_ipc(test_bridge(), Some(ipc));
+
+        // Game sends events back
+        game.send(GameEvent::EntityCreated { entity_id: 99 });
+
+        // JS sends a command first
+        js.eval(r##"
+            Ornis_sendIpc("Ping", "{}");
+        "##).unwrap();
+
+        // Check command received by game
+        let cmd = game.poll().expect("should receive Ping");
+        assert!(matches!(cmd, UiCommand::Custom { cmd_type, .. } if cmd_type == "Ping"));
+
+        // Poll IPC from the UI side
+        let ev = js.ipc.as_ref().unwrap().poll().expect("should receive EntityCreated");
+        assert!(matches!(ev, GameEvent::EntityCreated { entity_id: 99 }));
     }
 }

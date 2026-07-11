@@ -13,6 +13,7 @@ vello = { version = "0.6", features = ["wgpu"] }
 skrifa = "0.37"
 wgpu = "26"
 winit = "0.30"
+crossbeam-channel = "0.5"
 ornis-core = { path = "../core" }
 ornis-wgpu-backend = { path = "../wgpu_backend" }
 

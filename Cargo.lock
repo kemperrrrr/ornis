@@ -2537,6 +2537,7 @@ name = "ornis-ui"
 version = "0.1.0"
 dependencies = [
  "boa_engine",
+ "crossbeam-channel",
  "html5ever",
  "lightningcss",
  "ornis-core",
