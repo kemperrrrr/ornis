@@ -13,6 +13,7 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    pub tangent: [f32; 3],
 }
 
 impl Vertex {
@@ -35,6 +36,11 @@ impl Vertex {
                     offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x3,
                 },
             ],
         }
@@ -64,6 +70,10 @@ pub fn create_sphere(device: &wgpu::Device, radius: f32, sectors: u32, stacks: u
             let ny = y / radius;
             let nz = z / radius;
 
+            let tx = -sector_angle.sin();
+            let ty = sector_angle.cos();
+            let tz = 0.0;
+
             let u = j as f32 / sector_count as f32;
             let v = i as f32 / stack_count as f32;
 
@@ -71,6 +81,7 @@ pub fn create_sphere(device: &wgpu::Device, radius: f32, sectors: u32, stacks: u
                 position: [x, y, z],
                 normal: [nx, ny, nz],
                 uv: [u, v],
+                tangent: [tx, ty, tz],
             });
         }
     }

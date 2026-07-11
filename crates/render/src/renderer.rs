@@ -1,4 +1,4 @@
-use crate::material::Material;
+use crate::material::{OpenPBRMaterial, OPENPBR_MATERIAL_SIZE};
 use crate::mesh::{Mesh, Vertex};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
@@ -90,7 +90,7 @@ impl Renderer3D {
 
         let material_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("material buffer"),
-            size: (std::mem::size_of::<Material>() * max_materials as usize) as u64,
+            size: (OPENPBR_MATERIAL_SIZE * max_materials as usize) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -361,7 +361,7 @@ impl Renderer3D {
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&lighting));
     }
 
-    pub fn upload_materials(&self, queue: &wgpu::Queue, materials: &[Material]) {
+    pub fn upload_materials(&self, queue: &wgpu::Queue, materials: &[OpenPBRMaterial]) {
         let count = materials.len().min(self.max_materials as usize);
         queue.write_buffer(
             &self.material_buffer,

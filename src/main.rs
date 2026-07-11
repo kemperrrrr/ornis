@@ -8,7 +8,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowAttributes;
 
-use ornis_render::{Renderer3D, CompositePass, Material, Mesh, create_sphere, InstanceData};
+use ornis_render::{Renderer3D, CompositePass, OpenPBRMaterial, Mesh, create_sphere, InstanceData};
 use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
 use ornis_ui::editor::EditorOverlay;
@@ -94,7 +94,7 @@ struct GameContext {
     renderer3d: Renderer3D,
     composite: CompositePass,
     sphere_mesh: Mesh,
-    materials: Vec<Material>,
+    materials: Vec<OpenPBRMaterial>,
     instance_data: Vec<InstanceData>,
     js: JsRuntime,
     layout_tree: Option<LayoutTree>,
@@ -177,11 +177,21 @@ impl GameApp {
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let materials = vec![
-            Material::pbr([0.8, 0.2, 0.2, 1.0], 0.0, 0.3),
-            Material::pbr([0.2, 0.8, 0.2, 1.0], 0.0, 0.7),
-            Material::pbr([0.2, 0.2, 0.8, 1.0], 0.0, 0.1),
-            Material::pbr([0.9, 0.7, 0.1, 1.0], 1.0, 0.2),
-            Material::pbr([0.9, 0.9, 0.9, 1.0], 0.0, 0.5),
+            OpenPBRMaterial::dielectric()
+                .base_color_rgb([0.8, 0.2, 0.2]),
+            OpenPBRMaterial::dielectric()
+                .base_color_rgb([0.2, 0.8, 0.2])
+                .specular_roughness(0.7),
+            OpenPBRMaterial::dielectric()
+                .base_color_rgb([0.2, 0.2, 0.8])
+                .specular_roughness(0.1),
+            OpenPBRMaterial::metal()
+                .base_color_rgb([0.9, 0.7, 0.1])
+                .specular_roughness(0.2),
+            OpenPBRMaterial::coat()
+                .base_color_rgb([0.9, 0.9, 0.9])
+                .coat_weight(1.0)
+                .coat_roughness(0.1),
         ];
 
         let spacing = 2.8;
