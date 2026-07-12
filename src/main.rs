@@ -349,6 +349,8 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             ctx.instance_data.len() as u32,
         );
 
+        ctx.renderer.blit_to_surface(&ctx.device, &mut encoder, &frame_view);
+
         ctx.queue.submit(Some(encoder.finish()));
         frame.present();
     }
