@@ -1,6 +1,7 @@
 use crate::material::{OpenPBRMaterial, OPENPBR_MATERIAL_SIZE};
 use crate::mesh::{Mesh, Vertex};
-use crate::shader::{COMPOSITE_VERTEX, GBUFFER_FRAGMENT, GBUFFER_VERTEX, LIGHTING_FRAGMENT, LIGHTING_VERTEX, PBR_FRAGMENT, PBR_VERTEX};
+use crate::shaders;
+use std::borrow::Cow;
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
@@ -228,12 +229,12 @@ impl Renderer3D {
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pbr vertex"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PBR_VERTEX)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_vertex())),
         });
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pbr fragment"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PBR_FRAGMENT)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_fragment())),
         });
 
         let pipeline_layout =
@@ -489,12 +490,12 @@ impl Renderer3D {
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gbuffer vertex"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(GBUFFER_VERTEX)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_vertex())),
         });
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gbuffer fragment"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(GBUFFER_FRAGMENT)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_fragment())),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -713,12 +714,12 @@ Some(wgpu::ColorTargetState {
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lighting vertex"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(LIGHTING_VERTEX)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::lighting_vertex())),
         });
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lighting fragment"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(LIGHTING_FRAGMENT)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::lighting_fragment())),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -853,12 +854,12 @@ Some(wgpu::ColorTargetState {
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("forward vertex"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PBR_VERTEX)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_vertex())),
         });
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("forward fragment"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PBR_FRAGMENT)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_fragment())),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -926,12 +927,12 @@ Some(wgpu::ColorTargetState {
     ) -> CompositePass {
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite vertex"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(COMPOSITE_VERTEX)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::composite_vertex())),
         });
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite fragment"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(crate::shaders::composite_fragment())),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::composite_fragment())),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
