@@ -2599,6 +2599,7 @@ version = "0.1.0"
 dependencies = [
  "boa_engine",
  "crossbeam-channel",
+ "glam 0.30.10",
  "html5ever",
  "lightningcss",
  "ornis-core",

@@ -16,6 +16,7 @@ winit = "0.30"
 crossbeam-channel = "0.5"
 ornis-core = { path = "../core" }
 ornis-wgpu-backend = { path = "../wgpu_backend" }
+glam = "0.30"
 
 [dev-dependencies]
 pollster = "0.3"
