@@ -1,6 +1,6 @@
 use crate::material::{OpenPBRMaterial, OPENPBR_MATERIAL_SIZE};
 use crate::mesh::{Mesh, Vertex};
-use crate::shader::{COMPOSITE_FRAGMENT, COMPOSITE_VERTEX, GBUFFER_FRAGMENT, GBUFFER_VERTEX, LIGHTING_FRAGMENT, LIGHTING_VERTEX, PBR_FRAGMENT, PBR_VERTEX};
+use crate::shader::{COMPOSITE_VERTEX, GBUFFER_FRAGMENT, GBUFFER_VERTEX, LIGHTING_FRAGMENT, LIGHTING_VERTEX, PBR_FRAGMENT, PBR_VERTEX};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
@@ -931,7 +931,7 @@ Some(wgpu::ColorTargetState {
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite fragment"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(COMPOSITE_FRAGMENT)),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(crate::shaders::composite_fragment())),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
