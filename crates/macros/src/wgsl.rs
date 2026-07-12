@@ -52,6 +52,19 @@ impl WgslGen {
     fn path(p: &syn::ExprPath) -> String {
         let segs: Vec<_> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
         let last = segs.last().map(|s| s.as_str());
+
+        // Map glam type constants to WGSL constructors
+        let parent_type = segs.len().checked_sub(2).and_then(|i| segs.get(i)).map(|s| s.as_str());
+        match (parent_type, last) {
+            (Some("Vec2"), Some("ZERO")) => return "vec2<f32>(0.0)".into(),
+            (Some("Vec2"), Some("ONE")) => return "vec2<f32>(1.0)".into(),
+            (Some("Vec3"), Some("ZERO")) => return "vec3<f32>(0.0)".into(),
+            (Some("Vec3"), Some("ONE")) => return "vec3<f32>(1.0)".into(),
+            (Some("Vec4"), Some("ZERO")) => return "vec4<f32>(0.0)".into(),
+            (Some("Vec4"), Some("ONE")) => return "vec4<f32>(1.0)".into(),
+            _ => {}
+        }
+
         match last {
             Some("Vec2") | Some("vec2") => return "vec2<f32>".into(),
             Some("Vec3") | Some("vec3") => return "vec3<f32>".into(),
@@ -164,6 +177,16 @@ impl WgslGen {
                     }
                 }
             }
+            // splat: glam::Vec3::splat(1.0) -> vec3<f32>(1.0)
+            if ident_str == "splat" {
+                let segs: Vec<_> = p.path.segments.iter().collect();
+                if let Some(type_seg) = segs.iter().rev().nth(1) {
+                    let type_name = type_seg.ident.to_string();
+                    if let Some(wgsl_ty) = Self::wgsl_type(&type_name) {
+                        return format!("{}({})", wgsl_ty, args.join(", "));
+                    }
+                }
+            }
             if let Some(ident) = ident {
                 if let Some(mapped) = Self::map_fn(&ident, &args) {
                     return mapped;
@@ -249,6 +272,15 @@ impl WgslGen {
             }
             "clamp" => {
                 return format!("clamp({})", args.join(", "));
+            }
+            "lerp" => {
+                return format!("mix({})", args.join(", "));
+            }
+            "ln" => {
+                return format!("log({})", args.join(", "));
+            }
+            "powf" => {
+                return format!("pow({})", args.join(", "));
             }
             _ => {}
         }

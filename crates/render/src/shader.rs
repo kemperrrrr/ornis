@@ -1325,3 +1325,15 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> CompositeVertexOutput {
     return CompositeVertexOutput(QUAD[idx], UVS[idx]);
 }
 "#;
+
+/// Rust version of the WGSL octahedral_decode for testing.
+pub fn octahedral_decode_rust(p: glam::Vec2) -> glam::Vec3 {
+    let mut n = glam::Vec3::new(p.x, p.y, 1.0 - p.x.abs() - p.y.abs());
+    let t = (-n.z).max(0.0);
+    // Matches WGSL: select(-n.yx, n.yx, n.xy >= vec2<f32>(0.0)) * t
+    let ox = if n.x >= 0.0 { n.y } else { -n.y } * t;
+    let oy = if n.y >= 0.0 { n.x } else { -n.x } * t;
+    n.x += ox;
+    n.y += oy;
+    n.normalize()
+}

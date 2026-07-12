@@ -159,7 +159,11 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         pub mod #fn_name {
-            pub fn eval ( #inputs ) #output #body
+            #[allow(non_snake_case)]
+            pub fn eval ( #inputs ) #output {
+                use super::*;
+                #body
+            }
 
             #[allow(dead_code)]
             pub fn label() -> &'static str {
