@@ -8,7 +8,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowAttributes;
 
-use ornis_render::{Renderer3D, OpenPBRMaterial, Mesh, create_sphere, InstanceData};
+use ornis_render::{OpenPBRMaterial, Mesh, create_sphere, InstanceData, RenderBackend, RenderBackendConfig, create_render_backend};
 use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
 use ornis_ui::editor::EditorOverlay;
@@ -91,7 +91,7 @@ struct GameContext {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     renderer: UIRenderer,
-    renderer3d: Renderer3D,
+    renderer3d: Box<dyn RenderBackend>,
     sphere_mesh: Mesh,
     materials: Vec<OpenPBRMaterial>,
     instance_data: Vec<InstanceData>,
@@ -168,10 +168,16 @@ impl GameApp {
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = UIRenderer::new(&device, &surface_config, surface_format)
+let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             .map_err(|e| format!("renderer init: {e:?}"))?;
 
-        let renderer3d = Renderer3D::new(&device, &surface_config, 1);
+        let backend_config = RenderBackendConfig {
+            surface_config: surface_config.clone(),
+            sample_count: 1,
+            max_objects: 256,
+            max_materials: 64,
+        };
+        let renderer3d: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let materials = vec![
@@ -330,10 +336,15 @@ impl GameApp {
         };
         let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let context = ornis_render::RenderContext {
+            device: &ctx.device,
+            queue: &ctx.queue,
+            encoder: &mut encoder,
+            target: &frame_view,
+        };
+
         ctx.renderer3d.render_scene(
-            &ctx.device,
-            &mut encoder,
-            &frame_view,
+            context,
             &ctx.sphere_mesh,
             ctx.instance_data.len() as u32,
         );

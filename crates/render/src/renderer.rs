@@ -1,4 +1,4 @@
-use crate::material::{OpenPBRMaterial, OPENPBR_MATERIAL_SIZE};
+use ornis_core::material::{OpenPBRMaterial, OPENPBR_MATERIAL_SIZE};
 use crate::mesh::{Mesh, Vertex};
 use crate::shaders;
 use std::borrow::Cow;
