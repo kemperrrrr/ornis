@@ -3,6 +3,7 @@ pub mod mesh;
 pub mod transform;
 pub mod renderer;
 pub mod shader;
+pub mod shaders;
 pub mod composite;
 
 pub use material::{OpenPBRMaterial, OPENPBR_MATERIAL_VEC4_COUNT, OPENPBR_MATERIAL_SIZE};

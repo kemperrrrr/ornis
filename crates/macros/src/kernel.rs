@@ -146,24 +146,41 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
-    let wgsl = crate::wgsl::wgsl_source_from_fn(&func);
+    // Generate WGSL function source string
+    let wgsl_fn_src = crate::wgsl::wgsl_fn_source(&func);
+
+    // Keep the compute shader path for backward compatibility
+    let wgsl_compute = crate::wgsl::wgsl_source_from_fn(&func);
+
+    // Generate the Rust function body as WGSL for the compute version
+    let inputs = &func.sig.inputs;
+    let output = &func.sig.output;
+    let body = &func.block;
+
     let expanded = quote! {
         pub mod #fn_name {
+            pub fn eval ( #inputs ) #output #body
+
             #[allow(dead_code)]
-            pub fn pipeline_label() -> &'static str {
+            pub fn label() -> &'static str {
                 stringify!(#fn_name)
             }
 
             #[allow(dead_code)]
             pub fn wgsl_source() -> &'static str {
-                #wgsl
+                #wgsl_fn_src
+            }
+
+            #[allow(dead_code)]
+            pub fn wgsl_compute_source() -> &'static str {
+                #wgsl_compute
             }
 
             #[allow(dead_code)]
             pub fn create_shader_module(device: &wgpu::Device) -> wgpu::ShaderModule {
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(pipeline_label()),
-                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl_source())),
+                    label: Some(stringify!(#fn_name)),
+                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl_compute_source())),
                 })
             }
 
@@ -173,12 +190,12 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
             ) -> wgpu::ComputePipeline {
                 let shader = create_shader_module(device);
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some(pipeline_label()),
+                    label: Some(stringify!(#fn_name)),
                     bind_group_layouts: &[],
                     push_constant_ranges: &[],
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(pipeline_label()),
+                    label: Some(stringify!(#fn_name)),
                     layout: Some(&layout),
                     module: &shader,
                     entry_point: Some("main"),

@@ -2589,6 +2589,7 @@ dependencies = [
  "bytemuck",
  "glam 0.30.10",
  "ornis-core",
+ "ornis-macros",
  "wgpu",
 ]
 

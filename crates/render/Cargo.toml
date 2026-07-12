@@ -9,3 +9,4 @@ wgpu = "26"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
 ornis-core = { path = "../core" }
+ornis-macros = { path = "../macros" }
