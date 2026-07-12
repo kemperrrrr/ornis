@@ -143,13 +143,10 @@ fn subsurface_brdf(NoV: f32, NoL: f32, distance: f32, radius: glam::Vec3, anisot
 #[kernel]
 fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
     let cutoff = 0.04045;
-    let low = c / 12.92;
-    let high = ((c + 0.055) / 1.055).powf(2.4);
-    glam::Vec3::new(
-        if c.x <= cutoff { low.x } else { high.x },
-        if c.y <= cutoff { low.y } else { high.y },
-        if c.z <= cutoff { low.z } else { high.z },
-    )
+    let r = if c.x <= cutoff { c.x / 12.92 } else { ((c.x + 0.055) / 1.055).powf(2.4) };
+    let g = if c.y <= cutoff { c.y / 12.92 } else { ((c.y + 0.055) / 1.055).powf(2.4) };
+    let b = if c.z <= cutoff { c.z / 12.92 } else { ((c.z + 0.055) / 1.055).powf(2.4) };
+    glam::Vec3::new(r, g, b)
 }
 
 #[kernel]
@@ -197,14 +194,13 @@ fn thin_film_modulation(cos_theta: f32, film_ior: f32, thickness_nm: f32, ior_ou
 fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
     let p = n.xy() / (n.x.abs() + n.y.abs() + n.z.abs());
     let q = glam::Vec2::new(p.x, p.y);
+    let sign_x = if q.x >= 0.0 { 1.0 } else { -1.0 };
+    let sign_y = if q.y >= 0.0 { 1.0 } else { -1.0 };
+    let flipped = glam::Vec2::new(1.0 - q.y.abs(), 1.0 - q.x.abs()) * glam::Vec2::new(sign_x, sign_y);
     if n.z < 0.0 {
-        glam::Vec2::new(1.0 - q.y.abs(), 1.0 - q.x.abs()) * glam::Vec2::new(
-            if q.x >= 0.0 { 1.0 } else { -1.0 },
-            if q.y >= 0.0 { 1.0 } else { -1.0 },
-        )
-    } else {
-        q
+        return flipped;
     }
+    return q;
 }
 
 #[cfg(test)]

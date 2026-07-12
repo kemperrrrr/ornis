@@ -35,7 +35,14 @@ impl WgslGen {
         use syn::Lit::*;
         match &l.lit {
             Int(i) => i.to_string(),
-            Float(f) => f.to_string(),
+            Float(f) => {
+                let base = f.base10_digits();
+                if base.contains('.') || base.contains('e') || base.contains('E') {
+                    base.to_string()
+                } else {
+                    format!("{}.0", base)
+                }
+            },
             Bool(b) => {
                 if b.value {
                     "true".into()
@@ -260,6 +267,19 @@ impl WgslGen {
 
         // Map Rust methods to WGSL functions
         match method.as_str() {
+            // Swizzle methods - convert to field access in WGSL
+            "x" | "y" | "z" | "w" | "r" | "g" | "b" | "a"
+            | "xy" | "xz" | "xw" | "yx" | "yz" | "yw"
+            | "zx" | "zy" | "zw" | "wx" | "wy" | "wz"
+            | "xyz" | "xyw" | "xzy" | "xzw" | "yxz" | "yxw"
+            | "yzx" | "yzw" | "zxy" | "zxw" | "zyx" | "zyw"
+            | "wxy" | "wxz" | "wyz" | "wzx" | "wzy"
+            | "xyzw" | "xywz" | "xzyw" | "xzwy" | "xwyz" | "xwzy"
+            | "yxzw" | "yxwz" | "yzxw" | "yzwx" | "ywxz" | "ywzx"
+            | "zxyw" | "zxwy" | "zyxw" | "zywx" | "zwxy" | "zwyx"
+            | "wxyz" | "wxzy" | "wyxz" | "wyzx" | "wzxy" | "wzyx" => {
+                return format!("{}.{}", receiver, method);
+            }
             "signum" => return format!("sign({})", args[0]),
             "abs" | "sqrt" | "sin" | "cos" | "tan" | "floor" | "ceil"
             | "round" | "fract" | "exp" | "log" | "normalize"
@@ -311,12 +331,35 @@ impl WgslGen {
     }
 
     fn block(block: &syn::Block) -> String {
-        block.stmts.iter().map(|s| Self::stmt(s)).collect::<Vec<_>>().join(" ")
+        let count = block.stmts.len();
+        block.stmts.iter()
+            .enumerate()
+            .map(|(i, s)| Self::stmt(s, i == count - 1))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
-    fn stmt(s: &Stmt) -> String {
+    fn stmt(s: &Stmt, is_tail: bool) -> String {
         match s {
             Stmt::Local(local) => {
+                // Handle `let x = if/else { .. } else { .. };` — wrap if/else into var+if
+                if let Some(init) = &local.init {
+                    if let syn::Expr::If(if_expr) = init.expr.as_ref() {
+                        let pat = Self::pat(&local.pat);
+                        let cond = Self::expr(&if_expr.cond);
+                        let then_val = Self::last_expr_in_block(&if_expr.then_branch);
+                        let else_val = if_expr.else_branch.as_ref()
+                            .and_then(|(_, else_expr)| {
+                                if let syn::Expr::Block(block) = else_expr.as_ref() {
+                                    Some(Self::last_expr_in_block(&block.block))
+                                } else { None }
+                            })
+                            .unwrap_or_default();
+                        // Convert: let x = if c { a } else { b };
+                        // To WGSL: var x = b; if (c) { x = a; }
+                        return format!("var {} = {}; if ({}) {{ {} = {}; }} ", pat, else_val, cond, pat, then_val);
+                    }
+                }
                 let pat = Self::pat(&local.pat);
                 let init = local.init.as_ref().map(|init| Self::expr(&init.expr));
                 if let Some(init_val) = init {
@@ -327,14 +370,35 @@ impl WgslGen {
             }
             Stmt::Expr(expr, semi) => {
                 let e = Self::expr(expr);
-                if semi.is_some() {
+                // if/block expressions in WGSL are statements, not values
+                // — never wrap in `return` at this level; return is handled
+                // inside the branches via block() → is_tail
+                if matches!(expr, syn::Expr::If(_) | syn::Expr::Block(_)) {
+                    if semi.is_some() {
+                        format!("{}; ", e)
+                    } else {
+                        format!("{} ", e)
+                    }
+                } else if semi.is_some() || !is_tail {
                     format!("{}; ", e)
                 } else {
-                    format!("{} ", e)
+                    format!("return {}; ", e)
                 }
             }
             _ => String::new(),
         }
+    }
+
+    fn last_expr_in_block(block: &syn::Block) -> String {
+        block.stmts.last()
+            .and_then(|s| {
+                if let Stmt::Expr(e, _) = s {
+                    Some(Self::expr(e))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     }
 
     fn pat(p: &syn::Pat) -> String {
@@ -396,8 +460,9 @@ fn extract_and_convert_body(func: &ItemFn) -> String {
 /// Convert the entire function body to WGSL statements
 fn convert_body_to_wgsl(func: &ItemFn) -> String {
     let mut out = String::new();
-    for stmt in &func.block.stmts {
-        out.push_str(&WgslGen::stmt(stmt));
+    let count = func.block.stmts.len();
+    for (i, stmt) in func.block.stmts.iter().enumerate() {
+        out.push_str(&WgslGen::stmt(stmt, i == count - 1));
     }
     out
 }
@@ -557,7 +622,8 @@ mod tests {
     #[test]
     fn if_expr_translates() {
         let expr: syn::Expr = parse_quote!(if a > b { c } else { d });
-        assert_eq!(rust_to_wgsl(&expr), "if (a > b) { c } else { d }");
+        // WGSL requires return in blocks used as expressions
+        assert_eq!(rust_to_wgsl(&expr), "if (a > b) { return c; } else { return d; }");
     }
 
     #[test]
@@ -600,8 +666,11 @@ mod tests {
             }
         };
         let source = wgsl_fn_source(&func);
+        // let y = if/else → var y = else_val; if (cond) { y = if_val; }
+        assert!(source.contains("var y = -x;"));
         assert!(source.contains("if (x > 0.0)"));
-        assert!(source.contains("else"));
+        assert!(source.contains("y = x;"));
+        assert!(source.contains("return y;"));
     }
 
     #[test]
