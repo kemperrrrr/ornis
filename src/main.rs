@@ -8,10 +8,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowAttributes;
 
-use ornis_render::{OpenPBRMaterial, Mesh, create_sphere, InstanceData, RenderBackend, RenderBackendConfig, create_render_backend};
+use ornis_render::{OpenPBRMaterial, Mesh, create_sphere, InstanceData, RenderBackend, RenderBackendConfig, create_render_backend, LegacyCompositePass};
 use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
-use ornis_ui::editor::EditorOverlay;
+use ornis_ui::editor_template::EditorTemplate;
 use ornis_ui::ipc::{GameEvent, UiCommand};
 use ornis_ui::js::JsRuntime;
 use ornis_ui::layout::LayoutTree;
@@ -63,7 +63,7 @@ body {
   justify-content: center;
   gap: 8px;
   width: 200px;
-  height: 60px;
+  height: 60px
   background-color: #3b6ff0;
   border-radius: 12px;
 }
@@ -98,9 +98,12 @@ struct GameContext {
     js: JsRuntime,
     layout_tree: Option<LayoutTree>,
     font: FontData,
-    editor: EditorOverlay,
+    editor_html: String,
+    editor_css: String,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
+    pbr_target: wgpu::Texture,
+    composite_pass: LegacyCompositePass,
 }
 
 impl GameApp {
@@ -180,6 +183,22 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
         let renderer3d: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
+        let pbr_target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pbr intermediate"),
+            size: wgpu::Extent3d {
+                width: surface_config.width.max(1),
+                height: surface_config.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let composite_pass = LegacyCompositePass::new(&device, surface_format);
+
         let materials = vec![
             OpenPBRMaterial::dielectric()
                 .base_color_rgb([0.8, 0.2, 0.2]),
@@ -211,9 +230,17 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             }
         }).collect();
 
+        use ornis_ui::editor_template::EditorTemplate;
+
         let font = load_font();
         let bridge = EcsBridge::new();
         let js = JsRuntime::new(bridge);
+
+        // Generate editor HTML/CSS using the unified template
+        let editor_config = ornis_ui::editor_template::UnifiedEditorConfig::default();
+        let editor_template = EditorTemplate::new(editor_config);
+        let editor_html = editor_template.generate_html();
+        let editor_css = editor_template.generate_css();
 
         Ok(GameContext {
             window,
@@ -229,25 +256,30 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             js,
             layout_tree: None,
             font,
-            editor: EditorOverlay::new(),
+            editor_html,
+            editor_css,
             remote_cmd_rx,
             remote_ev_tx,
+            pbr_target,
+            composite_pass,
             })
     }
 
     fn build_layout(ctx: &mut GameContext) {
-        let _ = ctx.js.eval(UI_JS);
-        let root = ctx.js.document_node();
-        let doc = ornis_ui::dom::Document { root };
-        if let Ok(stylesheet) = Stylesheet::parse(UI_CSS) {
-            if let Ok(tree) = LayoutTree::build_with_viewport(
-                &doc,
-                &[stylesheet],
-                ctx.surface_config.width as f32,
-                ctx.surface_config.height as f32,
-            ) {
-                ctx.layout_tree = Some(tree);
-            }
+        // Use the unified editor HTML/CSS template instead of the old UI_JS/UI_CSS
+        let doc = ornis_ui::html::parse_html(&ctx.editor_html);
+        let stylesheet = ornis_ui::css::Stylesheet::parse(&ctx.editor_css)
+            .unwrap_or_else(|_| ornis_ui::css::Stylesheet { rules: Vec::new(), custom_properties: std::collections::HashMap::new() });
+        
+        match LayoutTree::build_with_viewport(
+            &doc,
+            &[stylesheet],
+            ctx.surface_config.width as f32,
+            ctx.surface_config.height as f32,
+            &ctx.font,
+        ) {
+            Ok(tree) => ctx.layout_tree = Some(tree),
+            Err(e) => eprintln!("ornis: editor layout build failed: {e:?}"),
         }
     }
 
@@ -282,25 +314,25 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
         let h = ctx.surface_config.height as f64;
         let aspect = w as f32 / h as f32;
 
-        // --- Build Vello UI scene (transparent bg) ---
+        // --- Build Vello UI scene using the unified editor HTML/CSS ---
         ctx.renderer.begin_frame();
 
-        // Starfield / decorative elements
+        // Starfield / decorative elements (background)
         ctx.renderer.fill_rect(0.0, 0.0, w, h, Color::new([0.0, 0.0, 0.0, 0.0]));
-        let stars = [(100.0, 80.0, 2.0), (300.0, 150.0, 1.5), (500.0, 60.0, 2.5),
-                     (700.0, 200.0, 1.0), (200.0, 400.0, 2.0), (600.0, 500.0, 1.5)];
-        for &(sx, sy, sr) in &stars {
-            ctx.renderer.fill_circle(sx, sy, sr, Color::new([1.0, 1.0, 1.0, 0.3]));
-        }
-        for i in 0..20 {
-            let y = (i as f64) * 60.0 + 30.0;
-            ctx.renderer.stroke_rect(0.0, y, w, 1.0, 1.0, Color::new([1.0, 1.0, 1.0, 0.04]));
+        if ctx.layout_tree.is_some() {
+            let stars = [(100.0, 80.0, 2.0), (300.0, 150.0, 1.5), (500.0, 60.0, 2.5),
+                         (700.0, 200.0, 1.0), (200.0, 400.0, 2.0), (600.0, 500.0, 1.5)];
+            for &(sx, sy, sr) in &stars {
+                ctx.renderer.fill_circle(sx, sy, sr, Color::new([1.0, 1.0, 1.0, 0.3]));
+            }
+            for i in 0..20 {
+                let y = (i as f64) * 60.0 + 30.0;
+                ctx.renderer.stroke_rect(0.0, y, w, 1.0, 1.0, Color::new([1.0, 1.0, 1.0, 0.04]));
+            }
         }
         if let Some(ref tree) = ctx.layout_tree {
             paint_layout(tree, &mut ctx.renderer, &ctx.font);
         }
-        ctx.editor.set_entity_count(entity_count(ctx));
-        ctx.editor.paint(&mut ctx.renderer, w, h, &ctx.font);
 
         // Render Vello scene to internal texture
         ctx.renderer.render_scene(&ctx.device, &ctx.queue).ok();
@@ -335,12 +367,13 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             }
         };
         let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let pbr_view = ctx.pbr_target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let context = ornis_render::RenderContext {
             device: &ctx.device,
             queue: &ctx.queue,
             encoder: &mut encoder,
-            target: &frame_view,
+            target: &pbr_view,
         };
 
         ctx.renderer3d.render_scene(
@@ -349,7 +382,8 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             ctx.instance_data.len() as u32,
         );
 
-        ctx.renderer.blit_to_surface(&ctx.device, &mut encoder, &frame_view);
+        let ui_view = ctx.renderer.get_internal_texture_view();
+        ctx.composite_pass.compose(&ctx.device, &mut encoder, &frame_view, &pbr_view, &ui_view);
 
         ctx.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -406,6 +440,20 @@ impl ApplicationHandler for GameApp {
                 ctx.surface.configure(&ctx.device, &ctx.surface_config);
                 ctx.renderer.resize(&ctx.device, size.width.max(1), size.height.max(1));
                 ctx.renderer3d.resize(&ctx.device, size.width.max(1), size.height.max(1));
+                ctx.pbr_target = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("pbr intermediate"),
+                    size: wgpu::Extent3d {
+                        width: size.width.max(1),
+                        height: size.height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: ctx.surface_config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
                 Self::build_layout(ctx);
                 ctx.window.request_redraw();
             }
@@ -417,9 +465,24 @@ impl ApplicationHandler for GameApp {
                         Key::Character(c) => c.as_str(),
                         _ => return,
                     };
-                    if ctx.editor.handle_key(key_str) {
+                    // Handle editor toggle and gizmo modes via the new unified editor
+                    // (key handling will be done via the JS runtime and ECS bridge)
+                    if key_str == "`" || key_str == "Backtick" || key_str == "F1" {
+                        // Toggle editor visibility - send to JS runtime
+                        let _ = ctx.js.eval("window.OrnisEditor?.toggle?.()");
                         Self::build_layout(ctx);
                         ctx.window.request_redraw();
+                    } else if key_str == "Escape" {
+                        // Close editor
+                        let _ = ctx.js.eval("window.OrnisEditor?.close?.()");
+                        Self::build_layout(ctx);
+                        ctx.window.request_redraw();
+                    } else if key_str == "1" {
+                        let _ = ctx.js.eval("window.OrnisEditor?.setGizmoMode?.('translate')");
+                    } else if key_str == "2" {
+                        let _ = ctx.js.eval("window.OrnisEditor?.setGizmoMode?.('rotate')");
+                    } else if key_str == "3" {
+                        let _ = ctx.js.eval("window.OrnisEditor?.setGizmoMode?.('scale')");
                     }
                 }
             }
@@ -444,19 +507,17 @@ fn entity_count(ctx: &GameContext) -> u32 {
 }
 
 fn load_font() -> FontData {
-    let paths = [
+    // Prefer the bundled Inter typeface shipped with the crate.
+    let inter = ornis_ui::text::load_inter_font();
+    // load_inter_font already falls back to system fonts (Arial/DejaVu/Segoe)
+    // if the bundle is missing, so just return it.
+    let _ = [
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/Menlo.ttc",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
     ];
-    for path in &paths {
-        if let Ok(data) = std::fs::read(path) {
-            return ornis_ui::text::load_font_from_bytes(&data);
-        }
-    }
-    eprintln!("warning: no system font found, text will be invisible");
-    FontData::new(vello::peniko::Blob::from(Vec::new()), 0)
+    inter
 }
 
 fn main() {

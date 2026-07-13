@@ -8,7 +8,7 @@ rust-version.workspace = true
 boa_engine = "0.21"
 html5ever = "0.27"
 lightningcss = "1.0.0-alpha.71"
-taffy = "0.5"
+taffy = { version = "0.8", features = ["grid"] }
 vello = { version = "0.6", features = ["wgpu"] }
 skrifa = "0.37"
 wgpu = "26"
@@ -17,6 +17,19 @@ crossbeam-channel = "0.5"
 ornis-core = { path = "../core" }
 ornis-wgpu-backend = { path = "../wgpu_backend" }
 glam = "0.30"
+image = "0.25"
+serde = { version = "1", features = ["derive"] }
+png = "0.17"
+
+# Enables `LayoutTree::to_json` (used by the `serialize_layout` example /
+# tests to diff our layout against a real browser via `diff.py`).
+[features]
+default = []
+serialize = ["dep:serde_json"]
+
+[dependencies.serde_json]
+version = "1"
+optional = true
 
 [dev-dependencies]
 pollster = "0.3"

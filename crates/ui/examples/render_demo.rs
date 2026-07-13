@@ -207,11 +207,13 @@ impl DemoApp {
         let root = ctx.js.document_node();
         let doc = ornis_ui::dom::Document { root };
         let stylesheets = vec![Stylesheet::parse(CSS).unwrap()];
+        let font = ornis_ui::text::load_font_from_bytes(&[]);
         let tree = LayoutTree::build_with_viewport(
             &doc,
             &stylesheets,
             viewport_width as f32,
             viewport_height as f32,
+            &font,
         ).unwrap();
         ctx.layout_tree = Some(tree);
     }

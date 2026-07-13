@@ -21,10 +21,11 @@ impl UIRenderer {
         surface_config: &SurfaceConfiguration,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, vello::Error> {
+        let use_cpu = cfg!(target_arch = "wasm32");
         let renderer = Renderer::new(
             device,
             RendererOptions {
-                use_cpu: false,
+                use_cpu,
                 antialiasing_support: AaSupport::area_only(),
                 num_init_threads: NonZeroUsize::new(1),
                 pipeline_cache: None,
@@ -35,6 +36,10 @@ impl UIRenderer {
         let width = surface_config.width;
         let height = surface_config.height;
 
+        // Vello renders into a storage-capable, linearly-encoded target.
+        // srgb surface formats (e.g. Bgra8UnormSrgb) do NOT support
+        // STORAGE_BINDING, so we use Rgba8Unorm for the offscreen target and
+        // let the composite pass sample it as a plain float texture.
         let output = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vello output"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -140,6 +145,37 @@ impl UIRenderer {
             .draw(Fill::NonZero, glyphs.into_iter());
     }
 
+    pub fn fill_bez_path(&mut self, path: &vello::peniko::kurbo::BezPath, transform: Affine, color: Color) {
+        self.brush = peniko::Brush::from(color);
+        self.scene.fill(
+            peniko::Fill::NonZero,
+            transform,
+            &self.brush,
+            None,
+            path,
+        );
+    }
+
+    /// Draws a raster image (`peniko::ImageData`, e.g. a decoded `<img>`) into
+    /// the scene, scaling its intrinsic pixel size to `transform`.
+    pub fn draw_image(&mut self, image: &vello::peniko::ImageData, transform: Affine) {
+        let brush = vello::peniko::ImageBrush::new(image.clone());
+        self.scene.draw_image(brush.as_ref(), transform);
+    }
+
+    /// Clips all subsequent drawing commands to the given rounded rectangle
+    /// (matching a CSS `border-radius`), until [`Self::pop_clip`] is called.
+    /// Used to keep a `background-image` inside the element's rounded box.
+    pub fn push_rounded_clip(&mut self, x: f64, y: f64, w: f64, h: f64, r: f64) {
+        let rect = RoundedRect::new(x, y, x + w, y + h, r);
+        self.scene.push_clip_layer(Affine::IDENTITY, &rect);
+    }
+
+    /// Pops the clip layer opened by [`Self::push_rounded_clip`].
+    pub fn pop_clip(&mut self) {
+        self.scene.pop_layer();
+    }
+
     pub fn get_internal_texture_view(&self) -> wgpu::TextureView {
         self.output.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())
     }
@@ -152,7 +188,7 @@ impl UIRenderer {
         let output = self.output.take().unwrap();
         let view = output.create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.renderer.render_to_texture(
+        let result = self.renderer.render_to_texture(
             device,
             queue,
             &self.scene,
@@ -163,10 +199,10 @@ impl UIRenderer {
                 height: self.height,
                 antialiasing_method: AaConfig::Area,
             },
-        )?;
+        );
 
         self.output = Some(output);
-        Ok(())
+        result
     }
 
     pub fn blit_to_surface(
@@ -199,6 +235,74 @@ impl UIRenderer {
         queue.submit(Some(encoder.finish()));
         frame.present();
 
+        Ok(())
+    }
+
+    /// Renders the current scene to the offscreen `output` texture and copies it
+    /// back to the CPU, writing an 8-bit RGBA PNG to `path`. Used for offline
+    /// visual verification (the engine otherwise only renders to a live surface).
+    pub fn save_png(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.render_scene(device, queue)?;
+
+        let output = self.output.as_ref().unwrap();
+        let (w, h) = (self.width, self.height);
+        let bytes_per_pixel = 4u32;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let unpadded = w * bytes_per_pixel;
+        let padded = (unpadded + align - 1) & !(align - 1);
+
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("png readback"),
+            size: (padded as u64) * (h as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("png copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::Wait);
+        let mapped = slice.get_mapped_range();
+        let mut img_data = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let src = &mapped[(y * padded) as usize..(y * padded + unpadded) as usize];
+            img_data.extend_from_slice(src);
+        }
+        drop(mapped);
+        buffer.unmap();
+
+        let file = std::fs::File::create(path)?;
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header()?;
+        writer.write_image_data(&img_data)?;
         Ok(())
     }
 }

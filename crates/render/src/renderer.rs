@@ -78,6 +78,10 @@ pub struct CompositePass {
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
+pub struct CompositeResources {
+    pub sampler: wgpu::Sampler,
+}
+
 pub struct Renderer3D {
     camera_buffer: wgpu::Buffer,
     per_object_buffer: wgpu::Buffer,
@@ -101,6 +105,7 @@ pub struct Renderer3D {
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     composite_pass: CompositePass,
+    composite_sampler: wgpu::Sampler,
 }
 
 impl Renderer3D {
@@ -313,6 +318,15 @@ impl Renderer3D {
         let lighting_pass = Self::create_lighting_pass(device, &gbuffer, &camera_buffer, &lighting_buffer, &material_buffer, &pbr_texture_view, sample_count);
         let forward_pass = Self::create_forward_pass(device, &camera_buffer, &per_object_buffer, &material_buffer, &lighting_buffer, width, height, sample_count);
         let composite_pass = Self::create_composite_pass(device, format);
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         Self {
             camera_buffer,
@@ -337,6 +351,7 @@ impl Renderer3D {
             lighting_pass,
             forward_pass,
             composite_pass,
+            composite_sampler,
         }
     }
 
@@ -1297,17 +1312,7 @@ Some(wgpu::ColorTargetState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(
-                        &device.create_sampler(&wgpu::SamplerDescriptor {
-                            address_mode_u: wgpu::AddressMode::ClampToEdge,
-                            address_mode_v: wgpu::AddressMode::ClampToEdge,
-                            address_mode_w: wgpu::AddressMode::ClampToEdge,
-                            mag_filter: wgpu::FilterMode::Linear,
-                            min_filter: wgpu::FilterMode::Linear,
-                            mipmap_filter: wgpu::FilterMode::Nearest,
-                            ..Default::default()
-                        }),
-                    ),
+                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
                 },
             ],
         });

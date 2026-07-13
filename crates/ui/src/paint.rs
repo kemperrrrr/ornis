@@ -7,14 +7,145 @@ pub fn paint_layout(tree: &LayoutTree, renderer: &mut UIRenderer, font: &FontDat
     paint_node(tree, tree.root, renderer, font);
 }
 
-fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, font: &FontData) {
+/// Walks up the ancestor chain to resolve an inherited property
+/// (e.g. `color`, `font-size`) for a node that has no own declaration.
+fn resolve_inherited<'a>(tree: &'a LayoutTree, id: LayoutNodeId, prop: &str) -> Option<&'a String> {
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        let node = &tree.arena[c];
+        if let Some(v) = node.styles.get(prop) {
+            return Some(v);
+        }
+        cur = node.parent;
+    }
+    None
+}
+
+/// Effective opacity for a node = product of `opacity` on the node and all
+/// its ancestors (CSS `opacity` compounds down the tree). Values outside
+/// `[0,1]` are clamped. Missing/unparseable `opacity` is treated as `1.0`.
+fn effective_opacity(tree: &LayoutTree, id: LayoutNodeId) -> f32 {
+    let mut acc = 1.0_f32;
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        let node = &tree.arena[c];
+        if let Some(v) = node.styles.get("opacity") {
+            if let Ok(o) = v.trim().parse::<f32>() {
+                acc *= o.clamp(0.0, 1.0);
+            }
+        }
+        cur = node.parent;
+    }
+    acc
+}
+
+/// Resolves an SVG icon `fill` to a concrete color.
+///
+/// When an explicit fill is given, `currentColor` resolves to the inherited
+/// `color`; any other explicit color is used directly. When no explicit fill is
+/// present (the common case — the `<path>` inherits `fill` from a parent such as
+/// an inline `style="fill:#5796e8"` on the `.icon` container, since `fill` is an
+/// inherited CSS property) we walk up the ancestor chain for an inherited
+/// `fill`, then `color`, falling back to white.
+fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> Color {
+    if let Some(f) = fill {
+        if f.eq_ignore_ascii_case("currentColor") {
+            if let Some(v) = resolve_inherited(tree, id, "color") {
+                if let Some(c) = css::parse_css_color(v) {
+                    return c;
+                }
+            }
+        } else if let Some(c) = css::parse_css_color(f) {
+            return c;
+        }
+    }
+    if let Some(v) = resolve_inherited(tree, id, "fill") {
+        if let Some(c) = css::parse_css_color(v) {
+            return c;
+        }
+    }
+    if let Some(v) = resolve_inherited(tree, id, "color") {
+        if let Some(c) = css::parse_css_color(v) {
+            return c;
+        }
+    }
+    Color::new([1.0, 1.0, 1.0, 1.0])
+}
+
+    fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, font: &FontData) {
     let node = &tree.arena[id];
     let rect = node.rect;
 
+    // Vector icons: draw the SVG path scaled into this node's box.
+    if let Some((d, fill)) = &node.svg_path {
+        if fill.as_deref() != Some("none") {
+            if let Some(path) = crate::svg::parse_svg_path(d) {
+                let (vx, vy, vbw, vbh) = node
+                    .svg_view_box
+                    .unwrap_or((0.0, 0.0, rect.width, rect.height));
+                let vbw = if vbw > 0.0 { vbw as f64 } else { rect.width as f64 };
+                let vbh = if vbh > 0.0 { vbh as f64 } else { rect.height as f64 };
+                let s = (rect.width as f64 / vbw).min(rect.height as f64 / vbh);
+                // Safety cap: never draw an icon larger than 48px on its longest
+                // axis, so a stretched/oversized container (e.g. an absolutely
+                // positioned overlay laid out in normal flow at fullscreen)
+                // can't blow the glyph up to fill the screen.
+                let s = s.min(48.0 / vbw).min(48.0 / vbh);
+                // Center the viewBox contents inside the node box, accounting
+                // for a non-zero viewBox origin (e.g. "0 -960 960 960").
+                let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
+                let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
+                let transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
+                let color = resolve_svg_fill(tree, id, fill.as_deref());
+                renderer.fill_bez_path(&path, transform, color);
+            }
+        }
+    }
+
+    // `<img>` nodes: draw the decoded image into this node's box.
+    // Raster images are scaled to fill the box; SVG images are drawn as a path
+    // (same scaling logic as inline `<svg>`), so both icon formats paint.
+    if let Some(decoded) = &node.image {
+        match decoded {
+            crate::image_loader::DecodedImage::Raster(data) => {
+                if data.width > 0 && data.height > 0 && rect.width > 0.0 && rect.height > 0.0 {
+                    let sx = rect.width as f64 / data.width as f64;
+                    let sy = rect.height as f64 / data.height as f64;
+                    let transform = vello::peniko::kurbo::Affine::new([
+                        sx, 0.0, 0.0, sy, rect.x as f64, rect.y as f64,
+                    ]);
+                    renderer.draw_image(data, transform);
+                }
+            }
+            crate::image_loader::DecodedImage::Svg { path_d, view_box, fill, .. } => {
+                if fill.as_deref() != Some("none") {
+                    if let Some(path) = crate::svg::parse_svg_path(path_d) {
+                        let (vx, vy, vbw, vbh) = *view_box;
+                        let vbw = if vbw > 0.0 { vbw as f64 } else { rect.width as f64 };
+                        let vbh = if vbh > 0.0 { vbh as f64 } else { rect.height as f64 };
+                        let s = (rect.width as f64 / vbw).min(rect.height as f64 / vbh);
+                        let s = s.min(48.0 / vbw).min(48.0 / vbh);
+                        let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
+                        let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
+                        let transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
+                        let color = resolve_svg_fill(tree, id, fill.as_deref());
+                        renderer.fill_bez_path(&path, transform, color);
+                    }
+                }
+            }
+        }
+    }
+
     if node.tag == "#text" {
         if let Some(ref text) = node.text {
-            let color = node.styles.get("color").and_then(|v| css::parse_css_color(v)).unwrap_or(Color::new([0.0, 0.0, 0.0, 1.0]));
-            let font_size = node.styles.get("font-size").and_then(|v| css::parse_css_length(v)).map(|v| v as f32).unwrap_or(16.0);
+            let color = resolve_inherited(tree, id, "color")
+                .and_then(|v| css::parse_css_color(v))
+                .unwrap_or(Color::new([0.0, 0.0, 0.0, 1.0]))
+                .multiply_alpha(effective_opacity(tree, id));
+            let font_size = resolve_inherited(tree, id, "font-size")
+                .and_then(|v| css::parse_css_length(v))
+                .map(|v| v as f32)
+                .unwrap_or(16.0);
             renderer.fill_text(rect.x as f64, rect.y as f64 + font_size as f64, text, font_size, color, font);
         }
         return;
@@ -22,7 +153,10 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
 
     let styles = &node.styles;
 
-    let bg = styles.get("background-color").and_then(|v| css::parse_css_color(v));
+    let bg = styles
+        .get("background-color")
+        .or_else(|| styles.get("background"))
+        .and_then(|v| css::parse_css_color(v));
     let border_radius = styles
         .get("border-radius")
         .and_then(|v| css::parse_css_border_radius(v).first().copied());
@@ -34,6 +168,7 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
         .and_then(|v| css::parse_css_color(v));
 
     if let Some(color) = bg {
+        let color = color.multiply_alpha(effective_opacity(tree, id));
         match border_radius {
             Some(r) if r > 0.0 => {
                 renderer.fill_rounded_rect(
@@ -53,6 +188,49 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                     rect.height as f64,
                     color,
                 );
+            }
+        }
+    }
+
+    // `background-image`: draw the decoded raster image clipped to this box,
+    // sized per `background-size` (cover/contain; anything else paints at the
+    // image's intrinsic pixel size). The source was decoded + cached during
+    // layout (see `build_node`).
+    if let Some(img) = &node.background_image {
+        if rect.width > 0.0 && rect.height > 0.0 {
+            if let Some(r) = border_radius {
+                renderer.push_rounded_clip(
+                    rect.x as f64,
+                    rect.y as f64,
+                    rect.width as f64,
+                    rect.height as f64,
+                    r as f64,
+                );
+            }
+            if let Some(decoded) = img.raster() {
+                let (iw, ih) = (decoded.width as f64, decoded.height as f64);
+                let (dw, dh) = match node.background_size.as_deref() {
+                    Some("cover") => {
+                        let s = (rect.width as f64 / iw).max(rect.height as f64 / ih);
+                        (iw * s, ih * s)
+                    }
+                    Some("contain") => {
+                        let s = (rect.width as f64 / iw).min(rect.height as f64 / ih);
+                        (iw * s, ih * s)
+                    }
+                    _ => (iw, ih),
+                };
+                let dx = rect.x as f64 + (rect.width as f64 - dw) / 2.0;
+                let dy = rect.y as f64 + (rect.height as f64 - dh) / 2.0;
+                let sx = dw / iw;
+                let sy = dh / ih;
+                let transform = vello::peniko::kurbo::Affine::new([
+                    sx, 0.0, 0.0, sy, dx, dy,
+                ]);
+                renderer.draw_image(&decoded, transform);
+            }
+            if border_radius.is_some() {
+                renderer.pop_clip();
             }
         }
     }

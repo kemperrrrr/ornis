@@ -1,3 +1,6 @@
+use std::fs;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -6,7 +9,13 @@ use crossbeam_channel::{Receiver, Sender};
 use ornis_ui::ipc::{GameEvent, UiCommand};
 use tiny_http::{Header, Response, Server};
 
-const HTML: &str = include_str!("remote_editor.html");
+/// Directory with the shared editor sources, relative to the workspace root
+/// (CARGO_MANIFEST_DIR for the `ornis` binary points at the workspace root).
+const ASSETS_REL: &str = "crates/ui/assets/editor";
+
+fn assets_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(ASSETS_REL)
+}
 
 pub struct RemoteEditor {
     stop: Arc<AtomicBool>,
@@ -61,6 +70,7 @@ fn serve(
 ) {
     let mut events_buffer: Vec<GameEvent> = Vec::new();
     let mut cached_status: String = r#"{"entity_count":0,"name":"Ornis Engine"}"#.to_string();
+    let root = assets_root();
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -88,47 +98,81 @@ fn serve(
         let url = request.url().to_string();
         let method = request.method().as_str().to_string();
 
-        let response = match (method.as_str(), url.as_str()) {
-            ("GET", "/") | ("GET", "/index.html") => {
-                Response::from_string(HTML)
-                    .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
-            }
-            ("GET", "/api/status") => {
-                Response::from_string(&cached_status)
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-            }
-            ("GET", "/api/events") => {
-                let body = format_events(&events_buffer);
-                events_buffer.clear();
-                Response::from_string(body)
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-            }
-            ("POST", "/api/command") => {
-                let mut body = String::new();
-                let _ = request.as_reader().read_to_string(&mut body);
-                let cmd = serde_json::from_str::<serde_json::Value>(&body).ok();
-                if let Some(cmd) = cmd {
-                    if let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str()) {
-                        let json_data = cmd.get("data")
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
-                        game_tx.send(UiCommand::Custom {
-                            cmd_type: cmd_type.to_string(),
-                            json_data,
-                        }).ok();
-                    }
+        let response: Response<Cursor<Vec<u8>>> =
+            match (method.as_str(), url.as_str()) {
+                ("GET", "/") | ("GET", "/index.html") => serve_static(&root, "index.html"),
+                ("GET", "/api/status") => json_response(&cached_status),
+                ("GET", "/api/events") => {
+                    let body = format_events(&events_buffer);
+                    events_buffer.clear();
+                    json_response(&body)
                 }
-                Response::from_string("{}")
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-            }
-            _ => {
-                Response::from_string("404 Not Found")
-                    .with_status_code(404)
-            }
-        };
+                ("POST", "/api/command") => {
+                    let mut body = String::new();
+                    let _ = request.as_reader().read_to_string(&mut body);
+                    let cmd = serde_json::from_str::<serde_json::Value>(&body).ok();
+                    if let Some(cmd) = cmd {
+                        if let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str()) {
+                            let json_data = cmd.get("data")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default();
+                            game_tx.send(UiCommand::Custom {
+                                cmd_type: cmd_type.to_string(),
+                                json_data,
+                            }).ok();
+                        }
+                    }
+                    json_response("{}")
+                }
+                ("GET", path) => serve_static(&root, path),
+                _ => not_found(),
+            };
 
         let _ = request.respond(response);
     }
+}
+
+fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
+    // Strip query string (e.g. `Inter-Regular.woff2?v=4.0`).
+    let path = url_path.split('?').next().unwrap_or(url_path);
+    let rel = path.trim_start_matches('/');
+    if rel.contains("..") {
+        return not_found();
+    }
+
+    let mut full = root.join(rel);
+    if rel.is_empty() || full.is_dir() {
+        full = root.join("index.html");
+    }
+
+    match fs::read(&full) {
+        Ok(bytes) => Response::from_data(bytes).with_header(content_type(&full)),
+        Err(_) => not_found(),
+    }
+}
+
+fn json_response(body: &str) -> Response<Cursor<Vec<u8>>> {
+    Response::from_data(body).with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+}
+
+fn not_found() -> Response<Cursor<Vec<u8>>> {
+    Response::from_data("404 Not Found").with_status_code(404)
+}
+
+fn content_type(path: &Path) -> Header {
+    let ct = match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        _ => "application/octet-stream",
+    };
+    Header::from_bytes("Content-Type", ct).unwrap()
 }
 
 fn format_events(events: &[GameEvent]) -> String {
