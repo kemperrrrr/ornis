@@ -57,6 +57,15 @@ pub struct LayoutNode {
     /// (e.g. `.file-icon { height: 4.5rem }` with no width, mirroring the
     /// browser's replaced-element sizing).
     pub image_intrinsic_size: Option<(u32, u32)>,
+    /// For `<img>` nodes: the CSS `object-fit` keyword (`fill`, `contain`,
+    /// `cover`, ...). Drives how the decoded raster is scaled into the box.
+    /// Browsers default `<img>` to `contain`, while the editor's header logo
+    /// explicitly sets `object-fit: contain`.
+    pub object_fit: Option<String>,
+    /// For `<img>` nodes: the CSS `image-rendering` keyword (`auto`,
+    /// `crisp-edges`, `pixelated`). When `pixelated`, uses nearest-neighbor
+    /// filtering instead of linear to avoid aliasing on scaled images.
+    pub image_rendering: Option<String>,
     /// For elements with a CSS `background-image: url(...)`: the decoded image
     /// to paint as the element's background. `None` when no background image is
     /// declared or it failed to load.
@@ -396,8 +405,18 @@ impl LayoutTree {
                     // so SVG icons pick up an inline `style="fill:#5796e8"` from
                     // their parent `.icon` container. Without this, every icon
                     // falls back to white.
-                    if ["color", "font-size", "font-family", "fill", "visibility"]
-                        .contains(&k.as_str())
+                    // `font-weight` is also inherited — panel headers set
+                    // `font-weight: 600/700` on the container, and the text node
+                    // inside must see it or the UI renders everything thin.
+                    if [
+                        "color",
+                        "font-size",
+                        "font-family",
+                        "font-weight",
+                        "fill",
+                        "visibility",
+                    ]
+                    .contains(&k.as_str())
                     {
                         styles.entry(k.clone()).or_insert_with(|| v.clone());
                     }
@@ -675,6 +694,8 @@ impl LayoutTree {
                     dom_id: el.id().map(|s| s.to_string()),
                     dom_class: el.classes().into_iter().next().map(|s| s.to_string()),
                     rect: Rect::default(),
+                    object_fit: styles.get("object-fit").cloned(),
+                    image_rendering: styles.get("image-rendering").cloned(),
                     styles,
                     children: child_arena_ids.clone(),
                     parent: None,
@@ -715,6 +736,8 @@ impl LayoutTree {
                     svg_path: None,
                     image: None,
                     image_intrinsic_size: None,
+                    object_fit: None,
+                    image_rendering: None,
                     background_image: None,
                     background_size: None,
                     parent_chain: Vec::new(),
@@ -949,6 +972,18 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
                 top: LengthPercentage::length(top),
                 bottom: LengthPercentage::length(bottom),
             };
+        }
+    }
+    // `box-sizing`: browsers ship `*{box-sizing:border-box}` (the editor's
+    // index.css sets it on the universal selector). taffy defaults to
+    // content-box, which would add every element's padding/border ON TOP of
+    // its declared width — blowing panels ~1rem wider than the original and
+    // making them visibly longer than Chromium. Honor border-box when set.
+    if let Some(bs) = styles.get("box-sizing") {
+        if bs.contains("border-box") {
+            s.box_sizing = taffy::style::BoxSizing::BorderBox;
+        } else if bs.contains("content-box") {
+            s.box_sizing = taffy::style::BoxSizing::ContentBox;
         }
     }
     if let Some(d) = styles.get("display") {

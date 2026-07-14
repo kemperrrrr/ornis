@@ -11,7 +11,28 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use image::imageops::FilterType;
 use vello::peniko::{Blob, ImageData};
+
+/// Resizes a raster image using Lanczos3 filter for high-quality downscaling.
+/// Returns None if resize fails.
+pub fn resize_lanczos(data: &ImageData, new_w: u32, new_h: u32) -> Option<ImageData> {
+    let img = image::RgbaImage::from_raw(
+        data.width,
+        data.height,
+        data.data.as_ref().as_ref().to_vec(),
+    )?;
+    let resized = image::imageops::resize(&img, new_w, new_h, FilterType::Lanczos3);
+    let raw = resized.into_raw();
+    let blob = Blob::new(std::sync::Arc::new(raw) as std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>);
+    Some(ImageData {
+        data: blob,
+        format: vello::peniko::ImageFormat::Rgba8,
+        alpha_type: vello::peniko::ImageAlphaType::Alpha,
+        width: new_w,
+        height: new_h,
+    })
+}
 
 /// A decoded `<img>` source, ready to paint.
 #[derive(Debug, Clone)]

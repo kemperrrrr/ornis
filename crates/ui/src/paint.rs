@@ -170,17 +170,49 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
         match decoded {
             crate::image_loader::DecodedImage::Raster(data) => {
                 if data.width > 0 && data.height > 0 && rect.width > 0.0 && rect.height > 0.0 {
-                    let sx = rect.width as f64 / data.width as f64;
-                    let sy = rect.height as f64 / data.height as f64;
+                    let (dw, dh) = match node.object_fit.as_deref() {
+                        Some("cover") => {
+                            let s = (rect.width as f64 / data.width as f64)
+                                .max(rect.height as f64 / data.height as f64);
+                            (data.width as f64 * s, data.height as f64 * s)
+                        }
+                        Some("fill") => (rect.width as f64, rect.height as f64),
+                        _ => {
+                            let s = (rect.width as f64 / data.width as f64)
+                                .min(rect.height as f64 / data.height as f64);
+                            (data.width as f64 * s, data.height as f64 * s)
+                        }
+                    };
+                    let dx = rect.x as f64 + (rect.width as f64 - dw) / 2.0;
+                    let dy = rect.y as f64 + (rect.height as f64 - dh) / 2.0;
+                    let sx = dw / data.width as f64;
+                    let sy = dh / data.height as f64;
+
+                    // For significant downscaling (<50%), pre-resize with Lanczos3
+                    // for better quality than vello's linear filter.
+                    let (image_to_draw, sx_final, sy_final) = if sx < 0.5 && sy < 0.5 {
+                        let new_w = (data.width as f64 * sx) as u32;
+                        let new_h = (data.height as f64 * sy) as u32;
+                        if new_w > 0 && new_h > 0 {
+                            match crate::image_loader::resize_lanczos(data, new_w, new_h) {
+                                Some(resized) => (resized, 1.0f64, 1.0f64),
+                                None => (data.clone(), sx, sy),
+                            }
+                        } else {
+                            (data.clone(), sx, sy)
+                        }
+                    } else {
+                        (data.clone(), sx, sy)
+                    };
+
                     let transform = vello::peniko::kurbo::Affine::new([
-                        sx,
-                        0.0,
-                        0.0,
-                        sy,
-                        rect.x as f64,
-                        rect.y as f64,
+                        sx_final, 0.0, 0.0, sy_final, dx, dy,
                     ]);
-                    renderer.draw_image(data, transform, vello::peniko::ImageQuality::High);
+                    let quality = match node.image_rendering.as_deref() {
+                        Some("pixelated") | Some("crisp-edges") => vello::peniko::ImageQuality::Low,
+                        _ => vello::peniko::ImageQuality::High,
+                    };
+                    renderer.draw_image(&image_to_draw, transform, quality);
                 }
             }
             crate::image_loader::DecodedImage::Svg {
@@ -229,12 +261,12 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 .and_then(|v| css::parse_css_length(v))
                 .map(|v| v as f32)
                 .unwrap_or(16.0);
-            let bold = node
+            let font_weight = node
                 .styles
                 .get("font-weight")
                 .and_then(|w| w.parse::<f32>().ok())
-                .unwrap_or(400.0)
-                >= 500.0;
+                .unwrap_or(400.0);
+            let bold = font_weight >= 500.0;
             renderer.fill_text(
                 rect.x as f64,
                 rect.y as f64 + font_size as f64,
@@ -243,6 +275,7 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 color,
                 font,
                 bold,
+                Some(font_weight),
             );
         }
         return;

@@ -20,6 +20,7 @@ glam = "0.30"
 image = "0.25"
 serde = { version = "1", features = ["derive"] }
 png = "0.17"
+cosmic-text = "0.13"
 
 # Enables `LayoutTree::to_json` (used by the `serialize_layout` example /
 # tests to diff our layout against a real browser via `diff.py`).

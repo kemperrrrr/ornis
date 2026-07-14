@@ -149,6 +149,7 @@ impl UIRenderer {
         color: Color,
         font: &FontData,
         bold: bool,
+        font_weight: Option<f32>,
     ) {
         let glyphs = crate::text::layout_text(font, text, font_size);
         if glyphs.is_empty() {
@@ -162,13 +163,20 @@ impl UIRenderer {
             .brush(color)
             .draw(Fill::NonZero, glyphs.iter().cloned());
         if bold {
-            // Fake-bold: overlay a thin stroke of the same color so glyph stems
-            // thicken toward the heavier CSS weights (500/600/700) the editor UI
-            // uses. Inter only ships a single weight in our assets, so we can't
-            // pick a real bold face — but thickening the stems visually matches
-            // the original without swapping the typeface.
+            // Gradient fake-bold based on font-weight:
+            // 500 (medium): 0.025 — thin thickening
+            // 600 (semibold): 0.04 — medium
+            // 700+ (bold): 0.06 — strong
+            let weight = font_weight.unwrap_or(400.0);
+            let weight_factor = if weight >= 700.0 {
+                0.06
+            } else if weight >= 600.0 {
+                0.04
+            } else {
+                0.025
+            };
             let stroke = Stroke {
-                width: (font_size as f64 * 0.04).max(0.5),
+                width: (font_size as f64 * weight_factor).max(0.3),
                 ..Default::default()
             };
             self.scene

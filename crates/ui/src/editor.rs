@@ -201,6 +201,7 @@ impl EditorOverlay {
             Color::new([1.0, 1.0, 1.0, 1.0]),
             font,
             false,
+            None,
         );
 
         // Search box
@@ -221,6 +222,7 @@ impl EditorOverlay {
             Color::new([0.7, 0.7, 0.7, 1.0]),
             font,
             false,
+            None,
         );
 
         // Entity list
@@ -242,6 +244,7 @@ impl EditorOverlay {
             Color::new([0.67, 0.67, 0.67, 1.0]),
             font,
             false,
+            None,
         );
 
         if self.search_filter.is_empty() {
@@ -253,6 +256,7 @@ impl EditorOverlay {
                 Color::new([0.5, 0.5, 0.5, 1.0]),
                 font,
                 false,
+            None,
             );
         }
     }
@@ -306,6 +310,7 @@ impl EditorOverlay {
             Color::new([1.0, 1.0, 1.0, 1.0]),
             font,
             false,
+            None,
         );
 
         // Component type badge
@@ -325,6 +330,7 @@ impl EditorOverlay {
             Color::new([0.5, 0.7, 1.0, 1.0]),
             font,
             false,
+            None,
         );
         renderer.fill_rounded_rect(
             panel_x + 120.0,
@@ -342,6 +348,7 @@ impl EditorOverlay {
             Color::new([0.5, 1.0, 0.7, 1.0]),
             font,
             false,
+            None,
         );
 
         // Add component button
@@ -367,6 +374,7 @@ impl EditorOverlay {
             Color::new([1.0, 1.0, 1.0, 1.0]),
             font,
             false,
+            None,
         );
 
         // Component details
@@ -422,6 +430,7 @@ impl EditorOverlay {
             Color::new([1.0, 1.0, 1.0, 1.0]),
             font,
             false,
+            None,
         );
         renderer.fill_text(
             modal_x + 24.0,
@@ -431,6 +440,7 @@ impl EditorOverlay {
             Color::new([0.7, 0.7, 0.7, 1.0]),
             font,
             false,
+            None,
         );
 
         let types = [
@@ -465,6 +475,7 @@ impl EditorOverlay {
                 Color::new([1.0, 1.0, 1.0, 1.0]),
                 font,
                 false,
+            None,
             );
         }
 
@@ -486,6 +497,7 @@ impl EditorOverlay {
             Color::new([1.0, 1.0, 1.0, 1.0]),
             font,
             false,
+            None,
         );
 
         renderer.fill_rounded_rect(
@@ -504,6 +516,7 @@ impl EditorOverlay {
             Color::new([1.0, 1.0, 1.0, 1.0]),
             font,
             false,
+            None,
         );
     }
 
@@ -568,6 +581,7 @@ impl EditorOverlay {
                 Color::new([1.0, 1.0, 1.0, 1.0]),
                 font,
                 false,
+            None,
             );
         }
 
@@ -589,6 +603,7 @@ impl EditorOverlay {
             Color::new([0.7, 0.7, 0.7, 1.0]),
             font,
             false,
+            None,
         );
     }
 }
