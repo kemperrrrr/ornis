@@ -8,7 +8,6 @@ members = [
     "crates/audio",
     "crates/render",
     "crates/materialx",
-    "crates/svg_bench",
 ]
 
 [workspace.package]
