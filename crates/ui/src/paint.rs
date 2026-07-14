@@ -4,7 +4,7 @@ use crate::render::UIRenderer;
 use vello::peniko::{Color, FontData};
 
 pub fn paint_layout(tree: &LayoutTree, renderer: &mut UIRenderer, font: &FontData) {
-    paint_node(tree, tree.root, renderer, font);
+    paint_node(tree, tree.root, renderer, font, vello::peniko::kurbo::Affine::IDENTITY);
 }
 
 /// Walks up the ancestor chain to resolve an inherited property
@@ -130,9 +130,21 @@ fn apply_css_transform_str(
     Some(around_center)
 }
 
-fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, font: &FontData) {
+fn paint_node(
+    tree: &LayoutTree,
+    id: LayoutNodeId,
+    renderer: &mut UIRenderer,
+    font: &FontData,
+    parent_transform: vello::peniko::kurbo::Affine,
+) {
     let node = &tree.arena[id];
     let rect = node.rect;
+
+    // Compute this node's CSS transform (if any) and combine with parent's.
+    let own_transform = node.styles.get("transform")
+        .and_then(|t| apply_css_transform_str(t, rect))
+        .unwrap_or(vello::peniko::kurbo::Affine::IDENTITY);
+    let combined = parent_transform * own_transform;
 
     // Vector icons: draw the SVG path scaled into this node's box.
     if let Some((d, fill)) = &node.svg_path {
@@ -162,33 +174,14 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
                 let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
                 let mut transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
-                // CSS transform is NOT inherited — it applies to the element and
-                // its children. The SVG <path> element itself has no own transform,
-                // but its grandparent .icon.new-tab may have `transform: rotate(45deg)`.
-                // Apply that parent transform to the SVG content. The rotation must
-                // be centered on the container's rect, not the path's rect.
-                let container_level = node.styles.get("transform").map(|_| 0)
-                    .or_else(|| tree.arena[id].parent
-                        .and_then(|pid| tree.arena[pid].styles.get("transform").map(|_| 1)))
-                    .or_else(|| tree.arena[id].parent
-                        .and_then(|pid| tree.arena[pid].parent)
-                        .and_then(|gid| tree.arena[gid].styles.get("transform").map(|_| 2)));
-                if let Some(level) = container_level {
-                    let (ts, cr) = match level {
-                        0 => (node.styles.get("transform").unwrap(), rect),
-                        1 => {
-                            let pid = tree.arena[id].parent.unwrap();
-                            (tree.arena[pid].styles.get("transform").unwrap(), tree.arena[pid].rect)
-                        }
-                        _ => {
-                            let pid = tree.arena[id].parent.unwrap();
-                            let gid = tree.arena[pid].parent.unwrap();
-                            (tree.arena[gid].styles.get("transform").unwrap(), tree.arena[gid].rect)
-                        }
-                    };
-                    if let Some(parsed) = apply_css_transform_str(ts, cr) {
-                        transform = parsed;
-                    }
+                // Apply ancestor CSS transform (already computed in `combined`).
+                if combined != vello::peniko::kurbo::Affine::IDENTITY {
+                    let cx = rect.x as f64 + rect.width as f64 / 2.0;
+                    let cy = rect.y as f64 + rect.height as f64 / 2.0;
+                    transform = vello::peniko::kurbo::Affine::translate((cx, cy))
+                        * combined
+                        * vello::peniko::kurbo::Affine::translate((-cx, -cy))
+                        * transform;
                 }
                 let color = resolve_svg_fill(tree, id, fill.as_deref());
                 renderer.fill_bez_path(&path, transform, color);
@@ -402,7 +395,7 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
     }
 
     for &child_id in &node.children {
-        paint_node(tree, child_id, renderer, font);
+        paint_node(tree, child_id, renderer, font, combined);
     }
 
     if let Some(w) = border_width {
