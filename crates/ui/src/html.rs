@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use html5ever::interface::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::tendril::{StrTendril, TendrilSink};
-use html5ever::{parse_document, Attribute, ExpandedName, QualName};
+use html5ever::{Attribute, ExpandedName, QualName, parse_document};
 
 use crate::dom::{Document, Element, Node};
 

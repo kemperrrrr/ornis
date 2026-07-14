@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use boa_engine::js_string;
 use boa_engine::native_function::NativeFunction;
-use boa_engine::object::builtins::JsArray;
 use boa_engine::object::JsObject;
+use boa_engine::object::builtins::JsArray;
 use boa_engine::{Context, JsNativeError, JsResult, JsValue};
 use ornis_core::{Entity, SmartStore};
 
@@ -31,10 +31,8 @@ impl Default for UIStyle {
 impl UIStyle {
     pub fn to_js(&self, ctx: &mut Context) -> JsResult<JsValue> {
         let obj = JsObject::with_object_proto(ctx.intrinsics());
-        let color = JsArray::from_iter(
-            self.color.iter().map(|&v| JsValue::from(f64::from(v))),
-            ctx,
-        );
+        let color =
+            JsArray::from_iter(self.color.iter().map(|&v| JsValue::from(f64::from(v))), ctx);
         obj.set(js_string!("color"), color, false, ctx)?;
         obj.set(
             js_string!("font_size"),
@@ -103,7 +101,12 @@ impl UIStyle {
             .map(|v| v as f32)
             .unwrap_or(20.0);
 
-        Ok(UIStyle { color, font_size, width, height })
+        Ok(UIStyle {
+            color,
+            font_size,
+            width,
+            height,
+        })
     }
 }
 
@@ -158,7 +161,10 @@ impl EcsBridge {
             let gens = self.generations.lock().unwrap();
             let idx = id as usize;
             let generation = gens.get(idx).copied().unwrap_or(0);
-            (Entity::new_with_gen(id, generation), self.store.lock().unwrap())
+            (
+                Entity::new_with_gen(id, generation),
+                self.store.lock().unwrap(),
+            )
         };
         store.destroy_entity(entity);
         self.entity_count.fetch_sub(1, Ordering::Relaxed);
@@ -193,7 +199,10 @@ impl EcsBridge {
     pub fn has_uistyle(&self, entity_id: u32) -> bool {
         let entity = self.make_entity(entity_id);
         let store = self.store.lock().unwrap();
-        store.read_lane::<UIStyle>().map(|l| l.contains(entity)).unwrap_or(false)
+        store
+            .read_lane::<UIStyle>()
+            .map(|l| l.contains(entity))
+            .unwrap_or(false)
     }
 
     pub fn register_js_functions(&self, ctx: &mut Context) {
@@ -211,9 +220,13 @@ impl EcsBridge {
                 NativeFunction::from_closure(move |_, args, ctx| {
                     let id = args
                         .first()
-                        .ok_or_else(|| JsNativeError::typ().with_message("destroyEntity: entity id required"))?
+                        .ok_or_else(|| {
+                            JsNativeError::typ().with_message("destroyEntity: entity id required")
+                        })?
                         .to_number(ctx)
-                        .map_err(|_| JsNativeError::typ().with_message("destroyEntity: expected number"))? as u32;
+                        .map_err(|_| {
+                            JsNativeError::typ().with_message("destroyEntity: expected number")
+                        })? as u32;
                     bridge.destroy_entity(id);
                     Ok(JsValue::undefined())
                 })
@@ -226,9 +239,13 @@ impl EcsBridge {
                 NativeFunction::from_closure(move |_, args, ctx| {
                     let id = args
                         .first()
-                        .ok_or_else(|| JsNativeError::typ().with_message("getUIStyle: entity id required"))?
+                        .ok_or_else(|| {
+                            JsNativeError::typ().with_message("getUIStyle: entity id required")
+                        })?
                         .to_number(ctx)
-                        .map_err(|_| JsNativeError::typ().with_message("getUIStyle: expected number"))? as u32;
+                        .map_err(|_| {
+                            JsNativeError::typ().with_message("getUIStyle: expected number")
+                        })? as u32;
                     bridge.get_uistyle(id, ctx)
                 })
             }
@@ -243,11 +260,12 @@ impl EcsBridge {
                             .with_message("setUIStyle: entityId, data required")
                             .into());
                     }
-                    let id = args[0]
-                        .to_number(ctx)
-                        .map_err(|_| JsNativeError::typ().with_message("setUIStyle: entityId must be a number"))?
-                        as u32;
-                    bridge.set_uistyle(id, &args[1], ctx).map(|_| JsValue::undefined())
+                    let id = args[0].to_number(ctx).map_err(|_| {
+                        JsNativeError::typ().with_message("setUIStyle: entityId must be a number")
+                    })? as u32;
+                    bridge
+                        .set_uistyle(id, &args[1], ctx)
+                        .map(|_| JsValue::undefined())
                 })
             }
         };
@@ -258,9 +276,13 @@ impl EcsBridge {
                 NativeFunction::from_closure(move |_, args, ctx| {
                     let id = args
                         .first()
-                        .ok_or_else(|| JsNativeError::typ().with_message("hasUIStyle: entity id required"))?
+                        .ok_or_else(|| {
+                            JsNativeError::typ().with_message("hasUIStyle: entity id required")
+                        })?
                         .to_number(ctx)
-                        .map_err(|_| JsNativeError::typ().with_message("hasUIStyle: expected number"))? as u32;
+                        .map_err(|_| {
+                            JsNativeError::typ().with_message("hasUIStyle: expected number")
+                        })? as u32;
                     Ok(JsValue::from(bridge.has_uistyle(id)))
                 })
             }
@@ -268,11 +290,36 @@ impl EcsBridge {
 
         let realm = ctx.realm().clone();
         let ornis = JsObject::with_object_proto(ctx.intrinsics());
-        let _ = ornis.set(js_string!("createEntity"), JsValue::from(create_entity_fn.to_js_function(&realm)), false, ctx);
-        let _ = ornis.set(js_string!("destroyEntity"), JsValue::from(destroy_entity_fn.to_js_function(&realm)), false, ctx);
-        let _ = ornis.set(js_string!("getUIStyle"), JsValue::from(get_uistyle_fn.to_js_function(&realm)), false, ctx);
-        let _ = ornis.set(js_string!("setUIStyle"), JsValue::from(set_uistyle_fn.to_js_function(&realm)), false, ctx);
-        let _ = ornis.set(js_string!("hasUIStyle"), JsValue::from(has_uistyle_fn.to_js_function(&realm)), false, ctx);
+        let _ = ornis.set(
+            js_string!("createEntity"),
+            JsValue::from(create_entity_fn.to_js_function(&realm)),
+            false,
+            ctx,
+        );
+        let _ = ornis.set(
+            js_string!("destroyEntity"),
+            JsValue::from(destroy_entity_fn.to_js_function(&realm)),
+            false,
+            ctx,
+        );
+        let _ = ornis.set(
+            js_string!("getUIStyle"),
+            JsValue::from(get_uistyle_fn.to_js_function(&realm)),
+            false,
+            ctx,
+        );
+        let _ = ornis.set(
+            js_string!("setUIStyle"),
+            JsValue::from(set_uistyle_fn.to_js_function(&realm)),
+            false,
+            ctx,
+        );
+        let _ = ornis.set(
+            js_string!("hasUIStyle"),
+            JsValue::from(has_uistyle_fn.to_js_function(&realm)),
+            false,
+            ctx,
+        );
 
         let global = ctx.global_object();
         let _ = global.set(js_string!("Ornis"), JsValue::from(ornis), false, ctx);

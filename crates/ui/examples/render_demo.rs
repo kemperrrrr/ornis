@@ -6,10 +6,10 @@ use winit::window::WindowAttributes;
 
 use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
+use ornis_ui::js::JsRuntime;
 use ornis_ui::layout::LayoutTree;
 use ornis_ui::paint::paint_layout;
 use ornis_ui::render::UIRenderer;
-use ornis_ui::js::JsRuntime;
 
 use vello::peniko::{Color, FontData};
 
@@ -105,29 +105,39 @@ impl ApplicationHandler for DemoApp {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
 
         let surface: wgpu::Surface<'static> = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap()).unwrap()
+            instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap())
+                .unwrap()
         };
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
-        })).unwrap();
+        }))
+        .unwrap();
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("demo device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            },
-        )).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("demo device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter().copied().find(|f| {
-            matches!(f, wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb)
-        }).unwrap_or(surface_caps.formats[0]);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| {
+                matches!(
+                    f,
+                    wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb
+                )
+            })
+            .unwrap_or(surface_caps.formats[0]);
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -180,7 +190,8 @@ impl ApplicationHandler for DemoApp {
                 ctx.surface_config.width = size.width.max(1);
                 ctx.surface_config.height = size.height.max(1);
                 ctx.surface.configure(&ctx.device, &ctx.surface_config);
-                ctx.renderer.resize(&ctx.device, size.width.max(1), size.height.max(1));
+                ctx.renderer
+                    .resize(&ctx.device, size.width.max(1), size.height.max(1));
                 self.build_layout(size.width, size.height);
                 self.render_frame();
             }
@@ -214,7 +225,8 @@ impl DemoApp {
             viewport_width as f32,
             viewport_height as f32,
             &font,
-        ).unwrap();
+        )
+        .unwrap();
         ctx.layout_tree = Some(tree);
     }
 
@@ -227,14 +239,18 @@ impl DemoApp {
         let h = ctx.surface_config.height as f64;
 
         // Clear background
-        ctx.renderer.fill_rect(0.0, 0.0, w, h, Color::new([0.12, 0.12, 0.14, 1.0]));
+        ctx.renderer
+            .fill_rect(0.0, 0.0, w, h, Color::new([0.12, 0.12, 0.14, 1.0]));
 
         // Paint layout tree
         if let Some(ref tree) = ctx.layout_tree {
             paint_layout(tree, &mut ctx.renderer, &ctx.font);
         }
 
-        if let Err(e) = ctx.renderer.end_frame(&ctx.device, &ctx.queue, &ctx.surface) {
+        if let Err(e) = ctx
+            .renderer
+            .end_frame(&ctx.device, &ctx.queue, &ctx.surface)
+        {
             eprintln!("render error: {e:?}");
         }
     }

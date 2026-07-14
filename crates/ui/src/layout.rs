@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use taffy::geometry::Line;
 use taffy::MaybeResolve;
+use taffy::geometry::Line;
 use taffy::style::{
     Dimension, Display, GridPlacement, LengthPercentage, LengthPercentageAuto, Position, Style,
     TrackSizingFunction,
 };
 use taffy::style_helpers::{
-    flex, FromLength, FromPercent, TaffyAuto, TaffyGridLine, TaffyGridSpan,
+    FromLength, FromPercent, TaffyAuto, TaffyGridLine, TaffyGridSpan, flex,
 };
-use vello::peniko::FontData;
 use taffy::{AlignItems, AvailableSpace, JustifyContent, Size, TaffyResult, TaffyTree};
+use vello::peniko::FontData;
 
 use crate::css::{SimpleSelector, Stylesheet};
 use crate::dom::{Document, Node};
@@ -84,14 +84,7 @@ pub struct Rect {
 /// Elements whose content must never be rendered as visible text/layout
 /// (`<head>` subtree, scripts, templates, etc.).
 const SKIP_TAGS: &[&str] = &[
-    "head",
-    "style",
-    "script",
-    "title",
-    "meta",
-    "link",
-    "noscript",
-    "template",
+    "head", "style", "script", "title", "meta", "link", "noscript", "template",
 ];
 
 impl LayoutTree {
@@ -146,7 +139,7 @@ impl LayoutTree {
                         return taffy::geometry::Size {
                             width: 0.0,
                             height: 0.0,
-                        }
+                        };
                     }
                 };
                 let node = &arena[aid];
@@ -157,7 +150,10 @@ impl LayoutTree {
                         .and_then(|v| parse_length(v, 16.0))
                         .unwrap_or(14.0);
                     let (w, h) = crate::text::measure_text(font, text, fs as f32);
-                    taffy::geometry::Size { width: w, height: h }
+                    taffy::geometry::Size {
+                        width: w,
+                        height: h,
+                    }
                 } else {
                     taffy::geometry::Size {
                         width: 0.0,
@@ -265,7 +261,8 @@ impl LayoutTree {
         false
     }
 
-    fn parse_view_box(attrs: &HashMap<String, String>) -> Option<(f32, f32, f32, f32)> {        attrs.get("viewBox").and_then(|vb| {
+    fn parse_view_box(attrs: &HashMap<String, String>) -> Option<(f32, f32, f32, f32)> {
+        attrs.get("viewBox").and_then(|vb| {
             let parts: Vec<f32> = vb
                 .split_whitespace()
                 .filter_map(|p| p.parse::<f32>().ok())
@@ -293,7 +290,13 @@ impl LayoutTree {
         }
     }
 
-    fn extract_svg(el: &crate::dom::Element, styles: &HashMap<String, String>) -> (Option<(f32, f32, f32, f32)>, Option<(String, Option<String>)>) {
+    fn extract_svg(
+        el: &crate::dom::Element,
+        styles: &HashMap<String, String>,
+    ) -> (
+        Option<(f32, f32, f32, f32)>,
+        Option<(String, Option<String>)>,
+    ) {
         let view_box = if el.tag == "svg" {
             Self::parse_view_box(&el.attrs)
         } else {
@@ -393,7 +396,9 @@ impl LayoutTree {
                     // so SVG icons pick up an inline `style="fill:#5796e8"` from
                     // their parent `.icon` container. Without this, every icon
                     // falls back to white.
-                    if ["color", "font-size", "font-family", "fill", "visibility"].contains(&k.as_str()) {
+                    if ["color", "font-size", "font-family", "fill", "visibility"]
+                        .contains(&k.as_str())
+                    {
                         styles.entry(k.clone()).or_insert_with(|| v.clone());
                     }
                 }
@@ -464,7 +469,8 @@ impl LayoutTree {
                                         stylesheets,
                                         &ancestors[..ancestors.len().saturating_sub(1)],
                                     );
-                                    ps.get("width").and_then(|w| parse_dimension(w, vw, vh, rem_base))
+                                    ps.get("width")
+                                        .and_then(|w| parse_dimension(w, vw, vh, rem_base))
                                 })
                                 .unwrap_or(Dimension::percent(100.0));
                             let ph = ancestors
@@ -475,7 +481,8 @@ impl LayoutTree {
                                         stylesheets,
                                         &ancestors[..ancestors.len().saturating_sub(1)],
                                     );
-                                    ps.get("height").and_then(|h| parse_dimension(h, vw, vh, rem_base))
+                                    ps.get("height")
+                                        .and_then(|h| parse_dimension(h, vw, vh, rem_base))
                                 })
                                 .unwrap_or(Dimension::percent(100.0));
                             taffy_style.size.width = pw;
@@ -522,9 +529,10 @@ impl LayoutTree {
                 // the box, sized per `background-size`) in the paint stage.
                 let mut bg_decoded: Option<crate::image_loader::DecodedImage> = None;
                 let mut bg_size: Option<String> = None;
-                if let Some(bg_src) =
-                    styles.get("background-image").and_then(|v| Self::extract_url(v))
-                        .or_else(|| styles.get("background").and_then(|v| Self::extract_url(v)))
+                if let Some(bg_src) = styles
+                    .get("background-image")
+                    .and_then(|v| Self::extract_url(v))
+                    .or_else(|| styles.get("background").and_then(|v| Self::extract_url(v)))
                 {
                     if let Some(decoded) = image_cache.get(&bg_src) {
                         bg_decoded = Some((*decoded).clone());
@@ -541,17 +549,23 @@ impl LayoutTree {
                 // `height/width: 100%` on a child of a flex container means "fill
                 // the parent" -> express it as flex-grow (taffy doesn't resolve
                 // percentage main-size against a flex parent).
-                let parent_is_column =
-                    taffy_style.display == Display::Flex && taffy_style.flex_direction == taffy::style::FlexDirection::Column;
-                let parent_is_row =
-                    taffy_style.display == Display::Flex && taffy_style.flex_direction == taffy::style::FlexDirection::Row;
+                let parent_is_column = taffy_style.display == Display::Flex
+                    && taffy_style.flex_direction == taffy::style::FlexDirection::Column;
+                let parent_is_row = taffy_style.display == Display::Flex
+                    && taffy_style.flex_direction == taffy::style::FlexDirection::Row;
                 if parent_is_column
-                    && styles.get("height").map(|v| v.trim() == "100%").unwrap_or(false)
+                    && styles
+                        .get("height")
+                        .map(|v| v.trim() == "100%")
+                        .unwrap_or(false)
                 {
                     taffy_style.flex_grow = 1.0;
                 }
                 if parent_is_row
-                    && styles.get("width").map(|v| v.trim() == "100%").unwrap_or(false)
+                    && styles
+                        .get("width")
+                        .map(|v| v.trim() == "100%")
+                        .unwrap_or(false)
                 {
                     taffy_style.flex_grow = 1.0;
                 }
@@ -648,12 +662,10 @@ impl LayoutTree {
                         format!(
                             "{}{}",
                             a.tag,
-                            a.classes()
-                                .into_iter()
-                                .fold(String::new(), |mut s, c| {
-                                    s.push_str(&format!(".{}", c));
-                                    s
-                                })
+                            a.classes().into_iter().fold(String::new(), |mut s, c| {
+                                s.push_str(&format!(".{}", c));
+                                s
+                            })
                         )
                     })
                     .collect();
@@ -809,25 +821,43 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
     let mut s = Style::default();
     s.display = Display::Block;
 
-    if let Some(w) = styles.get("width").and_then(|v| parse_dimension(v, vw, vh, rem_base)) {
+    if let Some(w) = styles
+        .get("width")
+        .and_then(|v| parse_dimension(v, vw, vh, rem_base))
+    {
         s.size.width = w;
     }
-    if let Some(h) = styles.get("height").and_then(|v| parse_dimension(v, vw, vh, rem_base)) {
+    if let Some(h) = styles
+        .get("height")
+        .and_then(|v| parse_dimension(v, vw, vh, rem_base))
+    {
         s.size.height = h;
     }
-    if let Some(m) = styles.get("min-height").and_then(|v| parse_dimension(v, vw, vh, rem_base)) {
+    if let Some(m) = styles
+        .get("min-height")
+        .and_then(|v| parse_dimension(v, vw, vh, rem_base))
+    {
         s.min_size = Size {
             width: Dimension::auto(),
             height: m,
         };
     }
-    if let Some(m) = styles.get("min-width").and_then(|v| parse_dimension(v, vw, vh, rem_base)) {
+    if let Some(m) = styles
+        .get("min-width")
+        .and_then(|v| parse_dimension(v, vw, vh, rem_base))
+    {
         s.min_size.width = m;
     }
-    if let Some(m) = styles.get("max-width").and_then(|v| parse_dimension(v, vw, vh, rem_base)) {
+    if let Some(m) = styles
+        .get("max-width")
+        .and_then(|v| parse_dimension(v, vw, vh, rem_base))
+    {
         s.max_size.width = m;
     }
-    if let Some(m) = styles.get("max-height").and_then(|v| parse_dimension(v, vw, vh, rem_base)) {
+    if let Some(m) = styles
+        .get("max-height")
+        .and_then(|v| parse_dimension(v, vw, vh, rem_base))
+    {
         s.max_size.height = m;
     }
     let parse_margin_len = |v: &str| -> Option<LengthPercentageAuto> {
@@ -864,13 +894,62 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
             bottom: mb.unwrap_or(s.margin.bottom),
         };
     }
-    if let Some(p) = styles.get("padding").and_then(|v| parse_length(v, rem_base)) {
-        s.padding = taffy::geometry::Rect {
-            left: LengthPercentage::length(p),
-            right: LengthPercentage::length(p),
-            top: LengthPercentage::length(p),
-            bottom: LengthPercentage::length(p),
-        };
+    // `padding` shorthand (1-4 values) plus per-side overrides. Missing sides
+    // default to 0. Previously only a single-value `padding` was honored, so
+    // `padding: 0.1rem 0.5rem` (and directional props) were silently dropped —
+    // that lost every panel's inner spacing and collapsed content upward.
+    {
+        let mut top = 0.0_f32;
+        let mut right = 0.0_f32;
+        let mut bottom = 0.0_f32;
+        let mut left = 0.0_f32;
+        let mut has_padding = false;
+        if let Some((t, r, b, l)) = styles
+            .get("padding")
+            .and_then(|v| parse_rect_shorthand(v, rem_base))
+        {
+            top = t;
+            right = r;
+            bottom = b;
+            left = l;
+            has_padding = true;
+        }
+        if let Some(v) = styles
+            .get("padding-top")
+            .and_then(|v| parse_length(v, rem_base))
+        {
+            top = v;
+            has_padding = true;
+        }
+        if let Some(v) = styles
+            .get("padding-right")
+            .and_then(|v| parse_length(v, rem_base))
+        {
+            right = v;
+            has_padding = true;
+        }
+        if let Some(v) = styles
+            .get("padding-bottom")
+            .and_then(|v| parse_length(v, rem_base))
+        {
+            bottom = v;
+            has_padding = true;
+        }
+        if let Some(v) = styles
+            .get("padding-left")
+            .and_then(|v| parse_length(v, rem_base))
+        {
+            left = v;
+            has_padding = true;
+        }
+        if has_padding {
+            s.padding = taffy::geometry::Rect {
+                left: LengthPercentage::length(left),
+                right: LengthPercentage::length(right),
+                top: LengthPercentage::length(top),
+                bottom: LengthPercentage::length(bottom),
+            };
+        }
     }
     if let Some(d) = styles.get("display") {
         if d == "none" {
@@ -911,13 +990,11 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
         right: LengthPercentageAuto::length(0.0),
     };
     let mut has_inset = false;
-    for (prop, field) in [
-        ("top", 0),
-        ("bottom", 1),
-        ("left", 2),
-        ("right", 3),
-    ] {
-        if let Some(v) = styles.get(prop).and_then(|v| parse_length_or_percent(v, rem_base)) {
+    for (prop, field) in [("top", 0), ("bottom", 1), ("left", 2), ("right", 3)] {
+        if let Some(v) = styles
+            .get(prop)
+            .and_then(|v| parse_length_or_percent(v, rem_base))
+        {
             let lp = match v {
                 InsetVal::Length(l) => LengthPercentageAuto::length(l),
                 InsetVal::Percent(p) => LengthPercentageAuto::percent(p),
@@ -943,8 +1020,11 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
         s.justify_content = parse_justify_content(v);
     }
 
-        if let Some(v) = styles.get("gap").and_then(|v| parse_length(v, rem_base)) {
-        s.gap = Size { width: LengthPercentage::length(v), height: LengthPercentage::length(v) };
+    if let Some(v) = styles.get("gap").and_then(|v| parse_length(v, rem_base)) {
+        s.gap = Size {
+            width: LengthPercentage::length(v),
+            height: LengthPercentage::length(v),
+        };
     }
 
     if let Some(d) = styles.get("flex-direction") {
@@ -998,19 +1078,35 @@ fn parse_dimension(s: &str, vw: f32, vh: f32, rem_base: f32) -> Option<Dimension
         return None;
     }
     if let Some(pct) = s.strip_suffix('%') {
-        return pct.trim().parse::<f32>().ok().map(|v| Dimension::percent(v / 100.0));
+        return pct
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| Dimension::percent(v / 100.0));
     }
     if let Some(px) = s.strip_suffix("px") {
         return px.trim().parse::<f32>().ok().map(Dimension::length);
     }
     if let Some(v) = s.strip_suffix("vh") {
-        return v.trim().parse::<f32>().ok().map(|v| Dimension::length(v / 100.0 * vh));
+        return v
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| Dimension::length(v / 100.0 * vh));
     }
     if let Some(v) = s.strip_suffix("vw") {
-        return v.trim().parse::<f32>().ok().map(|v| Dimension::length(v / 100.0 * vw));
+        return v
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| Dimension::length(v / 100.0 * vw));
     }
     if let Some(rem) = s.strip_suffix("rem") {
-        return rem.trim().parse::<f32>().ok().map(|v| Dimension::length(v * rem_base));
+        return rem
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| Dimension::length(v * rem_base));
     }
     s.parse::<f32>().ok().map(Dimension::length)
 }
@@ -1036,6 +1132,27 @@ fn parse_length(s: &str, rem_base: f32) -> Option<f32> {
     }
 }
 
+/// Parse a CSS box shorthand (`padding`/`margin`) of 1-4 space-separated
+/// lengths into `(top, right, bottom, left)` per the CSS spec:
+///   1 value  -> all four sides
+///   2 values -> vertical | horizontal
+///   3 values -> top | horizontal | bottom
+///   4 values -> top | right | bottom | left
+/// Returns `None` if the string is empty or any token fails to parse.
+fn parse_rect_shorthand(s: &str, rem_base: f32) -> Option<(f32, f32, f32, f32)> {
+    let parts: Vec<f32> = s
+        .split_whitespace()
+        .map(|tok| parse_length(tok, rem_base))
+        .collect::<Option<Vec<f32>>>()?;
+    match parts.as_slice() {
+        [a] => Some((*a, *a, *a, *a)),
+        [v, h] => Some((*v, *h, *v, *h)),
+        [t, h, b] => Some((*t, *h, *b, *h)),
+        [t, r, b, l] => Some((*t, *r, *b, *l)),
+        _ => None,
+    }
+}
+
 /// A parsed `top`/`left`/`right`/`bottom` inset value.
 enum InsetVal {
     Length(f32),
@@ -1046,13 +1163,21 @@ enum InsetVal {
 fn parse_length_or_percent(s: &str, rem_base: f32) -> Option<InsetVal> {
     let s = s.trim();
     if let Some(pct) = s.strip_suffix('%') {
-        return pct.trim().parse::<f32>().ok().map(|v| InsetVal::Percent(v / 100.0));
+        return pct
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| InsetVal::Percent(v / 100.0));
     }
     if let Some(px) = s.strip_suffix("px") {
         return px.trim().parse::<f32>().ok().map(InsetVal::Length);
     }
     if let Some(rem) = s.strip_suffix("rem") {
-        return rem.trim().parse::<f32>().ok().map(|v| InsetVal::Length(v * rem_base));
+        return rem
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| InsetVal::Length(v * rem_base));
     }
     s.parse::<f32>().ok().map(InsetVal::Length)
 }
@@ -1156,9 +1281,9 @@ fn parse_grid_line(s: &str) -> Line<GridPlacement> {
 #[cfg(test)]
 mod layout_probe {
     use super::*;
-    use crate::unified_editor::UnifiedEditorConfig;
     use crate::editor_template::EditorTemplate;
     use crate::html::parse_html;
+    use crate::unified_editor::UnifiedEditorConfig;
     use std::io::Read;
 
     fn load_font() -> FontData {
@@ -1193,7 +1318,15 @@ mod layout_probe {
             let h = n.styles.get("height").cloned().unwrap_or_default();
             println!(
                 "{:24} x={:7.1} y={:7.1} w={:7.1} h={:7.1}  pos={:9} disp={:10} w={:6} h={:6} svg={}",
-                label, n.rect.x, n.rect.y, n.rect.width, n.rect.height, pos, disp, w, h,
+                label,
+                n.rect.x,
+                n.rect.y,
+                n.rect.width,
+                n.rect.height,
+                pos,
+                disp,
+                w,
+                h,
                 n.svg_path.is_some()
             );
         }
@@ -1214,13 +1347,21 @@ mod layout_probe {
             .collect();
 
         if let Some(vp) = by_class.get("viewport") {
-            println!("\nCHECK viewport: x={:.1} w={:.1} (center grid col ~342/596)", vp.x, vp.width);
-            assert!(vp.width > 100.0 && vp.height > 100.0, "viewport has real size");
+            println!(
+                "\nCHECK viewport: x={:.1} w={:.1} (center grid col ~342/596)",
+                vp.x, vp.width
+            );
+            assert!(
+                vp.width > 100.0 && vp.height > 100.0,
+                "viewport has real size"
+            );
         }
         if let Some(right) = by_class.get("right") {
-            println!("CHECK right: x={:.1} y={:.1} (absolute, near 1242/780)", right.x, right.y);
+            println!(
+                "CHECK right: x={:.1} y={:.1} (absolute, near 1242/780)",
+                right.x, right.y
+            );
         }
         println!("\nProbe complete.");
     }
 }
-

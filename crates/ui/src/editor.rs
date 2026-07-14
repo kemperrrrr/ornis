@@ -1,31 +1,31 @@
-use vello::peniko::{Color, FontData};
 use crate::render::UIRenderer;
 use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 use ornis_core::Entity;
+use vello::peniko::{Color, FontData};
 
 /// In-game editor overlay rendered directly with Vello primitives.
 /// Provides entity hierarchy, component inspector, and gizmo tools.
 pub struct EditorOverlay {
     visible: bool,
     entity_count: u32,
-    
+
     /// Selected entity for inspection
     selected_entity: Option<Entity>,
-    
+
     /// Editor mode
     mode: EditorMode,
-    
+
     /// Scroll offsets for panels
     hierarchy_scroll: f64,
     inspector_scroll: f64,
-    
+
     /// Search filter for entities
     search_filter: String,
-    
+
     /// UI state
     show_add_component: bool,
     add_component_type: String,
-    
+
     /// Gizmo state
     gizmo_mode: GizmoMode,
     gizmo_active: bool,
@@ -140,7 +140,13 @@ impl EditorOverlay {
     }
 
     /// Paint the editor overlay on top of the current Vello scene.
-    pub fn paint(&self, renderer: &mut UIRenderer, viewport_w: f64, viewport_h: f64, font: &FontData) {
+    pub fn paint(
+        &self,
+        renderer: &mut UIRenderer,
+        viewport_w: f64,
+        viewport_h: f64,
+        font: &FontData,
+    ) {
         if !self.visible {
             return;
         }
@@ -151,42 +157,113 @@ impl EditorOverlay {
         self.paint_toolbar(renderer, viewport_w, viewport_h, font);
     }
 
-    fn paint_hierarchy_panel(&self, renderer: &mut UIRenderer, viewport_w: f64, viewport_h: f64, font: &FontData) {
+    fn paint_hierarchy_panel(
+        &self,
+        renderer: &mut UIRenderer,
+        viewport_w: f64,
+        viewport_h: f64,
+        font: &FontData,
+    ) {
         let panel_w = 280.0;
         let panel_x = 0.0;
 
         // Panel background
-        renderer.fill_rounded_rect(panel_x, 0.0, panel_w, viewport_h, 0.0, Color::new([0.12, 0.12, 0.14, 0.92]));
-        renderer.stroke_rect(panel_w, 0.0, 1.0, viewport_h, 1.0, Color::new([0.27, 0.27, 0.27, 1.0]));
+        renderer.fill_rounded_rect(
+            panel_x,
+            0.0,
+            panel_w,
+            viewport_h,
+            0.0,
+            Color::new([0.12, 0.12, 0.14, 0.92]),
+        );
+        renderer.stroke_rect(
+            panel_w,
+            0.0,
+            1.0,
+            viewport_h,
+            1.0,
+            Color::new([0.27, 0.27, 0.27, 1.0]),
+        );
 
         // Title bar
-        renderer.fill_rect(panel_x, 0.0, panel_w, 40.0, Color::new([0.18, 0.18, 0.20, 1.0]));
-        renderer.fill_text(panel_x + 16.0, 18.0, "Hierarchy", 16.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
-        
+        renderer.fill_rect(
+            panel_x,
+            0.0,
+            panel_w,
+            40.0,
+            Color::new([0.18, 0.18, 0.20, 1.0]),
+        );
+        renderer.fill_text(
+            panel_x + 16.0,
+            18.0,
+            "Hierarchy",
+            16.0,
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+            font,
+            false,
+        );
+
         // Search box
         let search_y = 48.0;
-        renderer.fill_rounded_rect(panel_x + 12.0, search_y, panel_w - 24.0, 28.0, 4.0, Color::new([1.0, 1.0, 1.0, 0.08]));
-        renderer.fill_text(panel_x + 20.0, search_y + 20.0, &format!("Search: {}", self.search_filter), 12.0, Color::new([0.7, 0.7, 0.7, 1.0]), font);
+        renderer.fill_rounded_rect(
+            panel_x + 12.0,
+            search_y,
+            panel_w - 24.0,
+            28.0,
+            4.0,
+            Color::new([1.0, 1.0, 1.0, 0.08]),
+        );
+        renderer.fill_text(
+            panel_x + 20.0,
+            search_y + 20.0,
+            &format!("Search: {}", self.search_filter),
+            12.0,
+            Color::new([0.7, 0.7, 0.7, 1.0]),
+            font,
+            false,
+        );
 
         // Entity list
         let list_y = search_y + 44.0;
         let list_h = viewport_h - list_y - 120.0;
-        
+
         // Clip rect for scrolling
         let entities_per_row = 1;
         let item_h = 24.0;
         let visible_count = (list_h / item_h).floor() as usize + 1;
-        
+
         // TODO: Draw actual entity list from ECS
         // For now show placeholder
-        renderer.fill_text(panel_x + 16.0, list_y + 20.0, "Entities:", 12.0, Color::new([0.67, 0.67, 0.67, 1.0]), font);
-        
+        renderer.fill_text(
+            panel_x + 16.0,
+            list_y + 20.0,
+            "Entities:",
+            12.0,
+            Color::new([0.67, 0.67, 0.67, 1.0]),
+            font,
+            false,
+        );
+
         if self.search_filter.is_empty() {
-            renderer.fill_text(panel_x + 24.0, list_y + 50.0, "(No entities)", 13.0, Color::new([0.5, 0.5, 0.5, 1.0]), font);
+            renderer.fill_text(
+                panel_x + 24.0,
+                list_y + 50.0,
+                "(No entities)",
+                13.0,
+                Color::new([0.5, 0.5, 0.5, 1.0]),
+                font,
+                false,
+            );
         }
     }
 
-    fn paint_inspector_panel(&self, renderer: &mut UIRenderer, viewport_w: f64, viewport_h: f64, font: &FontData) {
+    fn paint_inspector_panel(
+        &self,
+        renderer: &mut UIRenderer,
+        viewport_w: f64,
+        viewport_h: f64,
+        font: &FontData,
+    ) {
         if self.selected_entity.is_none() {
             return;
         }
@@ -195,26 +272,102 @@ impl EditorOverlay {
         let panel_x = viewport_w - panel_w;
 
         // Panel background
-        renderer.fill_rounded_rect(panel_x, 0.0, panel_w, viewport_h, 0.0, Color::new([0.12, 0.12, 0.14, 0.92]));
-        renderer.stroke_rect(panel_x, 0.0, 1.0, viewport_h, 1.0, Color::new([0.27, 0.27, 0.27, 1.0]));
+        renderer.fill_rounded_rect(
+            panel_x,
+            0.0,
+            panel_w,
+            viewport_h,
+            0.0,
+            Color::new([0.12, 0.12, 0.14, 0.92]),
+        );
+        renderer.stroke_rect(
+            panel_x,
+            0.0,
+            1.0,
+            viewport_h,
+            1.0,
+            Color::new([0.27, 0.27, 0.27, 1.0]),
+        );
 
         // Title bar
         let entity = self.selected_entity.unwrap();
-        renderer.fill_rect(panel_x, 0.0, panel_w, 40.0, Color::new([0.18, 0.18, 0.20, 1.0]));
-        renderer.fill_text(panel_x + 16.0, 18.0, &format!("Inspector: Entity {}", entity.id()), 14.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
-        
+        renderer.fill_rect(
+            panel_x,
+            0.0,
+            panel_w,
+            40.0,
+            Color::new([0.18, 0.18, 0.20, 1.0]),
+        );
+        renderer.fill_text(
+            panel_x + 16.0,
+            18.0,
+            &format!("Inspector: Entity {}", entity.id()),
+            14.0,
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+            font,
+            false,
+        );
+
         // Component type badge
-        renderer.fill_rounded_rect(panel_x + 16.0, 52.0, 100.0, 24.0, 4.0, Color::new([0.23, 0.43, 0.94, 0.3]));
-        renderer.fill_text(panel_x + 20.0, 64.0, "Transform", 12.0, Color::new([0.5, 0.7, 1.0, 1.0]), font);
-        renderer.fill_rounded_rect(panel_x + 120.0, 52.0, 100.0, 24.0, 4.0, Color::new([0.23, 0.94, 0.43, 0.3]));
-        renderer.fill_text(panel_x + 124.0, 64.0, "UIStyle", 12.0, Color::new([0.5, 1.0, 0.7, 1.0]), font);
+        renderer.fill_rounded_rect(
+            panel_x + 16.0,
+            52.0,
+            100.0,
+            24.0,
+            4.0,
+            Color::new([0.23, 0.43, 0.94, 0.3]),
+        );
+        renderer.fill_text(
+            panel_x + 20.0,
+            64.0,
+            "Transform",
+            12.0,
+            Color::new([0.5, 0.7, 1.0, 1.0]),
+            font,
+            false,
+        );
+        renderer.fill_rounded_rect(
+            panel_x + 120.0,
+            52.0,
+            100.0,
+            24.0,
+            4.0,
+            Color::new([0.23, 0.94, 0.43, 0.3]),
+        );
+        renderer.fill_text(
+            panel_x + 124.0,
+            64.0,
+            "UIStyle",
+            12.0,
+            Color::new([0.5, 1.0, 0.7, 1.0]),
+            font,
+            false,
+        );
 
         // Add component button
         let btn_y = 90.0;
         let btn_hover = self.show_add_component;
-        renderer.fill_rounded_rect(panel_x + 12.0, btn_y, panel_w - 24.0, 32.0, 4.0, 
-            if btn_hover { Color::new([0.23, 0.43, 0.94, 0.5]) } else { Color::new([1.0, 1.0, 1.0, 0.08]) });
-        renderer.fill_text(panel_x + 24.0, btn_y + 18.0, "+ Add Component", 13.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
+        renderer.fill_rounded_rect(
+            panel_x + 12.0,
+            btn_y,
+            panel_w - 24.0,
+            32.0,
+            4.0,
+            if btn_hover {
+                Color::new([0.23, 0.43, 0.94, 0.5])
+            } else {
+                Color::new([1.0, 1.0, 1.0, 0.08])
+            },
+        );
+        renderer.fill_text(
+            panel_x + 24.0,
+            btn_y + 18.0,
+            "+ Add Component",
+            13.0,
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+            font,
+            false,
+        );
 
         // Component details
         if self.show_add_component {
@@ -222,70 +375,221 @@ impl EditorOverlay {
         }
     }
 
-    fn paint_add_component_modal(&self, renderer: &mut UIRenderer, viewport_w: f64, viewport_h: f64, font: &FontData) {
+    fn paint_add_component_modal(
+        &self,
+        renderer: &mut UIRenderer,
+        viewport_w: f64,
+        viewport_h: f64,
+        font: &FontData,
+    ) {
         // Semi-transparent overlay
-        renderer.fill_rect(0.0, 0.0, viewport_w, viewport_h, Color::new([0.0, 0.0, 0.0, 0.5]));
-        
+        renderer.fill_rect(
+            0.0,
+            0.0,
+            viewport_w,
+            viewport_h,
+            Color::new([0.0, 0.0, 0.0, 0.5]),
+        );
+
         // Modal panel
         let modal_w = 400.0;
         let modal_h = 300.0;
         let modal_x = (viewport_w - modal_w) / 2.0;
         let modal_y = (viewport_h - modal_h) / 2.0;
-        
-        renderer.fill_rounded_rect(modal_x, modal_y, modal_w, modal_h, 8.0, Color::new([0.15, 0.15, 0.18, 0.98]));
-        renderer.stroke_rect(modal_x, modal_y, modal_w, modal_h, 1.0, Color::new([0.3, 0.3, 0.3, 1.0]));
-        
-        renderer.fill_text(modal_x + 24.0, modal_y + 28.0, "Add Component", 18.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
-        renderer.fill_text(modal_x + 24.0, modal_y + 58.0, "Select component type:", 13.0, Color::new([0.7, 0.7, 0.7, 1.0]), font);
-        
-        let types = ["Transform", "UIStyle", "RigidBody", "Mesh", "Light", "Camera", "AudioSource"];
+
+        renderer.fill_rounded_rect(
+            modal_x,
+            modal_y,
+            modal_w,
+            modal_h,
+            8.0,
+            Color::new([0.15, 0.15, 0.18, 0.98]),
+        );
+        renderer.stroke_rect(
+            modal_x,
+            modal_y,
+            modal_w,
+            modal_h,
+            1.0,
+            Color::new([0.3, 0.3, 0.3, 1.0]),
+        );
+
+        renderer.fill_text(
+            modal_x + 24.0,
+            modal_y + 28.0,
+            "Add Component",
+            18.0,
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+            font,
+            false,
+        );
+        renderer.fill_text(
+            modal_x + 24.0,
+            modal_y + 58.0,
+            "Select component type:",
+            13.0,
+            Color::new([0.7, 0.7, 0.7, 1.0]),
+            font,
+            false,
+        );
+
+        let types = [
+            "Transform",
+            "UIStyle",
+            "RigidBody",
+            "Mesh",
+            "Light",
+            "Camera",
+            "AudioSource",
+        ];
         for (i, t) in types.iter().enumerate() {
             let y = modal_y + 88.0 + i as f64 * 32.0;
             let selected = self.add_component_type == *t;
-            renderer.fill_rounded_rect(modal_x + 16.0, y, modal_w - 32.0, 28.0, 4.0,
-                if selected { Color::new([0.23, 0.43, 0.94, 0.5]) } else { Color::new([1.0, 1.0, 1.0, 0.05]) });
-            renderer.fill_text(modal_x + 28.0, y + 18.0, t, 13.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
+            renderer.fill_rounded_rect(
+                modal_x + 16.0,
+                y,
+                modal_w - 32.0,
+                28.0,
+                4.0,
+                if selected {
+                    Color::new([0.23, 0.43, 0.94, 0.5])
+                } else {
+                    Color::new([1.0, 1.0, 1.0, 0.05])
+                },
+            );
+            renderer.fill_text(
+                modal_x + 28.0,
+                y + 18.0,
+                t,
+                13.0,
+                Color::new([1.0, 1.0, 1.0, 1.0]),
+                font,
+                false,
+            );
         }
-        
+
         // Buttons
         let btn_y = modal_y + modal_h - 52.0;
-        renderer.fill_rounded_rect(modal_x + modal_w - 120.0, btn_y, 52.0, 32.0, 4.0, Color::new([0.5, 0.5, 0.5, 0.5]));
-        renderer.fill_text(modal_x + modal_w - 104.0, btn_y + 16.0, "Cancel", 13.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
-        
-        renderer.fill_rounded_rect(modal_x + modal_w - 60.0, btn_y, 52.0, 32.0, 4.0, Color::new([0.23, 0.43, 0.94, 0.8]));
-        renderer.fill_text(modal_x + modal_w - 44.0, btn_y + 16.0, "Add", 13.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
+        renderer.fill_rounded_rect(
+            modal_x + modal_w - 120.0,
+            btn_y,
+            52.0,
+            32.0,
+            4.0,
+            Color::new([0.5, 0.5, 0.5, 0.5]),
+        );
+        renderer.fill_text(
+            modal_x + modal_w - 104.0,
+            btn_y + 16.0,
+            "Cancel",
+            13.0,
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+            font,
+            false,
+        );
+
+        renderer.fill_rounded_rect(
+            modal_x + modal_w - 60.0,
+            btn_y,
+            52.0,
+            32.0,
+            4.0,
+            Color::new([0.23, 0.43, 0.94, 0.8]),
+        );
+        renderer.fill_text(
+            modal_x + modal_w - 44.0,
+            btn_y + 16.0,
+            "Add",
+            13.0,
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+            font,
+            false,
+        );
     }
 
-    fn paint_gizmo(&self, _renderer: &mut UIRenderer, _viewport_w: f64, _viewport_h: f64, _font: &FontData) {
+    fn paint_gizmo(
+        &self,
+        _renderer: &mut UIRenderer,
+        _viewport_w: f64,
+        _viewport_h: f64,
+        _font: &FontData,
+    ) {
         // TODO: Implement 3D gizmo rendering
         // For now, just show gizmo mode indicator
     }
 
-    fn paint_toolbar(&self, renderer: &mut UIRenderer, viewport_w: f64, viewport_h: f64, font: &FontData) {
+    fn paint_toolbar(
+        &self,
+        renderer: &mut UIRenderer,
+        viewport_w: f64,
+        viewport_h: f64,
+        font: &FontData,
+    ) {
         // Bottom toolbar
         let toolbar_h = 40.0;
         let toolbar_y = viewport_h - toolbar_h;
-        
-        renderer.fill_rect(0.0, toolbar_y, viewport_w, toolbar_h, Color::new([0.10, 0.10, 0.12, 0.95]));
-        renderer.stroke_rect(0.0, toolbar_y, viewport_w, 1.0, 1.0, Color::new([0.2, 0.2, 0.2, 1.0]));
-        
+
+        renderer.fill_rect(
+            0.0,
+            toolbar_y,
+            viewport_w,
+            toolbar_h,
+            Color::new([0.10, 0.10, 0.12, 0.95]),
+        );
+        renderer.stroke_rect(
+            0.0,
+            toolbar_y,
+            viewport_w,
+            1.0,
+            1.0,
+            Color::new([0.2, 0.2, 0.2, 1.0]),
+        );
+
         // Mode buttons
-        let modes = [("1", "Translate", GizmoMode::Translate), ("2", "Rotate", GizmoMode::Rotate), ("3", "Scale", GizmoMode::Scale)];
+        let modes = [
+            ("1", "Translate", GizmoMode::Translate),
+            ("2", "Rotate", GizmoMode::Rotate),
+            ("3", "Scale", GizmoMode::Scale),
+        ];
         for (i, (key, label, mode)) in modes.iter().enumerate() {
             let x = 20.0 + i as f64 * 120.0;
             let active = self.gizmo_mode == *mode;
-            let color = if active { Color::new([0.23, 0.43, 0.94, 0.8]) } else { Color::new([1.0, 1.0, 1.0, 0.1]) };
+            let color = if active {
+                Color::new([0.23, 0.43, 0.94, 0.8])
+            } else {
+                Color::new([1.0, 1.0, 1.0, 0.1])
+            };
             renderer.fill_rounded_rect(x, toolbar_y + 6.0, 100.0, 28.0, 4.0, color);
-            renderer.fill_text(x + 12.0, toolbar_y + 20.0, &format!("{} {}", key, label), 12.0, Color::new([1.0, 1.0, 1.0, 1.0]), font);
+            renderer.fill_text(
+                x + 12.0,
+                toolbar_y + 20.0,
+                &format!("{} {}", key, label),
+                12.0,
+                Color::new([1.0, 1.0, 1.0, 1.0]),
+                font,
+                false,
+            );
         }
-        
+
         // Status
         let status = if let Some(entity) = self.selected_entity {
-            format!("Selected: Entity {} | Mode: {:?}", entity.id(), self.gizmo_mode)
+            format!(
+                "Selected: Entity {} | Mode: {:?}",
+                entity.id(),
+                self.gizmo_mode
+            )
         } else {
             "No selection".to_string()
         };
-        renderer.fill_text(viewport_w - 300.0, toolbar_y + 14.0, &status, 12.0, Color::new([0.7, 0.7, 0.7, 1.0]), font);
+        renderer.fill_text(
+            viewport_w - 300.0,
+            toolbar_y + 14.0,
+            &status,
+            12.0,
+            Color::new([0.7, 0.7, 0.7, 1.0]),
+            font,
+            false,
+        );
     }
 }
 
@@ -344,7 +648,7 @@ impl GizmoSystem {
         let (vx, vy) = self.viewport_size;
         let ndc_x = (mouse_pos.0 / vx) * 2.0 - 1.0;
         let ndc_y = 1.0 - (mouse_pos.1 / vy) * 2.0;
-        
+
         // Ray in clip space
         let clip = Vec4::new(ndc_x as f32, ndc_y as f32, -1.0, 1.0);
         let inv_proj = self.camera_proj.inverse();
@@ -353,29 +657,29 @@ impl GizmoSystem {
         let inv_view = self.camera_view.inverse();
         let ray_dir = (inv_view * eye).xyz().normalize();
         let ray_origin = (inv_view * Vec4::new(0.0, 0.0, 0.0, 1.0)).xyz();
-        
+
         // Test against gizmo axes (simplified - axis-aligned lines from origin)
         let axes = [
             (GizmoAxis::X, Vec3::X),
             (GizmoAxis::Y, Vec3::Y),
             (GizmoAxis::Z, Vec3::Z),
         ];
-        
+
         let mut best_dist = f32::MAX;
         let mut best_axis = None;
-        
+
         for (axis, dir) in axes {
             // Distance from ray to axis line
             let origin_to_line = self.transform.w_axis.xyz() - ray_origin;
             let cross = origin_to_line.cross(ray_dir);
             let dist = cross.length() / ray_dir.length();
-            
+
             if dist < 0.1 && dist < best_dist {
                 best_dist = dist;
                 best_axis = Some(axis);
             }
         }
-        
+
         best_axis
     }
 
@@ -393,7 +697,7 @@ impl GizmoSystem {
             mouse_pos.1 as f32 - self.start_pos.unwrap().y,
             0.0,
         ) * 0.01; // Scale factor
-        
+
         match self.mode {
             GizmoMode::Translate => {
                 if let Some(axis) = self.axis {
@@ -422,9 +726,7 @@ impl GizmoSystem {
                 };
                 delta * axis
             }
-            GizmoMode::Scale => {
-                Vec3::ONE + delta * 0.1
-            }
+            GizmoMode::Scale => Vec3::ONE + delta * 0.1,
         }
     }
 }

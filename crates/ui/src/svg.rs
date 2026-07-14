@@ -28,12 +28,27 @@ pub fn parse_svg_path(d: &str) -> Option<BezPath> {
         let c = bytes[i];
         if c.is_ascii_alphabetic() {
             if !nums.is_empty() {
-                emit(&mut path, cmd, &nums, &mut cx, &mut cy, &mut start_x, &mut start_y, &mut last_ctrl);
+                emit(
+                    &mut path,
+                    cmd,
+                    &nums,
+                    &mut cx,
+                    &mut cy,
+                    &mut start_x,
+                    &mut start_y,
+                    &mut last_ctrl,
+                );
                 nums.clear();
             }
             cmd = c;
             i += 1;
-        } else if c.is_ascii_digit() || c == b'.' || c == b'-' || c == b'+' || c == b'e' || c == b'E' {
+        } else if c.is_ascii_digit()
+            || c == b'.'
+            || c == b'-'
+            || c == b'+'
+            || c == b'e'
+            || c == b'E'
+        {
             let num_start = i;
             let mut j = i;
             let mut seen_dot = false;
@@ -65,7 +80,16 @@ pub fn parse_svg_path(d: &str) -> Option<BezPath> {
         }
     }
     if cmd != b' ' {
-        emit(&mut path, cmd, &nums, &mut cx, &mut cy, &mut start_x, &mut start_y, &mut last_ctrl);
+        emit(
+            &mut path,
+            cmd,
+            &nums,
+            &mut cx,
+            &mut cy,
+            &mut start_x,
+            &mut start_y,
+            &mut last_ctrl,
+        );
     }
 
     if path.elements().is_empty() {
@@ -138,10 +162,7 @@ fn arc_to_beziers(
     let cxp_user = cos_p * cxp - sin_p * cyp + (cx + ex) / 2.0;
     let cyp_user = sin_p * cxp + cos_p * cyp + (cy + ey) / 2.0;
 
-    let theta1 = angle_between(
-        (1.0, 0.0),
-        ((x1p - cxp) / rx, (y1p - cyp) / ry),
-    );
+    let theta1 = angle_between((1.0, 0.0), ((x1p - cxp) / rx, (y1p - cyp) / ry));
     let mut dtheta = angle_between(
         ((x1p - cxp) / rx, (y1p - cyp) / ry),
         ((-x1p - cxp) / rx, (-y1p - cyp) / ry),
@@ -156,7 +177,10 @@ fn arc_to_beziers(
     let n_segs = ((dtheta.abs() / std::f64::consts::FRAC_PI_2).ceil()).max(1.0) as i32;
     let seg = dtheta / n_segs as f64;
     let to_user = |px: f64, py: f64| -> Point {
-        Point::new(cos_p * px - sin_p * py + cxp_user, sin_p * px + cos_p * py + cyp_user)
+        Point::new(
+            cos_p * px - sin_p * py + cxp_user,
+            sin_p * px + cos_p * py + cyp_user,
+        )
     };
 
     let mut out = Vec::new();
@@ -165,8 +189,14 @@ fn arc_to_beziers(
         let t1 = theta;
         let t2 = theta + seg;
         let f = (4.0 / 3.0) * (seg / 4.0).tan();
-        let q1 = to_user(rx * t1.cos() - f * ry * t1.sin(), ry * t1.sin() + f * rx * t1.cos());
-        let q2 = to_user(rx * t2.cos() + f * ry * t2.sin(), ry * t2.sin() - f * rx * t2.cos());
+        let q1 = to_user(
+            rx * t1.cos() - f * ry * t1.sin(),
+            ry * t1.sin() + f * rx * t1.cos(),
+        );
+        let q2 = to_user(
+            rx * t2.cos() + f * ry * t2.sin(),
+            ry * t2.sin() - f * rx * t2.cos(),
+        );
         let end = to_user(rx * t2.cos(), ry * t2.sin());
         out.push(q1);
         out.push(q2);
@@ -280,7 +310,8 @@ fn emit(
                 }
             }
             b'S' => {
-                if let (Some(x2), Some(y2), Some(x), Some(y)) = (next!(), next!(), next!(), next!()) {
+                if let (Some(x2), Some(y2), Some(x), Some(y)) = (next!(), next!(), next!(), next!())
+                {
                     let (a2x, a2y) = (abs(x2, *cx), abs(y2, *cy));
                     let (ax, ay) = (abs(x, *cx), abs(y, *cy));
                     let (c1x, c1y) = match *last_ctrl {
@@ -296,7 +327,8 @@ fn emit(
                 }
             }
             b'Q' => {
-                if let (Some(x1), Some(y1), Some(x), Some(y)) = (next!(), next!(), next!(), next!()) {
+                if let (Some(x1), Some(y1), Some(x), Some(y)) = (next!(), next!(), next!(), next!())
+                {
                     let (a1x, a1y) = (abs(x1, *cx), abs(y1, *cy));
                     let (ax, ay) = (abs(x, *cx), abs(y, *cy));
                     path.quad_to((a1x, a1y), (ax, ay));

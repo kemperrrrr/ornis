@@ -6,7 +6,7 @@
 //!   cargo run -p ornis-ui --features serialize --example render_to_png <W> <H> [out.png]
 
 use ornis_ui::css::Stylesheet;
-use ornis_ui::editor_template::{EditorTemplate, UnifiedEditorConfig};
+use ornis_ui::editor_template::{EditorTemplate, UnifiedEditorConfig, read_asset};
 use ornis_ui::html::parse_html;
 use ornis_ui::layout::LayoutTree;
 use ornis_ui::paint::paint_layout;
@@ -30,18 +30,16 @@ async fn run(w: u32, h: u32, out: &str) {
         .await
         .expect("adapter");
     let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("png device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits {
-                        max_storage_buffers_per_shader_stage: 8,
-                        ..wgpu::Limits::downlevel_defaults()
-                    },
-                    memory_hints: wgpu::MemoryHints::Performance,
-                    trace: wgpu::Trace::Off,
-                },
-            )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("png device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                max_storage_buffers_per_shader_stage: 8,
+                ..wgpu::Limits::downlevel_defaults()
+            },
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        })
         .await
         .expect("device");
 
@@ -62,22 +60,26 @@ async fn run(w: u32, h: u32, out: &str) {
 
     let editor_config = UnifiedEditorConfig::default();
     let editor_template = EditorTemplate::new(editor_config);
-    let editor_html = editor_template.generate_html();
+    let editor_html = read_asset("index.html");
     let editor_css = editor_template.generate_css();
 
     let doc = parse_html(&editor_html);
-    let stylesheet = Stylesheet::parse(&editor_css).unwrap_or_else(|_| {
-        Stylesheet {
-            rules: vec![],
-            custom_properties: std::collections::HashMap::new(),
-        }
+    let stylesheet = Stylesheet::parse(&editor_css).unwrap_or_else(|_| Stylesheet {
+        rules: vec![],
+        custom_properties: std::collections::HashMap::new(),
     });
 
     let tree = LayoutTree::build_with_viewport(&doc, &[stylesheet], w as f32, h as f32, &font)
         .expect("layout build");
 
     renderer.begin_frame();
-    renderer.fill_rect(0.0, 0.0, w as f64, h as f64, Color::new([0.12, 0.12, 0.14, 1.0]));
+    renderer.fill_rect(
+        0.0,
+        0.0,
+        w as f64,
+        h as f64,
+        Color::new([0.12, 0.12, 0.14, 1.0]),
+    );
     paint_layout(&tree, &mut renderer, &font);
     match renderer.save_png(&device, &queue, out) {
         Ok(_) => println!("wrote {out} ({w}x{h})"),
@@ -89,6 +91,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let w: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1280);
     let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(800);
-    let out = args.get(3).cloned().unwrap_or_else(|| "/tmp/ornis_editor.png".to_string());
+    let out = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "/tmp/ornis_editor.png".to_string());
     pollster::block_on(run(w, h, &out));
 }

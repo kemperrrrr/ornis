@@ -235,13 +235,24 @@ impl Stylesheet {
             }
         }
 
-        Ok(Stylesheet { rules, custom_properties })
+        Ok(Stylesheet {
+            rules,
+            custom_properties,
+        })
     }
 
-    pub fn match_element(&self, element: &Element, ancestors: &[&Element]) -> HashMap<String, String> {
+    pub fn match_element(
+        &self,
+        element: &Element,
+        ancestors: &[&Element],
+    ) -> HashMap<String, String> {
         let mut props = HashMap::new();
         for rule in &self.rules {
-            if rule.selectors.iter().any(|sel| matches_selector(sel, element, ancestors)) {
+            if rule
+                .selectors
+                .iter()
+                .any(|sel| matches_selector(sel, element, ancestors))
+            {
                 for (k, v) in &rule.declarations {
                     props.insert(k.clone(), v.clone());
                 }
@@ -373,7 +384,10 @@ fn resolve_var(value: &str, vars: &HashMap<String, String>) -> String {
         let inner = &result[start + 4..end];
         let parts: Vec<&str> = inner.splitn(2, ',').collect();
         let name = parts[0].trim();
-        let fallback = parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default();
+        let fallback = parts
+            .get(1)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         let replacement = vars.get(name).cloned().unwrap_or(fallback);
         result.replace_range(start..=end, &replacement);
     }
@@ -412,27 +426,44 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
             let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
             let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
             let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
-            Some(Color::new([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]))
+            Some(Color::new([
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                1.0,
+            ]))
         }
         6 => {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some(Color::new([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]))
+            Some(Color::new([
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                1.0,
+            ]))
         }
         8 => {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
             let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            Some(Color::new([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]))
+            Some(Color::new([
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                a as f32 / 255.0,
+            ]))
         }
         _ => None,
     }
 }
 
 fn parse_rgb_function(value: &str) -> Option<Color> {
-    let inner = value.trim().strip_prefix("rgb(")
+    let inner = value
+        .trim()
+        .strip_prefix("rgb(")
         .or_else(|| value.trim().strip_prefix("rgba("))
         .and_then(|s| s.strip_suffix(')'))?;
     let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
@@ -460,7 +491,8 @@ pub fn parse_css_length(value: &str) -> Option<f64> {
 }
 
 pub fn parse_css_border_radius(value: &str) -> Vec<f64> {
-    value.split_whitespace()
+    value
+        .split_whitespace()
         .filter_map(parse_css_length)
         .collect()
 }

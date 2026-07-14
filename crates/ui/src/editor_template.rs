@@ -84,7 +84,7 @@ fn assets_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/editor")
 }
 
-fn read_asset(name: &str) -> String {
+pub fn read_asset(name: &str) -> String {
     let path = assets_dir().join(name);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| format!("<!-- failed to load {name}: {e} -->"))

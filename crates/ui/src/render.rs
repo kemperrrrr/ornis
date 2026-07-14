@@ -1,9 +1,9 @@
 use std::num::NonZeroUsize;
 
-use vello::peniko::{self, Color, Fill, FontData};
 use vello::peniko::kurbo::{Affine, Circle, Rect, RoundedRect, Stroke};
+use vello::peniko::{self, Color, Fill, FontData};
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
-use wgpu::{util::TextureBlitter, Device, Queue, Surface, SurfaceConfiguration, Texture};
+use wgpu::{Device, Queue, Surface, SurfaceConfiguration, Texture, util::TextureBlitter};
 
 pub struct UIRenderer {
     renderer: Renderer,
@@ -42,7 +42,11 @@ impl UIRenderer {
         // let the composite pass sample it as a plain float texture.
         let output = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vello output"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -69,7 +73,11 @@ impl UIRenderer {
         self.height = height;
         self.output = Some(device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vello output"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -132,34 +140,71 @@ impl UIRenderer {
         );
     }
 
-    pub fn fill_text(&mut self, x: f64, y: f64, text: &str, font_size: f32, color: Color, font: &FontData) {
+    pub fn fill_text(
+        &mut self,
+        x: f64,
+        y: f64,
+        text: &str,
+        font_size: f32,
+        color: Color,
+        font: &FontData,
+        bold: bool,
+    ) {
         let glyphs = crate::text::layout_text(font, text, font_size);
         if glyphs.is_empty() {
             return;
         }
         self.brush = peniko::Brush::from(color);
-        self.scene.draw_glyphs(font)
+        self.scene
+            .draw_glyphs(font)
             .transform(Affine::translate((x, y)))
             .font_size(font_size)
             .brush(color)
-            .draw(Fill::NonZero, glyphs.into_iter());
+            .draw(Fill::NonZero, glyphs.iter().cloned());
+        if bold {
+            // Fake-bold: overlay a thin stroke of the same color so glyph stems
+            // thicken toward the heavier CSS weights (500/600/700) the editor UI
+            // uses. Inter only ships a single weight in our assets, so we can't
+            // pick a real bold face — but thickening the stems visually matches
+            // the original without swapping the typeface.
+            let stroke = Stroke {
+                width: (font_size as f64 * 0.04).max(0.5),
+                ..Default::default()
+            };
+            self.scene
+                .draw_glyphs(font)
+                .transform(Affine::translate((x, y)))
+                .font_size(font_size)
+                .brush(color)
+                .hint(true)
+                .draw(&stroke, glyphs.iter().cloned());
+        }
     }
 
-    pub fn fill_bez_path(&mut self, path: &vello::peniko::kurbo::BezPath, transform: Affine, color: Color) {
+    pub fn fill_bez_path(
+        &mut self,
+        path: &vello::peniko::kurbo::BezPath,
+        transform: Affine,
+        color: Color,
+    ) {
         self.brush = peniko::Brush::from(color);
-        self.scene.fill(
-            peniko::Fill::NonZero,
-            transform,
-            &self.brush,
-            None,
-            path,
-        );
+        self.scene
+            .fill(peniko::Fill::NonZero, transform, &self.brush, None, path);
     }
 
     /// Draws a raster image (`peniko::ImageData`, e.g. a decoded `<img>`) into
     /// the scene, scaling its intrinsic pixel size to `transform`.
-    pub fn draw_image(&mut self, image: &vello::peniko::ImageData, transform: Affine) {
-        let brush = vello::peniko::ImageBrush::new(image.clone());
+    ///
+    /// `quality` controls the sampler hint: `High` gives a smooth (linear)
+    /// up/downscale so bitmaps such as the editor logo stay anti-aliased
+    /// instead of showing nearest-neighbor pixel stairs.
+    pub fn draw_image(
+        &mut self,
+        image: &vello::peniko::ImageData,
+        transform: Affine,
+        quality: vello::peniko::ImageQuality,
+    ) {
+        let brush = vello::peniko::ImageBrush::new(image.clone()).with_quality(quality);
         self.scene.draw_image(brush.as_ref(), transform);
     }
 
@@ -177,14 +222,13 @@ impl UIRenderer {
     }
 
     pub fn get_internal_texture_view(&self) -> wgpu::TextureView {
-        self.output.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())
+        self.output
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    pub fn render_scene(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-    ) -> Result<(), vello::Error> {
+    pub fn render_scene(&mut self, device: &Device, queue: &Queue) -> Result<(), vello::Error> {
         let output = self.output.take().unwrap();
         let view = output.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -224,9 +268,12 @@ impl UIRenderer {
     ) -> Result<(), vello::Error> {
         self.render_scene(device, queue)?;
 
-        let frame = surface.get_current_texture()
+        let frame = surface
+            .get_current_texture()
             .map_err(|_| vello::Error::UnsupportedSurfaceFormat)?;
-        let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ornis ui blit"),
@@ -281,7 +328,11 @@ impl UIRenderer {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(Some(encoder.finish()));
 

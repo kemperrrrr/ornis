@@ -1,6 +1,6 @@
-use skrifa::{FontRef, MetadataProvider, prelude::Size, instance::LocationRef};
-use vello::peniko::{Blob, FontData};
+use skrifa::{FontRef, MetadataProvider, instance::LocationRef, prelude::Size};
 use vello::Glyph;
+use vello::peniko::{Blob, FontData};
 
 /// Loads the bundled **Inter** font (shipped in the crate's assets) so the
 /// editor renders with its real typeface instead of a system fallback.
@@ -14,12 +14,10 @@ pub fn load_inter_font() -> FontData {
     let candidates: Vec<std::path::PathBuf> = {
         let mut v = Vec::new();
         if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-            v.push(std::path::Path::new(&manifest)
-                .join("assets/editor/fonts/Inter-Regular.ttf"));
+            v.push(std::path::Path::new(&manifest).join("assets/editor/fonts/Inter-Regular.ttf"));
         }
         if let Ok(home) = std::env::var("HOME") {
-            v.push(std::path::Path::new(&home)
-                .join(".cache/ornis/fonts/Inter-Regular.ttf"));
+            v.push(std::path::Path::new(&home).join(".cache/ornis/fonts/Inter-Regular.ttf"));
         }
         v.push(std::path::PathBuf::from(
             "crates/ui/assets/editor/fonts/Inter-Regular.ttf",
@@ -60,7 +58,11 @@ pub fn layout_text(font: &FontData, text: &str, font_size: f32) -> Vec<Glyph> {
     for ch in text.chars() {
         if let Some(gid) = charmap.map(ch) {
             if let Some(advance) = metrics.advance_width(gid) {
-                glyphs.push(Glyph { id: gid.to_u32(), x, y: 0.0 });
+                glyphs.push(Glyph {
+                    id: gid.to_u32(),
+                    x,
+                    y: 0.0,
+                });
                 x += advance;
             }
         }

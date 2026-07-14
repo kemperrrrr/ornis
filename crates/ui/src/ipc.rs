@@ -4,14 +4,19 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 #[derive(Debug, Clone)]
 pub enum UiCommand {
     CreateEntity,
-    DestroyEntity { entity_id: u32 },
+    DestroyEntity {
+        entity_id: u32,
+    },
     SetComponent {
         entity_id: u32,
         type_name: String,
         json_data: String,
     },
     /// Generic command with a type tag and JSON payload.
-    Custom { cmd_type: String, json_data: String },
+    Custom {
+        cmd_type: String,
+        json_data: String,
+    },
 }
 
 /// Events pushed from the game thread back to the UI thread
@@ -22,10 +27,17 @@ pub enum GameEvent {
         type_name: String,
         json_data: String,
     },
-    EntityCreated { entity_id: u32 },
-    EntityDestroyed { entity_id: u32 },
+    EntityCreated {
+        entity_id: u32,
+    },
+    EntityDestroyed {
+        entity_id: u32,
+    },
     /// Generic event for remote editor / extensibility.
-    CustomEvent { cmd_type: String, json_data: String },
+    CustomEvent {
+        cmd_type: String,
+        json_data: String,
+    },
 }
 
 /// UI-side handle for two-way IPC with the game thread.
@@ -111,7 +123,11 @@ mod tests {
 
         let cmd3 = game.poll().expect("should receive SetComponent");
         match cmd3 {
-            UiCommand::SetComponent { entity_id, type_name, json_data } => {
+            UiCommand::SetComponent {
+                entity_id,
+                type_name,
+                json_data,
+            } => {
                 assert_eq!(entity_id, 0);
                 assert_eq!(type_name, "UIStyle");
                 assert_eq!(json_data, r#"{"color":[1,0,0,1]}"#);
@@ -138,7 +154,11 @@ mod tests {
 
         let ev2 = ui.poll().expect("should receive ComponentUpdated");
         match ev2 {
-            GameEvent::ComponentUpdated { entity_id, type_name, json_data } => {
+            GameEvent::ComponentUpdated {
+                entity_id,
+                type_name,
+                json_data,
+            } => {
                 assert_eq!(entity_id, 7);
                 assert_eq!(type_name, "UIStyle");
                 assert_eq!(json_data, r#"{"font_size":24}"#);
@@ -177,7 +197,11 @@ mod tests {
         // UI receives the response
         let ev = ui.poll().expect("should receive response");
         match ev {
-            GameEvent::ComponentUpdated { entity_id, json_data, .. } => {
+            GameEvent::ComponentUpdated {
+                entity_id,
+                json_data,
+                ..
+            } => {
                 assert_eq!(entity_id, 1);
                 assert!(json_data.contains("\"hp\":100"));
             }

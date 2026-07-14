@@ -6,12 +6,12 @@
 //! # -> writes ui_layout.json
 //! ```
 
-use std::io::Read;
 use ornis_ui::css::Stylesheet;
+use ornis_ui::editor_template::EditorTemplate;
 use ornis_ui::html::parse_html;
 use ornis_ui::layout::LayoutTree;
 use ornis_ui::unified_editor::UnifiedEditorConfig;
-use ornis_ui::editor_template::EditorTemplate;
+use std::io::Read;
 use vello::peniko::FontData;
 
 fn load_font() -> FontData {
@@ -43,16 +43,14 @@ fn main() {
     let sheet = Stylesheet::parse(&css).expect("css parses");
     let font = load_font();
 
-    let tree = LayoutTree::build_with_viewport(&doc, &[sheet], vw, vh, &font)
-        .expect("layout builds");
+    let tree =
+        LayoutTree::build_with_viewport(&doc, &[sheet], vw, vh, &font).expect("layout builds");
 
     let json = tree.to_json();
     let out = serde_json::to_string_pretty(&json).expect("serialize");
     std::fs::write("ui_layout.json", &out).expect("write");
     println!(
         "wrote ui_layout.json  (viewport {}x{}, {} nodes)",
-        vw as i32,
-        vh as i32,
-        json["node_count"]
+        vw as i32, vh as i32, json["node_count"]
     );
 }

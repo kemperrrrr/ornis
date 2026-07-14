@@ -1,5 +1,5 @@
 //! Unified Editor - HTML/CSS-based editor that runs both in-game (Vello) and remote (HTTP)
-//! 
+//!
 //! This replaces the old Vello-based editor with a unified HTML/CSS-based editor
 //! that uses our Rust ECS bridge instead of JavaScript.
 
@@ -8,8 +8,8 @@ use crate::layout::LayoutTree;
 use crate::paint::paint_layout;
 use crate::render::UIRenderer;
 use ornis_core::{Entity, SmartStore};
-use vello::peniko::{Color, FontData};
 use std::sync::Arc;
+use vello::peniko::{Color, FontData};
 
 /// Unified Editor configuration
 #[derive(Debug, Clone)]
@@ -59,10 +59,10 @@ impl Default for EditorTheme {
         // panel would tint differently over the 3D scene behind it).
         Self {
             window_background: Color::new([0.2235, 0.2235, 0.2431, 1.0]), // #39393e
-            panel_background: Color::new([0.1373, 0.1373, 0.1490, 1.0]), // #232326
-            panel_text: Color::new([1.0, 1.0, 1.0, 1.0]), // #ffffff
-            icons_background: Color::new([0.4863, 0.4863, 0.5294, 1.0]), // #7c7c87
-            input_background: Color::new([0.0941, 0.0941, 0.1020, 1.0]), // #18181a
+            panel_background: Color::new([0.1373, 0.1373, 0.1490, 1.0]),  // #232326
+            panel_text: Color::new([1.0, 1.0, 1.0, 1.0]),                 // #ffffff
+            icons_background: Color::new([0.4863, 0.4863, 0.5294, 1.0]),  // #7c7c87
+            input_background: Color::new([0.0941, 0.0941, 0.1020, 1.0]),  // #18181a
             input_text: Color::new([1.0, 1.0, 1.0, 1.0]),
             border: Color::new([0.27, 0.27, 0.27, 1.0]),
             accent: Color::new([0.23, 0.43, 0.94, 1.0]),
@@ -84,16 +84,16 @@ pub struct UnifiedEditor {
     pub search_filter: String,
     pub show_add_component: bool,
     pub add_component_type: String,
-    
+
     // Gizmo state
     gizmo_mode: GizmoMode,
     gizmo_active: bool,
     gizmo_axis: Option<GizmoAxis>,
     gizmo_start_pos: Option<(f64, f64)>,
-    
+
     // Layout tree for UI rendering
     layout_tree: Option<LayoutTree>,
-    
+
     // Editor theme CSS variables
     theme_css: String,
 }
@@ -203,17 +203,50 @@ impl UnifiedEditor {
     --warning: rgba({:.0}, {:.0}, {:.0}, {:.2});
     --success: rgba({:.0}, {:.0}, {:.0}, {:.2});
 }}"#,
-            wb[0] * 255.0, wb[1] * 255.0, wb[2] * 255.0, wb[3],
-            pb[0] * 255.0, pb[1] * 255.0, pb[2] * 255.0, pb[3],
-            pt[0] * 255.0, pt[1] * 255.0, pt[2] * 255.0, pt[3],
-            ib[0] * 255.0, ib[1] * 255.0, ib[2] * 255.0, ib[3],
-            inb[0] * 255.0, inb[1] * 255.0, inb[2] * 255.0, inb[3],
-            it[0] * 255.0, it[1] * 255.0, it[2] * 255.0, it[3],
-            b[0] * 255.0, b[1] * 255.0, b[2] * 255.0, b[3],
-            a[0] * 255.0, a[1] * 255.0, a[2] * 255.0, a[3],
-            e[0] * 255.0, e[1] * 255.0, e[2] * 255.0, e[3],
-            w[0] * 255.0, w[1] * 255.0, w[2] * 255.0, w[3],
-            s[0] * 255.0, s[1] * 255.0, s[2] * 255.0, s[3],
+            wb[0] * 255.0,
+            wb[1] * 255.0,
+            wb[2] * 255.0,
+            wb[3],
+            pb[0] * 255.0,
+            pb[1] * 255.0,
+            pb[2] * 255.0,
+            pb[3],
+            pt[0] * 255.0,
+            pt[1] * 255.0,
+            pt[2] * 255.0,
+            pt[3],
+            ib[0] * 255.0,
+            ib[1] * 255.0,
+            ib[2] * 255.0,
+            ib[3],
+            inb[0] * 255.0,
+            inb[1] * 255.0,
+            inb[2] * 255.0,
+            inb[3],
+            it[0] * 255.0,
+            it[1] * 255.0,
+            it[2] * 255.0,
+            it[3],
+            b[0] * 255.0,
+            b[1] * 255.0,
+            b[2] * 255.0,
+            b[3],
+            a[0] * 255.0,
+            a[1] * 255.0,
+            a[2] * 255.0,
+            a[3],
+            e[0] * 255.0,
+            e[1] * 255.0,
+            e[2] * 255.0,
+            e[3],
+            w[0] * 255.0,
+            w[1] * 255.0,
+            w[2] * 255.0,
+            w[3],
+            s[0] * 255.0,
+            s[1] * 255.0,
+            s[2] * 255.0,
+            s[3],
         )
     }
 
@@ -269,11 +302,20 @@ impl UnifiedEditor {
     }
 
     pub fn entity_count(&self, store: &SmartStore) -> u32 {
-        store.read_lane::<UIStyle>().map(|lane| lane.len() as u32).unwrap_or(0)
+        store
+            .read_lane::<UIStyle>()
+            .map(|lane| lane.len() as u32)
+            .unwrap_or(0)
     }
 
-pub fn build_layout(&mut self, _store: &SmartStore, font: &FontData, viewport_w: f32, viewport_h: f32) {
-        let html = self.generate_html();
+    pub fn build_layout(
+        &mut self,
+        _store: &SmartStore,
+        font: &FontData,
+        viewport_w: f32,
+        viewport_h: f32,
+    ) {
+        let html = crate::editor_template::read_asset("index.html");
         let document = crate::html::parse_html(&html);
 
         // Load the real editor CSS (base rules + inline `<style>` blocks from
@@ -285,23 +327,29 @@ pub fn build_layout(&mut self, _store: &SmartStore, font: &FontData, viewport_w:
         let css = crate::editor_template::EditorTemplate::generate_css_with_theme(&self.config);
         let stylesheet = crate::css::Stylesheet::parse(&css).unwrap_or_else(|e| {
             eprintln!("editor CSS parse failed: {e}");
-            crate::css::Stylesheet { rules: Vec::new(), custom_properties: std::collections::HashMap::new() }
+            crate::css::Stylesheet {
+                rules: Vec::new(),
+                custom_properties: std::collections::HashMap::new(),
+            }
         });
 
-        self.layout_tree = Some(LayoutTree::build_with_viewport(
-            &document,
-            &[stylesheet],
-            viewport_w,
-            viewport_h,
-            font,
-        ).unwrap_or_default());
+        self.layout_tree = Some(
+            LayoutTree::build_with_viewport(&document, &[stylesheet], viewport_w, viewport_h, font)
+                .unwrap_or_default(),
+        );
     }
 
-    pub fn paint(&self, renderer: &mut UIRenderer, _viewport_w: f64, _viewport_h: f64, font: &FontData) {
+    pub fn paint(
+        &self,
+        renderer: &mut UIRenderer,
+        _viewport_w: f64,
+        _viewport_h: f64,
+        font: &FontData,
+    ) {
         if !self.visible {
             return;
         }
-        
+
         if let Some(ref layout_tree) = self.layout_tree {
             paint_layout(layout_tree, renderer, font);
         }
@@ -309,7 +357,8 @@ pub fn build_layout(&mut self, _store: &SmartStore, font: &FontData, viewport_w:
 
     /// Generate the full HTML for the editor
     fn generate_html(&self) -> String {
-        format!(r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -681,7 +730,9 @@ pub fn build_layout(&mut self, _store: &SmartStore, font: &FontData, viewport_w:
     <script src="sliders.js"></script>
     <script src="editor.js"></script>
 </body>
-</html>"#, self.theme_css)
+</html>"#,
+            self.theme_css
+        )
     }
 
     fn get_full_css(&self) -> String {
@@ -702,7 +753,9 @@ pub fn build_layout(&mut self, _store: &SmartStore, font: &FontData, viewport_w:
             EditorEvent::AddComponent(component_type) => self.add_component(store, component_type),
             EditorEvent::SetGizmoMode(mode) => self.set_gizmo_mode(mode),
             EditorEvent::SetEntityName(entity, name) => self.set_entity_name(store, entity, name),
-            EditorEvent::SetTransform(entity, transform) => self.set_entity_transform(store, entity, transform),
+            EditorEvent::SetTransform(entity, transform) => {
+                self.set_entity_transform(store, entity, transform)
+            }
         }
     }
 
@@ -728,7 +781,12 @@ pub fn build_layout(&mut self, _store: &SmartStore, font: &FontData, viewport_w:
         // Would update entity name in a Name component
     }
 
-    fn set_entity_transform(&mut self, _store: &mut SmartStore, _entity: Entity, _transform: Transform) {
+    fn set_entity_transform(
+        &mut self,
+        _store: &mut SmartStore,
+        _entity: Entity,
+        _transform: Transform,
+    ) {
         // Would update Transform component
     }
 }

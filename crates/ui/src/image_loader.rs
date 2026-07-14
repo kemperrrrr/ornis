@@ -200,9 +200,7 @@ fn load_raster(path: &Path) -> Option<DecodedImage> {
     let (w, h) = (img.width(), img.height());
     // `image` gives straight (unpremultiplied) alpha; peniko expects the same.
     let raw: Vec<u8> = img.into_raw();
-    let data = Blob::new(
-        std::sync::Arc::new(raw) as std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>,
-    );
+    let data = Blob::new(std::sync::Arc::new(raw) as std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>);
     Some(DecodedImage::Raster(ImageData {
         data,
         format: vello::peniko::ImageFormat::Rgba8,

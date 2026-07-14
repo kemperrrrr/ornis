@@ -1,9 +1,6 @@
 use boa_engine::{
-    Context, JsValue, Source,
-    js_string,
-    native_function::NativeFunction,
-    object::builtins::JsArray,
-    property::PropertyKey,
+    Context, JsValue, Source, js_string, native_function::NativeFunction,
+    object::builtins::JsArray, property::PropertyKey,
 };
 
 use crate::components::EcsBridge;
@@ -291,18 +288,32 @@ impl JsRuntime {
                     }
                     let cmd_type = args[0]
                         .to_string(ctx)
-                        .map_err(|_| boa_engine::JsNativeError::typ().with_message("sendIpc: type must be a string"))?
+                        .map_err(|_| {
+                            boa_engine::JsNativeError::typ()
+                                .with_message("sendIpc: type must be a string")
+                        })?
                         .to_std_string_escaped();
                     let json_data = args[1]
                         .to_string(ctx)
-                        .map_err(|_| boa_engine::JsNativeError::typ().with_message("sendIpc: jsonData must be a string"))?
+                        .map_err(|_| {
+                            boa_engine::JsNativeError::typ()
+                                .with_message("sendIpc: jsonData must be a string")
+                        })?
                         .to_std_string_escaped();
-                    channel.send(UiCommand::Custom { cmd_type, json_data });
+                    channel.send(UiCommand::Custom {
+                        cmd_type,
+                        json_data,
+                    });
                     Ok(JsValue::undefined())
                 })
             };
             let global = ctx.global_object();
-            let _ = global.set(js_string!("Ornis_sendIpc"), JsValue::from(send_ipc_fn.to_js_function(&realm)), false, &mut ctx);
+            let _ = global.set(
+                js_string!("Ornis_sendIpc"),
+                JsValue::from(send_ipc_fn.to_js_function(&realm)),
+                false,
+                &mut ctx,
+            );
         }
 
         bridge.register_js_functions(&mut ctx);
@@ -313,47 +324,59 @@ impl JsRuntime {
     }
 
     pub fn eval(&mut self, code: &str) -> Result<(), String> {
-        self.ctx.eval(Source::from_bytes(code))
+        self.ctx
+            .eval(Source::from_bytes(code))
             .map(|_| ())
             .map_err(|e| format!("{e}"))
     }
 
     pub fn document_node(&mut self) -> Node {
         let global = self.ctx.global_object();
-        let doc_val = global.get(js_string!("document"), &mut self.ctx)
+        let doc_val = global
+            .get(js_string!("document"), &mut self.ctx)
             .unwrap_or_else(|_| JsValue::undefined());
 
         if !doc_val.is_object() {
             return Node::Element(Element::new("body"));
         }
 
-        let body_val = doc_val.as_object().unwrap()
+        let body_val = doc_val
+            .as_object()
+            .unwrap()
             .get(js_string!("body"), &mut self.ctx)
             .unwrap_or(JsValue::undefined());
 
         self.js_to_node(&body_val)
     }
 
-        fn js_to_node(&mut self, val: &JsValue) -> Node {
+    fn js_to_node(&mut self, val: &JsValue) -> Node {
         let Some(obj) = val.as_object() else {
             return Node::Text(String::new());
         };
 
-        let tag_val = obj.get(js_string!("tagName"), &mut self.ctx)
+        let tag_val = obj
+            .get(js_string!("tagName"), &mut self.ctx)
             .unwrap_or(JsValue::undefined());
         let tag = if tag_val.is_string() {
-            tag_val.to_string(&mut self.ctx).unwrap().to_std_string_escaped()
+            tag_val
+                .to_string(&mut self.ctx)
+                .unwrap()
+                .to_std_string_escaped()
         } else {
             return Node::Text(String::new());
         };
 
         if tag == "#text" {
-            let text_val = obj.get(js_string!("textContent"), &mut self.ctx)
+            let text_val = obj
+                .get(js_string!("textContent"), &mut self.ctx)
                 .unwrap_or(JsValue::null());
             let text = if text_val.is_null() || text_val.is_undefined() {
                 String::new()
             } else {
-                text_val.to_string(&mut self.ctx).unwrap().to_std_string_escaped()
+                text_val
+                    .to_string(&mut self.ctx)
+                    .unwrap()
+                    .to_std_string_escaped()
             };
             return Node::Text(text);
         }
@@ -429,12 +452,15 @@ mod tests {
     #[test]
     fn test_js_document_create_element() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var el = document.createElement("div");
             el.setAttribute("class", "my-class");
             el.textContent = "Hello World";
             document.body.appendChild(el);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         let elements = find_by_tag(&node, "div");
@@ -454,10 +480,13 @@ mod tests {
     #[test]
     fn test_js_create_text_node() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var text = document.createTextNode("hello");
             document.body.appendChild(text);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         // body should have one text child
@@ -476,13 +505,16 @@ mod tests {
     #[test]
     fn test_js_nested_elements() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var parent = document.createElement("ul");
             var child = document.createElement("li");
             child.textContent = "item 1";
             parent.appendChild(child);
             document.body.appendChild(parent);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         let uls = find_by_tag(&node, "ul");
@@ -495,12 +527,15 @@ mod tests {
     #[test]
     fn test_js_classlist() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var el = document.createElement("div");
             el.classList.add("foo");
             el.classList.add("bar");
             document.body.appendChild(el);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         if let crate::dom::Node::Element(body) = &node {
@@ -509,20 +544,27 @@ mod tests {
                 let cls = div.get_attr("class").unwrap_or("");
                 assert!(cls.contains("foo"));
                 assert!(cls.contains("bar"));
-            } else { panic!("expected element"); }
-        } else { panic!("expected body"); }
+            } else {
+                panic!("expected element");
+            }
+        } else {
+            panic!("expected body");
+        }
     }
 
     #[test]
     fn test_js_remove_child() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var parent = document.createElement("div");
             var child = document.createElement("span");
             parent.appendChild(child);
             parent.removeChild(child);
             document.body.appendChild(parent);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         let divs = find_by_tag(&node, "div");
@@ -533,7 +575,8 @@ mod tests {
     #[test]
     fn test_js_insert_before() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var ul = document.createElement("ul");
             var li1 = document.createElement("li");
             li1.textContent = "first";
@@ -542,7 +585,9 @@ mod tests {
             ul.appendChild(li2);
             ul.insertBefore(li1, li2);
             document.body.appendChild(ul);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         let uls = find_by_tag(&node, "ul");
@@ -553,13 +598,16 @@ mod tests {
     #[test]
     fn test_js_get_element_by_id() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var el = document.createElement("div");
             el.id = "my-id";
             el.setAttribute("class", "test");
             document.body.appendChild(el);
             var found = document.getElementById("my-id");
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         let divs = find_by_tag(&node, "div");
@@ -570,19 +618,28 @@ mod tests {
     #[test]
     fn test_js_style_set_property() {
         let mut js = JsRuntime::new(test_bridge());
-        js.eval(r##"
+        js.eval(
+            r##"
             var el = document.createElement("div");
             el.style.setProperty("color", "red");
             el.style.setProperty("font-size", "16px");
             document.body.appendChild(el);
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let node = js.document_node();
         let divs = find_by_tag(&node, "div");
         assert_eq!(divs.len(), 1);
         let style = divs[0].get_attr("style").unwrap_or("");
-        assert!(style.contains("color: red"), "style should contain color: red, got: {style}");
-        assert!(style.contains("font-size: 16px"), "style should contain font-size: 16px, got: {style}");
+        assert!(
+            style.contains("color: red"),
+            "style should contain color: red, got: {style}"
+        );
+        assert!(
+            style.contains("font-size: 16px"),
+            "style should contain font-size: 16px, got: {style}"
+        );
     }
 
     #[test]
@@ -608,14 +665,20 @@ mod tests {
         let (ipc, game) = IpcChannel::pair();
         let mut js = JsRuntime::with_ipc(test_bridge(), Some(ipc));
 
-        js.eval(r##"
+        js.eval(
+            r##"
             Ornis_sendIpc("SetVolume", JSON.stringify({ volume: 0.5 }));
             Ornis_sendIpc("PlaySound", JSON.stringify({ name: "click" }));
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         let cmd1 = game.poll().expect("should receive first command");
         match cmd1 {
-            UiCommand::Custom { cmd_type, json_data } => {
+            UiCommand::Custom {
+                cmd_type,
+                json_data,
+            } => {
                 assert_eq!(cmd_type, "SetVolume");
                 assert!(json_data.contains("\"volume\":0.5"));
             }
@@ -624,7 +687,10 @@ mod tests {
 
         let cmd2 = game.poll().expect("should receive second command");
         match cmd2 {
-            UiCommand::Custom { cmd_type, json_data } => {
+            UiCommand::Custom {
+                cmd_type,
+                json_data,
+            } => {
                 assert_eq!(cmd_type, "PlaySound");
                 assert!(json_data.contains("\"name\":\"click\""));
             }
@@ -643,16 +709,24 @@ mod tests {
         game.send(GameEvent::EntityCreated { entity_id: 99 });
 
         // JS sends a command first
-        js.eval(r##"
+        js.eval(
+            r##"
             Ornis_sendIpc("Ping", "{}");
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
 
         // Check command received by game
         let cmd = game.poll().expect("should receive Ping");
         assert!(matches!(cmd, UiCommand::Custom { cmd_type, .. } if cmd_type == "Ping"));
 
         // Poll IPC from the UI side
-        let ev = js.ipc.as_ref().unwrap().poll().expect("should receive EntityCreated");
+        let ev = js
+            .ipc
+            .as_ref()
+            .unwrap()
+            .poll()
+            .expect("should receive EntityCreated");
         assert!(matches!(ev, GameEvent::EntityCreated { entity_id: 99 }));
     }
 }

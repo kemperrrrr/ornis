@@ -72,7 +72,57 @@ fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> 
     Color::new([1.0, 1.0, 1.0, 1.0])
 }
 
-    fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, font: &FontData) {
+/// Composes a CSS `transform` (currently `rotate(<deg>)` and/or
+/// `scale(<x> [<y>])`) onto an existing affine `base`, rotating/scaling around
+/// the center of the node's box (CSS `transform-origin: center`, the default).
+///
+/// Without this, `.icon.new-tab { transform: rotate(45deg) }` would render as a
+/// plain close-X instead of the intended plus sign.
+fn apply_css_transform(
+    node: &crate::layout::LayoutNode,
+    rect: crate::layout::Rect,
+    base: vello::peniko::kurbo::Affine,
+) -> vello::peniko::kurbo::Affine {
+    let Some(transform_str) = node.styles.get("transform") else {
+        return base;
+    };
+    let mut extra = vello::peniko::kurbo::Affine::IDENTITY;
+    // Tokens like "rotate(45deg)" / "scale(1.2)" separated by whitespace.
+    for token in transform_str.split_whitespace() {
+        let (func, rest) = match token.find('(') {
+            Some(i) => (&token[..i], &token[i + 1..]),
+            None => continue,
+        };
+        let args: Vec<f64> = rest
+            .trim_end_matches(')')
+            .split(',')
+            .filter_map(|a| a.trim().trim_end_matches("deg").parse::<f64>().ok())
+            .collect();
+        match func {
+            "rotate" if !args.is_empty() => {
+                let rad = args[0].to_radians();
+                extra *= vello::peniko::kurbo::Affine::rotate(rad);
+            }
+            "scale" if !args.is_empty() => {
+                let sx = args[0];
+                let sy = args.get(1).copied().unwrap_or(sx);
+                extra *= vello::peniko::kurbo::Affine::scale_non_uniform(sx, sy);
+            }
+            _ => {}
+        }
+    }
+    if extra == vello::peniko::kurbo::Affine::IDENTITY {
+        return base;
+    }
+    let cx = rect.x as f64 + rect.width as f64 / 2.0;
+    let cy = rect.y as f64 + rect.height as f64 / 2.0;
+    let around_center = vello::peniko::kurbo::Affine::translate((cx, cy))
+        * extra
+        * vello::peniko::kurbo::Affine::translate((-cx, -cy));
+    around_center * base
+}
+
+fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, font: &FontData) {
     let node = &tree.arena[id];
     let rect = node.rect;
 
@@ -80,11 +130,19 @@ fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> 
     if let Some((d, fill)) = &node.svg_path {
         if fill.as_deref() != Some("none") {
             if let Some(path) = crate::svg::parse_svg_path(d) {
-                let (vx, vy, vbw, vbh) = node
-                    .svg_view_box
-                    .unwrap_or((0.0, 0.0, rect.width, rect.height));
-                let vbw = if vbw > 0.0 { vbw as f64 } else { rect.width as f64 };
-                let vbh = if vbh > 0.0 { vbh as f64 } else { rect.height as f64 };
+                let (vx, vy, vbw, vbh) =
+                    node.svg_view_box
+                        .unwrap_or((0.0, 0.0, rect.width, rect.height));
+                let vbw = if vbw > 0.0 {
+                    vbw as f64
+                } else {
+                    rect.width as f64
+                };
+                let vbh = if vbh > 0.0 {
+                    vbh as f64
+                } else {
+                    rect.height as f64
+                };
                 let s = (rect.width as f64 / vbw).min(rect.height as f64 / vbh);
                 // Safety cap: never draw an icon larger than 48px on its longest
                 // axis, so a stretched/oversized container (e.g. an absolutely
@@ -95,7 +153,10 @@ fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> 
                 // for a non-zero viewBox origin (e.g. "0 -960 960 960").
                 let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
                 let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
-                let transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
+                let mut transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
+                // Apply any CSS `transform` (e.g. `.icon.new-tab { rotate(45deg) }`
+                // turns the close-X into a plus). Rotates around the box center.
+                transform = apply_css_transform(node, rect, transform);
                 let color = resolve_svg_fill(tree, id, fill.as_deref());
                 renderer.fill_bez_path(&path, transform, color);
             }
@@ -112,22 +173,44 @@ fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> 
                     let sx = rect.width as f64 / data.width as f64;
                     let sy = rect.height as f64 / data.height as f64;
                     let transform = vello::peniko::kurbo::Affine::new([
-                        sx, 0.0, 0.0, sy, rect.x as f64, rect.y as f64,
+                        sx,
+                        0.0,
+                        0.0,
+                        sy,
+                        rect.x as f64,
+                        rect.y as f64,
                     ]);
-                    renderer.draw_image(data, transform);
+                    renderer.draw_image(data, transform, vello::peniko::ImageQuality::High);
                 }
             }
-            crate::image_loader::DecodedImage::Svg { path_d, view_box, fill, .. } => {
+            crate::image_loader::DecodedImage::Svg {
+                path_d,
+                view_box,
+                fill,
+                ..
+            } => {
                 if fill.as_deref() != Some("none") {
                     if let Some(path) = crate::svg::parse_svg_path(path_d) {
                         let (vx, vy, vbw, vbh) = *view_box;
-                        let vbw = if vbw > 0.0 { vbw as f64 } else { rect.width as f64 };
-                        let vbh = if vbh > 0.0 { vbh as f64 } else { rect.height as f64 };
+                        let vbw = if vbw > 0.0 {
+                            vbw as f64
+                        } else {
+                            rect.width as f64
+                        };
+                        let vbh = if vbh > 0.0 {
+                            vbh as f64
+                        } else {
+                            rect.height as f64
+                        };
                         let s = (rect.width as f64 / vbw).min(rect.height as f64 / vbh);
                         let s = s.min(48.0 / vbw).min(48.0 / vbh);
-                        let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
-                        let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
-                        let transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
+                        let tx =
+                            rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
+                        let ty =
+                            rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
+                        let mut transform =
+                            vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
+                        transform = apply_css_transform(node, rect, transform);
                         let color = resolve_svg_fill(tree, id, fill.as_deref());
                         renderer.fill_bez_path(&path, transform, color);
                     }
@@ -146,7 +229,21 @@ fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> 
                 .and_then(|v| css::parse_css_length(v))
                 .map(|v| v as f32)
                 .unwrap_or(16.0);
-            renderer.fill_text(rect.x as f64, rect.y as f64 + font_size as f64, text, font_size, color, font);
+            let bold = node
+                .styles
+                .get("font-weight")
+                .and_then(|w| w.parse::<f32>().ok())
+                .unwrap_or(400.0)
+                >= 500.0;
+            renderer.fill_text(
+                rect.x as f64,
+                rect.y as f64 + font_size as f64,
+                text,
+                font_size,
+                color,
+                font,
+                bold,
+            );
         }
         return;
     }
@@ -224,10 +321,8 @@ fn resolve_svg_fill(tree: &LayoutTree, id: LayoutNodeId, fill: Option<&str>) -> 
                 let dy = rect.y as f64 + (rect.height as f64 - dh) / 2.0;
                 let sx = dw / iw;
                 let sy = dh / ih;
-                let transform = vello::peniko::kurbo::Affine::new([
-                    sx, 0.0, 0.0, sy, dx, dy,
-                ]);
-                renderer.draw_image(&decoded, transform);
+                let transform = vello::peniko::kurbo::Affine::new([sx, 0.0, 0.0, sy, dx, dy]);
+                renderer.draw_image(&decoded, transform, vello::peniko::ImageQuality::High);
             }
             if border_radius.is_some() {
                 renderer.pop_clip();
