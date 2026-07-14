@@ -86,8 +86,16 @@ fn apply_css_transform(
     let Some(transform_str) = node.styles.get("transform") else {
         return base;
     };
+    apply_css_transform_str(transform_str, rect).unwrap_or(base)
+}
+
+/// Parse a CSS transform string like `"rotate(45deg)"` or `"scale(1.2)"`
+/// and return an Affine transform centred on `rect`.
+fn apply_css_transform_str(
+    transform_str: &str,
+    rect: crate::layout::Rect,
+) -> Option<vello::peniko::kurbo::Affine> {
     let mut extra = vello::peniko::kurbo::Affine::IDENTITY;
-    // Tokens like "rotate(45deg)" / "scale(1.2)" separated by whitespace.
     for token in transform_str.split_whitespace() {
         let (func, rest) = match token.find('(') {
             Some(i) => (&token[..i], &token[i + 1..]),
@@ -112,14 +120,14 @@ fn apply_css_transform(
         }
     }
     if extra == vello::peniko::kurbo::Affine::IDENTITY {
-        return base;
+        return None;
     }
     let cx = rect.x as f64 + rect.width as f64 / 2.0;
     let cy = rect.y as f64 + rect.height as f64 / 2.0;
     let around_center = vello::peniko::kurbo::Affine::translate((cx, cy))
         * extra
         * vello::peniko::kurbo::Affine::translate((-cx, -cy));
-    around_center * base
+    Some(around_center)
 }
 
 fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, font: &FontData) {
@@ -155,8 +163,15 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
                 let mut transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
                 // Apply any CSS `transform` (e.g. `.icon.new-tab { rotate(45deg) }`
-                // turns the close-X into a plus). Rotates around the box center.
-                transform = apply_css_transform(node, rect, transform);
+                // turns the close-X into a plus). Check both own styles and inherited
+                // (the transform may be on a parent HTML container).
+                let css_transform = resolve_inherited(tree, id, "transform")
+                    .or_else(|| node.styles.get("transform"));
+                if let Some(t) = css_transform {
+                    if let Some(parsed) = apply_css_transform_str(t, rect) {
+                        transform = parsed;
+                    }
+                }
                 let color = resolve_svg_fill(tree, id, fill.as_deref());
                 renderer.fill_bez_path(&path, transform, color);
             }
