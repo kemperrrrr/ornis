@@ -165,20 +165,32 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 // CSS transform is NOT inherited — it applies to the element and
                 // its children. The SVG <path> element itself has no own transform,
                 // but its grandparent .icon.new-tab may have `transform: rotate(45deg)`.
-                // Apply that parent transform to the SVG content.
-                if let Some(t) = node.styles.get("transform")
+                // Apply that parent transform to the SVG content. The rotation must
+                // be centered on the container's rect, not the path's rect.
+                let container_level = node.styles.get("transform").map(|_| 0)
                     .or_else(|| tree.arena[id].parent
-                        .and_then(|pid| tree.arena[pid].styles.get("transform")))
+                        .and_then(|pid| tree.arena[pid].styles.get("transform").map(|_| 1)))
                     .or_else(|| tree.arena[id].parent
                         .and_then(|pid| tree.arena[pid].parent)
-                        .and_then(|gid| tree.arena[gid].styles.get("transform")))
-                {
-                    if let Some(parsed) = apply_css_transform_str(t, rect) {
+                        .and_then(|gid| tree.arena[gid].styles.get("transform").map(|_| 2)));
+                if let Some(level) = container_level {
+                    let (ts, cr) = match level {
+                        0 => (node.styles.get("transform").unwrap(), rect),
+                        1 => {
+                            let pid = tree.arena[id].parent.unwrap();
+                            (tree.arena[pid].styles.get("transform").unwrap(), tree.arena[pid].rect)
+                        }
+                        _ => {
+                            let pid = tree.arena[id].parent.unwrap();
+                            let gid = tree.arena[pid].parent.unwrap();
+                            (tree.arena[gid].styles.get("transform").unwrap(), tree.arena[gid].rect)
+                        }
+                    };
+                    if let Some(parsed) = apply_css_transform_str(ts, cr) {
                         transform = parsed;
                     }
                 }
                 let color = resolve_svg_fill(tree, id, fill.as_deref());
-                renderer.fill_bez_path(&path, transform, color);
             }
         }
     }
