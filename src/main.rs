@@ -11,7 +11,7 @@ use winit::window::WindowAttributes;
 use ornis_render::{OpenPBRMaterial, Mesh, create_sphere, InstanceData, RenderBackend, RenderBackendConfig, create_render_backend, LegacyCompositePass};
 use ornis_ui::components::EcsBridge;
 use ornis_ui::css::Stylesheet;
-use ornis_ui::editor_template::EditorTemplate;
+use ornis_ui::editor_template::{EditorTemplate, UnifiedEditorConfig, read_asset};
 use ornis_ui::ipc::{GameEvent, UiCommand};
 use ornis_ui::js::JsRuntime;
 use ornis_ui::layout::LayoutTree;
@@ -230,16 +230,17 @@ let renderer = UIRenderer::new(&device, &surface_config, surface_format)
             }
         }).collect();
 
-        use ornis_ui::editor_template::EditorTemplate;
-
         let font = load_font();
         let bridge = EcsBridge::new();
         let js = JsRuntime::new(bridge);
 
-        // Generate editor HTML/CSS using the unified template
-        let editor_config = ornis_ui::editor_template::UnifiedEditorConfig::default();
-        let editor_template = EditorTemplate::new(editor_config);
-        let editor_html = editor_template.generate_html();
+        // Render the real editor reference (index.html) instead of the Rust
+        // template, so layout matches the original Chromium design.
+        // CSS comes from editor_template.generate_css(), which overlays the
+        // dark theme :root on top of index.css — the same look the Chromium
+        // reference was captured with.
+        let editor_template = EditorTemplate::new(UnifiedEditorConfig::default());
+        let editor_html = read_asset("index.html");
         let editor_css = editor_template.generate_css();
 
         Ok(GameContext {

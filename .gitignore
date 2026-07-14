@@ -2,3 +2,8 @@
 .DS_Store
 *.pdf
 *.txt
+
+# Debug artifacts (layout dumps, mockups) — not part of the source tree
+browser_layout*.json
+ui_layout*.json
+bevy_editor_mockup/
