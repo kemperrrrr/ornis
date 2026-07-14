@@ -191,6 +191,7 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                     }
                 }
                 let color = resolve_svg_fill(tree, id, fill.as_deref());
+                renderer.fill_bez_path(&path, transform, color);
             }
         }
     }
