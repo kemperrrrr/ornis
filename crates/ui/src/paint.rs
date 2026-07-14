@@ -267,7 +267,11 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 .and_then(|w| w.parse::<f32>().ok())
                 .unwrap_or(400.0);
             let bold = font_weight >= 500.0;
-            renderer.fill_text(
+            let letter_spacing = resolve_inherited(tree, id, "letter-spacing")
+                .and_then(|v| css::parse_css_length(v))
+                .map(|v| v as f32)
+                .unwrap_or(0.0);
+            renderer.fill_text_with_spacing(
                 rect.x as f64,
                 rect.y as f64 + font_size as f64,
                 text,
@@ -276,6 +280,7 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 font,
                 bold,
                 Some(font_weight),
+                letter_spacing,
             );
         }
         return;

@@ -1,15 +1,13 @@
-use skrifa::{FontRef, MetadataProvider, instance::LocationRef, prelude::Size};
-use vello::Glyph;
+use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping};
+use std::sync::OnceLock;
 use vello::peniko::{Blob, FontData};
+use vello::Glyph;
 
-/// Loads the bundled **Inter** font (shipped in the crate's assets) so the
-/// editor renders with its real typeface instead of a system fallback.
-///
-/// Resolution order:
-/// 1. `assets/editor/fonts/Inter-Regular.ttf` next to the crate manifest
-///    (works on every platform, no external dependency).
-/// 2. A writable cache dir (e.g. when the binary is run from a different cwd).
-/// 3. System fallbacks (Arial / DejaVu / Segoe) if the bundle is missing.
+fn font_system() -> &'static std::sync::Mutex<FontSystem> {
+    static FS: OnceLock<std::sync::Mutex<FontSystem>> = OnceLock::new();
+    FS.get_or_init(|| std::sync::Mutex::new(FontSystem::new()))
+}
+
 pub fn load_inter_font() -> FontData {
     let candidates: Vec<std::path::PathBuf> = {
         let mut v = Vec::new();
@@ -22,7 +20,6 @@ pub fn load_inter_font() -> FontData {
         v.push(std::path::PathBuf::from(
             "crates/ui/assets/editor/fonts/Inter-Regular.ttf",
         ));
-        // system fallbacks
         v.extend([
             std::path::PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf"),
             std::path::PathBuf::from("/Library/Fonts/Arial.ttf"),
@@ -45,48 +42,54 @@ pub fn load_font_from_bytes(bytes: &[u8]) -> FontData {
     FontData::new(Blob::from(bytes.to_vec()), 0)
 }
 
+/// Layout text using cosmic-text. Returns vello-compatible Glyphs.
 pub fn layout_text(font: &FontData, text: &str, font_size: f32) -> Vec<Glyph> {
-    let data: &[u8] = font.data.as_ref();
-    let Ok(font_ref) = FontRef::from_index(data, font.index) else {
+    if text.is_empty() {
         return Vec::new();
-    };
-    let charmap = font_ref.charmap();
-    let metrics = font_ref.glyph_metrics(Size::new(font_size), LocationRef::default());
-
-    let mut x = 0.0f32;
-    let mut glyphs = Vec::with_capacity(text.len());
-    for ch in text.chars() {
-        if let Some(gid) = charmap.map(ch) {
-            if let Some(advance) = metrics.advance_width(gid) {
-                glyphs.push(Glyph {
-                    id: gid.to_u32(),
-                    x,
-                    y: 0.0,
-                });
-                x += advance;
+    }
+    let mut fs = font_system().lock().unwrap();
+    let data: &[u8] = font.data.as_ref();
+    fs.db_mut().load_font_data(data.to_vec());
+    let metrics = Metrics::new(font_size, font_size * 1.2);
+    let mut buffer = Buffer::new(&mut fs, metrics);
+    buffer.set_text(
+        &mut fs,
+        text,
+        Attrs::new().family(cosmic_text::Family::Name("Inter")),
+        Shaping::Advanced,
+    );
+    let mut glyphs = Vec::new();
+    for line in &buffer.lines {
+        let Some(layout) = line.layout_opt() else { continue };
+        for run in layout {
+            for g in &run.glyphs {
+                glyphs.push(Glyph { id: g.glyph_id as u32, x: g.x, y: g.y });
             }
         }
     }
-
     glyphs
 }
 
-/// Measures the ink extent of `text` at `font_size` (single line).
-/// Returns `(width, height)` where height is the typical line height.
+/// Measure text extent: (width, height)
 pub fn measure_text(font: &FontData, text: &str, font_size: f32) -> (f32, f32) {
-    let data: &[u8] = font.data.as_ref();
-    let Ok(font_ref) = FontRef::from_index(data, font.index) else {
+    if text.is_empty() {
         return (0.0, font_size * 1.2);
-    };
-    let charmap = font_ref.charmap();
-    let metrics = font_ref.glyph_metrics(Size::new(font_size), LocationRef::default());
-    let mut width = 0.0f32;
-    for ch in text.chars() {
-        if let Some(gid) = charmap.map(ch) {
-            if let Some(advance) = metrics.advance_width(gid) {
-                width += advance;
-            }
-        }
     }
-    (width, font_size * 1.2)
+    let mut fs = font_system().lock().unwrap();
+    let data: &[u8] = font.data.as_ref();
+    fs.db_mut().load_font_data(data.to_vec());
+    let metrics = Metrics::new(font_size, font_size * 1.2);
+    let mut buffer = Buffer::new(&mut fs, metrics);
+    buffer.set_text(
+        &mut fs,
+        text,
+        Attrs::new().family(cosmic_text::Family::Name("Inter")),
+        Shaping::Advanced,
+    );
+    let w = buffer.lines.iter()
+        .filter_map(|l| l.layout_opt())
+        .flat_map(|runs| runs.iter())
+        .map(|l| l.w)
+        .fold(0.0f32, f32::max);
+    (w, font_size * 1.2)
 }

@@ -151,10 +151,35 @@ impl UIRenderer {
         bold: bool,
         font_weight: Option<f32>,
     ) {
-        let glyphs = crate::text::layout_text(font, text, font_size);
+        self.fill_text_with_spacing(x, y, text, font_size, color, font, bold, font_weight, 0.0);
+    }
+
+    pub fn fill_text_with_spacing(
+        &mut self,
+        x: f64,
+        y: f64,
+        text: &str,
+        font_size: f32,
+        color: Color,
+        font: &FontData,
+        bold: bool,
+        font_weight: Option<f32>,
+        letter_spacing: f32,
+    ) {
+        let mut glyphs = crate::text::layout_text(font, text, font_size);
         if glyphs.is_empty() {
             return;
         }
+
+        // Apply CSS letter-spacing: shift each glyph's x by cumulative spacing
+        if letter_spacing != 0.0 {
+            let mut x_offset = 0.0;
+            for glyph in &mut glyphs {
+                glyph.x += x_offset;
+                x_offset += letter_spacing;
+            }
+        }
+
         self.brush = peniko::Brush::from(color);
         self.scene
             .draw_glyphs(font)
