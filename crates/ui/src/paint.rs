@@ -162,12 +162,17 @@ fn paint_node(tree: &LayoutTree, id: LayoutNodeId, renderer: &mut UIRenderer, fo
                 let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
                 let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
                 let mut transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
-                // Apply any CSS `transform` (e.g. `.icon.new-tab { rotate(45deg) }`
-                // turns the close-X into a plus). Check both own styles and inherited
-                // (the transform may be on a parent HTML container).
-                let css_transform = resolve_inherited(tree, id, "transform")
-                    .or_else(|| node.styles.get("transform"));
-                if let Some(t) = css_transform {
+                // CSS transform is NOT inherited — it applies to the element and
+                // its children. The SVG <path> element itself has no own transform,
+                // but its grandparent .icon.new-tab may have `transform: rotate(45deg)`.
+                // Apply that parent transform to the SVG content.
+                if let Some(t) = node.styles.get("transform")
+                    .or_else(|| tree.arena[id].parent
+                        .and_then(|pid| tree.arena[pid].styles.get("transform")))
+                    .or_else(|| tree.arena[id].parent
+                        .and_then(|pid| tree.arena[pid].parent)
+                        .and_then(|gid| tree.arena[gid].styles.get("transform")))
+                {
                     if let Some(parsed) = apply_css_transform_str(t, rect) {
                         transform = parsed;
                     }
