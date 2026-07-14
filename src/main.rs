@@ -10,7 +10,6 @@ use winit::window::WindowAttributes;
 
 use ornis_render::{OpenPBRMaterial, Mesh, create_sphere, InstanceData, RenderBackend, RenderBackendConfig, create_render_backend, LegacyCompositePass};
 use ornis_ui::components::EcsBridge;
-use ornis_ui::css::Stylesheet;
 use ornis_ui::editor_template::{EditorTemplate, UnifiedEditorConfig, read_asset};
 use ornis_ui::ipc::{GameEvent, UiCommand};
 use ornis_ui::js::JsRuntime;
