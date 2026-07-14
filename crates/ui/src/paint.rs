@@ -173,16 +173,9 @@ fn paint_node(
                 // for a non-zero viewBox origin (e.g. "0 -960 960 960").
                 let tx = rect.x as f64 + (rect.width as f64 - vbw * s) / 2.0 - vx as f64 * s;
                 let ty = rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
-                let mut transform = vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
-                // Apply ancestor CSS transform (already computed in `combined`).
-                if combined != vello::peniko::kurbo::Affine::IDENTITY {
-                    let cx = rect.x as f64 + rect.width as f64 / 2.0;
-                    let cy = rect.y as f64 + rect.height as f64 / 2.0;
-                    transform = vello::peniko::kurbo::Affine::translate((cx, cy))
-                        * combined
-                        * vello::peniko::kurbo::Affine::translate((-cx, -cy))
-                        * transform;
-                }
+                // Apply ancestor CSS transform (already centered on parent in `combined`).
+                let transform = combined
+                    * vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
                 let color = resolve_svg_fill(tree, id, fill.as_deref());
                 renderer.fill_bez_path(&path, transform, color);
             }
@@ -268,7 +261,7 @@ fn paint_node(
                             rect.y as f64 + (rect.height as f64 - vbh * s) / 2.0 - vy as f64 * s;
                         let mut transform =
                             vello::peniko::kurbo::Affine::new([s, 0.0, 0.0, s, tx, ty]);
-                        transform = apply_css_transform(node, rect, transform);
+                        let transform = combined * transform;
                         let color = resolve_svg_fill(tree, id, fill.as_deref());
                         renderer.fill_bez_path(&path, transform, color);
                     }
