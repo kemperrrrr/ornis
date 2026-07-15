@@ -290,8 +290,22 @@ fn paint_node(
                 .and_then(|v| css::parse_css_length(v))
                 .map(|v| v as f32)
                 .unwrap_or(0.0);
+            // text-align: inherited from parent.
+            let text_align = resolve_inherited(tree, id, "text-align");
+            let mut text_x = rect.x as f64;
+            if let Some(ref align) = text_align {
+                let eq = align.as_str();
+                if eq == "center" || eq == "right" {
+                    let (tw, _th) = crate::text::measure_text(font, text, font_size);
+                    if eq == "center" {
+                        text_x = rect.x as f64 + (rect.width as f64 - tw as f64) / 2.0;
+                    } else {
+                        text_x = rect.x as f64 + rect.width as f64 - tw as f64;
+                    }
+                }
+            }
             renderer.fill_text_with_spacing(
-                rect.x as f64,
+                text_x,
                 rect.y as f64 + font_size as f64,
                 text,
                 font_size,
