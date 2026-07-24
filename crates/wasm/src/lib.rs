@@ -216,6 +216,23 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         .await
         .map_err(|e| format!("device: {:?}", e))?;
 
+    // Route uncaptured WebGPU validation errors into console.error explicitly.
+    // (The browser also prints them, but this makes them greppable and keeps
+    // them visible if the page's console filtering hides GPU messages.)
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+        console::error_1(&format!("[ornis-wasm] wgpu error: {:?}", e).into());
+    }));
+
+    console::log_1(
+        &format!(
+            "[ornis-wasm] adapter='{}' backend={:?}, limits: storage_buffers/stage={}",
+            adapter.get_info().name,
+            adapter.get_info().backend,
+            device.limits().max_storage_buffers_per_shader_stage
+        )
+        .into(),
+    );
+
     let surface_caps = surface.get_capabilities(&adapter);
     let surface_format = surface_caps
         .formats
@@ -248,7 +265,11 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     surface.configure(&device, &config);
 
     console::log_1(
-        &format!("[ornis-wasm] WebGPU ready, format={:?}", surface_format).into(),
+        &format!(
+            "[ornis-wasm] WebGPU ready, format={:?}, surface={}x{}",
+            surface_format, config.width, config.height
+        )
+        .into(),
     );
 
     // ── Scene ─────────────────────────────────────────────────────────
@@ -298,6 +319,8 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let window_for_loop = window.clone();
     let canvas_for_loop = canvas.clone();
 
+    let mut frame_count: u64 = 0;
+
     let f_inner = f.clone();
     *f_clone.borrow_mut() = Some(Closure::new(move || {
         // Handle resize
@@ -318,6 +341,9 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
             config.height = ph;
             surface.configure(&device, &config);
             renderer.resize(&device, pw, ph);
+            console::log_1(
+                &format!("[ornis-wasm] resized surface to {}x{}", pw, ph).into(),
+            );
         }
 
         // Camera for the current aspect ratio
@@ -351,6 +377,21 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
 
                 queue.submit(std::iter::once(encoder.finish()));
                 frame.present();
+
+                frame_count += 1;
+                if frame_count == 1 {
+                    console::log_1(
+                        &format!(
+                            "[ornis-wasm] first frame rendered ({}x{}, {} instances)",
+                            config.width, config.height, instance_count
+                        )
+                        .into(),
+                    );
+                } else if frame_count % 600 == 0 {
+                    console::log_1(
+                        &format!("[ornis-wasm] frame {} rendered", frame_count).into(),
+                    );
+                }
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 // Surface lost its configuration — reconfigure and retry next frame

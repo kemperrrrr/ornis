@@ -121,7 +121,7 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
-    @location(4) material_index: u32,
+    @location(4) @interpolate(flat) material_index: u32,
 };
 
 @vertex
@@ -183,7 +183,7 @@ struct FragmentInput {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
-    @location(4) material_index: u32,
+    @location(4) @interpolate(flat) material_index: u32,
 };
 
 struct GBufferOutput {
@@ -676,7 +676,7 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
-    @location(4) material_index: u32,
+    @location(4) @interpolate(flat) material_index: u32,
 };
 
 @vertex
@@ -757,7 +757,7 @@ struct FragmentInput {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
-    @location(4) material_index: u32,
+    @location(4) @interpolate(flat) material_index: u32,
 };
 
 const PI: f32 = 3.14159265359;
