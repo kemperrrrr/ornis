@@ -1,10 +1,22 @@
+use glam::{Mat4, Quat, Vec3};
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
+use ornis_core::OpenPBRMaterial;
+use ornis_render::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
+use ornis_render::{
+    InstanceData, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Ornis WASM — WebGPU entry point for browser editor
+// Renders assets/scene.ron through the shared Renderer3D (RenderBackend).
 // Build: wasm-pack build crates/wasm --target web
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Compiled-in fallback for the scene when fetch('scene.ron') is unavailable
+/// (e.g. opened without the ornis remote server).
+const FALLBACK_SCENE_RON: &str = include_str!("../../../assets/scene.ron");
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -30,7 +42,120 @@ impl raw_window_handle::HasWindowHandle for CanvasWindow {
     }
 }
 
-/// Initialize WebGPU on a canvas and start render loop.
+/// Fetch scene.ron from the server; fall back to the compiled-in copy.
+async fn load_scene_ron() -> String {
+    if let Some(window) = web_sys::window() {
+        let resp_value =
+            wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("scene.ron")).await;
+        if let Ok(resp_value) = resp_value {
+            let resp: web_sys::Response = match resp_value.dyn_into() {
+                Ok(r) => r,
+                Err(_) => return FALLBACK_SCENE_RON.to_string(),
+            };
+            if resp.ok() {
+                if let Ok(text_promise) = resp.text() {
+                    if let Ok(text) = wasm_bindgen_futures::JsFuture::from(text_promise).await {
+                        if let Some(s) = text.as_string() {
+                            console::log_1(&"[ornis-wasm] scene.ron fetched from server".into());
+                            return s;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    console::warn_1(&"[ornis-wasm] fetch(scene.ron) failed, using embedded scene".into());
+    FALLBACK_SCENE_RON.to_string()
+}
+
+/// GPU-side scene built from a parsed [`Scene`]: shared mesh, materials,
+/// per-entity instances and lights in the tuple form RenderBackend expects.
+struct GpuScene {
+    mesh: ornis_render::Mesh,
+    materials: Vec<OpenPBRMaterial>,
+    instances: Vec<InstanceData>,
+    lights: Vec<([f32; 3], f32, [f32; 3])>,
+}
+
+fn build_gpu_scene(device: &wgpu::Device, scene: &Scene) -> Result<GpuScene, JsValue> {
+    // Current scene format only has Sphere meshes and Renderer3D::render_scene
+    // draws a single mesh instanced — all entities share one mesh. Use the
+    // first entity's mesh parameters.
+    let first = scene
+        .entities
+        .first()
+        .ok_or("scene has no entities")?;
+    let mesh = match &first.mesh {
+        MeshDesc::Sphere {
+            radius,
+            segments,
+            rings,
+        } => ornis_render::create_sphere(device, *radius, *segments, *rings),
+    };
+
+    let mut materials = Vec::with_capacity(scene.entities.len());
+    let mut instances = Vec::with_capacity(scene.entities.len());
+    for (i, entity) in scene.entities.iter().enumerate() {
+        let material = match &entity.material {
+            MaterialDesc::Dielectric {
+                base_color,
+                roughness,
+            } => OpenPBRMaterial::dielectric()
+                .base_color_rgb(*base_color)
+                .specular_roughness(*roughness),
+            MaterialDesc::Metal {
+                base_color,
+                roughness,
+            } => OpenPBRMaterial::metal()
+                .base_color_rgb(*base_color)
+                .specular_roughness(*roughness),
+            MaterialDesc::Coat {
+                base_color,
+                coat_weight,
+                coat_roughness,
+            } => OpenPBRMaterial::coat()
+                .base_color_rgb(*base_color)
+                .coat_weight(*coat_weight)
+                .coat_roughness(*coat_roughness),
+        };
+        materials.push(material);
+
+        let t = &entity.transform;
+        let model = Mat4::from_scale_rotation_translation(
+            Vec3::from(t.scale),
+            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3])
+                .normalize(),
+            Vec3::from(t.translation),
+        );
+        let normal_matrix = model.inverse().transpose();
+        instances.push(InstanceData {
+            model_matrix: model,
+            normal_matrix,
+            material_index: i as u32,
+        });
+    }
+
+    let lights = scene
+        .lights
+        .iter()
+        .map(|l| match l {
+            LightDesc::Directional {
+                direction,
+                intensity,
+                color,
+            } => (*direction, *intensity, *color),
+        })
+        .collect();
+
+    Ok(GpuScene {
+        mesh,
+        materials,
+        instances,
+        lights,
+    })
+}
+
+/// Initialize WebGPU on a canvas, load scene.ron and start the render loop.
 #[wasm_bindgen]
 pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     console::log_1(&format!("[ornis-wasm] init canvas={}", canvas_id).into());
@@ -77,11 +202,14 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         .await
         .map_err(|_| "adapter not found")?;
 
+    // WebGPU spec defaults: max_storage_buffers_per_shader_stage = 8, which is
+    // what Renderer3D's bind groups need (camera + per-object + materials +
+    // lighting). Downlevel (WebGL2) defaults would zero out storage buffers.
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("ornis-wasm"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
         })
@@ -89,13 +217,29 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         .map_err(|e| format!("device: {:?}", e))?;
 
     let surface_caps = surface.get_capabilities(&adapter);
-    let surface_format = surface_caps.formats[0];
+    let surface_format = surface_caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb
+            )
+        })
+        .unwrap_or_else(|| {
+            surface_caps
+                .formats
+                .first()
+                .copied()
+                .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb)
+        });
 
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
-        width: canvas.width(),
-        height: canvas.height(),
+        width: canvas.width().max(1),
+        height: canvas.height().max(1),
         present_mode: wgpu::PresentMode::AutoNoVsync,
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![],
@@ -107,55 +251,43 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         &format!("[ornis-wasm] WebGPU ready, format={:?}", surface_format).into(),
     );
 
-    // ── Simple triangle shader ────────────────────────────────────────
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("triangle"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-    });
+    // ── Scene ─────────────────────────────────────────────────────────
+    let ron_text = load_scene_ron().await;
+    let scene = Scene::from_ron(&ron_text)
+        .map_err(|e| format!("scene parse: {:?}", e))?;
+    console::log_1(
+        &format!(
+            "[ornis-wasm] scene '{}' loaded: {} entities, {} lights",
+            scene.name,
+            scene.entities.len(),
+            scene.lights.len()
+        )
+        .into(),
+    );
 
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("pipeline_layout"),
-        bind_group_layouts: &[],
-        immediate_size: 0,
-    });
+    let gpu_scene = build_gpu_scene(&device, &scene)?;
 
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("render_pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        cache: None,
-        multiview_mask: None,
-    });
+    // ── Renderer3D via the RenderBackend trait ────────────────────────
+    let backend_config = RenderBackendConfig {
+        surface_config: config.clone(),
+        sample_count: 1,
+        max_objects: 256,
+        max_materials: 64,
+    };
+    let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
+
+    renderer.upload_materials(&queue, &gpu_scene.materials);
+    renderer.upload_instances(&queue, &gpu_scene.instances);
+    renderer.set_lights(&queue, scene.ambient, &gpu_scene.lights);
+
+    let instance_count = gpu_scene.instances.len() as u32;
+    let mesh = gpu_scene.mesh;
+
+    // Camera from the scene description.
+    let cam = scene.camera.clone();
+    let cam_pos = Vec3::from(cam.position);
+    let cam_target = Vec3::from(cam.target);
+    let cam_up = Vec3::from(cam.up);
 
     // ── Render loop ───────────────────────────────────────────────────
     let f = std::rc::Rc::new(std::cell::RefCell::new(
@@ -172,18 +304,28 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         let pw = canvas_for_loop
             .parent_element()
             .map(|p| p.client_width() as u32)
-            .unwrap_or(canvas_for_loop.width());
+            .unwrap_or(canvas_for_loop.width())
+            .max(1);
         let ph = canvas_for_loop
             .parent_element()
             .map(|p| p.client_height() as u32)
-            .unwrap_or(canvas_for_loop.height());
+            .unwrap_or(canvas_for_loop.height())
+            .max(1);
         if canvas_for_loop.width() != pw || canvas_for_loop.height() != ph {
             canvas_for_loop.set_width(pw);
             canvas_for_loop.set_height(ph);
             config.width = pw;
             config.height = ph;
             surface.configure(&device, &config);
+            renderer.resize(&device, pw, ph);
         }
+
+        // Camera for the current aspect ratio
+        let aspect = config.width as f32 / config.height as f32;
+        let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
+        let proj = Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
+        let view_proj = proj * view;
+        renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), cam.position);
 
         match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -196,40 +338,26 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
                     label: Some("render_encoder"),
                 });
 
-                {
-                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.05,
-                                    g: 0.05,
-                                    b: 0.07,
-                                    a: 1.0,
-                                }),
-                                store: wgpu::StoreOp::Store,
-                            },
-                            depth_slice: None,
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-
-                    render_pass.set_pipeline(&render_pipeline);
-                    render_pass.draw(0..3, 0..1);
-                }
+                renderer.render_scene(
+                    RenderContext {
+                        device: &device,
+                        queue: &queue,
+                        encoder: &mut encoder,
+                        target: &view,
+                    },
+                    &mesh,
+                    instance_count,
+                );
 
                 queue.submit(std::iter::once(encoder.finish()));
                 frame.present();
             }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                // Surface lost its configuration — reconfigure and retry next frame
+                surface.configure(&device, &config);
+            }
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Outdated
-            | wgpu::CurrentSurfaceTexture::Lost
             | wgpu::CurrentSurfaceTexture::Validation => {
                 // Skip frame, will retry next animation frame
             }
