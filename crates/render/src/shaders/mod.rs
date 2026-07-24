@@ -75,7 +75,10 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let combined = deferred_color + forward_color.rgb * forward_color.a;
     let tonemapped = aces_tonemap(combined);
 
-    return vec4<f32>(tonemapped, forward_color.a);
+    // The composited scene is opaque; forward_color.a is 0 where no forward
+    // geometry was drawn, which would make the whole frame transparent on a
+    // canvas/surface. Native compositing (LegacyCompositePass) also forces 1.0.
+    return vec4<f32>(tonemapped, 1.0);
 }
 "#;
 

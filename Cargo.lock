@@ -2946,6 +2946,8 @@ dependencies = [
  "glam 0.30.10",
  "ornis-core",
  "ornis-macros",
+ "png 0.17.16",
+ "pollster 0.3.0",
  "ron",
  "serde",
  "wgpu",
