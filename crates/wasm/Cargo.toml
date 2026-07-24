@@ -1,0 +1,35 @@
+[package]
+name = "ornis-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wgpu = { version = "29", features = ["webgpu"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "Navigator",
+    "Node",
+    "Window",
+] }
+console_error_panic_hook = "0.1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+ornis-render = { path = "../render" }
+ornis-core = { path = "../core" }
+ron = "0.8"
+serde = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+
+[features]
+default = []

@@ -1,0 +1,97 @@
+Scene(
+    name: "demo",
+    entities: [
+        // Red dielectric sphere
+        (
+            name: "Red Sphere",
+            transform: (
+                translation: (-5.6, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: [0.8, 0.2, 0.2],
+                roughness: 0.5,
+            ),
+        ),
+        // Green rough sphere
+        (
+            name: "Green Rough Sphere",
+            transform: (
+                translation: (-2.8, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: [0.2, 0.8, 0.2],
+                roughness: 0.7,
+            ),
+        ),
+        // Blue smooth sphere
+        (
+            name: "Blue Smooth Sphere",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: [0.2, 0.2, 0.8],
+                roughness: 0.1,
+            ),
+        ),
+        // Gold metallic sphere
+        (
+            name: "Gold Sphere",
+            transform: (
+                translation: (2.8, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Metal(
+                base_color: [0.9, 0.7, 0.1],
+                roughness: 0.2,
+            ),
+        ),
+        // White ceramic sphere
+        (
+            name: "Ceramic Sphere",
+            transform: (
+                translation: (5.6, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Coat(
+                base_color: [0.9, 0.9, 0.9],
+                coat_weight: 1.0,
+                coat_roughness: 0.1,
+            ),
+        ),
+    ],
+    lights: [
+        Directional(
+            direction: [1.0, 1.0, 1.0],
+            intensity: 0.6,
+            color: [1.0, 1.0, 1.0],
+        ),
+        Directional(
+            direction: [-0.5, 0.5, -0.5],
+            intensity: 0.3,
+            color: [0.8, 0.8, 1.0],
+        ),
+    ],
+    camera: (
+        position: [0.0, 2.5, 9.0],
+        target: [0.0, 0.0, 0.0],
+        up: [0.0, 1.0, 0.0],
+        fov: 60.0,
+        near: 0.1,
+        far: 100.0,
+    ),
+    ambient: [0.10, 0.10, 0.15],
+)
