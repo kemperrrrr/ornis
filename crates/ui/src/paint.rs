@@ -1,9 +1,15 @@
 use crate::css;
+use crate::events::InteractionState;
 use crate::layout::{LayoutNodeId, LayoutTree};
 use crate::render::UIRenderer;
 use vello::peniko::{Color, FontData};
 
-pub fn paint_layout(tree: &LayoutTree, renderer: &mut UIRenderer, font: &FontData) {
+pub fn paint_layout(
+    tree: &LayoutTree,
+    renderer: &mut UIRenderer,
+    font: &FontData,
+    _interaction: Option<&InteractionState>,
+) {
     paint_node(tree, tree.root, renderer, font, vello::peniko::kurbo::Affine::IDENTITY);
 }
 

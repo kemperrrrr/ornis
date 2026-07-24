@@ -20,7 +20,13 @@ fn load_font() -> VelloFontData {
 }
 
 async fn run(w: u32, h: u32, out: &str) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::empty(),
+        memory_budget_thresholds: Default::default(),
+        backend_options: Default::default(),
+        display: None,
+    });
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -37,6 +43,7 @@ async fn run(w: u32, h: u32, out: &str) {
                 max_storage_buffers_per_shader_stage: 8,
                 ..wgpu::Limits::downlevel_defaults()
             },
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
         })
@@ -68,10 +75,9 @@ async fn run(w: u32, h: u32, out: &str) {
         rules: vec![],
         custom_properties: std::collections::HashMap::new(),
     });
-
-    let tree = LayoutTree::build_with_viewport(&doc, &[stylesheet], w as f32, h as f32, &font)
+    let tree = LayoutTree::build_with_viewport(&doc, &[stylesheet], w as f32, h as f32, &font, &[], None)
         .expect("layout build");
-
+    
     renderer.begin_frame();
     renderer.fill_rect(
         0.0,
@@ -80,7 +86,7 @@ async fn run(w: u32, h: u32, out: &str) {
         h as f64,
         Color::new([0.12, 0.12, 0.14, 1.0]),
     );
-    paint_layout(&tree, &mut renderer, &font);
+    paint_layout(&tree, &mut renderer, &font, None);
     match renderer.save_png(&device, &queue, out) {
         Ok(_) => println!("wrote {out} ({w}x{h})"),
         Err(e) => eprintln!("png save failed: {e:?}"),

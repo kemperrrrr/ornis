@@ -377,7 +377,7 @@ fn evaluate_coat_layer(
     N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
     NoV: f32, NoL: f32, NoH: f32, VoH: f32,
     mat: OpenPBRMaterial,
-    coat_weight: f32, coat_roughness: f32, coat_anisotropy: f32, coat_darkening: f32, coat_ior: f32, coat_color: vec3<f32>,
+    coat_weight: f32, coat_roughness: f32, coat_anisotropy: f32, coat_dark: f32, coat_ior: f32, coat_color: vec3<f32>,
     base_metalness: f32, base_color: vec3<f32>, base_weight: f32, specular_weight: f32,
     subsurface_weight: f32, subsurface_color: vec3<f32>,
     T: vec3<f32>, B: vec3<f32>
@@ -392,7 +392,7 @@ fn evaluate_coat_layer(
     let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
     let darkening = coat_darkening(
-        coat_ior, coat_weight, coat_darkening,
+        coat_ior, coat_weight, coat_dark,
         base_metalness, base_color, base_weight, specular_weight,
         subsurface_weight, subsurface_color
     );
@@ -796,7 +796,7 @@ fn evaluate_coat_layer(
     N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
     NoV: f32, NoL: f32, NoH: f32, VoH: f32,
     mat: OpenPBRMaterial,
-    coat_weight: f32, coat_roughness: f32, coat_anisotropy: f32, coat_darkening: f32, coat_ior: f32, coat_color: vec3<f32>,
+    coat_weight: f32, coat_roughness: f32, coat_anisotropy: f32, coat_dark: f32, coat_ior: f32, coat_color: vec3<f32>,
     base_metalness: f32, base_color: vec3<f32>, base_weight: f32, specular_weight: f32,
     subsurface_weight: f32, subsurface_color: vec3<f32>,
     T: vec3<f32>, B: vec3<f32>
@@ -811,7 +811,7 @@ fn evaluate_coat_layer(
     let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
     let darkening = coat_darkening(
-        coat_ior, coat_weight, coat_darkening,
+        coat_ior, coat_weight, coat_dark,
         base_metalness, base_color, base_weight, specular_weight,
         subsurface_weight, subsurface_color
     );

@@ -5,6 +5,7 @@ pub mod shader;
 pub mod shaders;
 pub mod composite;
 pub mod render_backend;
+pub mod scene;
 
 pub use ornis_core::{OpenPBRMaterial, OPENPBR_MATERIAL_VEC4_COUNT, OPENPBR_MATERIAL_SIZE};
 pub use mesh::{Mesh, Vertex, create_sphere};

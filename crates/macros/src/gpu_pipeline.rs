@@ -37,7 +37,7 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(pipeline_label()),
                     bind_group_layouts: &[],
-                    push_constant_ranges: &[],
+                    immediate_size: 0,
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(pipeline_label()),

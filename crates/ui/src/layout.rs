@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use taffy::MaybeResolve;
 use taffy::geometry::Line;
 use taffy::style::{
-    Dimension, Display, GridPlacement, LengthPercentage, LengthPercentageAuto, Position, Style,
-    TrackSizingFunction,
+    Dimension, Display, GridPlacement, GridTemplateComponent, LengthPercentage,
+    LengthPercentageAuto, Position, Style, TrackSizingFunction,
 };
 use taffy::style_helpers::{
     FromLength, FromPercent, TaffyAuto, TaffyGridLine, TaffyGridSpan, flex,
@@ -19,7 +18,7 @@ use crate::image_loader::{DecodedImage, ImageCache};
 
 pub type LayoutNodeId = usize;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LayoutTree {
     pub arena: Vec<LayoutNode>,
     pub root: LayoutNodeId,
@@ -29,6 +28,24 @@ pub struct LayoutTree {
     /// The viewport (CSS px) the tree was laid out against. Kept so `to_json`
     /// can report the same container size a browser probe would use.
     pub viewport: (f32, f32),
+    /// The taffy layout tree, stored so that `hit_test`, `positioned_children`,
+    /// and `apply_details_states` can operate without a full rebuild.
+    pub taffy: TaffyTree,
+    /// Root taffy node id, needed for in-place re-layout in `apply_details_states`.
+    pub root_tid: u64,
+}
+
+impl Default for LayoutTree {
+    fn default() -> Self {
+        Self {
+            arena: Vec::new(),
+            root: 0,
+            image_cache: Arc::new(ImageCache::new()),
+            viewport: (1024.0, 768.0),
+            taffy: TaffyTree::new(),
+            root_tid: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +97,12 @@ pub struct LayoutNode {
     /// `parent_chain` so a layout/style diff can identify which DOM path a
     /// node took. Populated at build time from `ancestors`.
     pub parent_chain: Vec<String>,
+    /// For `<details>` elements: stable sequential index used by the editor
+    /// to track open/closed state across layout rebuilds.
+    pub details_index: Option<usize>,
+    /// Raw HTML attributes from the parsed DOM element (e.g. `value="Play"`
+    /// on `<input>`). Used by click handlers to read the initial value.
+    pub attributes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -98,7 +121,7 @@ const SKIP_TAGS: &[&str] = &[
 
 impl LayoutTree {
     pub fn build(doc: &Document, stylesheets: &[Stylesheet], font: &FontData) -> TaffyResult<Self> {
-        Self::build_with_viewport(doc, stylesheets, 1024.0, 768.0, font)
+        Self::build_with_viewport(doc, stylesheets, 1024.0, 768.0, font, &[], None)
     }
 
     pub fn build_with_viewport(
@@ -107,16 +130,16 @@ impl LayoutTree {
         viewport_width: f32,
         viewport_height: f32,
         font: &FontData,
+        closed_details: &[usize],
+        existing_cache: Option<Arc<ImageCache>>,
     ) -> TaffyResult<Self> {
         let mut taffy = TaffyTree::new();
         let mut arena = Vec::<LayoutNode>::new();
         let mut taffy_to_arena: HashMap<u64, LayoutNodeId> = HashMap::new();
         let inherited = HashMap::new();
-        // `rem` units resolve against the root element's computed font-size
-        // (defaults to 16px, but the editor's `:root { font-size: 12px }`
-        // overrides it). Pass this down so length parsing is correct.
         let rem_base = root_font_size(doc, stylesheets);
-        let image_cache = Arc::new(ImageCache::new());
+        let image_cache = existing_cache.unwrap_or_else(|| Arc::new(ImageCache::new()));
+        let mut details_counter = 0usize;
         let (root_tid, root_aid) = Self::build_node(
             &mut taffy,
             &doc.root,
@@ -132,6 +155,8 @@ impl LayoutTree {
             false,
             rem_base,
             &image_cache,
+            &mut details_counter,
+            closed_details,
         )?;
 
         taffy.compute_layout_with_measure(
@@ -174,14 +199,150 @@ impl LayoutTree {
 
         Self::apply_layout(&taffy, &mut arena, root_tid, &taffy_to_arena);
 
+        let root_tid_u: u64 = root_tid.into();
         Ok(LayoutTree {
             arena,
             root: root_aid,
             image_cache,
             viewport: (viewport_width, viewport_height),
+            taffy,
+            root_tid: root_tid_u,
         })
     }
 
+    /// Returns the deepest visible element at the given CSS-pixel coordinate.
+    /// Walks the arena top-down, checking bounding boxes. Text nodes (#text) are
+    /// skipped because they are always inside a styled element.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<LayoutNodeId> {
+        fn walk(arena: &[LayoutNode], id: LayoutNodeId, x: f32, y: f32) -> Option<LayoutNodeId> {
+            let node = &arena[id];
+            let r = node.rect;
+            if x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height {
+                // Children are drawn on top — check reverse order.
+                for &child in node.children.iter().rev() {
+                    if let Some(found) = walk(arena, child, x, y) {
+                        return Some(found);
+                    }
+                }
+                if node.tag != "#text" {
+                    return Some(id);
+                }
+            }
+            None
+        }
+        walk(&self.arena, self.root, x, y)
+    }
+
+    /// Apply `<details>` open/closed states by selectively hiding children in
+    /// the taffy tree, then re-computing layout in-place.
+    pub fn apply_details_states(
+        &mut self,
+        closed_indices: &[usize],
+        font: &FontData,
+    ) -> TaffyResult<()> {
+        use taffy::tree::NodeId;
+        let root_tid: NodeId = self.root_tid.into();
+
+        // Build a reverse lookup: taffy NodeId -> arena LayoutNodeId
+        // by walking both trees in parallel.
+        let mut rev: HashMap<u64, LayoutNodeId> = HashMap::new();
+        {
+            fn walk(
+                taffy: &TaffyTree,
+                arena: &[LayoutNode],
+                taffy_id: NodeId,
+                arena_id: LayoutNodeId,
+                rev: &mut HashMap<u64, LayoutNodeId>,
+            ) {
+                rev.insert(taffy_id.into(), arena_id);
+                if let Ok(children) = taffy.children(taffy_id) {
+                    let arena_children = &arena[arena_id].children;
+                    for (tc, &ac) in children.iter().zip(arena_children.iter()) {
+                        walk(taffy, arena, *tc, ac, rev);
+                    }
+                }
+            }
+            walk(&self.taffy, &self.arena, root_tid, self.root, &mut rev);
+        }
+
+        for i in 0..self.arena.len() {
+            if self.arena[i].tag != "details" {
+                continue;
+            }
+            let di = match self.arena[i].details_index {
+                Some(d) => d,
+                None => continue,
+            };
+            let is_closed = closed_indices.contains(&di);
+
+            // Find this details node's taffy id.
+            let details_tid = rev
+                .iter()
+                .find(|(_, aid)| **aid == i)
+                .map(|(tid, _)| *tid);
+            let details_tid: NodeId = match details_tid {
+                Some(t) => t.into(),
+                None => continue,
+            };
+
+            let children = self.taffy.children(details_tid)?;
+            for &ctid in children.iter() {
+                let ctid_u: u64 = ctid.into();
+                let arena_child = rev.get(&ctid_u).copied();
+                let is_summary = arena_child
+                    .map(|ac| self.arena[ac].tag == "summary")
+                    .unwrap_or(false);
+                let mut style = self.taffy.style(ctid)?.clone();
+                if is_closed && !is_summary {
+                    style.display = Display::None;
+                } else if !is_closed {
+                    if style.display == Display::None {
+                        style.display = Display::Block;
+                    }
+                }
+                self.taffy.set_style(ctid, style)?;
+            }
+        }
+
+        // Re-layout with text measure.
+        self.taffy.compute_layout_with_measure(
+            root_tid,
+            Size {
+                width: AvailableSpace::Definite(self.viewport.0),
+                height: AvailableSpace::Definite(self.viewport.1),
+            },
+            |_known, _available, node_id, _ctx, _style| {
+                let aid = match rev.get(&node_id.into()) {
+                    Some(&a) => a,
+                    None => {
+                        return taffy::geometry::Size {
+                            width: 0.0,
+                            height: 0.0,
+                        };
+                    }
+                };
+                if let Some(text) = &self.arena[aid].text {
+                    let fs = self.arena[aid]
+                        .styles
+                        .get("font-size")
+                        .and_then(|v| parse_length(v, 16.0))
+                        .unwrap_or(14.0);
+                    let (w, h) = crate::text::measure_text(font, text, fs as f32);
+                    taffy::geometry::Size { width: w, height: h }
+                } else {
+                    taffy::geometry::Size {
+                        width: 0.0,
+                        height: 0.0,
+                    }
+                }
+            },
+        )?;
+
+        // Re-apply layout: write taffy computed positions back to arena nodes.
+        Self::apply_layout_from_rev(&self.taffy, &mut self.arena, root_tid, &rev);
+
+        Ok(())
+    }
     /// Serializes the laid-out tree to a JSON value that mirrors what a browser
     /// probe (`getComputedStyle` + `getBoundingClientRect`) would report for the
     /// same HTML/CSS. Intended for `diff.py` so layout/style bugs can be
@@ -375,6 +536,7 @@ impl LayoutTree {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_node(
         taffy: &mut TaffyTree,
         node: &Node,
@@ -390,6 +552,8 @@ impl LayoutTree {
         parent_is_row: bool,
         rem_base: f32,
         image_cache: &Arc<ImageCache>,
+        details_counter: &mut usize,
+        closed_details: &[usize],
     ) -> TaffyResult<(taffy::NodeId, LayoutNodeId)> {
         match node {
             Node::Element(el) => {
@@ -632,6 +796,8 @@ impl LayoutTree {
                             parent_is_row,
                             rem_base,
                             image_cache,
+                            details_counter,
+                            closed_details,
                         )?;
                         child_taffy_ids.push(ct);
                         child_arena_ids.push(ca);
@@ -658,6 +824,8 @@ impl LayoutTree {
                             parent_is_row,
                             rem_base,
                             image_cache,
+                            details_counter,
+                            closed_details,
                         )?;
                         child_taffy_ids.push(ct);
                         child_arena_ids.push(ca);
@@ -688,6 +856,13 @@ impl LayoutTree {
                         )
                     })
                     .collect();
+                let di = if el.tag == "details" {
+                    let idx = *details_counter;
+                    *details_counter += 1;
+                    Some(idx)
+                } else {
+                    None
+                };
                 arena.push(LayoutNode {
                     id,
                     tag: el.tag.clone(),
@@ -707,6 +882,8 @@ impl LayoutTree {
                     background_image: bg_decoded,
                     background_size: bg_size,
                     parent_chain,
+                    details_index: di,
+                    attributes: el.attrs.clone(),
                 });
                 for &ca in &child_arena_ids {
                     arena[ca].parent = Some(id);
@@ -741,6 +918,8 @@ impl LayoutTree {
                     background_image: None,
                     background_size: None,
                     parent_chain: Vec::new(),
+                    details_index: None,
+                    attributes: HashMap::new(),
                 });
                 taffy_to_arena.insert(taffy_id.into(), id);
                 Ok((taffy_id, id))
@@ -784,6 +963,44 @@ impl LayoutTree {
 
         walk(taffy, arena, taffy_root, taffy_to_arena, 0.0, 0.0);
     }
+
+    /// Like `apply_layout` but uses a `HashMap<u64, LayoutNodeId>` (keyed
+    /// by taffy node id) instead of a forward `taffy_to_arena` mapping.
+    fn apply_layout_from_rev(
+        taffy: &TaffyTree,
+        arena: &mut [LayoutNode],
+        taffy_root: taffy::NodeId,
+        rev: &HashMap<u64, LayoutNodeId>,
+    ) {
+        fn walk(
+            taffy: &TaffyTree,
+            arena: &mut [LayoutNode],
+            taffy_id: taffy::NodeId,
+            rev: &HashMap<u64, LayoutNodeId>,
+            off_x: f32,
+            off_y: f32,
+        ) {
+            let tkey: u64 = taffy_id.into();
+            if let Some(&aid) = rev.get(&tkey) {
+                if let Ok(layout) = taffy.layout(taffy_id) {
+                    let abs_x = off_x + layout.location.x;
+                    let abs_y = off_y + layout.location.y;
+                    arena[aid].rect = Rect {
+                        x: abs_x,
+                        y: abs_y,
+                        width: layout.size.width,
+                        height: layout.size.height,
+                    };
+                    if let Ok(children) = taffy.children(taffy_id) {
+                        for child_tid in children {
+                            walk(taffy, arena, child_tid, rev, abs_x, abs_y);
+                        }
+                    }
+                }
+            }
+        }
+        walk(taffy, arena, taffy_root, rev, 0.0, 0.0);
+    }
 }
 
 /// Determine the root element's computed `font-size` so that `rem` units
@@ -800,7 +1017,7 @@ fn root_font_size(doc: &Document, stylesheets: &[Stylesheet]) -> f32 {
                 sel.iter().any(|cp| {
                     cp.parts.iter().any(|p| {
                         matches!(p, SimpleSelector::Root)
-                            || matches!(p, SimpleSelector::Tag(t) if t == "html")
+                            || matches!(p, SimpleSelector::Type(t) if t == "html")
                     })
                 })
             });
@@ -998,10 +1215,16 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
 
     // CSS Grid.
     if let Some(v) = styles.get("grid-template-columns") {
-        s.grid_template_columns = parse_grid_tracks(v, rem_base);
+        s.grid_template_columns = parse_grid_tracks(v, rem_base)
+            .into_iter()
+            .map(GridTemplateComponent::Single)
+            .collect();
     }
     if let Some(v) = styles.get("grid-template-rows") {
-        s.grid_template_rows = parse_grid_tracks(v, rem_base);
+        s.grid_template_rows = parse_grid_tracks(v, rem_base)
+            .into_iter()
+            .map(GridTemplateComponent::Single)
+            .collect();
     }
     if let Some(v) = styles.get("grid-column") {
         s.grid_column = parse_grid_line(v);
@@ -1085,23 +1308,23 @@ fn css_to_taffy_style(styles: &HashMap<String, String>, vw: f32, vh: f32, rem_ba
 
 fn parse_align_items(v: &str) -> Option<AlignItems> {
     match v.trim() {
-        "center" => Some(AlignItems::Center),
-        "flex-start" | "start" => Some(AlignItems::FlexStart),
-        "flex-end" | "end" => Some(AlignItems::FlexEnd),
-        "stretch" => Some(AlignItems::Stretch),
-        "baseline" => Some(AlignItems::Baseline),
+        "center" => Some(AlignItems::CENTER),
+        "flex-start" | "start" => Some(AlignItems::FLEX_START),
+        "flex-end" | "end" => Some(AlignItems::FLEX_END),
+        "stretch" => Some(AlignItems::STRETCH),
+        "baseline" => Some(AlignItems::BASELINE),
         _ => None,
     }
 }
 
 fn parse_justify_content(v: &str) -> Option<JustifyContent> {
     match v.trim() {
-        "center" => Some(JustifyContent::Center),
-        "flex-start" | "start" => Some(JustifyContent::FlexStart),
-        "flex-end" | "end" => Some(JustifyContent::FlexEnd),
-        "space-between" => Some(JustifyContent::SpaceBetween),
-        "space-around" => Some(JustifyContent::SpaceAround),
-        "space-evenly" => Some(JustifyContent::SpaceEvenly),
+        "center" => Some(JustifyContent::CENTER),
+        "flex-start" | "start" => Some(JustifyContent::FLEX_START),
+        "flex-end" | "end" => Some(JustifyContent::FLEX_END),
+        "space-between" => Some(JustifyContent::SPACE_BETWEEN),
+        "space-around" => Some(JustifyContent::SPACE_AROUND),
+        "space-evenly" => Some(JustifyContent::SPACE_EVENLY),
         _ => None,
     }
 }
@@ -1335,7 +1558,7 @@ mod layout_probe {
         let sheet = crate::css::Stylesheet::parse(&css).expect("css parses");
         let font = load_font();
 
-        let tree = LayoutTree::build_with_viewport(&doc, &[sheet], 1280.0, 800.0, &font)
+        let tree = LayoutTree::build_with_viewport(&doc, &[sheet], 1280.0, 800.0, &font, &[], None)
             .expect("layout builds");
 
         println!("\n=== ALL LAID-OUT NODES (1280x800) ===");

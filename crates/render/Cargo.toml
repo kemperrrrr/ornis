@@ -5,8 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-wgpu = "26"
+wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
 ornis-core = { path = "../core" }
 ornis-macros = { path = "../macros" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"

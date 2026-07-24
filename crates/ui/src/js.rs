@@ -1,3 +1,4 @@
+#![cfg(feature = "js-engine")]
 use boa_engine::{
     Context, JsValue, Source, js_string, native_function::NativeFunction,
     object::builtins::JsArray, property::PropertyKey,

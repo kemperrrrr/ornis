@@ -3,6 +3,7 @@
 //! This replaces the old Vello-based editor with a unified HTML/CSS-based editor
 //! that uses our Rust ECS bridge instead of JavaScript.
 
+#[cfg(feature = "js-engine")]
 use crate::components::{EcsBridge, UIStyle};
 use crate::layout::LayoutTree;
 use crate::paint::paint_layout;
@@ -301,12 +302,15 @@ impl UnifiedEditor {
         self.gizmo_mode
     }
 
+    #[cfg(feature = "js-engine")]
     pub fn entity_count(&self, store: &SmartStore) -> u32 {
         store
             .read_lane::<UIStyle>()
             .map(|lane| lane.len() as u32)
             .unwrap_or(0)
     }
+    #[cfg(not(feature = "js-engine"))]
+    pub fn entity_count(&self, _store: &SmartStore) -> u32 { 0 }
 
     pub fn build_layout(
         &mut self,
@@ -334,7 +338,7 @@ impl UnifiedEditor {
         });
 
         self.layout_tree = Some(
-            LayoutTree::build_with_viewport(&document, &[stylesheet], viewport_w, viewport_h, font)
+            LayoutTree::build_with_viewport(&document, &[stylesheet], viewport_w, viewport_h, font, &[], None)
                 .unwrap_or_default(),
         );
     }
@@ -351,7 +355,7 @@ impl UnifiedEditor {
         }
 
         if let Some(ref layout_tree) = self.layout_tree {
-            paint_layout(layout_tree, renderer, font);
+            paint_layout(layout_tree, renderer, font, None);
         }
     }
 
@@ -765,6 +769,7 @@ impl UnifiedEditor {
                 "Transform" => {
                     // Transform is added by default
                 }
+                #[cfg(feature = "js-engine")]
                 "UIStyle" => {
                     store.insert(entity, UIStyle::default());
                 }

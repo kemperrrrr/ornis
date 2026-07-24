@@ -225,6 +225,8 @@ impl DemoApp {
             viewport_width as f32,
             viewport_height as f32,
             &font,
+            &[],
+            None,
         )
         .unwrap();
         ctx.layout_tree = Some(tree);
@@ -244,7 +246,7 @@ impl DemoApp {
 
         // Paint layout tree
         if let Some(ref tree) = ctx.layout_tree {
-            paint_layout(tree, &mut ctx.renderer, &ctx.font);
+            paint_layout(tree, &mut ctx.renderer, &ctx.font, None);
         }
 
         if let Err(e) = ctx

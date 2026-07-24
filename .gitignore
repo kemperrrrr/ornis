@@ -1,4 +1,4 @@
-/target
+target/
 .DS_Store
 *.pdf
 *.txt
@@ -7,3 +7,14 @@
 browser_layout*.json
 ui_layout*.json
 bevy_editor_mockup/
+
+# Local third-party forks referenced via path deps (kept out of git, 2+ GB)
+/forks/
+
+# Scratch / probe artifacts in repo root
+/chromium_layout.json
+/diff_report.json
+/editor_test.html
+.hermes-tmp.*
+crates/ui/assets/editor/editor_test.html
+*.log

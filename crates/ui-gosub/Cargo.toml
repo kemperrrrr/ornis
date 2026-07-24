@@ -1,0 +1,27 @@
+[package]
+name = "ornis-ui-gosub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Gosub engine components
+gosub_engine = { path = "../../../gosub-engine/crates/gosub_engine" }
+gosub_renderer_vello = { path = "../../../gosub-engine/crates/gosub_renderer_vello" }
+gosub_fontmanager = { path = "../../../gosub-engine/crates/gosub_fontmanager" }
+
+# Core dependencies
+ornis-core = { path = "../core" }
+vello = { version = "0.9", features = ["wgpu"] }
+wgpu = "29"
+winit = "0.30"
+pollster = "0.3"
+anyhow = "1.0"
+image = "0.25"
+parking_lot = "0.12"
+
+[features]
+default = []
+
+[dev-dependencies]
+pollster = "0.3"

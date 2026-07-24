@@ -3,6 +3,7 @@ pub mod css;
 pub mod dom;
 pub mod editor;
 pub mod editor_template;
+pub mod events;
 pub mod html;
 pub mod image_loader;
 pub mod ipc;
@@ -13,3 +14,6 @@ pub mod render;
 pub mod svg;
 pub mod text;
 pub mod unified_editor;
+
+#[cfg(feature = "blitz-backend")]
+pub mod blitz_backend;

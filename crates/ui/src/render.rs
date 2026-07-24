@@ -246,7 +246,7 @@ impl UIRenderer {
     /// Used to keep a `background-image` inside the element's rounded box.
     pub fn push_rounded_clip(&mut self, x: f64, y: f64, w: f64, h: f64, r: f64) {
         let rect = RoundedRect::new(x, y, x + w, y + h, r);
-        self.scene.push_clip_layer(Affine::IDENTITY, &rect);
+        self.scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::IDENTITY, &rect);
     }
 
     /// Pops the clip layer opened by [`Self::push_rounded_clip`].
@@ -301,9 +301,10 @@ impl UIRenderer {
     ) -> Result<(), vello::Error> {
         self.render_scene(device, queue)?;
 
-        let frame = surface
-            .get_current_texture()
-            .map_err(|_| vello::Error::UnsupportedSurfaceFormat)?;
+        let frame = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            _ => return Err(vello::Error::UnsupportedSurfaceFormat),
+        };
         let frame_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -371,7 +372,7 @@ impl UIRenderer {
 
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         let mapped = slice.get_mapped_range();
         let mut img_data = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {

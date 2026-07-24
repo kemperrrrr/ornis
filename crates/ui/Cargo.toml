@@ -5,13 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-boa_engine = "0.21"
+boa_engine = { version = "0.21", optional = true }
 html5ever = "0.27"
 lightningcss = "1.0.0-alpha.71"
-taffy = { version = "0.8", features = ["grid"] }
-vello = { version = "0.6", features = ["wgpu"] }
+parcel_selectors = "0.28.2"
+taffy = { version = "0.12", features = ["grid"] }
+vello = { version = "0.9", features = ["wgpu"] }
 skrifa = "0.37"
-wgpu = "26"
+wgpu = "29"
 winit = "0.30"
 crossbeam-channel = "0.5"
 ornis-core = { path = "../core" }
@@ -22,12 +23,10 @@ serde = { version = "1", features = ["derive"] }
 png = "0.17"
 cosmic-text = "0.13"
 
-# Enables `LayoutTree::to_json` (used by the `serialize_layout` example /
-# tests to diff our layout against a real browser via `diff.py`).
 [features]
-default = []
 serialize = ["dep:serde_json"]
-
+js-engine = ["dep:boa_engine"]
+default = ["js-engine"]
 [dependencies.serde_json]
 version = "1"
 optional = true

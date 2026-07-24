@@ -1,0 +1,11 @@
+[package]
+name = "ornis-ui-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vello = { version = "0.9", features = ["wgpu"] }
+crossbeam-channel = "0.5"
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
