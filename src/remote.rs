@@ -1,20 +1,32 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender};
 use ornis_ui::ipc::{GameEvent, UiCommand};
 use tiny_http::{Header, Response, Server};
 
-/// Directory with the shared editor sources, relative to the workspace root
-/// (CARGO_MANIFEST_DIR for the `ornis` binary points at the workspace root).
-const ASSETS_REL: &str = "crates/ui/assets/editor";
-
+/// Editor frontend root. Resolution order:
+///   1. `--editor-dir <path>` CLI argument
+///   2. `ORNIS_EDITOR_DIR` environment variable
+///   3. `<workspace>/editor` (CARGO_MANIFEST_DIR for the `ornis` binary
+///      points at the workspace root)
 fn assets_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(ASSETS_REL)
+    let mut args = std::env::args().skip_while(|a| a != "--editor-dir");
+    if args.next().is_some() {
+        if let Some(dir) = args.next() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Ok(dir) = std::env::var("ORNIS_EDITOR_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor")
 }
 
 pub struct RemoteEditor {
@@ -23,17 +35,16 @@ pub struct RemoteEditor {
 }
 
 impl RemoteEditor {
-    pub fn start(
-        port: u16,
-        game_tx: Sender<UiCommand>,
-        game_rx: Receiver<GameEvent>,
-    ) -> Self {
+    pub fn start(port: u16, game_tx: Sender<UiCommand>, game_rx: Receiver<GameEvent>) -> Self {
         let addr = format!("127.0.0.1:{port}");
         let server = match Server::http(&addr) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("ornis: remote editor failed to bind {addr}: {e}");
-                return Self { stop: Arc::new(AtomicBool::new(true)), handle: None };
+                return Self {
+                    stop: Arc::new(AtomicBool::new(true)),
+                    handle: None,
+                };
             }
         };
 
@@ -45,7 +56,10 @@ impl RemoteEditor {
             .expect("spawn remote-editor thread");
 
         eprintln!("ornis: remote editor at http://{addr}");
-        Self { stop, handle: Some(handle) }
+        Self {
+            stop,
+            handle: Some(handle),
+        }
     }
 
     pub fn stop(&mut self) {
@@ -80,7 +94,10 @@ fn serve(
         // Drain incoming game events into buffer
         while let Ok(ev) = game_rx.try_recv() {
             match &ev {
-                GameEvent::CustomEvent { cmd_type, json_data } if cmd_type == "status" => {
+                GameEvent::CustomEvent {
+                    cmd_type,
+                    json_data,
+                } if cmd_type == "status" => {
                     cached_status = json_data.clone();
                 }
                 _ => {}
@@ -98,35 +115,34 @@ fn serve(
         let url = request.url().to_string();
         let method = request.method().as_str().to_string();
 
-        let response: Response<Cursor<Vec<u8>>> =
-            match (method.as_str(), url.as_str()) {
-                ("GET", "/") | ("GET", "/index.html") => serve_static(&root, "index.html"),
-                ("GET", "/api/status") => json_response(&cached_status),
-                ("GET", "/api/events") => {
-                    let body = format_events(&events_buffer);
-                    events_buffer.clear();
-                    json_response(&body)
-                }
-                ("POST", "/api/command") => {
-                    let mut body = String::new();
-                    let _ = request.as_reader().read_to_string(&mut body);
-                    let cmd = serde_json::from_str::<serde_json::Value>(&body).ok();
-                    if let Some(cmd) = cmd {
-                        if let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str()) {
-                            let json_data = cmd.get("data")
-                                .map(|v| v.to_string())
-                                .unwrap_or_default();
-                            game_tx.send(UiCommand::Custom {
+        let response: Response<Cursor<Vec<u8>>> = match (method.as_str(), url.as_str()) {
+            ("GET", "/") | ("GET", "/index.html") => serve_static(&root, "index.html"),
+            ("GET", "/api/status") => json_response(&cached_status),
+            ("GET", "/api/events") => {
+                let body = format_events(&events_buffer);
+                events_buffer.clear();
+                json_response(&body)
+            }
+            ("POST", "/api/command") => {
+                let mut body = String::new();
+                let _ = request.as_reader().read_to_string(&mut body);
+                let cmd = serde_json::from_str::<serde_json::Value>(&body).ok();
+                if let Some(cmd) = cmd {
+                    if let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str()) {
+                        let json_data = cmd.get("data").map(|v| v.to_string()).unwrap_or_default();
+                        game_tx
+                            .send(UiCommand::Custom {
                                 cmd_type: cmd_type.to_string(),
                                 json_data,
-                            }).ok();
-                        }
+                            })
+                            .ok();
                     }
-                    json_response("{}")
                 }
-                ("GET", path) => serve_static(&root, path),
-                _ => not_found(),
-            };
+                json_response("{}")
+            }
+            ("GET", path) => serve_static(&root, path),
+            _ => not_found(),
+        };
 
         let _ = request.respond(response);
     }
@@ -152,7 +168,8 @@ fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
 }
 
 fn json_response(body: &str) -> Response<Cursor<Vec<u8>>> {
-    Response::from_data(body).with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+    Response::from_data(body)
+        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
 }
 
 fn not_found() -> Response<Cursor<Vec<u8>>> {
@@ -185,10 +202,19 @@ fn format_events(events: &[GameEvent]) -> String {
             GameEvent::EntityDestroyed { entity_id } => {
                 format!(r#"{{"EntityDestroyed":{{"entity_id":{entity_id}}}}}"#)
             }
-            GameEvent::ComponentUpdated { entity_id, type_name, json_data } => {
-                format!(r#"{{"ComponentUpdated":{{"entity_id":{entity_id},"type_name":"{type_name}","json_data":{json_data}}}}}"#)
+            GameEvent::ComponentUpdated {
+                entity_id,
+                type_name,
+                json_data,
+            } => {
+                format!(
+                    r#"{{"ComponentUpdated":{{"entity_id":{entity_id},"type_name":"{type_name}","json_data":{json_data}}}}}"#
+                )
             }
-            GameEvent::CustomEvent { cmd_type, json_data } => {
+            GameEvent::CustomEvent {
+                cmd_type,
+                json_data,
+            } => {
                 format!(r#"{{"CustomEvent":{{"cmd_type":"{cmd_type}","json_data":{json_data}}}}}"#)
             }
         };

@@ -1,2 +1,4 @@
 [alias]
 blitz = "run --manifest-path crates/ui-blitz/Cargo.toml"
+xtask = "run --package xtask --"
+editor = "run --package xtask -- editor"

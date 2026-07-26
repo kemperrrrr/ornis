@@ -9,6 +9,7 @@ members = [
     "crates/render",
     "crates/materialx",
     "crates/wasm",
+    "xtask",
 ]
 exclude = ["crates/ui-blitz"]
 
