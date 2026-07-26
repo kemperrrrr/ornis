@@ -1,5 +1,5 @@
         // Ornis Engine — WebGPU WASM viewport
-        // Build: wasm-pack build crates/wasm --target web --out-dir ../../crates/ui/assets/editor/pkg
+        // Build: wasm-pack build crates/wasm --target web --out-dir editor/pkg
         import init, { start_renderer } from './pkg/ornis_wasm.js';
 
         const canvasEl = document.getElementById('bevy');

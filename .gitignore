@@ -16,5 +16,5 @@ bevy_editor_mockup/
 /diff_report.json
 /editor_test.html
 .hermes-tmp.*
-crates/ui/assets/editor/editor_test.html
+editor_test.html
 *.log
