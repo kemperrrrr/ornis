@@ -6,6 +6,12 @@ use quick_xml::events::{BytesStart, Event};
 
 pub struct MaterialXParser;
 
+impl Default for MaterialXParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MaterialXParser {
     pub fn new() -> Self {
         Self
@@ -98,12 +104,11 @@ impl MaterialXParser {
                     | b"generalized_schlick_edf"
                     | b"anisotropic_vdf"
                     | b"surface" => {
-                        if in_nodegraph {
-                            if let Some(node) = current_node.take() {
-                                if let Some(graph) = &mut current_nodegraph {
-                                    graph.nodes.push(node);
-                                }
-                            }
+                        if in_nodegraph
+                            && let Some(node) = current_node.take()
+                            && let Some(graph) = &mut current_nodegraph
+                        {
+                            graph.nodes.push(node);
                         }
                     }
                     _ => {}

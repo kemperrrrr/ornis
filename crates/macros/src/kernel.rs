@@ -50,9 +50,10 @@ impl KernelValidator {
 
     fn check_params(&mut self, inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>) {
         for arg in inputs {
-            if let FnArg::Typed(pat_ty) = arg {
-                if is_forbidden_type(&pat_ty.ty) {
-                    self.errors.push(syn::Error::new_spanned(
+            if let FnArg::Typed(pat_ty) = arg
+                && is_forbidden_type(&pat_ty.ty)
+            {
+                self.errors.push(syn::Error::new_spanned(
                         &pat_ty.ty,
                         format!(
                             "type `{}` is not allowed in GPU kernel `{}`; use f32, i32, u32, or glam vectors instead",
@@ -60,23 +61,22 @@ impl KernelValidator {
                             self.fn_name
                         ),
                     ));
-                }
             }
         }
     }
 
     fn check_return_type(&mut self, output: &syn::ReturnType) {
-        if let syn::ReturnType::Type(_, ty) = output {
-            if is_forbidden_type(ty) {
-                self.errors.push(syn::Error::new_spanned(
-                    ty,
-                    format!(
-                        "return type `{}` is not allowed in GPU kernel `{}`",
-                        quote!(#ty),
-                        self.fn_name
-                    ),
-                ));
-            }
+        if let syn::ReturnType::Type(_, ty) = output
+            && is_forbidden_type(ty)
+        {
+            self.errors.push(syn::Error::new_spanned(
+                ty,
+                format!(
+                    "return type `{}` is not allowed in GPU kernel `{}`",
+                    quote!(#ty),
+                    self.fn_name
+                ),
+            ));
         }
     }
 }

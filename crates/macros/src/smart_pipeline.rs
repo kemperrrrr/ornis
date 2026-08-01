@@ -42,6 +42,7 @@ struct FunctionAnalysis {
     safety_issues: Vec<String>,
 }
 
+#[derive(Default)]
 struct SmartPipelineAnalyzer {
     store_param: Option<Ident>,
     dt_param: Option<Ident>,
@@ -58,51 +59,22 @@ struct SmartPipelineAnalyzer {
     local_vars: Vec<Ident>,
 }
 
-impl Default for SmartPipelineAnalyzer {
-    fn default() -> Self {
-        Self {
-            store_param: None,
-            dt_param: None,
-            lanes: Vec::new(),
-            loops: Vec::new(),
-            captured_mut_vars: Vec::new(),
-            safety_issues: Vec::new(),
-            in_closure: false,
-            captured_vars: Vec::new(),
-            current_loop_vars: Vec::new(),
-            in_closure_body: false,
-            in_loop_body: false,
-            has_captured_mut: false,
-            local_vars: Vec::new(),
-        }
-    }
-}
-
 impl Visit<'_> for SmartPipelineAnalyzer {
     fn visit_item_fn(&mut self, node: &ItemFn) {
         for arg in &node.sig.inputs {
-            if let FnArg::Typed(PatType { pat, ty, .. }) = arg {
-                if let Pat::Ident(PatIdent { ident, .. }) = &**pat {
-                    if let Type::Reference(TypeReference { elem, .. }) = &**ty {
-                        if let Type::Path(TypePath { path, .. }) = &**elem {
-                            if path
-                                .segments
-                                .last()
-                                .map(|s| s.ident == "SmartStore")
-                                .unwrap_or(false)
-                            {
-                                self.store_param = Some(ident.clone());
-                            } else if path
-                                .segments
-                                .last()
-                                .map(|s| s.ident == "f32")
-                                .unwrap_or(false)
-                            {
-                                self.dt_param = Some(ident.clone());
-                            }
-                        }
-                    } else if let Type::Path(TypePath { path, .. }) = &**ty {
+            if let FnArg::Typed(PatType { pat, ty, .. }) = arg
+                && let Pat::Ident(PatIdent { ident, .. }) = &**pat
+            {
+                if let Type::Reference(TypeReference { elem, .. }) = &**ty {
+                    if let Type::Path(TypePath { path, .. }) = &**elem {
                         if path
+                            .segments
+                            .last()
+                            .map(|s| s.ident == "SmartStore")
+                            .unwrap_or(false)
+                        {
+                            self.store_param = Some(ident.clone());
+                        } else if path
                             .segments
                             .last()
                             .map(|s| s.ident == "f32")
@@ -111,6 +83,14 @@ impl Visit<'_> for SmartPipelineAnalyzer {
                             self.dt_param = Some(ident.clone());
                         }
                     }
+                } else if let Type::Path(TypePath { path, .. }) = &**ty
+                    && path
+                        .segments
+                        .last()
+                        .map(|s| s.ident == "f32")
+                        .unwrap_or(false)
+                {
+                    self.dt_param = Some(ident.clone());
                 }
             }
         }
@@ -118,45 +98,43 @@ impl Visit<'_> for SmartPipelineAnalyzer {
     }
 
     fn visit_expr_method_call(&mut self, node: &ExprMethodCall) {
-        if let Expr::Path(expr_path) = &*node.receiver {
-            if expr_path.path.segments.len() == 1 {
-                let store_ident = &expr_path.path.segments[0].ident;
-                let method_name = &node.method;
+        if let Expr::Path(expr_path) = &*node.receiver
+            && expr_path.path.segments.len() == 1
+        {
+            let store_ident = &expr_path.path.segments[0].ident;
+            let method_name = &node.method;
 
-                if method_name == "read_lane" || method_name == "write_lane" {
-                    // Parse turbofish generic argument
-                    if let syn::Expr::Path(type_path) = node.args.first().unwrap() {
-                        if let Some(segment) = type_path.path.segments.first() {
-                            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                                if let Some(syn::GenericArgument::Type(ty)) = args.args.first() {
-                                    let lane_type = ty.clone();
-                                    let is_mutable = method_name == "write_lane";
-                                    let type_str = lane_type.to_token_stream().to_string();
-                                    let var_name = format_ident!(
-                                        "_lane_{}",
-                                        type_str
-                                            .replace("::", "_")
-                                            .replace("<", "_")
-                                            .replace(">", "")
-                                            .replace(", ", "_")
-                                            .replace(" ", "")
-                                    );
+            if method_name == "read_lane" || method_name == "write_lane" {
+                // Parse turbofish generic argument
+                if let syn::Expr::Path(type_path) = node.args.first().unwrap()
+                    && let Some(segment) = type_path.path.segments.first()
+                    && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(syn::GenericArgument::Type(ty)) = args.args.first()
+                {
+                    let lane_type = ty.clone();
+                    let is_mutable = method_name == "write_lane";
+                    let type_str = lane_type.to_token_stream().to_string();
+                    let var_name = format_ident!(
+                        "_lane_{}",
+                        type_str
+                            .replace("::", "_")
+                            .replace("<", "_")
+                            .replace(">", "")
+                            .replace(", ", "_")
+                            .replace(" ", "")
+                    );
 
-                                    self.lanes.push(LaneAccess {
-                                        store_ident: store_ident.clone(),
-                                        lane_type,
-                                        is_mutable,
-                                        var_name: var_name.clone(),
-                                        method: if method_name == "read_lane" {
-                                            LaneMethod::Read
-                                        } else {
-                                            LaneMethod::Write
-                                        },
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    self.lanes.push(LaneAccess {
+                        store_ident: store_ident.clone(),
+                        lane_type,
+                        is_mutable,
+                        var_name: var_name.clone(),
+                        method: if method_name == "read_lane" {
+                            LaneMethod::Read
+                        } else {
+                            LaneMethod::Write
+                        },
+                    });
                 }
             }
         }
@@ -271,38 +249,35 @@ impl Visit<'_> for SmartPipelineAnalyzer {
     }
 
     fn visit_expr_assign(&mut self, node: &syn::ExprAssign) {
-        if self.in_closure_body || self.in_loop_body {
-            if let Expr::Path(expr_path) = &*node.left {
-                if let Some(ident) = expr_path.path.get_ident() {
-                    // Check if it's a non-local variable (potential capture)
-                    if !self.local_vars.contains(ident) && !self.current_loop_vars.contains(ident) {
-                        self.captured_mut_vars.push(ident.clone());
-                        self.has_captured_mut = true;
-                        self.safety_issues.push(format!(
+        if (self.in_closure_body || self.in_loop_body)
+            && let Expr::Path(expr_path) = &*node.left
+            && let Some(ident) = expr_path.path.get_ident()
+        {
+            // Check if it's a non-local variable (potential capture)
+            if !self.local_vars.contains(ident) && !self.current_loop_vars.contains(ident) {
+                self.captured_mut_vars.push(ident.clone());
+                self.has_captured_mut = true;
+                self.safety_issues.push(format!(
                             "Variable `{}` assigned inside closure/loop but not declared locally - likely a captured mutable variable, prevents parallelization",
                             ident
                         ));
-                    }
-                }
             }
         }
         visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_index(&mut self, node: &ExprIndex) {
-        if let Expr::Path(expr_path) = &*node.expr {
-            if let Some(ident) = expr_path.path.get_ident() {
-                if self.current_loop_vars.contains(ident) {
-                    if let Expr::Binary(binary) = &*node.index {
-                        if matches!(binary.op, syn::BinOp::Add(_) | syn::BinOp::Sub(_)) {
-                            self.safety_issues.push(format!(
-                                "Cross-iteration dependency detected: `{}[{}]` - prevents parallelization",
-                                ident, binary.to_token_stream()
-                            ));
-                        }
-                    }
-                }
-            }
+        if let Expr::Path(expr_path) = &*node.expr
+            && let Some(ident) = expr_path.path.get_ident()
+            && self.current_loop_vars.contains(ident)
+            && let Expr::Binary(binary) = &*node.index
+            && matches!(binary.op, syn::BinOp::Add(_) | syn::BinOp::Sub(_))
+        {
+            self.safety_issues.push(format!(
+                "Cross-iteration dependency detected: `{}[{}]` - prevents parallelization",
+                ident,
+                binary.to_token_stream()
+            ));
         }
         visit::visit_expr_index(self, node);
     }
@@ -311,14 +286,13 @@ impl Visit<'_> for SmartPipelineAnalyzer {
 impl SmartPipelineAnalyzer {
     fn extract_zip_lanes(&mut self, expr: &Expr, lanes: &mut Vec<LaneAccess>) {
         if let Expr::MethodCall(mc) = expr {
-            if mc.method == "iter" || mc.method == "iter_mut" {
-                if let Expr::Path(p) = &*mc.receiver {
-                    if let Some(ident) = p.path.get_ident() {
-                        for lane in &self.lanes {
-                            if lane.var_name == *ident || lane.store_ident == *ident {
-                                lanes.push(lane.clone());
-                            }
-                        }
+            if (mc.method == "iter" || mc.method == "iter_mut")
+                && let Expr::Path(p) = &*mc.receiver
+                && let Some(ident) = p.path.get_ident()
+            {
+                for lane in &self.lanes {
+                    if lane.var_name == *ident || lane.store_ident == *ident {
+                        lanes.push(lane.clone());
                     }
                 }
             }
@@ -496,7 +470,7 @@ fn generate_safety_comment(analysis: &LoopAnalysis) -> TokenStream2 {
         comments.push(lane_comment);
     }
 
-    let comment_str = comments.join("\n    // ");
+    let _comment_str = comments.join("\n    // ");
     quote! {
         #[allow(unused_unsafe)]
         unsafe {

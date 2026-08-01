@@ -54,14 +54,12 @@ fn extract_lane_type(ty: &Type) -> Type {
     match ty {
         Type::Path(TypePath { path, .. }) => {
             let mut path = path.clone();
-            if let Some(last) = path.segments.last_mut() {
-                if last.ident == "Option" {
-                    if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return inner.clone();
-                        }
-                    }
-                }
+            if let Some(last) = path.segments.last_mut()
+                && last.ident == "Option"
+                && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+            {
+                return inner.clone();
             }
             ty.clone()
         }
@@ -270,7 +268,7 @@ fn generate_pack_get_mut(
 }
 
 fn generate_pack_mut_struct(
-    struct_name: &Ident,
+    _struct_name: &Ident,
     fields: &[FieldInfo],
     ty_generics: &syn::TypeGenerics,
     where_clause: Option<&WhereClause>,

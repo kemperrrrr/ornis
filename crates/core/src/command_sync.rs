@@ -8,7 +8,6 @@
 use crate::smart_store::SmartStore;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 /// Data residency state for a lane
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

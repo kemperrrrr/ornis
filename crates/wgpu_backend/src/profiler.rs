@@ -41,12 +41,11 @@ impl AutoProfiler {
 
     pub fn load_or_calibrate(device: &wgpu::Device, queue: &wgpu::Queue) -> ProfilerConfig {
         let path = Self::config_path();
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(cfg) = serde_json::from_str::<ProfilerConfig>(&content) {
-                    return cfg;
-                }
-            }
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(cfg) = serde_json::from_str::<ProfilerConfig>(&content)
+        {
+            return cfg;
         }
 
         let cfg = Self::calibrate(device, queue);
@@ -152,7 +151,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let mut cpass = cbe.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups((count as u32 + 63) / 64, 1, 1);
+            cpass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
         }
         queue.submit([cbe.finish()]);
         device
@@ -173,7 +172,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let mut cpass = cbe.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                 cpass.set_pipeline(&pipeline);
                 cpass.set_bind_group(0, &bind_group, &[]);
-                cpass.dispatch_workgroups((count as u32 + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
             }
             queue.submit([cbe.finish()]);
         }

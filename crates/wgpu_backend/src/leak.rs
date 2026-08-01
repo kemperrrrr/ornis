@@ -207,6 +207,11 @@ mod tests {
 
         let buf = dispatch.record(&ctx.device);
         ctx.queue.submit([buf]);
-        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
     }
 }

@@ -9,7 +9,7 @@
 //! std::process::Command without a shell.
 
 use std::path::PathBuf;
-use std::process::{Command, exit};
+use std::process::{exit, Command};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -138,7 +138,10 @@ fn editor(args: &[String]) {
     }
 
     // ── 2. Run the engine with the remote editor ─────────────────────
-    eprintln!("xtask: cargo run --features editor-only (editor dir: {})", editor_dir.display());
+    eprintln!(
+        "xtask: cargo run --features editor-only (editor dir: {})",
+        editor_dir.display()
+    );
     run(
         Command::new("cargo")
             .arg("run")

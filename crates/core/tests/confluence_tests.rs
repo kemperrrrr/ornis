@@ -4,7 +4,6 @@
 
 use ornis_core::SmartStore;
 use ornis_macros::for_each_entity;
-use rayon::iter::IntoParallelRefMutIterator;
 
 // ===== Test Types =====
 

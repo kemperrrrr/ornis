@@ -255,7 +255,7 @@ mod tests {
             let mut s = 0.0;
             for v in lane.iter_mut() {
                 s += *v;
-                *v = *v * 2.0;
+                *v *= 2.0;
             }
             s
         });

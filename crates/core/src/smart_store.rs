@@ -154,13 +154,12 @@ impl SmartStore {
     pub fn insert_cold<T: 'static + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_cold_lane::<T>();
         let tid = TypeId::of::<T>();
-        if let Some(lane) = self.cold_lanes.get(&tid) {
-            if let Some(store) = lane
+        if let Some(lane) = self.cold_lanes.get(&tid)
+            && let Some(store) = lane
                 .as_any()
                 .downcast_ref::<RwLock<ColdComponentStore<T>>>()
-            {
-                store.write().unwrap().insert(entity, component);
-            }
+        {
+            store.write().unwrap().insert(entity, component);
         }
     }
 
@@ -197,10 +196,10 @@ impl SmartStore {
     }
 
     pub fn destroy_entity(&self, entity: Entity) {
-        for (_, lane) in self.lanes.iter() {
+        for lane in self.lanes.values() {
             lane.remove_entity(entity);
         }
-        for (_, lane) in self.cold_lanes.iter() {
+        for lane in self.cold_lanes.values() {
             lane.remove_entity(entity);
         }
         self.allocator.write().unwrap().deallocate(entity);

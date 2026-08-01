@@ -153,8 +153,8 @@ fn transmission_color_to_extinction(
 
 #[kernel]
 fn subsurface_brdf(
-    NoV: f32,
-    NoL: f32,
+    _NoV: f32,
+    _NoL: f32,
     distance: f32,
     radius: glam::Vec3,
     anisotropy: f32,
@@ -229,11 +229,10 @@ fn thin_film_modulation(
     let lambda = glam::Vec3::new(650.0, 550.0, 450.0);
     let phase = 4.0 * PI * film_ior * thickness_nm * cos_theta_film / lambda;
     let r0 = ((film_ior - ior_outside) / (film_ior + ior_outside)).powf(2.0);
-    let modulation = glam::Vec3::splat(1.0)
-        + glam::Vec3::splat(2.0 * r0)
-            * glam::Vec3::new(phase.x.cos(), phase.y.cos(), phase.z.cos())
-            / glam::Vec3::splat(1.0 - r0 * r0);
-    modulation
+
+    glam::Vec3::splat(1.0)
+        + glam::Vec3::splat(2.0 * r0) * glam::Vec3::new(phase.x.cos(), phase.y.cos(), phase.z.cos())
+            / glam::Vec3::splat(1.0 - r0 * r0)
 }
 
 #[kernel]

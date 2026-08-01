@@ -17,15 +17,15 @@ use crate::ipc::{GameEvent, UiCommand};
 ///      points at the workspace root)
 fn assets_root() -> PathBuf {
     let mut args = std::env::args().skip_while(|a| a != "--editor-dir");
-    if args.next().is_some() {
-        if let Some(dir) = args.next() {
-            return PathBuf::from(dir);
-        }
+    if args.next().is_some()
+        && let Some(dir) = args.next()
+    {
+        return PathBuf::from(dir);
     }
-    if let Ok(dir) = std::env::var("ORNIS_EDITOR_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("ORNIS_EDITOR_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor")
 }
@@ -128,16 +128,16 @@ fn serve(
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
                 let cmd = serde_json::from_str::<serde_json::Value>(&body).ok();
-                if let Some(cmd) = cmd {
-                    if let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str()) {
-                        let json_data = cmd.get("data").map(|v| v.to_string()).unwrap_or_default();
-                        game_tx
-                            .send(UiCommand::Custom {
-                                cmd_type: cmd_type.to_string(),
-                                json_data,
-                            })
-                            .ok();
-                    }
+                if let Some(cmd) = cmd
+                    && let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str())
+                {
+                    let json_data = cmd.get("data").map(|v| v.to_string()).unwrap_or_default();
+                    game_tx
+                        .send(UiCommand::Custom {
+                            cmd_type: cmd_type.to_string(),
+                            json_data,
+                        })
+                        .ok();
                 }
                 json_response("{}")
             }

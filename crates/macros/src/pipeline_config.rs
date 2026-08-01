@@ -265,20 +265,20 @@ impl TypeAnalyzer {
             }
             self.profile.size_estimate = self.profile.size_estimate.max(size);
 
-            if let Some(last_seg) = path.segments.last() {
-                if let PathArguments::AngleBracketed(args) = &last_seg.arguments {
-                    for arg in &args.args {
-                        if let GenericArgument::Type(ty) = arg {
-                            self.visit_type(ty);
-                        }
+            if let Some(last_seg) = path.segments.last()
+                && let PathArguments::AngleBracketed(args) = &last_seg.arguments
+            {
+                for arg in &args.args {
+                    if let GenericArgument::Type(ty) = arg {
+                        self.visit_type(ty);
                     }
                 }
             }
 
-            if let Some(ident) = path.get_ident() {
-                if ident == &self.type_name {
-                    self.profile.recursive_type = true;
-                }
+            if let Some(ident) = path.get_ident()
+                && ident == &self.type_name
+            {
+                self.profile.recursive_type = true;
             }
         }
     }
@@ -376,29 +376,24 @@ impl<'ast> Visit<'ast> for TypeAnalyzer {
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let Some(ref mut profile) = self.current_method {
-            if let Expr::Path(path) = &*node.func {
-                if let Some(ident) = path.path.get_ident() {
-                    if ident == &self.type_name {
-                        profile.recursive_call_count += 1;
-                    }
-                }
-            }
+        if let Some(ref mut profile) = self.current_method
+            && let Expr::Path(path) = &*node.func
+            && let Some(ident) = path.path.get_ident()
+            && ident == &self.type_name
+        {
+            profile.recursive_call_count += 1;
         }
         visit::visit_expr_call(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if let Some(ref mut profile) = self.current_method {
-            if let Expr::Path(path) = &*node.receiver {
-                if let Some(ident) = path.path.get_ident() {
-                    if ident == "self" || ident == &self.type_name {
-                        if node.method == self.type_name.to_string() {
-                            profile.recursive_call_count += 1;
-                        }
-                    }
-                }
-            }
+        if let Some(ref mut profile) = self.current_method
+            && let Expr::Path(path) = &*node.receiver
+            && let Some(ident) = path.path.get_ident()
+            && (ident == "self" || ident == &self.type_name)
+            && node.method == self.type_name
+        {
+            profile.recursive_call_count += 1;
         }
         visit::visit_expr_method_call(self, node);
     }
@@ -444,18 +439,17 @@ fn check_send_sync_bounds(generics: &Generics, type_name: &Ident) -> (bool, bool
 
     if let Some(wc) = &generics.where_clause {
         for predicate in &wc.predicates {
-            if let WherePredicate::Type(wt) = predicate {
-                if let Type::Path(tp) = &wt.bounded_ty {
-                    if tp.path.is_ident(type_name) {
-                        for bound in &wt.bounds {
-                            if let TypeParamBound::Trait(trait_bound) = bound {
-                                if trait_bound.path.is_ident("Send") {
-                                    has_send = true;
-                                }
-                                if trait_bound.path.is_ident("Sync") {
-                                    has_sync = true;
-                                }
-                            }
+            if let WherePredicate::Type(wt) = predicate
+                && let Type::Path(tp) = &wt.bounded_ty
+                && tp.path.is_ident(type_name)
+            {
+                for bound in &wt.bounds {
+                    if let TypeParamBound::Trait(trait_bound) = bound {
+                        if trait_bound.path.is_ident("Send") {
+                            has_send = true;
+                        }
+                        if trait_bound.path.is_ident("Sync") {
+                            has_sync = true;
                         }
                     }
                 }
@@ -602,11 +596,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let mut analyzer = TypeAnalyzer::new(&input);
 
-    if let Data::Struct(DataStruct { fields, .. }) = &input.data {
-        if let Fields::Named(FieldsNamed { named, .. }) = fields {
-            for field in named {
-                analyzer.visit_type(&field.ty);
-            }
+    if let Data::Struct(DataStruct { fields, .. }) = &input.data
+        && let Fields::Named(FieldsNamed { named, .. }) = fields
+    {
+        for field in named {
+            analyzer.visit_type(&field.ty);
         }
     }
 

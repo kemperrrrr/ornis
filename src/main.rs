@@ -49,7 +49,7 @@ fn main() {
 
 #[cfg(not(feature = "editor-only"))]
 mod native {
-    pub use crossbeam_channel::{Receiver, Sender, unbounded};
+    pub use crossbeam_channel::{Receiver, Sender};
     pub use glam::{Mat4, Vec3};
     pub use winit::application::ApplicationHandler;
     pub use winit::dpi::PhysicalSize;
@@ -244,11 +244,12 @@ impl GameApp {
 
     fn process_remote_commands(ctx: &mut GameContext) {
         while let Ok(cmd) = ctx.remote_cmd_rx.try_recv() {
-            match cmd {
-                UiCommand::Custom {
-                    cmd_type,
-                    json_data: _,
-                } => match cmd_type.as_str() {
+            if let UiCommand::Custom {
+                cmd_type,
+                json_data: _,
+            } = cmd
+            {
+                match cmd_type.as_str() {
                     "create_entity" => {
                         ctx.entity_count += 1;
                         let id = ctx.entity_count;
@@ -268,8 +269,7 @@ impl GameApp {
                             .ok();
                     }
                     _ => {}
-                },
-                _ => {}
+                }
             }
         }
     }

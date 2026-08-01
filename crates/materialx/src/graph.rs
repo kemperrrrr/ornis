@@ -1,6 +1,6 @@
 //! Graph evaluation and conversion to OpenPBRMaterial
 
-use crate::nodes::{Input, MaterialXDocument, Node, NodeDef, NodeGraph};
+use crate::nodes::{MaterialXDocument, Node, NodeDef, NodeGraph};
 use ornis_render::OpenPBRMaterial;
 use quick_xml::Error as XmlError;
 use quick_xml::events::attributes::AttrError;
@@ -950,13 +950,23 @@ pub fn load_materialx_file<P: AsRef<std::path::Path>>(
     materialx_to_openpbr(&content)
 }
 
+pub fn parse_materialx(content: &str) -> Result<OpenPBRMaterial, MaterialXError> {
+    let parser = crate::parser::MaterialXParser::new();
+    let document = parser.parse(content)?;
+    let converter = MaterialXConverter::new(document);
+    converter
+        .to_openpbr()
+        .map_err(|e| MaterialXError::Codegen(Box::new(e)))
+}
+
+pub struct OpenPBRGraph;
+
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_simple_materialx() {
-        let mtlx = r#"
+        let _mtlx = r#"
 <?xml version="1.0"?>
 <materialx version="1.39">
   <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
@@ -988,14 +998,3 @@ mod tests {
         // assert_eq!(mat.specular_params[2], 1.5);
     }
 }
-
-pub fn parse_materialx(content: &str) -> Result<OpenPBRMaterial, MaterialXError> {
-    let parser = crate::parser::MaterialXParser::new();
-    let document = parser.parse(content)?;
-    let converter = MaterialXConverter::new(document);
-    converter
-        .to_openpbr()
-        .map_err(|e| MaterialXError::Codegen(Box::new(e)))
-}
-
-pub struct OpenPBRGraph;

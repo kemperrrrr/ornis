@@ -248,27 +248,22 @@ impl WgslGen {
 
         // Handle powi specially
         if method == "powi" {
-            if let Some(arg) = m.args.first() {
-                if let syn::Expr::Lit(lit) = arg {
-                    if let syn::Lit::Int(int_lit) = &lit.lit {
-                        let p = int_lit.base10_parse::<i32>().unwrap_or(0);
-                        if p == 2 {
-                            return format!("{} * {}", receiver, receiver);
-                        } else if p == 3 {
-                            return format!("{} * {} * {}", receiver, receiver, receiver);
-                        } else if p == 4 {
-                            return format!(
-                                "{} * {} * {} * {}",
-                                receiver, receiver, receiver, receiver
-                            );
-                        } else if p > 0 {
-                            // Generate repeated multiplication for small positive ints
-                            let parts: Vec<String> = std::iter::repeat(receiver.clone())
-                                .take(p as usize)
-                                .collect();
-                            return parts.join(" * ");
-                        }
-                    }
+            if let Some(arg) = m.args.first()
+                && let syn::Expr::Lit(lit) = arg
+                && let syn::Lit::Int(int_lit) = &lit.lit
+            {
+                let p = int_lit.base10_parse::<i32>().unwrap_or(0);
+                if p == 2 {
+                    return format!("{} * {}", receiver, receiver);
+                } else if p == 3 {
+                    return format!("{} * {} * {}", receiver, receiver, receiver);
+                } else if p == 4 {
+                    return format!("{} * {} * {} * {}", receiver, receiver, receiver, receiver);
+                } else if p > 0 {
+                    // Generate repeated multiplication for small positive ints
+                    let parts: Vec<String> =
+                        std::iter::repeat_n(receiver.clone(), p as usize).collect();
+                    return parts.join(" * ");
                 }
             }
             return format!("pow({}, {})", receiver, args[1..].join(", "));
@@ -356,29 +351,29 @@ impl WgslGen {
         match s {
             Stmt::Local(local) => {
                 // Handle `let x = if/else { .. } else { .. };` — wrap if/else into var+if
-                if let Some(init) = &local.init {
-                    if let syn::Expr::If(if_expr) = init.expr.as_ref() {
-                        let pat = Self::pat(&local.pat);
-                        let cond = Self::expr(&if_expr.cond);
-                        let then_val = Self::last_expr_in_block(&if_expr.then_branch);
-                        let else_val = if_expr
-                            .else_branch
-                            .as_ref()
-                            .and_then(|(_, else_expr)| {
-                                if let syn::Expr::Block(block) = else_expr.as_ref() {
-                                    Some(Self::last_expr_in_block(&block.block))
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or_default();
-                        // Convert: let x = if c { a } else { b };
-                        // To WGSL: var x = b; if (c) { x = a; }
-                        return format!(
-                            "var {} = {}; if ({}) {{ {} = {}; }} ",
-                            pat, else_val, cond, pat, then_val
-                        );
-                    }
+                if let Some(init) = &local.init
+                    && let syn::Expr::If(if_expr) = init.expr.as_ref()
+                {
+                    let pat = Self::pat(&local.pat);
+                    let cond = Self::expr(&if_expr.cond);
+                    let then_val = Self::last_expr_in_block(&if_expr.then_branch);
+                    let else_val = if_expr
+                        .else_branch
+                        .as_ref()
+                        .and_then(|(_, else_expr)| {
+                            if let syn::Expr::Block(block) = else_expr.as_ref() {
+                                Some(Self::last_expr_in_block(&block.block))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    // Convert: let x = if c { a } else { b };
+                    // To WGSL: var x = b; if (c) { x = a; }
+                    return format!(
+                        "var {} = {}; if ({}) {{ {} = {}; }} ",
+                        pat, else_val, cond, pat, then_val
+                    );
                 }
                 let pat = Self::pat(&local.pat);
                 let init = local.init.as_ref().map(|init| Self::expr(&init.expr));

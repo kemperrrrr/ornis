@@ -2,19 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MaterialXDocument {
     pub nodedefs: Vec<NodeDef>,
     pub nodegraphs: Vec<NodeGraph>,
-}
-
-impl Default for MaterialXDocument {
-    fn default() -> Self {
-        Self {
-            nodedefs: Vec::new(),
-            nodegraphs: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

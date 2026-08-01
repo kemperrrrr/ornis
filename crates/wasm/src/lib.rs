@@ -52,15 +52,13 @@ async fn load_scene_ron() -> String {
                 Ok(r) => r,
                 Err(_) => return FALLBACK_SCENE_RON.to_string(),
             };
-            if resp.ok() {
-                if let Ok(text_promise) = resp.text() {
-                    if let Ok(text) = wasm_bindgen_futures::JsFuture::from(text_promise).await {
-                        if let Some(s) = text.as_string() {
-                            console::log_1(&"[ornis-wasm] scene.ron fetched from server".into());
-                            return s;
-                        }
-                    }
-                }
+            if resp.ok()
+                && let Ok(text_promise) = resp.text()
+                && let Ok(text) = wasm_bindgen_futures::JsFuture::from(text_promise).await
+                && let Some(s) = text.as_string()
+            {
+                console::log_1(&"[ornis-wasm] scene.ron fetched from server".into());
+                return s;
             }
         }
     }
@@ -380,7 +378,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
                         )
                         .into(),
                     );
-                } else if frame_count % 600 == 0 {
+                } else if frame_count.is_multiple_of(600) {
                     console::log_1(&format!("[ornis-wasm] frame {} rendered", frame_count).into());
                 }
             }

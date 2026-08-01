@@ -42,11 +42,11 @@ impl<T> ComponentStore<T> {
 
     pub fn insert(&mut self, entity: Entity, component: T) {
         let id = entity.id() as usize;
-        if self.bitset.contains(id) {
-            if let Some(&dense_idx) = self.sparse.get(id) {
-                self.data[dense_idx] = component;
-                return;
-            }
+        if self.bitset.contains(id)
+            && let Some(&dense_idx) = self.sparse.get(id)
+        {
+            self.data[dense_idx] = component;
+            return;
         }
         let dense_idx = self.data.len();
         self.data.push(component);
