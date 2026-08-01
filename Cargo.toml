@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/macros",
-    "crates/ui",
     "crates/wgpu_backend",
     "crates/audio",
     "crates/render",
@@ -11,7 +10,6 @@ members = [
     "crates/wasm",
     "xtask",
 ]
-exclude = ["crates/ui-blitz"]
 
 [workspace.lints.clippy]
 # Базовый уровень: все стандартные lint'ы как предупреждения.
@@ -37,23 +35,17 @@ license.workspace = true
 
 [dependencies]
 ornis-core = { path = "crates/core" }
-ornis-ui = { path = "crates/ui", default-features = false }
 ornis-render = { path = "crates/render" }
 wgpu = "29"
 winit = "0.30"
-vello = { version = "0.9", features = ["wgpu"] }
 pollster = "0.3"
 tiny_http = "0.12"
 serde_json = "1"
 crossbeam-channel = "0.5"
 glam = "0.30"
 
-[patch.crates-io]
-boa_engine = { path = "forks/boa_engine" }
-
 [features]
-default = ["engine-ours"]
-engine-ours = ["ornis-ui/js-engine"]
+default = []
 editor-only = []
 
 [lints]

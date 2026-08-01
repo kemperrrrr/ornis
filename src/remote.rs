@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender};
-use ornis_ui::ipc::{GameEvent, UiCommand};
 use tiny_http::{Header, Response, Server};
+
+use crate::ipc::{GameEvent, UiCommand};
 
 /// Editor frontend root. Resolution order:
 ///   1. `--editor-dir <path>` CLI argument

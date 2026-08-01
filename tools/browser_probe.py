@@ -4,11 +4,11 @@
 Loads the real editor HTML in Chromium, walks the DOM in pre-order (skipping
 the same tags the Rust engine skips), and dumps a `browser_layout.json` in the
 exact format produced by `LayoutTree::to_json` (see
-`crates/ui/examples/serialize_layout.rs`). `diff.py` then compares the two.
+WASM canvas / headless screenshot). `diff.py` then compares the two.
 
 Usage:
     python3 tools/browser_probe.py [html_path] [width] [height]
-    # defaults: crates/ui/assets/editor/index.html  1280 800
+    # defaults: editor/index.html  1280 800
     # -> writes browser_layout.json next to CWD
 
 Requires:  pip install playwright && playwright install chromium
@@ -117,7 +117,7 @@ def collect(root, out):
 
 
 def main():
-    html_path = sys.argv[1] if len(sys.argv) > 1 else "crates/ui/assets/editor/index.html"
+    html_path = sys.argv[1] if len(sys.argv) > 1 else "editor/index.html"
     width = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
     height = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 

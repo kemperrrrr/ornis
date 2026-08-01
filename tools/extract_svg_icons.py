@@ -4,7 +4,7 @@ icons/<name>.svg (root <svg id="icon">) and replace them with
 <use href="icons/<name>.svg#icon"/> references."""
 import re, hashlib, os
 
-HTML = 'crates/ui/assets/editor/index.html'
+HTML = 'editor/index.html'
 html = open(HTML).read()
 svgs = list(re.finditer(r'<svg\b.*?</svg>', html, re.S))
 
@@ -45,7 +45,7 @@ NAMES = {
 missing = [h for h in order if h not in NAMES]
 assert not missing, f"unnamed groups: {missing}"
 
-os.makedirs('crates/ui/assets/editor/icons', exist_ok=True)
+os.makedirs('editor/icons', exist_ok=True)
 for h in order:
     s = svgs[groups[h][0]].group(0)
     vb = re.search(r'viewBox="([^"]*)"', s).group(1)
@@ -53,7 +53,7 @@ for h in order:
     inner = re.sub(r'\s*\n\s*', ' ', inner)
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" id="icon" viewBox="{vb}">\n'
            f'  {inner}\n</svg>\n')
-    open(f'crates/ui/assets/editor/icons/{NAMES[h]}.svg', 'w').write(svg)
+    open(f'editor/icons/{NAMES[h]}.svg', 'w').write(svg)
 
 out, last = [], 0
 for i, m in enumerate(svgs):
