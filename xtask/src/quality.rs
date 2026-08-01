@@ -138,7 +138,7 @@ pub fn quality(args: &[String]) {
             n,
             total,
             "coverage (llvm-cov)",
-            "cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html",
+            "cargo llvm-cov --workspace --html --output-dir target/llvm-cov",
             cmd(
                 &root,
                 "cargo",
@@ -147,7 +147,7 @@ pub fn quality(args: &[String]) {
                     "--workspace",
                     "--html",
                     "--output-dir",
-                    "target/llvm-cov/html",
+                    "target/llvm-cov",
                 ],
             ),
             false,

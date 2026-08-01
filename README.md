@@ -32,6 +32,34 @@ cargo xtask editor        # или: cargo editor
 запускает бинарь `ornis` в режиме `editor-only`, который поднимает
 HTTP-сервер на порту 3420 и раздаёт фронтенд из `editor/`.
 
+## Качество
+
+Единая точка входа — `cargo xtask quality`:
+
+```bash
+cargo xtask quality           # уровень 1: fmt, clippy -D warnings, test, audit, deny, outdated
+cargo xtask quality --full    # + покрытие (llvm-cov → target/llvm-cov/html) и bench compile-check
+cargo xtask quality --bench   # + полный прогон criterion-бенчмарков (долго)
+cargo xtask fuzz <target>     # фаззинг парсеров: scene_ron, materialx_parse (через +nightly)
+cargo xtask mutants           # мутационное тестирование ornis-core (cargo-mutants, долго)
+```
+
+- Каждая стадия печатает PASS/FAIL; команда не прерывается на первом
+  падении, в конце — сводная таблица, exit code по худшей стадии.
+- Отсутствующие инструменты (cargo-audit, cargo-deny, cargo-outdated,
+  cargo-llvm-cov, cargo-fuzz, cargo-mutants) — SKIP с подсказкой
+  `cargo install ... --locked`.
+- Property-тесты ядра (proptest): `crates/core/tests/property_tests.rs` —
+  входят в обычный `cargo test`.
+- Фаззинг: `fuzz/` — независимый cargo-fuzz крейт (не в workspace),
+  запуск `cargo +nightly fuzz run <target>` (rust-toolchain.toml пинит
+  stable, поэтому `+nightly` указывается явно).
+- CI: `.github/workflows/quality.yml` — три job (quality, wasm-check,
+  supply-chain) на push/PR в `master`.
+
+Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md)
+и [`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md).
+
 ## Структура репозитория
 
 | Путь | Назначение | Статус |

@@ -1,0 +1,74 @@
+name: Quality
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Уровень 1: fmt, clippy -D warnings, test --workspace.
+  # Зеркалит `cargo xtask quality` (без audit/deny — они в отдельном job).
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Системные зависимости для Linux-сборки:
+      # libasound2-dev — cpal (аудио), libudev-dev — gilrs/winit input,
+      # pkg-config — общий build-time поиск библиотек.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+  # Проверка wasm-таргета редактора.
+  wasm-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (wasm32)
+        run: cargo check -p ornis-wasm --target wasm32-unknown-unknown
+
+  # Supply-chain: уязвимости (audit) и политика зависимостей (deny).
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: cargo audit
+        run: cargo audit
