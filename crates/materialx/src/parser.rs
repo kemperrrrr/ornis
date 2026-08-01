@@ -67,11 +67,6 @@ impl MaterialXParser {
                             node.inputs.push(Input::from_bytes_start(e)?);
                         }
                     }
-                    b"output" => {
-                        if let Some(graph) = &mut current_nodegraph {
-                            graph.outputs.push(Output::from_bytes_start(e)?);
-                        }
-                    }
                     _ => {}
                 },
                 Ok(Event::End(ref e)) => match e.name().as_ref() {

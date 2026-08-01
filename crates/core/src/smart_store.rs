@@ -75,6 +75,8 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
     }
 }
 
+// reserved: read-гард для lock-free лент (экспериментальный feature "lock-free")
+#[allow(dead_code)]
 pub struct LockFreeReadGuard<'g, T> {
     store: &'g ComponentStore<T>,
     _guard: Guard,
@@ -130,6 +132,8 @@ impl SmartStore {
             .or_insert_with(|| Box::new(RwLock::new(ComponentStore::<T>::new())));
     }
 
+    // reserved: регистрация lock-free ленты (экспериментальный feature "lock-free")
+    #[allow(dead_code)]
     fn ensure_lock_free_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
@@ -324,12 +328,12 @@ mod tests {
         store.register_lock_free::<f32>();
 
         let e = store.create_entity();
-        store.insert::<f32>(e, 3.14);
+        store.insert::<f32>(e, 3.5);
 
         let val = store
             .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
             .unwrap();
-        assert_eq!(val, Some(3.14));
+        assert_eq!(val, Some(3.5));
     }
 
     #[test]

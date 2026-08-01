@@ -157,8 +157,8 @@ fn run_audio_thread(
 
 fn pan_sample(sample: f32, azimuth: f32) -> (f32, f32) {
     let angle = (azimuth + 1.0) * std::f32::consts::FRAC_PI_4;
-    let left = (angle.cos() * sample).max(-1.0).min(1.0);
-    let right = (angle.sin() * sample).max(-1.0).min(1.0);
+    let left = (angle.cos() * sample).clamp(-1.0, 1.0);
+    let right = (angle.sin() * sample).clamp(-1.0, 1.0);
     (left, right)
 }
 
@@ -167,7 +167,7 @@ fn distance_attenuation(distance: f32, rolloff: f32, reference: f32) -> f32 {
         return 1.0;
     }
     let atten = reference / (reference + rolloff * (distance - reference));
-    atten.max(0.0).min(1.0)
+    atten.clamp(0.0, 1.0)
 }
 
 fn mix(active_sounds: &mut Vec<MixInput>, output: &mut [f32], output_channels: u16) {
@@ -192,7 +192,7 @@ fn mix(active_sounds: &mut Vec<MixInput>, output: &mut [f32], output_channels: u
             };
             sound.cursor += 1;
 
-            let vol = sound.volume.max(0.0).min(1.0);
+            let vol = sound.volume.clamp(0.0, 1.0);
             let s = sample * vol;
 
             if let Some(sp) = sound.spatial {
@@ -209,8 +209,8 @@ fn mix(active_sounds: &mut Vec<MixInput>, output: &mut [f32], output_channels: u
             true
         });
 
-        left = left.max(-1.0).min(1.0);
-        right = right.max(-1.0).min(1.0);
+        left = left.clamp(-1.0, 1.0);
+        right = right.clamp(-1.0, 1.0);
         frame[0] = left;
         if output_channels > 1 {
             frame[1] = right;

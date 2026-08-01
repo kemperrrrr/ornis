@@ -882,6 +882,9 @@ impl Renderer3D {
         }
     }
 
+    // Внутренний конструктор прохода: 4 буфера + параметры surface —
+    // группировка в struct не улучшит читаемость вызова.
+    #[allow(clippy::too_many_arguments)]
     fn create_forward_pass(
         device: &wgpu::Device,
         camera_buffer: &wgpu::Buffer,

@@ -581,7 +581,10 @@ mod tests {
     fn test_pod_zeroable() {
         let _mat = OpenPBRMaterial::default();
         let _zeroed = OpenPBRMaterial::zeroed();
-        let _pod =
-            unsafe { std::mem::transmute::<_, OpenPBRMaterial>([0u8; OPENPBR_MATERIAL_SIZE]) };
+        let _pod = unsafe {
+            std::mem::transmute::<[u8; OPENPBR_MATERIAL_SIZE], OpenPBRMaterial>(
+                [0u8; OPENPBR_MATERIAL_SIZE],
+            )
+        };
     }
 }

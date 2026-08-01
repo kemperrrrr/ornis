@@ -158,10 +158,12 @@ impl Visit<'_> for SmartPipelineAnalyzer {
             }
         }
 
-        let mut body_analyzer = SmartPipelineAnalyzer::default();
-        body_analyzer.in_loop_body = true;
-        body_analyzer.current_loop_vars = self.current_loop_vars.clone();
-        body_analyzer.local_vars = self.local_vars.clone();
+        let mut body_analyzer = SmartPipelineAnalyzer {
+            in_loop_body: true,
+            current_loop_vars: self.current_loop_vars.clone(),
+            local_vars: self.local_vars.clone(),
+            ..Default::default()
+        };
         body_analyzer.visit_block(&node.body);
 
         let mut safety_issues = body_analyzer.safety_issues;

@@ -11,7 +11,7 @@ struct Position {
 #[test]
 fn test_simple_position_gpu() {
     assert_eq!(Position::lane_target(), TargetDiscriminant::Gpu);
-    assert!(Position::THRESHOLD > 0);
+    const { assert!(Position::THRESHOLD > 0) };
 }
 
 #[derive(PipelineConfig)]
