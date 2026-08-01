@@ -9,7 +9,6 @@ use syn::{
 #[derive(Clone)]
 struct FieldInfo {
     name: Ident,
-    ty: Type,
     lane_ty: Type,
     // Unique wrapper type for this field's lane
     wrapper_name: Ident,
@@ -19,8 +18,6 @@ struct FieldInfo {
 struct LaneInfo {
     wrapper_ty: Type,
     inner_ty: Type,
-    name: Ident,
-    field_name: Ident,
 }
 
 struct PackInfo {
@@ -42,7 +39,6 @@ fn extract_field_info(struct_name: &Ident, fields: &FieldsNamed) -> Vec<FieldInf
             let wrapper_name = format_ident!("{}__{}__PackLane__{}", struct_name, name, idx);
             Some(FieldInfo {
                 name,
-                ty,
                 lane_ty,
                 wrapper_name,
             })
@@ -76,8 +72,6 @@ fn generate_lanes(fields: &[FieldInfo]) -> Vec<LaneInfo> {
             LaneInfo {
                 wrapper_ty,
                 inner_ty: field.lane_ty.clone(),
-                name: format_ident!("_lane_{}", field.name),
-                field_name: field.name.clone(),
             }
         })
         .collect()

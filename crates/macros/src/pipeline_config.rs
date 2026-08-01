@@ -12,17 +12,13 @@ use syn::{
 #[derive(Default)]
 struct TypeProfile {
     size_estimate: usize,
-    field_count: usize,
     has_heap_types: bool,
     has_gpu_types: bool,
     recursive_type: bool,
-    heap_field_names: Vec<String>,
-    gpu_field_names: Vec<String>,
 }
 
 #[derive(Default, Debug)]
 struct MethodProfile {
-    method_name: String,
     branch_count: usize,
     loop_count: usize,
     recursive_call_count: usize,
@@ -32,7 +28,6 @@ struct MethodProfile {
 struct ProfileResult {
     type_profile: TypeProfile,
     method_profiles: Vec<MethodProfile>,
-    impl_blocks: Vec<ItemImpl>,
     generics: Generics,
     type_name: Ident,
     attrs: Vec<Attribute>,
@@ -47,7 +42,6 @@ struct TypeAnalyzer {
     method_profiles: Vec<MethodProfile>,
     current_method: Option<MethodProfile>,
     current_impl_type: Option<Ident>,
-    impl_blocks: Vec<ItemImpl>,
     attrs: Vec<Attribute>,
 }
 
@@ -62,7 +56,6 @@ impl TypeAnalyzer {
             method_profiles: Vec::new(),
             current_method: None,
             current_impl_type: None,
-            impl_blocks: Vec::new(),
             attrs: input.attrs.clone(),
         }
     }
@@ -300,8 +293,6 @@ impl<'ast> Visit<'ast> for TypeAnalyzer {
     }
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        self.impl_blocks.push(node.clone());
-
         if node.trait_.is_some() {
             return;
         }
@@ -320,10 +311,8 @@ impl<'ast> Visit<'ast> for TypeAnalyzer {
     }
 
     fn visit_impl_item(&mut self, node: &'ast ImplItem) {
-        if let ImplItem::Fn(method) = node {
-            let method_name = method.sig.ident.to_string();
+        if let ImplItem::Fn(_) = node {
             self.current_method = Some(MethodProfile {
-                method_name: method_name.clone(),
                 branch_count: 0,
                 loop_count: 0,
                 recursive_call_count: 0,
@@ -609,7 +598,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let profile = ProfileResult {
         type_profile: analyzer.profile,
         method_profiles: analyzer.method_profiles,
-        impl_blocks: analyzer.impl_blocks,
         generics: analyzer.generics,
         type_name: analyzer.type_name,
         attrs: analyzer.attrs,

@@ -259,7 +259,6 @@ struct GraphEvaluator<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisitState {
-    Unvisited,
     Visiting,
     Visited,
 }
@@ -299,19 +298,6 @@ impl<'a> GraphEvaluator<'a> {
                     if let Some(value) = self.node_values.get(&input.nodename) {
                         outputs.insert(input.name.clone(), value.clone());
                     }
-
-                    pub fn parse_materialx(
-                        content: &str,
-                    ) -> Result<OpenPBRMaterial, MaterialXError> {
-                        let parser = crate::parser::MaterialXParser::new();
-                        let document = parser.parse(content)?;
-                        let converter = MaterialXConverter::new(document);
-                        converter
-                            .to_openpbr()
-                            .map_err(|e| MaterialXError::Codegen(Box::new(e)))
-                    }
-
-                    pub struct OpenPBRGraph;
                 }
             }
         }
@@ -329,7 +315,7 @@ impl<'a> GraphEvaluator<'a> {
                     .cloned()
                     .ok_or_else(|| CodegenError::InputNotFound(node.name.clone()));
             }
-            Some(VisitState::Unvisited) | None => {}
+            None => {}
         }
 
         self.visited.insert(node.name.clone(), VisitState::Visiting);

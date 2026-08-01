@@ -1,6 +1,6 @@
 //! MaterialX XML parser
 
-use crate::{Input, MaterialXDocument, MaterialXError, Node, NodeDef, NodeGraph, Output};
+use crate::{Input, MaterialXDocument, MaterialXError, Node, NodeDef, NodeGraph};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
@@ -257,30 +257,5 @@ impl Input {
         }
 
         Ok(input)
-    }
-}
-
-impl Output {
-    fn from_bytes_start(e: &BytesStart) -> Result<Self, MaterialXError> {
-        let mut output = Output {
-            name: String::new(),
-            output_type: String::new(),
-            nodename: String::new(),
-        };
-
-        for attr in e.attributes() {
-            let attr = attr?;
-            let key = std::str::from_utf8(attr.key.as_ref())?;
-            let value = std::str::from_utf8(&attr.value)?;
-
-            match key {
-                "name" => output.name = value.to_string(),
-                "type" => output.output_type = value.to_string(),
-                "nodename" => output.nodename = value.to_string(),
-                _ => {}
-            }
-        }
-
-        Ok(output)
     }
 }

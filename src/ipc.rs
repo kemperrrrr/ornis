@@ -65,6 +65,7 @@ pub struct IpcChannel {
     game_to_ui: Receiver<GameEvent>,
 }
 
+#[allow(dead_code)] // reserved: см. комментарий на struct
 impl IpcChannel {
     /// Create a new IPC pair. Returns the UI handle and the game connection.
     pub fn pair() -> (Self, GameConnection) {
@@ -101,6 +102,7 @@ pub struct GameConnection {
     ui_to_game: Receiver<UiCommand>,
 }
 
+#[allow(dead_code)] // reserved: см. комментарий на struct
 impl GameConnection {
     /// Try to receive a command from the UI thread (non-blocking).
     pub fn poll(&self) -> Option<UiCommand> {

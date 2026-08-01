@@ -13,15 +13,6 @@ struct LaneAccess {
     lane_type: Type,
     is_mutable: bool,
     var_name: Ident,
-    method: LaneMethod,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LaneMethod {
-    Read,
-    Write,
-    ReadUnwrap,
-    WriteUnwrap,
 }
 
 #[derive(Clone)]
@@ -30,15 +21,6 @@ struct LoopAnalysis {
     body: Block,
     iterator_vars: Vec<Ident>,
     is_parallel_safe: bool,
-    safety_issues: Vec<String>,
-}
-
-struct FunctionAnalysis {
-    store_param: Option<Ident>,
-    dt_param: Option<Ident>,
-    lanes: Vec<LaneAccess>,
-    loops: Vec<LoopAnalysis>,
-    captured_mut_vars: Vec<Ident>,
     safety_issues: Vec<String>,
 }
 
@@ -129,11 +111,6 @@ impl Visit<'_> for SmartPipelineAnalyzer {
                         lane_type,
                         is_mutable,
                         var_name: var_name.clone(),
-                        method: if method_name == "read_lane" {
-                            LaneMethod::Read
-                        } else {
-                            LaneMethod::Write
-                        },
                     });
                 }
             }

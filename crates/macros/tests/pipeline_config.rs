@@ -1,3 +1,7 @@
+// Поля fixture-структур не читаются напрямую: тесты проверяют
+// только константы/функции, сгенерированные derive-макросом.
+#![allow(dead_code)]
+
 use ornis_core::{PipelineConfig, TargetDiscriminant};
 use ornis_macros::PipelineConfig;
 

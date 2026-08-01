@@ -486,6 +486,8 @@ fn convert_body_to_wgsl(func: &ItemFn) -> String {
 
 /// Generate a standalone WGSL function definition (not a compute shader).
 /// Returns the function body as WGSL.
+// Вспомогательная обёртка, используется юнит-тестами этого модуля.
+#[allow(dead_code)]
 pub fn wgsl_body_from_fn(func: &ItemFn) -> String {
     convert_body_to_wgsl(func)
 }
