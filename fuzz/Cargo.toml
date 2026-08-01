@@ -1,0 +1,33 @@
+[package]
+name = "ornis-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Независимый от корневого workspace крейт (cargo-fuzz convention):
+# НЕ добавлять в members корневого Cargo.toml. Запуск только через
+# `cargo +nightly fuzz run <target>` — rust-toolchain.toml пинит stable,
+# поэтому +nightly указывается явно (это делает и `cargo xtask fuzz`).
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ornis-render = { path = "../crates/render" }
+ornis-materialx = { path = "../crates/materialx" }
+
+# Предотвращаем «multiple workspace roots» от корневого workspace.
+[workspace]
+
+[[bin]]
+name = "scene_ron"
+path = "fuzz_targets/scene_ron.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "materialx_parse"
+path = "fuzz_targets/materialx_parse.rs"
+test = false
+doc = false
