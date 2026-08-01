@@ -1,12 +1,17 @@
 //! Ornis build/task automation (cargo-xtask pattern, no shell required).
 //!
 //! Usage:
-//!   cargo xtask editor [--skip-wasm] [--editor-dir <path>]
+//!   cargo xtask editor  [--skip-wasm] [--editor-dir <path>]
+//!   cargo xtask quality [--full] [--bench]
+//!   cargo xtask fuzz <target> [-- <libfuzzer args>]
+//!   cargo xtask mutants [-- <cargo-mutants args>]
 //!   cargo editor   [--skip-wasm] [--editor-dir <path>]   (alias)
 //!
 //! `editor` builds the WASM viewport (wasm-pack) and runs the engine with the
 //! remote editor server. Cross-platform: everything goes through
 //! std::process::Command without a shell.
+
+mod quality;
 
 use std::path::PathBuf;
 use std::process::{exit, Command};
@@ -18,6 +23,9 @@ fn main() {
     };
     match cmd.as_str() {
         "editor" => editor(&args[1..]),
+        "quality" => quality::quality(&args[1..]),
+        "fuzz" => quality::fuzz(&args[1..]),
+        "mutants" => quality::mutants(&args[1..]),
         "-h" | "--help" | "help" => usage(0),
         other => {
             eprintln!("xtask: unknown task '{other}'");
@@ -35,7 +43,15 @@ fn usage(code: i32) -> ! {
          Build the WASM viewport (wasm-pack) and launch the engine\n      \
          with the remote editor at http://127.0.0.1:3420\n      \
          --skip-wasm    reuse the existing editor/pkg build\n      \
-         --editor-dir   editor frontend directory (default: <workspace>/editor)"
+         --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
+         quality [--full] [--bench]\n      \
+         Quality gate: fmt, clippy, test, audit, deny, outdated (level 1);\n      \
+         --full adds llvm-cov coverage + bench compile-check (level 2);\n      \
+         --bench runs the full criterion suite (long)\n  \
+         fuzz <target> [-- <args>]\n      \
+         Run a cargo-fuzz target (scene_ron, materialx_parse) via +nightly\n  \
+         mutants [-- <args>]\n      \
+         Run cargo-mutants against ornis-core"
     );
     exit(code);
 }
