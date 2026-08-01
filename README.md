@@ -6,11 +6,12 @@ SoA-хранилища (Sparse Sets) и направляют вычислени�
 GPU (wgpu compute). Редактор — браузерный: сцена рендерится в `<canvas>`
 через WASM + WebGPU, UI — обычное веб-приложение.
 
-> Этот README заменяет прежние документы `STRATEGY_PIVOT.md`, `SUMMARY.md`,
-> `implementation_plan.md`, `key_ideas.md`, `ANALYSIS_DOCS_VS_CODE.md`,
-> `GOSUB_INTEGRATION.md`. Они сохранены в [`docs/archive/`](docs/archive/)
-> и могут расходиться с текущим состоянием кода. Статусы ниже
-> верифицированы по исходникам, а не переписаны из старых документов.
+> Документация проекта — три файла: этот README (что есть сейчас,
+> статусы верифицированы по коду), [`PLAN.md`](PLAN.md) (план
+> реализации, синхронизированный с кодом) и [`IDEAS.md`](IDEAS.md)
+> (архитектурные идеи). Плюс аудит-снимки в [`docs/quality/`](docs/quality/).
+> Прежние документы (`STRATEGY_PIVOT.md`, `implementation_plan.md` и др.)
+> удалены из дерева — история сохранена в git.
 
 ---
 
@@ -66,7 +67,7 @@ cargo xtask mutants           # мутационное тестирование 
 |---|---|---|
 | `src/` | Бинарь `ornis`: нативный режим (winit + wgpu + Vello) и `editor-only` (HTTP-сервер) | Активен |
 | `editor/` | Фронтенд редактора: `index.html`, `css/`, `js/`, `icons/`, `scene.ron` | Активен |
-| `xtask/` | Команда `cargo xtask editor` | Активен |
+| `xtask/` | Команды `cargo xtask`: `editor`, `quality`, `fuzz`, `mutants` | Активен |
 | `crates/core` | Sparse Sets, Entity (генерационные индексы), диспетчер, физика, Command Sync | Активен |
 | `crates/macros` | Процедурные макросы: `smart_pipeline`, `for_each_entity`, `kernel`, `Pack` и др. | Активен |
 | `crates/render` | `Renderer3D`, OpenPBR-материал, WGSL-шейдеры, трейт `RenderBackend` | Активен |
@@ -81,7 +82,7 @@ cargo xtask mutants           # мутационное тестирование 
 > `forks/` (blitz, boa_engine, icu_normalizer). Решение: писать собственный
 > отрисовщик фронтенда нецелесообразно — редактор живёт в браузере (`editor/`),
 > сцена рендерится через WASM/WebGPU. IPC-типы `UiCommand`/`GameEvent`
-> переехали в `src/ipc.rs`. Планы и контекст — в `docs/archive/`.
+> переехали в `src/ipc.rs`. Планы и контекст — в git-истории.
 
 ## Текущее состояние (верифицировано по коду)
 
@@ -145,6 +146,8 @@ cargo xtask mutants           # мутационное тестирование 
 
 ## Roadmap
 
+Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).
+
 ### Ближайшее: оживить браузерный редактор
 
 1. **Обработчик команд engine ↔ editor** — в режиме `editor-only` читать
@@ -173,7 +176,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 
 ## Ключевые архитектурные идеи
 
-Полная версия — в `docs/archive/key_ideas.md` (26 идей). Суть:
+Полная версия — в [`IDEAS.md`](IDEAS.md) (26 идей). Суть:
 
 1. **Невидимый ECS.** Пользователь пишет `entity.position += entity.velocity`,
    макросы превращают AoS-код в SoA-хранилища (Sparse Sets: плотный `data` +
@@ -195,17 +198,18 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 7. **Браузерный редактор.** Нативный UI-движок удалён (август 2026): доведение
    его до production сопоставимо с командой браузерного движка. Редактор —
    веб-приложение, сцена — WASM/WebGPU в `<canvas>`. История нативного стека —
-   в git-истории и `docs/archive/`.
+   в git-истории.
 
-## Архив документации
+## Документация
 
-Прежние документы лежат в [`docs/archive/`](docs/archive/):
+Структура документации — три файла плюс аудит-снимки:
 
-- `STRATEGY_PIVOT.md` — решение о переходе от нативного UI к браузерному редактору
-- `implementation_plan.md` — фазовый план (фазы 0–11; статусы местами устарели)
-- `key_ideas.md` — 26 архитектурных идей
-- `SUMMARY.md` — автосводка по фазам (содержала дубли и конфликты статусов)
-- `ANALYSIS_DOCS_VS_CODE.md` — аудит «документы vs код» от 12 июля 2026 (устарел: с тех пор `RenderBackend`, GPU-исполнение Command Sync и `compile_warning!` появились)
-- `GOSUB_INTEGRATION.md` — план интеграции Gosub (эксперимент заморожен)
+- [`README.md`](README.md) — текущее состояние, верифицированное по коду (этот файл)
+- [`PLAN.md`](PLAN.md) — план реализации: сделано / частично / дорожная карта
+- [`IDEAS.md`](IDEAS.md) — 26 архитектурных идей (перенесён без изменений)
+- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline и report от 2026-08-01
 
-При расхождении архива с этим README верить README и коду.
+Прежние документы (`STRATEGY_PIVOT.md`, `implementation_plan.md`, `SUMMARY.md`,
+`ANALYSIS_DOCS_VS_CODE.md`, `GOSUB_INTEGRATION.md`) удалены из дерева при
+консолидации (август 2026) — история сохранена в git. При расхождении
+любых старых источников с кодом верить коду.
