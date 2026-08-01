@@ -1,7 +1,6 @@
 use crate::component_store::ComponentStore;
 use crate::pipeline::PipelineConfig;
 use crate::smart_store::SmartStore;
-use rayon::prelude::*;
 
 /// Result of runtime dispatch decision
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

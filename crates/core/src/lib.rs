@@ -18,6 +18,7 @@ pub use command_sync::{
 };
 pub use component_store::{ChunkedIterMut, ComponentStore, ZipIter};
 pub use entity::{Entity, EntityAllocator};
+pub use dispatcher::{CpuExecutor, Dispatchable, Dispatcher, ExecutionTarget, SmartDispatcher};
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use page_table::{PAGE_SIZE, PageTable};
 pub use physics::*;
