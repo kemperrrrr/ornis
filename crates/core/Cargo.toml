@@ -23,6 +23,7 @@ lock-free = []  # экспериментальные lock-free ленты
 criterion = { version = "0.5", features = ["rayon"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 ornis-macros = { path = "../macros" }
+proptest = "1"
 
 [[bench]]
 name = "store_bench"
