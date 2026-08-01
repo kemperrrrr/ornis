@@ -1,8 +1,8 @@
 //! MaterialX XML parser
 
-use quick_xml::events::{Event, BytesStart};
+use crate::{Input, MaterialXDocument, MaterialXError, Node, NodeDef, NodeGraph, Output};
 use quick_xml::Reader;
-use crate::{MaterialXError, MaterialXDocument, NodeDef, NodeGraph, Node, Input, Output};
+use quick_xml::events::{BytesStart, Event};
 
 pub struct MaterialXParser;
 
@@ -13,83 +13,108 @@ impl MaterialXParser {
 
     pub fn parse(&self, content: &str) -> Result<MaterialXDocument, MaterialXError> {
         let mut reader = Reader::from_str(content);
-        reader.trim_text(true);
-        
+        reader.config_mut().trim_text(true);
+
         let mut document = MaterialXDocument::default();
         let mut current_nodedef: Option<NodeDef> = None;
         let mut current_nodegraph: Option<NodeGraph> = None;
         let mut current_node: Option<Node> = None;
         let mut in_nodegraph = false;
-        
+
         let mut buf = Vec::new();
-        
+
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) => {
-                    match e.name().as_ref() {
-                        b"nodedef" => {
-                            current_nodedef = Some(NodeDef::from_bytes_start(e)?);
-                        }
-                        b"nodegraph" => {
-                            in_nodegraph = true;
-                            current_nodegraph = Some(NodeGraph::from_bytes_start(e)?);
-                        }
-                        b"node" | b"open_pbr_surface" | b"mix" | b"layer" | b"add" | b"multiply" | b"subsurface_bsdf" 
-                        | b"dielectric_bsdf" | b"conductor_bsdf" | b"oren_nayar_diffuse_bsdf" | b"sheen_bsdf"
-                        | b"thin_film_bsdf" | b"translucent_bsdf" | b"generalized_schlick_bsdf" | b"uniform_edf"
-                        | b"generalized_schlick_edf" | b"anisotropic_vdf" | b"surface" | b"output" => {
-                            if in_nodegraph {
-                                current_node = Some(Node::from_bytes_start(e)?);
-                            }
-                        }
-                        b"input" => {
-                            if let Some(node) = &mut current_node {
-                                node.inputs.push(Input::from_bytes_start(e)?);
-                            }
-                        }
-                        b"output" => {
-                            if let Some(graph) = &mut current_nodegraph {
-                                graph.outputs.push(Output::from_bytes_start(e)?);
-                            }
-                        }
-                        _ => {}
+                Ok(Event::Start(ref e)) => match e.name().as_ref() {
+                    b"nodedef" => {
+                        current_nodedef = Some(NodeDef::from_bytes_start(e)?);
                     }
-                }
-                Ok(Event::End(ref e)) => {
-                    match e.name().as_ref() {
-                        b"nodedef" => {
-                            if let Some(nd) = current_nodedef.take() {
-                                document.nodedefs.push(nd);
-                            }
+                    b"nodegraph" => {
+                        in_nodegraph = true;
+                        current_nodegraph = Some(NodeGraph::from_bytes_start(e)?);
+                    }
+                    b"node"
+                    | b"open_pbr_surface"
+                    | b"mix"
+                    | b"layer"
+                    | b"add"
+                    | b"multiply"
+                    | b"subsurface_bsdf"
+                    | b"dielectric_bsdf"
+                    | b"conductor_bsdf"
+                    | b"oren_nayar_diffuse_bsdf"
+                    | b"sheen_bsdf"
+                    | b"thin_film_bsdf"
+                    | b"translucent_bsdf"
+                    | b"generalized_schlick_bsdf"
+                    | b"uniform_edf"
+                    | b"generalized_schlick_edf"
+                    | b"anisotropic_vdf"
+                    | b"surface"
+                    | b"output" => {
+                        if in_nodegraph {
+                            current_node = Some(Node::from_bytes_start(e)?);
                         }
-                        b"nodegraph" => {
-                            in_nodegraph = false;
-                            if let Some(ng) = current_nodegraph.take() {
-                                document.nodegraphs.push(ng);
-                            }
+                    }
+                    b"input" => {
+                        if let Some(node) = &mut current_node {
+                            node.inputs.push(Input::from_bytes_start(e)?);
                         }
-                        b"node" | b"open_pbr_surface" | b"mix" | b"layer" | b"add" | b"multiply" 
-                        | b"subsurface_bsdf" | b"dielectric_bsdf" | b"conductor_bsdf" | b"oren_nayar_diffuse_bsdf" 
-                        | b"sheen_bsdf" | b"thin_film_bsdf" | b"translucent_bsdf" | b"generalized_schlick_bsdf" 
-                        | b"uniform_edf" | b"generalized_schlick_edf" | b"anisotropic_vdf" | b"surface" => {
-                            if in_nodegraph {
-                                if let Some(node) = current_node.take() {
-                                    if let Some(graph) = &mut current_nodegraph {
-                                        graph.nodes.push(node);
-                                    }
+                    }
+                    b"output" => {
+                        if let Some(graph) = &mut current_nodegraph {
+                            graph.outputs.push(Output::from_bytes_start(e)?);
+                        }
+                    }
+                    _ => {}
+                },
+                Ok(Event::End(ref e)) => match e.name().as_ref() {
+                    b"nodedef" => {
+                        if let Some(nd) = current_nodedef.take() {
+                            document.nodedefs.push(nd);
+                        }
+                    }
+                    b"nodegraph" => {
+                        in_nodegraph = false;
+                        if let Some(ng) = current_nodegraph.take() {
+                            document.nodegraphs.push(ng);
+                        }
+                    }
+                    b"node"
+                    | b"open_pbr_surface"
+                    | b"mix"
+                    | b"layer"
+                    | b"add"
+                    | b"multiply"
+                    | b"subsurface_bsdf"
+                    | b"dielectric_bsdf"
+                    | b"conductor_bsdf"
+                    | b"oren_nayar_diffuse_bsdf"
+                    | b"sheen_bsdf"
+                    | b"thin_film_bsdf"
+                    | b"translucent_bsdf"
+                    | b"generalized_schlick_bsdf"
+                    | b"uniform_edf"
+                    | b"generalized_schlick_edf"
+                    | b"anisotropic_vdf"
+                    | b"surface" => {
+                        if in_nodegraph {
+                            if let Some(node) = current_node.take() {
+                                if let Some(graph) = &mut current_nodegraph {
+                                    graph.nodes.push(node);
                                 }
                             }
                         }
-                        _ => {}
                     }
-                }
+                    _ => {}
+                },
                 Ok(Event::Eof) => break,
                 Ok(_) => {}
                 Err(e) => return Err(MaterialXError::Xml(e)),
             }
             buf.clear();
         }
-        
+
         Ok(document)
     }
 }
@@ -107,12 +132,12 @@ impl NodeDef {
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
-        
+
         for attr in e.attributes() {
             let attr = attr?;
             let key = std::str::from_utf8(attr.key.as_ref())?;
             let value = std::str::from_utf8(&attr.value)?;
-            
+
             match key {
                 "name" => nodedef.name = value.to_string(),
                 "node" => nodedef.node = value.to_string(),
@@ -124,7 +149,7 @@ impl NodeDef {
                 _ => {}
             }
         }
-        
+
         Ok(nodedef)
     }
 }
@@ -137,19 +162,19 @@ impl NodeGraph {
             nodes: Vec::new(),
             outputs: Vec::new(),
         };
-        
+
         for attr in e.attributes() {
             let attr = attr?;
             let key = std::str::from_utf8(attr.key.as_ref())?;
             let value = std::str::from_utf8(&attr.value)?;
-            
+
             match key {
                 "name" => graph.name = value.to_string(),
                 "nodedef" => graph.nodedef = value.to_string(),
                 _ => {}
             }
         }
-        
+
         Ok(graph)
     }
 }
@@ -162,24 +187,24 @@ impl Node {
             version: String::new(),
             inputs: Vec::new(),
         };
-        
+
         let name_binding = e.name();
         let name_bytes = name_binding.as_ref();
         let name = std::str::from_utf8(name_bytes)?;
         node.node_type = name.to_string();
-        
+
         for attr in e.attributes() {
             let attr = attr?;
             let key = std::str::from_utf8(attr.key.as_ref())?;
             let value = std::str::from_utf8(&attr.value)?;
-            
+
             match key {
                 "name" => node.name = value.to_string(),
                 "version" => node.version = value.to_string(),
                 _ => {}
             }
         }
-        
+
         Ok(node)
     }
 }
@@ -204,12 +229,12 @@ impl Input {
             interfacename: String::new(),
             string: String::new(),
         };
-        
+
         for attr in e.attributes() {
             let attr = attr?;
             let key = std::str::from_utf8(attr.key.as_ref())?;
             let value = std::str::from_utf8(&attr.value)?;
-            
+
             match key {
                 "name" => input.name = value.to_string(),
                 "type" => input.input_type = value.to_string(),
@@ -230,7 +255,7 @@ impl Input {
                 _ => {}
             }
         }
-        
+
         Ok(input)
     }
 }
@@ -242,12 +267,12 @@ impl Output {
             output_type: String::new(),
             nodename: String::new(),
         };
-        
+
         for attr in e.attributes() {
             let attr = attr?;
             let key = std::str::from_utf8(attr.key.as_ref())?;
             let value = std::str::from_utf8(&attr.value)?;
-            
+
             match key {
                 "name" => output.name = value.to_string(),
                 "type" => output.output_type = value.to_string(),
@@ -255,7 +280,7 @@ impl Output {
                 _ => {}
             }
         }
-        
+
         Ok(output)
     }
 }
