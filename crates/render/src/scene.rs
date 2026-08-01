@@ -28,20 +28,38 @@ pub struct TransformDesc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MeshDesc {
-    Sphere { radius: f32, segments: u32, rings: u32 },
+    Sphere {
+        radius: f32,
+        segments: u32,
+        rings: u32,
+    },
     // Future: Box, Plane, Cylinder, Custom { path: String }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MaterialDesc {
-    Dielectric { base_color: [f32; 3], roughness: f32 },
-    Metal { base_color: [f32; 3], roughness: f32 },
-    Coat { base_color: [f32; 3], coat_weight: f32, coat_roughness: f32 },
+    Dielectric {
+        base_color: [f32; 3],
+        roughness: f32,
+    },
+    Metal {
+        base_color: [f32; 3],
+        roughness: f32,
+    },
+    Coat {
+        base_color: [f32; 3],
+        coat_weight: f32,
+        coat_roughness: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LightDesc {
-    Directional { direction: [f32; 3], intensity: f32, color: [f32; 3] },
+    Directional {
+        direction: [f32; 3],
+        intensity: f32,
+        color: [f32; 3],
+    },
     // Future: Point, Spot
 }
 
@@ -50,7 +68,7 @@ pub struct CameraDesc {
     pub position: [f32; 3],
     pub target: [f32; 3],
     pub up: [f32; 3],
-    pub fov: f32,  // degrees
+    pub fov: f32, // degrees
     pub near: f32,
     pub far: f32,
 }

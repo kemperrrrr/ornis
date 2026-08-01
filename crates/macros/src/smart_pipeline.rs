@@ -1,11 +1,10 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote, ToTokens};
+use quote::{ToTokens, format_ident, quote};
 use syn::{
-    parse_macro_input,
+    Block, Expr, ExprClosure, ExprForLoop, ExprIndex, ExprMethodCall, FnArg, Ident, ItemFn, Pat,
+    PatIdent, PatType, Type, TypePath, TypeReference, parse_macro_input,
     visit::{self, Visit},
-    Block, Expr, ExprClosure, ExprForLoop, ExprIndex, ExprMethodCall, FnArg, Ident, ItemFn,
-    Pat, PatIdent, PatType, Type, TypePath, TypeReference,
 };
 
 #[derive(Clone)]
@@ -86,14 +85,29 @@ impl Visit<'_> for SmartPipelineAnalyzer {
                 if let Pat::Ident(PatIdent { ident, .. }) = &**pat {
                     if let Type::Reference(TypeReference { elem, .. }) = &**ty {
                         if let Type::Path(TypePath { path, .. }) = &**elem {
-                            if path.segments.last().map(|s| s.ident == "SmartStore").unwrap_or(false) {
+                            if path
+                                .segments
+                                .last()
+                                .map(|s| s.ident == "SmartStore")
+                                .unwrap_or(false)
+                            {
                                 self.store_param = Some(ident.clone());
-                            } else if path.segments.last().map(|s| s.ident == "f32").unwrap_or(false) {
+                            } else if path
+                                .segments
+                                .last()
+                                .map(|s| s.ident == "f32")
+                                .unwrap_or(false)
+                            {
                                 self.dt_param = Some(ident.clone());
                             }
                         }
                     } else if let Type::Path(TypePath { path, .. }) = &**ty {
-                        if path.segments.last().map(|s| s.ident == "f32").unwrap_or(false) {
+                        if path
+                            .segments
+                            .last()
+                            .map(|s| s.ident == "f32")
+                            .unwrap_or(false)
+                        {
                             self.dt_param = Some(ident.clone());
                         }
                     }
@@ -118,14 +132,26 @@ impl Visit<'_> for SmartPipelineAnalyzer {
                                     let lane_type = ty.clone();
                                     let is_mutable = method_name == "write_lane";
                                     let type_str = lane_type.to_token_stream().to_string();
-                                    let var_name = format_ident!("_lane_{}", type_str.replace("::", "_").replace("<", "_").replace(">", "").replace(", ", "_").replace(" ", ""));
-                                    
+                                    let var_name = format_ident!(
+                                        "_lane_{}",
+                                        type_str
+                                            .replace("::", "_")
+                                            .replace("<", "_")
+                                            .replace(">", "")
+                                            .replace(", ", "_")
+                                            .replace(" ", "")
+                                    );
+
                                     self.lanes.push(LaneAccess {
                                         store_ident: store_ident.clone(),
                                         lane_type,
                                         is_mutable,
                                         var_name: var_name.clone(),
-                                        method: if method_name == "read_lane" { LaneMethod::Read } else { LaneMethod::Write },
+                                        method: if method_name == "read_lane" {
+                                            LaneMethod::Read
+                                        } else {
+                                            LaneMethod::Write
+                                        },
                                     });
                                 }
                             }
@@ -140,7 +166,7 @@ impl Visit<'_> for SmartPipelineAnalyzer {
     fn visit_expr_for_loop(&mut self, node: &ExprForLoop) {
         let was_in_loop = self.in_loop_body;
         self.in_loop_body = true;
-        
+
         let mut loop_vars = Vec::new();
         if let Pat::Ident(PatIdent { ident, .. }) = &*node.pat {
             loop_vars.push(ident.clone());
@@ -163,8 +189,8 @@ impl Visit<'_> for SmartPipelineAnalyzer {
         let mut safety_issues = body_analyzer.safety_issues;
         safety_issues.extend(self.safety_issues.clone());
 
-        let is_parallel_safe = safety_issues.is_empty() 
-            && !body_analyzer.has_captured_mut 
+        let is_parallel_safe = safety_issues.is_empty()
+            && !body_analyzer.has_captured_mut
             && body_analyzer.captured_mut_vars.is_empty()
             && !loop_vars.is_empty();
 
@@ -175,7 +201,7 @@ impl Visit<'_> for SmartPipelineAnalyzer {
                 if let Some(first_arg) = method_call.args.first() {
                     self.extract_zip_lanes(first_arg, &mut lanes_in_zip);
                 }
-                
+
                 self.loops.push(LoopAnalysis {
                     lanes: lanes_in_zip,
                     body: node.body.clone(),
@@ -189,24 +215,29 @@ impl Visit<'_> for SmartPipelineAnalyzer {
                     body: node.body.clone(),
                     iterator_vars: loop_vars.clone(),
                     is_parallel_safe: false,
-                    safety_issues: vec!["Only zip iterations over lanes are supported for parallelization".to_string()],
+                    safety_issues: vec![
+                        "Only zip iterations over lanes are supported for parallelization"
+                            .to_string(),
+                    ],
                 });
             }
         } else {
-self.loops.push(LoopAnalysis {
-                    lanes: Vec::new(),
-                    body: node.body.clone(),
-                    iterator_vars: loop_vars.clone(),
-                    is_parallel_safe: false,
-                    safety_issues: vec!["Only zip iterations over lanes are supported for parallelization".to_string()],
-                });
+            self.loops.push(LoopAnalysis {
+                lanes: Vec::new(),
+                body: node.body.clone(),
+                iterator_vars: loop_vars.clone(),
+                is_parallel_safe: false,
+                safety_issues: vec![
+                    "Only zip iterations over lanes are supported for parallelization".to_string(),
+                ],
+            });
         }
 
         for _ in 0..loop_vars.len() {
             self.current_loop_vars.pop();
         }
         self.in_loop_body = was_in_loop;
-        
+
         visit::visit_expr_for_loop(self, node);
     }
 
@@ -215,24 +246,24 @@ self.loops.push(LoopAnalysis {
         let was_in_closure_body = self.in_closure_body;
         let prev_captured = std::mem::take(&mut self.captured_vars);
         let prev_local = std::mem::take(&mut self.local_vars);
-        
+
         self.in_closure = true;
         self.in_closure_body = true;
-        
+
         // The closure's parameters become local vars
         for input in &node.inputs {
             if let Pat::Ident(PatIdent { ident, .. }) = input {
                 self.local_vars.push(ident.clone());
             }
         }
-        
+
         // If it's a `move` closure, we can't easily track captures in syn 2.0
         // Just analyze the body
         visit::visit_expr(self, &node.body);
-        
+
         // Check for assignments to non-local variables (potential captures)
         // This is a simplified check
-        
+
         self.in_closure = was_in_closure;
         self.in_closure_body = was_in_closure_body;
         self.captured_vars = prev_captured;
@@ -334,33 +365,43 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     for var in &analyzer.captured_mut_vars {
-        warnings.push(format!("Captured mutable variable `{}` prevents parallelization", var));
+        warnings.push(format!(
+            "Captured mutable variable `{}` prevents parallelization",
+            var
+        ));
     }
 
     if !has_parallel_loops && !analyzer.loops.is_empty() {
         warnings.push("No parallelizable loops found in function body".to_string());
     }
 
-    let warning_tokens: Vec<TokenStream2> = warnings.iter().map(|w| {
-        quote! { compile_warning!(#w); }
-    }).collect();
+    let warning_tokens: Vec<TokenStream2> = warnings
+        .iter()
+        .map(|w| {
+            quote! { compile_warning!(#w); }
+        })
+        .collect();
 
-    let lane_decls: Vec<TokenStream2> = analyzer.lanes.iter().map(|lane| {
-        let store = &lane.store_ident;
-        let ty = &lane.lane_type;
-        let var = &lane.var_name;
-        if lane.is_mutable {
-            quote! {
-                let mut #var = #store.write_lane::<#ty>()
-                    .expect(concat!("lane not registered for ", stringify!(#ty)));
+    let lane_decls: Vec<TokenStream2> = analyzer
+        .lanes
+        .iter()
+        .map(|lane| {
+            let store = &lane.store_ident;
+            let ty = &lane.lane_type;
+            let var = &lane.var_name;
+            if lane.is_mutable {
+                quote! {
+                    let mut #var = #store.write_lane::<#ty>()
+                        .expect(concat!("lane not registered for ", stringify!(#ty)));
+                }
+            } else {
+                quote! {
+                    let #var = #store.read_lane::<#ty>()
+                        .expect(concat!("lane not registered for ", stringify!(#ty)));
+                }
             }
-        } else {
-            quote! {
-                let #var = #store.read_lane::<#ty>()
-                    .expect(concat!("lane not registered for ", stringify!(#ty)));
-            }
-        }
-    }).collect();
+        })
+        .collect();
 
     let mut loop_bodies = Vec::new();
     for loop_analysis in &analyzer.loops {
@@ -368,18 +409,29 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let (lane0, lane1) = (&loop_analysis.lanes[0], &loop_analysis.lanes[1]);
             let var0 = &lane0.var_name;
             let var1 = &lane1.var_name;
-            let iter0 = if lane0.is_mutable { quote!(par_iter_mut) } else { quote!(par_iter) };
-            let iter1 = if lane1.is_mutable { quote!(par_iter_mut) } else { quote!(par_iter) };
-            
+            let iter0 = if lane0.is_mutable {
+                quote!(par_iter_mut)
+            } else {
+                quote!(par_iter)
+            };
+            let iter1 = if lane1.is_mutable {
+                quote!(par_iter_mut)
+            } else {
+                quote!(par_iter)
+            };
+
             let (iter_var0, iter_var1) = if loop_analysis.iterator_vars.len() >= 2 {
-                (&loop_analysis.iterator_vars[0], &loop_analysis.iterator_vars[1])
+                (
+                    &loop_analysis.iterator_vars[0],
+                    &loop_analysis.iterator_vars[1],
+                )
             } else {
                 (&format_ident!("item0"), &format_ident!("item1"))
             };
 
             let body = &loop_analysis.body;
             let safety_comment = generate_safety_comment(loop_analysis);
-            
+
             loop_bodies.push(quote! {
                 #safety_comment
                 #var0.data.#iter0()
@@ -391,12 +443,16 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
         } else if loop_analysis.is_parallel_safe && loop_analysis.lanes.len() == 1 {
             let lane = &loop_analysis.lanes[0];
             let var = &lane.var_name;
-            let iter = if lane.is_mutable { quote!(par_iter_mut) } else { quote!(par_iter) };
+            let iter = if lane.is_mutable {
+                quote!(par_iter_mut)
+            } else {
+                quote!(par_iter)
+            };
             let iter_var = &loop_analysis.iterator_vars[0];
             let body = &loop_analysis.body;
-            
+
             let safety_comment = generate_safety_comment(loop_analysis);
-            
+
             loop_bodies.push(quote! {
                 #safety_comment
                 #var.data.#iter().for_each(|#iter_var| {
@@ -424,16 +480,22 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn generate_safety_comment(analysis: &LoopAnalysis) -> TokenStream2 {
     let mut comments: Vec<String> = Vec::new();
-    comments.push("SAFETY: Parallel iteration verified safe by #[smart_pipeline] analysis:".to_string());
-    comments.push("  - All iterations are independent (no cross-iteration dependencies)".to_string());
+    comments.push(
+        "SAFETY: Parallel iteration verified safe by #[smart_pipeline] analysis:".to_string(),
+    );
+    comments
+        .push("  - All iterations are independent (no cross-iteration dependencies)".to_string());
     comments.push("  - No captured mutable variables in closure".to_string());
-    
+
     for lane in &analysis.lanes {
         let ty = lane.lane_type.to_token_stream().to_string();
-        let lane_comment = format!("  - `{}` implements Send + Sync (verified by Rayon bounds)", ty);
+        let lane_comment = format!(
+            "  - `{}` implements Send + Sync (verified by Rayon bounds)",
+            ty
+        );
         comments.push(lane_comment);
     }
-    
+
     let comment_str = comments.join("\n    // ");
     quote! {
         #[allow(unused_unsafe)]

@@ -3,7 +3,7 @@ use rayon::prelude::*;
 
 use crate::entity::Entity;
 use crate::page_table::PageTable;
-use crate::prefetch::{prefetch_iter, PREFETCH_STRIDE};
+use crate::prefetch::{PREFETCH_STRIDE, prefetch_iter};
 
 #[repr(align(64))]
 pub struct ComponentStore<T> {
@@ -158,11 +158,12 @@ impl<T> ComponentStore<T> {
         Some(dense_idx)
     }
 
-    pub fn iter_zip<'a, 'b, U>(
-        &'a self,
-        other: &'b ComponentStore<U>,
-    ) -> ZipIter<'a, 'b, T, U> {
-        let entity_ids: Vec<u32> = self.bitset.intersection(&other.bitset).map(|i| i as u32).collect();
+    pub fn iter_zip<'a, 'b, U>(&'a self, other: &'b ComponentStore<U>) -> ZipIter<'a, 'b, T, U> {
+        let entity_ids: Vec<u32> = self
+            .bitset
+            .intersection(&other.bitset)
+            .map(|i| i as u32)
+            .collect();
         ZipIter {
             entity_ids,
             cursor: 0,
@@ -210,7 +211,9 @@ impl<T> ComponentStore<T> {
         if self.data.len() < 2 {
             return;
         }
-        let mut sorted: Vec<(Entity, T)> = self.entities.iter()
+        let mut sorted: Vec<(Entity, T)> = self
+            .entities
+            .iter()
             .zip(self.data.iter())
             .map(|(e, d)| (*e, d.clone()))
             .collect();
@@ -249,7 +252,11 @@ impl<'a, 'b, A, B> Iterator for ZipIter<'a, 'b, A, B> {
             if entity.generation() != self.store_b.entities[dense_b].generation() {
                 continue;
             }
-            return Some((entity, &self.store_a.data[dense_a], &self.store_b.data[dense_b]));
+            return Some((
+                entity,
+                &self.store_a.data[dense_a],
+                &self.store_b.data[dense_b],
+            ));
         }
         None
     }

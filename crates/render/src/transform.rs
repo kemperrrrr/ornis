@@ -9,11 +9,19 @@ pub struct Transform {
 
 impl Transform {
     pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        Self { position, rotation, scale }
+        Self {
+            position,
+            rotation,
+            scale,
+        }
     }
 
     pub fn from_position(position: Vec3) -> Self {
-        Self { position, rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Self {
+            position,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
 
     pub fn matrix(&self) -> Mat4 {

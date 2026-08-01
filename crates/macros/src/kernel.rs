@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, visit, visit::Visit, FnArg, ItemFn, Type};
+use syn::{FnArg, ItemFn, Type, parse_macro_input, visit, visit::Visit};
 
 fn is_forbidden_type(ty: &Type) -> bool {
     match ty {
@@ -9,8 +9,17 @@ fn is_forbidden_type(ty: &Type) -> bool {
             matches!(
                 last.as_deref(),
                 Some(
-                    "Vec" | "String" | "Box" | "Rc" | "Arc" | "HashMap" | "HashSet"
-                        | "VecDeque" | "LinkedList" | "BTreeMap" | "BTreeSet"
+                    "Vec"
+                        | "String"
+                        | "Box"
+                        | "Rc"
+                        | "Arc"
+                        | "HashMap"
+                        | "HashSet"
+                        | "VecDeque"
+                        | "LinkedList"
+                        | "BTreeMap"
+                        | "BTreeSet"
                 )
             )
         }
@@ -75,7 +84,11 @@ impl KernelValidator {
 impl<'ast> Visit<'ast> for KernelValidator {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Path(p) = node.func.as_ref() {
-            let callee = p.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+            let callee = p
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
             match callee.as_str() {
                 "Box" | "Vec" | "String" | "Rc" | "Arc" => {
                     self.errors.push(syn::Error::new_spanned(
@@ -128,7 +141,6 @@ impl<'ast> Visit<'ast> for KernelValidator {
         visit::visit_expr_match(self, node);
         self.match_depth -= 1;
     }
-
 }
 
 pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {

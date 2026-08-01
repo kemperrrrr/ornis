@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use ornis_core::{ComponentStore, Entity, EntityAllocator};
 
@@ -14,7 +14,11 @@ struct PureSparseStore<T> {
 
 impl<T> PureSparseStore<T> {
     fn new() -> Self {
-        Self { data: Vec::new(), entities: Vec::new(), sparse: Vec::new() }
+        Self {
+            data: Vec::new(),
+            entities: Vec::new(),
+            sparse: Vec::new(),
+        }
     }
 
     fn insert(&mut self, entity: Entity, component: T) {
@@ -53,7 +57,10 @@ struct ArchetypeStore<T> {
 
 impl<T> ArchetypeStore<T> {
     fn new() -> Self {
-        Self { chunks: vec![Vec::new()], entity_to_chunk: Vec::new() }
+        Self {
+            chunks: vec![Vec::new()],
+            entity_to_chunk: Vec::new(),
+        }
     }
 
     fn insert(&mut self, entity: Entity, component: T) {
@@ -81,7 +88,9 @@ fn setup_hybrid(count: usize) -> (Vec<Entity>, ComponentStore<f32>) {
     let mut alloc = EntityAllocator::new();
     let mut store = ComponentStore::new();
     let entities: Vec<_> = (0..count).map(|_| alloc.allocate()).collect();
-    for &e in &entities { store.insert(e, 1.0); }
+    for &e in &entities {
+        store.insert(e, 1.0);
+    }
     (entities, store)
 }
 
@@ -89,7 +98,9 @@ fn setup_pure(count: usize) -> (Vec<Entity>, PureSparseStore<f32>) {
     let mut alloc = EntityAllocator::new();
     let mut store = PureSparseStore::new();
     let entities: Vec<_> = (0..count).map(|_| alloc.allocate()).collect();
-    for &e in &entities { store.insert(e, 1.0); }
+    for &e in &entities {
+        store.insert(e, 1.0);
+    }
     (entities, store)
 }
 
@@ -97,7 +108,9 @@ fn setup_hashmap(count: usize) -> (Vec<Entity>, HashMap<Entity, f32>) {
     let mut alloc = EntityAllocator::new();
     let mut store = HashMap::new();
     let entities: Vec<_> = (0..count).map(|_| alloc.allocate()).collect();
-    for &e in &entities { store.insert(e, 1.0); }
+    for &e in &entities {
+        store.insert(e, 1.0);
+    }
     (entities, store)
 }
 
@@ -105,7 +118,9 @@ fn setup_archetype(count: usize) -> (Vec<Entity>, ArchetypeStore<f32>) {
     let mut alloc = EntityAllocator::new();
     let mut store = ArchetypeStore::new();
     let entities: Vec<_> = (0..count).map(|_| alloc.allocate()).collect();
-    for &e in &entities { store.insert(e, 1.0); }
+    for &e in &entities {
+        store.insert(e, 1.0);
+    }
     (entities, store)
 }
 
@@ -117,7 +132,9 @@ fn bench_insert(c: &mut Criterion) {
         let mut alloc = EntityAllocator::new();
         b.iter(|| {
             let mut store = ComponentStore::new();
-            for _ in 0..COUNT { store.insert(alloc.allocate(), 1.0); }
+            for _ in 0..COUNT {
+                store.insert(alloc.allocate(), 1.0);
+            }
             black_box(store.len());
         });
     });
@@ -126,7 +143,9 @@ fn bench_insert(c: &mut Criterion) {
         let mut alloc = EntityAllocator::new();
         b.iter(|| {
             let mut store = PureSparseStore::new();
-            for _ in 0..COUNT { store.insert(alloc.allocate(), 1.0); }
+            for _ in 0..COUNT {
+                store.insert(alloc.allocate(), 1.0);
+            }
             black_box(store.data.len());
         });
     });
@@ -135,7 +154,9 @@ fn bench_insert(c: &mut Criterion) {
         let mut alloc = EntityAllocator::new();
         b.iter(|| {
             let mut store = HashMap::new();
-            for _ in 0..COUNT { store.insert(alloc.allocate(), 1.0); }
+            for _ in 0..COUNT {
+                store.insert(alloc.allocate(), 1.0);
+            }
             black_box(store.len());
         });
     });
@@ -144,7 +165,9 @@ fn bench_insert(c: &mut Criterion) {
         let mut alloc = EntityAllocator::new();
         b.iter(|| {
             let mut store = ArchetypeStore::new();
-            for _ in 0..COUNT { store.insert(alloc.allocate(), 1.0); }
+            for _ in 0..COUNT {
+                store.insert(alloc.allocate(), 1.0);
+            }
             black_box(store.chunks[0].len());
         });
     });
@@ -162,19 +185,35 @@ fn bench_iterate(c: &mut Criterion) {
     let (_, arch) = setup_archetype(COUNT);
 
     group.bench_function("hybrid", |b| {
-        b.iter(|| { for v in hybrid.iter() { black_box(v); } });
+        b.iter(|| {
+            for v in hybrid.iter() {
+                black_box(v);
+            }
+        });
     });
 
     group.bench_function("pure_sparse", |b| {
-        b.iter(|| { for v in pure.iter() { black_box(v); } });
+        b.iter(|| {
+            for v in pure.iter() {
+                black_box(v);
+            }
+        });
     });
 
     group.bench_function("hashmap", |b| {
-        b.iter(|| { for v in hash.values() { black_box(v); } });
+        b.iter(|| {
+            for v in hash.values() {
+                black_box(v);
+            }
+        });
     });
 
     group.bench_function("archetype", |b| {
-        b.iter(|| { for v in arch.iter() { black_box(v); } });
+        b.iter(|| {
+            for v in arch.iter() {
+                black_box(v);
+            }
+        });
     });
 
     group.finish();
@@ -190,19 +229,35 @@ fn bench_random_access(c: &mut Criterion) {
     let (_, arch) = setup_archetype(COUNT);
 
     group.bench_function("hybrid", |b| {
-        b.iter(|| { for &e in &entities { black_box(hybrid.get(e)); } });
+        b.iter(|| {
+            for &e in &entities {
+                black_box(hybrid.get(e));
+            }
+        });
     });
 
     group.bench_function("pure_sparse", |b| {
-        b.iter(|| { for &e in &entities { black_box(pure.get(e)); } });
+        b.iter(|| {
+            for &e in &entities {
+                black_box(pure.get(e));
+            }
+        });
     });
 
     group.bench_function("hashmap", |b| {
-        b.iter(|| { for &e in &entities { black_box(hash.get(&e)); } });
+        b.iter(|| {
+            for &e in &entities {
+                black_box(hash.get(&e));
+            }
+        });
     });
 
     group.bench_function("archetype", |b| {
-        b.iter(|| { for &e in &entities { black_box(arch.get(e)); } });
+        b.iter(|| {
+            for &e in &entities {
+                black_box(arch.get(e));
+            }
+        });
     });
 
     group.finish();
@@ -244,7 +299,11 @@ fn bench_memory(c: &mut Criterion) {
 
     group.bench_function("archetype", |b| {
         b.iter(|| {
-            let size: usize = arch.chunks.iter().map(|c| c.capacity() * std::mem::size_of::<f32>()).sum();
+            let size: usize = arch
+                .chunks
+                .iter()
+                .map(|c| c.capacity() * std::mem::size_of::<f32>())
+                .sum();
             black_box(size);
         });
     });
@@ -252,5 +311,11 @@ fn bench_memory(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_insert, bench_iterate, bench_random_access, bench_memory);
+criterion_group!(
+    benches,
+    bench_insert,
+    bench_iterate,
+    bench_random_access,
+    bench_memory
+);
 criterion_main!(benches);

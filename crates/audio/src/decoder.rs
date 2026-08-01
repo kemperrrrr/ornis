@@ -62,10 +62,7 @@ pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<AudioClip, DecodeError> {
     let codec_params = &track.codec_params;
     let track_id = track.id;
     let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-    let channels = codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or(2);
+    let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(codec_params, &decoder_opts)
@@ -134,10 +131,7 @@ pub fn decode_bytes(data: &[u8], extension: &str) -> Result<AudioClip, DecodeErr
     let codec_params = &track.codec_params;
     let track_id = track.id;
     let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-    let channels = codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or(2);
+    let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(codec_params, &decoder_opts)

@@ -142,7 +142,11 @@ impl LeakDispatch {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &self.bind_group, &[]);
-            cpass.dispatch_workgroups(self.workgroup_count.0, self.workgroup_count.1, self.workgroup_count.2);
+            cpass.dispatch_workgroups(
+                self.workgroup_count.0,
+                self.workgroup_count.1,
+                self.workgroup_count.2,
+            );
         }
         encoder.finish()
     }
@@ -166,23 +170,29 @@ mod tests {
     fn leak_dispatch_compiles() {
         let ctx = WgpuContext::new_blocking();
 
-        let input = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("input"),
-            contents: bytemuck::cast_slice(&[1.0f32; 256]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let input = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("input"),
+                contents: bytemuck::cast_slice(&[1.0f32; 256]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
 
-        let output = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("output"),
-            contents: bytemuck::cast_slice(&[0.0f32; 256]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        });
+        let output = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("output"),
+                contents: bytemuck::cast_slice(&[0.0f32; 256]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
 
-        let dirty = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("dirty"),
-            contents: bytemuck::cast_slice(&[0u32; 256]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        });
+        let dirty = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dirty"),
+                contents: bytemuck::cast_slice(&[0u32; 256]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
 
         let dispatch = LeakDispatch::new(
             &ctx.device,
@@ -197,6 +207,6 @@ mod tests {
 
         let buf = dispatch.record(&ctx.device);
         ctx.queue.submit([buf]);
-        ctx.device.poll(wgpu::PollType::Wait).ok();
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
     }
 }

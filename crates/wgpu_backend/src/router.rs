@@ -1,5 +1,5 @@
-use ornis_core::{lane_target_of, LaneTarget, Route, TargetDiscriminant};
 use crate::dispatcher::{ExecutionTarget, Platform};
+use ornis_core::{LaneTarget, Route, TargetDiscriminant, lane_target_of};
 
 /// Zero-cost bridge between [`LaneTarget`] (ZST) and [`ExecutionTarget`].
 /// At runtime this compiles to a constant value — no branches.
@@ -24,7 +24,9 @@ impl PipelineRouter {
         match discriminant {
             TargetDiscriminant::Cpu => ExecutionTarget::Cpu,
             TargetDiscriminant::Gpu => ExecutionTarget::Gpu,
-            TargetDiscriminant::Hybrid | TargetDiscriminant::Auto(_) => ExecutionTarget::Auto(10_000),
+            TargetDiscriminant::Hybrid | TargetDiscriminant::Auto(_) => {
+                ExecutionTarget::Auto(10_000)
+            }
         }
     }
 }

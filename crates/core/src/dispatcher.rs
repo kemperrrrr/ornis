@@ -1,6 +1,6 @@
+use crate::component_store::ComponentStore;
 use crate::pipeline::PipelineConfig;
 use crate::smart_store::SmartStore;
-use crate::component_store::ComponentStore;
 use rayon::prelude::*;
 
 /// Result of runtime dispatch decision
@@ -20,7 +20,10 @@ pub struct Dispatcher {
 impl Dispatcher {
     /// Create a new dispatcher with a CPU threshold and GPU availability
     pub fn new(cpu_threshold: usize, gpu_available: bool) -> Self {
-        Self { cpu_threshold, gpu_available }
+        Self {
+            cpu_threshold,
+            gpu_available,
+        }
     }
 
     /// Create from a PipelineConfig type
@@ -146,7 +149,7 @@ impl SmartDispatcher {
         R: Send,
     {
         let target = self.dispatcher.decide(element_count);
-        
+
         match target {
             ExecutionTarget::Cpu => CpuExecutor::execute::<T, _, R>(store, f),
             ExecutionTarget::Gpu => {
@@ -220,12 +223,12 @@ mod tests {
     fn smart_dispatcher_cpu_execution() {
         let mut store = SmartStore::new();
         let dispatcher = SmartDispatcher::with_threshold(1000, false);
-        
+
         for i in 0..100 {
             let entity = store.create_entity();
             store.insert::<f32>(entity, i as f32);
         }
-        
+
         let result = dispatcher.execute_read::<f32, _, _>(&store, 100, |lane| lane.len());
         assert_eq!(result, Some(100));
     }

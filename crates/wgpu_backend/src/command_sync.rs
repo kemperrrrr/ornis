@@ -1,4 +1,4 @@
-use crate::dispatcher::{choose_platform, DispatchConfig, Platform};
+use crate::dispatcher::{DispatchConfig, Platform, choose_platform};
 
 type CpuCommand = Box<dyn FnOnce() + Send>;
 
@@ -46,8 +46,7 @@ impl CommandSync {
             cpass.set_bind_group(0, bind_group, &[]);
             cpass.dispatch_workgroups(workgroup_count.0, workgroup_count.1, workgroup_count.2);
         }
-        self.commands
-            .push(RecordedCommand::Gpu(encoder.finish()));
+        self.commands.push(RecordedCommand::Gpu(encoder.finish()));
     }
 
     /// Record a CPU-side closure for parallel execution.
@@ -67,8 +66,7 @@ impl CommandSync {
         match choose_platform(config, element_count) {
             Platform::Gpu => {
                 if let (Some(pipeline), Some(bg)) = (pipeline, bind_group) {
-                    let wgc =
-                        (element_count as u32).div_ceil(config.workgroup_size);
+                    let wgc = (element_count as u32).div_ceil(config.workgroup_size);
                     self.dispatch_gpu(pipeline, bg, (wgc, 1, 1), &config.label);
                 } else {
                     self.commands.push(RecordedCommand::Cpu(cpu_fn));
@@ -93,7 +91,12 @@ impl CommandSync {
 
         if !gpu_buffers.is_empty() {
             self.queue.submit(gpu_buffers);
-            self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+            self.device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .ok();
         }
     }
 
@@ -130,22 +133,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 ),
             });
 
-        let pipeline =
-            ctx.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("test_pipeline"),
-                    layout: None,
-                    module: &shader,
-                    entry_point: Some("main"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
+        let pipeline = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("test_pipeline"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
-        let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("test_buf"),
-            contents: bytemuck::cast_slice(&[1.0f32, 2.0, 3.0]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test_buf"),
+                contents: bytemuck::cast_slice(&[1.0f32, 2.0, 3.0]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
 
         let bind_group_layout = pipeline.get_bind_group_layout(0);
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {

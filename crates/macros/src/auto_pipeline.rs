@@ -10,20 +10,26 @@ pub fn derive(input: TokenStream) -> TokenStream {
     if has_pack {
         let fields = match &input.data {
             Data::Struct(s) => &s.fields,
-            _ => return syn::Error::new_spanned(name, "#[pack] only supported on structs")
-                .to_compile_error().into(),
+            _ => {
+                return syn::Error::new_spanned(name, "#[pack] only supported on structs")
+                    .to_compile_error()
+                    .into();
+            }
         };
         let field_names: Vec<_> = match fields {
-            Fields::Named(named) => named.named.iter()
+            Fields::Named(named) => named
+                .named
+                .iter()
                 .filter_map(|f| f.ident.as_ref())
                 .collect(),
-            _ => return syn::Error::new_spanned(fields, "#[pack] requires named fields")
-                .to_compile_error().into(),
+            _ => {
+                return syn::Error::new_spanned(fields, "#[pack] requires named fields")
+                    .to_compile_error()
+                    .into();
+            }
         };
         let field_tys: Vec<_> = match fields {
-            Fields::Named(named) => named.named.iter()
-                .map(|f| &f.ty)
-                .collect(),
+            Fields::Named(named) => named.named.iter().map(|f| &f.ty).collect(),
             _ => unreachable!(),
         };
 

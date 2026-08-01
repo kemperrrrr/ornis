@@ -1,12 +1,12 @@
 mod auto_pipeline;
-mod pack;
 mod for_each_entity;
-mod smart_pipeline;
-mod pipeline_config;
-mod wgsl;
 mod gpu_pipeline;
 mod kernel;
+mod pack;
+mod pipeline_config;
+mod smart_pipeline;
 mod static_profile;
+mod wgsl;
 
 use proc_macro::TokenStream;
 

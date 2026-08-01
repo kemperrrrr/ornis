@@ -1,6 +1,6 @@
-use ornis_core::{LaneTarget, Route};
 use crate::command_sync::CommandSync;
 use crate::router::PipelineRouter;
+use ornis_core::{LaneTarget, Route};
 
 /// CPU executor ZST — monomorphizes to sequential/rayon dispatch.
 pub struct CpuExecutor;
@@ -67,10 +67,24 @@ pub fn dispatch_lane<T, F>(
 {
     match PipelineRouter::resolve::<T>() {
         crate::dispatcher::Platform::Cpu => {
-            CpuExecutor.execute(sync, element_count, pipeline, bind_group, Box::new(cpu_work), "");
+            CpuExecutor.execute(
+                sync,
+                element_count,
+                pipeline,
+                bind_group,
+                Box::new(cpu_work),
+                "",
+            );
         }
         crate::dispatcher::Platform::Gpu => {
-            GpuExecutor.execute(sync, element_count, pipeline, bind_group, Box::new(cpu_work), "");
+            GpuExecutor.execute(
+                sync,
+                element_count,
+                pipeline,
+                bind_group,
+                Box::new(cpu_work),
+                "",
+            );
         }
     }
 }

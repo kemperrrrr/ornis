@@ -68,69 +68,221 @@ impl OpenPBRMaterial {
         }
     }
 
-    pub fn base_weight(mut self, v: f32) -> Self { self.base_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn base_diffuse_roughness(mut self, v: f32) -> Self { self.base_params[1] = v.clamp(0.0, 1.0); self }
-    pub fn base_metalness(mut self, v: f32) -> Self { self.base_params[2] = v.clamp(0.0, 1.0); self }
+    pub fn base_weight(mut self, v: f32) -> Self {
+        self.base_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn base_diffuse_roughness(mut self, v: f32) -> Self {
+        self.base_params[1] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn base_metalness(mut self, v: f32) -> Self {
+        self.base_params[2] = v.clamp(0.0, 1.0);
+        self
+    }
 
-    pub fn base_color(mut self, r: f32, g: f32, b: f32, a: f32) -> Self { self.base_color = [r, g, b, a]; self }
-    pub fn base_color_rgb(mut self, rgb: [f32; 3]) -> Self { self.base_color[0] = rgb[0]; self.base_color[1] = rgb[1]; self.base_color[2] = rgb[2]; self }
+    pub fn base_color(mut self, r: f32, g: f32, b: f32, a: f32) -> Self {
+        self.base_color = [r, g, b, a];
+        self
+    }
+    pub fn base_color_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.base_color[0] = rgb[0];
+        self.base_color[1] = rgb[1];
+        self.base_color[2] = rgb[2];
+        self
+    }
 
-    pub fn specular_weight(mut self, v: f32) -> Self { self.specular_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn specular_roughness(mut self, v: f32) -> Self { self.specular_params[1] = v.clamp(0.0, 1.0); self }
-    pub fn specular_ior(mut self, v: f32) -> Self { self.specular_params[2] = v.max(1.0); self }
-    pub fn specular_anisotropy(mut self, v: f32) -> Self { self.specular_params[3] = v.clamp(0.0, 1.0); self }
+    pub fn specular_weight(mut self, v: f32) -> Self {
+        self.specular_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn specular_roughness(mut self, v: f32) -> Self {
+        self.specular_params[1] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn specular_ior(mut self, v: f32) -> Self {
+        self.specular_params[2] = v.max(1.0);
+        self
+    }
+    pub fn specular_anisotropy(mut self, v: f32) -> Self {
+        self.specular_params[3] = v.clamp(0.0, 1.0);
+        self
+    }
 
-    pub fn specular_edge_tint(mut self, r: f32, g: f32, b: f32) -> Self { self.specular_color = [r, g, b, 0.0]; self }
-    pub fn specular_edge_tint_rgb(mut self, rgb: [f32; 3]) -> Self { self.specular_color[0] = rgb[0]; self.specular_color[1] = rgb[1]; self.specular_color[2] = rgb[2]; self }
+    pub fn specular_edge_tint(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.specular_color = [r, g, b, 0.0];
+        self
+    }
+    pub fn specular_edge_tint_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.specular_color[0] = rgb[0];
+        self.specular_color[1] = rgb[1];
+        self.specular_color[2] = rgb[2];
+        self
+    }
 
-    pub fn transmission_weight(mut self, v: f32) -> Self { self.transmission_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn transmission_depth(mut self, v: f32) -> Self { self.transmission_params[1] = v.max(0.0); self }
-    pub fn transmission_dispersion_scale(mut self, v: f32) -> Self { self.transmission_params[2] = v.max(0.0); self }
-    pub fn transmission_dispersion_abbe(mut self, v: f32) -> Self { self.transmission_params[3] = v.max(0.0); self }
+    pub fn transmission_weight(mut self, v: f32) -> Self {
+        self.transmission_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn transmission_depth(mut self, v: f32) -> Self {
+        self.transmission_params[1] = v.max(0.0);
+        self
+    }
+    pub fn transmission_dispersion_scale(mut self, v: f32) -> Self {
+        self.transmission_params[2] = v.max(0.0);
+        self
+    }
+    pub fn transmission_dispersion_abbe(mut self, v: f32) -> Self {
+        self.transmission_params[3] = v.max(0.0);
+        self
+    }
 
-    pub fn transmission_color(mut self, r: f32, g: f32, b: f32) -> Self { self.transmission_color = [r, g, b, 0.0]; self }
-    pub fn transmission_color_rgb(mut self, rgb: [f32; 3]) -> Self { self.transmission_color[0] = rgb[0]; self.transmission_color[1] = rgb[1]; self.transmission_color[2] = rgb[2]; self }
+    pub fn transmission_color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.transmission_color = [r, g, b, 0.0];
+        self
+    }
+    pub fn transmission_color_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.transmission_color[0] = rgb[0];
+        self.transmission_color[1] = rgb[1];
+        self.transmission_color[2] = rgb[2];
+        self
+    }
 
-    pub fn transmission_scatter_color(mut self, r: f32, g: f32, b: f32) -> Self { self.transmission_scatter = [r, g, b, 0.0]; self }
-    pub fn transmission_scatter_anisotropy(mut self, v: f32) -> Self { self.transmission_scatter[3] = v.clamp(-1.0, 1.0); self }
+    pub fn transmission_scatter_color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.transmission_scatter = [r, g, b, 0.0];
+        self
+    }
+    pub fn transmission_scatter_anisotropy(mut self, v: f32) -> Self {
+        self.transmission_scatter[3] = v.clamp(-1.0, 1.0);
+        self
+    }
 
-    pub fn subsurface_weight(mut self, v: f32) -> Self { self.subsurface_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn subsurface_radius(mut self, v: f32) -> Self { self.subsurface_params[1] = v.max(0.0); self }
-    pub fn subsurface_radius_scale_r(mut self, v: f32) -> Self { self.subsurface_params[2] = v.max(0.0); self }
-    pub fn subsurface_scatter_anisotropy(mut self, v: f32) -> Self { self.subsurface_params[3] = v.clamp(-1.0, 1.0); self }
+    pub fn subsurface_weight(mut self, v: f32) -> Self {
+        self.subsurface_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn subsurface_radius(mut self, v: f32) -> Self {
+        self.subsurface_params[1] = v.max(0.0);
+        self
+    }
+    pub fn subsurface_radius_scale_r(mut self, v: f32) -> Self {
+        self.subsurface_params[2] = v.max(0.0);
+        self
+    }
+    pub fn subsurface_scatter_anisotropy(mut self, v: f32) -> Self {
+        self.subsurface_params[3] = v.clamp(-1.0, 1.0);
+        self
+    }
 
-    pub fn subsurface_color(mut self, r: f32, g: f32, b: f32) -> Self { self.subsurface_color = [r, g, b, 1.0]; self }
-    pub fn subsurface_color_rgb(mut self, rgb: [f32; 3]) -> Self { self.subsurface_color[0] = rgb[0]; self.subsurface_color[1] = rgb[1]; self.subsurface_color[2] = rgb[2]; self }
+    pub fn subsurface_color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.subsurface_color = [r, g, b, 1.0];
+        self
+    }
+    pub fn subsurface_color_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.subsurface_color[0] = rgb[0];
+        self.subsurface_color[1] = rgb[1];
+        self.subsurface_color[2] = rgb[2];
+        self
+    }
 
-    pub fn subsurface_radius_scale_g(mut self, v: f32) -> Self { self.subsurface_radius_scale_gb[0] = v.max(0.0); self }
-    pub fn subsurface_radius_scale_b(mut self, v: f32) -> Self { self.subsurface_radius_scale_gb[1] = v.max(0.0); self }
+    pub fn subsurface_radius_scale_g(mut self, v: f32) -> Self {
+        self.subsurface_radius_scale_gb[0] = v.max(0.0);
+        self
+    }
+    pub fn subsurface_radius_scale_b(mut self, v: f32) -> Self {
+        self.subsurface_radius_scale_gb[1] = v.max(0.0);
+        self
+    }
 
-    pub fn fuzz_weight(mut self, v: f32) -> Self { self.fuzz_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn fuzz_roughness(mut self, v: f32) -> Self { self.fuzz_params[1] = v.clamp(0.0, 1.0); self }
+    pub fn fuzz_weight(mut self, v: f32) -> Self {
+        self.fuzz_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn fuzz_roughness(mut self, v: f32) -> Self {
+        self.fuzz_params[1] = v.clamp(0.0, 1.0);
+        self
+    }
 
-    pub fn fuzz_color(mut self, r: f32, g: f32, b: f32) -> Self { self.fuzz_color = [r, g, b, 0.0]; self }
-    pub fn fuzz_color_rgb(mut self, rgb: [f32; 3]) -> Self { self.fuzz_color[0] = rgb[0]; self.fuzz_color[1] = rgb[1]; self.fuzz_color[2] = rgb[2]; self }
+    pub fn fuzz_color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.fuzz_color = [r, g, b, 0.0];
+        self
+    }
+    pub fn fuzz_color_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.fuzz_color[0] = rgb[0];
+        self.fuzz_color[1] = rgb[1];
+        self.fuzz_color[2] = rgb[2];
+        self
+    }
 
-    pub fn coat_weight(mut self, v: f32) -> Self { self.coat_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn coat_roughness(mut self, v: f32) -> Self { self.coat_params[1] = v.clamp(0.0, 1.0); self }
-    pub fn coat_anisotropy(mut self, v: f32) -> Self { self.coat_params[2] = v.clamp(0.0, 1.0); self }
-    pub fn coat_darkening(mut self, v: f32) -> Self { self.coat_params[3] = v.clamp(0.0, 1.0); self }
+    pub fn coat_weight(mut self, v: f32) -> Self {
+        self.coat_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn coat_roughness(mut self, v: f32) -> Self {
+        self.coat_params[1] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn coat_anisotropy(mut self, v: f32) -> Self {
+        self.coat_params[2] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn coat_darkening(mut self, v: f32) -> Self {
+        self.coat_params[3] = v.clamp(0.0, 1.0);
+        self
+    }
 
-    pub fn coat_color(mut self, r: f32, g: f32, b: f32) -> Self { self.coat_color = [r, g, b, 0.0]; self }
-    pub fn coat_color_rgb(mut self, rgb: [f32; 3]) -> Self { self.coat_color[0] = rgb[0]; self.coat_color[1] = rgb[1]; self.coat_color[2] = rgb[2]; self }
+    pub fn coat_color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.coat_color = [r, g, b, 0.0];
+        self
+    }
+    pub fn coat_color_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.coat_color[0] = rgb[0];
+        self.coat_color[1] = rgb[1];
+        self.coat_color[2] = rgb[2];
+        self
+    }
 
-    pub fn coat_ior(mut self, v: f32) -> Self { self.coat_ior[0] = v.max(1.0); self }
+    pub fn coat_ior(mut self, v: f32) -> Self {
+        self.coat_ior[0] = v.max(1.0);
+        self
+    }
 
-    pub fn thin_film_weight(mut self, v: f32) -> Self { self.thin_film_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn thin_film_thickness_um(mut self, v: f32) -> Self { self.thin_film_params[1] = v.max(0.0); self }
-    pub fn thin_film_ior(mut self, v: f32) -> Self { self.thin_film_params[2] = v.max(1.0); self }
+    pub fn thin_film_weight(mut self, v: f32) -> Self {
+        self.thin_film_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn thin_film_thickness_um(mut self, v: f32) -> Self {
+        self.thin_film_params[1] = v.max(0.0);
+        self
+    }
+    pub fn thin_film_ior(mut self, v: f32) -> Self {
+        self.thin_film_params[2] = v.max(1.0);
+        self
+    }
 
-    pub fn emission_luminance(mut self, nits: f32) -> Self { self.emission_params[0] = nits.max(0.0); self }
-    pub fn emission_color(mut self, r: f32, g: f32, b: f32) -> Self { self.emission_color = [r, g, b, 1.0]; self }
-    pub fn emission_color_rgb(mut self, rgb: [f32; 3]) -> Self { self.emission_color[0] = rgb[0]; self.emission_color[1] = rgb[1]; self.emission_color[2] = rgb[2]; self }
+    pub fn emission_luminance(mut self, nits: f32) -> Self {
+        self.emission_params[0] = nits.max(0.0);
+        self
+    }
+    pub fn emission_color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.emission_color = [r, g, b, 1.0];
+        self
+    }
+    pub fn emission_color_rgb(mut self, rgb: [f32; 3]) -> Self {
+        self.emission_color[0] = rgb[0];
+        self.emission_color[1] = rgb[1];
+        self.emission_color[2] = rgb[2];
+        self
+    }
 
-    pub fn opacity(mut self, v: f32) -> Self { self.geometry_params[0] = v.clamp(0.0, 1.0); self }
-    pub fn thin_walled(mut self, v: bool) -> Self { self.geometry_params[1] = if v { 1.0 } else { 0.0 }; self }
+    pub fn opacity(mut self, v: f32) -> Self {
+        self.geometry_params[0] = v.clamp(0.0, 1.0);
+        self
+    }
+    pub fn thin_walled(mut self, v: bool) -> Self {
+        self.geometry_params[1] = if v { 1.0 } else { 0.0 };
+        self
+    }
 
     pub fn metal() -> Self {
         Self::pbr()
@@ -279,7 +431,7 @@ mod tests {
         assert_eq!(mat.specular_params[1], 0.1);
     }
 
-#[test]
+    #[test]
     fn test_dielectric_builder() {
         let mat = OpenPBRMaterial::dielectric();
         assert_eq!(mat.base_params[2], 0.0);
@@ -361,9 +513,7 @@ mod tests {
 
     #[test]
     fn test_opacity_and_thin_walled() {
-        let mat = OpenPBRMaterial::pbr()
-            .opacity(0.5)
-            .thin_walled(true);
+        let mat = OpenPBRMaterial::pbr().opacity(0.5).thin_walled(true);
         assert_eq!(mat.geometry_params[0], 0.5);
         assert_eq!(mat.geometry_params[1], 1.0);
     }
@@ -431,6 +581,7 @@ mod tests {
     fn test_pod_zeroable() {
         let _mat = OpenPBRMaterial::default();
         let _zeroed = OpenPBRMaterial::zeroed();
-        let _pod = unsafe { std::mem::transmute::<_, OpenPBRMaterial>([0u8; OPENPBR_MATERIAL_SIZE]) };
+        let _pod =
+            unsafe { std::mem::transmute::<_, OpenPBRMaterial>([0u8; OPENPBR_MATERIAL_SIZE]) };
     }
 }

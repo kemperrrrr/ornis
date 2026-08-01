@@ -76,11 +76,7 @@ mod tests {
         let func: syn::ItemFn = parse_quote!(
             fn kernel(a: f32) -> f32 {
                 if a > 0.0 {
-                    if a > 10.0 {
-                        a * 2.0
-                    } else {
-                        a
-                    }
+                    if a > 10.0 { a * 2.0 } else { a }
                 } else {
                     a * 3.0 + if a < -10.0 { 1.0 } else { 0.0 }
                 }
@@ -95,7 +91,29 @@ mod tests {
     fn single_branch_still_prefers_gpu() {
         let func: syn::ItemFn = parse_quote!(
             fn kernel(a: f32) -> f32 {
-                if a > 0.0 { a * 2.0 + b * 3.0 + c * 4.0 + d * 5.0 + e * 6.0 + f * 7.0 + g * 8.0 + h * 9.0 + i * 10.0 + j * 11.0 + k * 12.0 + l * 13.0 + m * 14.0 + n * 15.0 + o * 16.0 + p * 17.0 + q * 18.0 + r * 19.0 + s * 20.0 } else { a }
+                if a > 0.0 {
+                    a * 2.0
+                        + b * 3.0
+                        + c * 4.0
+                        + d * 5.0
+                        + e * 6.0
+                        + f * 7.0
+                        + g * 8.0
+                        + h * 9.0
+                        + i * 10.0
+                        + j * 11.0
+                        + k * 12.0
+                        + l * 13.0
+                        + m * 14.0
+                        + n * 15.0
+                        + o * 16.0
+                        + p * 17.0
+                        + q * 18.0
+                        + r * 19.0
+                        + s * 20.0
+                } else {
+                    a
+                }
             }
         );
         let profile = analyze(&func);

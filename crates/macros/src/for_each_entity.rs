@@ -1,8 +1,9 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
+    FnArg, Ident, Pat, PatType, Token, Type, TypeReference,
     parse::{Parse, ParseStream},
-    parse_macro_input, FnArg, Ident, Pat, PatType, Token, Type, TypeReference,
+    parse_macro_input,
 };
 
 struct ForEachInput {
@@ -34,12 +35,16 @@ impl Parse for ForEachInput {
                             _ => return Err(syn::Error::new_spanned(pat, "expected identifier")),
                         };
                         let (mutable, inner_ty) = match &*ty {
-                            Type::Reference(TypeReference { elem, mutability, .. }) => {
-                                (mutability.is_some(), *elem.clone())
-                            }
+                            Type::Reference(TypeReference {
+                                elem, mutability, ..
+                            }) => (mutability.is_some(), *elem.clone()),
                             _ => return Err(syn::Error::new_spanned(ty, "expected &T or &mut T")),
                         };
-                        closure_args.push(ClosureArg { name, mutable, ty: inner_ty });
+                        closure_args.push(ClosureArg {
+                            name,
+                            mutable,
+                            ty: inner_ty,
+                        });
                     }
                     _ => return Err(syn::Error::new_spanned(arg, "expected typed argument")),
                 }
@@ -51,7 +56,11 @@ impl Parse for ForEachInput {
         }
 
         let body: proc_macro2::TokenStream = input.parse()?;
-        Ok(ForEachInput { store, closure_args, body })
+        Ok(ForEachInput {
+            store,
+            closure_args,
+            body,
+        })
     }
 }
 
@@ -59,7 +68,9 @@ pub fn for_each_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ForEachInput);
     let store = &input.store;
 
-    let read_lanes: Vec<_> = input.closure_args.iter()
+    let read_lanes: Vec<_> = input
+        .closure_args
+        .iter()
         .filter(|a| !a.mutable)
         .map(|a| {
             let name = &a.name;
@@ -72,7 +83,9 @@ pub fn for_each_entity(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let write_lanes: Vec<_> = input.closure_args.iter()
+    let write_lanes: Vec<_> = input
+        .closure_args
+        .iter()
         .filter(|a| a.mutable)
         .map(|a| {
             let name = &a.name;
@@ -127,15 +140,19 @@ pub fn for_each_entity(input: TokenStream) -> TokenStream {
             };
         };
 
-        let lookups: Vec<_> = input.closure_args.iter().map(|a| {
-            let name = &a.name;
-            let lane = format_ident!("__lane_{}", name);
-            if a.mutable {
-                quote! { let #name = #lane.get_mut(entity).unwrap(); }
-            } else {
-                quote! { let #name = #lane.get(entity).unwrap(); }
-            }
-        }).collect();
+        let lookups: Vec<_> = input
+            .closure_args
+            .iter()
+            .map(|a| {
+                let name = &a.name;
+                let lane = format_ident!("__lane_{}", name);
+                if a.mutable {
+                    quote! { let #name = #lane.get_mut(entity).unwrap(); }
+                } else {
+                    quote! { let #name = #lane.get(entity).unwrap(); }
+                }
+            })
+            .collect();
 
         let body = &input.body;
         quote! {

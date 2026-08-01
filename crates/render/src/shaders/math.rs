@@ -1,5 +1,5 @@
-use ornis_macros::kernel;
 use glam::Vec3Swizzles;
+use ornis_macros::kernel;
 
 pub const PI: f32 = std::f32::consts::PI;
 pub const INV_PI: f32 = 1.0 / PI;
@@ -57,7 +57,14 @@ fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
 }
 
 #[kernel]
-fn ggx_ndf_aniso(_NoH: f32, H: glam::Vec3, T: glam::Vec3, B: glam::Vec3, alpha_u: f32, alpha_v: f32) -> f32 {
+fn ggx_ndf_aniso(
+    _NoH: f32,
+    H: glam::Vec3,
+    T: glam::Vec3,
+    B: glam::Vec3,
+    alpha_u: f32,
+    alpha_v: f32,
+) -> f32 {
     let Hu = H.dot(T);
     let Hv = H.dot(B);
     let a2u = alpha_u * alpha_u;
@@ -88,7 +95,16 @@ fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
 }
 
 #[kernel]
-fn smith_ggx_aniso(NoV: f32, NoL: f32, V: glam::Vec3, L: glam::Vec3, T: glam::Vec3, B: glam::Vec3, alpha_u: f32, alpha_v: f32) -> f32 {
+fn smith_ggx_aniso(
+    NoV: f32,
+    NoL: f32,
+    V: glam::Vec3,
+    L: glam::Vec3,
+    T: glam::Vec3,
+    B: glam::Vec3,
+    alpha_u: f32,
+    alpha_v: f32,
+) -> f32 {
     let Vu = V.dot(T);
     let Vv = V.dot(B);
     let Lu = L.dot(T);
@@ -124,7 +140,10 @@ fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
 }
 
 #[kernel]
-fn transmission_color_to_extinction(transmission_color: glam::Vec3, transmission_depth: f32) -> glam::Vec3 {
+fn transmission_color_to_extinction(
+    transmission_color: glam::Vec3,
+    transmission_depth: f32,
+) -> glam::Vec3 {
     if transmission_depth <= 0.0 {
         return glam::Vec3::splat(0.0);
     }
@@ -133,7 +152,13 @@ fn transmission_color_to_extinction(transmission_color: glam::Vec3, transmission
 }
 
 #[kernel]
-fn subsurface_brdf(NoV: f32, NoL: f32, distance: f32, radius: glam::Vec3, anisotropy: f32) -> glam::Vec3 {
+fn subsurface_brdf(
+    NoV: f32,
+    NoL: f32,
+    distance: f32,
+    radius: glam::Vec3,
+    anisotropy: f32,
+) -> glam::Vec3 {
     let sigma_tr = 3.0_f32.sqrt() / radius;
     let profile = (-distance * sigma_tr).exp() / distance.max(EPS);
     let phase = 1.0 + anisotropy * distance.cos();
@@ -143,9 +168,21 @@ fn subsurface_brdf(NoV: f32, NoL: f32, distance: f32, radius: glam::Vec3, anisot
 #[kernel]
 fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
     let cutoff = 0.04045;
-    let r = if c.x <= cutoff { c.x / 12.92 } else { ((c.x + 0.055) / 1.055).powf(2.4) };
-    let g = if c.y <= cutoff { c.y / 12.92 } else { ((c.y + 0.055) / 1.055).powf(2.4) };
-    let b = if c.z <= cutoff { c.z / 12.92 } else { ((c.z + 0.055) / 1.055).powf(2.4) };
+    let r = if c.x <= cutoff {
+        c.x / 12.92
+    } else {
+        ((c.x + 0.055) / 1.055).powf(2.4)
+    };
+    let g = if c.y <= cutoff {
+        c.y / 12.92
+    } else {
+        ((c.y + 0.055) / 1.055).powf(2.4)
+    };
+    let b = if c.z <= cutoff {
+        c.z / 12.92
+    } else {
+        ((c.z + 0.055) / 1.055).powf(2.4)
+    };
     glam::Vec3::new(r, g, b)
 }
 
@@ -173,20 +210,29 @@ fn coat_darkening(
     let Ebase_Kcoat = Ebase * Kcoat;
     let one_minus_Kcoat = 1.0 - Kcoat;
     let one_minus_Ebase_Kcoat = glam::Vec3::splat(1.0) - Ebase_Kcoat;
-    let base_darkening = glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6));
+    let base_darkening =
+        glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6));
 
     let mix_factor = coat_weight * coat_darkening;
     glam::Vec3::splat(1.0).lerp(base_darkening, mix_factor)
 }
 
 #[kernel]
-fn thin_film_modulation(cos_theta: f32, film_ior: f32, thickness_nm: f32, ior_outside: f32) -> glam::Vec3 {
+fn thin_film_modulation(
+    cos_theta: f32,
+    film_ior: f32,
+    thickness_nm: f32,
+    ior_outside: f32,
+) -> glam::Vec3 {
     let sin_theta_film = ior_outside * (1.0 - cos_theta * cos_theta).max(0.0).sqrt() / film_ior;
     let cos_theta_film = (1.0 - sin_theta_film * sin_theta_film).max(0.0).sqrt();
     let lambda = glam::Vec3::new(650.0, 550.0, 450.0);
     let phase = 4.0 * PI * film_ior * thickness_nm * cos_theta_film / lambda;
     let r0 = ((film_ior - ior_outside) / (film_ior + ior_outside)).powf(2.0);
-    let modulation = glam::Vec3::splat(1.0) + glam::Vec3::splat(2.0 * r0) * glam::Vec3::new(phase.x.cos(), phase.y.cos(), phase.z.cos()) / glam::Vec3::splat(1.0 - r0 * r0);
+    let modulation = glam::Vec3::splat(1.0)
+        + glam::Vec3::splat(2.0 * r0)
+            * glam::Vec3::new(phase.x.cos(), phase.y.cos(), phase.z.cos())
+            / glam::Vec3::splat(1.0 - r0 * r0);
     modulation
 }
 
@@ -196,7 +242,8 @@ fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
     let q = glam::Vec2::new(p.x, p.y);
     let sign_x = if q.x >= 0.0 { 1.0 } else { -1.0 };
     let sign_y = if q.y >= 0.0 { 1.0 } else { -1.0 };
-    let flipped = glam::Vec2::new(1.0 - q.y.abs(), 1.0 - q.x.abs()) * glam::Vec2::new(sign_x, sign_y);
+    let flipped =
+        glam::Vec2::new(1.0 - q.y.abs(), 1.0 - q.x.abs()) * glam::Vec2::new(sign_x, sign_y);
     if n.z < 0.0 {
         return flipped;
     }
@@ -286,7 +333,10 @@ mod tests {
         let enc = octahedral_encode::eval(n);
         let dec = crate::shader::octahedral_decode_rust(enc);
         for i in 0..3 {
-            assert!((n[i] - dec[i]).abs() < 0.01, "mismatch at {i}: {n} vs {dec}");
+            assert!(
+                (n[i] - dec[i]).abs() < 0.01,
+                "mismatch at {i}: {n} vs {dec}"
+            );
         }
     }
 

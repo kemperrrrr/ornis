@@ -1,11 +1,11 @@
-pub mod math;
 pub mod body;
+pub mod math;
 pub mod shape;
 
 use glam::Vec3;
 
-use math::{AABB, Ray, RaycastHit};
 use body::{BodyHandle, BodyType, RigidBody};
+use math::{AABB, Ray, RaycastHit};
 use shape::Shape;
 
 pub trait PhysicsEngine: Send + Sync {
@@ -30,10 +30,7 @@ fn compute_aabb(body: &RigidBody) -> AABB {
     body.shape.aabb(body.position)
 }
 
-fn sphere_vs_sphere(
-    pos_a: Vec3, radius_a: f32,
-    pos_b: Vec3, radius_b: f32,
-) -> Option<Contact> {
+fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> Option<Contact> {
     let diff = pos_b - pos_a;
     let dist_sq = diff.length_squared();
     let radius_sum = radius_a + radius_b;
@@ -53,8 +50,10 @@ fn sphere_vs_sphere(
 }
 
 fn sphere_vs_box(
-    sphere_pos: Vec3, sphere_radius: f32,
-    box_pos: Vec3, half_extents: Vec3,
+    sphere_pos: Vec3,
+    sphere_radius: f32,
+    box_pos: Vec3,
+    half_extents: Vec3,
 ) -> Option<Contact> {
     let local = sphere_pos - box_pos;
     let clamped = Vec3::new(
@@ -80,17 +79,20 @@ fn sphere_vs_box(
     })
 }
 
-fn box_vs_box(
-    pos_a: Vec3, half_a: Vec3,
-    pos_b: Vec3, half_b: Vec3,
-) -> Option<Contact> {
+fn box_vs_box(pos_a: Vec3, half_a: Vec3, pos_b: Vec3, half_b: Vec3) -> Option<Contact> {
     let diff = pos_b - pos_a;
     let overlap_x = half_a.x + half_b.x - diff.x.abs();
-    if overlap_x <= 0.0 { return None; }
+    if overlap_x <= 0.0 {
+        return None;
+    }
     let overlap_y = half_a.y + half_b.y - diff.y.abs();
-    if overlap_y <= 0.0 { return None; }
+    if overlap_y <= 0.0 {
+        return None;
+    }
     let overlap_z = half_a.z + half_b.z - diff.z.abs();
-    if overlap_z <= 0.0 { return None; }
+    if overlap_z <= 0.0 {
+        return None;
+    }
 
     let (penetration, normal) = if overlap_x < overlap_y && overlap_x < overlap_z {
         (overlap_x, Vec3::new(diff.x.signum(), 0.0, 0.0))
@@ -111,8 +113,12 @@ fn box_vs_box(
 }
 
 fn capsule_vs_capsule(
-    pos_a: Vec3, radius_a: f32, half_height_a: f32,
-    pos_b: Vec3, radius_b: f32, half_height_b: f32,
+    pos_a: Vec3,
+    radius_a: f32,
+    half_height_a: f32,
+    pos_b: Vec3,
+    radius_b: f32,
+    half_height_b: f32,
 ) -> Option<Contact> {
     let top_a = pos_a + Vec3::Y * half_height_a;
     let bot_a = pos_a - Vec3::Y * half_height_a;
@@ -167,20 +173,34 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
         }
 
         let contact = match (&a.shape, &b.shape) {
-            (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) =>
-                sphere_vs_sphere(a.position, ra, b.position, rb),
-            (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) =>
-                sphere_vs_box(a.position, ra, b.position, hb),
-            (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) =>
+            (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
+                sphere_vs_sphere(a.position, ra, b.position, rb)
+            }
+            (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
+                sphere_vs_box(a.position, ra, b.position, hb)
+            }
+            (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
                 sphere_vs_box(b.position, rb, a.position, ha).map(|c| Contact {
-                    body_a: c.body_a, body_b: c.body_b, normal: -c.normal,
-                    penetration: c.penetration, contact_point: c.contact_point,
-                }),
-            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) =>
-                box_vs_box(a.position, ha, b.position, hb),
-            (&Shape::Capsule { radius: ra, half_height: hha },
-             &Shape::Capsule { radius: rb, half_height: hhb }) =>
-                capsule_vs_capsule(a.position, ra, hha, b.position, rb, hhb),
+                    body_a: c.body_a,
+                    body_b: c.body_b,
+                    normal: -c.normal,
+                    penetration: c.penetration,
+                    contact_point: c.contact_point,
+                })
+            }
+            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
+                box_vs_box(a.position, ha, b.position, hb)
+            }
+            (
+                &Shape::Capsule {
+                    radius: ra,
+                    half_height: hha,
+                },
+                &Shape::Capsule {
+                    radius: rb,
+                    half_height: hhb,
+                },
+            ) => capsule_vs_capsule(a.position, ra, hha, b.position, rb, hhb),
             _ => None,
         };
 
@@ -201,7 +221,11 @@ struct SweepAndPrune {
 
 impl SweepAndPrune {
     fn new() -> Self {
-        Self { aabbs: Vec::new(), active: Vec::new(), sort_axis: 0 }
+        Self {
+            aabbs: Vec::new(),
+            active: Vec::new(),
+            sort_axis: 0,
+        }
     }
 
     fn update(&mut self, bodies: &[RigidBody]) {
@@ -210,7 +234,10 @@ impl SweepAndPrune {
         self.active.clear();
 
         let n = self.aabbs.len();
-        let mut starts: Vec<(f32, usize)> = self.aabbs.iter().enumerate()
+        let mut starts: Vec<(f32, usize)> = self
+            .aabbs
+            .iter()
+            .enumerate()
             .map(|(i, aabb)| match self.sort_axis {
                 0 => (aabb.min.x, i),
                 1 => (aabb.min.y, i),
@@ -233,7 +260,9 @@ impl SweepAndPrune {
                     1 => self.aabbs[j].min.y,
                     _ => self.aabbs[j].min.z,
                 };
-                if start_j > end { break; }
+                if start_j > end {
+                    break;
+                }
                 if i < j && sweep_aabb.overlaps(&self.aabbs[j]) {
                     self.active.push((i, j));
                 }
@@ -279,7 +308,9 @@ impl BuiltinPhysicsEngine {
             let inv_mass_a = self.bodies[i].inv_mass;
             let inv_mass_b = self.bodies[j].inv_mass;
             let total_inv = inv_mass_a + inv_mass_b;
-            if total_inv < 1e-10 { continue; }
+            if total_inv < 1e-10 {
+                continue;
+            }
 
             let correction = contact.normal * (contact.penetration / total_inv);
             self.bodies[i].position -= correction * inv_mass_a;
@@ -287,7 +318,9 @@ impl BuiltinPhysicsEngine {
 
             let rel_vel = self.bodies[j].velocity - self.bodies[i].velocity;
             let vel_along_normal = rel_vel.dot(contact.normal);
-            if vel_along_normal > 0.0 { continue; }
+            if vel_along_normal > 0.0 {
+                continue;
+            }
 
             let e = self.bodies[i].restitution.min(self.bodies[j].restitution);
             let j_impulse = -(1.0 + e) * vel_along_normal / total_inv;
@@ -334,7 +367,12 @@ impl BuiltinPhysicsEngine {
         if normal.length_squared() < 0.5 {
             return None;
         }
-        Some(RaycastHit { handle, point, normal, distance: t })
+        Some(RaycastHit {
+            handle,
+            point,
+            normal,
+            distance: t,
+        })
     }
 }
 
@@ -404,7 +442,11 @@ mod tests {
     #[test]
     fn static_body_does_not_fall() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
-        let ground = physics.add_body(RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(10.0, 1.0, 10.0), 0.0));
+        let ground = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(10.0, 1.0, 10.0),
+            0.0,
+        ));
         physics.step(1.0 / 60.0);
         let body = physics.get_body(ground).unwrap();
         assert_eq!(body.position.y, -1.0);
@@ -436,8 +478,16 @@ mod tests {
     #[test]
     fn box_vs_box_collision() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
-        let a = physics.add_body(RigidBody::new_box(Vec3::new(-0.4, 0.0, 0.0), Vec3::new(0.5, 0.5, 0.5), 1.0));
-        let b = physics.add_body(RigidBody::new_box(Vec3::new(0.4, 0.0, 0.0), Vec3::new(0.5, 0.5, 0.5), 1.0));
+        let a = physics.add_body(RigidBody::new_box(
+            Vec3::new(-0.4, 0.0, 0.0),
+            Vec3::new(0.5, 0.5, 0.5),
+            1.0,
+        ));
+        let b = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.4, 0.0, 0.0),
+            Vec3::new(0.5, 0.5, 0.5),
+            1.0,
+        ));
         physics.step(1.0 / 60.0);
         let body_a = physics.get_body(a).unwrap();
         let body_b = physics.get_body(b).unwrap();

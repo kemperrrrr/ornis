@@ -38,13 +38,15 @@ fn run_with_threads<F>(threads: usize, f: F) -> Vec<Position>
 where
     F: FnOnce(&mut SmartStore) -> Vec<Position>,
 {
-    unsafe { std::env::set_var("RAYON_NUM_THREADS", threads.to_string()); }
-    
+    unsafe {
+        std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
+    }
+
     let mut store = SmartStore::new();
     store.register::<Position>();
     store.register::<Velocity>();
     store.register::<Force>();
-    
+
     f(&mut store)
 }
 
@@ -60,7 +62,11 @@ fn assert_bitwise_equal(a: &[Position], b: &[Position], test_name: &str) {
     for (i, (pa, pb)) in a.iter().zip(b.iter()).enumerate() {
         let a_bytes = bytemuck::bytes_of(pa);
         let b_bytes = bytemuck::bytes_of(pb);
-        assert_eq!(a_bytes, b_bytes, "{}: position[{}] differs at bytes", test_name, i);
+        assert_eq!(
+            a_bytes, b_bytes,
+            "{}: position[{}] differs at bytes",
+            test_name, i
+        );
     }
 }
 
@@ -71,32 +77,60 @@ fn strong_confluence_for_each_entity_single_lane() {
     let threads_1 = run_with_threads(1, |store| {
         for i in 0..1000 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.1, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.1,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
     let threads_32 = run_with_threads(32, |store| {
         for i in 0..1000 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.1, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.1,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
@@ -108,32 +142,60 @@ fn strong_confluence_for_each_entity_two_lanes() {
     let threads_1 = run_with_threads(1, |store| {
         for i in 0..500 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.5, y: -0.2, z: 0.1 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.5,
+                    y: -0.2,
+                    z: 0.1,
+                },
+            );
         }
-        
+
         for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
     let threads_32 = run_with_threads(32, |store| {
         for i in 0..500 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.5, y: -0.2, z: 0.1 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.5,
+                    y: -0.2,
+                    z: 0.1,
+                },
+            );
         }
-        
+
         for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
@@ -145,42 +207,88 @@ fn strong_confluence_three_lanes() {
     let threads_1 = run_with_threads(1, |store| {
         for i in 0..500 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.1, y: 0.02, z: 0.0 });
-            store.insert(e, Force { x: 0.01, y: 0.0, z: -0.005 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.1,
+                    y: 0.02,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Force {
+                    x: 0.01,
+                    y: 0.0,
+                    z: -0.005,
+                },
+            );
         }
-        
-        for_each_entity!(store, |pos: &mut Position, vel: &mut Velocity, force: &Force| {
+
+        for_each_entity!(store, |pos: &mut Position,
+                                 vel: &mut Velocity,
+                                 force: &Force| {
             vel.x += force.x;
             vel.y += force.y;
             vel.z += force.z;
-            
+
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
     let threads_32 = run_with_threads(32, |store| {
         for i in 0..500 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.1, y: 0.02, z: 0.0 });
-            store.insert(e, Force { x: 0.01, y: 0.0, z: -0.005 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.1,
+                    y: 0.02,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Force {
+                    x: 0.01,
+                    y: 0.0,
+                    z: -0.005,
+                },
+            );
         }
-        
-        for_each_entity!(store, |pos: &mut Position, vel: &mut Velocity, force: &Force| {
+
+        for_each_entity!(store, |pos: &mut Position,
+                                 vel: &mut Velocity,
+                                 force: &Force| {
             vel.x += force.x;
             vel.y += force.y;
             vel.z += force.z;
-            
+
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
@@ -192,10 +300,24 @@ fn strong_confluence_smart_pipeline_branching() {
     let threads_1 = run_with_threads(1, |store| {
         for i in 0..1000 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: if i % 2 == 0 { 0.1 } else { -0.1 }, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: if i % 2 == 0 { 0.1 } else { -0.1 },
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
             if vel.x > 0.0 {
                 pos.x += vel.x * 2.0;
@@ -205,17 +327,31 @@ fn strong_confluence_smart_pipeline_branching() {
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
     let threads_32 = run_with_threads(32, |store| {
         for i in 0..1000 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: if i % 2 == 0 { 0.1 } else { -0.1 }, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: if i % 2 == 0 { 0.1 } else { -0.1 },
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
             if vel.x > 0.0 {
                 pos.x += vel.x * 2.0;
@@ -225,7 +361,7 @@ fn strong_confluence_smart_pipeline_branching() {
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
@@ -239,15 +375,22 @@ fn strong_confluence_entity_creation_order() {
         for i in 0..500 {
             let e = store.create_entity();
             entities.push(e);
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for e in entities.iter().rev() {
             if let Some(pos) = store.write_lane::<Position>().unwrap().get_mut(*e) {
                 pos.x += 100.0;
             }
         }
-        
+
         collect_positions(store)
     });
 
@@ -256,15 +399,22 @@ fn strong_confluence_entity_creation_order() {
         for i in 0..500 {
             let e = store.create_entity();
             entities.push(e);
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for e in entities.iter().rev() {
             if let Some(pos) = store.write_lane::<Position>().unwrap().get_mut(*e) {
                 pos.x += 100.0;
             }
         }
-        
+
         collect_positions(store)
     });
 
@@ -278,17 +428,24 @@ fn strong_confluence_defrag() {
         for i in 0..1000 {
             let e = store.create_entity();
             entities.push(e);
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for i in (0..1000).step_by(3) {
             store.destroy_entity(entities[i]);
         }
-        
+
         if let Some(mut lane) = store.write_lane::<Position>() {
             lane.defrag();
         }
-        
+
         collect_positions(store)
     });
 
@@ -297,17 +454,24 @@ fn strong_confluence_defrag() {
         for i in 0..1000 {
             let e = store.create_entity();
             entities.push(e);
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
         }
-        
+
         for i in (0..1000).step_by(3) {
             store.destroy_entity(entities[i]);
         }
-        
+
         if let Some(mut lane) = store.write_lane::<Position>() {
             lane.defrag();
         }
-        
+
         collect_positions(store)
     });
 
@@ -319,42 +483,88 @@ fn strong_confluence_for_each_entity_pure_math() {
     let threads_1 = run_with_threads(1, |store| {
         for i in 0..2000 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.01, y: 0.02, z: 0.03 });
-            store.insert(e, Force { x: 0.001, y: 0.002, z: 0.003 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.01,
+                    y: 0.02,
+                    z: 0.03,
+                },
+            );
+            store.insert(
+                e,
+                Force {
+                    x: 0.001,
+                    y: 0.002,
+                    z: 0.003,
+                },
+            );
         }
-        
-        for_each_entity!(store, |pos: &mut Position, vel: &mut Velocity, force: &Force| {
+
+        for_each_entity!(store, |pos: &mut Position,
+                                 vel: &mut Velocity,
+                                 force: &Force| {
             vel.x += force.x;
             vel.y += force.y;
             vel.z += force.z;
-            
+
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 
     let threads_32 = run_with_threads(32, |store| {
         for i in 0..2000 {
             let e = store.create_entity();
-            store.insert(e, Position { x: i as f32, y: 0.0, z: 0.0 });
-            store.insert(e, Velocity { x: 0.01, y: 0.02, z: 0.03 });
-            store.insert(e, Force { x: 0.001, y: 0.002, z: 0.003 });
+            store.insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+            store.insert(
+                e,
+                Velocity {
+                    x: 0.01,
+                    y: 0.02,
+                    z: 0.03,
+                },
+            );
+            store.insert(
+                e,
+                Force {
+                    x: 0.001,
+                    y: 0.002,
+                    z: 0.003,
+                },
+            );
         }
-        
-        for_each_entity!(store, |pos: &mut Position, vel: &mut Velocity, force: &Force| {
+
+        for_each_entity!(store, |pos: &mut Position,
+                                 vel: &mut Velocity,
+                                 force: &Force| {
             vel.x += force.x;
             vel.y += force.y;
             vel.z += force.z;
-            
+
             pos.x += vel.x;
             pos.y += vel.y;
             pos.z += vel.z;
         });
-        
+
         collect_positions(store)
     });
 

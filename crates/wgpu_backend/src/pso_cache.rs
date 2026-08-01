@@ -70,14 +70,15 @@ impl PsoCache {
                 source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
             });
 
-        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(label),
-            layout: None,
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        })
+        self.device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
     }
 
     /// Number of cached pipelines.

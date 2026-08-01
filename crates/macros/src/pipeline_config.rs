@@ -1,13 +1,13 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal, TokenStream as TokenStream2};
 use quote::quote;
+use std::collections::{HashMap, HashSet};
 use syn::{
     Attribute, Data, DataStruct, DeriveInput, Expr, ExprCall, ExprField, ExprForLoop, ExprIf,
     ExprLoop, ExprMatch, ExprMethodCall, ExprWhile, Fields, FieldsNamed, GenericArgument,
     GenericParam, Generics, ImplItem, ItemImpl, PathArguments, Type, TypeParamBound,
     WherePredicate, parse_macro_input, visit, visit::Visit,
 };
-use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 struct TypeProfile {
@@ -81,7 +81,11 @@ impl TypeAnalyzer {
 
         if let Type::Array(ta) = ty {
             let elem_size = self.analyze_type_get_size(&ta.elem);
-            if let Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit_int), .. }) = &ta.len {
+            if let Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(lit_int),
+                ..
+            }) = &ta.len
+            {
                 if let Ok(len) = lit_int.base10_parse::<usize>() {
                     self.profile.size_estimate = self.profile.size_estimate.max(elem_size * len);
                 }
@@ -106,9 +110,22 @@ impl TypeAnalyzer {
 
     fn type_to_string(&self, ty: &Type) -> String {
         match ty {
-            Type::Path(tp) => tp.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"),
+            Type::Path(tp) => tp
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::"),
             Type::Reference(tr) => format!("&{}", self.type_to_string(&tr.elem)),
-            Type::Tuple(tt) => format!("({})", tt.elems.iter().map(|e| self.type_to_string(e)).collect::<Vec<_>>().join(", ")),
+            Type::Tuple(tt) => format!(
+                "({})",
+                tt.elems
+                    .iter()
+                    .map(|e| self.type_to_string(e))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Type::Array(ta) => format!("[{}]", self.type_to_string(&ta.elem)),
             Type::Slice(ts) => format!("[{}]", self.type_to_string(&ts.elem)),
             Type::Paren(tp) => format!("({})", self.type_to_string(&tp.elem)),
@@ -121,7 +138,17 @@ impl TypeAnalyzer {
         if let Some(seg) = path.segments.last() {
             matches!(
                 seg.ident.to_string().as_str(),
-                "Vec" | "String" | "Box" | "Rc" | "Arc" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "LinkedList"
+                "Vec"
+                    | "String"
+                    | "Box"
+                    | "Rc"
+                    | "Arc"
+                    | "HashMap"
+                    | "HashSet"
+                    | "BTreeMap"
+                    | "BTreeSet"
+                    | "VecDeque"
+                    | "LinkedList"
             )
         } else {
             false
@@ -133,9 +160,31 @@ impl TypeAnalyzer {
             let name = seg.ident.to_string();
             matches!(
                 name.as_str(),
-                "f32" | "f64" | "i32" | "u32" | "i64" | "u64" | "i16" | "u16" | "i8" | "u8" | "bool" | "usize" | "isize"
-                    | "Vec2" | "Vec2A" | "Vec3" | "Vec3A" | "Vec4" | "Mat4" | "Quat"
-                    | "vec2" | "vec3" | "vec4" | "mat4" | "quat"
+                "f32"
+                    | "f64"
+                    | "i32"
+                    | "u32"
+                    | "i64"
+                    | "u64"
+                    | "i16"
+                    | "u16"
+                    | "i8"
+                    | "u8"
+                    | "bool"
+                    | "usize"
+                    | "isize"
+                    | "Vec2"
+                    | "Vec2A"
+                    | "Vec3"
+                    | "Vec3A"
+                    | "Vec4"
+                    | "Mat4"
+                    | "Quat"
+                    | "vec2"
+                    | "vec3"
+                    | "vec4"
+                    | "mat4"
+                    | "quat"
             )
         } else {
             false
@@ -146,7 +195,19 @@ impl TypeAnalyzer {
         if let Some(seg) = path.segments.last() {
             matches!(
                 seg.ident.to_string().as_str(),
-                "f32" | "f64" | "i32" | "u32" | "i64" | "u64" | "i16" | "u16" | "i8" | "u8" | "bool" | "usize" | "isize"
+                "f32"
+                    | "f64"
+                    | "i32"
+                    | "u32"
+                    | "i64"
+                    | "u64"
+                    | "i16"
+                    | "u16"
+                    | "i8"
+                    | "u8"
+                    | "bool"
+                    | "usize"
+                    | "isize"
             )
         } else {
             false
@@ -176,7 +237,11 @@ impl TypeAnalyzer {
                 "Option" => 8,
                 "Result" => 16,
                 _ => {
-                    if self.is_gpu_type(path) { 16 } else { 64 }
+                    if self.is_gpu_type(path) {
+                        16
+                    } else {
+                        64
+                    }
                 }
             }
         } else {
@@ -441,7 +506,8 @@ fn compute_threshold(profile: &ProfileResult) -> usize {
         base_threshold = usize::MAX / 2;
     }
 
-    let unique_fields: usize = method_profiles.iter()
+    let unique_fields: usize = method_profiles
+        .iter()
         .flat_map(|m| m.field_access_count.keys())
         .collect::<HashSet<_>>()
         .len();
@@ -493,7 +559,8 @@ fn compute_lane_target(profile: &ProfileResult) -> TokenStream2 {
     let total_branches: usize = method_profiles.iter().map(|m| m.branch_count).sum();
     let total_loops: usize = method_profiles.iter().map(|m| m.loop_count).sum();
     let total_recursive: usize = method_profiles.iter().map(|m| m.recursive_call_count).sum();
-    let unique_fields: usize = method_profiles.iter()
+    let unique_fields: usize = method_profiles
+        .iter()
         .flat_map(|m| m.field_access_count.keys())
         .collect::<HashSet<_>>()
         .len();

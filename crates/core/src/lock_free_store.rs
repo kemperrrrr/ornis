@@ -18,7 +18,9 @@ struct LaneInner<T: Clone + Send + Sync> {
 
 impl<T: 'static + Clone + Send + Sync> LaneInner<T> {
     fn new() -> Self {
-        Self { store: Atomic::new(ComponentStore::new()) }
+        Self {
+            store: Atomic::new(ComponentStore::new()),
+        }
     }
 
     fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
@@ -42,7 +44,9 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLane for LaneInner<T> {
     }
 
     fn remove_entity(&self, entity: Entity) {
-        self.write(|store| { store.remove(entity); });
+        self.write(|store| {
+            store.remove(entity);
+        });
     }
 }
 
@@ -67,16 +71,16 @@ impl LockFreeStore {
 
     pub fn register<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.lanes.entry(tid).or_insert_with(|| {
-            Box::new(LaneInner::<T>::new())
-        });
+        self.lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(LaneInner::<T>::new()));
     }
 
     fn ensure_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.lanes.entry(tid).or_insert_with(|| {
-            Box::new(LaneInner::<T>::new())
-        });
+        self.lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(LaneInner::<T>::new()));
     }
 
     pub fn create_entity(&self) -> Entity {
@@ -101,7 +105,9 @@ impl LockFreeStore {
         lane.as_any()
             .downcast_ref::<LaneInner<T>>()
             .unwrap()
-            .write(|store| { store.insert(entity, component); });
+            .write(|store| {
+                store.insert(entity, component);
+            });
     }
 
     pub fn read_lane<T: 'static + Clone + Send + Sync>(&self) -> Option<LockFreeReadGuard<'_, T>> {
@@ -110,7 +116,10 @@ impl LockFreeStore {
         let lane = self.lanes.get(&tid)?;
         let inner = lane.as_any().downcast_ref::<LaneInner<T>>().unwrap();
         let store_ref: &ComponentStore<T> = inner.read(&guard);
-        Some(LockFreeReadGuard { store: store_ref, _guard: guard })
+        Some(LockFreeReadGuard {
+            store: store_ref,
+            _guard: guard,
+        })
     }
 }
 

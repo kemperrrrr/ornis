@@ -1,6 +1,6 @@
-use ornis_core::material::OpenPBRMaterial;
 use crate::mesh::Mesh;
 use crate::renderer::InstanceData;
+use ornis_core::material::OpenPBRMaterial;
 use wgpu;
 
 #[derive(Debug, Clone)]
@@ -54,12 +54,7 @@ pub trait RenderBackend {
 
     fn upload_instances(&mut self, queue: &wgpu::Queue, instances: &[InstanceData]);
 
-    fn render_scene(
-        &self,
-        context: RenderContext<'_>,
-        mesh: &Mesh,
-        instance_count: u32,
-    );
+    fn render_scene(&self, context: RenderContext<'_>, mesh: &Mesh, instance_count: u32);
 }
 
 /// Factory function to create a render backend implementation
@@ -67,7 +62,11 @@ pub fn create_render_backend(
     device: &wgpu::Device,
     config: &RenderBackendConfig,
 ) -> Box<dyn RenderBackend> {
-    Box::new(crate::renderer::Renderer3D::new(device, &config.surface_config, config.sample_count))
+    Box::new(crate::renderer::Renderer3D::new(
+        device,
+        &config.surface_config,
+        config.sample_count,
+    ))
 }
 
 pub mod renderer3d_backend {
@@ -79,7 +78,12 @@ pub mod renderer3d_backend {
             Renderer3D::resize(self, device, width, height);
         }
 
-        fn set_camera(&mut self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]) {
+        fn set_camera(
+            &mut self,
+            queue: &wgpu::Queue,
+            view_proj: &[[f32; 4]; 4],
+            camera_pos: [f32; 3],
+        ) {
             Renderer3D::set_camera(self, queue, view_proj, camera_pos);
         }
 
@@ -100,13 +104,15 @@ pub mod renderer3d_backend {
             Renderer3D::upload_instances(self, queue, instances);
         }
 
-        fn render_scene(
-            &self,
-            context: RenderContext<'_>,
-            mesh: &Mesh,
-            instance_count: u32,
-        ) {
-            Renderer3D::render_scene(self, context.device, context.encoder, context.target, mesh, instance_count);
+        fn render_scene(&self, context: RenderContext<'_>, mesh: &Mesh, instance_count: u32) {
+            Renderer3D::render_scene(
+                self,
+                context.device,
+                context.encoder,
+                context.target,
+                mesh,
+                instance_count,
+            );
         }
     }
 }

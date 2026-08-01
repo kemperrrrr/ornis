@@ -7,7 +7,9 @@ pub struct ColdComponentStore<T> {
 
 impl<T> Default for ColdComponentStore<T> {
     fn default() -> Self {
-        Self { inner: ComponentStore::new() }
+        Self {
+            inner: ComponentStore::new(),
+        }
     }
 }
 

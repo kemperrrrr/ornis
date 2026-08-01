@@ -1,24 +1,29 @@
-mod page_table;
-mod component_store;
-mod entity;
-mod smart_store;
-mod prefetch;
 mod cold_store;
-mod dispatcher;
 mod command_sync;
-pub mod pipeline;
-pub mod material;
+mod component_store;
+mod dispatcher;
+mod entity;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
+pub mod material;
+mod page_table;
 pub mod physics;
+pub mod pipeline;
+mod prefetch;
+mod smart_store;
 
-pub use entity::{Entity, EntityAllocator};
-pub use component_store::{ComponentStore, ZipIter, ChunkedIterMut};
-pub use page_table::{PageTable, PAGE_SIZE};
-pub use smart_store::{SmartStore, Pack};
 pub use cold_store::ColdComponentStore;
-pub use prefetch::prefetch_read;
-pub use pipeline::{AutoPipeline, LaneTarget, PipelineConfig, TargetDiscriminant, Route, lane_target_of, GpuLane, CpuLane, HybridLane, pipeline_enter, pipeline_exit};
-pub use material::{OpenPBRMaterial, OPENPBR_MATERIAL_VEC4_COUNT, OPENPBR_MATERIAL_SIZE};
+pub use command_sync::{
+    CommandQueue, CommandSync, CommandSyncable, DataResidency, GpuCommand, ResidencyTracker,
+};
+pub use component_store::{ChunkedIterMut, ComponentStore, ZipIter};
+pub use entity::{Entity, EntityAllocator};
+pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
+pub use page_table::{PAGE_SIZE, PageTable};
 pub use physics::*;
-pub use command_sync::{CommandSync, CommandQueue, GpuCommand, ResidencyTracker, DataResidency, CommandSyncable};
+pub use pipeline::{
+    AutoPipeline, CpuLane, GpuLane, HybridLane, LaneTarget, PipelineConfig, Route,
+    TargetDiscriminant, lane_target_of, pipeline_enter, pipeline_exit,
+};
+pub use prefetch::prefetch_read;
+pub use smart_store::{Pack, SmartStore};

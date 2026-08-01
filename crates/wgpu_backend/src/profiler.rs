@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +155,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             cpass.dispatch_workgroups((count as u32 + 63) / 64, 1, 1);
         }
         queue.submit([cbe.finish()]);
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
 
         // Timed run
         let start = Instant::now();
@@ -172,7 +177,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             queue.submit([cbe.finish()]);
         }
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
 
         start.elapsed().as_nanos() as f64 / ITERS as f64
     }

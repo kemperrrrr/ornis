@@ -12,7 +12,10 @@ impl AABB {
     }
 
     pub fn from_point(point: Vec3) -> Self {
-        Self { min: point, max: point }
+        Self {
+            min: point,
+            max: point,
+        }
     }
 
     pub fn from_points(points: &[Vec3]) -> Self {

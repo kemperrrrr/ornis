@@ -18,7 +18,12 @@ pub struct SmartBuffer<T: bytemuck::Pod> {
 }
 
 impl<T: bytemuck::Pod> SmartBuffer<T> {
-    pub fn new(cpu_data: Vec<T>, device: &wgpu::Device, usage: wgpu::BufferUsages, label: &str) -> Self {
+    pub fn new(
+        cpu_data: Vec<T>,
+        device: &wgpu::Device,
+        usage: wgpu::BufferUsages,
+        label: &str,
+    ) -> Self {
         let size = cpu_data.len() * std::mem::size_of::<T>();
         let raw: &[u8] = bytemuck::cast_slice(&cpu_data);
         let gpu_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -84,7 +89,12 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
             buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
-            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .ok();
             if let Ok(Ok(())) = receiver.recv() {
                 let view = buffer_slice.get_mapped_range();
                 let downloaded: &[T] = bytemuck::cast_slice(&view);
@@ -101,11 +111,13 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
     pub fn ensure_gpu_buffer(&mut self, device: &wgpu::Device, usage: wgpu::BufferUsages) {
         if self.gpu_buffer.is_none() {
             let raw: &[u8] = bytemuck::cast_slice(&self.cpu_data);
-            self.gpu_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&self.label),
-                contents: raw,
-                usage,
-            }));
+            self.gpu_buffer = Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&self.label),
+                    contents: raw,
+                    usage,
+                }),
+            );
         }
     }
 }
@@ -123,7 +135,9 @@ mod tests {
         let mut buf = SmartBuffer::new(
             data,
             &ctx.device,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             "test",
         );
 

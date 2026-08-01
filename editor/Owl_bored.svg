@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+<svg
+    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+    xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    xmlns="http://www.w3.org/2000/svg"
+    xmlns:cc="http://creativecommons.org/ns#"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+    xmlns:svg="http://www.w3.org/2000/svg"
+    xmlns:ns1="http://sozi.baierouge.fr"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    id="svg3997"
+    sodipodi:docname="Новый документ 5"
+    viewBox="0 0 800 606.71"
+    version="1.1"
+    inkscape:version="0.48.0 r9654"
+  >
+  <sodipodi:namedview
+      id="base"
+      bordercolor="#666666"
+      inkscape:pageshadow="2"
+      inkscape:window-y="-4"
+      fit-margin-left="0"
+      pagecolor="#ffffff"
+      fit-margin-top="0"
+      inkscape:window-maximized="1"
+      inkscape:zoom="0.35"
+      inkscape:window-x="-4"
+      inkscape:window-height="911"
+      showgrid="false"
+      borderopacity="1.0"
+      inkscape:current-layer="layer1"
+      inkscape:cx="123.62625"
+      inkscape:cy="105.50654"
+      fit-margin-right="0"
+      fit-margin-bottom="0"
+      inkscape:window-width="1280"
+      inkscape:pageopacity="0.0"
+      inkscape:document-units="px"
+  />
+  <g
+      id="layer1"
+      inkscape:label="Layer 1"
+      inkscape:groupmode="layer"
+      transform="translate(-251.37 -31.157)"
+    >
+    <g
+        id="g4058"
+        transform="matrix(1.7717 0 0 1.7717 -193.99 -492.26)"
+      >
+      <path
+          id="path3953"
+          d="m251.37 637.87c24.728-20.238 39.675-43.168 48.981-67.677 22.982-60.527 12.446-125.64 51.912-175.75 13.079-16.605 4.8557-62.156 5.1734-87.904 14.371 19.148 29.715 31.486 40.486 75.833 40.373-9.1712 89.258-7.7639 129.22-3.1531 19.4-68.879 28.102-71.431 38.386-83.792 5.388 38.823 16.758 69.742 37.376 88.893 46.26 42.971 50.068 107.25 64.65 159.6 8.9773 32.232 35.355 93.944 35.355 93.944z"
+          sodipodi:nodetypes="cssccccsscc"
+          style="fill:#6f6049"
+          inkscape:connector-curvature="0"
+      />
+      <path
+          id="path3955"
+          sodipodi:rx="49.285713"
+          sodipodi:ry="46.07143"
+          style="fill:#000000"
+          sodipodi:type="arc"
+          d="m1420.7 1014.1c0 25.444-22.066 46.071-49.286 46.071s-49.286-20.627-49.286-46.071c0-25.445 22.066-46.071 49.286-46.071s49.286 20.627 49.286 46.071z"
+          transform="matrix(1.2012 -.19273 .16345 1.0705 -1270.1 -344.3)"
+          sodipodi:cy="1014.1479"
+          sodipodi:cx="1371.4286"
+      />
+      <path
+          id="path3957"
+          sodipodi:rx="37.142857"
+          sodipodi:ry="43.92857"
+          style="fill:#000000"
+          sodipodi:type="arc"
+          d="m1274.3 994.15c0 24.261-16.629 43.929-37.143 43.929-20.513 0-37.143-19.668-37.143-43.929s16.629-43.929 37.143-43.929 37.143 19.667 37.143 43.929z"
+          transform="matrix(1.2424 0 0 1.2068 -1154.5 -740.58)"
+          sodipodi:cy="994.14789"
+          sodipodi:cx="1237.1428"
+      />
+      <path
+          id="path3959"
+          sodipodi:rx="49.285713"
+          sodipodi:ry="46.07143"
+          style="fill:#a86927"
+          sodipodi:type="arc"
+          d="m1420.7 1014.1c0 25.444-22.066 46.071-49.286 46.071s-49.286-20.627-49.286-46.071c0-25.445 22.066-46.071 49.286-46.071s49.286 20.627 49.286 46.071z"
+          transform="matrix(1.0771 -.17807 .14656 .98913 -1088.9 -280.39)"
+          sodipodi:cy="1014.1479"
+          sodipodi:cx="1371.4286"
+      />
+      <path
+          id="path3961"
+          sodipodi:rx="37.142857"
+          sodipodi:ry="43.92857"
+          style="fill:#a86927"
+          sodipodi:type="arc"
+          d="m1274.3 994.15c0 24.261-16.629 43.929-37.143 43.929-20.513 0-37.143-19.668-37.143-43.929s16.629-43.929 37.143-43.929 37.143 19.667 37.143 43.929z"
+          transform="matrix(1.0622 0 0 1.0883 -924.89 -620.97)"
+          sodipodi:cy="994.14789"
+          sodipodi:cx="1237.1428"
+      />
+      <path
+          id="path3965"
+          style="fill:#000000"
+          inkscape:connector-curvature="0"
+          d="m376.22 451.01c-1.361 3.0214-2.125 6.357-2.125 9.8438 0 13.947 12.052 25.25 26.906 25.25s26.906-11.303 26.906-25.25c0-3.4868-0.764-6.8224-2.125-9.8438h-49.562z"
+      />
+      <path
+          id="path3967"
+          style="fill:#000000"
+          inkscape:connector-curvature="0"
+          d="m489.1 461.19c-0.1954 1.4175-0.3125 2.8423-0.3125 4.3125 0 17.637 14.522 31.938 32.438 31.938 16.796-0.0001 30.589-12.553 32.25-28.656l-64.375-7.5938z"
+      />
+      <path
+          id="path3969"
+          style="fill:#f9e431"
+          inkscape:connector-curvature="0"
+          d="m381.6 456.8c-0.023 0.422-0.031 0.8533-0.031 1.2813 0 11.992 9.2487 21.719 20.656 21.719 11.408 0 20.656-9.7271 20.656-21.719 0-0.4281-0.01-0.8593-0.031-1.2813h-12.625v0.1875c0 4.0373-2.837 7.3125-6.3125 7.3125s-6.2811-3.2752-6.2813-7.3125v-0.1875h-16.031zm113.03 8.75c0.2803 13.921 11.454 25.125 25.188 25.125 11.389 0 21.012-7.7113 24.125-18.281-5.4917-0.7735-11.758-1.6407-17.906-2.5-1.5504 2.3794-4.2054 3.9375-7.2187 3.9376-3.8508 0-7.1258-2.5525-8.25-6.0938-5.4646-0.7547-11.104-1.5343-15.938-2.1875z"
+      />
+      <path
+          id="path3963"
+          style="fill:#a19584"
+          inkscape:connector-curvature="0"
+          d="m399.19 395.2s-1.9173 30.578 2.3437 45.937c-6.9446 2.1231-15.094 6.457-27.188 9.0626l38.281 0.5312c8.2857 3.1251 11.654 12.82 15.094 21-14.569 23.491-29.639 32.526-54.406 39.406 23.504 4.614 56.916 27.224 75.312 64.438 11.311-31.138 26.769-49.487 88.281-48.313-21.076-11.14-47.096-24.426-52.969-50.594 4.815-5.5223 8.3043-10.404 12.844-15l60.406 6.75c-0.0001 0-10.092-3.8574-17.125-10-10.338-9.0294-17.686-12.342-28.906-8.6875 9.389-12.001 12.281-45.719 12.281-45.719-46.895 79.837-85.813 56.859-124.25-8.8124z"
+      />
+      <path
+          id="path3951"
+          sodipodi:nodetypes="ccsc"
+          style="fill:#000000"
+          inkscape:connector-curvature="0"
+          d="m448.81 476.72c-33.266 30.049-20.225 65.65-4.1874 98.594 5.8242-21.126 8.1543-16.422 20.464-34.027 3.4632-4.953-4.2008-42.758-16.277-64.567z"
+      />
+    </g
+    >
+  </g
+  >
+  <metadata
+    >
+    <rdf:RDF
+      >
+      <cc:Work
+        >
+        <dc:format
+          >image/svg+xml</dc:format
+        >
+        <dc:type
+            rdf:resource="http://purl.org/dc/dcmitype/StillImage"
+        />
+        <cc:license
+            rdf:resource="http://creativecommons.org/licenses/publicdomain/"
+        />
+        <dc:publisher
+          >
+          <cc:Agent
+              rdf:about="http://openclipart.org/"
+            >
+            <dc:title
+              >Openclipart</dc:title
+            >
+          </cc:Agent
+          >
+        </dc:publisher
+        >
+        <dc:title
+          >Owl bored</dc:title
+        >
+        <dc:date
+          >2012-01-04T06:43:20</dc:date
+        >
+        <dc:description
+        />
+        <dc:source
+          >https://openclipart.org/detail/166822/owl-bored-by-rones</dc:source
+        >
+        <dc:creator
+          >
+          <cc:Agent
+            >
+            <dc:title
+              >rones</dc:title
+            >
+          </cc:Agent
+          >
+        </dc:creator
+        >
+        <dc:subject
+          >
+          <rdf:Bag
+            >
+            <rdf:li
+              >animal</rdf:li
+            >
+            <rdf:li
+              >bird</rdf:li
+            >
+            <rdf:li
+              >cartoon</rdf:li
+            >
+            <rdf:li
+              >face</rdf:li
+            >
+            <rdf:li
+              >head</rdf:li
+            >
+            <rdf:li
+              >humor</rdf:li
+            >
+            <rdf:li
+              >humour</rdf:li
+            >
+            <rdf:li
+              >owl</rdf:li
+            >
+          </rdf:Bag
+          >
+        </dc:subject
+        >
+      </cc:Work
+      >
+      <cc:License
+          rdf:about="http://creativecommons.org/licenses/publicdomain/"
+        >
+        <cc:permits
+            rdf:resource="http://creativecommons.org/ns#Reproduction"
+        />
+        <cc:permits
+            rdf:resource="http://creativecommons.org/ns#Distribution"
+        />
+        <cc:permits
+            rdf:resource="http://creativecommons.org/ns#DerivativeWorks"
+        />
+      </cc:License
+      >
+    </rdf:RDF
+    >
+  </metadata
+  >
+</svg
+>

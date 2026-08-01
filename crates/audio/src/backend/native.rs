@@ -170,11 +170,7 @@ fn distance_attenuation(distance: f32, rolloff: f32, reference: f32) -> f32 {
     atten.max(0.0).min(1.0)
 }
 
-fn mix(
-    active_sounds: &mut Vec<MixInput>,
-    output: &mut [f32],
-    output_channels: u16,
-) {
+fn mix(active_sounds: &mut Vec<MixInput>, output: &mut [f32], output_channels: u16) {
     for frame in output.chunks_exact_mut(output_channels as usize) {
         let mut left: f32 = 0.0;
         let mut right: f32 = 0.0;
@@ -200,7 +196,8 @@ fn mix(
             let s = sample * vol;
 
             if let Some(sp) = sound.spatial {
-                let atten = distance_attenuation(sp.distance, sp.rolloff_factor, sp.reference_distance);
+                let atten =
+                    distance_attenuation(sp.distance, sp.rolloff_factor, sp.reference_distance);
                 let (l, r) = pan_sample(s * atten, sp.azimuth);
                 left += l;
                 right += r;

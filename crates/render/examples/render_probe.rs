@@ -180,7 +180,11 @@ async fn run(scene: &Scene, out_path: &str) {
     // ── Camera ────────────────────────────────────────────────────────
     let cam = &scene.camera;
     let aspect = WIDTH as f32 / HEIGHT as f32;
-    let view = Mat4::look_at_rh(Vec3::from(cam.position), Vec3::from(cam.target), Vec3::from(cam.up));
+    let view = Mat4::look_at_rh(
+        Vec3::from(cam.position),
+        Vec3::from(cam.target),
+        Vec3::from(cam.up),
+    );
     let proj = Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
     let view_proj = proj * view;
     renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), cam.position);
@@ -275,7 +279,12 @@ async fn run(scene: &Scene, out_path: &str) {
     // where the 5 spheres should be (y ≈ 55% of height).
     let sample = |x: u32, y: u32| {
         let off = ((y * WIDTH + x) * bytes_per_pixel) as usize;
-        [pixels[off], pixels[off + 1], pixels[off + 2], pixels[off + 3]]
+        [
+            pixels[off],
+            pixels[off + 1],
+            pixels[off + 2],
+            pixels[off + 3],
+        ]
     };
     let mid_y = (HEIGHT as f32 * 0.55) as u32;
     for frac in [0.1f32, 0.3, 0.5, 0.7, 0.9] {

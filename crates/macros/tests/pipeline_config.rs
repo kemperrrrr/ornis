@@ -1,5 +1,5 @@
-use ornis_macros::PipelineConfig;
 use ornis_core::{PipelineConfig, TargetDiscriminant};
+use ornis_macros::PipelineConfig;
 
 #[derive(PipelineConfig)]
 struct Position {

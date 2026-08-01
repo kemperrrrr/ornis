@@ -81,10 +81,7 @@ fn build_gpu_scene(device: &wgpu::Device, scene: &Scene) -> Result<GpuScene, JsV
     // Current scene format only has Sphere meshes and Renderer3D::render_scene
     // draws a single mesh instanced — all entities share one mesh. Use the
     // first entity's mesh parameters.
-    let first = scene
-        .entities
-        .first()
-        .ok_or("scene has no entities")?;
+    let first = scene.entities.first().ok_or("scene has no entities")?;
     let mesh = match &first.mesh {
         MeshDesc::Sphere {
             radius,
@@ -123,8 +120,7 @@ fn build_gpu_scene(device: &wgpu::Device, scene: &Scene) -> Result<GpuScene, JsV
         let t = &entity.transform;
         let model = Mat4::from_scale_rotation_translation(
             Vec3::from(t.scale),
-            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3])
-                .normalize(),
+            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]).normalize(),
             Vec3::from(t.translation),
         );
         let normal_matrix = model.inverse().transpose();
@@ -274,8 +270,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
 
     // ── Scene ─────────────────────────────────────────────────────────
     let ron_text = load_scene_ron().await;
-    let scene = Scene::from_ron(&ron_text)
-        .map_err(|e| format!("scene parse: {:?}", e))?;
+    let scene = Scene::from_ron(&ron_text).map_err(|e| format!("scene parse: {:?}", e))?;
     console::log_1(
         &format!(
             "[ornis-wasm] scene '{}' loaded: {} entities, {} lights",
@@ -341,9 +336,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
             config.height = ph;
             surface.configure(&device, &config);
             renderer.resize(&device, pw, ph);
-            console::log_1(
-                &format!("[ornis-wasm] resized surface to {}x{}", pw, ph).into(),
-            );
+            console::log_1(&format!("[ornis-wasm] resized surface to {}x{}", pw, ph).into());
         }
 
         // Camera for the current aspect ratio
@@ -388,9 +381,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
                         .into(),
                     );
                 } else if frame_count % 600 == 0 {
-                    console::log_1(
-                        &format!("[ornis-wasm] frame {} rendered", frame_count).into(),
-                    );
+                    console::log_1(&format!("[ornis-wasm] frame {} rendered", frame_count).into());
                 }
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -410,8 +401,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
             .unwrap();
     }));
 
-    window
-        .request_animation_frame(f_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref())?;
+    window.request_animation_frame(f_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref())?;
 
     // Prevent dropping the closure so the JS callback stays valid
     std::mem::forget(f);

@@ -27,19 +27,24 @@ pub struct ResidencyTracker {
 
 impl ResidencyTracker {
     pub fn new() -> Self {
-        Self { residency: HashMap::new() }
+        Self {
+            residency: HashMap::new(),
+        }
     }
 
     pub fn mark_cpu<T: 'static + Send + Sync>(&mut self) {
-        self.residency.insert(TypeId::of::<T>(), DataResidency::CpuOnly);
+        self.residency
+            .insert(TypeId::of::<T>(), DataResidency::CpuOnly);
     }
 
     pub fn mark_gpu<T: 'static + Send + Sync>(&mut self) {
-        self.residency.insert(TypeId::of::<T>(), DataResidency::GpuOnly);
+        self.residency
+            .insert(TypeId::of::<T>(), DataResidency::GpuOnly);
     }
 
     pub fn mark_both<T: 'static + Send + Sync>(&mut self) {
-        self.residency.insert(TypeId::of::<T>(), DataResidency::Both);
+        self.residency
+            .insert(TypeId::of::<T>(), DataResidency::Both);
     }
 
     pub fn get<T: 'static + Send + Sync>(&self) -> DataResidency {
@@ -111,7 +116,10 @@ impl CommandQueue {
     }
 
     pub fn is_dirty<T: 'static + Send + Sync>(&self) -> bool {
-        self.dirty_lanes.get(&TypeId::of::<T>()).copied().unwrap_or(false)
+        self.dirty_lanes
+            .get(&TypeId::of::<T>())
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn clear_dirty<T: 'static + Send + Sync>(&mut self) {

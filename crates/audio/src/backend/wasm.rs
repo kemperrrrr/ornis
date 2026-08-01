@@ -2,10 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
-use web_sys::{
-    AudioBufferSourceNode, AudioContext,
-    GainNode, PannerNode,
-};
+use web_sys::{AudioBufferSourceNode, AudioContext, GainNode, PannerNode};
 
 use crate::source::MixInput;
 
@@ -13,14 +10,22 @@ type SourceId = usize;
 
 pub struct AudioBackend {
     context: AudioContext,
-    active: Rc<RefCell<Vec<(SourceId, AudioBufferSourceNode, GainNode, Option<PannerNode>)>>>,
+    active: Rc<
+        RefCell<
+            Vec<(
+                SourceId,
+                AudioBufferSourceNode,
+                GainNode,
+                Option<PannerNode>,
+            )>,
+        >,
+    >,
     next_id: Rc<RefCell<SourceId>>,
 }
 
 impl AudioBackend {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let context = AudioContext::new()
-            .map_err(|_| "failed to create AudioContext")?;
+        let context = AudioContext::new().map_err(|_| "failed to create AudioContext")?;
         Ok(Self {
             context,
             active: Rc::new(RefCell::new(Vec::new())),
@@ -36,7 +41,10 @@ impl AudioBackend {
             return;
         }
 
-        let audio_buffer = match self.context.create_buffer(channels, frame_count, sample_rate) {
+        let audio_buffer = match self
+            .context
+            .create_buffer(channels, frame_count, sample_rate)
+        {
             Ok(buf) => buf,
             Err(_) => return,
         };
@@ -109,7 +117,10 @@ impl AudioBackend {
         }
 
         if let Err(e) = source.start() {
-            let _ = web_sys::console::error_1(&JsValue::from_str(&format!("Audio start error: {:?}", e)));
+            let _ = web_sys::console::error_1(&JsValue::from_str(&format!(
+                "Audio start error: {:?}",
+                e
+            )));
             return;
         }
 

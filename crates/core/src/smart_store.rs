@@ -5,8 +5,8 @@ use std::sync::{RwLock, atomic::Ordering};
 use crossbeam_epoch::{Atomic, Guard, Owned, pin as epoch_pin};
 
 use crate::cold_store::ColdComponentStore;
-use crate::entity::{Entity, EntityAllocator};
 use crate::component_store::ComponentStore;
+use crate::entity::{Entity, EntityAllocator};
 
 trait Lane: Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -43,7 +43,9 @@ struct LockFreeLaneInner<T: Clone + Send + Sync> {
 
 impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
     fn new() -> Self {
-        Self { store: Atomic::new(ComponentStore::new()) }
+        Self {
+            store: Atomic::new(ComponentStore::new()),
+        }
     }
 
     fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
@@ -67,7 +69,9 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
     }
 
     fn remove_entity(&self, entity: Entity) {
-        self.write(|store| { store.remove(entity); });
+        self.write(|store| {
+            store.remove(entity);
+        });
     }
 }
 
@@ -107,51 +111,52 @@ impl SmartStore {
 
     pub fn register<T: 'static + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.lanes.entry(tid).or_insert_with(|| {
-            Box::new(RwLock::new(ComponentStore::<T>::new()))
-        });
+        self.lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(RwLock::new(ComponentStore::<T>::new())));
     }
 
     pub fn register_lock_free<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.lanes.entry(tid).or_insert_with(|| {
-            Box::new(LockFreeLaneInner::<T>::new())
-        });
+        self.lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(LockFreeLaneInner::<T>::new()));
     }
 
     fn ensure_lane<T: 'static + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.lanes.entry(tid).or_insert_with(|| {
-            Box::new(RwLock::new(ComponentStore::<T>::new()))
-        });
+        self.lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(RwLock::new(ComponentStore::<T>::new())));
     }
 
     fn ensure_lock_free_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.lanes.entry(tid).or_insert_with(|| {
-            Box::new(LockFreeLaneInner::<T>::new())
-        });
+        self.lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(LockFreeLaneInner::<T>::new()));
     }
 
     pub fn register_cold<T: 'static + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.cold_lanes.entry(tid).or_insert_with(|| {
-            Box::new(RwLock::new(ColdComponentStore::<T>::new()))
-        });
+        self.cold_lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(RwLock::new(ColdComponentStore::<T>::new())));
     }
 
     fn ensure_cold_lane<T: 'static + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
-        self.cold_lanes.entry(tid).or_insert_with(|| {
-            Box::new(RwLock::new(ColdComponentStore::<T>::new()))
-        });
+        self.cold_lanes
+            .entry(tid)
+            .or_insert_with(|| Box::new(RwLock::new(ColdComponentStore::<T>::new())));
     }
 
     pub fn insert_cold<T: 'static + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_cold_lane::<T>();
         let tid = TypeId::of::<T>();
         if let Some(lane) = self.cold_lanes.get(&tid) {
-            if let Some(store) = lane.as_any()
+            if let Some(store) = lane
+                .as_any()
                 .downcast_ref::<RwLock<ColdComponentStore<T>>>()
             {
                 store.write().unwrap().insert(entity, component);
@@ -159,24 +164,32 @@ impl SmartStore {
         }
     }
 
-    pub fn read_cold_lane<T: 'static + Send + Sync>(&self) -> Option<std::sync::RwLockReadGuard<'_, ColdComponentStore<T>>> {
+    pub fn read_cold_lane<T: 'static + Send + Sync>(
+        &self,
+    ) -> Option<std::sync::RwLockReadGuard<'_, ColdComponentStore<T>>> {
         let tid = TypeId::of::<T>();
         let lane = self.cold_lanes.get(&tid)?;
-        Some(lane.as_any()
-            .downcast_ref::<RwLock<ColdComponentStore<T>>>()
-            .unwrap()
-            .read()
-            .unwrap())
+        Some(
+            lane.as_any()
+                .downcast_ref::<RwLock<ColdComponentStore<T>>>()
+                .unwrap()
+                .read()
+                .unwrap(),
+        )
     }
 
-    pub fn write_cold_lane<T: 'static + Send + Sync>(&self) -> Option<std::sync::RwLockWriteGuard<'_, ColdComponentStore<T>>> {
+    pub fn write_cold_lane<T: 'static + Send + Sync>(
+        &self,
+    ) -> Option<std::sync::RwLockWriteGuard<'_, ColdComponentStore<T>>> {
         let tid = TypeId::of::<T>();
         let lane = self.cold_lanes.get(&tid)?;
-        Some(lane.as_any()
-            .downcast_ref::<RwLock<ColdComponentStore<T>>>()
-            .unwrap()
-            .write()
-            .unwrap())
+        Some(
+            lane.as_any()
+                .downcast_ref::<RwLock<ColdComponentStore<T>>>()
+                .unwrap()
+                .write()
+                .unwrap(),
+        )
     }
 
     pub fn create_entity(&self) -> Entity {
@@ -208,27 +221,38 @@ impl SmartStore {
         }
     }
 
-    pub fn read_lane<T: 'static + Send + Sync>(&self) -> Option<std::sync::RwLockReadGuard<'_, ComponentStore<T>>> {
+    pub fn read_lane<T: 'static + Send + Sync>(
+        &self,
+    ) -> Option<std::sync::RwLockReadGuard<'_, ComponentStore<T>>> {
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
-        Some(lane.as_any()
-            .downcast_ref::<RwLock<ComponentStore<T>>>()
-            .unwrap()
-            .read()
-            .unwrap())
+        Some(
+            lane.as_any()
+                .downcast_ref::<RwLock<ComponentStore<T>>>()
+                .unwrap()
+                .read()
+                .unwrap(),
+        )
     }
 
-    pub fn write_lane<T: 'static + Send + Sync>(&self) -> Option<std::sync::RwLockWriteGuard<'_, ComponentStore<T>>> {
+    pub fn write_lane<T: 'static + Send + Sync>(
+        &self,
+    ) -> Option<std::sync::RwLockWriteGuard<'_, ComponentStore<T>>> {
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
-        Some(lane.as_any()
-            .downcast_ref::<RwLock<ComponentStore<T>>>()
-            .unwrap()
-            .write()
-            .unwrap())
+        Some(
+            lane.as_any()
+                .downcast_ref::<RwLock<ComponentStore<T>>>()
+                .unwrap()
+                .write()
+                .unwrap(),
+        )
     }
 
-    pub fn with_lock_free_lane<T: 'static + Clone + Send + Sync, R>(&self, f: impl FnOnce(&ComponentStore<T>) -> R) -> Option<R> {
+    pub fn with_lock_free_lane<T: 'static + Clone + Send + Sync, R>(
+        &self,
+        f: impl FnOnce(&ComponentStore<T>) -> R,
+    ) -> Option<R> {
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
         let guard = epoch_pin();
@@ -237,7 +261,10 @@ impl SmartStore {
         Some(f(store_ref))
     }
 
-    pub fn write_lock_free_lane<T: 'static + Clone + Send + Sync>(&self, f: impl FnOnce(&mut ComponentStore<T>)) {
+    pub fn write_lock_free_lane<T: 'static + Clone + Send + Sync>(
+        &self,
+        f: impl FnOnce(&mut ComponentStore<T>),
+    ) {
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid).unwrap();
         if let Some(lf) = lane.as_any().downcast_ref::<LockFreeLaneInner<T>>() {
@@ -250,7 +277,7 @@ pub trait Pack: Clone + Send + Sync + 'static {
     type PackMut<'a>
     where
         Self: 'a;
-    
+
     fn pack_register(store: &mut SmartStore);
     fn pack_insert(&self, store: &mut SmartStore, entity: Entity);
     fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self>;
@@ -300,9 +327,9 @@ mod tests {
         let e = store.create_entity();
         store.insert::<f32>(e, 3.14);
 
-        let val = store.with_lock_free_lane::<f32, _>(|store| {
-            store.get(e).copied()
-        }).unwrap();
+        let val = store
+            .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
+            .unwrap();
         assert_eq!(val, Some(3.14));
     }
 
@@ -318,9 +345,9 @@ mod tests {
             store.insert(e, 2.0);
         });
 
-        let val = store.with_lock_free_lane::<f32, _>(|store| {
-            store.get(e).copied()
-        }).unwrap();
+        let val = store
+            .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
+            .unwrap();
         assert_eq!(val, Some(2.0));
     }
 
@@ -342,9 +369,9 @@ mod tests {
             let s = Arc::clone(&store);
             handles.push(thread::spawn(move || {
                 for _ in 0..1000 {
-                    let val = s.with_lock_free_lane::<f32, _>(|store| {
-                        store.get(e).copied()
-                    }).unwrap();
+                    let val = s
+                        .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
+                        .unwrap();
                     assert_eq!(val, Some(1.0));
                 }
             }));
@@ -372,6 +399,10 @@ mod tests {
 
         let elapsed = start.elapsed();
         // Benchmark test - threshold generous to account for CI variance
-        assert!(elapsed.as_millis() < 2000, "took {} ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 2000,
+            "took {} ms",
+            elapsed.as_millis()
+        );
     }
 }

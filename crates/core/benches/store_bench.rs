@@ -1,9 +1,16 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rayon::iter::ParallelIterator;
 
 use ornis_core::{ComponentStore, Entity, EntityAllocator};
 
-fn setup(count: usize) -> (EntityAllocator, Vec<Entity>, ComponentStore<f32>, ComponentStore<f32>) {
+fn setup(
+    count: usize,
+) -> (
+    EntityAllocator,
+    Vec<Entity>,
+    ComponentStore<f32>,
+    ComponentStore<f32>,
+) {
     let mut alloc = EntityAllocator::new();
     let mut store_a = ComponentStore::new();
     let mut store_b = ComponentStore::new();
@@ -67,12 +74,15 @@ fn bench_par_iterate(c: &mut Criterion) {
     c.bench_function("par_iterate_100k", |b| {
         let (_, _, store, _) = setup(100_000);
         b.iter(|| {
-            store.par_iter().for_each(|val| { black_box(val); });
+            store.par_iter().for_each(|val| {
+                black_box(val);
+            });
         });
     });
 }
 
-criterion_group!(benches,
+criterion_group!(
+    benches,
     bench_insert,
     bench_iterate,
     bench_par_iterate,

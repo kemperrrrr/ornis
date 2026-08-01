@@ -16,11 +16,13 @@ impl Shape {
                 position - Vec3::splat(*radius),
                 position + Vec3::splat(*radius),
             ),
-            Shape::Box { half_extents } => AABB::new(
-                position - *half_extents,
-                position + *half_extents,
-            ),
-            Shape::Capsule { radius, half_height } => {
+            Shape::Box { half_extents } => {
+                AABB::new(position - *half_extents, position + *half_extents)
+            }
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => {
                 let half = Vec3::new(*radius, *half_height + *radius, *radius);
                 AABB::new(position - half, position + half)
             }

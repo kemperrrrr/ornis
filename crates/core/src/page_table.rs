@@ -13,13 +13,17 @@ impl<T: Clone + Default> Default for PageTable<T> {
 impl<T: Clone + Default> Clone for PageTable<T> {
     fn clone(&self) -> Self {
         Self {
-            pages: self.pages.iter().map(|opt| {
-                opt.as_ref().map(|b| {
-                    let mut v: Vec<T> = Vec::with_capacity(PAGE_SIZE);
-                    v.extend_from_slice(&b[..]);
-                    v.into_boxed_slice().try_into().ok().unwrap()
+            pages: self
+                .pages
+                .iter()
+                .map(|opt| {
+                    opt.as_ref().map(|b| {
+                        let mut v: Vec<T> = Vec::with_capacity(PAGE_SIZE);
+                        v.extend_from_slice(&b[..]);
+                        v.into_boxed_slice().try_into().ok().unwrap()
+                    })
                 })
-            }).collect(),
+                .collect(),
         }
     }
 }
@@ -55,9 +59,7 @@ impl<T: Clone + Default> PageTable<T> {
     pub fn set(&mut self, index: usize, value: T) {
         let page = self.page_mut(index);
         let offset = index % PAGE_SIZE;
-        let p = page.get_or_insert_with(|| {
-            Box::new(std::array::from_fn(|_| T::default()))
-        });
+        let p = page.get_or_insert_with(|| Box::new(std::array::from_fn(|_| T::default())));
         p[offset] = value;
     }
 }

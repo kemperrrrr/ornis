@@ -42,7 +42,7 @@ impl WgslGen {
                 } else {
                     format!("{}.0", base)
                 }
-            },
+            }
             Bool(b) => {
                 if b.value {
                     "true".into()
@@ -57,11 +57,20 @@ impl WgslGen {
     }
 
     fn path(p: &syn::ExprPath) -> String {
-        let segs: Vec<_> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let segs: Vec<_> = p
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
         let last = segs.last().map(|s| s.as_str());
 
         // Map glam type constants to WGSL constructors
-        let parent_type = segs.len().checked_sub(2).and_then(|i| segs.get(i)).map(|s| s.as_str());
+        let parent_type = segs
+            .len()
+            .checked_sub(2)
+            .and_then(|i| segs.get(i))
+            .map(|s| s.as_str());
         match (parent_type, last) {
             (Some("Vec2"), Some("ZERO")) => return "vec2<f32>(0.0)".into(),
             (Some("Vec2"), Some("ONE")) => return "vec2<f32>(1.0)".into(),
@@ -130,7 +139,7 @@ impl WgslGen {
             _ => {
                 return syn::Error::new_spanned(b.op, "operator not supported in WGSL kernel")
                     .to_compile_error()
-                    .to_string()
+                    .to_string();
             }
         };
         format!("{} {} {}", Self::expr(&b.left), op, Self::expr(&b.right))
@@ -157,11 +166,10 @@ impl WgslGen {
             "clamp" => Some(format!("clamp({})", args.join(", "))),
             "saturate" => Some(format!("saturate({})", args.join(", "))),
             "select" => Some(format!("select({})", args.join(", "))),
-            "sqrt" | "abs" | "floor" | "ceil" | "round" | "fract" | "exp"
-            | "log" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
-            | "atan2" | "pow" | "max" | "min" | "step" | "smoothstep"
-            | "mix" | "reflect" | "refract" | "transpose" | "determinant"
-            | "inverse" | "sign" | "dpdx" | "dpdy" | "fwidth" => {
+            "sqrt" | "abs" | "floor" | "ceil" | "round" | "fract" | "exp" | "log" | "sin"
+            | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "pow" | "max" | "min"
+            | "step" | "smoothstep" | "mix" | "reflect" | "refract" | "transpose"
+            | "determinant" | "inverse" | "sign" | "dpdx" | "dpdy" | "fwidth" => {
                 Some(format!("{}({})", fn_name, args.join(", ")))
             }
             _ => None,
@@ -249,10 +257,15 @@ impl WgslGen {
                         } else if p == 3 {
                             return format!("{} * {} * {}", receiver, receiver, receiver);
                         } else if p == 4 {
-                            return format!("{} * {} * {} * {}", receiver, receiver, receiver, receiver);
+                            return format!(
+                                "{} * {} * {} * {}",
+                                receiver, receiver, receiver, receiver
+                            );
                         } else if p > 0 {
                             // Generate repeated multiplication for small positive ints
-                            let parts: Vec<String> = std::iter::repeat(receiver.clone()).take(p as usize).collect();
+                            let parts: Vec<String> = std::iter::repeat(receiver.clone())
+                                .take(p as usize)
+                                .collect();
                             return parts.join(" * ");
                         }
                     }
@@ -268,26 +281,21 @@ impl WgslGen {
         // Map Rust methods to WGSL functions
         match method.as_str() {
             // Swizzle methods - convert to field access in WGSL
-            "x" | "y" | "z" | "w" | "r" | "g" | "b" | "a"
-            | "xy" | "xz" | "xw" | "yx" | "yz" | "yw"
-            | "zx" | "zy" | "zw" | "wx" | "wy" | "wz"
-            | "xyz" | "xyw" | "xzy" | "xzw" | "yxz" | "yxw"
-            | "yzx" | "yzw" | "zxy" | "zxw" | "zyx" | "zyw"
-            | "wxy" | "wxz" | "wyz" | "wzx" | "wzy"
-            | "xyzw" | "xywz" | "xzyw" | "xzwy" | "xwyz" | "xwzy"
-            | "yxzw" | "yxwz" | "yzxw" | "yzwx" | "ywxz" | "ywzx"
-            | "zxyw" | "zxwy" | "zyxw" | "zywx" | "zwxy" | "zwyx"
-            | "wxyz" | "wxzy" | "wyxz" | "wyzx" | "wzxy" | "wzyx" => {
+            "x" | "y" | "z" | "w" | "r" | "g" | "b" | "a" | "xy" | "xz" | "xw" | "yx" | "yz"
+            | "yw" | "zx" | "zy" | "zw" | "wx" | "wy" | "wz" | "xyz" | "xyw" | "xzy" | "xzw"
+            | "yxz" | "yxw" | "yzx" | "yzw" | "zxy" | "zxw" | "zyx" | "zyw" | "wxy" | "wxz"
+            | "wyz" | "wzx" | "wzy" | "xyzw" | "xywz" | "xzyw" | "xzwy" | "xwyz" | "xwzy"
+            | "yxzw" | "yxwz" | "yzxw" | "yzwx" | "ywxz" | "ywzx" | "zxyw" | "zxwy" | "zyxw"
+            | "zywx" | "zwxy" | "zwyx" | "wxyz" | "wxzy" | "wyxz" | "wyzx" | "wzxy" | "wzyx" => {
                 return format!("{}.{}", receiver, method);
             }
             "signum" => return format!("sign({})", args[0]),
-            "abs" | "sqrt" | "sin" | "cos" | "tan" | "floor" | "ceil"
-            | "round" | "fract" | "exp" | "log" | "normalize"
-            | "length" | "saturate" | "asin" | "acos" | "atan" => {
+            "abs" | "sqrt" | "sin" | "cos" | "tan" | "floor" | "ceil" | "round" | "fract"
+            | "exp" | "log" | "normalize" | "length" | "saturate" | "asin" | "acos" | "atan" => {
                 return format!("{}({})", method, args[0]);
             }
-            "dot" | "cross" | "pow" | "max" | "min" | "step" | "smoothstep"
-            | "reflect" | "refract" | "atan2" => {
+            "dot" | "cross" | "pow" | "max" | "min" | "step" | "smoothstep" | "reflect"
+            | "refract" | "atan2" => {
                 return format!("{}({})", method, args.join(", "));
             }
             "clamp" => {
@@ -312,7 +320,7 @@ impl WgslGen {
         let cond = Self::expr(&i.cond);
         let then_body = Self::block(&i.then_branch);
         let then_trimmed = then_body.trim();
-        
+
         if let Some(ref else_branch) = i.else_branch {
             let else_body = match &*else_branch.1 {
                 syn::Expr::Block(block) => Self::block(&block.block),
@@ -320,7 +328,10 @@ impl WgslGen {
                 _ => "".to_string(),
             };
             let else_trimmed = else_body.trim();
-            format!("if ({}) {{ {} }} else {{ {} }}", cond, then_trimmed, else_trimmed)
+            format!(
+                "if ({}) {{ {} }} else {{ {} }}",
+                cond, then_trimmed, else_trimmed
+            )
         } else {
             format!("if ({}) {{ {} }}", cond, then_trimmed)
         }
@@ -332,7 +343,9 @@ impl WgslGen {
 
     fn block(block: &syn::Block) -> String {
         let count = block.stmts.len();
-        block.stmts.iter()
+        block
+            .stmts
+            .iter()
             .enumerate()
             .map(|(i, s)| Self::stmt(s, i == count - 1))
             .collect::<Vec<_>>()
@@ -348,16 +361,23 @@ impl WgslGen {
                         let pat = Self::pat(&local.pat);
                         let cond = Self::expr(&if_expr.cond);
                         let then_val = Self::last_expr_in_block(&if_expr.then_branch);
-                        let else_val = if_expr.else_branch.as_ref()
+                        let else_val = if_expr
+                            .else_branch
+                            .as_ref()
                             .and_then(|(_, else_expr)| {
                                 if let syn::Expr::Block(block) = else_expr.as_ref() {
                                     Some(Self::last_expr_in_block(&block.block))
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             })
                             .unwrap_or_default();
                         // Convert: let x = if c { a } else { b };
                         // To WGSL: var x = b; if (c) { x = a; }
-                        return format!("var {} = {}; if ({}) {{ {} = {}; }} ", pat, else_val, cond, pat, then_val);
+                        return format!(
+                            "var {} = {}; if ({}) {{ {} = {}; }} ",
+                            pat, else_val, cond, pat, then_val
+                        );
                     }
                 }
                 let pat = Self::pat(&local.pat);
@@ -390,7 +410,9 @@ impl WgslGen {
     }
 
     fn last_expr_in_block(block: &syn::Block) -> String {
-        block.stmts.last()
+        block
+            .stmts
+            .last()
             .and_then(|s| {
                 if let Stmt::Expr(e, _) = s {
                     Some(Self::expr(e))
@@ -501,7 +523,13 @@ pub fn wgsl_fn_source(func: &ItemFn) -> String {
 
     let body = convert_body_to_wgsl(func);
 
-    format!("fn {}({}) -> {} {{ {} }}", fn_name, param_wgsl.join(", "), return_ty, body)
+    format!(
+        "fn {}({}) -> {} {{ {} }}",
+        fn_name,
+        param_wgsl.join(", "),
+        return_ty,
+        body
+    )
 }
 
 pub fn wgsl_source_from_fn(func: &ItemFn) -> String {
@@ -623,7 +651,10 @@ mod tests {
     fn if_expr_translates() {
         let expr: syn::Expr = parse_quote!(if a > b { c } else { d });
         // WGSL requires return in blocks used as expressions
-        assert_eq!(rust_to_wgsl(&expr), "if (a > b) { return c; } else { return d; }");
+        assert_eq!(
+            rust_to_wgsl(&expr),
+            "if (a > b) { return c; } else { return d; }"
+        );
     }
 
     #[test]

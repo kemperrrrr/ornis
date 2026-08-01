@@ -34,7 +34,11 @@ impl RigidBody {
             restitution: 0.5,
             friction: 0.3,
             shape: Shape::Sphere { radius },
-            body_type: if mass > 0.0 { BodyType::Dynamic } else { BodyType::Static },
+            body_type: if mass > 0.0 {
+                BodyType::Dynamic
+            } else {
+                BodyType::Static
+            },
         }
     }
 
@@ -48,7 +52,11 @@ impl RigidBody {
             restitution: 0.3,
             friction: 0.5,
             shape: Shape::Box { half_extents },
-            body_type: if mass > 0.0 { BodyType::Dynamic } else { BodyType::Static },
+            body_type: if mass > 0.0 {
+                BodyType::Dynamic
+            } else {
+                BodyType::Static
+            },
         }
     }
 
@@ -61,8 +69,15 @@ impl RigidBody {
             inv_mass,
             restitution: 0.4,
             friction: 0.4,
-            shape: Shape::Capsule { radius, half_height },
-            body_type: if mass > 0.0 { BodyType::Dynamic } else { BodyType::Static },
+            shape: Shape::Capsule {
+                radius,
+                half_height,
+            },
+            body_type: if mass > 0.0 {
+                BodyType::Dynamic
+            } else {
+                BodyType::Static
+            },
         }
     }
 }
