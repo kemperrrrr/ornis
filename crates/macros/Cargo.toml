@@ -3,6 +3,7 @@ name = "ornis-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [lib]
 proc-macro = true
@@ -16,3 +17,6 @@ glam = { version = "0.28", optional = true }
 [dev-dependencies]
 ornis-core = { path = "../core" }
 glam = "0.28"
+
+[lints]
+workspace = true

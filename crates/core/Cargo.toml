@@ -3,6 +3,7 @@ name = "ornis-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 rayon = "1.10"
@@ -27,3 +28,6 @@ harness = false
 [[bench]]
 name = "comparison_bench"
 harness = false
+
+[lints]
+workspace = true

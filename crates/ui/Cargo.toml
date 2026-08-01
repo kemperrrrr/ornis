@@ -3,6 +3,7 @@ name = "ornis-ui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 boa_engine = { version = "0.21", optional = true }
@@ -33,3 +34,6 @@ optional = true
 
 [dev-dependencies]
 pollster = "0.3"
+
+[lints]
+workspace = true

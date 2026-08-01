@@ -3,6 +3,7 @@ name = "ornis-audio"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 ornis-core = { path = "../core" }
@@ -25,3 +26,6 @@ web-sys = { version = "0.3", features = [
     "Window", "HtmlDocument",
     "console",
 ] }
+
+[lints]
+workspace = true

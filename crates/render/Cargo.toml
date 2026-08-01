@@ -3,6 +3,7 @@ name = "ornis-render"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 wgpu = "29"
@@ -16,3 +17,6 @@ ron = "0.8"
 [dev-dependencies]
 pollster = "0.3"
 png = "0.17"
+
+[lints]
+workspace = true
