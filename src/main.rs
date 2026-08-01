@@ -20,7 +20,8 @@ fn main() {
     let (cmd_tx, _cmd_rx) = unbounded();
     let (_ev_tx, ev_rx) = unbounded();
 
-    let editor = remote::RemoteEditor::start(3420, cmd_tx, ev_rx);
+    // Биндинг держит RemoteEditor живым до конца main (Drop остановит сервер).
+    let _editor = remote::RemoteEditor::start(3420, cmd_tx, ev_rx);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║           Ornis Engine — Browser Editor Mode                 ║");
