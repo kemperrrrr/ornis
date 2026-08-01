@@ -11,7 +11,19 @@ feature-depth = 1
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+# unmaintained проверяется только для крейтов самого workspace: транзитивный
+# ttf-parser ← ab_glyph ← sctk-adwaita ← winit; замена (skrifa/fontations)
+# требует апгрейда стека winit. (cargo-deny 0.20: all|workspace|transitive|none)
+unmaintained = "workspace"
+ignore = [
+    # quick-xml 0.39.4 приходит транзитивно через wayland-scanner (build-time
+    # proc-macro стека winit/smithay, только Linux). Обновление до 0.41 заблокировано
+    # пином winit 0.30 → smithay-client-toolkit 0.19 → wayland-scanner 0.31.
+    # Поверхность атаки отсутствует: парсер применяется к доверенному XML
+    # протоколов Wayland на этапе сборки. Снять ignore после апгрейда winit.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [bans]
 multiple-versions = "warn"
