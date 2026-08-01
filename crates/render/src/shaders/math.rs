@@ -1,3 +1,7 @@
+// Функции зеркалят сигнатуры WGSL/PBR-шейдеров (спека OpenPBR), поэтому
+// у ряда из них больше 7 аргументов — это осознанное соответствие.
+#![allow(clippy::too_many_arguments)]
+
 use glam::Vec3Swizzles;
 use ornis_macros::kernel;
 
@@ -95,8 +99,6 @@ fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
 }
 
 #[kernel]
-// Зеркалит сигнатуру WGSL/PBR-функции — параметры соответствуют спеке OpenPBR.
-#[allow(clippy::too_many_arguments)]
 fn smith_ggx_aniso(
     NoV: f32,
     NoL: f32,
@@ -189,8 +191,6 @@ fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
 }
 
 #[kernel]
-// Зеркалит сигнатуру WGSL/PBR-функции — параметры соответствуют спеке OpenPBR.
-#[allow(clippy::too_many_arguments)]
 fn coat_darkening(
     coat_ior: f32,
     coat_weight: f32,
