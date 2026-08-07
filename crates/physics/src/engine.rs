@@ -184,6 +184,41 @@ fn box_vs_box(
     })
 }
 
+/// Sphere vs an oriented capsule: closest point on the capsule's segment.
+#[allow(clippy::too_many_arguments)]
+fn sphere_vs_capsule(
+    sphere_pos: Vec3,
+    sphere_radius: f32,
+    cap_pos: Vec3,
+    cap_radius: f32,
+    cap_half_height: f32,
+    cap_rot: Quat,
+) -> Option<Contact> {
+    let axis = cap_rot * Vec3::Y;
+    let bottom = cap_pos - axis * cap_half_height;
+    let seg = axis * (2.0 * cap_half_height);
+    let t = (sphere_pos - bottom).dot(seg) / seg.length_squared();
+    let t = t.clamp(0.0, 1.0);
+    let closest = bottom + seg * t;
+    let to_sphere = sphere_pos - closest;
+    let d = to_sphere.length();
+    let rr = cap_radius + sphere_radius;
+    if d >= rr || d < 1e-10 {
+        return None;
+    }
+    // Normal points from the capsule toward the sphere.
+    let n = to_sphere / d;
+    let penetration = rr - d;
+    let contact_point = closest + n * (cap_radius - penetration * 0.5);
+    Some(Contact {
+        body_a: 0,
+        body_b: 0,
+        normal: n,
+        penetration,
+        contact_point,
+    })
+}
+
 /// Capsule-capsule: both segment axes are rotated by the body orientation.
 #[allow(clippy::too_many_arguments)]
 fn capsule_vs_capsule(
@@ -286,6 +321,28 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
                 hb,
                 b.orientation,
             ),
+            (
+                &Shape::Sphere { radius: r },
+                &Shape::Capsule {
+                    radius: cr,
+                    half_height: hh,
+                },
+            ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation),
+            (
+                &Shape::Capsule {
+                    radius: cr,
+                    half_height: hh,
+                },
+                &Shape::Sphere { radius: r },
+            ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation).map(|c| {
+                Contact {
+                    body_a: c.body_a,
+                    body_b: c.body_b,
+                    normal: -c.normal,
+                    penetration: c.penetration,
+                    contact_point: c.contact_point,
+                }
+            }),
             _ => None,
         };
 
@@ -414,10 +471,37 @@ impl BuiltinPhysicsEngine {
             let n = contact.normal;
             let p = contact.contact_point;
 
-            // ---- Positional (split-impulse style) correction ----
-            let correction = n * (contact.penetration / total_inv);
-            self.bodies[i].position -= correction * inv_mass_a;
-            self.bodies[j].position += correction * inv_mass_b;
+            // ---- Positional correction (incl. rotation), resolved against the
+            //      effective mass so rotated bodies rotate out of penetration. ----
+            let ra = p - self.bodies[i].position;
+            let rb = p - self.bodies[j].position;
+            let ia_p = self.bodies[i].inertia;
+            let ib_p = self.bodies[j].inertia;
+            let oa_p = self.bodies[i].orientation;
+            let ob_p = self.bodies[j].orientation;
+            let ra_n = ra.cross(n);
+            let rb_n = rb.cross(n);
+            let k_pos = total_inv
+                + ra_n.dot(mul_inv_inertia(ia_p, oa_p, ra_n))
+                + rb_n.dot(mul_inv_inertia(ib_p, ob_p, rb_n));
+            if k_pos > 1e-10 {
+                // A small slop + a relaxation factor so resting contacts stay put.
+                let c = (contact.penetration - 0.02).clamp(0.0, 0.25);
+                let lam = 0.5 * c / k_pos;
+                let jp = n * lam;
+                self.bodies[i].position -= jp * inv_mass_a;
+                self.bodies[j].position += jp * inv_mass_b;
+                let da = mul_inv_inertia(ia_p, oa_p, ra.cross(-jp));
+                let db = mul_inv_inertia(ib_p, ob_p, rb.cross(jp));
+                if da != Vec3::ZERO {
+                    self.bodies[i].orientation =
+                        (Quat::from_scaled_axis(da) * self.bodies[i].orientation).normalize();
+                }
+                if db != Vec3::ZERO {
+                    self.bodies[j].orientation =
+                        (Quat::from_scaled_axis(db) * self.bodies[j].orientation).normalize();
+                }
+            }
 
             // ---- Relative point velocity ----
             let ra = p - self.bodies[i].position;
@@ -554,7 +638,41 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         closest
     }
 
-    fn shapecast(&self, _shape: &Shape, _from: Vec3, _to: Vec3) -> Option<RaycastHit> {
+    fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit> {
+        // Conservative sweep by reusing the narrow-phase over a probe body.
+        let delta = to - from;
+        if delta.length_squared() < 1e-9 {
+            return None;
+        }
+        const STEPS: usize = 64;
+        for s in 1..=STEPS {
+            let pos = from + delta * (s as f32 / STEPS as f32);
+            let probe = RigidBody {
+                position: pos,
+                orientation: Quat::IDENTITY,
+                velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+                mass: 1.0,
+                inv_mass: 1.0,
+                inertia: shape.inertia(1.0),
+                torque: Vec3::ZERO,
+                restitution: 0.0,
+                friction: 0.0,
+                shape: shape.clone(),
+                body_type: BodyType::Dynamic,
+            };
+            for (handle, body) in self.bodies.iter().enumerate() {
+                let pair = [probe.clone(), body.clone()];
+                if !detect_collisions(&pair, &[(0, 1)]).is_empty() {
+                    return Some(RaycastHit {
+                        handle,
+                        point: pos,
+                        normal: Vec3::ZERO,
+                        distance: (pos - from).length(),
+                    });
+                }
+            }
+        }
         None
     }
 }
@@ -707,6 +825,39 @@ mod tests {
         assert!(
             (half_y - 2f32.sqrt()).abs() < 1e-3,
             "OBB->AABB y-extent, got {half_y}"
+        );
+    }
+
+    #[test]
+    fn sphere_capsule_collision() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let sphere = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, 0.0), 0.5, 1.0));
+        let capsule = physics.add_body(
+            RigidBody::new_capsule(Vec3::new(0.6, 0.0, 0.0), 0.5, 1.0, 1.0)
+                .with_orientation(glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
+        );
+        physics.step(1.0 / 60.0);
+        let d = (physics.get_body(sphere).unwrap().position
+            - physics.get_body(capsule).unwrap().position)
+            .length();
+        // Sphere radius 0.5 + capsule radius 0.5 -> resting center distance ~1.0.
+        assert!(d <= 1.05, "sphere/capsule should resolve on contact, d={d}");
+    }
+
+    #[test]
+    fn shapecast_hits_body() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, -5.0), 1.0, 0.0));
+        // Cast a small sphere from origin toward the static target.
+        let shape = Shape::Sphere { radius: 0.1 };
+        let hit = physics.shapecast(&shape, Vec3::ZERO, Vec3::new(0.0, 0.0, -10.0));
+        assert!(hit.is_some(), "conservative shapecast should hit");
+        let hit = hit.unwrap();
+        assert_eq!(hit.handle, 0);
+        assert!(
+            hit.distance > 3.0 && hit.distance < 10.0,
+            "hit distance={}",
+            hit.distance
         );
     }
 }
