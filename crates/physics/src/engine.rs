@@ -1,12 +1,8 @@
-pub mod body;
-pub mod math;
-pub mod shape;
-
 use glam::Vec3;
 
-use body::{BodyHandle, BodyType, RigidBody};
-use math::{AABB, Ray, RaycastHit};
-use shape::Shape;
+use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::math::{AABB, Ray, RaycastHit};
+use crate::shape::Shape;
 
 pub trait PhysicsEngine: Send + Sync {
     fn step(&mut self, dt: f32);

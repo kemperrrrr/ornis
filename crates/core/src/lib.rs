@@ -7,7 +7,6 @@ mod entity;
 mod lock_free_store;
 pub mod material;
 mod page_table;
-pub mod physics;
 pub mod pipeline;
 mod prefetch;
 mod smart_store;
@@ -21,7 +20,6 @@ pub use dispatcher::{CpuExecutor, Dispatchable, Dispatcher, ExecutionTarget, Sma
 pub use entity::{Entity, EntityAllocator};
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use page_table::{PAGE_SIZE, PageTable};
-pub use physics::*;
 pub use pipeline::{
     AutoPipeline, CpuLane, GpuLane, HybridLane, LaneTarget, PipelineConfig, Route,
     TargetDiscriminant, lane_target_of, pipeline_enter, pipeline_exit,

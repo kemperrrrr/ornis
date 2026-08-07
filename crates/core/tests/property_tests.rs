@@ -9,8 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ornis_core::physics::math::{AABB, Ray};
 use ornis_core::{ComponentStore, Entity, EntityAllocator, PageTable};
+use ornis_physics::math::{AABB, Ray};
 use proptest::prelude::*;
 
 const CASES: u32 = 64;

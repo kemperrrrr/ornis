@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/macros",
+    "crates/physics",
     "crates/wgpu_backend",
     "crates/audio",
     "crates/render",

@@ -68,7 +68,8 @@ cargo xtask mutants           # мутационное тестирование 
 | `src/` | Бинарь `ornis`: нативный режим (winit + wgpu + Vello) и `editor-only` (HTTP-сервер) | Активен |
 | `editor/` | Фронтенд редактора: `index.html`, `css/`, `js/`, `icons/`, `scene.ron` | Активен |
 | `xtask/` | Команды `cargo xtask`: `editor`, `quality`, `fuzz`, `mutants` | Активен |
-| `crates/core` | Sparse Sets, Entity (генерационные индексы), диспетчер, физика, Command Sync | Активен |
+| `crates/core` | Sparse Sets, Entity (генерационные индексы), диспетчер, Command Sync | Активен |
+| `crates/physics` | Физика: трейт `PhysicsEngine`, Sweep-and-Prune, `RigidBody`, raycast | Активен (вынесен из core в августе 2026) |
 | `crates/macros` | Процедурные макросы: `smart_pipeline`, `for_each_entity`, `kernel`, `Pack` и др. | Активен |
 | `crates/render` | `Renderer3D`, OpenPBR-материал, WGSL-шейдеры, трейт `RenderBackend` | Активен |
 | `crates/wgpu_backend` | GPU-исполнение: command sync, smart buffer, PSO-кэш, роутер | Активен |
@@ -213,3 +214,47 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 `ANALYSIS_DOCS_VS_CODE.md`, `GOSUB_INTEGRATION.md`) удалены из дерева при
 консолидации (август 2026) — история сохранена в git. При расхождении
 любых старых источников с кодом верить коду.
+
+---
+## Приложение A — Движок рендеринга и физический движок (черновик для ревью)
+
+> 🔎 Черновик, написан по коду (`crates/render`, `crates/core/src/physics`).
+> Нужен ваш ревью: там, где формулировки неточны, — поправьте.
+
+### A1. Движок рендеринга (`crates/render`)
+
+#### Что есть в коде
+- **`Renderer3D`** (`renderer.rs`) — основной рендерер на wgpu. Содержит:
+  - **forward-проход** + структуры **G-buffer** (`GBufferTextures`: albedo,
+    normal, material_id, world_position, material_params, depth) и pipeline'ы
+    `ForwardPass` / `LightingPass` / `CompositePass`.
+    ⚠️ *Примечание для ревью: в README выше (раздел «Рендер») отмечено
+    «Deferred/Forward hybrid — ❌, есть только forward + composite», но в коде
+    G-buffer/lighting-структуры присутствуют. Нужно уточнить, что реально
+    в пайплайне (активен ли gbuffer-путь, или это только каркас).*
+  - Uniform'ы: `CameraUniform` (view_proj, inv_view_proj, cam_pos),
+    `PerObjectGpu` (model, normal_matrix, material_index), `GpuLight`+`LightingUniform`
+    (ambient + до 4 направленных источников), `InstanceData`.
+  - Бюджеты: `max_objects=256`, `max_materials=64`.
+- **Материалы**: `OpenPBRMaterial` (20 vec4-параметра, все BSDF) из `ornis_core`, константа `OPENPBR_MATERIAL_SIZE`.
+- **`RenderBackend`** (`render_backend.rs`) — трейт + фабрика `create_render_backend` (плагинная точка смены бэкенда).
+- **`scene.rs`** — загрузка сцены, **`mesh.rs`** (`Mesh`/`Vertex`), **`shader.rs`**/`shaders/` (WGSL, `math.rs` — math-хелперы шейдеров), **`transform.rs`**, **`composite.rs`**.
+
+### A2. Физический движок (`crates/physics`)
+
+#### Что есть в коде
+- **Трейт `PhysicsEngine`** (Send+Sync): `step`, `add_body`/`remove_body`/`get_body(_mut)`, `raycast`, `shapecast` — точка подключения внешних движков (Rapier/Jolt за тем же трейтом).
+- **`BuiltinPhysicsEngine`** (`mod.rs`):
+  - **Sweep-and-Prune** широкофазный: сортировка AABB-ов по сменяющейся оси (x→y→z), active-пары.
+  - **Узкая фаза**: контакты сфера/сфера, сфера/бокс, бокс/бокс (минимальная ось SAT), капсула/капсула.
+  - **Разрешение**: позиционная коррекция по проникновению + импульс (реституция) + **трение Кулона**.
+  - **Substeps** = 4: внутри `step` цикл `integrate → broadphase → detect → resolve`.
+  - **Raycast** — t-slab по AABB, возвращает ближайшее. **`shapecast` — заглушка (`None`)**.
+  - `BodyType` dynamic/static, `RigidBody` (position, velocity, inv_mass, restitution, friction), `Shape` (sphere/box/capsule).
+- Тесты в `mod.rs`: падение сферы, статика не падает, сфера-сфера, box-box, raycast на сферу.
+
+### A3. Открытые вопросы для ревью
+1. Рендер: активен ли G-buffer/lighting-путь или только forward? Уточнить README (deferred: 🟡 каркас /❌ не в пайплайне).
+2. Физика: какие связки (joints) нужны в первую очередь (revolute/ball), нужен ли CCD для быстрых тел.
+3. `shapecast` — пустая заглушка; планируется ли честная реализация или достаточно raycast+sphere-cast.
+4. Движок рендера и физики не связаны с ECS-сценой в браузере (см. План B в PLAN.md).

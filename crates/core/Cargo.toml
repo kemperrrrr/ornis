@@ -24,6 +24,7 @@ criterion = { version = "0.5", features = ["rayon"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 ornis-macros = { path = "../macros" }
 proptest = "1"
+ornis-physics = { path = "../physics" }
 
 [[bench]]
 name = "store_bench"

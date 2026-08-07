@@ -1799,6 +1799,7 @@ dependencies = [
  "fixedbitset",
  "glam 0.30.10",
  "ornis-macros",
+ "ornis-physics",
  "proptest",
  "rayon",
 ]
@@ -1825,6 +1826,13 @@ dependencies = [
  "quick-xml 0.41.0",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ornis-physics"
+version = "0.1.0"
+dependencies = [
+ "glam 0.30.10",
 ]
 
 [[package]]
