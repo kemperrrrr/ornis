@@ -1,4 +1,4 @@
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::math::{AABB, Ray, RaycastHit};
@@ -22,9 +22,31 @@ struct Contact {
     contact_point: Vec3,
 }
 
-fn compute_aabb(body: &RigidBody) -> AABB {
-    body.shape.aabb(body.position)
+#[inline]
+fn clamp01(v: f32) -> f32 {
+    v.clamp(0.0, 1.0)
 }
+
+#[inline]
+fn inv_inertia_axis(i: f32) -> f32 {
+    if i > 0.0 { 1.0 / i } else { 0.0 }
+}
+
+/// Apply the inverse world-space inertia tensor (body axes rotated to world).
+fn mul_inv_inertia(inertia: Vec3, orientation: glam::Quat, v: Vec3) -> Vec3 {
+    let body = orientation.inverse() * v;
+    Vec3::new(
+        inv_inertia_axis(inertia.x) * body.x,
+        inv_inertia_axis(inertia.y) * body.y,
+        inv_inertia_axis(inertia.z) * body.z,
+    )
+}
+
+fn compute_aabb(body: &RigidBody) -> AABB {
+    body.shape.aabb(body.position, body.orientation)
+}
+
+// ---- Narrow-phase: world-frame analytic contact tests (oriented shapes) ----
 
 fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> Option<Contact> {
     let diff = pos_b - pos_a;
@@ -45,84 +67,142 @@ fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> O
     })
 }
 
-fn sphere_vs_box(
+/// Sphere vs an oriented box (OBB), resolved in the box's local frame.
+fn sphere_vs_obb(
     sphere_pos: Vec3,
     sphere_radius: f32,
     box_pos: Vec3,
     half_extents: Vec3,
+    box_rot: Quat,
 ) -> Option<Contact> {
-    let local = sphere_pos - box_pos;
-    let clamped = Vec3::new(
-        local.x.clamp(-half_extents.x, half_extents.x),
-        local.y.clamp(-half_extents.y, half_extents.y),
-        local.z.clamp(-half_extents.z, half_extents.z),
-    );
-    let closest = clamped + box_pos;
-    let diff = sphere_pos - closest;
-    let dist_sq = diff.length_squared();
+    let local = box_rot.inverse() * (sphere_pos - box_pos);
+    let clamped = local.clamp(-half_extents, half_extents);
+    let delta = clamped - local;
+    let dist_sq = delta.length_squared();
     if dist_sq > sphere_radius * sphere_radius || dist_sq < 1e-10 {
         return None;
     }
     let dist = dist_sq.sqrt();
-    let normal = diff / dist;
+    // Normal points from the box toward the sphere, in world space.
+    let normal = box_rot * (delta / dist);
     let penetration = sphere_radius - dist;
+    // Contact point: where the sphere touches the box (midway on the normal).
+    let contact_point = (local + clamped) * 0.5;
     Some(Contact {
         body_a: 0,
         body_b: 0,
         normal,
         penetration,
-        contact_point: closest,
+        contact_point: box_pos + box_rot * contact_point,
     })
 }
 
-fn box_vs_box(pos_a: Vec3, half_a: Vec3, pos_b: Vec3, half_b: Vec3) -> Option<Contact> {
-    let diff = pos_b - pos_a;
-    let overlap_x = half_a.x + half_b.x - diff.x.abs();
-    if overlap_x <= 0.0 {
-        return None;
+/// Axis used for the OBB overlap test: returns `radius_a + radius_b - separation`.
+#[allow(clippy::too_many_arguments)]
+fn obb_overlap_on(
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+    axis: Vec3,
+) -> f32 {
+    let aa = rot_a * Vec3::X;
+    let ab = rot_a * Vec3::Y;
+    let ac = rot_a * Vec3::Z;
+    let ba = rot_b * Vec3::X;
+    let bb = rot_b * Vec3::Y;
+    let bc = rot_b * Vec3::Z;
+    let ra = half_a.x * axis.dot(aa).abs()
+        + half_a.y * axis.dot(ab).abs()
+        + half_a.z * axis.dot(ac).abs();
+    let rb = half_b.x * axis.dot(ba).abs()
+        + half_b.y * axis.dot(bb).abs()
+        + half_b.z * axis.dot(bc).abs();
+    let center_dist = (pos_b - pos_a).dot(axis);
+    ra + rb - center_dist.abs()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn box_vs_box(
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+) -> Option<Contact> {
+    // SAT: the 3 face normals of each box plus the cross products of their axes.
+    let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
+    let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
+
+    let mut best_overlap = f32::MAX;
+    let mut best_axis = Vec3::X;
+
+    // Candidate axes: face normals first, then edge-edge cross products.
+    let mut axes: Vec<Vec3> = Vec::with_capacity(15);
+    for i in 0..3 {
+        axes.push(aa[i]);
+        axes.push(ba[i]);
     }
-    let overlap_y = half_a.y + half_b.y - diff.y.abs();
-    if overlap_y <= 0.0 {
-        return None;
-    }
-    let overlap_z = half_a.z + half_b.z - diff.z.abs();
-    if overlap_z <= 0.0 {
-        return None;
+    for ai in &aa {
+        for bi in &ba {
+            let c = ai.cross(*bi);
+            if c.length() < 1e-6 {
+                continue;
+            }
+            axes.push(c.normalize());
+        }
     }
 
-    let (penetration, normal) = if overlap_x < overlap_y && overlap_x < overlap_z {
-        (overlap_x, Vec3::new(diff.x.signum(), 0.0, 0.0))
-    } else if overlap_y < overlap_z {
-        (overlap_y, Vec3::new(0.0, diff.y.signum(), 0.0))
+    for u in axes {
+        let overlap = obb_overlap_on(pos_a, half_a, rot_a, pos_b, half_b, rot_b, u);
+        // Separated along any axis -> no contact.
+        if overlap <= 0.0 {
+            return None;
+        }
+        if overlap < best_overlap {
+            best_overlap = overlap;
+            best_axis = u;
+        }
+    }
+
+    // Orient the normal so it points from A to B.
+    let normal = if best_axis.dot(pos_b - pos_a) < 0.0 {
+        -best_axis
     } else {
-        (overlap_z, Vec3::new(0.0, 0.0, diff.z.signum()))
+        best_axis
     };
-
     let contact_point = (pos_a + pos_b) * 0.5;
     Some(Contact {
         body_a: 0,
         body_b: 0,
         normal,
-        penetration,
+        penetration: best_overlap,
         contact_point,
     })
 }
 
+/// Capsule-capsule: both segment axes are rotated by the body orientation.
+#[allow(clippy::too_many_arguments)]
 fn capsule_vs_capsule(
     pos_a: Vec3,
     radius_a: f32,
     half_height_a: f32,
+    rot_a: Quat,
     pos_b: Vec3,
     radius_b: f32,
     half_height_b: f32,
+    rot_b: Quat,
 ) -> Option<Contact> {
-    let top_a = pos_a + Vec3::Y * half_height_a;
-    let bot_a = pos_a - Vec3::Y * half_height_a;
-    let top_b = pos_b + Vec3::Y * half_height_b;
-    let bot_b = pos_b - Vec3::Y * half_height_b;
+    let ax = rot_a * Vec3::Y;
+    let bx = rot_b * Vec3::Y;
+    let bot_a = pos_a - ax * half_height_a;
+    let bot_b = pos_b - bx * half_height_b;
 
-    let seg_a = top_a - bot_a;
-    let seg_b = top_b - bot_b;
+    let seg_a = ax * (2.0 * half_height_a);
+    let seg_b = bx * (2.0 * half_height_b);
     let diff = bot_b - bot_a;
     let a = seg_a.dot(seg_a);
     let b = seg_a.dot(seg_b);
@@ -136,8 +216,8 @@ fn capsule_vs_capsule(
     } else {
         ((b * e - c * d) / det, (a * e - b * d) / det)
     };
-    let t_a = t_a.clamp(0.0, 1.0);
-    let t_b = t_b.clamp(0.0, 1.0);
+    let t_a = clamp01(t_a);
+    let t_b = clamp01(t_b);
 
     let closest_a = bot_a + seg_a * t_a;
     let closest_b = bot_b + seg_b * t_b;
@@ -173,10 +253,10 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
                 sphere_vs_sphere(a.position, ra, b.position, rb)
             }
             (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
-                sphere_vs_box(a.position, ra, b.position, hb)
+                sphere_vs_obb(a.position, ra, b.position, hb, b.orientation)
             }
             (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_box(b.position, rb, a.position, ha).map(|c| Contact {
+                sphere_vs_obb(b.position, rb, a.position, ha, a.orientation).map(|c| Contact {
                     body_a: c.body_a,
                     body_b: c.body_b,
                     normal: -c.normal,
@@ -185,18 +265,27 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
                 })
             }
             (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
-                box_vs_box(a.position, ha, b.position, hb)
+                box_vs_box(a.position, ha, a.orientation, b.position, hb, b.orientation)
             }
             (
                 &Shape::Capsule {
                     radius: ra,
-                    half_height: hha,
+                    half_height: ha,
                 },
                 &Shape::Capsule {
                     radius: rb,
-                    half_height: hhb,
+                    half_height: hb,
                 },
-            ) => capsule_vs_capsule(a.position, ra, hha, b.position, rb, hhb),
+            ) => capsule_vs_capsule(
+                a.position,
+                ra,
+                ha,
+                a.orientation,
+                b.position,
+                rb,
+                hb,
+                b.orientation,
+            ),
             _ => None,
         };
 
@@ -293,8 +382,22 @@ impl BuiltinPhysicsEngine {
             if body.body_type != BodyType::Dynamic {
                 continue;
             }
+            // Linear integrate (semi-implicit).
             body.velocity += self.gravity * dt;
             body.position += body.velocity * dt;
+
+            // Angular integrate from applied torque.
+            if body.torque != Vec3::ZERO {
+                body.angular_velocity +=
+                    mul_inv_inertia(body.inertia, body.orientation, body.torque * dt);
+                body.torque = Vec3::ZERO;
+            }
+
+            // Rotation: exact small-step quaternion update (exp of angular velocity * dt).
+            if body.angular_velocity != Vec3::ZERO {
+                let dwq = Quat::from_scaled_axis(body.angular_velocity * dt);
+                body.orientation = (dwq * body.orientation).normalize();
+            }
         }
     }
 
@@ -308,38 +411,71 @@ impl BuiltinPhysicsEngine {
                 continue;
             }
 
-            let correction = contact.normal * (contact.penetration / total_inv);
+            let n = contact.normal;
+            let p = contact.contact_point;
+
+            // ---- Positional (split-impulse style) correction ----
+            let correction = n * (contact.penetration / total_inv);
             self.bodies[i].position -= correction * inv_mass_a;
             self.bodies[j].position += correction * inv_mass_b;
 
-            let rel_vel = self.bodies[j].velocity - self.bodies[i].velocity;
-            let vel_along_normal = rel_vel.dot(contact.normal);
-            if vel_along_normal > 0.0 {
+            // ---- Relative point velocity ----
+            let ra = p - self.bodies[i].position;
+            let rb = p - self.bodies[j].position;
+            let va = self.bodies[i].velocity + self.bodies[i].angular_velocity.cross(ra);
+            let vb = self.bodies[j].velocity + self.bodies[j].angular_velocity.cross(rb);
+            let rel = vb - va;
+            let vn = rel.dot(n);
+            if vn > 0.0 {
                 continue;
             }
 
+            // ---- Normal impulse ----
+            let ra_n = ra.cross(n);
+            let rb_n = rb.cross(n);
+            let ia = self.bodies[i].inertia;
+            let ib = self.bodies[j].inertia;
+            let oa = self.bodies[i].orientation;
+            let ob = self.bodies[j].orientation;
+            let k = total_inv
+                + ra_n.dot(mul_inv_inertia(ia, oa, ra_n))
+                + rb_n.dot(mul_inv_inertia(ib, ob, rb_n));
+            if k < 1e-10 {
+                continue;
+            }
             let e = self.bodies[i].restitution.min(self.bodies[j].restitution);
-            let j_impulse = -(1.0 + e) * vel_along_normal / total_inv;
-            let impulse = contact.normal * j_impulse;
-            self.bodies[i].velocity -= impulse * inv_mass_a;
-            self.bodies[j].velocity += impulse * inv_mass_b;
+            let j_impulse = -(1.0 + e) * vn / k;
+            if j_impulse < 0.0 {
+                continue;
+            }
 
-            let tangent = rel_vel - contact.normal * vel_along_normal;
+            let imp = n * j_impulse;
+            self.bodies[i].velocity -= imp * inv_mass_a;
+            self.bodies[j].velocity += imp * inv_mass_b;
+            self.bodies[i].angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(imp));
+            self.bodies[j].angular_velocity += mul_inv_inertia(ib, ob, rb.cross(imp));
+
+            // ---- Friction (Coulomb, tangential) ----
+            let vn_now = rel.dot(n);
+            let tangent = rel - n * vn_now;
             let tangent_len = tangent.length();
             if tangent_len > 1e-6 {
                 let tangent_dir = tangent / tangent_len;
                 let mu = self.bodies[i].friction.max(self.bodies[j].friction);
                 let max_friction = j_impulse * mu;
                 let friction_impulse = (-tangent_len / total_inv).min(max_friction);
-                self.bodies[i].velocity -= tangent_dir * friction_impulse * inv_mass_a;
-                self.bodies[j].velocity += tangent_dir * friction_impulse * inv_mass_b;
+                let jt = tangent_dir * friction_impulse;
+                self.bodies[i].velocity -= jt * inv_mass_a;
+                self.bodies[j].velocity += jt * inv_mass_b;
+                self.bodies[i].angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(jt));
+                self.bodies[j].angular_velocity += mul_inv_inertia(ib, ob, rb.cross(jt));
             }
         }
     }
 
     fn raycast_body(&self, ray: &Ray, handle: usize, max_dist: f32) -> Option<RaycastHit> {
         let body = &self.bodies[handle];
-        let aabb = body.shape.aabb(body.position);
+        let aabb = body.shape.aabb(body.position, body.orientation);
         let inv_dir = Vec3::new(
             1.0 / ray.direction.x,
             1.0 / ray.direction.y,
@@ -359,6 +495,7 @@ impl BuiltinPhysicsEngine {
 
         let t = enter.max(0.0);
         let point = ray.point_at(t);
+        // Approximate surface normal pointing away from the shape centre.
         let normal = (point - body.position).normalize_or_zero();
         if normal.length_squared() < 0.5 {
             return None;
@@ -489,5 +626,87 @@ mod tests {
         let body_b = physics.get_body(b).unwrap();
         let dist = (body_a.position - body_b.position).length();
         assert!(dist < 1.1);
+    }
+
+    // ---- G1: orientation + angular dynamics ----
+
+    #[test]
+    fn angular_velocity_rotates_body() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let handle = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        physics
+            .get_body_mut(handle)
+            .unwrap()
+            .set_angular_velocity(Vec3::new(0.0, 2.0, 0.0));
+        physics.step(1.0 / 60.0);
+        let body = physics.get_body(handle).unwrap();
+        // Orientation must have changed and remain a unit quaternion.
+        assert!(
+            body.orientation.to_axis_angle().1.abs() > 1e-4,
+            "should have rotated about Y"
+        );
+        assert!(
+            (body.orientation.length() - 1.0).abs() < 1e-4,
+            "unit quaternion preserved"
+        );
+    }
+
+    #[test]
+    fn torque_turns_body() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let sphere = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        // Apply torque around Z -> angular velocity must appear.
+        let w_after = {
+            physics
+                .get_body_mut(sphere)
+                .unwrap()
+                .apply_torque(Vec3::new(0.0, 0.0, 1.0));
+            physics.step(1.0 / 60.0);
+            physics.get_body(sphere).unwrap().angular_velocity
+        };
+        assert!(
+            w_after.z.abs() > 1e-5,
+            "torque must produce angular velocity, got {w_after:?}"
+        );
+    }
+
+    #[test]
+    fn oriented_boxes_collide() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        // Same center, rotated 45° about Y, box-ish units: OBB-OBB should separate.
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let a = physics.add_body(
+            RigidBody::new_box(Vec3::new(0.0, 0.0, 0.0), half, 1.0)
+                .with_orientation(Quat::from_rotation_z(0.0)),
+        );
+        let b = physics.add_body(
+            RigidBody::new_box(Vec3::new(0.4, 0.0, 0.0), half, 1.0)
+                .with_orientation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
+        );
+        physics.step(1.0 / 60.0);
+        let body_a = physics.get_body(a).unwrap();
+        let body_b = physics.get_body(b).unwrap();
+        // Resting separation for two half-0.5 cubes is exactly 1.0 (touching).
+        let dist = (body_a.position - body_b.position).length();
+        assert!(dist <= 1.05, "oriented boxes should resolve, dist={dist}");
+    }
+
+    #[test]
+    fn obb_aabb_respects_rotation() {
+        let half = Vec3::new(1.0, 1.0, 1.0);
+        let q = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let aabb = Shape::Box { half_extents: half }.aabb(Vec3::ZERO, q);
+        // The rotated corner (1,1,1) -> (0, 1.414, 1) must be inside the bounding AABB.
+        let corner = q * Vec3::splat(1.0);
+        assert!(
+            aabb.contains_point(corner),
+            "corner {corner:?} not inside {aabb:?}"
+        );
+        // Y half-extent grows to sqrt(2) after the 45° rotation.
+        let half_y = (aabb.max.y - aabb.min.y) * 0.5;
+        assert!(
+            (half_y - 2f32.sqrt()).abs() < 1e-3,
+            "OBB->AABB y-extent, got {half_y}"
+        );
     }
 }

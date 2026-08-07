@@ -19,7 +19,7 @@
   `derive(Pack)` (SoA-пакинг, `14bca2e`), `kernel`, `for_each_entity`.
 - **Ядро — прочее**: lock-free SmartStore (`26bde36`), hot/cold split,
   тесты детерминизма Strong Confluence (`8ac94ca`), физика
-  (Sweep-and-Prune, PBD, raycast за трейтом `PhysicsEngine`).
+  (Sweep-and-Prune, импульсный солвер, raycast за трейтом `PhysicsEngine`).
 - **База аудио**: `AudioSource`/`AudioListener`, декодер symphonia,
   бэкенды cpal и Web Audio (`b2ed884`, `75b16ae`).
 - **RenderBackend + Renderer3D**: forward-рендер, WGSL PBR
@@ -157,19 +157,29 @@ API (rustdoc) и релизная упаковка.
   актуальное состояние, ввод/камера из браузера (перекликается с
   «b. Живой ECS в браузере»).
 
-### B2. Физика (`crates/physics`) — план
+### B2. Физика (`crates/physics`) — план работ
 
-1. **F1.** Расширить набор форм: добавить convex hull и/или triangle mesh
-   (сейчас только sphere / box / capsule).
-2. **F2.** Честный `shapecast` (заглушка `None`) — либо реализовать
-   sweep-тест body, либо явно зафиксировать scope (raycast + sphere-cast).
-3. **F3.** CCD для быстрых тел — чтобы не проскакивали преграды на больших
-   скоростях/больших `dt` (сейчас только substeps).
-4. **F4.** Связки (joints): определить по ревью, какие нужны первыми
-   (revolute/ball/prismatic) — `Contact`/`RigidBody` это позволяет.
-5. **F5.** Интеграция в ECS-конвейер: мост между `PhysicsEngine` и сущностями
-   (позиции/скорости систем ↔ `RigidBody`), `step` внутри игрового loop.
-6. **F6.** Детерминизм (Strong Confluence): убедиться, что физика побитово
-   детерминирована при любом числе потоков (аналог ядра) — proptest-сеть.
-7. **F7.** Внешние движки: довести связку Rapier/Jolt через `PhysicsEngine`
-   (трейт уже есть) как альтернативный бэкенд.
+> Архитектура сверена с реальными исходниками **Box3D** (`github.com/erincatto/box3d`,
+> soltimeer 3D-преемник Box2D, Catto, июнь 2026) и **Jolt** (`github.com/jrouwe/JoltPhysics`):
+> multisolver = joint-солверы + широкий (SIMD) контактный солвер + manifold-солвер,
+> стадии WarmStart→Solve→IntegratePositions→Relax→Restitution, warm starting,
+> split impulse (velocity/position раздельно), constraint graph → острова + sleeping,
+> speculative CCD, мягкие констрейнты.
+> Наш текущий солвер — одиночный проход sequential impulse, по 1 контакту на пару,
+> без ориентации; это стартовый стиль. Ниже — поэтапный апгрейд, каждый этап с гейтом тестов.
+
+| Этап | Что делаем | Основание (реальный код) | Статус |
+|---|---|---|---|
+| **G1** | **Ориентация + угловая динамика**: `RigidBody` с `orientation: Quat`, `angular_velocity`, инерцией (тензор), интеграция (semi-implicit Euler) + вращение; коллизия с учётом ориентации (sphere↔OBB, OBB↔OBB по SAT, капсула по оси тела) | Box3D `b3BodyState` (linear+angular velocity), Jolt `Body` (инерция) | ✅ Реализовано |
+| **G2** | Контактные манифолды (несколько точек на пару) + кэш + warm starting | Box3D `b3ContactConstraintWide`/`ManifoldConstraint` (симметрический `cached_manifold`), Jolt `mContactPoints` | ❌ |
+| **G3** | Split impulse: раздельные velocity/position проходы + мягкие констрейнты (`b3MakeSoft`-аналог) | Box3D стадии `IntegrateVelocities`/`IntegratePositions`, `b3Softness`; Jolt `ContactConstraintPart` | ❌ |
+| **G4** | Constraint graph → острова + sleeping (awake/static кэш) | Box3D `b3ConstraintGraph`/`b3SolverSet`/`sleepVelocity`, Jolt islands | ❌ |
+| **G5** | Joints: ball (spherical), revolute; через под-солверы | Box3D `spherical_joint`/`revolute_joint`, Jolt `ConstraintPart/*` | ❌ |
+| **G6** | CCD (speculative контакты + TOI `b3SolveContinuous`) и честный `shapecast` | Box3D `B3_SPECULATIVE_DISTANCE`, `b3SolveContinuous` | ❌ |
+| **G7** | Производительность: wide/SIMD-контактный путь + параллельные таски (граф-раскраска, CAS-блоки) | Box3D `solver.h` (WideContact, per-block syncIndex, bepu-inspired) | ❌ |
+
+**Качество на каждом этапе (обязательный гейт):** сценарии (стек из N бокстов стоит N сек без дрифта; сфера спокойно покоится; sleep/пробуждение корректны), proptest-инварианты (после settle нет проникновения; сохранение импульса; детерминизм `RAYON_NUM_THREADS=1` vs `=32`); fuzz (нет NaN/паник); mutants на солвер. Согласуется с философией Strong Confluence.
+
+**Логика порядка**: G1 (ориентация) — фундамент, без него невозможны ни joints, ни настоящие манифолды; G2-G3 — стабильность/качество; G4 — производительность; G5-G6 — поверхность; G7 — peak-производ.
+
+**G1 (2026-08-07, реализовано)**: добавлены `orientation: Quat`, `angular_velocity`, инерция (диагональный тензор через `Shape::inertia`), `torque`; полуимплицитная интеграция линейной + угловой динамики (вращение кватерниона через `from_scaled_axis`); коллизии с учётом ориентации: sphere↔OBB (в локальном фрейме), OBB↔OBB (полный SAT по 15 осям), капсула по оси тела; resolve контакта теперь с угловым импульсом (world-инерция через `mul_inv_inertia`). Тесты: +4 (`angular_velocity_rotates`, `torque_turns`, `oriented_boxes`, `obb_aabb`). **Остатки → G2**: смешанные пары форм (sphere↔capsule и др. всё ещё `None`), вращательная позиционная коррекция в resolve, `shapecast` остаётся заглушкой.
