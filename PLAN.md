@@ -171,7 +171,7 @@ API (rustdoc) и релизная упаковка.
 | Этап | Что делаем | Основание (реальный код) | Статус |
 |---|---|---|---|
 | **G1** | **Ориентация + угловая динамика**: `RigidBody` с `orientation: Quat`, `angular_velocity`, инерцией (тензор), интеграция (semi-implicit Euler) + вращение; коллизия с учётом ориентации (sphere↔OBB, OBB↔OBB по SAT, капсула по оси тела) | Box3D `b3BodyState` (linear+angular velocity), Jolt `Body` (инерция) | ✅ Реализовано |
-| **G2** | Контактные манифолды (несколько точек на пару) + кэш + warm starting | Box3D `b3ContactConstraintWide`/`ManifoldConstraint` (симметрический `cached_manifold`), Jolt `mContactPoints` | ❌ |
+| **G2** | Контактные манифолды (несколько точек на пару) + кэш + warm starting. **G2a**: структуры (до 4 точек), OBB↔OBB vertex-face манифолд, солвер по точкам с warm-start кэшем импульсов. **G2b**: стабильность покоя (нужны итерации солвера/velocity bias — сейчас бокс на статичном полу может провалиться), кэш контактных точек. | Box3D `b3ContactConstraintWide`/`ManifoldConstraint` (симметрический `cached_manifold`), Jolt `mContactPoints` | 🟡 G2a ✅, G2b в работе |
 | **G3** | Split impulse: раздельные velocity/position проходы + мягкие констрейнты (`b3MakeSoft`-аналог) | Box3D стадии `IntegrateVelocities`/`IntegratePositions`, `b3Softness`; Jolt `ContactConstraintPart` | ❌ |
 | **G4** | Constraint graph → острова + sleeping (awake/static кэш) | Box3D `b3ConstraintGraph`/`b3SolverSet`/`sleepVelocity`, Jolt islands | ❌ |
 | **G5** | Joints: ball (spherical), revolute; через под-солверы | Box3D `spherical_joint`/`revolute_joint`, Jolt `ConstraintPart/*` | ❌ |

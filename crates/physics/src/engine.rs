@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use glam::{Quat, Vec3};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
@@ -15,11 +17,46 @@ pub trait PhysicsEngine: Send + Sync {
 }
 
 struct Contact {
-    body_a: BodyHandle,
-    body_b: BodyHandle,
     normal: Vec3,
     penetration: f32,
     contact_point: Vec3,
+}
+
+/// A single contact point inside a manifold (G2).
+#[derive(Clone, Copy, Debug)]
+struct ManifoldPoint {
+    world_point: Vec3,
+    penetration: f32,
+}
+
+/// Contact manifold: one normal + up to 4 points per body pair.
+#[derive(Clone, Debug)]
+struct Manifold {
+    body_a: BodyHandle,
+    body_b: BodyHandle,
+    normal: Vec3,
+    point_count: usize,
+    points: [ManifoldPoint; 4],
+}
+
+impl Manifold {
+    fn single(body_a: BodyHandle, body_b: BodyHandle, c: Contact) -> Self {
+        let mut points = [ManifoldPoint {
+            world_point: Vec3::ZERO,
+            penetration: 0.0,
+        }; 4];
+        points[0] = ManifoldPoint {
+            world_point: c.contact_point,
+            penetration: c.penetration,
+        };
+        Self {
+            body_a,
+            body_b,
+            normal: c.normal,
+            point_count: 1,
+            points,
+        }
+    }
 }
 
 #[inline]
@@ -59,8 +96,6 @@ fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> O
     let normal = diff / dist;
     let penetration = radius_sum - dist;
     Some(Contact {
-        body_a: 0,
-        body_b: 0,
         normal,
         penetration,
         contact_point: pos_a + normal * (radius_a - penetration * 0.5),
@@ -89,8 +124,6 @@ fn sphere_vs_obb(
     // Contact point: where the sphere touches the box (midway on the normal).
     let contact_point = (local + clamped) * 0.5;
     Some(Contact {
-        body_a: 0,
-        body_b: 0,
         normal,
         penetration,
         contact_point: box_pos + box_rot * contact_point,
@@ -125,14 +158,14 @@ fn obb_overlap_on(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn box_vs_box(
+fn obb_sat(
     pos_a: Vec3,
     half_a: Vec3,
     rot_a: Quat,
     pos_b: Vec3,
     half_b: Vec3,
     rot_b: Quat,
-) -> Option<Contact> {
+) -> Option<(Vec3, f32)> {
     // SAT: the 3 face normals of each box plus the cross products of their axes.
     let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
     let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
@@ -174,13 +207,128 @@ fn box_vs_box(
     } else {
         best_axis
     };
-    let contact_point = (pos_a + pos_b) * 0.5;
+    Some((normal, best_overlap))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn box_vs_box(
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+) -> Option<Contact> {
+    let (normal, penetration) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b)?;
     Some(Contact {
+        normal,
+        penetration,
+        contact_point: (pos_a + pos_b) * 0.5,
+    })
+}
+
+/// Eight world-space corners of an oriented box.
+fn obb_corners(pos: Vec3, half: Vec3, rot: Quat) -> [Vec3; 8] {
+    let x = rot * (Vec3::X * half.x);
+    let y = rot * (Vec3::Y * half.y);
+    let z = rot * (Vec3::Z * half.z);
+    [
+        pos + x + y + z,
+        pos + x + y - z,
+        pos + x - y + z,
+        pos + x - y - z,
+        pos - x + y + z,
+        pos - x + y - z,
+        pos - x - y + z,
+        pos - x - y - z,
+    ]
+}
+
+/// Multi-point manifold for OBB-OBB: keeps up to 4 vertices that lie inside the
+/// opposing box's face (vertex-face contacts), falling back to a single point.
+#[allow(clippy::too_many_arguments)]
+fn box_manifold(
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+) -> Option<Manifold> {
+    let (n, _pen) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b)?;
+
+    let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
+    let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
+    // Half-width of each box projected onto the contact normal.
+    let hwn_a = half_a.x * aa[0].dot(n).abs()
+        + half_a.y * aa[1].dot(n).abs()
+        + half_a.z * aa[2].dot(n).abs();
+    let hwn_b = half_b.x * ba[0].dot(n).abs()
+        + half_b.y * ba[1].dot(n).abs()
+        + half_b.z * ba[2].dot(n).abs();
+
+    let mut cand: Vec<(Vec3, f32)> = Vec::new();
+    // B's corners inside A's face.
+    let eps = 1e-3;
+    for c in obb_corners(pos_b, half_b, rot_b) {
+        let local = rot_a.inverse() * (c - pos_a);
+        if local.x.abs() <= half_a.x + eps
+            && local.y.abs() <= half_a.y + eps
+            && local.z.abs() <= half_a.z + eps
+        {
+            let d = hwn_a - (c - pos_a).dot(n);
+            if d > -eps {
+                cand.push((c, d));
+            }
+        }
+    }
+    // A's corners inside B's box.
+    for c in obb_corners(pos_a, half_a, rot_a) {
+        let local = rot_b.inverse() * (c - pos_b);
+        if local.x.abs() <= half_b.x + eps
+            && local.y.abs() <= half_b.y + eps
+            && local.z.abs() <= half_b.z + eps
+        {
+            let d = hwn_b - (c - pos_b).dot(-n);
+            if d > -eps {
+                cand.push((c, d));
+            }
+        }
+    }
+
+    // Deduplicate near-identical points, sort by depth, keep up to 4.
+    let mut uniq: Vec<(Vec3, f32)> = Vec::new();
+    for (p, d) in cand {
+        if uniq.iter().any(|&(q, _)| (p - q).length() < 1e-3) {
+            continue;
+        }
+        uniq.push((p, d));
+    }
+    uniq.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut points = [ManifoldPoint {
+        world_point: Vec3::ZERO,
+        penetration: 0.0,
+    }; 4];
+    let mut count = 0;
+    for (p, d) in uniq.into_iter().take(4) {
+        points[count] = ManifoldPoint {
+            world_point: p,
+            penetration: d.max(0.0),
+        };
+        count += 1;
+    }
+
+    if count == 0 {
+        return box_vs_box(pos_a, half_a, rot_a, pos_b, half_b, rot_b)
+            .map(|c| Manifold::single(0, 0, c));
+    }
+    Some(Manifold {
         body_a: 0,
         body_b: 0,
-        normal,
-        penetration: best_overlap,
-        contact_point,
+        normal: n,
+        point_count: count,
+        points,
     })
 }
 
@@ -211,8 +359,6 @@ fn sphere_vs_capsule(
     let penetration = rr - d;
     let contact_point = closest + n * (cap_radius - penetration * 0.5);
     Some(Contact {
-        body_a: 0,
-        body_b: 0,
         normal: n,
         penetration,
         contact_point,
@@ -266,16 +412,14 @@ fn capsule_vs_capsule(
     let normal = diff2 / dist;
     let penetration = radius_sum - dist;
     Some(Contact {
-        body_a: 0,
-        body_b: 0,
         normal,
         penetration,
         contact_point: (closest_a + closest_b) * 0.5,
     })
 }
 
-fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Contact> {
-    let mut contacts = Vec::new();
+fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Manifold> {
+    let mut manifolds = Vec::new();
     for &(i, j) in active {
         let a = &bodies[i];
         let b = &bodies[j];
@@ -283,24 +427,29 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
             continue;
         }
 
-        let contact = match (&a.shape, &b.shape) {
+        let manifold = match (&a.shape, &b.shape) {
             (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_sphere(a.position, ra, b.position, rb)
+                sphere_vs_sphere(a.position, ra, b.position, rb).map(|c| Manifold::single(i, j, c))
             }
             (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
                 sphere_vs_obb(a.position, ra, b.position, hb, b.orientation)
+                    .map(|c| Manifold::single(i, j, c))
             }
             (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_obb(b.position, rb, a.position, ha, a.orientation).map(|c| Contact {
-                    body_a: c.body_a,
-                    body_b: c.body_b,
-                    normal: -c.normal,
-                    penetration: c.penetration,
-                    contact_point: c.contact_point,
+                sphere_vs_obb(b.position, rb, a.position, ha, a.orientation).map(|c| {
+                    Manifold::single(
+                        i,
+                        j,
+                        Contact {
+                            normal: -c.normal,
+                            penetration: c.penetration,
+                            contact_point: c.contact_point,
+                        },
+                    )
                 })
             }
             (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
-                box_vs_box(a.position, ha, a.orientation, b.position, hb, b.orientation)
+                box_manifold(a.position, ha, a.orientation, b.position, hb, b.orientation)
             }
             (
                 &Shape::Capsule {
@@ -320,14 +469,16 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
                 rb,
                 hb,
                 b.orientation,
-            ),
+            )
+            .map(|c| Manifold::single(i, j, c)),
             (
                 &Shape::Sphere { radius: r },
                 &Shape::Capsule {
                     radius: cr,
                     half_height: hh,
                 },
-            ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation),
+            ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation)
+                .map(|c| Manifold::single(i, j, c)),
             (
                 &Shape::Capsule {
                     radius: cr,
@@ -335,24 +486,24 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Con
                 },
                 &Shape::Sphere { radius: r },
             ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation).map(|c| {
-                Contact {
-                    body_a: c.body_a,
-                    body_b: c.body_b,
-                    normal: -c.normal,
-                    penetration: c.penetration,
-                    contact_point: c.contact_point,
-                }
+                Manifold::single(
+                    i,
+                    j,
+                    Contact {
+                        normal: -c.normal,
+                        penetration: c.penetration,
+                        contact_point: c.contact_point,
+                    },
+                )
             }),
             _ => None,
         };
 
-        if let Some(mut c) = contact {
-            c.body_a = i;
-            c.body_b = j;
-            contacts.push(c);
+        if let Some(m) = manifold {
+            manifolds.push(m);
         }
     }
-    contacts
+    manifolds
 }
 
 struct SweepAndPrune {
@@ -418,6 +569,8 @@ pub struct BuiltinPhysicsEngine {
     broadphase: SweepAndPrune,
     gravity: Vec3,
     substeps: u32,
+    /// Accumulated normal impulses per point, keyed by sorted body pair (warm start).
+    warm_impulses: HashMap<(usize, usize), [f32; 4]>,
 }
 
 impl BuiltinPhysicsEngine {
@@ -427,6 +580,7 @@ impl BuiltinPhysicsEngine {
             broadphase: SweepAndPrune::new(),
             gravity,
             substeps: 4,
+            warm_impulses: HashMap::new(),
         }
     }
 
@@ -458,103 +612,114 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    fn resolve_contacts(&mut self, contacts: &[Contact]) {
-        for contact in contacts {
-            let (i, j) = (contact.body_a, contact.body_b);
+    fn resolve_manifolds(&mut self, manifolds: &[Manifold]) {
+        let mut next: HashMap<(usize, usize), [f32; 4]> = HashMap::new();
+        for m in manifolds {
+            let (i, j) = (m.body_a, m.body_b);
             let inv_mass_a = self.bodies[i].inv_mass;
             let inv_mass_b = self.bodies[j].inv_mass;
             let total_inv = inv_mass_a + inv_mass_b;
             if total_inv < 1e-10 {
                 continue;
             }
+            let n = m.normal;
+            let key = (i.min(j), i.max(j));
+            let warm = self.warm_impulses.get(&key).copied().unwrap_or([0.0; 4]);
+            let mut acc = warm;
 
-            let n = contact.normal;
-            let p = contact.contact_point;
-
-            // ---- Positional correction (incl. rotation), resolved against the
-            //      effective mass so rotated bodies rotate out of penetration. ----
-            let ra = p - self.bodies[i].position;
-            let rb = p - self.bodies[j].position;
-            let ia_p = self.bodies[i].inertia;
-            let ib_p = self.bodies[j].inertia;
-            let oa_p = self.bodies[i].orientation;
-            let ob_p = self.bodies[j].orientation;
-            let ra_n = ra.cross(n);
-            let rb_n = rb.cross(n);
-            let k_pos = total_inv
-                + ra_n.dot(mul_inv_inertia(ia_p, oa_p, ra_n))
-                + rb_n.dot(mul_inv_inertia(ib_p, ob_p, rb_n));
-            if k_pos > 1e-10 {
-                // A small slop + a relaxation factor so resting contacts stay put.
-                let c = (contact.penetration - 0.02).clamp(0.0, 0.25);
-                let lam = 0.5 * c / k_pos;
-                let jp = n * lam;
-                self.bodies[i].position -= jp * inv_mass_a;
-                self.bodies[j].position += jp * inv_mass_b;
-                let da = mul_inv_inertia(ia_p, oa_p, ra.cross(-jp));
-                let db = mul_inv_inertia(ib_p, ob_p, rb.cross(jp));
-                if da != Vec3::ZERO {
-                    self.bodies[i].orientation =
-                        (Quat::from_scaled_axis(da) * self.bodies[i].orientation).normalize();
+            // ---- Positional correction per point (incl. rotation) ----
+            for k in 0..m.point_count {
+                let p = m.points[k].world_point;
+                let ra = p - self.bodies[i].position;
+                let rb = p - self.bodies[j].position;
+                let ia = self.bodies[i].inertia;
+                let ib = self.bodies[j].inertia;
+                let oa = self.bodies[i].orientation;
+                let ob = self.bodies[j].orientation;
+                let ra_n = ra.cross(n);
+                let rb_n = rb.cross(n);
+                let k_pos = total_inv
+                    + ra_n.dot(mul_inv_inertia(ia, oa, ra_n))
+                    + rb_n.dot(mul_inv_inertia(ib, ob, rb_n));
+                if k_pos > 1e-10 {
+                    let c = (m.points[k].penetration - 0.02).clamp(0.0, 0.25);
+                    let lam = 0.5 * c / k_pos;
+                    let jp = n * lam;
+                    self.bodies[i].position -= jp * inv_mass_a;
+                    self.bodies[j].position += jp * inv_mass_b;
+                    let da = mul_inv_inertia(ia, oa, ra.cross(-jp));
+                    let db = mul_inv_inertia(ib, ob, rb.cross(jp));
+                    if da != Vec3::ZERO {
+                        self.bodies[i].orientation =
+                            (Quat::from_scaled_axis(da) * self.bodies[i].orientation).normalize();
+                    }
+                    if db != Vec3::ZERO {
+                        self.bodies[j].orientation =
+                            (Quat::from_scaled_axis(db) * self.bodies[j].orientation).normalize();
+                    }
                 }
-                if db != Vec3::ZERO {
-                    self.bodies[j].orientation =
-                        (Quat::from_scaled_axis(db) * self.bodies[j].orientation).normalize();
+            }
+
+            // ---- Velocity solve per point with warm starting ----
+            for k in 0..m.point_count {
+                let p = m.points[k].world_point;
+                let ra = p - self.bodies[i].position;
+                let rb = p - self.bodies[j].position;
+                let ia = self.bodies[i].inertia;
+                let ib = self.bodies[j].inertia;
+                let oa = self.bodies[i].orientation;
+                let ob = self.bodies[j].orientation;
+                let ra_n = ra.cross(n);
+                let rb_n = rb.cross(n);
+                let k_eff = total_inv
+                    + ra_n.dot(mul_inv_inertia(ia, oa, ra_n))
+                    + rb_n.dot(mul_inv_inertia(ib, ob, rb_n));
+                if k_eff < 1e-10 {
+                    continue;
+                }
+                let va = self.bodies[i].velocity + self.bodies[i].angular_velocity.cross(ra);
+                let vb = self.bodies[j].velocity + self.bodies[j].angular_velocity.cross(rb);
+                let rel = vb - va;
+                let vn = rel.dot(n);
+                if vn > 0.0 {
+                    // Separating: keep the warm impulse, don't add.
+                    acc[k] = warm[k].max(0.0);
+                    continue;
+                }
+                let e = self.bodies[i].restitution.min(self.bodies[j].restitution);
+                let j_impulse = -(1.0 + e) * vn / k_eff;
+                // Warm start: accumulate from the cached impulse, clamp >= 0,
+                // apply only the delta.
+                let new_impulse = (warm[k] + j_impulse).max(0.0);
+                let delta = new_impulse - warm[k];
+                acc[k] = new_impulse;
+                if delta.abs() < 1e-9 {
+                    continue;
+                }
+                let imp = n * delta;
+                self.bodies[i].velocity -= imp * inv_mass_a;
+                self.bodies[j].velocity += imp * inv_mass_b;
+                self.bodies[i].angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(imp));
+                self.bodies[j].angular_velocity += mul_inv_inertia(ib, ob, rb.cross(imp));
+
+                // ---- Friction (Coulomb), bound by the accumulated normal impulse ----
+                let tangent = rel - n * vn;
+                let tangent_len = tangent.length();
+                if tangent_len > 1e-6 {
+                    let tangent_dir = tangent / tangent_len;
+                    let mu = self.bodies[i].friction.max(self.bodies[j].friction);
+                    let max_friction = new_impulse * mu;
+                    let f_impulse = (-tangent_len / total_inv).min(max_friction);
+                    let jt = tangent_dir * f_impulse;
+                    self.bodies[i].velocity -= jt * inv_mass_a;
+                    self.bodies[j].velocity += jt * inv_mass_b;
+                    self.bodies[i].angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(jt));
+                    self.bodies[j].angular_velocity += mul_inv_inertia(ib, ob, rb.cross(jt));
                 }
             }
-
-            // ---- Relative point velocity ----
-            let ra = p - self.bodies[i].position;
-            let rb = p - self.bodies[j].position;
-            let va = self.bodies[i].velocity + self.bodies[i].angular_velocity.cross(ra);
-            let vb = self.bodies[j].velocity + self.bodies[j].angular_velocity.cross(rb);
-            let rel = vb - va;
-            let vn = rel.dot(n);
-            if vn > 0.0 {
-                continue;
-            }
-
-            // ---- Normal impulse ----
-            let ra_n = ra.cross(n);
-            let rb_n = rb.cross(n);
-            let ia = self.bodies[i].inertia;
-            let ib = self.bodies[j].inertia;
-            let oa = self.bodies[i].orientation;
-            let ob = self.bodies[j].orientation;
-            let k = total_inv
-                + ra_n.dot(mul_inv_inertia(ia, oa, ra_n))
-                + rb_n.dot(mul_inv_inertia(ib, ob, rb_n));
-            if k < 1e-10 {
-                continue;
-            }
-            let e = self.bodies[i].restitution.min(self.bodies[j].restitution);
-            let j_impulse = -(1.0 + e) * vn / k;
-            if j_impulse < 0.0 {
-                continue;
-            }
-
-            let imp = n * j_impulse;
-            self.bodies[i].velocity -= imp * inv_mass_a;
-            self.bodies[j].velocity += imp * inv_mass_b;
-            self.bodies[i].angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(imp));
-            self.bodies[j].angular_velocity += mul_inv_inertia(ib, ob, rb.cross(imp));
-
-            // ---- Friction (Coulomb, tangential) ----
-            let vn_now = rel.dot(n);
-            let tangent = rel - n * vn_now;
-            let tangent_len = tangent.length();
-            if tangent_len > 1e-6 {
-                let tangent_dir = tangent / tangent_len;
-                let mu = self.bodies[i].friction.max(self.bodies[j].friction);
-                let max_friction = j_impulse * mu;
-                let friction_impulse = (-tangent_len / total_inv).min(max_friction);
-                let jt = tangent_dir * friction_impulse;
-                self.bodies[i].velocity -= jt * inv_mass_a;
-                self.bodies[j].velocity += jt * inv_mass_b;
-                self.bodies[i].angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(jt));
-                self.bodies[j].angular_velocity += mul_inv_inertia(ib, ob, rb.cross(jt));
-            }
+            next.insert(key, acc);
         }
+        self.warm_impulses = next;
     }
 
     fn raycast_body(&self, ray: &Ray, handle: usize, max_dist: f32) -> Option<RaycastHit> {
@@ -599,8 +764,8 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         for _ in 0..self.substeps {
             self.integrate(sub_dt);
             self.broadphase.update(&self.bodies);
-            let contacts = detect_collisions(&self.bodies, &self.broadphase.active);
-            self.resolve_contacts(&contacts);
+            let manifolds = detect_collisions(&self.bodies, &self.broadphase.active);
+            self.resolve_manifolds(&manifolds);
         }
     }
 
@@ -859,5 +1024,29 @@ mod tests {
             "hit distance={}",
             hit.distance
         );
+    }
+
+    #[test]
+    fn box_manifold_produces_four_points() {
+        // Two equal half-0.5 boxes, overlapping by 0.25 along +Y: the resting
+        // face yields 4 manifold points (vertex-face contact), not one.
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let m = box_manifold(
+            Vec3::new(0.0, 0.0, 0.0),
+            half,
+            Quat::IDENTITY,
+            Vec3::new(0.0, 0.75, 0.0),
+            half,
+            Quat::IDENTITY,
+        )
+        .expect("boxes overlap");
+        assert_eq!(m.point_count, 4, "expected a 4-point manifold");
+        assert!((m.normal - Vec3::Y).length() < 1e-3, "normal should be +Y");
+        for k in 0..m.point_count {
+            assert!(
+                m.points[k].penetration > 0.0,
+                "point {k} has positive penetration"
+            );
+        }
     }
 }
