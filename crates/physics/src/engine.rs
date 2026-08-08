@@ -499,7 +499,9 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Man
             _ => None,
         };
 
-        if let Some(m) = manifold {
+        if let Some(mut m) = manifold {
+            m.body_a = i;
+            m.body_b = j;
             manifolds.push(m);
         }
     }
@@ -1048,5 +1050,41 @@ mod tests {
                 "point {k} has positive penetration"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "G2b: resting under gravity — warm-start energy injection not yet fixed"]
+    fn box_rests_on_static_floor() {
+        // A box in free fall must settle on a static floor (G2b target).
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let top = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.8, 0.0),
+            Vec3::new(0.5, 0.5, 0.5),
+            1.0,
+        ));
+        for _ in 0..240 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(top).unwrap();
+        assert!(
+            b.position.y > 0.40 && b.position.y < 0.55,
+            "box should rest at y≈0.5, got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.05,
+            "settled velocity: {:?}",
+            b.velocity
+        );
+        assert!(
+            b.angular_velocity.length() < 0.05,
+            "no jitter: {:?}",
+            b.angular_velocity
+        );
     }
 }
