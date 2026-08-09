@@ -134,7 +134,7 @@ cargo xtask mutants           # мутационное тестирование 
 |---|---|---|
 | Аудио-база: `AudioSource`/`AudioListener`, декодер (symphonia), бэкенды cpal / Web Audio | ✅ | `crates/audio/`; в настоящий момент файл активно дорабатывается |
 | DSP на GPU, процедурный звук | ❌ | |
-| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, PBD, raycast) | ✅ | `crates/core/src/physics/` |
+| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, raycast) | ✅ | `crates/physics/` |
 | Подключение Rapier/Jolt через трейт | ❌ | трейт есть, адаптеров нет |
 
 ### Не начато
@@ -218,7 +218,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 ---
 ## Приложение A — Движок рендеринга и физический движок (черновик для ревью)
 
-> 🔎 Черновик, написан по коду (`crates/render`, `crates/core/src/physics`).
+> 🔎 Черновик, написан по коду (`crates/render`, `crates/physics`).
 > Нужен ваш ревью: там, где формулировки неточны, — поправьте.
 
 ### A1. Движок рендеринга (`crates/render`)
