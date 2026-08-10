@@ -44,6 +44,17 @@ pub struct InstanceData {
     pub material_index: u32,
 }
 
+/// G-buffer texture views, fed either from persistent textures (legacy
+/// path) or from render-graph pool slots (graph path).
+pub struct GbufferTargets<'a> {
+    pub albedo: &'a wgpu::TextureView,
+    pub normal: &'a wgpu::TextureView,
+    pub material_id: &'a wgpu::TextureView,
+    pub world_position: &'a wgpu::TextureView,
+    pub material_params: &'a wgpu::TextureView,
+    pub depth: &'a wgpu::TextureView,
+}
+
 pub struct GBufferTextures {
     pub albedo: wgpu::Texture,
     pub albedo_view: wgpu::TextureView,
@@ -61,8 +72,8 @@ pub struct GBufferTextures {
 
 pub struct LightingPass {
     pipeline: wgpu::RenderPipeline,
-    _bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
 }
 
 pub struct ForwardPass {
@@ -327,15 +338,7 @@ impl Renderer3D {
                 &material_buffer,
                 sample_count,
             );
-        let lighting_pass = Self::create_lighting_pass(
-            device,
-            &gbuffer,
-            &camera_buffer,
-            &lighting_buffer,
-            &material_buffer,
-            &pbr_texture_view,
-            sample_count,
-        );
+        let lighting_pass = Self::create_lighting_pass(device, &pbr_texture_view, sample_count);
         let forward_pass = Self::create_forward_pass(
             device,
             &camera_buffer,
@@ -654,10 +657,6 @@ impl Renderer3D {
 
     fn create_lighting_pass(
         device: &wgpu::Device,
-        gbuffer: &GBufferTextures,
-        camera_buffer: &wgpu::Buffer,
-        lighting_buffer: &wgpu::Buffer,
-        material_buffer: &wgpu::Buffer,
         output_view: &wgpu::TextureView,
         sample_count: u32,
     ) -> LightingPass {
@@ -774,53 +773,6 @@ impl Renderer3D {
             ..Default::default()
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting bind group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: lighting_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: material_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&gbuffer.albedo_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&gbuffer.normal_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&gbuffer.material_id_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&gbuffer.world_position_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&gbuffer.material_params_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&gbuffer.depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lighting vertex"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::lighting_vertex())),
@@ -877,8 +829,8 @@ impl Renderer3D {
 
         LightingPass {
             pipeline,
-            _bind_group_layout: bind_group_layout,
-            bind_group,
+            bind_group_layout,
+            sampler,
         }
     }
 
@@ -1208,15 +1160,8 @@ impl Renderer3D {
         self.gbuffer_bind_group_layout = gbuffer_bind_group_layout;
         self.gbuffer_bind_group = gbuffer_bind_group;
 
-        self.lighting_pass = Self::create_lighting_pass(
-            device,
-            &self.gbuffer,
-            &self.camera_buffer,
-            &self.lighting_buffer,
-            &self.material_buffer,
-            &self.pbr_texture_view,
-            self.sample_count,
-        );
+        self.lighting_pass =
+            Self::create_lighting_pass(device, &self.pbr_texture_view, self.sample_count);
 
         self.forward_pass = Self::create_forward_pass(
             device,
@@ -1313,6 +1258,7 @@ impl Renderer3D {
     pub fn render_gbuffer(
         &self,
         encoder: &mut wgpu::CommandEncoder,
+        g: &GbufferTargets<'_>,
         mesh: &Mesh,
         instance_count: u32,
     ) {
@@ -1320,7 +1266,7 @@ impl Renderer3D {
             label: Some("gbuffer pass"),
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gbuffer.albedo_view,
+                    view: g.albedo,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1334,7 +1280,7 @@ impl Renderer3D {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gbuffer.normal_view,
+                    view: g.normal,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1348,7 +1294,7 @@ impl Renderer3D {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gbuffer.material_id_view,
+                    view: g.material_id,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1362,7 +1308,7 @@ impl Renderer3D {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gbuffer.world_position_view,
+                    view: g.world_position,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1376,7 +1322,7 @@ impl Renderer3D {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gbuffer.material_params_view,
+                    view: g.material_params,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1391,7 +1337,7 @@ impl Renderer3D {
                 }),
             ],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.gbuffer.depth_view,
+                view: g.depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
@@ -1410,11 +1356,66 @@ impl Renderer3D {
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
     }
 
-    pub fn render_lighting(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn render_lighting(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        g: &GbufferTargets<'_>,
+        output: &wgpu::TextureView,
+    ) {
+        // The bind group is rebuilt per frame: gbuffer views come from the
+        // render-graph pool (transient) or from persistent textures.
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lighting bind group (frame)"),
+            layout: &self.lighting_pass.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.lighting_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.material_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(g.albedo),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(g.normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(g.material_id),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(g.world_position),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(g.material_params),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(g.depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&self.lighting_pass.sampler),
+                },
+            ],
+        });
+
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.pbr_texture_view,
+                view: output,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -1434,20 +1435,22 @@ impl Renderer3D {
         });
 
         rpass.set_pipeline(&self.lighting_pass.pipeline);
-        rpass.set_bind_group(0, &self.lighting_pass.bind_group, &[]);
+        rpass.set_bind_group(0, &bind_group, &[]);
         rpass.draw(0..4, 0..1);
     }
 
     pub fn render_forward(
         &self,
         encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        output: &wgpu::TextureView,
         mesh: &Mesh,
         instance_count: u32,
     ) {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("forward pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.forward_pass.color_view,
+                view: output,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -1461,7 +1464,7 @@ impl Renderer3D {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.gbuffer.depth_view,
+                view: depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -1485,6 +1488,8 @@ impl Renderer3D {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        hdr: &wgpu::TextureView,
+        hdr_fwd: &wgpu::TextureView,
     ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bind group"),
@@ -1492,11 +1497,11 @@ impl Renderer3D {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.pbr_texture_view),
+                    resource: wgpu::BindingResource::TextureView(hdr),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.forward_pass.color_view),
+                    resource: wgpu::BindingResource::TextureView(hdr_fwd),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1540,9 +1545,29 @@ impl Renderer3D {
         mesh: &Mesh,
         instance_count: u32,
     ) {
-        self.render_gbuffer(encoder, mesh, instance_count);
-        self.render_lighting(encoder);
-        self.render_forward(encoder, mesh, instance_count);
-        self.render_composite(device, encoder, target);
+        let g = GbufferTargets {
+            albedo: &self.gbuffer.albedo_view,
+            normal: &self.gbuffer.normal_view,
+            material_id: &self.gbuffer.material_id_view,
+            world_position: &self.gbuffer.world_position_view,
+            material_params: &self.gbuffer.material_params_view,
+            depth: &self.gbuffer.depth_view,
+        };
+        self.render_gbuffer(encoder, &g, mesh, instance_count);
+        self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
+        self.render_forward(
+            encoder,
+            &self.gbuffer.depth_view,
+            &self.forward_pass.color_view,
+            mesh,
+            instance_count,
+        );
+        self.render_composite(
+            device,
+            encoder,
+            target,
+            &self.pbr_texture_view,
+            &self.forward_pass.color_view,
+        );
     }
 }

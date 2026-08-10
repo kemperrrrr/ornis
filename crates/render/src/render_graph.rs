@@ -60,8 +60,12 @@ pub struct ResourceLayout {
     pub first_use: usize,
     /// Index of the last pass that uses the resource; `0` if unused.
     pub last_use: usize,
-    /// Pool slot (`None` — the resource is not used by any enabled pass).
+    /// Pool slot (`None` — the resource is not used by any enabled pass,
+    /// or it is external).
     pub slot: Option<usize>,
+    /// Backed by an externally provided view (swapchain or similar);
+    /// never pooled.
+    pub external: bool,
 }
 
 impl ResourceLayout {
@@ -97,15 +101,15 @@ pub struct PassLayout {
 /// Result of `RenderGraph::build()` — the computed frame layout.
 #[derive(Debug)]
 pub struct GraphLayout {
-    surface_size: (u32, u32),
+    pub(crate) surface_size: (u32, u32),
     /// Passes in execution order (insertion order, disabled passes dropped).
-    passes: Vec<PassLayout>,
+    pub(crate) passes: Vec<PassLayout>,
     /// Resources (parallel to `RenderGraph::resources`).
-    resources: Vec<ResourceLayout>,
+    pub(crate) resources: Vec<ResourceLayout>,
     /// Pool slots.
-    slots: Vec<PoolSlot>,
+    pub(crate) slots: Vec<PoolSlot>,
     /// Live resources per pass (by index into `passes`).
-    pass_alive: Vec<Vec<ResourceId>>,
+    pub(crate) pass_alive: Vec<Vec<ResourceId>>,
 }
 
 impl GraphLayout {
@@ -172,6 +176,9 @@ struct ResourceNode {
     /// Imported (external) resource: the "first touch must be a write"
     /// rule does not apply.
     imported: bool,
+    /// Resource backed by an externally provided view (e.g. the swapchain):
+    /// never pooled, `slot` is always `None`.
+    external: bool,
 }
 
 #[derive(Debug)]
@@ -212,6 +219,7 @@ impl RenderGraph {
             name: name.into(),
             spec,
             imported: false,
+            external: false,
         });
         id
     }
@@ -225,6 +233,25 @@ impl RenderGraph {
             name: name.into(),
             spec,
             imported: true,
+            external: false,
+        });
+        id
+    }
+
+    /// Registers an externally backed output (e.g. the swapchain image):
+    /// passes may write it, but the graph never pools it — the executor
+    /// must provide the view via `GraphExecutor::set_external_view`.
+    pub fn external_output(&mut self, name: impl Into<String>) -> ResourceId {
+        let id = ResourceId(self.resources.len() as u32);
+        self.resources.push(ResourceNode {
+            name: name.into(),
+            spec: TextureSpec {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                samples: 1,
+                size: SizePolicy::MatchSurface,
+            },
+            imported: true,
+            external: true,
         });
         id
     }
@@ -302,6 +329,7 @@ impl RenderGraph {
                 first_use: usize::MAX,
                 last_use: 0,
                 slot: None,
+                external: node.external,
             })
             .collect();
 
@@ -336,10 +364,10 @@ impl RenderGraph {
         }
 
         // Interval partitioning: greedy first-fit over slots with a free
-        // window and a matching spec.
+        // window and a matching spec. External resources are never pooled.
         let mut used: Vec<ResourceId> = resources
             .iter()
-            .filter(|rl| rl.first_use != usize::MAX)
+            .filter(|rl| rl.first_use != usize::MAX && !rl.external)
             .map(|rl| rl.id)
             .collect();
         used.sort_by_key(|&id| {

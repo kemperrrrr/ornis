@@ -1,4 +1,5 @@
 pub mod composite;
+pub mod graph_frame;
 pub mod mesh;
 pub mod render_backend;
 pub mod render_graph;
@@ -9,6 +10,7 @@ pub mod shaders;
 pub mod transform;
 
 pub use composite::CompositePass as LegacyCompositePass;
+pub use graph_frame::{GraphExecutor, GraphIds, PassViews, RenderGraph3D};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use render_backend::{
@@ -19,8 +21,8 @@ pub use render_graph::{
     ResourceLayout, SizePolicy, TextureSpec,
 };
 pub use renderer::{
-    CameraUniform, CompositePass, ForwardPass, GBufferTextures, InstanceData, LightingPass,
-    PerObjectGpu, Renderer3D,
+    CameraUniform, CompositePass, ForwardPass, GBufferTextures, GbufferTargets, InstanceData,
+    LightingPass, PerObjectGpu, Renderer3D,
 };
 pub use shader::{
     COMPOSITE_FRAGMENT, COMPOSITE_VERTEX, GBUFFER_FRAGMENT, GBUFFER_VERTEX, LIGHTING_FRAGMENT,
