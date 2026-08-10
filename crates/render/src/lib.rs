@@ -1,6 +1,7 @@
 pub mod composite;
 pub mod mesh;
 pub mod render_backend;
+pub mod render_graph;
 pub mod renderer;
 pub mod scene;
 pub mod shader;
@@ -12,6 +13,10 @@ pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use render_backend::{
     RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+};
+pub use render_graph::{
+    GraphLayout, PassContext, PassId, PassLayout, PoolSlot, RenderGraph, ResourceId,
+    ResourceLayout, SizePolicy, TextureSpec,
 };
 pub use renderer::{
     CameraUniform, CompositePass, ForwardPass, GBufferTextures, InstanceData, LightingPass,
