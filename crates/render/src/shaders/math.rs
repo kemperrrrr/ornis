@@ -1,5 +1,5 @@
-// Функции зеркалят сигнатуры WGSL/PBR-шейдеров (спека OpenPBR), поэтому
-// у ряда из них больше 7 аргументов — это осознанное соответствие.
+// These functions mirror the WGSL/PBR shader signatures (OpenPBR spec), so
+// some of them take more than 7 arguments — a deliberate match.
 #![allow(clippy::too_many_arguments)]
 
 use glam::Vec3Swizzles;

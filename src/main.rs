@@ -4,15 +4,15 @@ mod ipc;
 mod remote;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// РЕЖИМ "ТОЛЬКО РЕДАКТОР В БРАУЗЕРЕ" (editor-only)
+// "BROWSER-ONLY EDITOR" MODE (editor-only)
 // ═══════════════════════════════════════════════════════════════════════════
-// Запуск: cargo run --features editor-only
-// При этом нативное winit-окно НЕ создаётся. Работает только HTTP-сервер
-// RemoteEditor на порту 3420. Разработчик открывает браузер по адресу
-// http://127.0.0.1:3420 и получает полноценный редактор.
+// Run with: cargo run --features editor-only
+// No native winit window is created; only the RemoteEditor HTTP server
+// on port 3420 runs. The developer opens http://127.0.0.1:3420 in a
+// browser and gets the full editor.
 //
-// Стратегический поворот от нативного UI к браузерному редактору
-// (июль 2026, см. PLAN.md). Нативный UI-крейт удалён (август 2026).
+// Strategic pivot from native UI to the browser editor
+// (July 2026, see PLAN.md). The native UI crate was removed (August 2026).
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(feature = "editor-only")]
@@ -20,7 +20,7 @@ fn main() {
     let (cmd_tx, _cmd_rx) = unbounded();
     let (_ev_tx, ev_rx) = unbounded();
 
-    // Биндинг держит RemoteEditor живым до конца main (Drop остановит сервер).
+    // The binding keeps RemoteEditor alive until main ends (Drop stops the server).
     let _editor = remote::RemoteEditor::start(3420, cmd_tx, ev_rx);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -32,20 +32,20 @@ fn main() {
     println!("║  Press Ctrl+C to stop                                        ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 
-    // Бесконечное ожидание — сервер работает в отдельном потоке.
+    // Wait forever — the server runs on a separate thread.
     loop {
         std::thread::park();
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ПОЛНЫЙ ДВИЖОК С НАТИВНЫМ ОКНОМ (режим по умолчанию)
+// FULL ENGINE WITH A NATIVE WINDOW (default mode)
 // ═══════════════════════════════════════════════════════════════════════════
-// Запуск: cargo run
-// winit-окно, wgpu-рендеринг, 3D-сцена со сферами (OpenPBR).
-// RemoteEditor тоже работает на порту 3420.
-// Нативный UI overlay удалён вместе с крейтом ornis-ui — редактор живёт
-// в браузере (см. режим editor-only / cargo xtask editor).
+// Run with: cargo run
+// winit window, wgpu rendering, a 3D scene of spheres (OpenPBR).
+// RemoteEditor also runs on port 3420.
+// The native UI overlay was removed with the ornis-ui crate — the editor
+// lives in the browser (see editor-only mode / cargo xtask editor).
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(not(feature = "editor-only"))]

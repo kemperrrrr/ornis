@@ -1,8 +1,8 @@
 #![no_main]
 
-//! Фаззинг десериализации сцены из RON — внешний ввод (файлы сцен,
-//! приходящие от редактора и с диска). Парсер не должен паниковать
-//! ни на каком входе: любой мусор → Ok или Err, но не panic/abort.
+//! Fuzzing of scene deserialization from RON — external input (scene
+//! files from the editor and disk). The parser must not panic on any
+//! input: garbage → Ok or Err, never panic/abort.
 
 use libfuzzer_sys::fuzz_target;
 

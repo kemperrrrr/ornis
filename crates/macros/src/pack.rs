@@ -184,7 +184,7 @@ fn generate_wrapper_defs(lanes: &[LaneInfo]) -> TokenStream2 {
         quote! {
             #[derive(Clone, Debug, PartialEq)]
             #[repr(transparent)]
-            // Имя генерируется как Struct__field__PackLane__N — осознанно не CamelCase.
+            // The name is generated as Struct__field__PackLane__N — deliberately not CamelCase.
             #[allow(non_camel_case_types)]
             pub struct #wrapper_name(pub #inner_ty);
         }

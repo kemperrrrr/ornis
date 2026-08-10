@@ -1,19 +1,19 @@
-//! IPC-протокол редактор ↔ движок.
+//! Editor ↔ engine IPC protocol.
 //!
-//! Типы команд и событий, которыми обмениваются браузерный редактор и
-//! движок через crossbeam-channel (см. `remote.rs`: `POST /api/command`
-//! → `UiCommand`, события движка → `GET /api/events` ← `GameEvent`).
+//! Command and event types exchanged between the browser editor and the
+//! engine over crossbeam-channels (see `remote.rs`: `POST /api/command`
+//! → `UiCommand`, engine events → `GET /api/events` ← `GameEvent`).
 //!
-//! Набор вариантов — протокольная поверхность под roadmap (обработчик
-//! команд engine↔editor, `GET /api/scene`): сейчас реально ходят только
-//! `Custom`/`CustomEvent`, остальные варианты зарезервированы для
-//! entity-операций редактора и помечены `#[allow(dead_code)]`.
+//! The variant set is the protocol surface for the roadmap (engine↔editor
+//! command handler, `GET /api/scene`): today only `Custom`/`CustomEvent`
+//! actually travel; the rest are reserved for editor entity operations
+//! and marked `#[allow(dead_code)]`.
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 /// Commands sent from UI (JS) to the game thread
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // протокольная поверхность editor↔engine (roadmap)
+#[allow(dead_code)] // protocol surface for editor↔engine (roadmap)
 pub enum UiCommand {
     CreateEntity,
     DestroyEntity {
@@ -33,7 +33,7 @@ pub enum UiCommand {
 
 /// Events pushed from the game thread back to the UI thread
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // протокольная поверхность editor↔engine (roadmap)
+#[allow(dead_code)] // protocol surface for editor↔engine (roadmap)
 pub enum GameEvent {
     ComponentUpdated {
         entity_id: u32,
@@ -56,8 +56,8 @@ pub enum GameEvent {
 /// UI-side handle for two-way IPC with the game thread.
 /// Clone it freely — all clones share the same channel endpoints.
 ///
-// reserved: двусторонний канал для будущего протокола editor↔engine;
-/// сейчас remote.rs работает с сырыми каналами напрямую.
+// reserved: two-way channel for the future editor↔engine protocol;
+/// remote.rs currently works with the raw channels directly.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct IpcChannel {
@@ -65,7 +65,7 @@ pub struct IpcChannel {
     game_to_ui: Receiver<GameEvent>,
 }
 
-#[allow(dead_code)] // reserved: см. комментарий на struct
+#[allow(dead_code)] // reserved: see comment on the struct
 impl IpcChannel {
     /// Create a new IPC pair. Returns the UI handle and the game connection.
     pub fn pair() -> (Self, GameConnection) {
@@ -95,14 +95,14 @@ impl IpcChannel {
 }
 
 /// Game-side handle for two-way IPC with the UI thread.
-// reserved: см. IpcChannel — протокольная поверхность (roadmap).
+// reserved: see IpcChannel — protocol surface (roadmap).
 #[allow(dead_code)]
 pub struct GameConnection {
     game_to_ui: Sender<GameEvent>,
     ui_to_game: Receiver<UiCommand>,
 }
 
-#[allow(dead_code)] // reserved: см. комментарий на struct
+#[allow(dead_code)] // reserved: see comment on the struct
 impl GameConnection {
     /// Try to receive a command from the UI thread (non-blocking).
     pub fn poll(&self) -> Option<UiCommand> {

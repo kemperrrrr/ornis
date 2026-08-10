@@ -11,16 +11,16 @@ feature-depth = 1
 [advisories]
 version = 2
 yanked = "warn"
-# unmaintained проверяется только для крейтов самого workspace: транзитивный
-# ttf-parser ← ab_glyph ← sctk-adwaita ← winit; замена (skrifa/fontations)
-# требует апгрейда стека winit. (cargo-deny 0.20: all|workspace|transitive|none)
+# unmaintained is checked only for workspace crates: transitive
+# ttf-parser ← ab_glyph ← sctk-adwaita ← winit; replacing (skrifa/fontations)
+# requires a winit stack upgrade. (cargo-deny 0.20: all|workspace|transitive|none)
 unmaintained = "workspace"
 ignore = [
-    # quick-xml 0.39.4 приходит транзитивно через wayland-scanner (build-time
-    # proc-macro стека winit/smithay, только Linux). Обновление до 0.41 заблокировано
-    # пином winit 0.30 → smithay-client-toolkit 0.19 → wayland-scanner 0.31.
-    # Поверхность атаки отсутствует: парсер применяется к доверенному XML
-    # протоколов Wayland на этапе сборки. Снять ignore после апгрейда winit.
+    # quick-xml 0.39.4 comes transitively via wayland-scanner (build-time
+    # proc-macro of the winit/smithay stack, Linux only). Updating to 0.41 is
+    # blocked by the winit 0.30 → smithay-client-toolkit 0.19 → wayland-scanner
+    # 0.31 pin. No attack surface: the parser runs on trusted Wayland protocol
+    # XML at build time. Remove the ignore after a winit upgrade.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 ]
@@ -47,19 +47,19 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    # MPL-2.0: стек lightningcss/cssparser (Servo) — file-level copyleft,
-    # совместим с MIT/Apache-2.0 при линковке как отдельный крейт.
+    # MPL-2.0: the lightningcss/cssparser (Servo) stack — file-level copyleft,
+    # compatible with MIT/Apache-2.0 when linked as a separate crate.
     "MPL-2.0",
-    # CC0-1.0: option-ext (транзитивно через dirs).
+    # CC0-1.0: option-ext (transitively via dirs).
     "CC0-1.0",
 ]
 confidence-threshold = 0.8
 exceptions = [
-    # libfuzzer-sys: (MIT OR Apache-2.0) AND NCSA — NCSA по сути эквивалентна MIT.
+    # libfuzzer-sys: (MIT OR Apache-2.0) AND NCSA — NCSA is effectively equivalent to MIT.
     { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
-# Крейты workspace не опубликованы; license.workspace=true пока не проставлен —
-# рекомендация из baseline-отчёта.
+# Workspace crates are not published; license.workspace=true not set yet —
+# recommendation from the baseline report.
 private = { ignore = true }
 
 [sources]
@@ -67,5 +67,5 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
-# Локальные path-зависимости (forks/boa_engine, crates/*) не являются
-# git/registry-источниками, поэтому проверкой sources не затрагиваются.
+# Local path dependencies (forks/boa_engine, crates/*) are not
+# git/registry sources, so the sources check does not touch them.

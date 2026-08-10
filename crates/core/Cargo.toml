@@ -15,9 +15,9 @@ bytemuck = { version = "1", features = ["derive"] }
 
 [features]
 default = []
-# Зарезервированные точки расширения (используются через cfg в коде):
-gpu = []        # GpuExecutor в dispatcher (пока CPU-fallback)
-lock-free = []  # экспериментальные lock-free ленты
+# Reserved extension points (used via cfg in code):
+gpu = []        # GpuExecutor in the dispatcher (CPU-fallback for now)
+lock-free = []  # experimental lock-free lanes
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["rayon"] }

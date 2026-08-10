@@ -1,7 +1,7 @@
 #![no_main]
 
-//! Фаззинг MaterialX XML-парсера — внешний ввод (.mtlx ассеты).
-//! Инвариант: любой вход → Ok/Err, без паник и бесконечных циклов.
+//! Fuzzing of the MaterialX XML parser — external input (.mtlx assets).
+//! Invariant: any input → Ok/Err, no panics and no infinite loops.
 
 use libfuzzer_sys::fuzz_target;
 use ornis_materialx::MaterialXParser;

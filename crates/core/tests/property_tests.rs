@@ -1,11 +1,11 @@
-//! Property-тесты ядра ECS (proptest, уровень 2 quality-гейта).
+//! Property tests for the ECS core (proptest, quality-gate level 2).
 //!
-//! Проверяем инварианты, а не примеры: sparse-set ComponentStore
-//! (insert/remove/get/iter против модели на HashMap), generational
-//! EntityAllocator (recycling слотов, протухшие handle), PageTable
-//! (разреженные индексы большого диапазона) и чистую геометрию AABB/Ray.
+//! We check invariants, not examples: sparse-set ComponentStore
+//! (insert/remove/get/iter against a HashMap model), generational
+//! EntityAllocator (slot recycling, stale handles), PageTable
+//! (sparse indices over a large range) and pure AABB/Ray geometry.
 //!
-//! Количество случаев ограничено, чтобы `cargo test` не раздувался.
+//! The case count is bounded so `cargo test` stays fast.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,7 +23,7 @@ fn vec3_strategy() -> impl Strategy<Value = glam::Vec3> {
     (-1e4f32..1e4, -1e4f32..1e4, -1e4f32..1e4).prop_map(|(x, y, z)| glam::Vec3::new(x, y, z))
 }
 
-/// Операция над ComponentStore для model-based теста.
+/// Operation on ComponentStore for the model-based test.
 #[derive(Debug, Clone)]
 enum StoreOp {
     Insert(Entity, u64),
@@ -44,9 +44,9 @@ fn store_ops_strategy() -> impl Strategy<Value = Vec<StoreOp>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
 
-    // ── ComponentStore: sparse-set инварианты ────────────────────────
+    // ── ComponentStore: sparse-set invariants ────────────────────────
 
-    /// После insert компонент читается обратно.
+    /// After insert, the component reads back.
     #[test]
     fn insert_then_get_returns_value(e in entity_strategy(), v in any::<u64>()) {
         let mut store = ComponentStore::new();
@@ -56,7 +56,7 @@ proptest! {
         prop_assert_eq!(store.len(), 1);
     }
 
-    /// Повторный insert той же entity перезаписывает значение, len не растёт.
+    /// Re-inserting the same entity overwrites the value; len does not grow.
     #[test]
     fn insert_overwrite_keeps_len(e in entity_strategy(), v1 in any::<u64>(), v2 in any::<u64>()) {
         let mut store = ComponentStore::new();
@@ -66,7 +66,7 @@ proptest! {
         prop_assert_eq!(store.get(e), Some(&v2));
     }
 
-    /// После remove компонент не читается, remove возвращает его значение.
+    /// After remove the component is gone, and remove returns its value.
     #[test]
     fn remove_returns_value_and_clears(e in entity_strategy(), v in any::<u64>()) {
         let mut store = ComponentStore::new();
@@ -77,7 +77,7 @@ proptest! {
         prop_assert_eq!(store.len(), 0);
     }
 
-    /// Удаление отсутствующей entity — None, длина не меняется.
+    /// Removing a missing entity yields None; length is unchanged.
     #[test]
     fn remove_absent_is_none(e in entity_strategy(), absent in entity_strategy(), v in any::<u64>()) {
         prop_assume!(e != absent);
@@ -87,7 +87,7 @@ proptest! {
         prop_assert_eq!(store.len(), 1);
     }
 
-    /// Протухший handle (другая generation) не видит чужой компонент в том же слоте.
+    /// A stale handle (different generation) cannot see another entity's component in the same slot.
     #[test]
     fn stale_handle_is_rejected(id in 0u32..512, v in any::<u64>()) {
         let mut store = ComponentStore::new();
@@ -98,15 +98,15 @@ proptest! {
         prop_assert!(!store.contains(stale));
     }
 
-    /// Model-based: случайная смесь insert/remove против HashMap-модели.
-    /// Сильнейшее свойство: swap-remove ничего не теряет и не дублирует,
-    /// iter покрывает ровно живые entity. Модель: один слот на id,
-    /// последний insert выигрывает (включая generation), remove только
-    /// живым handle.
+    /// Model-based: a random mix of insert/remove against a HashMap model.
+    /// Strongest property: swap-remove loses and duplicates nothing,
+    /// iter covers exactly the live entities. Model: one slot per id,
+    /// the last insert wins (including generation); remove applies only
+    /// to live handles.
     #[test]
     fn store_matches_hashmap_model(ops in store_ops_strategy()) {
         let mut store: ComponentStore<u64> = ComponentStore::new();
-        // id → (generation живого handle, значение)
+        // id → (generation of the live handle, value)
         let mut model: HashMap<u32, (u32, u64)> = HashMap::new();
 
         for op in ops {
@@ -129,7 +129,7 @@ proptest! {
         }
 
         prop_assert_eq!(store.len(), model.len());
-        // iter покрывает ровно живые entity — без пропусков и дублей.
+        // iter covers exactly the live entities — no gaps or duplicates.
         let iter_entities: HashSet<(u32, u32)> = store
             .entities
             .iter()
@@ -145,7 +145,7 @@ proptest! {
 
     // ── EntityAllocator: generational indices ────────────────────────
 
-    /// Свежие аллокации живы и уникальны.
+    /// Fresh allocations are alive and unique.
     #[test]
     fn fresh_allocations_are_alive_and_unique(n in 1usize..64) {
         let mut alloc = EntityAllocator::new();
@@ -157,7 +157,7 @@ proptest! {
         }
     }
 
-    /// Переиспользование слота повышает generation, старый handle мёртв.
+    /// Slot reuse bumps the generation; the old handle is dead.
     #[test]
     fn recycling_bumps_generation(_ in 0u32..1) {
         let mut alloc = EntityAllocator::new();
@@ -171,7 +171,7 @@ proptest! {
         prop_assert!(!alloc.is_alive(a));
     }
 
-    /// Model-based: случайные alloc/dealloc — is_alive согласован с моделью.
+    /// Model-based: random alloc/dealloc — is_alive agrees with the model.
     #[test]
     fn allocator_matches_model(ops in proptest::collection::vec(any::<bool>(), 0..64)) {
         let mut alloc = EntityAllocator::new();
@@ -194,9 +194,9 @@ proptest! {
         }
     }
 
-    // ── PageTable: разреженные индексы большого диапазона ────────────
+    // ── PageTable: sparse indices over a large range ────────────
 
-    /// set→get для случайных индексов, разбросанных по многим страницам.
+    /// set→get for random indices scattered across many pages.
     #[test]
     fn page_table_roundtrip_sparse(
         entries in proptest::collection::hash_map(0usize..100_000, any::<u64>(), 1..64)
@@ -210,16 +210,16 @@ proptest! {
         }
     }
 
-    /// get на нетронутой странице — None; на тронутой, но незаписанной
-    /// позиции — Some(default).
+    /// get on an untouched page — None; on a touched but unwritten
+    /// position — Some(default).
     #[test]
     fn page_table_untouched_semantics(i in 0usize..100_000, v in any::<u64>()) {
         let mut table: PageTable<u64> = PageTable::new();
         prop_assert_eq!(table.get(i), None);
         table.set(i, v);
-        // Соседний слот той же страницы (та же страница, другой offset)
-        // уже аллоцирован и возвращает default.
-        let neighbour = i ^ 1; // меняем только младший бит — та же страница
+        // Neighbouring slot of the same page (same page, different offset)
+        // is already allocated and returns default.
+        let neighbour = i ^ 1; // flip only the low bit — same page
         if neighbour != i {
             prop_assert_eq!(table.get(neighbour), Some(&u64::default()));
         }
@@ -228,7 +228,7 @@ proptest! {
 
     // ── physics math: AABB / Ray ─────────────────────────────────────
 
-    /// AABB::from_points содержит каждую точку выборки.
+    /// AABB::from_points contains every sampled point.
     #[test]
     fn aabb_from_points_contains_all(
         points in proptest::collection::vec(vec3_strategy(), 1..32)
@@ -239,7 +239,7 @@ proptest! {
         }
     }
 
-    /// expand(point) делает AABB содержащим и старые точки, и новую.
+    /// expand(point) grows the AABB to contain both old points and the new one.
     #[test]
     fn aabb_expand_keeps_contents(
         points in proptest::collection::vec(vec3_strategy(), 1..32),
@@ -252,7 +252,7 @@ proptest! {
         }
     }
 
-    /// overlaps коммутативен.
+    /// overlaps is commutative.
     #[test]
     fn aabb_overlaps_is_commutative(
         a_min in vec3_strategy(),

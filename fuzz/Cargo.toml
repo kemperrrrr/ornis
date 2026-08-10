@@ -7,17 +7,17 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
-# Независимый от корневого workspace крейт (cargo-fuzz convention):
-# НЕ добавлять в members корневого Cargo.toml. Запуск только через
-# `cargo +nightly fuzz run <target>` — rust-toolchain.toml пинит stable,
-# поэтому +nightly указывается явно (это делает и `cargo xtask fuzz`).
+# A crate independent from the root workspace (cargo-fuzz convention):
+# do NOT add to members of the root Cargo.toml. Run only via
+# `cargo +nightly fuzz run <target>` — rust-toolchain.toml pins stable,
+# so +nightly is passed explicitly (cargo xtask fuzz does this too).
 
 [dependencies]
 libfuzzer-sys = "0.4"
 ornis-render = { path = "../crates/render" }
 ornis-materialx = { path = "../crates/materialx" }
 
-# Предотвращаем «multiple workspace roots» от корневого workspace.
+# Prevents "multiple workspace roots" from the root workspace.
 [workspace]
 
 [[bin]]

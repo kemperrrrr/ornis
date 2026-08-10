@@ -46,9 +46,9 @@ impl<T> ComponentStore<T> {
             && let Some(&dense_idx) = self.sparse.get(id)
         {
             self.data[dense_idx] = component;
-            // Handle может нести более новую generation: без обновления записи
-            // свежий handle не смог бы прочитать собственный компонент
-            // (обнаружено proptest store_matches_hashmap_model).
+            // A handle may carry a newer generation: without updating the entry,
+            // a fresh handle could not read its own component
+            // (found by proptest store_matches_hashmap_model).
             self.entities[dense_idx] = entity;
             return;
         }
@@ -66,8 +66,8 @@ impl<T> ComponentStore<T> {
             return None;
         }
         let dense_idx = *self.sparse.get(id)?;
-        // Протухший handle (другое поколение) не должен удалять чужой
-        // компонент — та же проверка, что в get/contains.
+        // A stale handle (different generation) must not remove another
+        // entity's component — the same check as in get/contains.
         if entity.generation() != self.entities[dense_idx].generation() {
             return None;
         }

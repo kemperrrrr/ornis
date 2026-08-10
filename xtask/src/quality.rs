@@ -1,9 +1,9 @@
 //! Quality gate: fmt, clippy, tests, supply-chain (audit/deny/outdated),
-//! плюс уровень 2 (--full: coverage + bench compile-check; --bench: criterion).
+//! plus level 2 (--full: coverage + bench compile-check; --bench: criterion).
 //!
-//! Архитектура стадий: каждая стадия печатает заголовок и PASS/FAIL/SKIP/INFO,
-//! команда продолжает выполнение после падения стадии и в конце печатает
-//! сводную таблицу; exit code — 1, если хотя бы одна стадия FAIL.
+//! Stage architecture: each stage prints a header and PASS/FAIL/SKIP/INFO;
+//! the run continues after a failed stage and prints a summary table at
+//! the end; the exit code is 1 if any stage FAILs.
 
 use std::path::Path;
 use std::process::{exit, Command};
@@ -12,9 +12,9 @@ use std::process::{exit, Command};
 enum Status {
     Pass,
     Fail,
-    /// Инструмент отсутствует — стадия пропущена (не считается падением).
+    /// The tool is missing — the stage is skipped (not counted as a failure).
     Skip,
-    /// Информационная стадия (outdated): результат не влияет на exit code.
+    /// Informational stage (outdated): the result does not affect the exit code.
     Info,
 }
 
@@ -55,7 +55,7 @@ pub fn quality(args: &[String]) {
     let total = 6 + usize::from(full) * 2 + usize::from(bench);
     let mut n = 0usize;
 
-    // ── Уровень 1 (обязательный набор) ───────────────────────────────
+    // ── Level 1 (mandatory set) ───────────────────────────────
 
     n += 1;
     results.push(run_stage(
@@ -118,8 +118,8 @@ pub fn quality(args: &[String]) {
         false,
     ));
 
-    // Информационная стадия: cargo-outdated возвращает ненулевой код,
-    // когда есть устаревшие зависимости — это не повод валить гейт.
+    // Informational stage: cargo-outdated returns a non-zero code when
+    // dependencies are outdated — that is not a reason to fail the gate.
     n += 1;
     results.push(run_stage(
         n,
@@ -130,7 +130,7 @@ pub fn quality(args: &[String]) {
         true,
     ));
 
-    // ── Уровень 2 (--full) ───────────────────────────────────────────
+    // ── Level 2 (--full) ───────────────────────────────────────────
 
     if full {
         n += 1;
@@ -184,25 +184,25 @@ pub fn quality(args: &[String]) {
 
 fn quality_usage(code: i32) -> ! {
     eprintln!(
-        "xtask quality — качественный гейт Ornis\n\
+        "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           быстрый набор (уровень 1): fmt, clippy, test, audit, deny, outdated\n  \
-         cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) и bench compile-check\n  \
-         cargo xtask quality --bench   + полный прогон criterion-бенчмарков (долго)"
+         cargo xtask quality           quick set (level 1): fmt, clippy, test, audit, deny, outdated\n  \
+         cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
+         cargo xtask quality --bench   + full criterion benchmark run (slow)"
     );
     exit(code);
 }
 
-/// Собрать Command с рабочей директорией workspace root.
+/// Builds a Command with the workspace root as the working directory.
 fn cmd(root: &Path, program: &str, args: &[&str]) -> Command {
     let mut c = Command::new(program);
     c.args(args).current_dir(root);
     c
 }
 
-/// Запустить одну стадию: заголовок, проверка инструмента, статус.
-/// `informational` — ненулевой exit не считается FAIL (cargo-outdated).
+/// Runs one stage: header, tool availability check, status.
+/// `informational` — a non-zero exit is not counted as FAIL (cargo-outdated).
 fn run_stage(
     index: usize,
     total: usize,
@@ -214,9 +214,9 @@ fn run_stage(
     eprintln!();
     eprintln!("═══ [{index}/{total}] {name}: {display_cmd} ═══");
 
-    // Проверка наличия внешнего cargo-инструмента с подсказкой по установке.
-    // Проверяем только сторонние subcommands: у встроенных (test, bench, …)
-    // нет бинаря cargo-<sub>, который можно было бы найти в PATH.
+    // Check for an external cargo tool, with an install hint.
+    // Only third-party subcommands are checked: built-in ones (test, bench, …)
+    // have no cargo-<sub> binary that could be found in PATH.
     const EXTERNAL: &[&str] = &["audit", "deny", "outdated", "llvm-cov"];
     let program = command.get_program().to_string_lossy().into_owned();
     let first_arg = command
@@ -227,11 +227,11 @@ fn run_stage(
         if let Some(sub) = first_arg.filter(|s| EXTERNAL.contains(&s.as_str())) {
             if !cargo_subcommand_exists(&sub) {
                 let hint = install_hint(&sub);
-                eprintln!("xtask quality: SKIP — инструмент 'cargo {sub}' не найден.\n{hint}");
+                eprintln!("xtask quality: SKIP — tool 'cargo {sub}' not found.\n{hint}");
                 return StageResult {
                     name: name.to_string(),
                     status: Status::Skip,
-                    note: format!("cargo-{sub} не установлен"),
+                    note: format!("cargo-{sub} not installed"),
                 };
             }
         }
@@ -255,7 +255,7 @@ fn run_stage(
         }
         Ok(status) => {
             if informational {
-                eprintln!("── {name}: INFO (exit {status} — есть устаревшие зависимости) ──");
+                eprintln!("── {name}: INFO (exit {status} — outdated dependencies) ──");
                 StageResult {
                     name: name.to_string(),
                     status: Status::Info,
@@ -295,9 +295,9 @@ fn print_summary(results: &[StageResult]) {
     eprintln!("╚═════════════════════════════════════════╝");
 }
 
-/// Есть ли cargo-subcommand в PATH (`cargo-<sub>`)?
-/// Проверяем наличие бинаря, а не `--version`: часть инструментов
-/// (например cargo-outdated) не понимает `--version` напрямую.
+/// Whether a cargo subcommand exists in PATH (`cargo-<sub>`).
+/// Checks for the binary, not `--version`: some tools
+/// (e.g. cargo-outdated) do not understand `--version` directly.
 fn cargo_subcommand_exists(sub: &str) -> bool {
     let binary = if cfg!(windows) {
         format!("cargo-{sub}.exe")
@@ -311,32 +311,32 @@ fn cargo_subcommand_exists(sub: &str) -> bool {
 
 fn install_hint(sub: &str) -> String {
     match sub {
-        "audit" => "Установи:  cargo install cargo-audit --locked".to_string(),
-        "deny" => "Установи:  cargo install cargo-deny --locked".to_string(),
-        "outdated" => "Установи:  cargo install cargo-outdated --locked".to_string(),
-        "llvm-cov" => "Установи:  cargo install cargo-llvm-cov --locked\n\
-             и компонент:  rustup component add llvm-tools-preview"
+        "audit" => "Install:  cargo install cargo-audit --locked".to_string(),
+        "deny" => "Install:  cargo install cargo-deny --locked".to_string(),
+        "outdated" => "Install:  cargo install cargo-outdated --locked".to_string(),
+        "llvm-cov" => "Install:  cargo install cargo-llvm-cov --locked\n\
+             and the component:  rustup component add llvm-tools-preview"
             .to_string(),
-        "fuzz" => "Установи:  cargo install cargo-fuzz --locked".to_string(),
-        "mutants" => "Установи:  cargo install cargo-mutants --locked".to_string(),
-        other => format!("Установи:  cargo install cargo-{other} --locked"),
+        "fuzz" => "Install:  cargo install cargo-fuzz --locked".to_string(),
+        "mutants" => "Install:  cargo install cargo-mutants --locked".to_string(),
+        other => format!("Install:  cargo install cargo-{other} --locked"),
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// fuzz / mutants — отдельные сабкоманды (не входят в quality default)
+// fuzz / mutants — separate subcommands (not part of quality default)
 // ═══════════════════════════════════════════════════════════════════════
 
 pub fn fuzz(args: &[String]) {
     let Some(target) = args.first() else {
         eprintln!(
-            "xtask fuzz — прогон cargo-fuzz таргетов (парсеры внешнего ввода)\n\
+            "xtask fuzz — runs cargo-fuzz targets (external-input parsers)\n\
              \n\
              USAGE:\n  \
              cargo xtask fuzz <target> [-- <libfuzzer args>]\n  \
-             доступные таргеты: scene_ron, materialx_parse\n\
+             available targets: scene_ron, materialx_parse\n\
              \n\
-             Пример:  cargo xtask fuzz scene_ron -- -runs=1000"
+             Example:  cargo xtask fuzz scene_ron -- -runs=1000"
         );
         exit(2);
     };
@@ -344,17 +344,17 @@ pub fn fuzz(args: &[String]) {
 
     if !cargo_subcommand_exists("fuzz") {
         eprintln!(
-            "xtask fuzz: 'cargo-fuzz' не найден.\n{}",
+            "xtask fuzz: 'cargo-fuzz' not found.\n{}",
             install_hint("fuzz")
         );
         exit(1);
     }
     if !nightly_available() {
         eprintln!(
-            "xtask fuzz: nightly toolchain не найден (cargo-fuzz требует nightly).\n\
-             Установи:  rustup toolchain install nightly\n\
-             (workspace pinned на stable через rust-toolchain.toml — fuzz всегда \
-             запускается явно через +nightly)"
+            "xtask fuzz: nightly toolchain not found (cargo-fuzz requires nightly).\n\
+             Install:  rustup toolchain install nightly\n\
+             (the workspace is pinned to stable via rust-toolchain.toml — fuzz is \
+             always run explicitly through +nightly)"
         );
         exit(1);
     }
@@ -380,7 +380,7 @@ pub fn fuzz(args: &[String]) {
 pub fn mutants(args: &[String]) {
     if !cargo_subcommand_exists("mutants") {
         eprintln!(
-            "xtask mutants: 'cargo-mutants' не найден.\n{}",
+            "xtask mutants: 'cargo-mutants' not found.\n{}",
             install_hint("mutants")
         );
         exit(1);

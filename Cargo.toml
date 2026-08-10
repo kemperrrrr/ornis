@@ -13,9 +13,9 @@ members = [
 ]
 
 [workspace.lints.clippy]
-# Базовый уровень: все стандартные lint'ы как предупреждения.
-# pedantic намеренно не включён — слишком шумно для старта.
-# unwrap_used/expect_used будут подняты после снятия baseline.
+# Baseline: all standard lints as warnings.
+# pedantic is intentionally off — too noisy for a start.
+# unwrap_used/expect_used will be enabled once the baseline is cleared.
 all = "warn"
 
 [workspace.package]
