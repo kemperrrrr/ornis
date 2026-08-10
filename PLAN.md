@@ -177,6 +177,11 @@ API (rustdoc) и релизная упаковка.
   forward/hybrid/deferred как конфигурация графа.
   Разбор: [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md);
   идея: IDEAS.md §27.
+  **Статус (2026-08-10, подтверждено ревью): фазы 0–1 выполнены** —
+  каркас `render_graph.rs` + исполнитель `graph_frame.rs` (`GraphExecutor`,
+  `RenderGraph3D`; 4 пасса как узлы, pass-тела на `GbufferTargets`).
+  Верификация `render_graph_probe`: legacy vs graph пути пиксельно
+  идентичны, 9 ресурсов → 7 слотов пула.
 
 ### B2. Физика (`crates/physics`) — план работ
 

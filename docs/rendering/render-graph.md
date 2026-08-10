@@ -159,3 +159,12 @@ pub struct PassContext<'a> {
 - [wgpu-rendergraph — matthewjberger](https://github.com/matthewjberger/wgpu-rendergraph) — рабочий рендерграф на wgpu: native + webgpu + webgl (wasm) — прецедент для редактора.
 - [Clustered Forward vs Deferred — Yosoygames, 2016](https://www.yosoygames.com.ar/wp/2016/11/clustered-forward-vs-deferred-shading/) — гибрид depth-prepass + малый G-buffer (Doom 2016).
 - [Writing an efficient Vulkan renderer — zeux.io, 2020](https://zeux.io/2020/02/27/writing-an-efficient-vulkan-renderer/) — обзорная рекомендация по графам.
+
+---
+
+## 9. Статус реализации (2026-08-10, подтверждено ревью)
+
+- **Фаза 0 — каркас** ✅: `render_graph.rs` — lifetime-окна, пул слотов (жадная интервальная раскладка), culling пассов, импортированные и внешние ресурсы; 10 юнит-тестов.
+- **Фаза 1 — исполнитель** ✅: `graph_frame.rs` — `GraphExecutor` (пул → реальные `wgpu::Texture`, внешние view для swapchain), `PassViews` (view_of с проверкой живости), `RenderGraph3D` (gbuffer → lighting → forward → composite как узлы). Pass-тела в `renderer.rs` параметризованы `GbufferTargets`; lighting собирает бинд-группу per-frame (gbuffer теперь transient-доступен).
+- **Верификация**: `examples/render_graph_probe.rs` — legacy и graph пути байт-в-байт идентичны (1280×720, 0 отличий из 3 686 400 байт); 9 ресурсов → 7 слотов (алиасинг `material_params` + `hdr_fwd` в слоте #4). `cargo xtask quality` — PASS.
+- Осталось: **Фаза 2** — замер пиковой памяти GPU до/после (профиль уже даёт число слотов), **Фаза 3** — первый новый узел (SSAO/блум), **Фаза 4** — переключатель forward/hybrid/deferred как конфигурация графа.
