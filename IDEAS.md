@@ -446,3 +446,16 @@ pub struct ComponentStore<T> {
 | Открытые стандарты материалов | — | — | **OpenPBR + MaterialX** из коробки; совместимость с VFX-пайплайном |
 | Физика | Встроенная | C# / Burst / Havok | **Своя лёгкая (Sweep-and-Prune) + Rapier/Jolt/PhysX** через единый `PhysicsEngine` trait |
 | Рендер-бэкенд | Встроенный (WGPU) | Встроенный (D3D/Metal) | **Свой WGPU + OpenPBR + MaterialX; смена бэкенда** через `RenderBackend` trait |
+
+---
+
+## 27. Render Graph — гибрид Forward+Deferred через граф пассов (черновик, для ревью)
+
+> ⚠️ Черновик, для ревью. Полный разбор: [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md). Дата: 2026-08-10.
+
+- **Проблема**: не могли определиться Forward vs Deferred. Ответ исследования: выбрать не нужно — нужен слой оркестрации пассов.
+- **Что это**: render graph — DAG, где пассы = узлы, зависимости по ресурсам = рёбра. Глобальное знание о кадре → transient-ресурсы, переиспользование памяти, culling пассов, расширяемость. Не третья техника рендеринга, а каркас, на котором гибрид (deferred неопрачные + forward прозрачные) собирается как конфигурация.
+- **Состояние Ornis**: гибрид уже есть императивно — `renderer.rs` (~1550 строк): gbuffer (5 MRT) → lighting → forward → composite. Не хватает оркестрации.
+- **Оговорка wgpu**: барьеры/layout transitions wgpu делает сам; ценность графа для Ornis — lifetime ресурсов (gbuffer → transient), декларативность, расширяемость. Тяжёлый bake Granite (алиасинг памяти, async compute) на wgpu не переносится буквально.
+- **План**: лёгкий immediate-граф (паттерн Frostbite/Ponies&Light): каркас → обёртка 4 существующих пассов → gbuffer transient → первый новый узел (SSAO/блум) → переключатель forward/hybrid/deferred.
+- **Референсы**: Frostbite FrameGraph (GDC 2017), Granite deep dive (themaister), Ponies & Light, rafx (Rust), Bevy render_graph, wgpu-rendergraph (wasm webgl/webgpu).

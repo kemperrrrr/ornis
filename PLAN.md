@@ -116,7 +116,9 @@ flamegraph/dhat — на perf-спринт.
 
 ### f. Дальше по старому плану
 
-Deferred/Forward hybrid рендер (G-buffer, lighting pass) →
+Deferred/Forward hybrid рендер (G-buffer, lighting pass) —
+  конкретизирован в **B1-R7** (render graph, черновик для ревью,
+  [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md)) →
 NUMA-aware allocation → кроссплатформенные прогоны (Linux/Windows
 CI, miri) → адаптеры Rapier/Jolt за `PhysicsEngine` → документация
 API (rustdoc) и релизная упаковка.
@@ -143,6 +145,10 @@ API (rustdoc) и релизная упаковка.
   Deferred/Forward hybrid как ❌. Либо довести gbuffer-путь до активного
   (G-buffer → lighting pass → composite), либо удалить как спекулятивный
   каркас. Быстрый шаг: поставить README-статус точно по коду.
+  - **→ Решено (2026-08-10, черновик для ревью):** доводить gbuffer-путь
+    до активного гибрида, не удалять. Способ — render graph (см. R7).
+    README-статус «Deferred/Forward hybrid» актуализировать по коду
+    (гибрид уже работает императивно).
 - **R2.** `Renderer3D` под живой ECS: поднять бюджет с `max_objects=256`,
   перейти на инстансинг через `InstanceData`, поддержать динамические
   меши/трансформы без пересоздания буферов.
@@ -156,6 +162,21 @@ API (rustdoc) и релизная упаковка.
 - **R6.** Связать рендер с ECS-сценой в браузере: WASM-canvas рендерит
   актуальное состояние, ввод/камера из браузера (перекликается с
   «b. Живой ECS в браузере»).
+- **R7.** Render Graph — слой оркестрации пассов (черновик для ревью,
+  2026-08-10). Гибрид forward/deferred уже работает императивно в
+  `renderer.rs` (gbuffer 5 MRT → lighting → forward → composite); render
+  graph делает выбор техники конфигурацией графа. Оговорка wgpu: барьеры
+  и layout transitions wgpu делает сам — берём lifetime ресурсов
+  (gbuffer → transient), пул текстур, culling пассов; memory aliasing на
+  уровне драйвера недоступен (пул объектов вместо него). План — лёгкий
+  immediate-граф (Frostbite/Ponies&Light), фазы:
+  0 — каркас `render_graph` (юнит-тесты на lifetime ресурсов), 1 —
+  обёртка 4 существующих пассов как узлов (попиксельная проверка через
+  `render_probe`), 2 — gbuffer в transient-пул (замер пиковой памяти GPU
+  через profiler), 3 — первый новый узел (SSAO/блум), 4 — переключатель
+  forward/hybrid/deferred как конфигурация графа.
+  Разбор: [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md);
+  идея: IDEAS.md §27.
 
 ### B2. Физика (`crates/physics`) — план работ
 
