@@ -101,14 +101,14 @@ pub struct Renderer3D {
     _bind_group_layout: wgpu::BindGroupLayout,
     _bind_group: wgpu::BindGroup,
     _pipeline: wgpu::RenderPipeline,
-    depth_texture: wgpu::Texture,
-    depth_view: wgpu::TextureView,
     pbr_texture: wgpu::Texture,
     pbr_texture_view: wgpu::TextureView,
     sample_count: u32,
     max_objects: u32,
     max_materials: u32,
     format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
     gbuffer: GBufferTextures,
     gbuffer_pipeline: wgpu::RenderPipeline,
     gbuffer_bind_group_layout: wgpu::BindGroupLayout,
@@ -265,9 +265,6 @@ impl Renderer3D {
             immediate_size: 0,
         });
 
-        let depth_texture = Self::create_depth_texture(device, width, height, sample_count);
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("pbr render pipeline"),
             layout: Some(&pipeline_layout),
@@ -368,14 +365,14 @@ impl Renderer3D {
             _bind_group_layout: bind_group_layout,
             _bind_group: bind_group,
             _pipeline: pipeline,
-            depth_texture,
-            depth_view,
             pbr_texture,
             pbr_texture_view,
             sample_count,
             max_objects,
             max_materials,
             format,
+            width,
+            height,
             gbuffer,
             gbuffer_pipeline,
             gbuffer_bind_group_layout,
@@ -1097,36 +1094,11 @@ impl Renderer3D {
         }
     }
 
-    fn create_depth_texture(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        sample_count: u32,
-    ) -> wgpu::Texture {
-        device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-    }
-
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
-
-        self.depth_texture = Self::create_depth_texture(device, width, height, self.sample_count);
-        self.depth_view = self
-            .depth_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.width = width;
+        self.height = height;
 
         self.pbr_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pbr render target"),
@@ -1179,6 +1151,27 @@ impl Renderer3D {
 
     pub fn pbr_view(&self) -> &wgpu::TextureView {
         &self.pbr_texture_view
+    }
+
+    /// Bytes allocated by the persistent textures of the legacy path
+    /// (5 g-buffer MRTs + g-buffer depth + lighting target + forward color).
+    pub fn texture_budget(&self) -> u64 {
+        let bpp = crate::graph_frame::format_bytes_per_pixel;
+        let w = self.width as u64;
+        let h = self.height as u64;
+        let s = self.sample_count as u64;
+        let gbuffer = (bpp(wgpu::TextureFormat::Rgba8Unorm)
+            + bpp(wgpu::TextureFormat::Rg16Float)
+            + bpp(wgpu::TextureFormat::R32Uint)
+            + bpp(wgpu::TextureFormat::Rg16Float)
+            + bpp(wgpu::TextureFormat::Rgba16Float)
+            + bpp(wgpu::TextureFormat::Depth32Float)) as u64
+            * w
+            * h
+            * s;
+        let pbr = bpp(self.format) as u64 * w * h * s;
+        let forward = bpp(wgpu::TextureFormat::Rgba16Float) as u64 * w * h * s;
+        gbuffer + pbr + forward
     }
 
     pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]) {

@@ -254,6 +254,32 @@ async fn run(scene: &Scene) {
     let (legacy_pixels, unpadded) = read_target(&legacy_tex, "legacy readback");
     let (graph_pixels, _) = read_target(&graph_tex, "graph readback");
 
+    // ── Multi-frame stability: pool reuse across frames ───────────────
+    let slots_before = graph3d.pool_slots();
+    const FRAMES: u32 = 16;
+    let mut frames_identical = 0u32;
+    for _ in 1..FRAMES {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("probe frame encoder"),
+        });
+        graph3d.render(
+            &device,
+            &mut encoder,
+            &graph_view,
+            &renderer,
+            &mesh,
+            instances.len() as u32,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let (pixels, _) = read_target(&graph_tex, "graph readback (frame)");
+        if pixels == graph_pixels {
+            frames_identical += 1;
+        }
+    }
+    let slots_after = graph3d.pool_slots();
+    let pool_stable = slots_before == slots_after && slots_after < 9;
+    let all_frames_stable = frames_identical == FRAMES - 1;
+
     // ── Compare ───────────────────────────────────────────────────────
     let diff_count = legacy_pixels
         .iter()
@@ -287,7 +313,28 @@ async fn run(scene: &Scene) {
         9
     );
 
-    if same {
+    // ── Memory: legacy persistent textures vs graph pool ──────────────
+    let legacy_bytes = renderer.texture_budget();
+    let graph_bytes = graph3d.texture_budget();
+    let saved = legacy_bytes.saturating_sub(graph_bytes);
+    let pct = if legacy_bytes > 0 {
+        saved as f64 * 100.0 / legacy_bytes as f64
+    } else {
+        0.0
+    };
+    println!(
+        "legacy texture budget: {legacy_bytes} bytes ({:.1} MB)",
+        legacy_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "graph pool budget:     {graph_bytes} bytes ({:.1} MB)",
+        graph_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "saved: {saved} bytes ({pct:.1}%) — {FRAMES}-frame pool stable: {pool_stable}, frames identical: {all_frames_stable}"
+    );
+
+    if same && all_frames_stable && pool_stable {
         println!("PASS: legacy and render-graph paths are pixel-identical");
         println!("PNGs: target/render_graph_probe_{{legacy,graph}}.png ({WIDTH}x{HEIGHT})");
     } else {
@@ -295,6 +342,7 @@ async fn run(scene: &Scene) {
             "FAIL: {diff_count} mismatching pixels, max byte diff {max_diff} (of {})",
             legacy_pixels.len()
         );
+        println!("frames identical: {all_frames_stable}, pool stable: {pool_stable}");
         println!("PNGs: target/render_graph_probe_{{legacy,graph}}.png");
         std::process::exit(1);
     }

@@ -22,6 +22,22 @@ use std::collections::HashMap;
 struct PooledTexture {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
+    bytes: u64,
+}
+
+/// Bytes per pixel for the texture formats used by the engine's renderer.
+pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::Rgba8Unorm
+        | wgpu::TextureFormat::Rgba8UnormSrgb
+        | wgpu::TextureFormat::R32Uint
+        | wgpu::TextureFormat::Rg16Float
+        | wgpu::TextureFormat::Depth32Float
+        | wgpu::TextureFormat::Depth24Plus => 4,
+        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
+        wgpu::TextureFormat::Rgba32Float => 16,
+        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
+    }
 }
 
 /// Executes a [`GraphLayout`] on wgpu: lazily creates one texture per pool
@@ -47,6 +63,13 @@ impl GraphExecutor {
     /// Number of pooled textures currently allocated.
     pub fn slots_len(&self) -> usize {
         self.pool.len()
+    }
+
+    /// Total bytes of the pooled GPU textures at the current surface size.
+    /// The gap between this and the legacy path's persistent textures is
+    /// the aliasing win (see `Renderer3D::texture_budget`).
+    pub fn texture_budget(&self) -> u64 {
+        self.pool.iter().flatten().map(|t| t.bytes).sum()
     }
 
     /// Executes `layout`: for each pass in order, `run` receives the encoder
@@ -115,9 +138,14 @@ fn create_pooled_texture(
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bytes = format_bytes_per_pixel(slot.spec.format) as u64
+        * width as u64
+        * height as u64
+        * slot.spec.samples as u64;
     PooledTexture {
         _texture: texture,
         view,
+        bytes,
     }
 }
 
@@ -299,6 +327,11 @@ impl RenderGraph3D {
         self.executor.slots_len()
     }
 
+    /// Bytes of the pooled GPU textures (see `GraphExecutor::texture_budget`).
+    pub fn texture_budget(&self) -> u64 {
+        self.executor.texture_budget()
+    }
+
     /// Renders one frame through the graph: builds the layout, feeds the
     /// swapchain view, executes the four passes against `renderer`.
     pub fn render(
@@ -352,5 +385,53 @@ impl RenderGraph3D {
                 other => unreachable!("render graph 3d: unknown pass '{other}'"),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_per_pixel_table() {
+        assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Rgba8Unorm), 4);
+        assert_eq!(
+            format_bytes_per_pixel(wgpu::TextureFormat::Rgba8UnormSrgb),
+            4
+        );
+        assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Rg16Float), 4);
+        assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::R32Uint), 4);
+        assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Rgba16Float), 8);
+        assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Depth32Float), 4);
+        assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Rgba32Float), 16);
+    }
+
+    #[test]
+    fn texture_budget_matches_spec() {
+        // 1280x720: Rgba16Float = 8 B/px * 921_600 px = 7_372_800 B.
+        let spec = TextureSpec {
+            format: wgpu::TextureFormat::Rgba16Float,
+            samples: 1,
+            size: SizePolicy::Fixed {
+                width: 1280,
+                height: 720,
+            },
+        };
+        let mut graph = RenderGraph::new((1280, 720));
+        let a = graph.create_resource("a", spec);
+        let b = graph.create_resource("b", spec);
+        graph.add_pass("p0").write(a);
+        graph.add_pass("p2").read(a);
+        graph.add_pass("p3").write(b);
+        graph.add_pass("p4").read(b);
+        // a [0,1], b [2,3]: same spec, non-overlapping → one slot.
+        let layout = graph.build();
+        assert_eq!(layout.slots.len(), 1);
+        // Budget math is exercised on the wgpu side (needs a device); here
+        // we only pin the per-slot byte formula via the layout spec.
+        assert_eq!(
+            format_bytes_per_pixel(spec.format) as u64 * 1280 * 720,
+            7_372_800
+        );
     }
 }
