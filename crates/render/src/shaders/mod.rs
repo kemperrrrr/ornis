@@ -39,9 +39,17 @@ struct Camera {
     camera_pos: vec4<f32>,
 };
 
+struct BloomParams {
+    threshold: f32,
+    intensity: f32,
+    _pad: vec2<f32>,
+};
+
 @group(0) @binding(0) var deferred_tex: texture_2d<f32>;
 @group(0) @binding(1) var forward_tex: texture_2d<f32>;
 @group(0) @binding(2) var composite_sampler: sampler;
+@group(0) @binding(3) var bloom_tex: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> bloom_params: BloomParams;
 
 const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
     vec4<f32>(-1.0, -1.0, 0.0, 1.0),
@@ -73,7 +81,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let forward_color = textureSample(forward_tex, composite_sampler, uv).rgba;
 
     let combined = deferred_color + forward_color.rgb * forward_color.a;
-    let tonemapped = aces_tonemap(combined);
+    let bloom = textureSample(bloom_tex, composite_sampler, uv).rgb;
+    let tonemapped = aces_tonemap(combined + bloom * bloom_params.intensity);
 
     // The composited scene is opaque; forward_color.a is 0 where no forward
     // geometry was drawn, which would make the whole frame transparent on a
@@ -84,9 +93,73 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
 pub fn composite_fragment() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         COMPOSITE_FRAGMENT_BOILERPLATE,
         math::aces_tonemap::wgsl_source(),
+        math::luminance::wgsl_source(),
+    )
+}
+
+/// ── BLOOM ───────────────────────────────────────────────────────────
+///
+/// A single quad shader used by the whole bloom chain. Each pass samples
+/// the previous (smaller or larger) level and applies a soft threshold on
+/// luminance: the first downsample keeps only the bright pixels
+/// (threshold ≈ 0.6-0.7), later levels pass everything (threshold = 0),
+/// and the upsample passes re-add the level's own content via additive
+/// blending (dst = src + previous), recreating the classic Frostbite
+/// "downsample chain, upsample with add" cascade.
+const BLOOM_FRAGMENT_BOILERPLATE: &str = r#"
+struct BloomParams {
+    threshold: f32,
+    intensity: f32,
+    _pad: vec2<f32>,
+};
+
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_sampler: sampler;
+@group(0) @binding(2) var<uniform> bloom_params: BloomParams;
+
+const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
+    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
+    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
+    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
+    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
+);
+
+const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 0.0),
+);
+
+struct BloomVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> BloomVertexOutput {
+    return BloomVertexOutput(QUAD[idx], UVS[idx]);
+}
+
+@fragment
+fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    let color = textureSample(src_tex, src_sampler, uv).rgb;
+    let luma = luminance(color);
+    // Soft knee: pixels above `threshold` pass fully, a thin band below it
+    // fades out. With threshold = 0 everything except pure black passes.
+    let keep = smoothstep(bloom_params.threshold, bloom_params.threshold + 0.05, luma);
+    return vec4<f32>(color * keep, 1.0);
+}
+"#;
+
+pub fn bloom_fragment() -> String {
+    format!(
+        "{}\n{}",
+        BLOOM_FRAGMENT_BOILERPLATE,
+        math::luminance::wgsl_source(),
     )
 }
 

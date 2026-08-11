@@ -14,7 +14,7 @@ use crate::mesh::Mesh;
 use crate::render_graph::{
     GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout, SizePolicy, TextureSpec,
 };
-use crate::renderer::{GbufferTargets, Renderer3D};
+use crate::renderer::{CompositeInputs, GbufferTargets, Renderer3D};
 use std::collections::HashMap;
 
 /// One pooled texture per render-graph slot.
@@ -24,6 +24,10 @@ struct PooledTexture {
     view: wgpu::TextureView,
     bytes: u64,
 }
+
+/// Bright-pass threshold for the first bloom downsample (luminance gate:
+/// only pixels brighter than this contribute to the bloom chain).
+const BLOOM_BRIGHT_THRESHOLD: f32 = 0.7;
 
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
@@ -119,10 +123,7 @@ fn create_pooled_texture(
     surface_size: (u32, u32),
     index: usize,
 ) -> PooledTexture {
-    let (width, height) = match slot.spec.size {
-        SizePolicy::MatchSurface => surface_size,
-        SizePolicy::Fixed { width, height } => (width, height),
-    };
+    let (width, height) = slot.spec.size.resolve(surface_size);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(&format!("render graph slot #{index}")),
         size: wgpu::Extent3d {
@@ -233,6 +234,7 @@ pub struct RenderGraph3D {
     graph: RenderGraph,
     executor: GraphExecutor,
     ids: GraphIds,
+    bloom: bool,
 }
 
 /// Resource handles of the [`RenderGraph3D`] graph.
@@ -247,6 +249,12 @@ pub struct GraphIds {
     pub hdr: ResourceId,
     pub hdr_fwd: ResourceId,
     pub target: ResourceId,
+    /// Bloom chain levels: 1/2, 1/4, 1/8 of the surface. Always declared so
+    /// every graph shares one `GraphIds` shape; they only consume pool slots
+    /// when the bloom passes exist (`new_with_bloom`).
+    pub bloom0: ResourceId,
+    pub bloom1: ResourceId,
+    pub bloom2: ResourceId,
 }
 
 impl RenderGraph3D {
@@ -254,11 +262,31 @@ impl RenderGraph3D {
     /// (the lighting pass writes into it); `surface_size` seeds
     /// `SizePolicy::MatchSurface` resources.
     pub fn new(surface_format: wgpu::TextureFormat, surface_size: (u32, u32)) -> Self {
+        Self::build(surface_format, surface_size, false)
+    }
+
+    /// Like [`new`](Self::new), plus the bloom cascade:
+    ///
+    /// `bloom_down0` (bright-pass at 1/2) → `bloom_down1` (1/4) →
+    /// `bloom_down2` (1/8) → `bloom_up1` → `bloom_up0`, where each upsample
+    /// adds its level back over the downsampled content (`LoadOp::Load`).
+    /// The composite pass then mixes the final bloom level into the HDR
+    /// result.
+    pub fn new_with_bloom(surface_format: wgpu::TextureFormat, surface_size: (u32, u32)) -> Self {
+        Self::build(surface_format, surface_size, true)
+    }
+
+    fn build(surface_format: wgpu::TextureFormat, surface_size: (u32, u32), bloom: bool) -> Self {
         let mut graph = RenderGraph::new(surface_size);
         let spec = |format| TextureSpec {
             format,
             samples: 1,
             size: SizePolicy::MatchSurface,
+        };
+        let frac = |format, divisor| TextureSpec {
+            format,
+            samples: 1,
+            size: SizePolicy::Fraction(divisor),
         };
         let ids = GraphIds {
             albedo: graph.create_resource("albedo", spec(wgpu::TextureFormat::Rgba8Unorm)),
@@ -272,6 +300,9 @@ impl RenderGraph3D {
             hdr: graph.create_resource("hdr", spec(surface_format)),
             hdr_fwd: graph.create_resource("hdr_fwd", spec(wgpu::TextureFormat::Rgba16Float)),
             target: graph.external_output("target"),
+            bloom0: graph.create_resource("bloom0", frac(wgpu::TextureFormat::Rgba16Float, 2)),
+            bloom1: graph.create_resource("bloom1", frac(wgpu::TextureFormat::Rgba16Float, 4)),
+            bloom2: graph.create_resource("bloom2", frac(wgpu::TextureFormat::Rgba16Float, 8)),
         };
         graph
             .add_pass("gbuffer")
@@ -294,15 +325,43 @@ impl RenderGraph3D {
             .add_pass("forward")
             .read(ids.depth)
             .write_clear(ids.hdr_fwd, wgpu::Color::TRANSPARENT);
-        graph
+        if bloom {
+            // Bright-pass threshold: only the brightest pixels survive the
+            // first downsample; deeper levels pass everything (threshold 0).
+            graph
+                .add_pass("bloom_down0")
+                .read(ids.hdr)
+                .write_clear(ids.bloom0, wgpu::Color::BLACK);
+            graph
+                .add_pass("bloom_down1")
+                .read(ids.bloom0)
+                .write_clear(ids.bloom1, wgpu::Color::BLACK);
+            graph
+                .add_pass("bloom_down2")
+                .read(ids.bloom1)
+                .write_clear(ids.bloom2, wgpu::Color::BLACK);
+            graph
+                .add_pass("bloom_up1")
+                .read(ids.bloom2)
+                .write(ids.bloom1);
+            graph
+                .add_pass("bloom_up0")
+                .read(ids.bloom1)
+                .write(ids.bloom0);
+        }
+        let composite = graph
             .add_pass("composite")
             .read(ids.hdr)
             .read(ids.hdr_fwd)
             .write(ids.target);
+        if bloom {
+            composite.read(ids.bloom0);
+        }
         Self {
             graph,
             executor: GraphExecutor::new(),
             ids,
+            bloom,
         }
     }
 
@@ -333,12 +392,13 @@ impl RenderGraph3D {
     }
 
     /// Renders one frame through the graph: builds the layout, feeds the
-    /// swapchain view, executes the four passes against `renderer`.
+    /// swapchain view, executes the passes against `renderer`. With bloom
+    /// enabled, the composite pass mixes the bloom chain into the HDR
+    /// result; without it, a zero-intensity stub keeps the composite
+    /// pixel-identical to the legacy path.
     pub fn render(
         &mut self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
+        context: crate::render_backend::RenderContext<'_>,
         renderer: &Renderer3D,
         mesh: &Mesh,
         instance_count: u32,
@@ -347,7 +407,14 @@ impl RenderGraph3D {
             graph,
             executor,
             ids,
+            bloom,
         } = self;
+        let crate::render_backend::RenderContext {
+            device,
+            queue,
+            encoder,
+            target,
+        } = context;
         let layout = graph.build();
         executor.set_external_view(ids.target, target.clone());
         executor.execute(device, encoder, &layout, |encoder, pass| {
@@ -375,13 +442,64 @@ impl RenderGraph3D {
                     mesh,
                     instance_count,
                 ),
-                "composite" => renderer.render_composite(
+                "bloom_down0" => renderer.render_bloom_down(
+                    device,
+                    queue,
+                    encoder,
+                    pass.view_of(ids.hdr),
+                    pass.view_of(ids.bloom0),
+                    BLOOM_BRIGHT_THRESHOLD,
+                ),
+                "bloom_down1" => renderer.render_bloom_down(
+                    device,
+                    queue,
+                    encoder,
+                    pass.view_of(ids.bloom0),
+                    pass.view_of(ids.bloom1),
+                    0.0,
+                ),
+                "bloom_down2" => renderer.render_bloom_down(
+                    device,
+                    queue,
+                    encoder,
+                    pass.view_of(ids.bloom1),
+                    pass.view_of(ids.bloom2),
+                    0.0,
+                ),
+                "bloom_up1" => renderer.render_bloom_up(
                     device,
                     encoder,
-                    pass.view_of(ids.target),
-                    pass.view_of(ids.hdr),
-                    pass.view_of(ids.hdr_fwd),
+                    pass.view_of(ids.bloom2),
+                    pass.view_of(ids.bloom1),
                 ),
+                "bloom_up0" => renderer.render_bloom_up(
+                    device,
+                    encoder,
+                    pass.view_of(ids.bloom1),
+                    pass.view_of(ids.bloom0),
+                ),
+                "composite" => {
+                    // With bloom culled (no bloom passes), `bloom0` is never
+                    // written → not alive here; bind the forward target as a
+                    // stub with zero intensity, exactly like `render_scene`.
+                    let (bloom, bloom_intensity) = if *bloom {
+                        (pass.view_of(ids.bloom0), 1.0)
+                    } else {
+                        (pass.view_of(ids.hdr_fwd), 0.0)
+                    };
+                    renderer.render_composite(
+                        device,
+                        queue,
+                        encoder,
+                        CompositeInputs {
+                            target: pass.view_of(ids.target),
+                            hdr: pass.view_of(ids.hdr),
+                            hdr_fwd: pass.view_of(ids.hdr_fwd),
+                            bloom,
+                            bloom_intensity,
+                        },
+                    );
+                }
                 other => unreachable!("render graph 3d: unknown pass '{other}'"),
             }
         });

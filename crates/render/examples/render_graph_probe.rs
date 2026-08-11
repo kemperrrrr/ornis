@@ -185,15 +185,19 @@ async fn run(scene: &Scene) {
     });
     renderer.render_scene(
         &device,
+        &queue,
         &mut encoder,
         &legacy_view,
         &mesh,
         instances.len() as u32,
     );
     graph3d.render(
-        &device,
-        &mut encoder,
-        &graph_view,
+        ornis_render::render_backend::RenderContext {
+            device: &device,
+            queue: &queue,
+            encoder: &mut encoder,
+            target: &graph_view,
+        },
         &renderer,
         &mesh,
         instances.len() as u32,
@@ -263,9 +267,12 @@ async fn run(scene: &Scene) {
             label: Some("probe frame encoder"),
         });
         graph3d.render(
-            &device,
-            &mut encoder,
-            &graph_view,
+            ornis_render::render_backend::RenderContext {
+                device: &device,
+                queue: &queue,
+                encoder: &mut encoder,
+                target: &graph_view,
+            },
             &renderer,
             &mesh,
             instances.len() as u32,
@@ -279,6 +286,50 @@ async fn run(scene: &Scene) {
     let slots_after = graph3d.pool_slots();
     let pool_stable = slots_before == slots_after && slots_after < 9;
     let all_frames_stable = frames_identical == FRAMES - 1;
+
+    // ── Bloom: the same graph plus the bloom node chain ───────────────
+    let (bloom_tex, bloom_view) = make_target("probe bloom target");
+    let mut graph3d_bloom = RenderGraph3D::new_with_bloom(format, (WIDTH, HEIGHT));
+    let mut bloom_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("probe bloom encoder"),
+    });
+    graph3d_bloom.render(
+        ornis_render::render_backend::RenderContext {
+            device: &device,
+            queue: &queue,
+            encoder: &mut bloom_encoder,
+            target: &bloom_view,
+        },
+        &renderer,
+        &mesh,
+        instances.len() as u32,
+    );
+    queue.submit(std::iter::once(bloom_encoder.finish()));
+    let (bloom_pixels, _) = read_target(&bloom_tex, "bloom readback");
+
+    // Bloom must not change pixels without bright content... but it must
+    // change *something*: the bright specular highlights should glow.
+    let bloom_diff = graph_pixels
+        .iter()
+        .zip(&bloom_pixels)
+        .filter(|(a, b)| a != b)
+        .count();
+    let bloom_active = bloom_diff > 0;
+    save_png(
+        "target/render_graph_probe_bloom.png",
+        &bloom_pixels,
+        unpadded,
+    );
+
+    println!("--- bloom graph layout ---");
+    println!("{}", graph3d_bloom.layout_dump());
+    let bloom_slots = graph3d_bloom.pool_slots();
+    let bloom_bytes = graph3d_bloom.texture_budget();
+    println!("bloom pool slots: {bloom_slots}, budget: {bloom_bytes} bytes");
+    println!(
+        "bloom vs no-bloom: {bloom_diff} differing pixels (of {}), active: {bloom_active}",
+        graph_pixels.len()
+    );
 
     // ── Compare ───────────────────────────────────────────────────────
     let diff_count = legacy_pixels
@@ -334,16 +385,20 @@ async fn run(scene: &Scene) {
         "saved: {saved} bytes ({pct:.1}%) — {FRAMES}-frame pool stable: {pool_stable}, frames identical: {all_frames_stable}"
     );
 
-    if same && all_frames_stable && pool_stable {
+    if same && all_frames_stable && pool_stable && bloom_active {
         println!("PASS: legacy and render-graph paths are pixel-identical");
-        println!("PNGs: target/render_graph_probe_{{legacy,graph}}.png ({WIDTH}x{HEIGHT})");
+        println!(
+            "PASS: bloom chain is active (downsample/upsample/composite) with {bloom_slots} pool slots"
+        );
+        println!("PNGs: target/render_graph_probe_{{legacy,graph,bloom}}.png ({WIDTH}x{HEIGHT})");
     } else {
         println!(
             "FAIL: {diff_count} mismatching pixels, max byte diff {max_diff} (of {})",
             legacy_pixels.len()
         );
+        println!("bloom active: {bloom_active} ({bloom_diff} differing pixels vs no-bloom)");
         println!("frames identical: {all_frames_stable}, pool stable: {pool_stable}");
-        println!("PNGs: target/render_graph_probe_{{legacy,graph}}.png");
+        println!("PNGs: target/render_graph_probe_{{legacy,graph,bloom}}.png");
         std::process::exit(1);
     }
 }

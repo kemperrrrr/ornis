@@ -21,8 +21,8 @@ pub use render_graph::{
     ResourceLayout, SizePolicy, TextureSpec,
 };
 pub use renderer::{
-    CameraUniform, CompositePass, ForwardPass, GBufferTextures, GbufferTargets, InstanceData,
-    LightingPass, PerObjectGpu, Renderer3D,
+    CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,
+    InstanceData, LightingPass, PerObjectGpu, Renderer3D,
 };
 pub use shader::{
     COMPOSITE_FRAGMENT, COMPOSITE_VERTEX, GBUFFER_FRAGMENT, GBUFFER_VERTEX, LIGHTING_FRAGMENT,

@@ -30,8 +30,25 @@ use std::collections::HashMap;
 pub enum SizePolicy {
     /// Size matches the surface (swapchain) size.
     MatchSurface,
+    /// Surface size divided by a power-of-two divisor (mip chains, e.g.
+    /// bloom at 1/2, 1/4, 1/8). The result is floored and clamped to 1.
+    Fraction(u32),
     /// Fixed size.
     Fixed { width: u32, height: u32 },
+}
+
+impl SizePolicy {
+    /// Resolves the policy to a concrete (width, height) for a surface size.
+    pub fn resolve(&self, surface: (u32, u32)) -> (u32, u32) {
+        match *self {
+            SizePolicy::MatchSurface => surface,
+            SizePolicy::Fraction(divisor) => {
+                let divisor = divisor.max(1);
+                ((surface.0 / divisor).max(1), (surface.1 / divisor).max(1))
+            }
+            SizePolicy::Fixed { width, height } => (width, height),
+        }
+    }
 }
 
 /// Texture specification — the pool reuse key.

@@ -89,6 +89,47 @@ pub struct CompositePass {
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
+/// Inputs of the composite pass: the two HDR layers plus the bloom
+/// contribution (view + blend intensity). Grouped so the pass signature
+/// stays small as the mix gains terms.
+pub struct CompositeInputs<'a> {
+    pub target: &'a wgpu::TextureView,
+    pub hdr: &'a wgpu::TextureView,
+    pub hdr_fwd: &'a wgpu::TextureView,
+    pub bloom: &'a wgpu::TextureView,
+    pub bloom_intensity: f32,
+}
+
+/// Per-frame bloom parameters shared by the bloom passes and the composite
+/// pass. `threshold` gates the bright-pass (first downsample level only);
+/// `intensity` scales the bloom contribution in the composite pass.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BloomUniform {
+    threshold: f32,
+    intensity: f32,
+    _pad: [f32; 2],
+}
+
+impl Default for BloomUniform {
+    fn default() -> Self {
+        Self {
+            threshold: 0.0,
+            intensity: 1.0,
+            _pad: [0.0; 2],
+        }
+    }
+}
+
+/// Bloom pass pipelines: a downsample (replace-blend, clear) and an upsample
+/// (additive blend over a loaded target) sharing one fragment shader.
+pub struct BloomPass {
+    down_pipeline: wgpu::RenderPipeline,
+    up_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    params_buffer: wgpu::Buffer,
+}
+
 pub struct CompositeResources {
     pub sampler: wgpu::Sampler,
 }
@@ -117,6 +158,7 @@ pub struct Renderer3D {
     forward_pass: ForwardPass,
     composite_pass: CompositePass,
     composite_sampler: wgpu::Sampler,
+    bloom_pass: BloomPass,
 }
 
 impl Renderer3D {
@@ -347,6 +389,7 @@ impl Renderer3D {
             sample_count,
         );
         let composite_pass = Self::create_composite_pass(device, format);
+        let bloom_pass = Self::create_bloom_pass(device);
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -381,6 +424,7 @@ impl Renderer3D {
             forward_pass,
             composite_pass,
             composite_sampler,
+            bloom_pass,
         }
     }
 
@@ -1041,6 +1085,29 @@ impl Renderer3D {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            std::num::NonZeroU64::new(std::mem::size_of::<BloomUniform>() as u64)
+                                .unwrap(),
+                        ),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1092,6 +1159,140 @@ impl Renderer3D {
             pipeline,
             bind_group_layout,
         }
+    }
+
+    fn create_bloom_pass(device: &wgpu::Device) -> BloomPass {
+        let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bloom fragment"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::bloom_fragment())),
+        });
+        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bloom vertex"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::composite_vertex())),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bloom bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            std::num::NonZeroU64::new(std::mem::size_of::<BloomUniform>() as u64)
+                                .unwrap(),
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bloom pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bloom params buffer"),
+            contents: bytemuck::bytes_of(&BloomUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Downsample: replace-blend, target is cleared first.
+        let down_pipeline =
+            Self::bloom_pipeline(device, &pipeline_layout, &fs_module, &vs_module, None);
+        // Upsample: additive blend over the loaded previous level.
+        let up_pipeline = Self::bloom_pipeline(
+            device,
+            &pipeline_layout,
+            &fs_module,
+            &vs_module,
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+        );
+
+        BloomPass {
+            down_pipeline,
+            up_pipeline,
+            bind_group_layout,
+            params_buffer,
+        }
+    }
+
+    fn bloom_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        fs_module: &wgpu::ShaderModule,
+        vs_module: &wgpu::ShaderModule,
+        blend: Option<wgpu::BlendState>,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bloom pipeline"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: vs_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: fs_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -1479,26 +1680,47 @@ impl Renderer3D {
     pub fn render_composite(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        hdr: &wgpu::TextureView,
-        hdr_fwd: &wgpu::TextureView,
+        inputs: CompositeInputs<'_>,
     ) {
+        // The bloom view is bound unconditionally; a zero intensity makes the
+        // contribution null, so the legacy path (`render_scene`) stays
+        // pixel-identical to the graph path with bloom culled.
+        queue.write_buffer(
+            &self.bloom_pass.params_buffer,
+            0,
+            bytemuck::bytes_of(&BloomUniform {
+                threshold: 0.0,
+                intensity: inputs.bloom_intensity,
+                _pad: [0.0; 2],
+            }),
+        );
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bind group"),
             layout: &self.composite_pass.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(hdr),
+                    resource: wgpu::BindingResource::TextureView(inputs.hdr),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(hdr_fwd),
+                    resource: wgpu::BindingResource::TextureView(inputs.hdr_fwd),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(inputs.bloom),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(
+                        self.bloom_pass.params_buffer.slice(..).into(),
+                    ),
                 },
             ],
         });
@@ -1506,7 +1728,7 @@ impl Renderer3D {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: inputs.target,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -1533,6 +1755,7 @@ impl Renderer3D {
     pub fn render_scene(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         mesh: &Mesh,
@@ -1557,10 +1780,128 @@ impl Renderer3D {
         );
         self.render_composite(
             device,
+            queue,
             encoder,
-            target,
-            &self.pbr_texture_view,
-            &self.forward_pass.color_view,
+            CompositeInputs {
+                target,
+                hdr: &self.pbr_texture_view,
+                hdr_fwd: &self.forward_pass.color_view,
+                bloom: &self.pbr_texture_view,
+                bloom_intensity: 0.0,
+            },
         );
+    }
+
+    /// Downsample pass of the bloom chain: thresholded for the first level,
+    /// plain downsample for deeper levels (`threshold` = 0 passes everything
+    /// except pure black). Writes into `dst` with a replace blend.
+    pub fn render_bloom_down(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &wgpu::TextureView,
+        dst: &wgpu::TextureView,
+        threshold: f32,
+    ) {
+        queue.write_buffer(
+            &self.bloom_pass.params_buffer,
+            0,
+            bytemuck::bytes_of(&BloomUniform {
+                threshold,
+                intensity: 0.0,
+                _pad: [0.0; 2],
+            }),
+        );
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom down bind group"),
+            layout: &self.bloom_pass.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(
+                        self.bloom_pass.params_buffer.slice(..).into(),
+                    ),
+                },
+            ],
+        });
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bloom down pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        rpass.set_pipeline(&self.bloom_pass.down_pipeline);
+        rpass.set_bind_group(0, &bind_group, &[]);
+        rpass.draw(0..4, 0..1);
+    }
+
+    /// Upsample pass of the bloom chain: samples `src`, adds the result over
+    /// the *loaded* contents of `dst` (additive blend) — the classic
+    /// "upsample with add" cascade that recombines the levels.
+    pub fn render_bloom_up(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &wgpu::TextureView,
+        dst: &wgpu::TextureView,
+    ) {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom up bind group"),
+            layout: &self.bloom_pass.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(
+                        self.bloom_pass.params_buffer.slice(..).into(),
+                    ),
+                },
+            ],
+        });
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bloom up pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        rpass.set_pipeline(&self.bloom_pass.up_pipeline);
+        rpass.set_bind_group(0, &bind_group, &[]);
+        rpass.draw(0..4, 0..1);
     }
 }

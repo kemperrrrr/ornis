@@ -108,6 +108,7 @@ pub mod renderer3d_backend {
             Renderer3D::render_scene(
                 self,
                 context.device,
+                context.queue,
                 context.encoder,
                 context.target,
                 mesh,
