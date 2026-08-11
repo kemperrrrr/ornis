@@ -110,11 +110,11 @@ cargo xtask mutants           # мутационное тестирование 
 
 | Фича | Статус | Комментарий |
 |---|---|---|
-| `Renderer3D` (forward) + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, ACES) | ✅ | `crates/render/src/` |
+| `Renderer3D` + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, ACES) | ✅ | `crates/render/src/` |
 | OpenPBR-материал (20 vec4 параметров, все BSDF) | ✅ | `crates/render/src/material.rs` |
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
-| Deferred/Forward hybrid (G-buffer, lighting pass, переключение бэкендов) | ❌ | есть только forward-рендерер + composite-проход |
+| Render Graph: `RenderGraph3D` + `Technique` (forward/deferred/hybrid как конфигурация графа) + блум-каскад | ✅ | `crates/render/src/render_graph.rs`, `graph_frame.rs`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 
@@ -228,10 +228,9 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
   - **forward-проход** + структуры **G-buffer** (`GBufferTextures`: albedo,
     normal, material_id, world_position, material_params, depth) и pipeline'ы
     `ForwardPass` / `LightingPass` / `CompositePass`.
-    ⚠️ *Примечание для ревью: в README выше (раздел «Рендер») отмечено
-    «Deferred/Forward hybrid — ❌, есть только forward + composite», но в коде
-    G-buffer/lighting-структуры присутствуют. Нужно уточнить, что реально
-    в пайплайне (активен ли gbuffer-путь, или это только каркас).*
+    ✅ *Спор forward vs deferred закрыт (см. раздел «Рендер»): техника — это
+    конфигурация render graph (`Technique`), все три ветки верифицированы
+    probe-диффами (гибрид == legacy пиксель-в-пиксель).*
   - Uniform'ы: `CameraUniform` (view_proj, inv_view_proj, cam_pos),
     `PerObjectGpu` (model, normal_matrix, material_index), `GpuLight`+`LightingUniform`
     (ambient + до 4 направленных источников), `InstanceData`.
@@ -254,7 +253,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 - Тесты в `mod.rs`: падение сферы, статика не падает, сфера-сфера, box-box, raycast на сферу.
 
 ### A3. Открытые вопросы для ревью
-1. Рендер: активен ли G-buffer/lighting-путь или только forward? Уточнить README (deferred: 🟡 каркас /❌ не в пайплайне).
+1. ~~Рендер: активен ли G-buffer/lighting-путь или только forward?~~ **Закрыто в Фазе 4** — render graph c `Technique` (forward/deferred/hybrid), гибрид == legacy пиксель-в-пиксель.
 2. Физика: какие связки (joints) нужны в первую очередь (revolute/ball), нужен ли CCD для быстрых тел.
 3. `shapecast` — пустая заглушка; планируется ли честная реализация или достаточно raycast+sphere-cast.
 4. Движок рендера и физики не связаны с ECS-сценой в браузере (см. План B в PLAN.md).
