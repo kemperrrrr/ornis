@@ -177,13 +177,26 @@ API (rustdoc) и релизная упаковка.
   forward/hybrid/deferred как конфигурация графа.
   Разбор: [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md);
   идея: IDEAS.md §27.
-  **Статус (2026-08-11, подтверждено ревью): фазы 0–2 выполнены** —
+  **Статус (2026-08-11, подтверждено ревью): фазы 0–4 выполнены** —
   каркас `render_graph.rs` + исполнитель `graph_frame.rs` (`GraphExecutor`,
   `RenderGraph3D`; 4 пасса как узлы, pass-тела на `GbufferTargets`).
   Фаза 2: `texture_budget()` — legacy 8 постоянных текстур vs пул 7
   слотов, −20,0% на 1280×720; мёртвые depth-текстуры удалены; пул
   стабилен 16 кадров. Верификация `render_graph_probe`: legacy vs graph
   пути пиксельно идентичны, 9 ресурсов → 7 слотов пула.
+  Фаза 3 — блум как первый новый узел: каскад down0(½, bright-pass 0.7)→
+  down1(¼)→down2(⅛)→up1→up0 (ADD поверх Load), composite смешивает bloom
+  перед tonemap; bloom-off пиксельно = legacy, bloom-on: 267 103 px
+  изменены, слоты 7→10 (+3 уровня), бюджет +3,8 MB. Фаза 4 —
+  переключатель техники как конфигурация графа: `Technique { Forward,
+  Deferred, Hybrid }` → `RenderGraph3D::new_with(format, size, technique,
+  bloom)`; узлы gbuffer/lighting/forward добавляются по флагу,
+  composite-шейдер смешивает по `mode` uniform (0/1/2), в forward-only
+  пасс сам владеет depth, блум читает живую HDR-текстуру. Probe:
+  deferred-only == legacy (0 отличий), forward-only: 137 164 px отличий,
+  2 слота / 10,6 MB (−62%), свой блум активен; hybrid без регрессий.
+  Тесты 30/30, quality PASS. Статус-описание: §9
+  `docs/rendering/render-graph.md`.
 
 ### B2. Физика (`crates/physics`) — план работ
 
