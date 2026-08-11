@@ -39,8 +39,10 @@ HTTP-сервер на порту 3420 и раздаёт фронтенд из `
 
 ```bash
 cargo xtask quality           # уровень 1: fmt, clippy -D warnings, test, audit, deny, outdated
+cargo xtask quality --ci      # + rustdoc и wasm32 check — ровно то, что гоняет GitHub CI
 cargo xtask quality --full    # + покрытие (llvm-cov → target/llvm-cov/html) и bench compile-check
 cargo xtask quality --bench   # + полный прогон criterion-бенчмарков (долго)
+cargo xtask quality --everything  # всё сразу: --ci + --full + --bench + mutants + fuzz smoke
 cargo xtask fuzz <target>     # фаззинг парсеров: scene_ron, materialx_parse (через +nightly)
 cargo xtask mutants           # мутационное тестирование ornis-core (cargo-mutants, долго)
 ```
@@ -55,8 +57,11 @@ cargo xtask mutants           # мутационное тестирование 
 - Фаззинг: `fuzz/` — независимый cargo-fuzz крейт (не в workspace),
   запуск `cargo +nightly fuzz run <target>` (rust-toolchain.toml пинит
   stable, поэтому `+nightly` указывается явно).
-- CI: `.github/workflows/quality.yml` — три job (quality, wasm-check,
-  supply-chain) на push/PR в `master`.
+- CI: `.github/workflows/quality.yml` — одна job на push/PR в `master`:
+  только установка окружения (системные пакеты, toolchain 1.97, wasm
+  target, cargo-deny/audit/outdated) и один шаг `cargo xtask quality --ci`.
+  xtask — единственный источник правды о составе гейта: локально и в CI
+  выполняется одна и та же команда.
 
 Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md)
 и [`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md).
