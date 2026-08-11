@@ -235,6 +235,46 @@ pub struct RenderGraph3D {
     executor: GraphExecutor,
     ids: GraphIds,
     bloom: bool,
+    technique: Technique,
+}
+
+/// Which lighting technique the graph wires up. The choice is expressed
+/// purely as which nodes get added — `gbuffer`/`lighting` appear for
+/// deferred work, `forward` for forward work; the composite pass mixes
+/// whichever layers exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Technique {
+    /// Only the forward node: mesh → composite. No G-buffer, no lighting
+    /// pass; best for cheap scenes or weak GPUs.
+    Forward,
+    /// Only the deferred chain: gbuffer → lighting → composite. The
+    /// forward layer is dropped, so transparency needs another future node.
+    Deferred,
+    /// Both: opaque lighting through the G-buffer, extra forward work on
+    /// top — the engine's classic path.
+    Hybrid,
+}
+
+impl Technique {
+    /// Whether the `gbuffer`/`lighting` nodes exist for this technique.
+    pub fn has_deferred(&self) -> bool {
+        !matches!(self, Self::Forward)
+    }
+
+    /// Whether the `forward` node exists for this technique.
+    pub fn has_forward(&self) -> bool {
+        !matches!(self, Self::Deferred)
+    }
+
+    /// Composite shader mode: 0 = deferred-only, 1 = forward-only,
+    /// 2 = hybrid (deferred + forward over it).
+    fn composite_mode(&self) -> u32 {
+        match self {
+            Self::Forward => 1,
+            Self::Deferred => 0,
+            Self::Hybrid => 2,
+        }
+    }
 }
 
 /// Resource handles of the [`RenderGraph3D`] graph.
@@ -262,7 +302,7 @@ impl RenderGraph3D {
     /// (the lighting pass writes into it); `surface_size` seeds
     /// `SizePolicy::MatchSurface` resources.
     pub fn new(surface_format: wgpu::TextureFormat, surface_size: (u32, u32)) -> Self {
-        Self::build(surface_format, surface_size, false)
+        Self::new_with(surface_format, surface_size, Technique::Hybrid, false)
     }
 
     /// Like [`new`](Self::new), plus the bloom cascade:
@@ -273,10 +313,20 @@ impl RenderGraph3D {
     /// The composite pass then mixes the final bloom level into the HDR
     /// result.
     pub fn new_with_bloom(surface_format: wgpu::TextureFormat, surface_size: (u32, u32)) -> Self {
-        Self::build(surface_format, surface_size, true)
+        Self::new_with(surface_format, surface_size, Technique::Hybrid, true)
     }
 
-    fn build(surface_format: wgpu::TextureFormat, surface_size: (u32, u32), bloom: bool) -> Self {
+    /// Builds the graph for a specific [`Technique`] with optional bloom.
+    /// The technique decides which nodes are wired: deferred nodes
+    /// (`gbuffer`, `lighting`) exist only when [`Technique::has_deferred`],
+    /// the `forward` node only when [`Technique::has_forward`], and the
+    /// bloom chain reads whichever HDR layer the technique produces.
+    pub fn new_with(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: bool,
+    ) -> Self {
         let mut graph = RenderGraph::new(surface_size);
         let spec = |format| TextureSpec {
             format,
@@ -304,33 +354,50 @@ impl RenderGraph3D {
             bloom1: graph.create_resource("bloom1", frac(wgpu::TextureFormat::Rgba16Float, 4)),
             bloom2: graph.create_resource("bloom2", frac(wgpu::TextureFormat::Rgba16Float, 8)),
         };
-        graph
-            .add_pass("gbuffer")
-            .write(ids.albedo)
-            .write(ids.normal)
-            .write(ids.material_id)
-            .write(ids.world_position)
-            .write(ids.material_params)
-            .write(ids.depth);
-        graph
-            .add_pass("lighting")
-            .read(ids.albedo)
-            .read(ids.normal)
-            .read(ids.material_id)
-            .read(ids.world_position)
-            .read(ids.material_params)
-            .read(ids.depth)
-            .write_clear(ids.hdr, wgpu::Color::BLACK);
-        graph
-            .add_pass("forward")
-            .read(ids.depth)
-            .write_clear(ids.hdr_fwd, wgpu::Color::TRANSPARENT);
+        if technique.has_deferred() {
+            graph
+                .add_pass("gbuffer")
+                .write(ids.albedo)
+                .write(ids.normal)
+                .write(ids.material_id)
+                .write(ids.world_position)
+                .write(ids.material_params)
+                .write(ids.depth);
+            graph
+                .add_pass("lighting")
+                .read(ids.albedo)
+                .read(ids.normal)
+                .read(ids.material_id)
+                .read(ids.world_position)
+                .read(ids.material_params)
+                .read(ids.depth)
+                .write_clear(ids.hdr, wgpu::Color::BLACK);
+        }
+        if technique.has_forward() {
+            // In forward-only mode the depth comes from this pass itself;
+            // in hybrid it was already filled by the gbuffer pass.
+            let pass = graph.add_pass("forward");
+            let pass = if technique == Technique::Forward {
+                pass.write_clear(ids.depth, wgpu::Color::WHITE)
+            } else {
+                pass.read(ids.depth)
+            };
+            pass.write_clear(ids.hdr_fwd, wgpu::Color::TRANSPARENT);
+        }
+        // The bloom chain's bright-pass input is the HDR layer the active
+        // technique produced: `hdr` (deferred/hybrid) or `hdr_fwd`
+        // (forward-only).
+        let bloom_input = if technique.has_deferred() {
+            ids.hdr
+        } else {
+            ids.hdr_fwd
+        };
         if bloom {
             // Bright-pass threshold: only the brightest pixels survive the
             // first downsample; deeper levels pass everything (threshold 0).
             graph
                 .add_pass("bloom_down0")
-                .read(ids.hdr)
+                .read(bloom_input)
                 .write_clear(ids.bloom0, wgpu::Color::BLACK);
             graph
                 .add_pass("bloom_down1")
@@ -349,11 +416,16 @@ impl RenderGraph3D {
                 .read(ids.bloom1)
                 .write(ids.bloom0);
         }
-        let composite = graph
-            .add_pass("composite")
-            .read(ids.hdr)
-            .read(ids.hdr_fwd)
-            .write(ids.target);
+        let mut composite = graph.add_pass("composite").write(ids.target);
+        // The composite shader always bind two HDR inputs; the graph only
+        // wires the ones this technique produces, and the executor feeds
+        // the live view into both slots.
+        if technique.has_deferred() {
+            composite = composite.read(ids.hdr);
+        }
+        if technique.has_forward() {
+            composite = composite.read(ids.hdr_fwd);
+        }
         if bloom {
             composite.read(ids.bloom0);
         }
@@ -362,6 +434,7 @@ impl RenderGraph3D {
             executor: GraphExecutor::new(),
             ids,
             bloom,
+            technique,
         }
     }
 
@@ -408,6 +481,7 @@ impl RenderGraph3D {
             executor,
             ids,
             bloom,
+            technique,
         } = self;
         let crate::render_backend::RenderContext {
             device,
@@ -441,15 +515,29 @@ impl RenderGraph3D {
                     pass.view_of(ids.hdr_fwd),
                     mesh,
                     instance_count,
+                    // In forward-only mode this pass owns the depth buffer
+                    // and must clear it; in hybrid the gbuffer pass did.
+                    *technique == Technique::Forward,
                 ),
-                "bloom_down0" => renderer.render_bloom_down(
-                    device,
-                    queue,
-                    encoder,
-                    pass.view_of(ids.hdr),
-                    pass.view_of(ids.bloom0),
-                    BLOOM_BRIGHT_THRESHOLD,
-                ),
+                "bloom_down0" => {
+                    // The bright-pass input is the HDR layer this technique
+                    // produced: `hdr` (deferred/hybrid) or `hdr_fwd`
+                    // (forward-only). The other layer is dead and has no
+                    // view to bind.
+                    let input = if technique.has_deferred() {
+                        pass.view_of(ids.hdr)
+                    } else {
+                        pass.view_of(ids.hdr_fwd)
+                    };
+                    renderer.render_bloom_down(
+                        device,
+                        queue,
+                        encoder,
+                        input,
+                        pass.view_of(ids.bloom0),
+                        BLOOM_BRIGHT_THRESHOLD,
+                    );
+                }
                 "bloom_down1" => renderer.render_bloom_down(
                     device,
                     queue,
@@ -479,13 +567,27 @@ impl RenderGraph3D {
                     pass.view_of(ids.bloom0),
                 ),
                 "composite" => {
-                    // With bloom culled (no bloom passes), `bloom0` is never
-                    // written → not alive here; bind the forward target as a
-                    // stub with zero intensity, exactly like `render_scene`.
+                    // The shader always reads two HDR inputs and picks the
+                    // mix by `mode`. A dead layer has no pool view, so its
+                    // slot receives the live layer instead — the mode tells
+                    // the shader which one to trust. Same for bloom: when
+                    // culled, `bloom0` is never written → bind the forward
+                    // target as a stub with zero intensity.
+                    let (hdr, hdr_fwd) = if technique.has_deferred() {
+                        if technique.has_forward() {
+                            (pass.view_of(ids.hdr), pass.view_of(ids.hdr_fwd))
+                        } else {
+                            // Deferred-only: forward is dead, duplicate hdr.
+                            (pass.view_of(ids.hdr), pass.view_of(ids.hdr))
+                        }
+                    } else {
+                        // Forward-only: hdr is dead, duplicate hdr_fwd.
+                        (pass.view_of(ids.hdr_fwd), pass.view_of(ids.hdr_fwd))
+                    };
                     let (bloom, bloom_intensity) = if *bloom {
                         (pass.view_of(ids.bloom0), 1.0)
                     } else {
-                        (pass.view_of(ids.hdr_fwd), 0.0)
+                        (hdr_fwd, 0.0)
                     };
                     renderer.render_composite(
                         device,
@@ -493,10 +595,11 @@ impl RenderGraph3D {
                         encoder,
                         CompositeInputs {
                             target: pass.view_of(ids.target),
-                            hdr: pass.view_of(ids.hdr),
-                            hdr_fwd: pass.view_of(ids.hdr_fwd),
+                            hdr,
+                            hdr_fwd,
                             bloom,
                             bloom_intensity,
+                            mode: technique.composite_mode(),
                         },
                     );
                 }
@@ -522,6 +625,154 @@ mod tests {
         assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Rgba16Float), 8);
         assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Depth32Float), 4);
         assert_eq!(format_bytes_per_pixel(wgpu::TextureFormat::Rgba32Float), 16);
+    }
+
+    #[test]
+    fn technique_flag_matrix() {
+        // Forward: no gbuffer/lighting, forward node present.
+        assert!(!Technique::Forward.has_deferred());
+        assert!(Technique::Forward.has_forward());
+        assert_eq!(Technique::Forward.composite_mode(), 1);
+        // Deferred: deferred chain only, no forward node.
+        assert!(Technique::Deferred.has_deferred());
+        assert!(!Technique::Deferred.has_forward());
+        assert_eq!(Technique::Deferred.composite_mode(), 0);
+        // Hybrid: both node sets.
+        assert!(Technique::Hybrid.has_deferred());
+        assert!(Technique::Hybrid.has_forward());
+        assert_eq!(Technique::Hybrid.composite_mode(), 2);
+    }
+
+    #[test]
+    fn technique_wires_expected_passes() {
+        let pass_names = |technique: Technique| {
+            let graph =
+                RenderGraph3D::new_with(wgpu::TextureFormat::Rgba8Unorm, (32, 32), technique, true);
+            graph
+                .graph
+                .build()
+                .passes
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            pass_names(Technique::Forward),
+            vec![
+                "forward",
+                "bloom_down0",
+                "bloom_down1",
+                "bloom_down2",
+                "bloom_up1",
+                "bloom_up0",
+                "composite"
+            ]
+        );
+        assert_eq!(
+            pass_names(Technique::Deferred),
+            vec![
+                "gbuffer",
+                "lighting",
+                "bloom_down0",
+                "bloom_down1",
+                "bloom_down2",
+                "bloom_up1",
+                "bloom_up0",
+                "composite"
+            ]
+        );
+        assert_eq!(
+            pass_names(Technique::Hybrid),
+            vec![
+                "gbuffer",
+                "lighting",
+                "forward",
+                "bloom_down0",
+                "bloom_down1",
+                "bloom_down2",
+                "bloom_up1",
+                "bloom_up0",
+                "composite"
+            ]
+        );
+    }
+
+    #[test]
+    fn technique_bloom_input_follows_hdr_layer() {
+        // Forward-only: bloom's bright-pass input is `hdr_fwd` (hdr dead).
+        let forward = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Forward,
+            true,
+        );
+        let layout = forward.graph.build();
+        let down0 = layout
+            .passes
+            .iter()
+            .find(|p| p.name == "bloom_down0")
+            .expect("bloom_down0 exists");
+        assert_eq!(down0.reads, vec![forward.ids.hdr_fwd]);
+        // Hybrid: bright-pass input is `hdr`.
+        let hybrid = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Hybrid,
+            true,
+        );
+        let layout = hybrid.graph.build();
+        let down0 = layout
+            .passes
+            .iter()
+            .find(|p| p.name == "bloom_down0")
+            .expect("bloom_down0 exists");
+        assert_eq!(down0.reads, vec![hybrid.ids.hdr]);
+    }
+
+    #[test]
+    fn technique_forward_owns_depth_in_forward_mode() {
+        let forward = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Forward,
+            false,
+        );
+        let layout = forward.graph.build();
+        let fwd = layout
+            .passes
+            .iter()
+            .find(|p| p.name == "forward")
+            .expect("forward pass exists");
+        // Depth is cleared (owned) by the forward pass itself.
+        assert!(
+            fwd.writes
+                .iter()
+                .any(|(id, clear)| *id == forward.ids.depth && clear.is_some())
+        );
+        // Composite reads only the forward layer — hdr stays dead/unpooled.
+        let composite = layout
+            .passes
+            .iter()
+            .find(|p| p.name == "composite")
+            .expect("composite exists");
+        assert_eq!(
+            composite.reads,
+            vec![forward.ids.hdr_fwd, forward.ids.target]
+                .into_iter()
+                .filter(|id| *id != forward.ids.target)
+                .collect::<Vec<_>>(),
+            "composite reads the live layers only"
+        );
+        assert!(!composite.reads.contains(&forward.ids.hdr));
+        // hdr and the gbuffer targets are never touched → not pooled.
+        let dead = layout
+            .resources
+            .iter()
+            .filter(|r| r.first_use == usize::MAX)
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(dead.contains(&"hdr"));
+        assert!(dead.contains(&"albedo"));
     }
 
     #[test]

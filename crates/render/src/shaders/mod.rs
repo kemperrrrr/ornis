@@ -42,7 +42,8 @@ struct Camera {
 struct BloomParams {
     threshold: f32,
     intensity: f32,
-    _pad: vec2<f32>,
+    mode: u32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var deferred_tex: texture_2d<f32>;
@@ -80,7 +81,15 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;
     let forward_color = textureSample(forward_tex, composite_sampler, uv).rgba;
 
-    let combined = deferred_color + forward_color.rgb * forward_color.a;
+    // Layer mix depends on the technique: 0 = deferred-only, 1 = forward-only,
+    // 2 = hybrid. The dead layer is bound to the live one, so the mode is
+    // what disambiguates the two inputs.
+    var combined = deferred_color;
+    if (bloom_params.mode == 1u) {
+        combined = forward_color.rgb * forward_color.a;
+    } else if (bloom_params.mode == 2u) {
+        combined = deferred_color + forward_color.rgb * forward_color.a;
+    }
     let bloom = textureSample(bloom_tex, composite_sampler, uv).rgb;
     let tonemapped = aces_tonemap(combined + bloom * bloom_params.intensity);
 
@@ -113,7 +122,8 @@ const BLOOM_FRAGMENT_BOILERPLATE: &str = r#"
 struct BloomParams {
     threshold: f32,
     intensity: f32,
-    _pad: vec2<f32>,
+    mode: u32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;

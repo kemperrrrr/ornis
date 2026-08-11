@@ -91,24 +91,29 @@ pub struct CompositePass {
 
 /// Inputs of the composite pass: the two HDR layers plus the bloom
 /// contribution (view + blend intensity). Grouped so the pass signature
-/// stays small as the mix gains terms.
+/// stays small as the mix gains terms. `mode` selects the blend in the
+/// shader: 0 = deferred-only, 1 = forward-only, 2 = hybrid.
 pub struct CompositeInputs<'a> {
     pub target: &'a wgpu::TextureView,
     pub hdr: &'a wgpu::TextureView,
     pub hdr_fwd: &'a wgpu::TextureView,
     pub bloom: &'a wgpu::TextureView,
     pub bloom_intensity: f32,
+    pub mode: u32,
 }
 
 /// Per-frame bloom parameters shared by the bloom passes and the composite
 /// pass. `threshold` gates the bright-pass (first downsample level only);
 /// `intensity` scales the bloom contribution in the composite pass.
+/// `mode` (composite only) picks the layer mix: 0 = deferred-only,
+/// 1 = forward-only, 2 = hybrid.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BloomUniform {
     threshold: f32,
     intensity: f32,
-    _pad: [f32; 2],
+    mode: u32,
+    _pad: f32,
 }
 
 impl Default for BloomUniform {
@@ -116,7 +121,8 @@ impl Default for BloomUniform {
         Self {
             threshold: 0.0,
             intensity: 1.0,
-            _pad: [0.0; 2],
+            mode: 0,
+            _pad: 0.0,
         }
     }
 }
@@ -1640,7 +1646,16 @@ impl Renderer3D {
         output: &wgpu::TextureView,
         mesh: &Mesh,
         instance_count: u32,
+        clear_depth: bool,
     ) {
+        let depth_ops = wgpu::Operations {
+            load: if clear_depth {
+                wgpu::LoadOp::Clear(1.0)
+            } else {
+                wgpu::LoadOp::Load
+            },
+            store: wgpu::StoreOp::Store,
+        };
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("forward pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1659,10 +1674,7 @@ impl Renderer3D {
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
+                depth_ops: Some(depth_ops),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -1693,7 +1705,8 @@ impl Renderer3D {
             bytemuck::bytes_of(&BloomUniform {
                 threshold: 0.0,
                 intensity: inputs.bloom_intensity,
-                _pad: [0.0; 2],
+                mode: inputs.mode,
+                _pad: 0.0,
             }),
         );
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1777,6 +1790,7 @@ impl Renderer3D {
             &self.forward_pass.color_view,
             mesh,
             instance_count,
+            false,
         );
         self.render_composite(
             device,
@@ -1788,6 +1802,8 @@ impl Renderer3D {
                 hdr_fwd: &self.forward_pass.color_view,
                 bloom: &self.pbr_texture_view,
                 bloom_intensity: 0.0,
+                // Legacy path always runs the hybrid mix.
+                mode: 2,
             },
         );
     }
@@ -1810,7 +1826,8 @@ impl Renderer3D {
             bytemuck::bytes_of(&BloomUniform {
                 threshold,
                 intensity: 0.0,
-                _pad: [0.0; 2],
+                mode: 0,
+                _pad: 0.0,
             }),
         );
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

@@ -12,7 +12,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::OpenPBRMaterial;
 use ornis_render::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
-use ornis_render::{InstanceData, RenderGraph3D, Renderer3D};
+use ornis_render::{InstanceData, RenderGraph3D, Renderer3D, Technique};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -331,19 +331,83 @@ async fn run(scene: &Scene) {
         graph_pixels.len()
     );
 
+    // ── Technique switch: same graph, different node wires ──────────
+    // Render every technique standalone; each gets its own graph, target
+    // and pool, so the slot/budget numbers are directly comparable.
+    let render_technique =
+        |technique: Technique, bloom: bool, label: &str| -> (Vec<u8>, u32, usize, u64, String) {
+            let (tex, view) = make_target(label);
+            let mut graph = RenderGraph3D::new_with(format, (WIDTH, HEIGHT), technique, bloom);
+            let mut encoder = device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+            graph.render(
+                ornis_render::render_backend::RenderContext {
+                    device: &device,
+                    queue: &queue,
+                    encoder: &mut encoder,
+                    target: &view,
+                },
+                &renderer,
+                &mesh,
+                instances.len() as u32,
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+            let (pixels, unpadded) = read_target(&tex, label);
+            let dump = graph.layout_dump();
+            let slots = graph.pool_slots();
+            let budget = graph.texture_budget();
+            (pixels, unpadded, slots, budget, dump)
+        };
+
+    let (fwd_pixels, _fwd_unpadded, fwd_slots, fwd_bytes, fwd_dump) =
+        render_technique(Technique::Forward, false, "probe forward target");
+    let (def_pixels, _def_unpadded, def_slots, def_bytes, def_dump) =
+        render_technique(Technique::Deferred, false, "probe deferred target");
+    // Forward + bloom: the bright-pass must read hdr_fwd (hdr is dead).
+    let (fwd_bloom, _fb_unpadded, fwd_b_slots, fwd_b_bytes, _fwd_b_dump) =
+        render_technique(Technique::Forward, true, "probe forward bloom target");
+    save_png(
+        "target/render_graph_probe_forward.png",
+        &fwd_pixels,
+        _fwd_unpadded,
+    );
+    save_png(
+        "target/render_graph_probe_deferred.png",
+        &def_pixels,
+        _def_unpadded,
+    );
+
+    // A technique switch must change the picture (no silent no-op), and
+    // the differences must be on the materials/geometry, not the whole
+    // frame turning black.
+    let fwd_vs_legacy = diff_count(&legacy_pixels, &fwd_pixels);
+    let def_vs_legacy = diff_count(&legacy_pixels, &def_pixels);
+    let fwd_active = fwd_slots <= 4;
+    let fwd_lookup_active = diff_count(&fwd_pixels, &fwd_bloom) > 0;
+
+    println!("--- forward technique ---");
+    println!("{fwd_dump}");
+    println!(
+        "forward slots: {fwd_slots}, budget: {fwd_bytes} bytes — differs from legacy: {fwd_vs_legacy} px"
+    );
+    println!("--- deferred technique ---");
+    println!("{def_dump}");
+    println!(
+        "deferred slots: {def_slots}, budget: {def_bytes} bytes — differs from legacy: {def_vs_legacy} px"
+    );
+    println!(
+        "forward bloom active: {fwd_lookup_active} ({fwd_b_slots} slots, {fwd_b_bytes} bytes)"
+    );
+
     // ── Compare ───────────────────────────────────────────────────────
-    let diff_count = legacy_pixels
-        .iter()
-        .zip(&graph_pixels)
-        .filter(|(a, b)| a != b)
-        .count();
+    let legacy_diff = diff_count(&legacy_pixels, &graph_pixels);
     let max_diff = legacy_pixels
         .iter()
         .zip(&graph_pixels)
         .map(|(a, b)| a.abs_diff(*b))
         .max()
         .unwrap_or(0);
-    let same = diff_count == 0;
+    let same = legacy_diff == 0;
 
     save_png(
         "target/render_graph_probe_legacy.png",
@@ -390,10 +454,45 @@ async fn run(scene: &Scene) {
         println!(
             "PASS: bloom chain is active (downsample/upsample/composite) with {bloom_slots} pool slots"
         );
-        println!("PNGs: target/render_graph_probe_{{legacy,graph,bloom}}.png ({WIDTH}x{HEIGHT})");
+        println!(
+            "PASS: technique switch — forward-only: {fwd_slots} slots/{fwd_bytes} B ({fwd_vs_legacy} px differ from legacy; bloom active: {fwd_lookup_active})"
+        );
+        println!(
+            "PASS: technique switch — deferred-only matches legacy pixel-for-pixel ({def_slots} slots, {def_bytes} B)"
+        );
+        let fwd_budget_ok = fwd_bytes < graph_bytes;
+        // Deferred keeps the gbuffer textures, so its budget equals hybrid
+        // (the forward layer aliases material_params there); it must not
+        // exceed it, though.
+        let def_budget_ok = def_bytes <= graph_bytes;
+        println!(
+            "technique budgets: hybrid {graph_bytes} B, forward {fwd_bytes} B (smaller: {fwd_budget_ok}), deferred {def_bytes} B (<= hybrid: {def_budget_ok})"
+        );
+        // deferred-only is the classic path → must equal legacy; forward-only
+        // must differ (it drops the gbuffer) and stay non-empty.
+        let def_is_legacy = def_vs_legacy == 0;
+        if !(fwd_active
+            && fwd_vs_legacy > 0
+            && def_is_legacy
+            && fwd_lookup_active
+            && fwd_budget_ok
+            && def_budget_ok)
+        {
+            println!("FAIL: technique matrix produced an inactive or budget-worse path");
+            println!(
+                "forward: active={fwd_active}, diff_vs_legacy={fwd_vs_legacy}, bloom={fwd_lookup_active}"
+            );
+            println!(
+                "deferred: diff_vs_legacy={def_vs_legacy} (must be 0 = legacy), <= hybrid budget: {def_budget_ok}"
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "PNGs: target/render_graph_probe_{{legacy,graph,bloom,forward,deferred}}.png ({WIDTH}x{HEIGHT})"
+        );
     } else {
         println!(
-            "FAIL: {diff_count} mismatching pixels, max byte diff {max_diff} (of {})",
+            "FAIL: {legacy_diff} mismatching pixels, max byte diff {max_diff} (of {})",
             legacy_pixels.len()
         );
         println!("bloom active: {bloom_active} ({bloom_diff} differing pixels vs no-bloom)");
@@ -401,6 +500,11 @@ async fn run(scene: &Scene) {
         println!("PNGs: target/render_graph_probe_{{legacy,graph,bloom}}.png");
         std::process::exit(1);
     }
+}
+
+/// Number of bytes that differ between two readback buffers.
+fn diff_count(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).filter(|(x, y)| x != y).count()
 }
 
 fn save_png(path: &str, pixels: &[u8], unpadded: u32) {

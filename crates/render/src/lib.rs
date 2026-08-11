@@ -10,7 +10,7 @@ pub mod shaders;
 pub mod transform;
 
 pub use composite::CompositePass as LegacyCompositePass;
-pub use graph_frame::{GraphExecutor, GraphIds, PassViews, RenderGraph3D};
+pub use graph_frame::{GraphExecutor, GraphIds, PassViews, RenderGraph3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use render_backend::{
