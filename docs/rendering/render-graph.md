@@ -162,9 +162,10 @@ pub struct PassContext<'a> {
 
 ---
 
-## 9. Статус реализации (2026-08-10, подтверждено ревью)
+## 9. Статус реализации (2026-08-11, подтверждено ревью)
 
 - **Фаза 0 — каркас** ✅: `render_graph.rs` — lifetime-окна, пул слотов (жадная интервальная раскладка), culling пассов, импортированные и внешние ресурсы; 10 юнит-тестов.
 - **Фаза 1 — исполнитель** ✅: `graph_frame.rs` — `GraphExecutor` (пул → реальные `wgpu::Texture`, внешние view для swapchain), `PassViews` (view_of с проверкой живости), `RenderGraph3D` (gbuffer → lighting → forward → composite как узлы). Pass-тела в `renderer.rs` параметризованы `GbufferTargets`; lighting собирает бинд-группу per-frame (gbuffer теперь transient-доступен).
-- **Верификация**: `examples/render_graph_probe.rs` — legacy и graph пути байт-в-байт идентичны (1280×720, 0 отличий из 3 686 400 байт); 9 ресурсов → 7 слотов (алиасинг `material_params` + `hdr_fwd` в слоте #4). `cargo xtask quality` — PASS.
-- Осталось: **Фаза 2** — замер пиковой памяти GPU до/после (профиль уже даёт число слотов), **Фаза 3** — первый новый узел (SSAO/блум), **Фаза 4** — переключатель forward/hybrid/deferred как конфигурация графа.
+- **Фаза 2 — budget памяти GPU** ✅: `Renderer3D::texture_budget()` (legacy: 8 постоянных текстур) vs `GraphExecutor`/`RenderGraph3D::texture_budget()` (пул: 7 слотов); `format_bytes_per_pixel()` (таблица форматов, 2 юнит-теста). Удалены мёртвые `depth_texture`/`depth_view` из `Renderer3D` (рабочий depth живёт в gbuffer MRT). 1280×720: legacy 36 864 000 B (35,2 MB) → graph 29 491 200 B (28,1 MB), **−20,0%** (ровно один `Rgba16Float`, слот #4).
+- **Верификация**: `examples/render_graph_probe.rs` — legacy и graph пути байт-в-байт идентичны (0 отличий из 3 686 400); 9 ресурсов → 7 слотов (алиасинг `material_params` + `hdr_fwd` в слоте #4); 16 кадров — пул стабилен, кадры идентичны. `cargo xtask quality` — PASS (тесты 26/26).
+- Осталось: **Фаза 3** — первый новый узел (**блум**), **Фаза 4** — переключатель forward/hybrid/deferred как конфигурация графа.
