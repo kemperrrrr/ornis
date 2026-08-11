@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   cargo xtask editor  [--skip-wasm] [--editor-dir <path>]
-//!   cargo xtask quality [--full] [--bench]
+//!   cargo xtask quality [--ci] [--full] [--bench] [--everything]
 //!   cargo xtask fuzz <target> [-- <libfuzzer args>]
 //!   cargo xtask mutants [-- <cargo-mutants args>]
 //!   cargo editor   [--skip-wasm] [--editor-dir <path>]   (alias)
@@ -44,10 +44,12 @@ fn usage(code: i32) -> ! {
          with the remote editor at http://127.0.0.1:3420\n      \
          --skip-wasm    reuse the existing editor/pkg build\n      \
          --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
-         quality [--full] [--bench]\n      \
-         Quality gate: fmt, clippy, test, audit, deny, outdated (level 1);\n      \
-         --full adds llvm-cov coverage + bench compile-check (level 2);\n      \
-         --bench runs the full criterion suite (long)\n  \
+         quality [--ci] [--full] [--bench] [--everything]\n      \
+                  Quality gate: fmt, clippy, test, audit, deny, outdated (level 1);\n      \
+                  --ci adds rustdoc + wasm32 check (the exact set CI runs);\n      \
+                  --full adds llvm-cov coverage + bench compile-check (level 2);\n      \
+                  --bench runs the full criterion suite (long);\n      \
+                  --everything = --ci + --full + --bench + mutants + fuzz smoke\n  \
          fuzz <target> [-- <args>]\n      \
          Run a cargo-fuzz target (scene_ron, materialx_parse) via +nightly\n  \
          mutants [-- <args>]\n      \

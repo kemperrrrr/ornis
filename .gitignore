@@ -18,3 +18,7 @@ bevy_editor_mockup/
 .hermes-tmp.*
 editor_test.html
 *.log
+
+# cargo-mutants output (regenerated on every run)
+/mutants.out/
+/mutants.out.old/

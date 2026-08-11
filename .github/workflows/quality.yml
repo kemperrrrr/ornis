@@ -10,8 +10,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Уровень 1: fmt, clippy -D warnings, test --workspace.
-  # Зеркалит `cargo xtask quality` (без audit/deny — они в отдельном job).
+  # Единственная джоба: ровно та же команда, что гоняется локально
+  # (`cargo xtask quality --ci`). xtask — единственный источник правды о
+  # составе гейта; этот файл занимается только установкой окружения
+  # (системные пакеты, toolchain, wasm target, cargo-инструменты).
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -32,50 +34,19 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: fmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: test
-        run: cargo test --workspace
-
-  # Проверка wasm-таргета редактора.
-  wasm-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.97
-
       # rust-toolchain.toml already declares the wasm target, but install it
       # explicitly so this job is correct even if the dtolnay action chooses
       # to ignore the file (it installs its own toolchain then).
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: cargo check (wasm32)
-        run: cargo check -p ornis-wasm --target wasm32-unknown-unknown
-
-  # Supply-chain: уязвимости (audit) и политика зависимостей (deny).
-  supply-chain:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
+      # Supply-chain-tools: same set `cargo xtask quality` expects locally.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-audit
+          tool: cargo-deny,cargo-audit,cargo-outdated
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo deny
-        run: cargo deny check
-
-      - name: cargo audit
-        run: cargo audit
+      # The one command. Locally: same flags, same result.
+      - name: Quality gate
+        run: cargo xtask quality --ci

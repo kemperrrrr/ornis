@@ -38,10 +38,14 @@ struct StageResult {
 pub fn quality(args: &[String]) {
     let mut full = false;
     let mut bench = false;
+    let mut ci = false;
+    let mut everything = false;
     for a in args {
         match a.as_str() {
             "--full" => full = true,
             "--bench" => bench = true,
+            "--ci" => ci = true,
+            "--everything" => everything = true,
             "-h" | "--help" => quality_usage(0),
             other => {
                 eprintln!("xtask quality: unknown flag '{other}'");
@@ -49,10 +53,24 @@ pub fn quality(args: &[String]) {
             }
         }
     }
+    // --everything implies all levels: level 2 (coverage + bench
+    // compile-check), criterion, the CI set (doc + wasm check) and
+    // the deep static-analysis stages (mutants, fuzz smoke).
+    if everything {
+        full = true;
+        bench = true;
+        ci = true;
+    }
 
     let root = crate::workspace_root();
     let mut results: Vec<StageResult> = Vec::new();
-    let total = 6 + usize::from(full) * 2 + usize::from(bench);
+    // The total is computed up-front so the stage numbering stays
+    // honest even when a deep stage is skipped (tool not installed).
+    let total = 6
+        + usize::from(ci) * 2
+        + usize::from(full) * 2
+        + usize::from(bench)
+        + usize::from(everything) * 2;
     let mut n = 0usize;
 
     // ── Level 1 (mandatory set) ───────────────────────────────
@@ -176,6 +194,100 @@ pub fn quality(args: &[String]) {
         ));
     }
 
+    // ── CI set (--ci): rustdoc + wasm target check ─────────────
+    // These two stages mirror what the GitHub Actions quality job
+    // runs; --ci makes the local gate identical to CI by construction.
+    if ci {
+        n += 1;
+        results.push(run_stage(
+            n,
+            total,
+            "doc",
+            "cargo doc --workspace --no-deps",
+            cmd(&root, "cargo", &["doc", "--workspace", "--no-deps"]),
+            false,
+        ));
+
+        n += 1;
+        if wasm_target_installed() {
+            results.push(run_stage(
+                n,
+                total,
+                "wasm-check",
+                "cargo check -p ornis-wasm --target wasm32-unknown-unknown",
+                cmd(
+                    &root,
+                    "cargo",
+                    &[
+                        "check",
+                        "-p",
+                        "ornis-wasm",
+                        "--target",
+                        "wasm32-unknown-unknown",
+                    ],
+                ),
+                false,
+            ));
+        } else {
+            results.push(skip_stage(
+                n,
+                total,
+                "wasm-check",
+                "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
+            ));
+        }
+    }
+
+    // ── Deep static analysis (--everything) ─────────────────────
+    // Long-running stages, only under the explicit deep flag.
+    if everything {
+        n += 1;
+        if cargo_subcommand_exists("mutants") {
+            results.push(run_stage(
+                n,
+                total,
+                "mutants (ornis-core)",
+                "cargo mutants -p ornis-core --timeout 300",
+                cmd(
+                    &root,
+                    "cargo",
+                    &["mutants", "-p", "ornis-core", "--timeout", "300"],
+                ),
+                false,
+            ));
+        } else {
+            results.push(skip_stage(
+                n,
+                total,
+                "mutants (ornis-core)",
+                "cargo-mutants not installed",
+            ));
+        }
+
+        n += 1;
+        if cargo_subcommand_exists("fuzz") && nightly_available() {
+            results.push(run_stage(
+                n,
+                total,
+                "fuzz smoke (scene_ron)",
+                "cargo +nightly fuzz run scene_ron -- -runs=200",
+                cmd(
+                    &root,
+                    "cargo",
+                    &["+nightly", "fuzz", "run", "scene_ron", "--", "-runs=200"],
+                ),
+                false,
+            ));
+        } else {
+            results.push(skip_stage(
+                n,
+                total,
+                "fuzz smoke (scene_ron)",
+                "cargo-fuzz or nightly toolchain missing",
+            ));
+        }
+    }
+
     print_summary(&results);
     if results.iter().any(|r| r.status == Status::Fail) {
         exit(1);
@@ -188,8 +300,11 @@ fn quality_usage(code: i32) -> ! {
          \n\
          USAGE:\n  \
          cargo xtask quality           quick set (level 1): fmt, clippy, test, audit, deny, outdated\n  \
+         cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
-         cargo xtask quality --bench   + full criterion benchmark run (slow)"
+         cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
+         cargo xtask quality --everything\n      \
+         everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)"
     );
     exit(code);
 }
@@ -306,6 +421,32 @@ fn cargo_subcommand_exists(sub: &str) -> bool {
     };
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(&binary).is_file()))
+        .unwrap_or(false)
+}
+
+/// Records a SKIP without spawning a command (no progress output).
+fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult {
+    eprintln!();
+    eprintln!("═══ [{index}/{total}] {name} ═══");
+    eprintln!("── {name}: SKIP ({note}) ──");
+    StageResult {
+        name: name.to_string(),
+        status: Status::Skip,
+        note: note.to_string(),
+    }
+}
+
+/// Whether the wasm32-unknown-unknown target is installed for the
+/// active toolchain (`rustup target list --installed`).
+fn wasm_target_installed() -> bool {
+    Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| l.trim().starts_with("wasm32-unknown-unknown"))
+        })
         .unwrap_or(false)
 }
 
