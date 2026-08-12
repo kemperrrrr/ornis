@@ -247,11 +247,19 @@ pub fn quality(args: &[String]) {
                 n,
                 total,
                 "mutants (ornis-core)",
-                "cargo mutants -p ornis-core --timeout 300",
+                "cargo mutants -p ornis-core --features lock-free --timeout 300",
                 cmd(
                     &root,
                     "cargo",
-                    &["mutants", "-p", "ornis-core", "--timeout", "300"],
+                    &[
+                        "mutants",
+                        "-p",
+                        "ornis-core",
+                        "--features",
+                        "lock-free",
+                        "--timeout",
+                        "300",
+                    ],
                 ),
                 false,
             ));
@@ -533,12 +541,14 @@ pub fn mutants(args: &[String]) {
     c.arg("mutants")
         .arg("-p")
         .arg("ornis-core")
+        .arg("--features")
+        .arg("lock-free")
         .arg("--timeout")
         .arg("300")
         .args(&extra)
         .current_dir(&root);
     eprintln!(
-        "xtask mutants: cargo mutants -p ornis-core --timeout 300 {}",
+        "xtask mutants: cargo mutants -p ornis-core --features lock-free --timeout 300 {}",
         extra.join(" ")
     );
     let status = c

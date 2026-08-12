@@ -115,7 +115,10 @@ impl LockFreeStore {
         let guard = crossbeam_epoch::pin();
         let lane = self.lanes.get(&tid)?;
         let inner = lane.as_any().downcast_ref::<LaneInner<T>>().unwrap();
-        let store_ref: &ComponentStore<T> = inner.read(&guard);
+        // Safety: `guard` is moved into the returned LockFreeReadGuard,
+        // so the epoch pin outlives the reference loaded from the lane.
+        let store_ptr: *const ComponentStore<T> = inner.read(&guard);
+        let store_ref: &ComponentStore<T> = unsafe { &*store_ptr };
         Some(LockFreeReadGuard {
             store: store_ref,
             _guard: guard,
@@ -159,5 +162,54 @@ mod tests {
         assert!(!store.is_alive(e));
         let guard = store.read_lane::<f32>().unwrap();
         assert!(guard.get(e).is_none());
+    }
+
+    #[test]
+    fn register_creates_readable_lane() {
+        let mut store = LockFreeStore::new();
+        store.register::<u32>();
+        // A registered lane must be readable even before any insert.
+        let guard = store.read_lane::<u32>();
+        assert!(guard.is_some());
+    }
+
+    #[test]
+    fn insert_overwrite_read_back() {
+        let mut store = LockFreeStore::new();
+        let e = store.create_entity();
+
+        store.insert::<f32>(e, 1.0);
+        store.insert::<f32>(e, 2.0);
+
+        let guard = store.read_lane::<f32>().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard.get(e), Some(&2.0));
+    }
+
+    #[test]
+    fn deref_exposes_lane_data() {
+        let mut store = LockFreeStore::new();
+        let e = store.create_entity();
+        store.insert::<f32>(e, 7.5);
+
+        let guard = store.read_lane::<f32>().unwrap();
+        // Deref must reach the real lane, not an empty default store.
+        assert_eq!((*guard).get(e), Some(&7.5));
+    }
+
+    #[test]
+    fn destroy_entity_removes_from_all_lanes() {
+        let mut store = LockFreeStore::new();
+        let e = store.create_entity();
+        store.insert::<f32>(e, 1.0);
+        store.insert::<u64>(e, 2);
+
+        store.destroy_entity(e);
+
+        let f32_lane = store.read_lane::<f32>().unwrap();
+        assert!(f32_lane.get(e).is_none());
+        let u64_lane = store.read_lane::<u64>().unwrap();
+        assert!(u64_lane.get(e).is_none());
+        assert_eq!(f32_lane.len(), 0);
     }
 }

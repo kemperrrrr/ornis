@@ -84,4 +84,46 @@ mod tests {
         assert_eq!(pt.get(9999), Some(&7));
         assert!(pt.get(0).is_none());
     }
+
+    #[test]
+    fn get_mut_offsets_within_page() {
+        // The page offset must be `index % PAGE_SIZE`, not `/` or `+`:
+        // both alternatives would either alias another slot or panic.
+        let mut pt: PageTable<usize> = PageTable::new();
+        pt.set(PAGE_SIZE + 7, 42);
+        pt.set(2 * PAGE_SIZE + 3, 99);
+
+        assert_eq!(pt.get_mut(PAGE_SIZE + 7), Some(&mut 42));
+        assert_eq!(pt.get_mut(2 * PAGE_SIZE + 3), Some(&mut 99));
+
+        // Mutations through get_mut must be visible via get.
+        *pt.get_mut(PAGE_SIZE + 7).unwrap() = 1;
+        assert_eq!(pt.get(PAGE_SIZE + 7), Some(&1));
+        // A different slot in the same page is untouched.
+        assert_eq!(pt.get(2 * PAGE_SIZE + 3), Some(&99));
+    }
+
+    #[test]
+    fn get_mut_missing_page_is_none() {
+        let mut pt: PageTable<usize> = PageTable::new();
+        // No page allocated yet: get_mut must return None (not a leaked default).
+        assert!(pt.get_mut(0).is_none());
+        assert!(pt.get_mut(PAGE_SIZE).is_none());
+    }
+
+    #[test]
+    fn clone_preserves_and_is_independent() {
+        let mut pt: PageTable<usize> = PageTable::new();
+        pt.set(0, 10);
+        pt.set(PAGE_SIZE + 1, 20);
+
+        let copy = pt.clone();
+        assert_eq!(copy.get(0), Some(&10));
+        assert_eq!(copy.get(PAGE_SIZE + 1), Some(&20));
+
+        // Mutating the clone must not touch the source.
+        let mut copy = copy;
+        *copy.get_mut(0).unwrap() = 99;
+        assert_eq!(pt.get(0), Some(&10));
+    }
 }

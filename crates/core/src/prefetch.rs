@@ -3,13 +3,19 @@
 //! `_mm_prefetch` takes its locality hint as a compile-time constant
 //! (`const LOCALITY: i32`), so the public helper is generic over it; the
 //! non-x86 fallback is an empty function so the call sites stay portable.
+//!
+//! The x86 bodies are pure CPU hints with no observable semantics, so
+//! mutation testing cannot distinguish a removed body from the real one —
+//! they are skipped via `#[mutants::skip]`.
 
 #[cfg(target_arch = "x86_64")]
+#[mutants::skip]
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
     unsafe { std::arch::x86_64::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }
 
 #[cfg(target_arch = "x86")]
+#[mutants::skip]
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
     unsafe { std::arch::x86::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }

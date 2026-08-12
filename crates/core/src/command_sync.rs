@@ -53,6 +53,14 @@ impl ResidencyTracker {
             .unwrap_or(DataResidency::CpuOnly)
     }
 
+    pub fn len(&self) -> usize {
+        self.residency.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.residency.is_empty()
+    }
+
     pub fn needs_cpu_to_gpu<T: 'static + Send + Sync>(&self) -> bool {
         matches!(self.get::<T>(), DataResidency::CpuOnly)
     }
@@ -221,5 +229,75 @@ mod tests {
 
         sync.queue.clear_dirty::<f32>();
         assert!(!sync.queue.is_dirty::<f32>());
+    }
+
+    #[test]
+    fn command_queue_enqueue_drain() {
+        let mut queue = CommandQueue::new();
+        let cmd = GpuCommand::new::<f32>(CommandType::CpuToGpu);
+
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+
+        queue.enqueue::<f32>(cmd);
+        assert!(!queue.is_empty());
+        assert_eq!(queue.len(), 1);
+
+        queue.mark_dirty::<f32>();
+        assert!(queue.is_dirty::<f32>());
+        queue.clear_dirty::<f32>();
+        assert!(!queue.is_dirty::<f32>());
+
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].command_type, CommandType::CpuToGpu);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn command_queue_dirty_per_type() {
+        let mut queue = CommandQueue::new();
+
+        queue.mark_dirty::<f32>();
+        assert!(queue.is_dirty::<f32>());
+        // Different type stays clean.
+        assert!(!queue.is_dirty::<u64>());
+
+        queue.clear_dirty::<f32>();
+        assert!(!queue.is_dirty::<f32>());
+    }
+
+    #[test]
+    fn command_sync_exposes_real_state() {
+        let mut sync = CommandSync::new();
+        let store = SmartStore::new();
+
+        // Empty tracker before any mark: catches len()→1 / is_empty()→false
+        // mutants on the tracker itself.
+        assert_eq!(sync.residency().len(), 0);
+        assert!(sync.residency().is_empty());
+
+        // Accessors must return the live queue/tracker, not a default stub.
+        sync.mark_dirty::<f32>(&store);
+        assert!(sync.queue().is_dirty::<f32>());
+        assert_eq!(sync.residency().get::<f32>(), DataResidency::CpuOnly);
+        // A stub tracker would be empty; the live one holds the f32 entry.
+        assert_eq!(sync.residency().len(), 1);
+        assert!(!sync.residency().is_empty());
+    }
+
+    #[test]
+    fn residency_mark_cpu_sets_residency() {
+        let mut tracker = ResidencyTracker::new();
+        assert_eq!(tracker.get::<u32>(), DataResidency::CpuOnly);
+
+        tracker.mark_gpu::<u32>();
+        assert_eq!(tracker.get::<u32>(), DataResidency::GpuOnly);
+        assert!(tracker.needs_gpu_to_cpu::<u32>());
+
+        tracker.mark_cpu::<u32>();
+        assert_eq!(tracker.get::<u32>(), DataResidency::CpuOnly);
+        assert!(tracker.needs_cpu_to_gpu::<u32>());
+        assert!(!tracker.needs_gpu_to_cpu::<u32>());
     }
 }

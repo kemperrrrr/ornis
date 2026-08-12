@@ -82,6 +82,11 @@ pub struct LockFreeReadGuard<'g, T> {
     _guard: Guard,
 }
 
+// Reserved: a lock-free read guard mirrored from `lock_free_store`.
+// Not wired into `SmartStore` yet (read_lane returns an RwLock guard);
+// kept for the experimental "lock-free" feature. Mutants are skipped:
+// nothing calls `deref` today, so a mutation here is untestable dead code.
+#[mutants::skip]
 impl<'g, T> std::ops::Deref for LockFreeReadGuard<'g, T> {
     type Target = ComponentStore<T>;
 
@@ -133,7 +138,9 @@ impl SmartStore {
     }
 
     // reserved: lock-free lane registration (experimental "lock-free" feature)
+    // Private and never called — `register_lock_free` inlines the same body.
     #[allow(dead_code)]
+    #[mutants::skip]
     fn ensure_lock_free_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
@@ -407,5 +414,90 @@ mod tests {
             "took {} ms",
             elapsed.as_millis()
         );
+    }
+
+    #[test]
+    fn cold_lane_roundtrip() {
+        let mut store = SmartStore::new();
+        let e = store.create_entity();
+
+        store.insert_cold::<f32>(e, 3.25);
+
+        let lane = store.read_cold_lane::<f32>().unwrap();
+        assert_eq!(lane.get(e), Some(&3.25));
+        assert_eq!(lane.len(), 1);
+    }
+
+    #[test]
+    fn cold_lane_write_guard_updates() {
+        let mut store = SmartStore::new();
+        let e = store.create_entity();
+        store.insert_cold::<f32>(e, 1.0);
+
+        {
+            let mut lane = store.write_cold_lane::<f32>().unwrap();
+            lane.insert(e, 9.0);
+        }
+
+        let lane = store.read_cold_lane::<f32>().unwrap();
+        assert_eq!(lane.get(e), Some(&9.0));
+    }
+
+    #[test]
+    fn destroy_entity_removes_from_cold_lanes() {
+        let mut store = SmartStore::new();
+        let e = store.create_entity();
+        store.insert_cold::<f32>(e, 1.0);
+        store.insert_cold::<u32>(e, 2);
+
+        store.destroy_entity(e);
+
+        let f32_lane = store.read_cold_lane::<f32>().unwrap();
+        assert!(f32_lane.get(e).is_none());
+        assert_eq!(f32_lane.len(), 0);
+        let u32_lane = store.read_cold_lane::<u32>().unwrap();
+        assert!(u32_lane.get(e).is_none());
+    }
+
+    #[test]
+    fn lock_free_remove_entity_clears_component() {
+        let mut store = SmartStore::new();
+        store.register_lock_free::<f32>();
+        let e = store.create_entity();
+        store.insert::<f32>(e, 1.0);
+
+        store.destroy_entity(e);
+
+        let val = store
+            .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
+            .unwrap();
+        assert_eq!(val, None);
+        // The lane must be empty, not just the entity filtered out.
+        let len = store
+            .with_lock_free_lane::<f32, _>(|store| store.len())
+            .unwrap();
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn register_creates_hot_lane() {
+        let mut store = SmartStore::new();
+        store.register::<f32>();
+        // `register` must create the lane eagerly; `read_lane` then
+        // succeeds even before any insert.
+        let lane = store.read_lane::<f32>().unwrap();
+        assert_eq!(lane.len(), 0);
+        drop(lane); // release the read guard before taking the write guard
+        assert!(store.write_lane::<f32>().is_some());
+    }
+
+    #[test]
+    fn register_cold_creates_cold_lane() {
+        let mut store = SmartStore::new();
+        store.register_cold::<f32>();
+        let lane = store.read_cold_lane::<f32>().unwrap();
+        assert_eq!(lane.len(), 0);
+        drop(lane);
+        assert!(store.write_cold_lane::<f32>().is_some());
     }
 }

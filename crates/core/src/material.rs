@@ -587,4 +587,66 @@ mod tests {
             )
         };
     }
+
+    #[test]
+    fn scalar_builders_write_distinct_values() {
+        // Each scalar builder must write its argument into the right slot.
+        // Values are chosen to differ from the pbr() defaults so a mutant
+        // that returns Default::default() instead of `self` fails.
+        let mat = OpenPBRMaterial::pbr()
+            .base_weight(0.5)
+            .base_diffuse_roughness(0.4)
+            .transmission_scatter_anisotropy(-0.5)
+            .subsurface_scatter_anisotropy(-0.25);
+        assert_eq!(mat.base_params[0], 0.5);
+        assert_eq!(mat.base_params[1], 0.4);
+        assert_eq!(mat.transmission_scatter[3], -0.5);
+        assert_eq!(mat.subsurface_params[3], -0.25);
+    }
+
+    #[test]
+    fn color_builders_write_distinct_values() {
+        let mat = OpenPBRMaterial::pbr()
+            .base_color(0.1, 0.2, 0.3, 0.9)
+            .specular_edge_tint(0.4, 0.5, 0.6)
+            .specular_edge_tint_rgb([0.7, 0.8, 0.9])
+            .transmission_color(0.11, 0.12, 0.13)
+            .transmission_scatter_color(0.21, 0.22, 0.23)
+            .subsurface_color(0.31, 0.32, 0.33)
+            .fuzz_color(0.41, 0.42, 0.43)
+            .coat_color(0.51, 0.52, 0.53)
+            .coat_color_rgb([0.61, 0.62, 0.63])
+            .emission_color(0.71, 0.72, 0.73);
+        assert_eq!(mat.base_color, [0.1, 0.2, 0.3, 0.9]);
+        assert_eq!(mat.specular_color, [0.7, 0.8, 0.9, 0.0]);
+        assert_eq!(mat.transmission_color, [0.11, 0.12, 0.13, 0.0]);
+        assert_eq!(&mat.transmission_scatter[..3], &[0.21, 0.22, 0.23]);
+        assert_eq!(mat.subsurface_color, [0.31, 0.32, 0.33, 1.0]);
+        assert_eq!(mat.fuzz_color, [0.41, 0.42, 0.43, 0.0]);
+        assert_eq!(mat.coat_color, [0.61, 0.62, 0.63, 0.0]);
+        assert_eq!(mat.emission_color, [0.71, 0.72, 0.73, 1.0]);
+    }
+
+    #[test]
+    fn builders_do_not_disturb_other_fields() {
+        let mat = OpenPBRMaterial::pbr()
+            .base_weight(0.5)
+            .specular_edge_tint(0.1, 0.2, 0.3);
+        // Fields untouched by the chain keep their pbr() defaults.
+        assert_eq!(mat.base_params[1], 0.0);
+        assert_eq!(mat.base_color, [0.8, 0.8, 0.8, 1.0]);
+        assert_eq!(mat.transmission_color, [1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn dielectric_preset_writes_expected_fields() {
+        // `dielectric()` is a convenience preset; a mutant that collapses
+        // it to Default::default() must be caught by checking the fields
+        // it is supposed to set.
+        let mat = OpenPBRMaterial::dielectric();
+        assert_eq!(mat.base_params[2], 0.0); // base_metalness
+        assert_eq!(&mat.base_color[..3], &[0.8, 0.8, 0.8]);
+        assert_eq!(mat.specular_params[0], 1.0); // specular_weight
+        assert_eq!(mat.specular_params[1], 0.3); // specular_roughness
+    }
 }

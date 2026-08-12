@@ -96,7 +96,12 @@ impl GpuExecutor {
         Self {}
     }
 
-    /// Execute a compute shader on a component lane
+    /// Execute a compute shader on a component lane.
+    ///
+    /// Stub: the `gpu` feature is a reserved extension point and ornis-core
+    /// does not depend on wgpu yet, so this code path cannot even compile
+    /// (let alone be exercised) — mutants here are untestable, skip.
+    #[mutants::skip]
     pub fn execute<T, F, R>(&self, _store: &SmartStore, _f: F) -> Option<R>
     where
         T: 'static + Send + Sync,
@@ -134,8 +139,11 @@ impl SmartDispatcher {
         }
     }
 
-    /// Set GPU executor (requires gpu feature)
+    /// Set GPU executor (requires gpu feature).
+    /// Stub only: `gpu_executor` is never read without the (uncompilable)
+    /// `gpu` feature, so a `with ()` mutant is unobservable — skip.
     #[cfg(feature = "gpu")]
+    #[mutants::skip]
     pub fn set_gpu_executor(&mut self, executor: GpuExecutor) {
         self.gpu_executor = Some(executor);
     }
@@ -259,5 +267,61 @@ mod tests {
             s
         });
         assert_eq!(sum, Some((0..10).map(|i| i as f32).sum()));
+    }
+
+    #[test]
+    fn dispatcher_threshold_reported() {
+        let dispatcher = Dispatcher::new(500, true);
+        assert_eq!(dispatcher.threshold(), 500);
+    }
+
+    #[test]
+    fn cpu_executor_execute_par_reads_lane() {
+        let mut store = SmartStore::new();
+        for i in 0..10 {
+            let e = store.create_entity();
+            store.insert(e, i as f32);
+        }
+        let sum = CpuExecutor::execute_par::<f32, _, _>(&store, |lane| lane.iter().sum::<f32>());
+        assert_eq!(sum, Some((0..10).map(|i| i as f32).sum()));
+    }
+
+    #[test]
+    fn smart_dispatcher_execute_mut_writes() {
+        let mut store = SmartStore::new();
+        let dispatcher = SmartDispatcher::with_threshold(1000, false);
+
+        for i in 0..10 {
+            let e = store.create_entity();
+            store.insert(e, i as f32);
+        }
+
+        let result = dispatcher.execute_mut::<f32, _, _>(&store, 100, |lane| {
+            let mut s = 0.0;
+            for v in lane.iter_mut() {
+                s += *v;
+                *v += 100.0;
+            }
+            s
+        });
+        assert_eq!(result, Some((0..10).map(|i| i as f32).sum()));
+
+        // The mutation must be visible afterwards.
+        let back =
+            dispatcher.execute_read::<f32, _, _>(&store, 100, |lane| lane.iter().sum::<f32>());
+        assert_eq!(back, Some((0..10).map(|i| i as f32 + 100.0).sum()));
+    }
+
+    #[test]
+    fn dispatchable_element_count() {
+        let mut store = SmartStore::new();
+        for i in 0..7 {
+            let e = store.create_entity();
+            store.insert(e, i as f32);
+        }
+        assert_eq!(0f32.element_count(&store), 7);
+
+        // Unregistered type yields zero.
+        assert_eq!(0u64.element_count(&store), 0);
     }
 }

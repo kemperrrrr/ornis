@@ -123,4 +123,19 @@ mod tests {
         f32::register(&mut store);
         u32::register(&mut store);
     }
+
+    #[test]
+    fn auto_pipeline_lane_target_is_cpu() {
+        // The default lane target string must remain exactly "cpu":
+        // callers match on this literal (mutants replacing it with ""
+        // or "xyzzy" would silently change dispatch).
+        assert_eq!(<f32 as AutoPipeline>::lane_target(), "cpu");
+        assert_eq!(<u32 as AutoPipeline>::lane_target(), "cpu");
+    }
+
+    #[test]
+    fn lane_target_of_maps_markers() {
+        assert_eq!(lane_target_of::<f32>(), TargetDiscriminant::Cpu);
+        assert_eq!(lane_target_of::<u64>(), TargetDiscriminant::Cpu);
+    }
 }

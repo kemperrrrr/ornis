@@ -54,3 +54,97 @@ impl<T> ColdComponentStore<T> {
         self.inner.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::EntityAllocator;
+
+    #[test]
+    fn insert_get_contains_len() {
+        let mut alloc = EntityAllocator::new();
+        let mut store = ColdComponentStore::new();
+
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+
+        let a = alloc.allocate();
+        let b = alloc.allocate();
+        store.insert(a, 1u32);
+        store.insert(b, 2);
+
+        assert_eq!(store.len(), 2);
+        assert!(!store.is_empty());
+        assert!(store.contains(a));
+        assert!(store.contains(b));
+        assert_eq!(store.get(a), Some(&1));
+        assert_eq!(store.get(b), Some(&2));
+    }
+
+    #[test]
+    fn get_mut_updates_in_place() {
+        let mut alloc = EntityAllocator::new();
+        let mut store = ColdComponentStore::new();
+
+        let e = alloc.allocate();
+        store.insert(e, 10u32);
+        *store.get_mut(e).unwrap() += 5;
+
+        assert_eq!(store.get(e), Some(&15));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn remove_returns_value_and_shrinks() {
+        let mut alloc = EntityAllocator::new();
+        let mut store = ColdComponentStore::new();
+
+        let a = alloc.allocate();
+        let b = alloc.allocate();
+        store.insert(a, 1u32);
+        store.insert(b, 2);
+
+        assert_eq!(store.remove(a), Some(1));
+        assert_eq!(store.len(), 1);
+        assert!(!store.contains(a));
+        assert!(store.contains(b));
+
+        // Removing the last element empties the store.
+        assert_eq!(store.remove(b), Some(2));
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn missing_entity_operations() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ColdComponentStore<u32> = ColdComponentStore::new();
+
+        let e = alloc.allocate();
+        assert!(!store.contains(e));
+        assert!(store.get(e).is_none());
+        assert!(store.get_mut(e).is_none());
+        assert_eq!(store.remove(e), None);
+    }
+
+    #[test]
+    fn iter_visits_all_elements() {
+        let mut alloc = EntityAllocator::new();
+        let mut store = ColdComponentStore::new();
+
+        for i in 0..5 {
+            store.insert(alloc.allocate(), i);
+        }
+
+        let mut collected: Vec<_> = store.iter().copied().collect();
+        collected.sort();
+        assert_eq!(collected, vec![0, 1, 2, 3, 4]);
+
+        for v in store.iter_mut() {
+            *v *= 10;
+        }
+        let mut scaled: Vec<_> = store.iter().copied().collect();
+        scaled.sort();
+        assert_eq!(scaled, vec![0, 10, 20, 30, 40]);
+    }
+}

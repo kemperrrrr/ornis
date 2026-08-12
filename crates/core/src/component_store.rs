@@ -487,4 +487,184 @@ mod tests {
         assert_eq!(store.get(entities[3]), Some(&30));
         assert_eq!(store.get(entities[4]), Some(&40));
     }
+
+    #[test]
+    fn defrag_two_unsorted_elements() {
+        // Exactly two elements, inserted out of id order: the early-return
+        // guard `len < 2` must not swallow this case (mutants replacing
+        // `<` with `==`/`<=` return without sorting and leave the store
+        // in unsorted order).
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        // allocate() hands out ids in order, so insert them in reverse
+        // id order to make the dense array genuinely unsorted.
+        let first = alloc.allocate(); // id 0
+        let second = alloc.allocate(); // id 1
+        store.insert(second, 20);
+        store.insert(first, 10);
+
+        store.defrag();
+
+        let dense_ids: Vec<u32> = store.entities.iter().map(|e| e.id()).collect();
+        assert_eq!(dense_ids, vec![0, 1]);
+        assert_eq!(store.get(first), Some(&10));
+        assert_eq!(store.get(second), Some(&20));
+    }
+
+    #[test]
+    fn is_empty_true_and_false() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        assert!(store.is_empty());
+
+        store.insert(alloc.allocate(), 1);
+        assert!(!store.is_empty());
+
+        // Empty again after removal — the counter must be exact.
+        store.remove(Entity::new(0));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn dense_index_returns_index() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        let a = alloc.allocate();
+        let b = alloc.allocate();
+        store.insert(a, 1);
+        store.insert(b, 2);
+
+        assert_eq!(store.dense_index(a), Some(0));
+        assert_eq!(store.dense_index(b), Some(1));
+
+        // A stale generation must not map to the live entry.
+        let stale = Entity::new_with_gen(a.id(), a.generation() + 1);
+        assert_eq!(store.dense_index(stale), None);
+    }
+
+    #[test]
+    fn bitset_tracks_insert() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        let a = alloc.allocate();
+        let b = alloc.allocate();
+        store.insert(a, 1);
+        store.insert(b, 2);
+
+        assert!(store.bitset().contains(a.id() as usize));
+        assert!(store.bitset().contains(b.id() as usize));
+
+        store.remove(a);
+        assert!(!store.bitset().contains(a.id() as usize));
+        assert!(store.bitset().contains(b.id() as usize));
+    }
+
+    #[test]
+    fn clone_preserves_data() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        let a = alloc.allocate();
+        let b = alloc.allocate();
+        store.insert(a, 10);
+        store.insert(b, 20);
+
+        let copy = store.clone();
+        assert_eq!(copy.len(), 2);
+        assert_eq!(copy.get(a), Some(&10));
+        assert_eq!(copy.get(b), Some(&20));
+
+        // The clone is independent: mutating it must not touch the source.
+        let mut copy = copy;
+        copy.insert(a, 99);
+        assert_eq!(store.get(a), Some(&10));
+    }
+
+    #[test]
+    fn zip_iter_size_hint_tracks_remaining() {
+        let mut alloc = EntityAllocator::new();
+        let mut pos = ComponentStore::new();
+        let mut vel = ComponentStore::new();
+
+        for _ in 0..5 {
+            let e = alloc.allocate();
+            pos.insert(e, 0);
+            vel.insert(e, 0);
+        }
+
+        let mut iter = pos.iter_zip(&vel);
+        assert_eq!(iter.size_hint(), (5, Some(5)));
+
+        assert!(iter.next().is_some());
+        assert!(iter.next().is_some());
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+    }
+
+    #[test]
+    fn chunked_iter_mut_sizes_and_tail() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        for i in 0..13 {
+            store.insert(alloc.allocate(), i);
+        }
+
+        // 13 elements: three exact 4-element chunks plus a 1-element tail.
+        let mut iter = store.chunked_iter_mut();
+        let mut chunk_sizes = Vec::new();
+        let mut seen = 0usize;
+        for chunk in &mut iter {
+            chunk_sizes.push(chunk.len());
+            for v in chunk.iter_mut() {
+                *v += 1;
+                seen += 1;
+            }
+        }
+        let tail = iter.into_tail().expect("13 elements must leave a tail");
+        assert_eq!(tail.len(), 1);
+        tail[0] += 1;
+        seen += 1;
+
+        assert_eq!(chunk_sizes, vec![4, 4, 4]);
+        assert_eq!(seen, 13);
+        assert_eq!(store.iter().sum::<i32>(), (0..13).map(|x| x + 1).sum());
+    }
+
+    #[test]
+    fn chunked_iter_mut_exact_multiple_has_no_tail() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        for i in 0..8 {
+            store.insert(alloc.allocate(), i);
+        }
+
+        let mut iter = store.chunked_iter_mut();
+        let mut chunk_sizes = Vec::new();
+        for chunk in &mut iter {
+            chunk_sizes.push(chunk.len());
+        }
+        assert_eq!(chunk_sizes, vec![4, 4]);
+        assert!(iter.into_tail().is_none());
+    }
+
+    #[test]
+    fn chunked_iter_mut_size_hint() {
+        let mut alloc = EntityAllocator::new();
+        let mut store: ComponentStore<i32> = ComponentStore::new();
+
+        for i in 0..12 {
+            store.insert(alloc.allocate(), i);
+        }
+
+        let mut iter = store.chunked_iter_mut();
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+
+        assert!(iter.next().is_some());
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+    }
 }
