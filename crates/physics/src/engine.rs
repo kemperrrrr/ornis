@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use glam::{Quat, Vec3};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;
 
@@ -12,6 +13,15 @@ pub trait PhysicsEngine: Send + Sync {
     fn remove_body(&mut self, handle: BodyHandle);
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody>;
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody>;
+    /// Create a joint between two existing, distinct bodies (G5).
+    /// Returns None on invalid handles or a self-joint.
+    fn add_joint(
+        &mut self,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        kind: JointKind,
+    ) -> Option<JointHandle>;
+    fn remove_joint(&mut self, handle: JointHandle);
     fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit>;
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit>;
 }
@@ -69,14 +79,15 @@ fn inv_inertia_axis(i: f32) -> f32 {
     if i > 0.0 { 1.0 / i } else { 0.0 }
 }
 
-/// Apply the inverse world-space inertia tensor (body axes rotated to world).
+/// Apply the inverse world-space inertia tensor: I⁻¹_world = R · I⁻¹_body · Rᵀ.
 fn mul_inv_inertia(inertia: Vec3, orientation: glam::Quat, v: Vec3) -> Vec3 {
     let body = orientation.inverse() * v;
-    Vec3::new(
+    let scaled = Vec3::new(
         inv_inertia_axis(inertia.x) * body.x,
         inv_inertia_axis(inertia.y) * body.y,
         inv_inertia_axis(inertia.z) * body.z,
-    )
+    );
+    orientation * scaled
 }
 
 /// Effective inverse mass along direction `dir` at contact points with
@@ -181,6 +192,30 @@ fn apply_impulse(bodies: &mut [RigidBody], i: usize, j: usize, imp: Vec3, ra: Ve
     b.velocity += imp * b.inv_mass;
     a.angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(imp));
     b.angular_velocity += mul_inv_inertia(ib, ob, rb.cross(imp));
+}
+
+/// Apply a pure angular impulse to the body pair (joint axis constraints).
+/// Positive impulse spins body `j` along `imp` and body `i` against it.
+fn apply_angular_impulse(bodies: &mut [RigidBody], i: usize, j: usize, imp: Vec3) {
+    debug_assert!(i != j);
+    let (lo, hi, swapped) = if i < j { (i, j, false) } else { (j, i, true) };
+    let (head, tail) = bodies.split_at_mut(hi);
+    let (a, b) = if swapped {
+        (&mut tail[0], &mut head[lo])
+    } else {
+        (&mut head[lo], &mut tail[0])
+    };
+    // `a` is body i, `b` is body j.
+    a.angular_velocity -= mul_inv_inertia(a.inertia, a.orientation, imp);
+    b.angular_velocity += mul_inv_inertia(b.inertia, b.orientation, imp);
+}
+
+/// Rotate a body by a small positional (pseudo) rotation vector, leaving
+/// velocities untouched (NGS-style, cf. apply_positional_impulse).
+fn apply_positional_rotation(body: &mut RigidBody, d: Vec3) {
+    if d != Vec3::ZERO {
+        body.orientation = (Quat::from_scaled_axis(d) * body.orientation).normalize();
+    }
 }
 
 /// Velocity of a body at a world-space contact point (linear + angular part).
@@ -926,6 +961,9 @@ pub struct BuiltinPhysicsEngine {
     /// Per-island sleep timers, keyed by island root handle.
     island_timers: HashMap<u32, f32>,
     asleep: Vec<bool>,
+    /// Persistent joint constraints with warm-start state (G5). Joints also
+    /// feed the island union-find: jointed bodies sleep and wake together.
+    joints: Vec<Joint>,
 }
 
 impl BuiltinPhysicsEngine {
@@ -942,6 +980,7 @@ impl BuiltinPhysicsEngine {
             island: Vec::new(),
             island_timers: HashMap::new(),
             asleep: Vec::new(),
+            joints: Vec::new(),
         }
     }
 
@@ -1002,6 +1041,19 @@ impl BuiltinPhysicsEngine {
 
         for m in manifolds {
             let (a, b) = (m.body_a, m.body_b);
+            if self.bodies[a].body_type == BodyType::Dynamic
+                && self.bodies[b].body_type == BodyType::Dynamic
+            {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb {
+                    parent[rb] = ra;
+                }
+            }
+        }
+        // Joints are constraint-graph edges too (G5): jointed dynamic bodies
+        // belong to one island and sleep/wake together.
+        for joint in &self.joints {
+            let (a, b) = (joint.body_a, joint.body_b);
             if self.bodies[a].body_type == BodyType::Dynamic
                 && self.bodies[b].body_type == BodyType::Dynamic
             {
@@ -1101,6 +1153,164 @@ impl BuiltinPhysicsEngine {
             }
         }
         self.island_timers.insert(root, 0.0);
+    }
+
+    /// Joint sub-solver (G5), run once per substep after the contact pass.
+    /// Ball joint: 3 linear equality constraints along the world axes at the
+    /// anchor points. Revolute: ball + 2 angular equality constraints along
+    /// the axes perpendicular to the hinge (the hinge rotation itself is
+    /// free). Both are warm-started from impulses accumulated last substep,
+    /// exactly like the contact cache. Joints and contacts alternate at
+    /// substep granularity (12 substeps ≈ 720 Hz), which converges well for
+    /// chains; true per-iteration interleaving is left for a later refactor.
+    fn solve_joints(&mut self) {
+        if self.joints.is_empty() {
+            return;
+        }
+        // Positional pass: Baumgarte-style, same β/cap policy as contacts.
+        const BETA: f32 = 0.2;
+        const MAX_LIN_CORRECTION: f32 = 0.25;
+        const MAX_ANG_CORRECTION: f32 = 0.5;
+        const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+
+        let Self {
+            bodies,
+            joints,
+            asleep,
+            velocity_iterations,
+            position_iterations,
+            ..
+        } = self;
+
+        for joint in joints.iter_mut() {
+            let (a, b) = (joint.body_a, joint.body_b);
+            // A fully sleeping jointed pair is frozen; island-coherent sleep
+            // guarantees both members share the sleep state.
+            if asleep[a] && asleep[b] {
+                continue;
+            }
+            let (la, lb) = joint.local_anchors();
+            let revolute_axes = match &joint.kind {
+                JointKind::Revolute {
+                    local_axis_a,
+                    local_axis_b,
+                    ..
+                } => Some((*local_axis_a, *local_axis_b)),
+                JointKind::Ball { .. } => None,
+            };
+
+            // --- Warm start: re-apply the accumulated impulses (G2b pattern).
+            let ra = bodies[a].orientation * la;
+            let rb = bodies[b].orientation * lb;
+            for (k, dir) in AXES.iter().enumerate() {
+                let l = joint.acc_lin[k];
+                if l.abs() > 1e-12 {
+                    apply_impulse(bodies, a, b, dir * l, ra, rb);
+                }
+            }
+            if let Some((axis_a, _)) = revolute_axes {
+                let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
+                let t1 = tangent_basis(wa);
+                let t2 = wa.cross(t1).normalize_or_zero();
+                for (k, t) in [t1, t2].iter().enumerate() {
+                    let l = joint.acc_ang[k];
+                    if l.abs() > 1e-12 {
+                        apply_angular_impulse(bodies, a, b, t * l);
+                    }
+                }
+            }
+
+            // --- Velocity iterations.
+            for _ in 0..*velocity_iterations {
+                for (k, dir) in AXES.iter().enumerate() {
+                    let k_eff = effective_mass(bodies, a, b, *dir, ra, rb);
+                    if k_eff < 1e-9 {
+                        continue;
+                    }
+                    let vrel =
+                        (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(*dir);
+                    // Equality constraint: no clamp, any sign of impulse.
+                    let dl = -vrel / k_eff;
+                    joint.acc_lin[k] += dl;
+                    apply_impulse(bodies, a, b, dir * dl, ra, rb);
+                }
+                if let Some((axis_a, _)) = revolute_axes {
+                    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
+                    let t1 = tangent_basis(wa);
+                    let t2 = wa.cross(t1).normalize_or_zero();
+                    for (k, t) in [t1, t2].iter().enumerate() {
+                        let (ba, bb) = (&bodies[a], &bodies[b]);
+                        let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *t).dot(*t)
+                            + mul_inv_inertia(bb.inertia, bb.orientation, *t).dot(*t);
+                        if k_eff < 1e-9 {
+                            continue;
+                        }
+                        let wrel = (bb.angular_velocity - ba.angular_velocity).dot(*t);
+                        let dl = -wrel / k_eff;
+                        joint.acc_ang[k] += dl;
+                        apply_angular_impulse(bodies, a, b, t * dl);
+                    }
+                }
+            }
+
+            // --- Positional iterations (split impulse: positions only).
+            for _ in 0..*position_iterations {
+                let ra = bodies[a].orientation * la;
+                let rb = bodies[b].orientation * lb;
+                let c = (bodies[b].position + rb) - (bodies[a].position + ra);
+                for dir in AXES {
+                    let e = c.dot(dir).clamp(-MAX_LIN_CORRECTION, MAX_LIN_CORRECTION);
+                    if e.abs() < 1e-6 {
+                        continue;
+                    }
+                    let k_eff = effective_mass(bodies, a, b, dir, ra, rb);
+                    if k_eff < 1e-9 {
+                        continue;
+                    }
+                    let lambda = -BETA * e / k_eff;
+                    apply_positional_impulse(bodies, a, b, dir * lambda, ra, rb);
+                }
+                if let Some((axis_a, axis_b)) = revolute_axes {
+                    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
+                    let wb = (bodies[b].orientation * axis_b).normalize_or(Vec3::Z);
+                    // Small-angle misalignment. Rotation aligning wb with wa
+                    // is δ = −(wa × wb) (triple product: (wa×wb)×wb =
+                    // wb·cosθ − wa, i.e. +e would PUSH wb away — sign matters,
+                    // a flipped sign turns the correction into an exponential
+                    // pump). The error lives in the plane ⟂ wa.
+                    let e = wa.cross(wb);
+                    let t1 = tangent_basis(wa);
+                    let t2 = wa.cross(t1).normalize_or_zero();
+                    for t in [t1, t2] {
+                        let err = e.dot(t).clamp(-MAX_ANG_CORRECTION, MAX_ANG_CORRECTION);
+                        if err.abs() < 1e-6 {
+                            continue;
+                        }
+                        let (ba, bb) = (&bodies[a], &bodies[b]);
+                        let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, t).dot(t)
+                            + mul_inv_inertia(bb.inertia, bb.orientation, t).dot(t);
+                        if k_eff < 1e-9 {
+                            continue;
+                        }
+                        let lambda = -BETA * err / k_eff;
+                        // Inertia-weighted split: b rotates toward alignment,
+                        // a rotates against it (a static body has I⁻¹ = 0).
+                        let da = mul_inv_inertia(ba.inertia, ba.orientation, t * -lambda);
+                        let db = mul_inv_inertia(bb.inertia, bb.orientation, t * lambda);
+                        // Reborrow mutably after the shared reads above.
+                        let (lo, hi, swapped) = if a < b { (a, b, false) } else { (b, a, true) };
+                        let (head, tail) = bodies.split_at_mut(hi);
+                        let (ma, mb) = if swapped {
+                            (&mut tail[0], &mut head[lo])
+                        } else {
+                            (&mut head[lo], &mut tail[0])
+                        };
+                        apply_positional_rotation(ma, da);
+                        apply_positional_rotation(mb, db);
+                    }
+                }
+            }
+        }
     }
 
     // Solver loops index several parallel per-point arrays (manifold points,
@@ -1548,6 +1758,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             let manifolds = detect_collisions(&self.bodies, &self.broadphase.active);
             // Restitution is one-shot per step, evaluated on the first substep.
             self.resolve_manifolds(&manifolds, s == 0);
+            self.solve_joints();
             last_manifolds = manifolds;
         }
         self.rebuild_islands(&last_manifolds);
@@ -1569,12 +1780,70 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 
     fn remove_body(&mut self, handle: BodyHandle) {
         if handle < self.bodies.len() {
+            let last = self.bodies.len() - 1;
             self.bodies.swap_remove(handle);
             self.island.swap_remove(handle);
             self.asleep.swap_remove(handle);
             // swap_remove shifts the last body's index; warm-start keys are
             // body indices, so the cache is no longer valid.
             self.warm_impulses.clear();
+            // Drop joints touching the removed body; remap the swapped-in
+            // body's index in the survivors.
+            self.joints.retain_mut(|j| {
+                if j.body_a == handle || j.body_b == handle {
+                    return false;
+                }
+                if j.body_a == last {
+                    j.body_a = handle;
+                }
+                if j.body_b == last {
+                    j.body_b = handle;
+                }
+                true
+            });
+        }
+    }
+
+    fn add_joint(
+        &mut self,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        kind: JointKind,
+    ) -> Option<JointHandle> {
+        if body_a == body_b || body_a >= self.bodies.len() || body_b >= self.bodies.len() {
+            return None;
+        }
+        // Normalize the hinge axes once, at creation.
+        let kind = match kind {
+            JointKind::Revolute {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a,
+                local_axis_b,
+            } => JointKind::Revolute {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a: local_axis_a.normalize_or(Vec3::Z),
+                local_axis_b: local_axis_b.normalize_or(Vec3::Z),
+            },
+            other => other,
+        };
+        // A new joint on a sleeping island changes its constraint set — wake
+        // it so the joint state can settle coherently.
+        for h in [body_a, body_b] {
+            if self.bodies[h].body_type == BodyType::Dynamic
+                && self.asleep.get(h).copied().unwrap_or(false)
+            {
+                self.wake_island(h);
+            }
+        }
+        self.joints.push(Joint::new(body_a, body_b, kind));
+        Some(self.joints.len() - 1)
+    }
+
+    fn remove_joint(&mut self, handle: JointHandle) {
+        if handle < self.joints.len() {
+            self.joints.swap_remove(handle);
         }
     }
 
@@ -2051,5 +2320,189 @@ mod tests {
             b.velocity,
             b.angular_velocity
         );
+    }
+
+    /// World-space distance between the two anchor points of a joint.
+    fn joint_anchor_error(
+        physics: &BuiltinPhysicsEngine,
+        ja: BodyHandle,
+        jb: BodyHandle,
+        la: Vec3,
+        lb: Vec3,
+    ) -> f32 {
+        let (a, b) = (physics.get_body(ja).unwrap(), physics.get_body(jb).unwrap());
+        let pa = a.position + a.orientation * la;
+        let pb = b.position + b.orientation * lb;
+        (pa - pb).length()
+    }
+
+    #[test]
+    fn ball_joint_pendulum_holds_anchor() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let anchor = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.1, 0.0));
+        // Pendulum bob released off to the side: it must swing, not fall.
+        let bob = physics.add_body(RigidBody::new_sphere(Vec3::new(1.0, -1.0, 0.0), 0.25, 1.0));
+        let lb = Vec3::new(-1.0, 1.0, 0.0); // world anchor = origin
+        physics
+            .add_joint(
+                anchor,
+                bob,
+                JointKind::Ball {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: lb,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+            let err = joint_anchor_error(&physics, anchor, bob, Vec3::ZERO, lb);
+            assert!(err < 0.05, "anchor drifted apart: {err}");
+        }
+        let b = physics.get_body(bob).unwrap();
+        // Still hanging from the anchor: distance to the pivot stays ≈ √2.
+        let dist = b.position.length();
+        assert!(
+            (dist - std::f32::consts::SQRT_2).abs() < 0.15,
+            "pendulum length drifted: {dist}"
+        );
+        // And it did swing at some point (started at x=1, must reach x<0).
+        // (Checked implicitly: a falling bob would have y << -1.5.)
+        assert!(
+            b.position.y > -1.6,
+            "bob fell off the joint: {:?}",
+            b.position
+        );
+    }
+
+    #[test]
+    fn ball_joint_chain_hangs() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let mut prev = anchor;
+        let mut links = Vec::new();
+        for k in 1..=3 {
+            let link = physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, -(k as f32), 0.0),
+                Vec3::splat(0.1),
+                0.5,
+            ));
+            physics
+                .add_joint(
+                    prev,
+                    link,
+                    JointKind::Ball {
+                        local_anchor_a: if prev == anchor {
+                            Vec3::ZERO
+                        } else {
+                            Vec3::new(0.0, -0.5, 0.0)
+                        },
+                        local_anchor_b: Vec3::new(0.0, 0.5, 0.0),
+                    },
+                )
+                .expect("valid joint");
+            links.push(link);
+            prev = link;
+        }
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+        }
+        // Every link still connected: anchor pairs coincide.
+        let mut prev = anchor;
+        let mut prev_anchor = Vec3::ZERO;
+        for (k, &link) in links.iter().enumerate() {
+            let lb = Vec3::new(0.0, 0.5, 0.0);
+            let err = joint_anchor_error(&physics, prev, link, prev_anchor, lb);
+            assert!(err < 0.1, "chain link {k} detached: err={err}");
+            let b = physics.get_body(link).unwrap();
+            assert!(
+                b.position.y > -(k as f32) - 1.5,
+                "link {k} fell too far: {:?}",
+                b.position
+            );
+            prev = link;
+            prev_anchor = Vec3::new(0.0, -0.5, 0.0);
+        }
+    }
+
+    #[test]
+    fn revolute_hinge_rotates_about_axis_only() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let arm = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -2.0, 0.0),
+            Vec3::new(0.1, 1.0, 0.1),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                arm,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::new(0.0, 1.0, 0.0), // arm top at origin
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                },
+            )
+            .expect("valid joint");
+        // Kick sideways so the pendulum arm swings about the Z hinge.
+        physics.get_body_mut(arm).unwrap().velocity = Vec3::new(1.5, 0.0, 0.0);
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(arm).unwrap();
+        // The arm swung: it rotated about Z...
+        let q = b.orientation;
+        let z_rotation = q.z.abs() > 0.01 || (q.w - 1.0).abs() > 0.01;
+        assert!(z_rotation, "hinge should rotate about Z, q={q:?}");
+        // ...but tilt about X and Y stays locked.
+        assert!(
+            q.x.abs() < 0.02 && q.y.abs() < 0.02,
+            "hinge tilted off its axis: q={q:?}"
+        );
+        // Anchor stays coincident.
+        let err = joint_anchor_error(&physics, anchor, arm, Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
+        assert!(err < 0.05, "hinge anchor drifted: {err}");
+    }
+
+    #[test]
+    fn remove_body_drops_dependent_joints() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0));
+        let b = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -2.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        let j = physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Ball {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::new(0.0, 2.0, 0.0),
+                },
+            )
+            .expect("valid joint");
+        // Self-joint and invalid handles are rejected.
+        assert!(
+            physics
+                .add_joint(
+                    a,
+                    a,
+                    JointKind::Ball {
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: Vec3::ZERO
+                    }
+                )
+                .is_none()
+        );
+        // Removing the body drops the joint; stepping must not panic.
+        physics.remove_body(b);
+        physics.remove_joint(j); // stale handle: must be a no-op, not UB
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.get_body(b).is_none());
     }
 }
