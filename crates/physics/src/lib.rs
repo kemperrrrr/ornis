@@ -1,4 +1,5 @@
 pub mod body;
+pub(crate) mod distance;
 pub mod engine;
 pub mod joint;
 pub mod math;

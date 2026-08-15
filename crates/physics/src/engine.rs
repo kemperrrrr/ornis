@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::{Quat, Vec3};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::distance;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;
@@ -276,9 +277,12 @@ fn apply_positional_impulse(
 /// Generalizes the Box2D b2ContactSolver case tree to 3-4 points: enumerate
 /// active sets (largest first), solve the K system for the new accumulated
 /// impulses directly, and take the first set satisfying complementarity
-/// (acc' ≥ 0 on active, vn' ≥ 0 on inactive). Scalar per-point Gauss-Seidel
-/// oscillates between coupled points of one manifold (the rocking pump from
-/// G3); the block solve finds the exact active set in one shot.
+/// (acc' ≥ 0 on active, vn' ≥ target on inactive). Scalar per-point
+/// Gauss-Seidel oscillates between coupled points of one manifold (the
+/// rocking pump from G3); the block solve finds the exact active set in one
+/// shot. `target` (G6) is the per-point velocity floor: 0 for touching
+/// points, the speculative approach limit for separated ones.
+#[allow(clippy::too_many_arguments)]
 fn solve_normal_block(
     bodies: &mut [RigidBody],
     i: usize,
@@ -286,6 +290,7 @@ fn solve_normal_block(
     n: Vec3,
     pts: &[Vec3; 4],
     acc: &mut [f32; 4],
+    target: &[f32; 4],
     count: usize,
 ) {
     let pa = bodies[i].position;
@@ -321,15 +326,16 @@ fn solve_normal_block(
                     ns += 1;
                 }
             }
-            // Solve K_S · acc'_S = -vn_S + K_{S,all} · acc (new accumulated
-            // impulses directly, so zeroing the inactive set is consistent).
+            // Solve K_S · acc'_S = target_S − vn_S + K_{S,all} · acc (new
+            // accumulated impulses directly, so zeroing the inactive set is
+            // consistent). vn' = target on the active set.
             let mut ks = [[0.0f32; 4]; 4];
             let mut bs = [0.0f32; 4];
             for a in 0..ns {
                 for b in 0..ns {
                     ks[a][b] = k_mat[idx[a]][idx[b]];
                 }
-                let mut r = -vn[idx[a]];
+                let mut r = target[idx[a]] - vn[idx[a]];
                 for m in 0..count {
                     r += k_mat[idx[a]][m] * acc[m];
                 }
@@ -341,7 +347,7 @@ fn solve_normal_block(
             if ap.iter().take(ns).any(|&v| v < -1e-6) {
                 continue;
             }
-            // vn' on the inactive set must stay non-negative.
+            // vn' on the inactive set must stay at or above its target.
             let mut ok = true;
             for t in 0..count {
                 if (mask >> t) & 1 == 1 {
@@ -357,7 +363,7 @@ fn solve_normal_block(
                         v -= k_mat[t][m] * acc[m];
                     }
                 }
-                if v < -1e-5 {
+                if v < target[t] - 1e-5 {
                     ok = false;
                     break;
                 }
@@ -396,16 +402,25 @@ fn compute_aabb(body: &RigidBody) -> AABB {
 
 // ---- Narrow-phase: world-frame analytic contact tests (oriented shapes) ----
 
-fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> Option<Contact> {
+/// Sphere-sphere. `margin` (G6 speculative): pairs separated by less than
+/// the margin still report a contact with NEGATIVE penetration (= the gap),
+/// so the solver can stop approach before any overlap exists.
+fn sphere_vs_sphere(
+    pos_a: Vec3,
+    radius_a: f32,
+    pos_b: Vec3,
+    radius_b: f32,
+    margin: f32,
+) -> Option<Contact> {
     let diff = pos_b - pos_a;
     let dist_sq = diff.length_squared();
-    let radius_sum = radius_a + radius_b;
+    let radius_sum = radius_a + radius_b + margin;
     if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
         return None;
     }
     let dist = dist_sq.sqrt();
     let normal = diff / dist;
-    let penetration = radius_sum - dist;
+    let penetration = radius_sum - dist - margin;
     Some(Contact {
         normal,
         penetration,
@@ -414,18 +429,21 @@ fn sphere_vs_sphere(pos_a: Vec3, radius_a: f32, pos_b: Vec3, radius_b: f32) -> O
 }
 
 /// Sphere vs an oriented box (OBB), resolved in the box's local frame.
+/// `margin`: speculative contact distance (see sphere_vs_sphere).
 fn sphere_vs_obb(
     sphere_pos: Vec3,
     sphere_radius: f32,
     box_pos: Vec3,
     half_extents: Vec3,
     box_rot: Quat,
+    margin: f32,
 ) -> Option<Contact> {
     let local = box_rot.inverse() * (sphere_pos - box_pos);
     let clamped = local.clamp(-half_extents, half_extents);
     let delta = clamped - local;
     let dist_sq = delta.length_squared();
-    if dist_sq > sphere_radius * sphere_radius || dist_sq < 1e-10 {
+    let reach = sphere_radius + margin;
+    if dist_sq > reach * reach || dist_sq < 1e-10 {
         return None;
     }
     let dist = dist_sq.sqrt();
@@ -476,6 +494,7 @@ fn obb_sat(
     pos_b: Vec3,
     half_b: Vec3,
     rot_b: Quat,
+    margin: f32,
 ) -> Option<(Vec3, f32)> {
     // SAT: the 3 face normals of each box plus the cross products of their axes.
     let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
@@ -485,20 +504,17 @@ fn obb_sat(
     // it beats it by a margin. Otherwise micro-tilts at face contacts make
     // SAT pick noisy cross-product axes and the normal flickers.
     const FACE_PREFERENCE: f32 = 1e-3;
-    // Speculative margin on the "separated" verdict: a pair closer than this
-    // is still reported as touching so the manifold never blinks off for one
-    // substep (which would drop the warm-start cache and pump energy).
-    const SAT_SEPARATION_EPS: f32 = 2e-3;
 
     let mut best_overlap = f32::MAX;
     let mut best_axis = Vec3::X;
 
     for u in aa.into_iter().chain(ba) {
         let overlap = obb_overlap_on(pos_a, half_a, rot_a, pos_b, half_b, rot_b, u);
-        // Separated along any axis -> no contact. A hair of negative
-        // tolerance turns near-touching into a speculative contact instead
-        // of a blink (the solver treats zero-depth points as harmless).
-        if overlap <= -SAT_SEPARATION_EPS {
+        // Separated along any axis by more than the speculative margin -> no
+        // contact. Within the margin the pair still reports as touching
+        // (negative overlap = gap): the manifold never blinks off for a
+        // substep, and fast pairs get speculative constraints (G6).
+        if overlap <= -margin {
             return None;
         }
         if overlap < best_overlap {
@@ -518,7 +534,7 @@ fn obb_sat(
             }
             let u = c.normalize();
             let overlap = obb_overlap_on(pos_a, half_a, rot_a, pos_b, half_b, rot_b, u);
-            if overlap <= -SAT_SEPARATION_EPS {
+            if overlap <= -margin {
                 return None;
             }
             if overlap < best_overlap - FACE_PREFERENCE {
@@ -545,8 +561,9 @@ fn box_vs_box(
     pos_b: Vec3,
     half_b: Vec3,
     rot_b: Quat,
+    margin: f32,
 ) -> Option<Contact> {
-    let (normal, penetration) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b)?;
+    let (normal, penetration) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)?;
     Some(Contact {
         normal,
         penetration,
@@ -581,8 +598,9 @@ fn box_manifold(
     pos_b: Vec3,
     half_b: Vec3,
     rot_b: Quat,
+    margin: f32,
 ) -> Option<Manifold> {
-    let (n, _pen) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b)?;
+    let (n, _pen) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)?;
 
     let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
     let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
@@ -595,9 +613,11 @@ fn box_manifold(
         + half_b.z * ba[2].dot(n).abs();
 
     // Contact-region tolerance: a corner counts as touching the opposing face
-    // when it is within this distance along the (negated) contact normal —
-    // a small speculative margin keeps near-touching corners in the manifold.
-    const DEPTH_TOL: f32 = 0.01;
+    // when it is within this distance along the (negated) contact normal.
+    // G6: this is the pair's speculative margin (base + approach speed · dt),
+    // so fast pairs generate constraints BEFORE any overlap exists; points
+    // then carry negative penetration (= the remaining gap).
+    let depth_tol = margin;
     // Tangential slack beyond the face rectangle: corners slightly outside the
     // face edge (micro-tilts at face contacts) must still generate points,
     // otherwise the manifold collapses to the single-point fallback and the
@@ -610,7 +630,7 @@ fn box_manifold(
         let local = rot_a.inverse() * (c - pos_a);
         // Depth of the corner relative to A's surface along the normal.
         let d = hwn_a - (c - pos_a).dot(n);
-        if d < -DEPTH_TOL {
+        if d < -depth_tol {
             continue;
         }
         // Tangential containment inside the face rectangle (with slack).
@@ -625,7 +645,7 @@ fn box_manifold(
     for c in obb_corners(pos_a, half_a, rot_a) {
         let local = rot_b.inverse() * (c - pos_b);
         let d = hwn_b - (c - pos_b).dot(-n);
-        if d < -DEPTH_TOL {
+        if d < -depth_tol {
             continue;
         }
         if local.x.abs() <= half_b.x + tangent_slack
@@ -668,15 +688,17 @@ fn box_manifold(
     }; 4];
     let mut count = 0;
     for (p, d) in uniq.into_iter().take(4) {
+        // Speculative points keep their NEGATIVE depth (= the gap); the
+        // velocity solver turns it into an approach-speed limit (G6).
         points[count] = ManifoldPoint {
             world_point: p,
-            penetration: d.max(0.0),
+            penetration: d,
         };
         count += 1;
     }
 
     if count == 0 {
-        return box_vs_box(pos_a, half_a, rot_a, pos_b, half_b, rot_b)
+        return box_vs_box(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)
             .map(|c| Manifold::single(0, 0, c));
     }
     Some(Manifold {
@@ -697,6 +719,7 @@ fn sphere_vs_capsule(
     cap_radius: f32,
     cap_half_height: f32,
     cap_rot: Quat,
+    margin: f32,
 ) -> Option<Contact> {
     let axis = cap_rot * Vec3::Y;
     let bottom = cap_pos - axis * cap_half_height;
@@ -706,13 +729,13 @@ fn sphere_vs_capsule(
     let closest = bottom + seg * t;
     let to_sphere = sphere_pos - closest;
     let d = to_sphere.length();
-    let rr = cap_radius + sphere_radius;
+    let rr = cap_radius + sphere_radius + margin;
     if d >= rr || d < 1e-10 {
         return None;
     }
     // Normal points from the capsule toward the sphere.
     let n = to_sphere / d;
-    let penetration = rr - d;
+    let penetration = rr - d - margin;
     let contact_point = closest + n * (cap_radius - penetration * 0.5);
     Some(Contact {
         normal: n,
@@ -732,6 +755,7 @@ fn capsule_vs_capsule(
     radius_b: f32,
     half_height_b: f32,
     rot_b: Quat,
+    margin: f32,
 ) -> Option<Contact> {
     let ax = rot_a * Vec3::Y;
     let bx = rot_b * Vec3::Y;
@@ -760,13 +784,13 @@ fn capsule_vs_capsule(
     let closest_b = bot_b + seg_b * t_b;
     let diff2 = closest_b - closest_a;
     let dist_sq = diff2.length_squared();
-    let radius_sum = radius_a + radius_b;
+    let radius_sum = radius_a + radius_b + margin;
     if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
         return None;
     }
     let dist = dist_sq.sqrt();
     let normal = diff2 / dist;
-    let penetration = radius_sum - dist;
+    let penetration = radius_sum - dist - margin;
     Some(Contact {
         normal,
         penetration,
@@ -774,7 +798,18 @@ fn capsule_vs_capsule(
     })
 }
 
-fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Manifold> {
+/// Narrow phase over the broadphase pair list. G6: every pair gets a
+/// speculative contact margin = base + approach speed · sub_dt, so contacts
+/// exist BEFORE overlap; the velocity solver then caps the approach speed
+/// to the remaining gap instead of letting the bodies interpenetrate.
+fn detect_collisions(
+    bodies: &[RigidBody],
+    active: &[(usize, usize)],
+    sub_dt: f32,
+) -> Vec<Manifold> {
+    /// Base speculative margin (m): also the AABB inflation used by the
+    /// broadphase, so pairs within it are guaranteed to reach narrow phase.
+    const SPEC_BASE: f32 = 0.05;
     let mut manifolds = Vec::new();
     for &(i, j) in active {
         let a = &bodies[i];
@@ -782,17 +817,20 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Man
         if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
             continue;
         }
+        let rel_speed = (a.velocity - b.velocity).length();
+        let margin = SPEC_BASE + rel_speed * sub_dt;
 
         let manifold = match (&a.shape, &b.shape) {
             (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_sphere(a.position, ra, b.position, rb).map(|c| Manifold::single(i, j, c))
+                sphere_vs_sphere(a.position, ra, b.position, rb, margin)
+                    .map(|c| Manifold::single(i, j, c))
             }
             (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
-                sphere_vs_obb(a.position, ra, b.position, hb, b.orientation)
+                sphere_vs_obb(a.position, ra, b.position, hb, b.orientation, margin)
                     .map(|c| Manifold::single(i, j, c))
             }
             (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_obb(b.position, rb, a.position, ha, a.orientation).map(|c| {
+                sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(|c| {
                     Manifold::single(
                         i,
                         j,
@@ -804,9 +842,15 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Man
                     )
                 })
             }
-            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
-                box_manifold(a.position, ha, a.orientation, b.position, hb, b.orientation)
-            }
+            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => box_manifold(
+                a.position,
+                ha,
+                a.orientation,
+                b.position,
+                hb,
+                b.orientation,
+                margin,
+            ),
             (
                 &Shape::Capsule {
                     radius: ra,
@@ -825,6 +869,7 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Man
                 rb,
                 hb,
                 b.orientation,
+                margin,
             )
             .map(|c| Manifold::single(i, j, c)),
             (
@@ -833,7 +878,7 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Man
                     radius: cr,
                     half_height: hh,
                 },
-            ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation)
+            ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
                 .map(|c| Manifold::single(i, j, c)),
             (
                 &Shape::Capsule {
@@ -841,17 +886,19 @@ fn detect_collisions(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<Man
                     half_height: hh,
                 },
                 &Shape::Sphere { radius: r },
-            ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation).map(|c| {
-                Manifold::single(
-                    i,
-                    j,
-                    Contact {
-                        normal: -c.normal,
-                        penetration: c.penetration,
-                        contact_point: c.contact_point,
-                    },
-                )
-            }),
+            ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(
+                |c| {
+                    Manifold::single(
+                        i,
+                        j,
+                        Contact {
+                            normal: -c.normal,
+                            penetration: c.penetration,
+                            contact_point: c.contact_point,
+                        },
+                    )
+                },
+            ),
             _ => None,
         };
 
@@ -879,8 +926,27 @@ impl SweepAndPrune {
         }
     }
 
-    fn update(&mut self, bodies: &[RigidBody]) {
-        self.aabbs = bodies.iter().map(compute_aabb).collect();
+    /// Rebuild AABBs and the active pair list. G6: dynamic bodies get a
+    /// SWEPT AABB (extended by this substep's displacement) and everything
+    /// is inflated by half the base speculative margin — a fast pair must
+    /// reach the narrow phase before its shapes can interpenetrate.
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
+        const HALF_SPEC_MARGIN: f32 = 0.025; // SPEC_BASE / 2 in detect_collisions
+        self.aabbs = bodies
+            .iter()
+            .map(|b| {
+                let mut aabb = compute_aabb(b);
+                if b.body_type == BodyType::Dynamic {
+                    let d = b.velocity * sub_dt;
+                    aabb.expand(aabb.min + d);
+                    aabb.expand(aabb.max + d);
+                }
+                let m = Vec3::splat(HALF_SPEC_MARGIN);
+                aabb.expand(aabb.min - m);
+                aabb.expand(aabb.max + m);
+                aabb
+            })
+            .collect();
         self.sort_axis = (self.sort_axis + 1) % 3;
         self.active.clear();
 
@@ -940,6 +1006,37 @@ struct WarmPoint {
 /// Warm-start cache: per body pair, up to 4 matched contact points.
 type WarmCache = HashMap<(usize, usize), ([WarmPoint; 4], usize)>;
 
+/// Per-manifold solver state shared between the velocity and position stages
+/// of a substep (G6 stage split: velocities solve BEFORE positions move, so
+/// the NGS pass needs the detection-time anchors/penetrations carried over).
+struct ManifoldState {
+    mi: usize,
+    i: usize,
+    j: usize,
+    count: usize,
+    acc: [f32; 4],
+    acc_friction: [f32; 4],
+    acc_friction2: [f32; 4],
+    bias: [f32; 4],
+    // G6 speculative: per-point approach-speed LIMIT (negative of the
+    // remaining gap / sub_dt; 0 for touching points). The velocity
+    // solve drives vn to this target instead of 0, so a separated
+    // point may close its gap within the substep but never more.
+    target: [f32; 4],
+    mu: f32,
+    // Fixed tangent basis (Box2D-style): friction is solved along
+    // directions derived from the contact normal ONCE, not from the
+    // instantaneous slip velocity — velocity-aligned friction walks
+    // the contact and lets resting stacks drift sideways.
+    t1: Vec3,
+    t2: Vec3,
+    // G3: body-frame anchors and detection-time penetration per point,
+    // so the positional pass can re-measure live separation.
+    la: [Vec3; 4],
+    lb: [Vec3; 4],
+    pen0: [f32; 4],
+}
+
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: SweepAndPrune,
@@ -964,6 +1061,11 @@ pub struct BuiltinPhysicsEngine {
     /// Persistent joint constraints with warm-start state (G5). Joints also
     /// feed the island union-find: jointed bodies sleep and wake together.
     joints: Vec<Joint>,
+    /// Sorted body pairs connected by a joint. Jointed bodies never collide
+    /// (Box2D `collide_connected = false` default): a hinge pin passes through
+    /// the arm, so the parts legitimately sweep through each other's space,
+    /// and contact friction there would act as a phantom brake on the joint.
+    joint_pairs: HashSet<(usize, usize)>,
 }
 
 impl BuiltinPhysicsEngine {
@@ -981,6 +1083,7 @@ impl BuiltinPhysicsEngine {
             island_timers: HashMap::new(),
             asleep: Vec::new(),
             joints: Vec::new(),
+            joint_pairs: HashSet::new(),
         }
     }
 
@@ -1000,14 +1103,15 @@ impl BuiltinPhysicsEngine {
         self.contact_softness = softness;
     }
 
-    fn integrate(&mut self, dt: f32) {
+    /// Velocity half of the integration (Box3D `IntegrateVelocities`): apply
+    /// gravity and pending torque so the constraint solvers below act on the
+    /// velocities that the upcoming position integration will actually use.
+    fn integrate_velocities(&mut self, dt: f32) {
         for (h, body) in self.bodies.iter_mut().enumerate() {
             if body.body_type != BodyType::Dynamic || self.asleep.get(h).copied().unwrap_or(false) {
                 continue;
             }
-            // Linear integrate (semi-implicit).
             body.velocity += self.gravity * dt;
-            body.position += body.velocity * dt;
 
             // Angular integrate from applied torque.
             if body.torque != Vec3::ZERO {
@@ -1015,6 +1119,23 @@ impl BuiltinPhysicsEngine {
                     mul_inv_inertia(body.inertia, body.orientation, body.torque * dt);
                 body.torque = Vec3::ZERO;
             }
+        }
+    }
+
+    /// Position half of the integration (Box3D `IntegratePositions`): move
+    /// bodies along the solver-adjusted velocities. Bodies flagged in `skip`
+    /// were already clamped to their time of impact by the continuous pass
+    /// and must not move again this substep.
+    fn integrate_positions(&mut self, dt: f32, skip: &[bool]) {
+        for (h, body) in self.bodies.iter_mut().enumerate() {
+            if body.body_type != BodyType::Dynamic || self.asleep.get(h).copied().unwrap_or(false) {
+                continue;
+            }
+            if skip.get(h).copied().unwrap_or(false) {
+                continue;
+            }
+            // Linear integrate (semi-implicit, post-solve velocities).
+            body.position += body.velocity * dt;
 
             // Rotation: exact small-step quaternion update (exp of angular velocity * dt).
             if body.angular_velocity != Vec3::ZERO {
@@ -1163,14 +1284,12 @@ impl BuiltinPhysicsEngine {
     /// exactly like the contact cache. Joints and contacts alternate at
     /// substep granularity (12 substeps ≈ 720 Hz), which converges well for
     /// chains; true per-iteration interleaving is left for a later refactor.
-    fn solve_joints(&mut self) {
+    /// Velocity stage of the joint solver: warm start from the accumulated
+    /// impulses, then velocity iterations. Runs before positions move.
+    fn solve_joints_velocity(&mut self) {
         if self.joints.is_empty() {
             return;
         }
-        // Positional pass: Baumgarte-style, same β/cap policy as contacts.
-        const BETA: f32 = 0.2;
-        const MAX_LIN_CORRECTION: f32 = 0.25;
-        const MAX_ANG_CORRECTION: f32 = 0.5;
         const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 
         let Self {
@@ -1178,7 +1297,6 @@ impl BuiltinPhysicsEngine {
             joints,
             asleep,
             velocity_iterations,
-            position_iterations,
             ..
         } = self;
 
@@ -1252,8 +1370,44 @@ impl BuiltinPhysicsEngine {
                     }
                 }
             }
+        }
+    }
 
-            // --- Positional iterations (split impulse: positions only).
+    /// Position stage of the joint solver (split impulse: positions only).
+    /// Runs after `integrate_positions`, like Box3D's joint position pass.
+    fn solve_joints_position(&mut self) {
+        if self.joints.is_empty() {
+            return;
+        }
+        // Baumgarte-style, same β/cap policy as contacts.
+        const BETA: f32 = 0.2;
+        const MAX_LIN_CORRECTION: f32 = 0.25;
+        const MAX_ANG_CORRECTION: f32 = 0.5;
+        const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+
+        let Self {
+            bodies,
+            joints,
+            asleep,
+            position_iterations,
+            ..
+        } = self;
+
+        for joint in joints.iter_mut() {
+            let (a, b) = (joint.body_a, joint.body_b);
+            if asleep[a] && asleep[b] {
+                continue;
+            }
+            let (la, lb) = joint.local_anchors();
+            let revolute_axes = match &joint.kind {
+                JointKind::Revolute {
+                    local_axis_a,
+                    local_axis_b,
+                    ..
+                } => Some((*local_axis_a, *local_axis_b)),
+                JointKind::Ball { .. } => None,
+            };
+
             for _ in 0..*position_iterations {
                 let ra = bodies[a].orientation * la;
                 let rb = bodies[b].orientation * lb;
@@ -1313,10 +1467,92 @@ impl BuiltinPhysicsEngine {
         }
     }
 
+    /// Time-of-impact pass (G6, b3SolveContinuous analog in its linear form):
+    /// runs after the velocity solve, before positions move. A body whose
+    /// predicted substep displacement exceeds half its smallest dimension is
+    /// cast along that displacement (exact distances, rotation fixed) and
+    /// clamped to the first impact; the clamped body is flagged in `skip` so
+    /// `integrate_positions` leaves it where the cast put it. This is the
+    /// safety net under the speculative contacts for extreme speeds — a true
+    /// pass-through needs the displacement to exceed margin + thickness +
+    /// radii in one substep.
+    // The loop indexes bodies/asleep/skip in parallel; a range loop is the
+    // clearest form here (same policy as the solver loops above).
+    #[allow(clippy::needless_range_loop)]
+    fn solve_continuous(&mut self, sub_dt: f32, skip: &mut [bool]) {
+        for h in 0..self.bodies.len() {
+            if self.bodies[h].body_type != BodyType::Dynamic || self.asleep[h] {
+                continue;
+            }
+            let disp = self.bodies[h].velocity * sub_dt;
+            let min_dim = match &self.bodies[h].shape {
+                Shape::Sphere { radius } => *radius,
+                Shape::Box { half_extents } => half_extents.min_element(),
+                Shape::Capsule { radius, .. } => *radius,
+            };
+            if disp.length_squared() <= (0.5 * min_dim) * (0.5 * min_dim) {
+                continue;
+            }
+            let mover = distance::ShapeRef {
+                shape: &self.bodies[h].shape,
+                pos: self.bodies[h].position,
+                rot: self.bodies[h].orientation,
+            };
+            let targets = self
+                .bodies
+                .iter()
+                .enumerate()
+                .filter(|&(o, _)| o != h)
+                .map(|(o, b)| {
+                    (
+                        o,
+                        distance::ShapeRef {
+                            shape: &b.shape,
+                            pos: b.position,
+                            rot: b.orientation,
+                        },
+                    )
+                });
+            let hit = distance::cast_shape(mover, disp, targets);
+            if let Some(hit) = hit {
+                let n = hit.normal; // from the target toward the mover
+                let e = self.bodies[h]
+                    .restitution
+                    .min(self.bodies[hit.handle].restitution);
+                let b = &mut self.bodies[h];
+                // Back off a hair so the discrete narrow phase sees a clean
+                // touching contact next substep, not a zero-gap flicker.
+                // hit.t is an ABSOLUTE distance along the displacement.
+                b.position += disp.normalize() * hit.t + n * 1e-3;
+                skip[h] = true;
+                let vn = b.velocity.dot(n);
+                if vn < 0.0 {
+                    // Inelastic below the shared restitution threshold; a
+                    // genuine impact bounces (one-shot, like the discrete
+                    // restitution stage).
+                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
+                    b.velocity -= n * (bounce * vn);
+                }
+            }
+        }
+    }
+
+    /// Velocity stage of the contact solver (G6 order, Box3D
+    /// `IntegrateVelocities` → `Solve` → `IntegratePositions`): runs BEFORE
+    /// positions move, so the constraint impulses act on the velocities that
+    /// the upcoming integration will actually use — no "free fall into the
+    /// contact, then snap" per substep (that snap is an inelastic collision
+    /// and was bleeding energy at every substep). Returns the per-manifold
+    /// state the position stage needs after integration.
     // Solver loops index several parallel per-point arrays (manifold points,
     // warm cache, accumulators); range loops are the clearest form here.
     #[allow(clippy::needless_range_loop)]
-    fn resolve_manifolds(&mut self, manifolds: &[Manifold], allow_restitution: bool) {
+    fn solve_contacts_velocity(
+        &mut self,
+        manifolds: &[Manifold],
+        allow_restitution: bool,
+        sub_dt: f32,
+    ) -> Vec<ManifoldState> {
         // G2b: warm-start cache matches points by proximity, not by index —
         // manifold point order changes frame to frame (sorted by depth).
         const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
@@ -1330,31 +1566,7 @@ impl BuiltinPhysicsEngine {
         // pump. Deep contacts recover purely inelastically (dissipative).
         const RESTITUTION_MAX_PEN: f32 = 0.05;
 
-        // Per-manifold solver state, index-aligned via `mi`.
-        struct State {
-            mi: usize,
-            i: usize,
-            j: usize,
-            count: usize,
-            acc: [f32; 4],
-            acc_friction: [f32; 4],
-            acc_friction2: [f32; 4],
-            bias: [f32; 4],
-            mu: f32,
-            // Fixed tangent basis (Box2D-style): friction is solved along
-            // directions derived from the contact normal ONCE, not from the
-            // instantaneous slip velocity — velocity-aligned friction walks
-            // the contact and lets resting stacks drift sideways.
-            t1: Vec3,
-            t2: Vec3,
-            // G3: body-frame anchors and detection-time penetration per point,
-            // so the positional pass can re-measure live separation.
-            la: [Vec3; 4],
-            lb: [Vec3; 4],
-            pen0: [f32; 4],
-        }
-
-        let mut states: Vec<State> = Vec::with_capacity(manifolds.len());
+        let mut states: Vec<ManifoldState> = Vec::with_capacity(manifolds.len());
         for (mi, m) in manifolds.iter().enumerate() {
             let (i, j) = (m.body_a, m.body_b);
             let total_inv = self.bodies[i].inv_mass + self.bodies[j].inv_mass;
@@ -1433,6 +1645,15 @@ impl BuiltinPhysicsEngine {
             let e = self.bodies[i].restitution.min(self.bodies[j].restitution);
             let mu = self.bodies[i].friction.max(self.bodies[j].friction);
             let mut bias = [0.0f32; 4];
+            let mut target = [0.0f32; 4];
+            for k in 0..count {
+                // Speculative (separated) point: may close the gap within this
+                // substep, but not more — Box2D's speculative distance baked
+                // into the velocity target.
+                if pen0[k] < 0.0 {
+                    target[k] = pen0[k] / sub_dt;
+                }
+            }
             if allow_restitution {
                 for k in 0..count {
                     if matched[k] || pen0[k] > RESTITUTION_MAX_PEN {
@@ -1444,9 +1665,16 @@ impl BuiltinPhysicsEngine {
                     let vn0 = (point_velocity(&self.bodies[j], rb)
                         - point_velocity(&self.bodies[i], ra))
                     .dot(n);
-                    if vn0 < -RESTITUTION_THRESHOLD {
-                        bias[k] = -e * vn0;
+                    if vn0 >= -RESTITUTION_THRESHOLD {
+                        continue;
                     }
+                    // A speculative point restitutes only if the approach is
+                    // fast enough to actually land within this substep —
+                    // otherwise the bounce would fire in mid-air.
+                    if pen0[k] < 0.0 && -pen0[k] > -vn0 * sub_dt {
+                        continue;
+                    }
+                    bias[k] = -e * vn0;
                 }
             }
 
@@ -1469,7 +1697,9 @@ impl BuiltinPhysicsEngine {
                     let vn_pre = (point_velocity(&self.bodies[j], rb)
                         - point_velocity(&self.bodies[i], ra))
                     .dot(n);
-                    let applied = warm[k].min((-vn_pre / k_eff).max(0.0));
+                    // Cap against the speculative target too: a separated
+                    // point may keep approaching up to its gap limit.
+                    let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
                     warm_applied[k] = applied;
                     if applied > 0.0 {
                         apply_impulse(&mut self.bodies, i, j, n * applied, ra, rb);
@@ -1477,7 +1707,7 @@ impl BuiltinPhysicsEngine {
                 }
             }
 
-            states.push(State {
+            states.push(ManifoldState {
                 mi,
                 i,
                 j,
@@ -1486,6 +1716,7 @@ impl BuiltinPhysicsEngine {
                 acc_friction: [0.0; 4],
                 acc_friction2: [0.0; 4],
                 bias,
+                target,
                 mu,
                 t1: tangent_basis(n),
                 t2: tangent_basis(n).cross(n),
@@ -1513,7 +1744,16 @@ impl BuiltinPhysicsEngine {
                     for k in 0..st.count {
                         pts[k] = m.points[k].world_point;
                     }
-                    solve_normal_block(&mut self.bodies, i, j, n, &pts, &mut st.acc, st.count);
+                    solve_normal_block(
+                        &mut self.bodies,
+                        i,
+                        j,
+                        n,
+                        &pts,
+                        &mut st.acc,
+                        &st.target,
+                        st.count,
+                    );
                 } else {
                     let k = 0;
                     let p = m.points[k].world_point;
@@ -1525,8 +1765,10 @@ impl BuiltinPhysicsEngine {
                             - point_velocity(&self.bodies[i], ra);
                         let vn = rel.dot(n);
                         // Inelastic contact: restitution is a separate
-                        // one-shot stage (below), never accumulated.
-                        let lambda = -vn / k_eff;
+                        // one-shot stage (below), never accumulated. G6: the
+                        // target is the speculative approach limit (0 when
+                        // touching), not necessarily a full stop.
+                        let lambda = (st.target[k] - vn) / k_eff;
                         let new_acc = (st.acc[k] + lambda).max(0.0);
                         let delta = new_acc - st.acc[k];
                         st.acc[k] = new_acc;
@@ -1640,19 +1882,44 @@ impl BuiltinPhysicsEngine {
             }
         }
 
-        // ---- G3 split impulse: iterated NGS over ALL manifolds ----
-        // Position errors are corrected with pseudo-motion only — real
-        // velocities are never touched. Each iteration re-measures the LIVE
-        // separation at the stored body-frame anchors, so corrections
-        // distribute evenly across the whole manifold set (stacks) instead
-        // of one-shot rigid pushes, which seeded the micro-tilts from G2b.
-        // β is kept low (0.2): stronger pseudo-correction resonates with the
-        // velocity solve on rocking contacts and pumps the rock mode.
+        // --- Persist the cache for the next substep/step ---
+        let mut next: WarmCache = HashMap::new();
+        for st in &states {
+            let m = &manifolds[st.mi];
+            let mut pts = [WarmPoint {
+                la: Vec3::ZERO,
+                lb: Vec3::ZERO,
+                normal: Vec3::ZERO,
+                impulse: 0.0,
+            }; 4];
+            for k in 0..st.count {
+                pts[k] = WarmPoint {
+                    la: st.la[k],
+                    lb: st.lb[k],
+                    normal: m.normal,
+                    impulse: st.acc[k],
+                };
+            }
+            next.insert((st.i.min(st.j), st.i.max(st.j)), (pts, st.count));
+        }
+        self.warm_impulses = next;
+        states
+    }
+
+    /// Position stage (G3 split impulse, G6 order): runs AFTER positions are
+    /// integrated. Iterated NGS over ALL manifolds; pseudo-motion only —
+    /// real velocities are never touched. Each iteration re-measures the
+    /// LIVE separation at the stored body-frame anchors, so corrections
+    /// distribute evenly across the whole manifold set (stacks) instead
+    /// of one-shot rigid pushes, which seeded the micro-tilts from G2b.
+    /// β is kept low (0.2): stronger pseudo-correction resonates with the
+    /// velocity solve on rocking contacts and pumps the rock mode.
+    fn solve_contacts_position(&mut self, manifolds: &[Manifold], states: &[ManifoldState]) {
         const SLOP: f32 = 0.02;
         const MAX_CORRECTION: f32 = 0.25;
         const BETA_POS: f32 = 0.2;
         for _ in 0..self.position_iterations {
-            for st in &states {
+            for st in states {
                 let m = &manifolds[st.mi];
                 let (i, j) = (st.i, st.j);
                 let n = m.normal;
@@ -1688,28 +1955,6 @@ impl BuiltinPhysicsEngine {
                 }
             }
         }
-
-        // --- Persist the cache for the next substep/step ---
-        let mut next: WarmCache = HashMap::new();
-        for st in &states {
-            let m = &manifolds[st.mi];
-            let mut pts = [WarmPoint {
-                la: Vec3::ZERO,
-                lb: Vec3::ZERO,
-                normal: Vec3::ZERO,
-                impulse: 0.0,
-            }; 4];
-            for k in 0..st.count {
-                pts[k] = WarmPoint {
-                    la: st.la[k],
-                    lb: st.lb[k],
-                    normal: m.normal,
-                    impulse: st.acc[k],
-                };
-            }
-            next.insert((st.i.min(st.j), st.i.max(st.j)), (pts, st.count));
-        }
-        self.warm_impulses = next;
     }
 
     fn raycast_body(&self, ray: &Ray, handle: usize, max_dist: f32) -> Option<RaycastHit> {
@@ -1753,12 +1998,36 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         let sub_dt = dt / self.substeps as f32;
         let mut last_manifolds = Vec::new();
         for s in 0..self.substeps {
-            self.integrate(sub_dt);
-            self.broadphase.update(&self.bodies);
-            let manifolds = detect_collisions(&self.bodies, &self.broadphase.active);
+            // Box3D stage order: solve velocities BEFORE moving positions, so
+            // a resting contact kills gravity's velocity gain in the same
+            // substep instead of letting the body free-fall and snapping it
+            // back (the snap is an inelastic collision and bleeds energy).
+            self.integrate_velocities(sub_dt);
+            self.broadphase.update(&self.bodies, sub_dt);
+            // Jointed pairs never collide: their parts legitimately sweep
+            // through each other's space (a hinge pin passes through the arm).
+            let manifolds = if self.joint_pairs.is_empty() {
+                detect_collisions(&self.bodies, &self.broadphase.active, sub_dt)
+            } else {
+                let pairs: Vec<(usize, usize)> = self
+                    .broadphase
+                    .active
+                    .iter()
+                    .copied()
+                    .filter(|p| !self.joint_pairs.contains(p))
+                    .collect();
+                detect_collisions(&self.bodies, &pairs, sub_dt)
+            };
             // Restitution is one-shot per step, evaluated on the first substep.
-            self.resolve_manifolds(&manifolds, s == 0);
-            self.solve_joints();
+            let states = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt);
+            self.solve_joints_velocity();
+            // Continuous pass on the solver-adjusted velocities: clamp fast
+            // movers to their first impact and keep them there this substep.
+            let mut clamped = vec![false; self.bodies.len()];
+            self.solve_continuous(sub_dt, &mut clamped);
+            self.integrate_positions(sub_dt, &clamped);
+            self.solve_contacts_position(&manifolds, &states);
+            self.solve_joints_position();
             last_manifolds = manifolds;
         }
         self.rebuild_islands(&last_manifolds);
@@ -1801,6 +2070,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 }
                 true
             });
+            self.joint_pairs = self
+                .joints
+                .iter()
+                .map(|j| (j.body_a.min(j.body_b), j.body_a.max(j.body_b)))
+                .collect();
         }
     }
 
@@ -1837,13 +2111,26 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 self.wake_island(h);
             }
         }
+        self.joint_pairs
+            .insert((body_a.min(body_b), body_a.max(body_b)));
         self.joints.push(Joint::new(body_a, body_b, kind));
         Some(self.joints.len() - 1)
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
         if handle < self.joints.len() {
-            self.joints.swap_remove(handle);
+            let removed = self.joints.swap_remove(handle);
+            // The pair may still be covered by another joint between the
+            // same bodies — only forget it when no joint references it.
+            let (a, b) = (removed.body_a, removed.body_b);
+            let key = (a.min(b), a.max(b));
+            if !self
+                .joints
+                .iter()
+                .any(|j| (j.body_a.min(j.body_b), j.body_a.max(j.body_b)) == key)
+            {
+                self.joint_pairs.remove(&key);
+            }
         }
     }
 
@@ -1869,42 +2156,33 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         closest
     }
 
+    /// Honest shapecast (G6): conservative advancement over exact pairwise
+    /// shape distances (`distance.rs`). Tunnel-free for any cast length and
+    /// any target thickness; the hit distance is the true first touch, not
+    /// the nearest fixed sample. Rotation of the cast shape is fixed during
+    /// the sweep (linear cast).
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit> {
-        // Conservative sweep by reusing the narrow-phase over a probe body.
-        let delta = to - from;
-        if delta.length_squared() < 1e-9 {
-            return None;
-        }
-        const STEPS: usize = 64;
-        for s in 1..=STEPS {
-            let pos = from + delta * (s as f32 / STEPS as f32);
-            let probe = RigidBody {
-                position: pos,
-                orientation: Quat::IDENTITY,
-                velocity: Vec3::ZERO,
-                angular_velocity: Vec3::ZERO,
-                mass: 1.0,
-                inv_mass: 1.0,
-                inertia: shape.inertia(1.0),
-                torque: Vec3::ZERO,
-                restitution: 0.0,
-                friction: 0.0,
-                shape: shape.clone(),
-                body_type: BodyType::Dynamic,
-            };
-            for (handle, body) in self.bodies.iter().enumerate() {
-                let pair = [probe.clone(), body.clone()];
-                if !detect_collisions(&pair, &[(0, 1)]).is_empty() {
-                    return Some(RaycastHit {
-                        handle,
-                        point: pos,
-                        normal: Vec3::ZERO,
-                        distance: (pos - from).length(),
-                    });
-                }
-            }
-        }
-        None
+        let mover = distance::ShapeRef {
+            shape,
+            pos: from,
+            rot: Quat::IDENTITY,
+        };
+        let targets = self.bodies.iter().enumerate().map(|(h, b)| {
+            (
+                h,
+                distance::ShapeRef {
+                    shape: &b.shape,
+                    pos: b.position,
+                    rot: b.orientation,
+                },
+            )
+        });
+        distance::cast_shape(mover, to - from, targets).map(|h| RaycastHit {
+            handle: h.handle,
+            point: h.point,
+            normal: h.normal,
+            distance: h.t,
+        })
     }
 }
 
@@ -2093,6 +2371,80 @@ mod tests {
     }
 
     #[test]
+    fn shapecast_exact_hit_distance() {
+        // Sphere r=0.5 cast straight down onto a half-1 box at the origin:
+        // contact when the sphere center is 1.5 above the origin, so a cast
+        // from y=5 must report a hit distance of exactly 3.5 (G6: the cast
+        // uses analytic shape distances, not a sampled march).
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0));
+        let shape = Shape::Sphere { radius: 0.5 };
+        let hit = physics
+            .shapecast(&shape, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO)
+            .expect("cast straight down must hit the box");
+        assert!(
+            (hit.distance - 3.5).abs() < 1e-2,
+            "hit distance={} expected 3.5",
+            hit.distance
+        );
+        // Surface normal at the hit points up, toward the caster.
+        assert!(hit.normal.y > 0.99, "normal={:?}", hit.normal);
+    }
+
+    #[test]
+    fn shapecast_thin_wall_no_tunnel() {
+        // A 4 cm wall is far thinner than the cast segment: a sampled march
+        // would step over it, conservative advancement must not (G6).
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(2.0, 2.0, 0.02),
+            0.0,
+        ));
+        let shape = Shape::Sphere { radius: 0.1 };
+        let hit = physics.shapecast(&shape, Vec3::new(0.0, 0.0, -2.0), Vec3::new(0.0, 0.0, 2.0));
+        let hit = hit.expect("cast through the thin wall must hit, not tunnel");
+        // Sphere surface touches the wall face at z = -0.02 - 0.1 = -0.12,
+        // i.e. 1.88 into the 4-unit cast.
+        assert!(
+            (hit.distance - 1.88).abs() < 1e-2,
+            "hit distance={} expected 1.88",
+            hit.distance
+        );
+    }
+
+    #[test]
+    fn fast_sphere_does_not_tunnel() {
+        // Bullet vs thin floor (G6): at -80 m/s the sphere moves 0.111 m per
+        // substep (12 substeps at 60 Hz) — more than the 0.1 m floor slab.
+        // Without speculative contacts + the TOI pass it would sail through;
+        // here it must end up resting on top.
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.05, 10.0),
+            0.0,
+        ));
+        let bullet = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 3.0, 0.0), 0.1, 1.0));
+        {
+            let b = physics.get_body_mut(bullet).unwrap();
+            b.velocity = Vec3::new(0.0, -80.0, 0.0);
+            b.restitution = 0.0; // we test tunneling, not bouncing
+        }
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let y = physics.get_body(bullet).unwrap().position.y;
+        assert!(y > 0.0, "bullet tunneled through the floor: y={y}");
+        // And it settled near the contact plane (center = slab top + radius),
+        // not hovering or buried.
+        assert!(
+            (y - 0.15).abs() < 0.05,
+            "bullet did not settle on the floor: y={y}"
+        );
+    }
+
+    #[test]
     fn box_manifold_produces_four_points() {
         // Two equal half-0.5 boxes, overlapping by 0.25 along +Y: the resting
         // face yields 4 manifold points (vertex-face contact), not one.
@@ -2104,6 +2456,7 @@ mod tests {
             Vec3::new(0.0, 0.75, 0.0),
             half,
             Quat::IDENTITY,
+            0.05,
         )
         .expect("boxes overlap");
         assert_eq!(m.point_count, 4, "expected a 4-point manifold");
@@ -2428,8 +2781,11 @@ mod tests {
     fn revolute_hinge_rotates_about_axis_only() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        // Arm hangs with its top at the origin: center one meter below. The
+        // jointed pair does not collide (a hinge pin passes through the arm),
+        // so the test measures the JOINT, not contact friction.
         let arm = physics.add_body(RigidBody::new_box(
-            Vec3::new(0.0, -2.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(0.1, 1.0, 0.1),
             1.0,
         ));
@@ -2447,19 +2803,20 @@ mod tests {
             .expect("valid joint");
         // Kick sideways so the pendulum arm swings about the Z hinge.
         physics.get_body_mut(arm).unwrap().velocity = Vec3::new(1.5, 0.0, 0.0);
+        // The pendulum oscillates; the swing EXTREMES are what must show pure
+        // Z rotation, so track the maxima rather than the final frame's phase.
+        let mut max_z_rot = 0.0f32;
+        let mut max_tilt = 0.0f32;
         for _ in 0..300 {
             physics.step(1.0 / 60.0);
+            let q = physics.get_body(arm).unwrap().orientation;
+            max_z_rot = max_z_rot.max(q.z.abs());
+            max_tilt = max_tilt.max(q.x.abs()).max(q.y.abs());
         }
-        let b = physics.get_body(arm).unwrap();
-        // The arm swung: it rotated about Z...
-        let q = b.orientation;
-        let z_rotation = q.z.abs() > 0.01 || (q.w - 1.0).abs() > 0.01;
-        assert!(z_rotation, "hinge should rotate about Z, q={q:?}");
-        // ...but tilt about X and Y stays locked.
-        assert!(
-            q.x.abs() < 0.02 && q.y.abs() < 0.02,
-            "hinge tilted off its axis: q={q:?}"
-        );
+        // The arm swung about Z (the 1.5 m/s kick lifts it well past 5°)...
+        assert!(max_z_rot > 0.05, "hinge barely rotated: {max_z_rot}");
+        // ...but tilt about X and Y stays locked throughout the swing.
+        assert!(max_tilt < 0.02, "hinge tilted off its axis: {max_tilt}");
         // Anchor stays coincident.
         let err = joint_anchor_error(&physics, anchor, arm, Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
         assert!(err < 0.05, "hinge anchor drifted: {err}");
