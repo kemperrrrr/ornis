@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use glam::{Quat, Vec3};
+use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance;
@@ -805,6 +806,7 @@ fn capsule_vs_capsule(
 fn detect_collisions(
     bodies: &[RigidBody],
     active: &[(usize, usize)],
+    asleep: &[bool],
     sub_dt: f32,
 ) -> Vec<Manifold> {
     /// Base speculative margin (m): also the AABB inflation used by the
@@ -815,6 +817,13 @@ fn detect_collisions(
         let a = &bodies[i];
         let b = &bodies[j];
         if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
+            continue;
+        }
+        // G7: both-asleep pairs are frozen in place — their relative geometry
+        // cannot change, so re-running the narrow phase (SAT!) per substep is
+        // pure waste. On a settled scene this IS the frame cost. The island
+        // graph keeps them composed via the frozen-asleep union instead.
+        if asleep[i] && asleep[j] {
             continue;
         }
         let rel_speed = (a.velocity - b.velocity).length();
@@ -1037,6 +1046,29 @@ struct ManifoldState {
     pen0: [f32; 4],
 }
 
+/// Per-island work item for the G7 parallel solver: an island-local shard of
+/// the world. Body indices inside `manifolds` and `states` are LOCAL
+/// (positions in `body_idx`/`bodies`); `keys` maps each local manifold to its
+/// global body-pair key for the warm-start cache. Islands are disjoint over
+/// dynamic bodies by construction (union-find over the fresh manifolds), so
+/// solving them concurrently is race-free and bit-identical for any thread
+/// count: each island runs its manifolds in the original global order, and
+/// Gauss-Seidel updates on disjoint state commute exactly.
+struct IslandWork {
+    /// Sorted global body handles; local index = position in this vec.
+    body_idx: Vec<usize>,
+    /// Gathered body shard (statics included; never written back).
+    bodies: Vec<RigidBody>,
+    /// Manifolds cloned with LOCAL body indices.
+    manifolds: Vec<Manifold>,
+    /// Global sorted body-pair key per local manifold (warm cache I/O).
+    keys: Vec<(usize, usize)>,
+    /// Velocity-stage output, consumed by the position stage.
+    states: Vec<ManifoldState>,
+    /// This island's updated warm-cache entries (merged after the join).
+    warm: WarmCache,
+}
+
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: SweepAndPrune,
@@ -1066,6 +1098,8 @@ pub struct BuiltinPhysicsEngine {
     /// the arm, so the parts legitimately sweep through each other's space,
     /// and contact friction there would act as a phantom brake on the joint.
     joint_pairs: HashSet<(usize, usize)>,
+    /// Diagnostics: (body_a, body_b) of the last substep's manifolds.
+    debug_pairs: Vec<(usize, usize)>,
 }
 
 impl BuiltinPhysicsEngine {
@@ -1084,6 +1118,7 @@ impl BuiltinPhysicsEngine {
             asleep: Vec::new(),
             joints: Vec::new(),
             joint_pairs: HashSet::new(),
+            debug_pairs: Vec::new(),
         }
     }
 
@@ -1101,6 +1136,27 @@ impl BuiltinPhysicsEngine {
 
     pub fn set_contact_softness(&mut self, softness: f32) {
         self.contact_softness = softness;
+    }
+
+    /// Whether the body's island is currently sleeping (G4/G7 diagnostics).
+    pub fn is_asleep(&self, handle: BodyHandle) -> bool {
+        self.asleep.get(handle).copied().unwrap_or(false)
+    }
+
+    /// (Diagnostics) island id of the body and its current sleep timer.
+    pub fn debug_island_info(&self, handle: BodyHandle) -> Option<(u32, f32)> {
+        let root = *self.island.get(handle)?;
+        let timer = self.island_timers.get(&root).copied().unwrap_or(0.0);
+        Some((root, timer))
+    }
+
+    /// (Diagnostics) how many contact manifolds touched the body on the last
+    /// substep of the previous step.
+    pub fn debug_contact_count(&self, handle: BodyHandle) -> usize {
+        self.debug_pairs
+            .iter()
+            .filter(|&&(a, b)| a == handle || b == handle)
+            .count()
     }
 
     /// Velocity half of the integration (Box3D `IntegrateVelocities`): apply
@@ -1188,25 +1244,47 @@ impl BuiltinPhysicsEngine {
         // detection blinks for a step: its members are not integrated, so
         // their relative geometry cannot change — dissolving the island
         // would let one member wake while its support stays asleep.
-        for a in 0..n {
-            if !self.asleep.get(a).copied().unwrap_or(false) {
+        // (One representative per old island, not an O(n²) pair scan.)
+        let mut asleep_rep: HashMap<u32, usize> = HashMap::new();
+        for h in 0..n {
+            if !self.asleep.get(h).copied().unwrap_or(false) {
                 continue;
             }
-            for b in (a + 1)..n {
-                if self.asleep.get(b).copied().unwrap_or(false)
-                    && self.island[a] == self.island[b]
-                    && self.island[a] != u32::MAX
-                {
-                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            let old = self.island[h];
+            if old == u32::MAX {
+                continue;
+            }
+            match asleep_rep.entry(old) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(h);
+                }
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    let (ra, rb) = (find(&mut parent, *e.get()), find(&mut parent, h));
                     if ra != rb {
                         parent[rb] = ra;
                     }
                 }
             }
         }
+        // Canonicalize island ids to the MINIMUM member index. The raw
+        // union-find root depends on manifold order, which varies step to
+        // step; a root that flips identity resets the island's sleep timer
+        // forever and the island never sleeps (measured on a 1025-body grid:
+        // half of the perfectly quiet scene stayed awake at ~200 ms/frame).
+        let mut canonical: HashMap<usize, usize> = HashMap::new();
+        for h in 0..n {
+            if self.bodies[h].body_type != BodyType::Dynamic {
+                continue;
+            }
+            let r = find(&mut parent, h);
+            canonical
+                .entry(r)
+                .and_modify(|m| *m = (*m).min(h))
+                .or_insert(h);
+        }
         for h in 0..n {
             self.island[h] = if self.bodies[h].body_type == BodyType::Dynamic {
-                find(&mut parent, h) as u32
+                canonical[&find(&mut parent, h)] as u32
             } else {
                 u32::MAX
             };
@@ -1259,6 +1337,14 @@ impl BuiltinPhysicsEngine {
                     let b = &mut self.bodies[h];
                     b.velocity = Vec3::ZERO;
                     b.angular_velocity = Vec3::ZERO;
+                    // A sleeping body is STATIC for the solver (Jolt
+                    // semantics): zero inverse mass/inertia makes every
+                    // impulse and effective-mass computation treat it as
+                    // immovable, so a resting contact with an awake body
+                    // can never accumulate invisible velocity in the
+                    // sleeper and detonate it on wake. Restored on wake.
+                    b.inv_mass = 0.0;
+                    b.inertia = Vec3::ZERO;
                 }
             }
         }
@@ -1268,9 +1354,15 @@ impl BuiltinPhysicsEngine {
     /// propagates motion through the island, so partial wake is incoherent).
     fn wake_island(&mut self, h: usize) {
         let root = self.island[h];
-        for b in 0..self.bodies.len() {
-            if self.island[b] == root {
-                self.asleep[b] = false;
+        for h2 in 0..self.bodies.len() {
+            if self.island[h2] == root {
+                self.asleep[h2] = false;
+                // Undo the sleep-time staticification (see update_sleep).
+                let b = &mut self.bodies[h2];
+                if b.body_type == BodyType::Dynamic {
+                    b.inv_mass = 1.0 / b.mass;
+                    b.inertia = b.shape.inertia(b.mass);
+                }
             }
         }
         self.island_timers.insert(root, 0.0);
@@ -1537,22 +1629,260 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    /// Velocity stage of the contact solver (G6 order, Box3D
-    /// `IntegrateVelocities` → `Solve` → `IntegratePositions`): runs BEFORE
-    /// positions move, so the constraint impulses act on the velocities that
-    /// the upcoming integration will actually use — no "free fall into the
-    /// contact, then snap" per substep (that snap is an inelastic collision
-    /// and was bleeding energy at every substep). Returns the per-manifold
-    /// state the position stage needs after integration.
-    // Solver loops index several parallel per-point arrays (manifold points,
-    // warm cache, accumulators); range loops are the clearest form here.
-    #[allow(clippy::needless_range_loop)]
+    /// Velocity stage of the contact solver (G6 stage order, G7 island
+    /// dispatch). Orchestrator: a sequential sleep/wake pre-pass (the only
+    /// part mutating island state), a union-find partition over the FRESH
+    /// manifolds, then each island solved independently by
+    /// `solve_island_velocity` — in parallel via rayon when the scene is wide
+    /// enough. Islands are disjoint over dynamic bodies by construction, so
+    /// concurrent solves are race-free and bit-identical for any thread
+    /// count (Strong Confluence). Returns the island work items; the position
+    /// stage reuses them (states + remapped manifolds) after integration.
     fn solve_contacts_velocity(
         &mut self,
         manifolds: &[Manifold],
         allow_restitution: bool,
         sub_dt: f32,
-    ) -> Vec<ManifoldState> {
+    ) -> Vec<IslandWork> {
+        // Parallel dispatch pays off only with real width; below that the
+        // same code runs sequentially over the same per-island structure.
+        const PAR_MIN_ISLANDS: usize = 2;
+        const PAR_MIN_MANIFOLDS: usize = 24;
+
+        // --- Sequential pre-pass: sleep/wake policy + active filtering ---
+        // Sleep: a contact needs work only if at least one side is an AWAKE
+        // DYNAMIC body. Static geometry never wakes anything (a body asleep
+        // on the floor must stay asleep).
+        const WAKE_IMPACT_SPEED: f32 = 0.5;
+        let mut active: Vec<usize> = Vec::with_capacity(manifolds.len());
+        for (mi, m) in manifolds.iter().enumerate() {
+            let (i, j) = (m.body_a, m.body_b);
+            let ai = self.asleep[i] || self.bodies[i].body_type != BodyType::Dynamic;
+            let aj = self.asleep[j] || self.bodies[j].body_type != BodyType::Dynamic;
+            if ai && aj {
+                continue;
+            }
+            // Wake hysteresis (G7): a sleeping island is woken only by a
+            // genuine IMPACT — approach speed above the threshold. A resting
+            // micro-jitter contact (vn ≈ 0) must NOT wake it: island
+            // composition can flicker at solver limit-cycle boundaries, and
+            // without hysteresis a singleton sliver sleeps, gets tickled
+            // awake by its quiet neighbour, and the pair churns
+            // sleep→wake→sleep forever, keeping half of a settled scene
+            // awake (measured on a 1025-body grid: ~50% never slept).
+            if (self.asleep[i] && !aj) || (self.asleep[j] && !ai) {
+                let (s, o) = if self.asleep[i] { (i, j) } else { (j, i) };
+                let p = m.points[0].world_point;
+                let rs = p - self.bodies[s].position;
+                let ro = p - self.bodies[o].position;
+                let approach = (point_velocity(&self.bodies[o], ro)
+                    - point_velocity(&self.bodies[s], rs))
+                .dot(m.normal)
+                    * if self.asleep[i] { -1.0 } else { 1.0 };
+                // m.normal points i → j; `approach` is the speed at which the
+                // awake partner closes in on the sleeper (sleep velocities
+                // are zeroed, so this is just the partner's normal speed).
+                if approach > WAKE_IMPACT_SPEED {
+                    self.wake_island(s);
+                }
+            }
+            // A still-sleeping body is static for the solver (its inv_mass is
+            // zeroed at sleep), so sleeper+static pairs carry no work.
+            if self.bodies[i].inv_mass + self.bodies[j].inv_mass < 1e-10 {
+                continue;
+            }
+            active.push(mi);
+        }
+        if active.is_empty() {
+            self.warm_impulses.clear();
+            return Vec::new();
+        }
+
+        // --- Partition: union-find over the fresh active manifolds ---
+        // Only dynamic–dynamic contacts merge islands; a manifold against
+        // static geometry rides in its dynamic side's island.
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let n = self.bodies.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        for &mi in &active {
+            let m = &manifolds[mi];
+            let (a, b) = (m.body_a, m.body_b);
+            if self.bodies[a].body_type == BodyType::Dynamic
+                && self.bodies[b].body_type == BodyType::Dynamic
+            {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb {
+                    parent[rb] = ra;
+                }
+            }
+        }
+        // Group manifold indices by island root, in order of first appearance
+        // (`active` is in global manifold order → deterministic groups).
+        let mut group_of: HashMap<usize, usize> = HashMap::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for &mi in &active {
+            let m = &manifolds[mi];
+            let d = if self.bodies[m.body_a].body_type == BodyType::Dynamic {
+                m.body_a
+            } else {
+                m.body_b
+            };
+            let root = find(&mut parent, d);
+            match group_of.entry(root) {
+                std::collections::hash_map::Entry::Occupied(e) => groups[*e.get()].push(mi),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(groups.len());
+                    groups.push(vec![mi]);
+                }
+            }
+        }
+
+        // --- Build per-island work items: gather bodies, remap manifolds ---
+        let mut islands: Vec<IslandWork> = Vec::with_capacity(groups.len());
+        for group in groups {
+            let mut body_idx: Vec<usize> = Vec::new();
+            for &mi in &group {
+                body_idx.push(manifolds[mi].body_a);
+                body_idx.push(manifolds[mi].body_b);
+            }
+            body_idx.sort_unstable();
+            body_idx.dedup();
+            let shard: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
+            let local = |g: usize| body_idx.binary_search(&g).expect("island body");
+            let island_manifolds: Vec<Manifold> = group
+                .iter()
+                .map(|&mi| {
+                    let mut mc = manifolds[mi].clone();
+                    mc.body_a = local(manifolds[mi].body_a);
+                    mc.body_b = local(manifolds[mi].body_b);
+                    mc
+                })
+                .collect();
+            let keys: Vec<(usize, usize)> = group
+                .iter()
+                .map(|&mi| {
+                    let m = &manifolds[mi];
+                    (m.body_a.min(m.body_b), m.body_a.max(m.body_b))
+                })
+                .collect();
+            islands.push(IslandWork {
+                body_idx,
+                bodies: shard,
+                manifolds: island_manifolds,
+                keys,
+                states: Vec::new(),
+                warm: HashMap::new(),
+            });
+        }
+
+        // --- Dispatch: parallel across islands when the scene is wide ---
+        let parallel = islands.len() >= PAR_MIN_ISLANDS && active.len() >= PAR_MIN_MANIFOLDS;
+        let warm_in = &self.warm_impulses;
+        let iters = self.velocity_iterations;
+        let solve = |isl: &mut IslandWork| {
+            let (states, warm) = Self::solve_island_velocity(
+                &mut isl.bodies,
+                &isl.manifolds,
+                &isl.keys,
+                warm_in,
+                iters,
+                allow_restitution,
+                sub_dt,
+            );
+            isl.states = states;
+            isl.warm = warm;
+        };
+        if parallel {
+            islands.par_iter_mut().for_each(solve);
+        } else {
+            islands.iter_mut().for_each(solve);
+        }
+
+        // --- Scatter bodies back + merge the warm caches ---
+        // Cache keys are disjoint across islands by construction; write-back
+        // touches only dynamic bodies (statics and sleepers never move).
+        let mut next: WarmCache = HashMap::new();
+        for isl in &islands {
+            for (l, &g) in isl.body_idx.iter().enumerate() {
+                if self.bodies[g].body_type == BodyType::Dynamic {
+                    self.bodies[g] = isl.bodies[l].clone();
+                }
+            }
+            next.extend(isl.warm.iter().map(|(k, v)| (*k, *v)));
+        }
+        self.warm_impulses = next;
+        islands
+    }
+
+    /// Position stage (G3 split impulse, G6 order, G7 island dispatch): runs
+    /// AFTER positions are integrated. Iterated NGS per island;
+    /// pseudo-motion only — real velocities are never touched. Each iteration
+    /// re-measures the LIVE separation at the stored body-frame anchors, so
+    /// corrections distribute evenly across the manifold set instead of
+    /// one-shot rigid pushes. β is kept low (0.2): stronger pseudo-correction
+    /// resonates with the velocity solve on rocking contacts.
+    fn solve_contacts_position(&mut self, islands: &mut [IslandWork]) {
+        const PAR_MIN_ISLANDS: usize = 2;
+        const PAR_MIN_MANIFOLDS: usize = 24;
+        if islands.is_empty() {
+            return;
+        }
+        // Re-gather: integration, TOI clamps and the joint velocity pass all
+        // moved the main array since the velocity stage ran.
+        for isl in islands.iter_mut() {
+            for (l, &g) in isl.body_idx.iter().enumerate() {
+                isl.bodies[l] = self.bodies[g].clone();
+            }
+        }
+        let iters = self.position_iterations;
+        let softness = self.contact_softness;
+        let total_manifolds: usize = islands.iter().map(|i| i.manifolds.len()).sum();
+        let solve = |isl: &mut IslandWork| {
+            Self::solve_island_position(
+                &mut isl.bodies,
+                &isl.manifolds,
+                &isl.states,
+                iters,
+                softness,
+            );
+        };
+        if islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS {
+            islands.par_iter_mut().for_each(solve);
+        } else {
+            islands.iter_mut().for_each(solve);
+        }
+        for isl in islands.iter() {
+            for (l, &g) in isl.body_idx.iter().enumerate() {
+                if self.bodies[g].body_type == BodyType::Dynamic {
+                    self.bodies[g] = isl.bodies[l].clone();
+                }
+            }
+        }
+    }
+
+    /// Per-island velocity solve: the G2b–G6 inner solver (warm start,
+    /// Gauss-Seidel with block-LCP normals and fixed-basis friction, one-shot
+    /// restitution, cache persist), operating on an island-local body shard.
+    /// All body indices in `manifolds` and the returned states are LOCAL;
+    /// `keys` maps each local manifold to its global body-pair warm-cache key.
+    // Solver loops index several parallel per-point arrays (manifold points,
+    // warm cache, accumulators); range loops are the clearest form here.
+    #[allow(clippy::needless_range_loop)]
+    fn solve_island_velocity(
+        bodies: &mut [RigidBody],
+        manifolds: &[Manifold],
+        keys: &[(usize, usize)],
+        warm_in: &WarmCache,
+        velocity_iterations: u32,
+        allow_restitution: bool,
+        sub_dt: f32,
+    ) -> (Vec<ManifoldState>, WarmCache) {
         // G2b: warm-start cache matches points by proximity, not by index —
         // manifold point order changes frame to frame (sorted by depth).
         const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
@@ -1569,27 +1899,12 @@ impl BuiltinPhysicsEngine {
         let mut states: Vec<ManifoldState> = Vec::with_capacity(manifolds.len());
         for (mi, m) in manifolds.iter().enumerate() {
             let (i, j) = (m.body_a, m.body_b);
-            let total_inv = self.bodies[i].inv_mass + self.bodies[j].inv_mass;
+            let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
             if total_inv < 1e-10 {
                 continue;
             }
-            // Sleep: a contact needs work only if at least one side is an
-            // AWAKE DYNAMIC body. Static geometry never wakes anything (a
-            // body asleep on the floor must stay asleep); an awake dynamic
-            // partner wakes the sleeper's whole island.
-            let ai = self.asleep[i] || self.bodies[i].body_type != BodyType::Dynamic;
-            let aj = self.asleep[j] || self.bodies[j].body_type != BodyType::Dynamic;
-            if ai && aj {
-                continue;
-            }
-            if self.asleep[i] && !aj {
-                self.wake_island(i);
-            }
-            if self.asleep[j] && !ai {
-                self.wake_island(j);
-            }
             let n = m.normal;
-            let key = (i.min(j), i.max(j));
+            let key = keys[mi];
             let count = m.point_count;
 
             // --- Body-frame anchors first: matching and G3 both need them ---
@@ -1598,8 +1913,8 @@ impl BuiltinPhysicsEngine {
             let mut pen0 = [0.0f32; 4];
             for k in 0..count {
                 let p = m.points[k].world_point;
-                la[k] = self.bodies[i].orientation.inverse() * (p - self.bodies[i].position);
-                lb[k] = self.bodies[j].orientation.inverse() * (p - self.bodies[j].position);
+                la[k] = bodies[i].orientation.inverse() * (p - bodies[i].position);
+                lb[k] = bodies[j].orientation.inverse() * (p - bodies[j].position);
                 pen0[k] = m.points[k].penetration;
             }
 
@@ -1608,7 +1923,7 @@ impl BuiltinPhysicsEngine {
             // stays in contact, even when the bodies move fast in world space.
             let mut warm = [0.0f32; 4];
             let mut matched = [false; 4];
-            if let Some((cached_points, cached_count)) = self.warm_impulses.get(&key) {
+            if let Some((cached_points, cached_count)) = warm_in.get(&key) {
                 let mut used = [false; 4];
                 for k in 0..count {
                     let mut best: Option<(usize, f32)> = None;
@@ -1642,8 +1957,8 @@ impl BuiltinPhysicsEngine {
             // re-restitute — the NGS position pass would feed it fresh
             // approach velocity every step and the bounce becomes an energy
             // pump (Box3D applies restitution as a one-shot, never cached).
-            let e = self.bodies[i].restitution.min(self.bodies[j].restitution);
-            let mu = self.bodies[i].friction.max(self.bodies[j].friction);
+            let e = bodies[i].restitution.min(bodies[j].restitution);
+            let mu = bodies[i].friction.max(bodies[j].friction);
             let mut bias = [0.0f32; 4];
             let mut target = [0.0f32; 4];
             for k in 0..count {
@@ -1660,11 +1975,10 @@ impl BuiltinPhysicsEngine {
                         continue;
                     }
                     let p = m.points[k].world_point;
-                    let ra = p - self.bodies[i].position;
-                    let rb = p - self.bodies[j].position;
-                    let vn0 = (point_velocity(&self.bodies[j], rb)
-                        - point_velocity(&self.bodies[i], ra))
-                    .dot(n);
+                    let ra = p - bodies[i].position;
+                    let rb = p - bodies[j].position;
+                    let vn0 =
+                        (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
                     if vn0 >= -RESTITUTION_THRESHOLD {
                         continue;
                     }
@@ -1687,22 +2001,21 @@ impl BuiltinPhysicsEngine {
             for k in 0..count {
                 if warm[k] > 0.0 {
                     let p = m.points[k].world_point;
-                    let ra = p - self.bodies[i].position;
-                    let rb = p - self.bodies[j].position;
-                    let k_eff = effective_mass(&self.bodies, i, j, n, ra, rb);
+                    let ra = p - bodies[i].position;
+                    let rb = p - bodies[j].position;
+                    let k_eff = effective_mass(bodies, i, j, n, ra, rb);
                     if k_eff < 1e-10 {
                         warm_applied[k] = 0.0;
                         continue;
                     }
-                    let vn_pre = (point_velocity(&self.bodies[j], rb)
-                        - point_velocity(&self.bodies[i], ra))
-                    .dot(n);
+                    let vn_pre =
+                        (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
                     // Cap against the speculative target too: a separated
                     // point may keep approaching up to its gap limit.
                     let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
                     warm_applied[k] = applied;
                     if applied > 0.0 {
-                        apply_impulse(&mut self.bodies, i, j, n * applied, ra, rb);
+                        apply_impulse(bodies, i, j, n * applied, ra, rb);
                     }
                 }
             }
@@ -1727,12 +2040,12 @@ impl BuiltinPhysicsEngine {
         }
 
         // --- Velocity solve: Gauss-Seidel iterations over ALL manifolds ---
-        for _ in 0..self.velocity_iterations {
+        for _ in 0..velocity_iterations {
             for st in states.iter_mut() {
                 let m = &manifolds[st.mi];
                 let (i, j) = (st.i, st.j);
                 let n = m.normal;
-                let total_inv = self.bodies[i].inv_mass + self.bodies[j].inv_mass;
+                let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
 
                 // ---- Normal direction ----
                 // G4: multi-point manifolds are solved as an exact LCP block
@@ -1744,25 +2057,15 @@ impl BuiltinPhysicsEngine {
                     for k in 0..st.count {
                         pts[k] = m.points[k].world_point;
                     }
-                    solve_normal_block(
-                        &mut self.bodies,
-                        i,
-                        j,
-                        n,
-                        &pts,
-                        &mut st.acc,
-                        &st.target,
-                        st.count,
-                    );
+                    solve_normal_block(bodies, i, j, n, &pts, &mut st.acc, &st.target, st.count);
                 } else {
                     let k = 0;
                     let p = m.points[k].world_point;
-                    let ra = p - self.bodies[i].position;
-                    let rb = p - self.bodies[j].position;
-                    let k_eff = effective_mass(&self.bodies, i, j, n, ra, rb);
+                    let ra = p - bodies[i].position;
+                    let rb = p - bodies[j].position;
+                    let k_eff = effective_mass(bodies, i, j, n, ra, rb);
                     if k_eff >= 1e-10 {
-                        let rel = point_velocity(&self.bodies[j], rb)
-                            - point_velocity(&self.bodies[i], ra);
+                        let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
                         let vn = rel.dot(n);
                         // Inelastic contact: restitution is a separate
                         // one-shot stage (below), never accumulated. G6: the
@@ -1773,7 +2076,7 @@ impl BuiltinPhysicsEngine {
                         let delta = new_acc - st.acc[k];
                         st.acc[k] = new_acc;
                         if delta.abs() > 1e-12 {
-                            apply_impulse(&mut self.bodies, i, j, n * delta, ra, rb);
+                            apply_impulse(bodies, i, j, n * delta, ra, rb);
                         }
                     }
                 }
@@ -1784,10 +2087,9 @@ impl BuiltinPhysicsEngine {
                 // iteration makes the contact "walk" — stacks drift.)
                 for k in 0..st.count {
                     let p = m.points[k].world_point;
-                    let ra = p - self.bodies[i].position;
-                    let rb = p - self.bodies[j].position;
-                    let rel =
-                        point_velocity(&self.bodies[j], rb) - point_velocity(&self.bodies[i], ra);
+                    let ra = p - bodies[i].position;
+                    let rb = p - bodies[j].position;
+                    let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
                     let max_friction = st.mu * st.acc[k];
                     let mut f_imp = Vec3::ZERO;
                     for axis in 0..2 {
@@ -1796,13 +2098,13 @@ impl BuiltinPhysicsEngine {
                         let rb_t = rb.cross(t);
                         let k_t = total_inv
                             + ra_t.dot(mul_inv_inertia(
-                                self.bodies[i].inertia,
-                                self.bodies[i].orientation,
+                                bodies[i].inertia,
+                                bodies[i].orientation,
                                 ra_t,
                             ))
                             + rb_t.dot(mul_inv_inertia(
-                                self.bodies[j].inertia,
-                                self.bodies[j].orientation,
+                                bodies[j].inertia,
+                                bodies[j].orientation,
                                 rb_t,
                             ));
                         if k_t < 1e-10 {
@@ -1832,7 +2134,7 @@ impl BuiltinPhysicsEngine {
                         }
                     }
                     if f_imp.length_squared() > 1e-24 {
-                        apply_impulse(&mut self.bodies, i, j, f_imp, ra, rb);
+                        apply_impulse(bodies, i, j, f_imp, ra, rb);
                     }
                 }
             }
@@ -1847,42 +2149,43 @@ impl BuiltinPhysicsEngine {
                 let m = &manifolds[st.mi];
                 let (i, j) = (st.i, st.j);
                 let n = m.normal;
-                let total_inv = self.bodies[i].inv_mass + self.bodies[j].inv_mass;
+                let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
                 for k in 0..st.count {
                     if st.bias[k] <= 0.0 {
                         continue;
                     }
                     let p = m.points[k].world_point;
-                    let ra = p - self.bodies[i].position;
-                    let rb = p - self.bodies[j].position;
+                    let ra = p - bodies[i].position;
+                    let rb = p - bodies[j].position;
                     let ra_n = ra.cross(n);
                     let rb_n = rb.cross(n);
                     let k_eff = total_inv
                         + ra_n.dot(mul_inv_inertia(
-                            self.bodies[i].inertia,
-                            self.bodies[i].orientation,
+                            bodies[i].inertia,
+                            bodies[i].orientation,
                             ra_n,
                         ))
                         + rb_n.dot(mul_inv_inertia(
-                            self.bodies[j].inertia,
-                            self.bodies[j].orientation,
+                            bodies[j].inertia,
+                            bodies[j].orientation,
                             rb_n,
                         ));
                     if k_eff < 1e-10 {
                         continue;
                     }
-                    let vn = (point_velocity(&self.bodies[j], rb)
-                        - point_velocity(&self.bodies[i], ra))
-                    .dot(n);
+                    let vn =
+                        (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
                     let lambda = (st.bias[k] - vn) / k_eff;
                     if lambda > 0.0 {
-                        apply_impulse(&mut self.bodies, i, j, n * lambda, ra, rb);
+                        apply_impulse(bodies, i, j, n * lambda, ra, rb);
                     }
                 }
             }
         }
 
         // --- Persist the cache for the next substep/step ---
+        // --- Persist this island's cache entries for the next substep ---
+        // (st.i/st.j are island-LOCAL indices; the cache is keyed globally.)
         let mut next: WarmCache = HashMap::new();
         for st in &states {
             let m = &manifolds[st.mi];
@@ -1900,36 +2203,39 @@ impl BuiltinPhysicsEngine {
                     impulse: st.acc[k],
                 };
             }
-            next.insert((st.i.min(st.j), st.i.max(st.j)), (pts, st.count));
+            next.insert(keys[st.mi], (pts, st.count));
         }
-        self.warm_impulses = next;
-        states
+        (states, next)
     }
 
-    /// Position stage (G3 split impulse, G6 order): runs AFTER positions are
-    /// integrated. Iterated NGS over ALL manifolds; pseudo-motion only —
-    /// real velocities are never touched. Each iteration re-measures the
-    /// LIVE separation at the stored body-frame anchors, so corrections
-    /// distribute evenly across the whole manifold set (stacks) instead
-    /// of one-shot rigid pushes, which seeded the micro-tilts from G2b.
-    /// β is kept low (0.2): stronger pseudo-correction resonates with the
-    /// velocity solve on rocking contacts and pumps the rock mode.
-    fn solve_contacts_position(&mut self, manifolds: &[Manifold], states: &[ManifoldState]) {
+    /// Per-island NGS position solve on the local shard (stage doc lives on
+    /// `solve_contacts_position`). Pseudo-motion only: real velocities and
+    /// the warm cache are never touched here.
+    // Live anchors are re-measured per iteration; range loops over the
+    // per-point arrays are the clearest form here.
+    #[allow(clippy::needless_range_loop)]
+    fn solve_island_position(
+        bodies: &mut [RigidBody],
+        manifolds: &[Manifold],
+        states: &[ManifoldState],
+        position_iterations: u32,
+        contact_softness: f32,
+    ) {
         const SLOP: f32 = 0.02;
         const MAX_CORRECTION: f32 = 0.25;
         const BETA_POS: f32 = 0.2;
-        for _ in 0..self.position_iterations {
+        for _ in 0..position_iterations {
             for st in states {
                 let m = &manifolds[st.mi];
                 let (i, j) = (st.i, st.j);
                 let n = m.normal;
-                let inv_mass_a = self.bodies[i].inv_mass;
-                let inv_mass_b = self.bodies[j].inv_mass;
+                let inv_mass_a = bodies[i].inv_mass;
+                let inv_mass_b = bodies[j].inv_mass;
                 let total_inv = inv_mass_a + inv_mass_b;
-                let cfm = self.contact_softness * total_inv;
+                let cfm = contact_softness * total_inv;
                 for k in 0..st.count {
-                    let (pos_a, rot_a) = (self.bodies[i].position, self.bodies[i].orientation);
-                    let (pos_b, rot_b) = (self.bodies[j].position, self.bodies[j].orientation);
+                    let (pos_a, rot_a) = (bodies[i].position, bodies[i].orientation);
+                    let (pos_b, rot_b) = (bodies[j].position, bodies[j].orientation);
                     // Live world anchors; at detection they coincided, so the
                     // separation along n started at -pen0.
                     let wa = pos_a + rot_a * st.la[k];
@@ -1944,14 +2250,14 @@ impl BuiltinPhysicsEngine {
                     let ra_n = ra.cross(n);
                     let rb_n = rb.cross(n);
                     let k_pos = total_inv
-                        + ra_n.dot(mul_inv_inertia(self.bodies[i].inertia, rot_a, ra_n))
-                        + rb_n.dot(mul_inv_inertia(self.bodies[j].inertia, rot_b, rb_n));
+                        + ra_n.dot(mul_inv_inertia(bodies[i].inertia, rot_a, ra_n))
+                        + rb_n.dot(mul_inv_inertia(bodies[j].inertia, rot_b, rb_n));
                     let k_soft = make_soft(k_pos, cfm);
                     if k_soft < 1e-10 {
                         continue;
                     }
                     let lam = BETA_POS * c / k_soft;
-                    apply_positional_impulse(&mut self.bodies, i, j, n * lam, ra, rb);
+                    apply_positional_impulse(bodies, i, j, n * lam, ra, rb);
                 }
             }
         }
@@ -1995,6 +2301,17 @@ impl BuiltinPhysicsEngine {
 
 impl PhysicsEngine for BuiltinPhysicsEngine {
     fn step(&mut self, dt: f32) {
+        // G7: a fully sleeping world cannot change — skip the whole substep
+        // loop (broadphase re-sort included) instead of paying ~10 ms/frame
+        // to rediscover that nothing moves.
+        if self
+            .bodies
+            .iter()
+            .enumerate()
+            .all(|(h, b)| b.body_type != BodyType::Dynamic || self.asleep[h])
+        {
+            return;
+        }
         let sub_dt = dt / self.substeps as f32;
         let mut last_manifolds = Vec::new();
         for s in 0..self.substeps {
@@ -2007,7 +2324,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // Jointed pairs never collide: their parts legitimately sweep
             // through each other's space (a hinge pin passes through the arm).
             let manifolds = if self.joint_pairs.is_empty() {
-                detect_collisions(&self.bodies, &self.broadphase.active, sub_dt)
+                detect_collisions(&self.bodies, &self.broadphase.active, &self.asleep, sub_dt)
             } else {
                 let pairs: Vec<(usize, usize)> = self
                     .broadphase
@@ -2016,20 +2333,25 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     .copied()
                     .filter(|p| !self.joint_pairs.contains(p))
                     .collect();
-                detect_collisions(&self.bodies, &pairs, sub_dt)
+                detect_collisions(&self.bodies, &pairs, &self.asleep, sub_dt)
             };
             // Restitution is one-shot per step, evaluated on the first substep.
-            let states = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt);
+            let mut islands = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt);
             self.solve_joints_velocity();
             // Continuous pass on the solver-adjusted velocities: clamp fast
             // movers to their first impact and keep them there this substep.
             let mut clamped = vec![false; self.bodies.len()];
             self.solve_continuous(sub_dt, &mut clamped);
             self.integrate_positions(sub_dt, &clamped);
-            self.solve_contacts_position(&manifolds, &states);
+            self.solve_contacts_position(&mut islands);
             self.solve_joints_position();
             last_manifolds = manifolds;
         }
+        // Diagnostics: contact-manifold partners per body from the last
+        // substep (drives sleep/island debugging; tiny flat copy).
+        self.debug_pairs.clear();
+        self.debug_pairs
+            .extend(last_manifolds.iter().map(|m| (m.body_a, m.body_b)));
         self.rebuild_islands(&last_manifolds);
         self.update_sleep(dt);
     }
@@ -2634,6 +2956,70 @@ mod tests {
                 "box {level} spinning: {:?}",
                 b.angular_velocity
             );
+        }
+    }
+
+    #[test]
+    fn solver_is_deterministic_across_thread_counts() {
+        // G7 gate: per-island parallel dispatch must be bit-identical to the
+        // sequential run. Islands are disjoint over dynamic bodies and the
+        // warm cache is merged by disjoint keys, so any difference here is a
+        // data race, not float noise. The scene (9 separate 4-box stacks on
+        // a floor) is wide enough to engage the rayon path: ≥2 islands,
+        // ≥24 manifolds.
+        fn build_scene() -> BuiltinPhysicsEngine {
+            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(8.0, 1.0, 8.0),
+                0.0,
+            ));
+            for gx in 0..3 {
+                for gz in 0..3 {
+                    let base = Vec3::new(gx as f32 * 2.5 - 2.5, 0.0, gz as f32 * 2.5 - 2.5);
+                    for level in 0..4 {
+                        physics.add_body(RigidBody::new_box(
+                            base + Vec3::new(0.0, 0.5 + level as f32 * 1.02, 0.0),
+                            Vec3::new(0.5, 0.5, 0.5),
+                            1.0,
+                        ));
+                    }
+                }
+            }
+            physics
+        }
+        /// (position, orientation, velocity, angular velocity) as f32 bits.
+        type Snapshot = ([u32; 3], [u32; 4], [u32; 3], [u32; 3]);
+        fn run(threads: usize) -> Vec<Snapshot> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut physics = build_scene();
+                for _ in 0..120 {
+                    physics.step(1.0 / 60.0);
+                }
+                (0..physics.bodies.len())
+                    .map(|i| {
+                        let b = &physics.bodies[i];
+                        let (p, o) = (b.position.to_array(), b.orientation.to_array());
+                        let (v, w) = (b.velocity.to_array(), b.angular_velocity.to_array());
+                        (
+                            p.map(f32::to_bits),
+                            o.map(f32::to_bits),
+                            v.map(f32::to_bits),
+                            w.map(f32::to_bits),
+                        )
+                    })
+                    .collect()
+            })
+        }
+        let single = run(1);
+        let multi = run(4);
+        assert_eq!(single.len(), multi.len(), "body count differs between runs");
+        for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
+            assert_eq!(a, b, "body {i} diverged between 1-thread and 4-thread runs");
         }
     }
 

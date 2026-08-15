@@ -7,6 +7,14 @@ license.workspace = true
 
 [dependencies]
 glam = "0.30"
+rayon = "1.10"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["rayon"] }
+
+[[bench]]
+name = "solver_bench"
+harness = false
 
 [lints]
 workspace = true
