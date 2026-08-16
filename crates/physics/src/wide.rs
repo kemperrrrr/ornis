@@ -193,8 +193,8 @@ pub(crate) struct WideBatch {
     apply_w_a: Vec3x4,
     apply_w_b: Vec3x4,
     /// World-space inverse inertia matrix rows per lane: `w_mat[lane][row]`.
-    wa_mat: [[Vec3; 4]; 4],
-    wb_mat: [[Vec3; 4]; 4],
+    wa_mat: [[Vec3; 3]; 4],
+    wb_mat: [[Vec3; 3]; 4],
     target: Fx4,
     mu: Fx4,
     /// One-shot restitution bias per lane.
@@ -267,8 +267,8 @@ impl WideBatch {
             apply_n_b: Vec3x4::zero(),
             apply_w_a: Vec3x4::zero(),
             apply_w_b: Vec3x4::zero(),
-            wa_mat: [[Vec3::ZERO; 4]; 4],
-            wb_mat: [[Vec3::ZERO; 4]; 4],
+            wa_mat: [[Vec3::ZERO; 3]; 4],
+            wb_mat: [[Vec3::ZERO; 3]; 4],
             target: Fx4::zero(),
             mu: Fx4::zero(),
             bias: Fx4::zero(),
@@ -318,10 +318,8 @@ impl WideBatch {
 
             let wa = Self::world_inertia(a.orientation, a.inertia);
             let wb = Self::world_inertia(bb.orientation, bb.inertia);
-            for row in 0..3 {
-                b.wa_mat[l][row] = wa[row];
-                b.wb_mat[l][row] = wb[row];
-            }
+            b.wa_mat[l] = wa;
+            b.wb_mat[l] = wb;
 
             let total_inv = a.inv_mass + bb.inv_mass;
             let k_n = total_inv + ra_n.dot(Self::matvec(&wa, ra_n))

@@ -181,13 +181,13 @@ fn solve_small(a: &[[f32; 4]; 4], b: &[f32; 4], n: usize) -> Option<[f32; 4]> {
 /// The contact normal points from body `i` to body `j`; a positive impulse
 /// pushes `j` along it and `i` against it.
 pub(crate) fn apply_impulse(
-        bodies: &mut [RigidBody],
-        i: usize,
-        j: usize,
-        imp: Vec3,
-        ra: Vec3,
-        rb: Vec3,
-    ) {
+    bodies: &mut [RigidBody],
+    i: usize,
+    j: usize,
+    imp: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+) {
     debug_assert!(i != j);
     let (lo, hi, swapped) = if i < j { (i, j, false) } else { (j, i, true) };
     let (head, tail) = bodies.split_at_mut(hi);
@@ -1082,7 +1082,7 @@ struct IslandWork {
 /// Context for building a ManifoldState (packs the per-manifold parameters,
 /// keeping `build_manifold_state` below the bca nargs limit).
 struct ManifoldCtx<'a> {
-    bodies: &'a [RigidBody],
+    bodies: &'a mut [RigidBody],
     warm_in: &'a WarmCache,
     allow_restitution: bool,
     sub_dt: f32,
@@ -1964,7 +1964,7 @@ impl BuiltinPhysicsEngine {
             let (i, j) = (m.body_a, m.body_b);
             let key = (i.min(j), i.max(j));
             let ctx = ManifoldCtx {
-                bodies: &self.bodies, warm_in: &self.warm_impulses,
+                bodies: &mut self.bodies, warm_in: &self.warm_impulses,
                 allow_restitution, sub_dt, mi, i, j,
             };
             if let Some(st) = Self::build_manifold_state(&ctx, m, key) {
@@ -2535,7 +2535,7 @@ impl BuiltinPhysicsEngine {
         bodies: &mut [RigidBody],
         i: usize,
         j: usize,
-        st: &ManifoldState,
+        st: &mut ManifoldState,
         m: &Manifold,
         total_inv: f32,
     ) {

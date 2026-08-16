@@ -425,11 +425,8 @@ impl WgpuContactSolver {
             source: wgpu::ShaderSource::Wgsl(CONTACT_SOLVER_WGSL.into()),
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("physics_contact_layout"),
-            bind_group_layouts: &[&device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                label: Some("physics_contact_bgl"),
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("physics_contact_bgl"),
                 entries: &[
                     // body_buf: read-write storage
                     wgpu::BindGroupLayoutEntry {
@@ -465,7 +462,10 @@ impl WgpuContactSolver {
                         count: None,
                     },
                 ],
-            })],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("physics_contact_layout"),
+            bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -655,19 +655,23 @@ pub fn pack_single_point_batches(
     let mut cur_bodies: [usize; 8] = [usize::MAX; 8];
     let mut cur_n = 0usize;
 
-    let flush = |batches: &mut Vec<GpuBatch>,
-                    cur: &mut GpuBatch,
-                    cur_len: &mut usize,
-                    cur_bodies: &mut [usize; 8],
-                    cur_n: &mut usize| {
-        if *cur_len == 0 { return; }
+    fn flush_batch(
+        batches: &mut Vec<GpuBatch>,
+        cur: &mut GpuBatch,
+        cur_len: &mut usize,
+        cur_bodies: &mut [usize; 8],
+        cur_n: &mut usize,
+    ) {
+        if *cur_len == 0 {
+            return;
+        }
         cur.count = *cur_len as u32;
         batches.push(*cur);
         *cur = GpuBatch::zero();
         *cur_len = 0;
         *cur_n = 0;
         *cur_bodies = [usize::MAX; 8];
-    };
+    }
 
     for &si in single_indices {
         let st = &states[si];
@@ -675,7 +679,7 @@ pub fn pack_single_point_batches(
         let (i, j) = (st.i, st.j);
         let conflicts = cur_bodies[..cur_n].contains(&i) || cur_bodies[..cur_n].contains(&j);
         if cur_len >= 4 || conflicts {
-            flush(&mut batches, &mut cur, &mut cur_len, &mut cur_bodies, &mut cur_n);
+            flush_batch(&mut batches, &mut cur, &mut cur_len, &mut cur_bodies, &mut cur_n);
         }
         let p = m.points[0].world_point;
         let ra = p - bodies[i].position;
@@ -693,7 +697,7 @@ pub fn pack_single_point_batches(
         cur_len += 1;
         cur.count = cur_len as u32;
     }
-    flush(&mut batches, &mut cur, &mut cur_len, &mut cur_bodies, &mut cur_n);
+    flush_batch(&mut batches, &mut cur, &mut cur_len, &mut cur_bodies, &mut cur_n);
 
     let count = batches.len() as u32;
     (batches, count)
