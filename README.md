@@ -38,33 +38,53 @@ HTTP-сервер на порту 3420 и раздаёт фронтенд из `
 Единая точка входа — `cargo xtask quality`:
 
 ```bash
-cargo xtask quality           # уровень 1: fmt, clippy -D warnings, test, audit, deny, outdated
+cargo xtask quality           # уровень 1: fmt, clippy, bca, test, audit, deny, outdated
 cargo xtask quality --ci      # + rustdoc и wasm32 check — ровно то, что гоняет GitHub CI
 cargo xtask quality --full    # + покрытие (llvm-cov → target/llvm-cov/html) и bench compile-check
 cargo xtask quality --bench   # + полный прогон criterion-бенчмарков (долго)
 cargo xtask quality --everything  # всё сразу: --ci + --full + --bench + mutants + fuzz smoke
 cargo xtask fuzz <target>     # фаззинг парсеров: scene_ron, materialx_parse (через +nightly)
 cargo xtask mutants           # мутационное тестирование ornis-core (cargo-mutants, долго)
+
+# complexity gate (опционально, внешний бинарь) — обёртка над ручной последовательностью:
+cargo xtask bca --full        # = install (если нет) + baseline + report + quality
+cargo xtask bca --install     # cargo install big-code-analysis-cli --locked
+cargo xtask bca --write-baseline
+cargo xtask bca --report      # html to target/bca/index.html
+
+# ручной эквивалент (как было ранее):
+# cargo install big-code-analysis-cli --locked
+# bca check --write-baseline
+# git add .bca-baseline.toml
+# bca report -O html -o target/bca/index.html
+# cargo xtask quality
 ```
 
-- Каждая стадия печатает PASS/FAIL; команда не прерывается на первом
+- Каждая стадия печатает PASS/FAIL/SKIP/INFO; команда не прерывается на первом
   падении, в конце — сводная таблица, exit code по худшей стадии.
 - Отсутствующие инструменты (cargo-audit, cargo-deny, cargo-outdated,
-  cargo-llvm-cov, cargo-fuzz, cargo-mutants) — SKIP с подсказкой
+  cargo-llvm-cov, bca, cargo-fuzz, cargo-mutants) — SKIP с подсказкой
   `cargo install ... --locked`.
 - Property-тесты ядра (proptest): `crates/core/tests/property_tests.rs` —
   входят в обычный `cargo test`.
 - Фаззинг: `fuzz/` — независимый cargo-fuzz крейт (не в workspace),
   запуск `cargo +nightly fuzz run <target>` (rust-toolchain.toml пинит
   stable, поэтому `+nightly` указывается явно).
+- Complexity: [`bca.toml`](bca.toml) + [`.bcaignore`](.bcaignore) + [`.bca-baseline.toml`](.bca-baseline.toml)
+  — гейт `bca` (https://github.com/dekobon/big-code-analysis) измеряет
+  cognitive/cyclomatic/Halstead/ABC. Лицензия CLI — MPL-2.0, но как внешний
+  бинарь он **не влияет** на лицензию Ornis (MIT OR Apache-2.0). Не добавлять
+  как либу в Cargo — только `cargo install big-code-analysis-cli`.
+  Подробности: [`docs/quality/bca.md`](docs/quality/bca.md).
 - CI: `.github/workflows/quality.yml` — одна job на push/PR в `master`:
   только установка окружения (системные пакеты, toolchain 1.97, wasm
   target, cargo-deny/audit/outdated) и один шаг `cargo xtask quality --ci`.
   xtask — единственный источник правды о составе гейта: локально и в CI
   выполняется одна и та же команда.
 
-Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md)
-и [`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md).
+Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md),
+[`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md)
+и [`docs/quality/bca.md`](docs/quality/bca.md).
 
 ## Структура репозитория
 

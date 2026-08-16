@@ -66,7 +66,8 @@ pub fn quality(args: &[String]) {
     let mut results: Vec<StageResult> = Vec::new();
     // The total is computed up-front so the stage numbering stays
     // honest even when a deep stage is skipped (tool not installed).
-    let total = 6
+    // Level 1 now: fmt, clippy, bca, test, audit, deny, outdated = 7
+    let total = 7
         + usize::from(ci) * 2
         + usize::from(full) * 2
         + usize::from(bench)
@@ -105,6 +106,33 @@ pub fn quality(args: &[String]) {
         ),
         false,
     ));
+
+    // Maintainability / complexity gate (optional, external tool).
+    // If `bca` is not found, SKIP with install hint — does not fail the gate.
+    // License: bca is MPL-2.0, but used as external binary it does NOT affect
+    // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
+    n += 1;
+    if binary_exists("bca") {
+        results.push(run_stage(
+            n,
+            total,
+            "bca",
+            "bca check",
+            {
+                let mut c = Command::new("bca");
+                c.arg("check").current_dir(&root);
+                c
+            },
+            false,
+        ));
+    } else {
+        results.push(skip_stage(
+            n,
+            total,
+            "bca",
+            "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
+        ));
+    }
 
     n += 1;
     results.push(run_stage(
@@ -307,12 +335,16 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy, test, audit, deny, outdated\n  \
+         cargo xtask quality           quick set (level 1): fmt, clippy, bca, test, audit, deny, outdated\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
-         everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)"
+         everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n\
+         \n\
+         External tools (audit, deny, outdated, llvm-cov, bca) are optional:\n  \
+         missing → SKIP with install hint. bca is MPL-2.0 as external binary\n  \
+         and does NOT affect Ornis license (MIT OR Apache-2.0)."
     );
     exit(code);
 }
@@ -418,18 +450,23 @@ fn print_summary(results: &[StageResult]) {
     eprintln!("╚═════════════════════════════════════════╝");
 }
 
-/// Whether a cargo subcommand exists in PATH (`cargo-<sub>`).
-/// Checks for the binary, not `--version`: some tools
-/// (e.g. cargo-outdated) do not understand `--version` directly.
-fn cargo_subcommand_exists(sub: &str) -> bool {
+/// Whether a binary exists in PATH.
+fn binary_exists(bin: &str) -> bool {
     let binary = if cfg!(windows) {
-        format!("cargo-{sub}.exe")
+        format!("{bin}.exe")
     } else {
-        format!("cargo-{sub}")
+        bin.to_string()
     };
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(&binary).is_file()))
         .unwrap_or(false)
+}
+
+/// Whether a cargo subcommand exists in PATH (`cargo-<sub>`).
+/// Checks for the binary, not `--version`: some tools
+/// (e.g. cargo-outdated) do not understand `--version` directly.
+fn cargo_subcommand_exists(sub: &str) -> bool {
+    binary_exists(&format!("cargo-{sub}"))
 }
 
 /// Records a SKIP without spawning a command (no progress output).
@@ -468,6 +505,10 @@ fn install_hint(sub: &str) -> String {
             .to_string(),
         "fuzz" => "Install:  cargo install cargo-fuzz --locked".to_string(),
         "mutants" => "Install:  cargo install cargo-mutants --locked".to_string(),
+        "bca" => "Install:  cargo install big-code-analysis-cli --locked\n\
+             or prebuilt binary: https://github.com/dekobon/big-code-analysis/releases\n\
+             (external tool, MPL-2.0, does NOT affect Ornis MIT OR Apache-2.0 license)"
+            .to_string(),
         other => format!("Install:  cargo install cargo-{other} --locked"),
     }
 }

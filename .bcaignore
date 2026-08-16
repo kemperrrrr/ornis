@@ -1,0 +1,40 @@
+# .bcaignore — excludes for `bca check` walk and `bca report`
+# Syntax: gitignore-like, but applied to bca's tree walk.
+# See bca.toml `exclude_from` key.
+
+# build artifacts
+target/
+editor/pkg/
+editor/dist/
+editor/node_modules/
+.fuzz/
+fuzz/corpus/
+fuzz/artifacts/
+
+# large binary / vendored assets
+assets/
+*.lock
+*.svg
+*.woff2
+*.woff
+*.ttf
+*.otf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.mp3
+*.wav
+*.ogg
+
+# docs & generated reports
+docs/quality/
+target/llvm-cov/
+target/bca/
+
+# fuzz harnesses are intentionally complex
+fuzz/fuzz_targets/
+
+# wgsl shaders are not supported by tree-sitter Rust grammar — high false positives
+crates/render/src/shaders/
