@@ -12,12 +12,18 @@
 # The gate is optional: `cargo xtask quality` runs it if `bca` is in PATH,
 # otherwise SKIP with install hint (same pattern as audit/deny/outdated).
 
+# `paths` and `exclude_from` are walk-scope: they control which files are
+# analysed at all (by `check`, `report` and `metrics` alike). Keep
+# `exclude_from` at the top level, NOT under `[check]` — the latter only
+# exempts violations from the gate and leaves the walk picking up
+# binaries and non-source files.
 paths = ["crates", "src", "xtask", "editor"]
+exclude_from = ".bcaignore"
 
 [check]
 baseline = ".bca-baseline.toml"
-exclude_from = ".bcaignore"
-# tiered codes: 2=new, 3=regression, 4=both — useful for CI branching
+# tiered codes (--exit-codes=tiered): 2=new-only, 3=regression-only,
+# 4=mixed, 5=soft-tier hard breach — useful for CI branching.
 exit_codes = "tiered"
 
 [thresholds]

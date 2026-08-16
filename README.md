@@ -78,7 +78,9 @@ cargo xtask bca --report      # html to target/bca/index.html
   Подробности: [`docs/quality/bca.md`](docs/quality/bca.md).
 - CI: `.github/workflows/quality.yml` — одна job на push/PR в `master`:
   только установка окружения (системные пакеты, toolchain 1.97, wasm
-  target, cargo-deny/audit/outdated) и один шаг `cargo xtask quality --ci`.
+  target, cargo-deny/audit/outdated, bca — опционально, если установка
+  не удалась, гейт SKIP-нет complexity-стадию) и один шаг
+  `cargo xtask quality --ci`.
   xtask — единственный источник правды о составе гейта: локально и в CI
   выполняется одна и та же команда.
 

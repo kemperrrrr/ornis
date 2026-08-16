@@ -43,7 +43,16 @@ jobs:
       # Supply-chain-tools: same set `cargo xtask quality` expects locally.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-audit,cargo-outdated,big-code-analysis-cli
+          tool: cargo-deny,cargo-audit,cargo-outdated
+
+      # bca (big-code-analysis-cli) is not in taiki-e/install-action's tool
+      # manifest, so install it with the same command `cargo xtask bca
+      # --install` uses. The tool is optional: if this step fails, the
+      # quality gate SKIPs the complexity stage (same contract as
+      # audit/deny/outdated) instead of failing.
+      - name: Install bca (optional, complexity gate)
+        continue-on-error: true
+        run: cargo install big-code-analysis-cli --locked
 
       - uses: Swatinem/rust-cache@v2
 

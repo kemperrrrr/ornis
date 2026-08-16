@@ -15,8 +15,13 @@ parses via tree-sitter and computes per-function metrics:
 ## Integration in Ornis
 
 * Config: `bca.toml` at repo root (auto-discovered), excludes in `.bcaignore`, baseline in `.bca-baseline.toml`.
+* `paths` and `exclude_from` are **walk-scope** — they control which files are analysed at all, by `check`,
+  `report` and `metrics` alike. `exclude_from` must stay at the top level, not under `[check]`: the latter
+  only exempts violations from the gate and leaves the walk picking up binaries and non-source files.
 * Gate: `cargo xtask quality` runs `bca check` as stage `[3/7]` if binary exists, else SKIP (same as audit/deny/outdated).
 * Wrapper: `cargo xtask bca` automates your manual sequence — install + baseline + report + quality.
+* Tests: `xtask/tests/bca_cli.rs` (end-to-end, skip when `bca` is not in PATH) + unit tests for the flag
+  parsing in `xtask/src/bca.rs`.
 * Total count: 7 base stages (was 6) — fmt, clippy, bca, test, audit, deny, outdated.
 
 ### Via xtask (recommended)
@@ -47,11 +52,13 @@ Chosen from upstream defaults (`bca init`) tuned for physics engine (3251 LOC):
 * Rust override: 20 / 20 / 120k
 * JS/TS: 30 / 25
 
-All violations are ratcheted via baseline — initial baseline is empty, populate with:
+All violations are ratcheted via `.bca-baseline.toml` — the committed baseline
+absorbs the current offender set, so only regressions and new offenders fail.
+Refresh it after an intentional complexity change:
 
 ```bash
 bca check --write-baseline
-git add .bca-baseline.toml && git commit -m "chore(bca): initial baseline"
+git add .bca-baseline.toml && git commit -m "chore(bca): update baseline"
 ```
 
 ## CI
@@ -63,7 +70,10 @@ External tool, installed on demand:
 - run: bca check
 ```
 
-Exit codes: 0 clean, 2 new/regression, 1 tool error — same contract as other quality stages.
+Exit codes (the gate treats any non-zero as FAIL): 0 clean, 1 tool error,
+2 metric gate exceeded. With `[check] exit_codes = "tiered"` the metric gate
+is split for CI branching: 2 = new offenders only, 3 = baseline regressions
+only, 4 = mixed, 5 = hard-tier breach under `--tier=soft`.
 
 ## Agent feedback loop
 
