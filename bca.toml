@@ -1,0 +1,54 @@
+# bca.toml — big-code-analysis gate for Ornis
+# Docs: https://dekobon.github.io/big-code-analysis/
+# License of this tool: MPL-2.0, but used as external binary it does NOT affect
+# Ornis distribution (MIT OR Apache-2.0). Do NOT add big-code-analysis as library dependency.
+#
+# Usage:
+#   cargo install big-code-analysis-cli --locked   # or prebuilt from releases
+#   bca check                                     # uses this file auto-discovered at repo root
+#   bca check --write-baseline                      # update .bca-baseline.toml after intentional complexity growth
+#   bca report -O html -o target/bca/index.html
+#
+# The gate is optional: `cargo xtask quality` runs it if `bca` is in PATH,
+# otherwise SKIP with install hint (same pattern as audit/deny/outdated).
+
+paths = ["crates", "src", "xtask", "editor"]
+
+[check]
+baseline = ".bca-baseline.toml"
+exclude_from = ".bcaignore"
+# tiered codes: 2=new, 3=regression, 4=both — useful for CI branching
+exit_codes = "tiered"
+
+[thresholds]
+# Defaults from bca init, tuned for Ornis.
+# Rust 97.5th percentile is cognitive=8 / cyclomatic=8, but physics solver
+# legitimately exceeds them. We keep defaults permissive and rely on baseline ratchet.
+cognitive = 25
+cyclomatic = 25
+abc = 80
+nargs = 8
+nexits = 6
+"halstead.effort" = 150000
+"loc.ploc" = 1000
+"loc.sloc" = 2000
+nom = 30
+wmc = 80
+
+# Per-language overrides: Rust is simpler on average, JS/TS need higher limits
+[thresholds.lang.rust]
+cognitive = 20
+cyclomatic = 20
+"halstead.effort" = 120000
+"loc.ploc" = 900
+abc = 60
+
+[thresholds.lang.javascript]
+cognitive = 30
+cyclomatic = 25
+"halstead.effort" = 100000
+
+[thresholds.lang.typescript]
+cognitive = 30
+cyclomatic = 25
+"halstead.effort" = 100000
