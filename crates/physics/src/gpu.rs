@@ -26,8 +26,9 @@ use glam::Vec3;
 use std::sync::Arc;
 use wgpu;
 
+use bytemuck::Zeroable;
 use crate::body::RigidBody;
-use crate::engine::{Manifold, ManifoldState, Manifold};
+use crate::engine::{Manifold, ManifoldState};
 
 // ---------------------------------------------------------------------------
 // Layout constants (match WGSL struct)
@@ -164,7 +165,9 @@ impl GpuBatch {
         let wb = world_inertia_matrix(b.orientation, b.inertia);
         let set_mat = |m: &[Vec3; 3], dest: &mut [&mut [f32; 4]; 9]| {
             for r in 0..3 {
-                dest[r * 3][lane] = m[r].x; dest[r * 3 + 1][lane] = m[r].y; dest[r * 3 + 2][lane] = m[r].z;
+                dest[r * 3][lane] = m[r].x;
+                dest[r * 3 + 1][lane] = m[r].y;
+                dest[r * 3 + 2][lane] = m[r].z;
             }
         };
         set_mat(&wa, &mut [&mut self.w_a00, &mut self.w_a01, &mut self.w_a02,
@@ -424,7 +427,8 @@ impl WgpuContactSolver {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("physics_contact_layout"),
-            bind_group_layouts: &[&device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            bind_group_layouts: &[&device.create_bind_group_layout(
+                &wgpu::BindGroupLayoutDescriptor {
                 label: Some("physics_contact_bgl"),
                 entries: &[
                     // body_buf: read-write storage
@@ -480,7 +484,9 @@ impl WgpuContactSolver {
         let body_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("physics_body_state"),
             size: body_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let batch_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -649,7 +655,11 @@ pub fn pack_single_point_batches(
     let mut cur_bodies: [usize; 8] = [usize::MAX; 8];
     let mut cur_n = 0usize;
 
-    let flush = |batches: &mut Vec<GpuBatch>, cur: &mut GpuBatch, cur_len: &mut usize, cur_bodies: &mut [usize; 8], cur_n: &mut usize| {
+    let flush = |batches: &mut Vec<GpuBatch>,
+                    cur: &mut GpuBatch,
+                    cur_len: &mut usize,
+                    cur_bodies: &mut [usize; 8],
+                    cur_n: &mut usize| {
         if *cur_len == 0 { return; }
         cur.count = *cur_len as u32;
         batches.push(*cur);
@@ -691,7 +701,11 @@ pub fn pack_single_point_batches(
 
 /// Write GPU batch accumulated impulses back to the ManifoldState array
 /// (for warm-cache persistence).
-pub fn write_back_acc(states: &mut [ManifoldState], single_indices: &[usize], batches: &[GpuBatch]) {
+pub fn write_back_acc(
+    states: &mut [ManifoldState],
+    single_indices: &[usize],
+    batches: &[GpuBatch],
+) {
     let mut bi = 0usize;
     let mut lane = 0usize;
     for &si in single_indices {
@@ -747,7 +761,8 @@ mod tests {
         }).collect();
         let single_indices: Vec<usize> = (0..3).collect();
 
-        let (batches, count) = pack_single_point_batches(&bodies, &states, &manifolds, &single_indices);
+        let (batches, count) =
+            pack_single_point_batches(&bodies, &states, &manifolds, &single_indices);
         assert_eq!(count, 2, "should form 2 batches: [1, 2] with conflict");
         assert_eq!(batches[0].count, 1, "first batch only has the non-conflicting contact... wait");
         // Actually with greedy pack: (0,1) starts batch; (0,2) conflicts → flush batch1(1), start batch2 with (0,2); (3,4) clears bodies → adds to batch2.

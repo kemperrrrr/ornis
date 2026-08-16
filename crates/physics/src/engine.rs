@@ -180,7 +180,14 @@ fn solve_small(a: &[[f32; 4]; 4], b: &[f32; 4], n: usize) -> Option<[f32; 4]> {
 /// Apply an impulse at a contact point to the body pair (velocity + angular).
 /// The contact normal points from body `i` to body `j`; a positive impulse
 /// pushes `j` along it and `i` against it.
-pub(crate) fn apply_impulse(bodies: &mut [RigidBody], i: usize, j: usize, imp: Vec3, ra: Vec3, rb: Vec3) {
+pub(crate) fn apply_impulse(
+        bodies: &mut [RigidBody],
+        i: usize,
+        j: usize,
+        imp: Vec3,
+        ra: Vec3,
+        rb: Vec3,
+    ) {
     debug_assert!(i != j);
     let (lo, hi, swapped) = if i < j { (i, j, false) } else { (j, i, true) };
     let (head, tail) = bodies.split_at_mut(hi);
@@ -1072,6 +1079,18 @@ struct IslandWork {
     warm: WarmCache,
 }
 
+/// Context for building a ManifoldState (packs the per-manifold parameters,
+/// keeping `build_manifold_state` below the bca nargs limit).
+struct ManifoldCtx<'a> {
+    bodies: &'a [RigidBody],
+    warm_in: &'a WarmCache,
+    allow_restitution: bool,
+    sub_dt: f32,
+    mi: usize,
+    i: usize,
+    j: usize,
+}
+
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: SweepAndPrune,
@@ -1659,16 +1678,6 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    /// Context for building a ManifoldState (reduces nargs for bca gate).
-struct ManifoldCtx<'a> {
-    bodies: &'a [RigidBody],
-    warm_in: &'a WarmCache,
-    allow_restitution: bool,
-    sub_dt: f32,
-    mi: usize,
-    i: usize,
-    j: usize,
-}
     /// Build one ManifoldState entry for a manifold at global body indices
     /// `i`/`j`. This is the preamble extracted from `solve_island_velocity`
     /// and shared by the CPU island path and the GPU single-point path.
@@ -1744,7 +1753,8 @@ struct ManifoldCtx<'a> {
                     warm_applied[k] = 0.0;
                     continue;
                 }
-                let vn_pre = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
+                let vn_pre = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra))
+                    .dot(n);
                 let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
                 warm_applied[k] = applied;
                 if applied > 0.0 {
