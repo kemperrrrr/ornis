@@ -621,3 +621,64 @@ path = "xtask/src/quality.rs"
 qualified = "quality"
 metric = "halstead.effort"
 value = 251129.77286629946
+
+# G7 new functions and regressions (2026-08-16)
+[[entry]]
+path = "crates/physics/src/gpu.rs"
+qualified = "GpuBatch::fill_lane"
+metric = "abc"
+value = 64.35837163881635
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::solve_scalar_friction"
+metric = "cognitive"
+value = 25.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::partition_into_islands"
+metric = "halstead.effort"
+value = 201576.11412466844
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::match_warm_points"
+metric = "cognitive"
+value = 22.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::build_manifold_state"
+metric = "halstead.effort"
+value = 263321.7004888288
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::build_manifold_state"
+metric = "cognitive"
+value = 28.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine"
+metric = "wmc"
+value = 276.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine"
+metric = "nom"
+value = 50.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "<file>"
+metric = "loc.sloc"
+value = 3613.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "<file>"
+metric = "loc.ploc"
+value = 2937.0
