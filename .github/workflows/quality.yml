@@ -43,7 +43,7 @@ jobs:
       # Supply-chain-tools: same set `cargo xtask quality` expects locally.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-audit,cargo-outdated
+          tool: cargo-deny,cargo-audit,cargo-outdated,big-code-analysis-cli
 
       - uses: Swatinem/rust-cache@v2
 
