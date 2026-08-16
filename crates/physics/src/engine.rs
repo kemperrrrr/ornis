@@ -1673,6 +1673,7 @@ struct ManifoldCtx<'a> {
     /// `i`/`j`. This is the preamble extracted from `solve_island_velocity`
     /// and shared by the CPU island path and the GPU single-point path.
     /// `key` is the sorted global body-pair for warm-cache lookup.
+    #[allow(clippy::needless_range_loop)]
     fn build_manifold_state(
         ctx: &ManifoldCtx,
         m: &Manifold,
@@ -1765,6 +1766,7 @@ struct ManifoldCtx<'a> {
     }
 
     /// Warm-start matching helper (extracted to reduce bca complexity).
+    #[allow(clippy::needless_range_loop)]
     fn match_warm_points(
         la: &[Vec3; 4],
         lb: &[Vec3; 4],
