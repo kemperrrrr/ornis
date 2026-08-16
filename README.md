@@ -161,7 +161,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Аудио-база: `AudioSource`/`AudioListener`, декодер (symphonia), бэкенды cpal / Web Audio | ✅ | `crates/audio/`; в настоящий момент файл активно дорабатывается |
 | DSP на GPU, процедурный звук | ❌ | |
-| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, raycast) | ✅ | `crates/physics/` |
+| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, raycast, SIMD-wide батч-солвер G7) | ✅ | `crates/physics/`; G7: `wide.rs` (SIMD-wide CPU), `gpu.rs` (GPU, feature `gpu`) |
 | Подключение Rapier/Jolt через трейт | ❌ | трейт есть, адаптеров нет |
 
 ### Не начато
