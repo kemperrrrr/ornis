@@ -308,13 +308,13 @@ value = 31.0
 path = "crates/physics/src/engine.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 2939.0
+value = 2947.0
 
 [[entry]]
 path = "crates/physics/src/engine.rs"
 qualified = "<file>"
 metric = "loc.sloc"
-value = 3615.0
+value = 3625.0
 
 [[entry]]
 path = "crates/physics/src/engine.rs"
