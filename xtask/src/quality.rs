@@ -66,8 +66,9 @@ pub fn quality(args: &[String]) {
     let mut results: Vec<StageResult> = Vec::new();
     // The total is computed up-front so the stage numbering stays
     // honest even when a deep stage is skipped (tool not installed).
-    // Level 1 now: fmt, clippy, bca, test, audit, deny, outdated = 7
-    let total = 7
+    // Level 1 now: fmt, clippy, bca, test, test (physics gpu),
+    // clippy (physics gpu), audit, deny, outdated = 9
+    let total = 9
         + usize::from(ci) * 2
         + usize::from(full) * 2
         + usize::from(bench)
@@ -141,6 +142,49 @@ pub fn quality(args: &[String]) {
         "test",
         "cargo test --workspace",
         cmd(&root, "cargo", &["test", "--workspace"]),
+        false,
+    ));
+
+    // Physics GPU solver (feature `gpu`): the shader is generated from Rust
+    // via ornis-macros. This stage validates the generated WGSL with naga and
+    // runs the solver against the CPU reference on a software adapter
+    // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
+    // so the gate stays green on machines without GPU drivers.
+    n += 1;
+    results.push(run_stage(
+        n,
+        total,
+        "test (physics gpu)",
+        "cargo test -p ornis-physics --features gpu",
+        cmd(
+            &root,
+            "cargo",
+            &["test", "-p", "ornis-physics", "--features", "gpu"],
+        ),
+        false,
+    ));
+
+    n += 1;
+    results.push(run_stage(
+        n,
+        total,
+        "clippy (physics gpu)",
+        "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
+        cmd(
+            &root,
+            "cargo",
+            &[
+                "clippy",
+                "-p",
+                "ornis-physics",
+                "--features",
+                "gpu",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
         false,
     ));
 

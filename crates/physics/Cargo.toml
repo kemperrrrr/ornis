@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 glam = "0.30"
 rayon = "1.10"
+ornis-macros = { path = "../macros" }
 wgpu = { version = "29", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 
@@ -17,6 +18,8 @@ gpu = ["dep:wgpu", "dep:bytemuck"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["rayon"] }
+naga = "29"
+pollster = "0.4"
 
 [[bench]]
 name = "solver_bench"

@@ -125,7 +125,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
 | ZST-диспетчеризация (`GpuLane`/`CpuLane`/`HybridLane`, `LaneTarget`) | ✅ | `crates/core/src/pipeline.rs` |
-| Макросы (`smart_pipeline`, `for_each_entity`, `kernel`, `gpu_pipeline`, `Pack`, `PipelineConfig`, `AutoPipeline`) | ✅ | `crates/macros/src/` |
+| Макросы (`smart_pipeline`, `for_each_entity`, `kernel`, `gpu_pipeline`, `WgslStruct`, `Pack`, `PipelineConfig`, `AutoPipeline`) | ✅ | `crates/macros/src/` |
 | Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | ✅ | `crates/core/src/dispatcher.rs` |
 | Command-Based Sync: CPU-side очередь команд + residency tracker | ✅ | `crates/core/src/command_sync.rs` |
 | Command-Based Sync: реальное GPU-исполнение (compute dispatch + flush) | ✅ | `crates/wgpu_backend/src/command_sync.rs`, есть тест `gpu_dispatch_records_and_flushes` |
@@ -161,7 +161,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Аудио-база: `AudioSource`/`AudioListener`, декодер (symphonia), бэкенды cpal / Web Audio | ✅ | `crates/audio/`; в настоящий момент файл активно дорабатывается |
 | DSP на GPU, процедурный звук | ❌ | |
-| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, raycast, SIMD-wide батч-солвер G7) | ✅ | `crates/physics/`; G7: `wide.rs` (SIMD-wide CPU), `gpu.rs` (GPU, feature `gpu`) |
+| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, raycast, SIMD-wide батч-солвер G7) | ✅ | `crates/physics/`; G7: `wide.rs` (SIMD-wide CPU), `gpu.rs` (GPU, feature `gpu`; шейдер написан на Rust и транслируется в WGSL макросами `gpu_pipeline`/`WgslStruct`, проверен naga и lavapipe-тестами в quality-гейте) |
 | Подключение Rapier/Jolt через трейт | ❌ | трейт есть, адаптеров нет |
 
 ### Не начато
