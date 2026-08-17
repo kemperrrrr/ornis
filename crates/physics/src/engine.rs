@@ -1028,6 +1028,7 @@ type WarmCache = HashMap<(usize, usize), ([WarmPoint; 4], usize)>;
 /// Per-manifold solver state shared between the velocity and position stages
 /// of a substep (G6 stage split: velocities solve BEFORE positions move, so
 /// the NGS pass needs the detection-time anchors/penetrations carried over).
+#[derive(Clone)]
 pub(crate) struct ManifoldState {
     pub mi: usize,
     pub i: usize,
