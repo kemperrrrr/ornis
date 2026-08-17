@@ -9,6 +9,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Explicit token scopes. The failure-digest comment step needs
+# `pull-requests: write`; the others (contents: read, actions: read)
+# are implicit for the runner, but listing them is best practice and
+# future-proofs the file against org-level Workflow permissions
+# changes (Settings → Actions → General → Workflow permissions).
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   # Единственная джоба: ровно та же команда, что гоняется локально
   # (`cargo xtask quality --ci`). xtask — единственный источник правды о
@@ -57,5 +66,68 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # The one command. Locally: same flags, same result.
+      # `tee` mirrors stdout+stderr to the GitHub log AND to
+      # `target/quality.log`, which the post-failure steps below
+      # read to build a structured PR comment. The arena.ai agent
+      # operates only via GitHub API and its sandbox's egress proxy
+      # blocks the Azure Blob endpoint where GitHub stores the raw
+      # run logs, so we re-publish a digest in the same API channel
+      # the agent can read.
       - name: Quality gate
-        run: cargo xtask quality --ci
+        id: gate
+        run: cargo xtask quality --ci 2>&1 | tee target/quality.log
+        continue-on-error: true
+
+      # Artifact: full log, kept 7 days. Visible in the Actions UI
+      # (not the agent's reach, but useful for humans debugging the
+      # gate itself or comparing two runs).
+      - name: Upload failure log
+        if: steps.gate.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-log
+          path: target/quality.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      # One comment per PR, overwritten on each failing run. Built
+      # from the QUALITY SUMMARY block of the xtask output (per-stage
+      # PASS/FAIL/SKIP, a clean structured view) plus a collapsible
+      # tail of the raw log. The agent reads this via the PR comments
+      # endpoint and iterates from it.
+      - name: Build failure digest body
+        if: github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          {
+            printf '❌ **Quality gate failed** on `%s` (run [%s](%s/%s/actions/runs/%s)).\n\n' \
+              "$HEAD_REF" "$RUN_ID" "$SERVER_URL" "$REPOSITORY" "$RUN_ID"
+            echo '### 📊 QUALITY SUMMARY'
+            echo
+            echo '```text'
+            if grep -q 'QUALITY SUMMARY' target/quality.log; then
+              awk '/QUALITY SUMMARY/,/^╚/' target/quality.log
+            else
+              echo '(no summary block found in log — xtask may have crashed before printing it)'
+            fi
+            echo '```'
+            echo
+            echo '### 📜 Tail of log (200 lines)'
+            echo
+            echo '```text'
+            tail -n 200 target/quality.log
+            echo '```'
+            echo
+            echo 'Полные логи — в артефакте `quality-log` этого run.'
+          } > target/comment-body.md
+
+      - name: Post failure digest to PR
+        if: github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: target/comment-body.md
