@@ -1684,7 +1684,7 @@ impl BuiltinPhysicsEngine {
     /// `key` is the sorted global body-pair for warm-cache lookup.
     #[allow(clippy::needless_range_loop)]
     fn build_manifold_state(
-        ctx: &ManifoldCtx,
+        ctx: &mut ManifoldCtx,
         m: &Manifold,
         key: (usize, usize),
     ) -> Option<ManifoldState> {
@@ -1692,7 +1692,7 @@ impl BuiltinPhysicsEngine {
         const RESTITUTION_THRESHOLD: f32 = 1.0;
         const RESTITUTION_MAX_PEN: f32 = 0.05;
 
-        let bodies = ctx.bodies;
+        let bodies = &mut *ctx.bodies;
         let (i, j) = (ctx.i, ctx.j);
         let sub_dt = ctx.sub_dt;
         let allow_restitution = ctx.allow_restitution;
@@ -1967,7 +1967,7 @@ impl BuiltinPhysicsEngine {
                 bodies: &mut self.bodies, warm_in: &self.warm_impulses,
                 allow_restitution, sub_dt, mi, i, j,
             };
-            if let Some(st) = Self::build_manifold_state(&ctx, m, key) {
+            if let Some(st) = Self::build_manifold_state(&mut ctx, m, key) {
                 global_states.push(st);
             }
         }
