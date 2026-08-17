@@ -8,6 +8,9 @@ use crate::distance;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;
+use crate::wide::{SolverStep, build_solver_steps};
+#[cfg(feature = "gpu")]
+use crate::gpu::{WgpuContactSolver, pack_single_point_batches, write_back_acc};
 
 pub trait PhysicsEngine: Send + Sync {
     fn step(&mut self, dt: f32);
@@ -36,19 +39,19 @@ struct Contact {
 
 /// A single contact point inside a manifold (G2).
 #[derive(Clone, Copy, Debug)]
-struct ManifoldPoint {
-    world_point: Vec3,
-    penetration: f32,
+pub(crate) struct ManifoldPoint {
+    pub world_point: Vec3,
+    pub penetration: f32,
 }
 
 /// Contact manifold: one normal + up to 4 points per body pair.
 #[derive(Clone, Debug)]
-struct Manifold {
-    body_a: BodyHandle,
-    body_b: BodyHandle,
-    normal: Vec3,
-    point_count: usize,
-    points: [ManifoldPoint; 4],
+pub(crate) struct Manifold {
+    pub body_a: BodyHandle,
+    pub body_b: BodyHandle,
+    pub normal: Vec3,
+    pub point_count: usize,
+    pub points: [ManifoldPoint; 4],
 }
 
 impl Manifold {
@@ -82,7 +85,7 @@ fn inv_inertia_axis(i: f32) -> f32 {
 }
 
 /// Apply the inverse world-space inertia tensor: I⁻¹_world = R · I⁻¹_body · Rᵀ.
-fn mul_inv_inertia(inertia: Vec3, orientation: glam::Quat, v: Vec3) -> Vec3 {
+pub(crate) fn mul_inv_inertia(inertia: Vec3, orientation: glam::Quat, v: Vec3) -> Vec3 {
     let body = orientation.inverse() * v;
     let scaled = Vec3::new(
         inv_inertia_axis(inertia.x) * body.x,
@@ -177,7 +180,14 @@ fn solve_small(a: &[[f32; 4]; 4], b: &[f32; 4], n: usize) -> Option<[f32; 4]> {
 /// Apply an impulse at a contact point to the body pair (velocity + angular).
 /// The contact normal points from body `i` to body `j`; a positive impulse
 /// pushes `j` along it and `i` against it.
-fn apply_impulse(bodies: &mut [RigidBody], i: usize, j: usize, imp: Vec3, ra: Vec3, rb: Vec3) {
+pub(crate) fn apply_impulse(
+    bodies: &mut [RigidBody],
+    i: usize,
+    j: usize,
+    imp: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+) {
     debug_assert!(i != j);
     let (lo, hi, swapped) = if i < j { (i, j, false) } else { (j, i, true) };
     let (head, tail) = bodies.split_at_mut(hi);
@@ -222,7 +232,7 @@ fn apply_positional_rotation(body: &mut RigidBody, d: Vec3) {
 
 /// Velocity of a body at a world-space contact point (linear + angular part).
 #[inline]
-fn point_velocity(body: &RigidBody, r: Vec3) -> Vec3 {
+pub(crate) fn point_velocity(body: &RigidBody, r: Vec3) -> Vec3 {
     body.velocity + body.angular_velocity.cross(r)
 }
 
@@ -1018,32 +1028,33 @@ type WarmCache = HashMap<(usize, usize), ([WarmPoint; 4], usize)>;
 /// Per-manifold solver state shared between the velocity and position stages
 /// of a substep (G6 stage split: velocities solve BEFORE positions move, so
 /// the NGS pass needs the detection-time anchors/penetrations carried over).
-struct ManifoldState {
-    mi: usize,
-    i: usize,
-    j: usize,
-    count: usize,
-    acc: [f32; 4],
-    acc_friction: [f32; 4],
-    acc_friction2: [f32; 4],
-    bias: [f32; 4],
+#[derive(Clone)]
+pub(crate) struct ManifoldState {
+    pub mi: usize,
+    pub i: usize,
+    pub j: usize,
+    pub count: usize,
+    pub acc: [f32; 4],
+    pub acc_friction: [f32; 4],
+    pub acc_friction2: [f32; 4],
+    pub bias: [f32; 4],
     // G6 speculative: per-point approach-speed LIMIT (negative of the
     // remaining gap / sub_dt; 0 for touching points). The velocity
     // solve drives vn to this target instead of 0, so a separated
     // point may close its gap within the substep but never more.
-    target: [f32; 4],
-    mu: f32,
+    pub target: [f32; 4],
+    pub mu: f32,
     // Fixed tangent basis (Box2D-style): friction is solved along
     // directions derived from the contact normal ONCE, not from the
     // instantaneous slip velocity — velocity-aligned friction walks
     // the contact and lets resting stacks drift sideways.
-    t1: Vec3,
-    t2: Vec3,
+    pub t1: Vec3,
+    pub t2: Vec3,
     // G3: body-frame anchors and detection-time penetration per point,
     // so the positional pass can re-measure live separation.
-    la: [Vec3; 4],
-    lb: [Vec3; 4],
-    pen0: [f32; 4],
+    pub la: [Vec3; 4],
+    pub lb: [Vec3; 4],
+    pub pen0: [f32; 4],
 }
 
 /// Per-island work item for the G7 parallel solver: an island-local shard of
@@ -1067,6 +1078,18 @@ struct IslandWork {
     states: Vec<ManifoldState>,
     /// This island's updated warm-cache entries (merged after the join).
     warm: WarmCache,
+}
+
+/// Context for building a ManifoldState (packs the per-manifold parameters,
+/// keeping `build_manifold_state` below the bca nargs limit).
+struct ManifoldCtx<'a> {
+    bodies: &'a mut [RigidBody],
+    warm_in: &'a WarmCache,
+    allow_restitution: bool,
+    sub_dt: f32,
+    mi: usize,
+    i: usize,
+    j: usize,
 }
 
 pub struct BuiltinPhysicsEngine {
@@ -1100,6 +1123,14 @@ pub struct BuiltinPhysicsEngine {
     joint_pairs: HashSet<(usize, usize)>,
     /// Diagnostics: (body_a, body_b) of the last substep's manifolds.
     debug_pairs: Vec<(usize, usize)>,
+    /// G7: enable SIMD-wide contact solver for single-point manifolds.
+    /// Default true. Set to false for bit-exact scalar reproduction.
+    wide_solver: bool,
+    /// G7: optional GPU contact solver (gpu feature). When attached,
+    /// single-point manifolds are solved on the GPU instead of the CPU
+    /// wide path; multi-point manifolds stay on the CPU island path.
+    #[cfg(feature = "gpu")]
+    gpu_solver: Option<WgpuContactSolver>,
 }
 
 impl BuiltinPhysicsEngine {
@@ -1119,7 +1150,26 @@ impl BuiltinPhysicsEngine {
             joints: Vec::new(),
             joint_pairs: HashSet::new(),
             debug_pairs: Vec::new(),
+            wide_solver: true,
+            #[cfg(feature = "gpu")]
+            gpu_solver: None,
         }
+    }
+
+    /// Toggle the G7 SIMD-wide contact solver (default: enabled). Disabling
+    /// it forces the scalar single-point path, which is bit-exact with the
+    /// pre-G7 solver for scenes that predate the wide batches.
+    pub fn set_wide_solver(&mut self, enabled: bool) {
+        self.wide_solver = enabled;
+    }
+
+    /// Attach a GPU contact solver (G7, `gpu` feature). When the GPU solver
+    /// is present, single-point contacts are solved on the GPU and the CPU
+    /// wide-path is unused. The GPU solver is a Jacobi/GS hybrid (not
+    /// bit-identical to the CPU path); see the `gpu` module docs.
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu_solver(&mut self, solver: WgpuContactSolver) {
+        self.gpu_solver = Some(solver);
     }
 
     pub fn set_substeps(&mut self, n: u32) {
@@ -1629,6 +1679,359 @@ impl BuiltinPhysicsEngine {
         }
     }
 
+    /// Build one ManifoldState entry for a manifold at global body indices
+    /// `i`/`j`. This is the preamble extracted from `solve_island_velocity`
+    /// and shared by the CPU island path and the GPU single-point path.
+    /// `key` is the sorted global body-pair for warm-cache lookup.
+    #[allow(clippy::needless_range_loop)]
+    fn build_manifold_state(
+        ctx: &mut ManifoldCtx,
+        m: &Manifold,
+        key: (usize, usize),
+    ) -> Option<ManifoldState> {
+        const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
+        const RESTITUTION_THRESHOLD: f32 = 1.0;
+        const RESTITUTION_MAX_PEN: f32 = 0.05;
+
+        let bodies = &mut *ctx.bodies;
+        let (i, j) = (ctx.i, ctx.j);
+        let sub_dt = ctx.sub_dt;
+        let allow_restitution = ctx.allow_restitution;
+        let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
+        if total_inv < 1e-10 {
+            return None;
+        }
+        let n = m.normal;
+        let count = m.point_count;
+
+        let mut la = [Vec3::ZERO; 4];
+        let mut lb = [Vec3::ZERO; 4];
+        let mut pen0 = [0.0f32; 4];
+        for k in 0..count {
+            let p = m.points[k].world_point;
+            la[k] = bodies[i].orientation.inverse() * (p - bodies[i].position);
+            lb[k] = bodies[j].orientation.inverse() * (p - bodies[j].position);
+            pen0[k] = m.points[k].penetration;
+        }
+
+        // Warm-start matching (extracted to reduce bca cognitive)
+        let (warm, matched) = Self::match_warm_points(
+            &la, &lb, m, key, ctx.warm_in, MATCH_TOL_SQ, count,
+        );
+
+        // Restitution bias & speculative target
+        let e = bodies[i].restitution.min(bodies[j].restitution);
+        let mu = bodies[i].friction.max(bodies[j].friction);
+        let mut bias = [0.0f32; 4];
+        let mut target = [0.0f32; 4];
+        for k in 0..count {
+            if pen0[k] < 0.0 {
+                target[k] = pen0[k] / sub_dt;
+            }
+        }
+        if allow_restitution {
+            for k in 0..count {
+                if matched[k] || pen0[k] > RESTITUTION_MAX_PEN { continue; }
+                let p = m.points[k].world_point;
+                let ra = p - bodies[i].position;
+                let rb = p - bodies[j].position;
+                let vn0 = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
+                if vn0 >= -RESTITUTION_THRESHOLD { continue; }
+                if pen0[k] < 0.0 && -pen0[k] > -vn0 * sub_dt { continue; }
+                bias[k] = -e * vn0;
+            }
+        }
+
+        // Warm-start application (capped)
+        let mut warm_applied = warm;
+        for k in 0..count {
+            if warm[k] > 0.0 {
+                let p = m.points[k].world_point;
+                let ra = p - bodies[i].position;
+                let rb = p - bodies[j].position;
+                let k_eff = effective_mass(bodies, i, j, n, ra, rb);
+                if k_eff < 1e-10 {
+                    warm_applied[k] = 0.0;
+                    continue;
+                }
+                let vn_pre = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra))
+                    .dot(n);
+                let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
+                warm_applied[k] = applied;
+                if applied > 0.0 {
+                    apply_impulse(bodies, i, j, n * applied, ra, rb);
+                }
+            }
+        }
+
+        Some(ManifoldState {
+            mi: ctx.mi, i: ctx.i, j: ctx.j, count,
+            acc: warm_applied,
+            acc_friction: [0.0; 4],
+            acc_friction2: [0.0; 4],
+            bias, target, mu,
+            t1: tangent_basis(n),
+            t2: tangent_basis(n).cross(n),
+            la, lb, pen0,
+        })
+    }
+
+    /// Warm-start matching helper (extracted to reduce bca complexity).
+    #[allow(clippy::needless_range_loop)]
+    fn match_warm_points(
+        la: &[Vec3; 4],
+        lb: &[Vec3; 4],
+        m: &Manifold,
+        key: (usize, usize),
+        warm_in: &WarmCache,
+        match_tol_sq: f32,
+        count: usize,
+    ) -> ([f32; 4], [bool; 4]) {
+        let mut warm = [0.0f32; 4];
+        let mut matched = [false; 4];
+        if let Some((cached_points, cached_count)) = warm_in.get(&key) {
+            let mut used = [false; 4];
+            for k in 0..count {
+                let mut best: Option<(usize, f32)> = None;
+                for (c, cp) in cached_points.iter().enumerate().take(*cached_count) {
+                    if used[c] { continue; }
+                    if cp.normal.dot(m.normal) < 0.7 { continue; }
+                    let d2 = (cp.la - la[k]).length_squared() + (cp.lb - lb[k]).length_squared();
+                    if d2 < match_tol_sq && best.is_none_or(|(_, bd)| d2 < bd) {
+                        best = Some((c, d2));
+                    }
+                }
+                if let Some((c, _)) = best {
+                    used[c] = true;
+                    warm[k] = cached_points[c].impulse;
+                    matched[k] = true;
+                }
+            }
+        }
+        (warm, matched)
+    }
+
+    /// Partition `active` (manifold indices) into islands and build work
+    /// items. Extracted so both the CPU path and the GPU hybrid path reuse
+    /// the same island-building logic.
+    fn partition_into_islands(
+        &self,
+        active: &[usize],
+        manifolds: &[Manifold],
+    ) -> Vec<IslandWork> {
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let n = self.bodies.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        for &mi in active {
+            let m = &manifolds[mi];
+            let (a, b) = (m.body_a, m.body_b);
+            if self.bodies[a].body_type == BodyType::Dynamic
+                && self.bodies[b].body_type == BodyType::Dynamic
+            {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb {
+                    parent[rb] = ra;
+                }
+            }
+        }
+        let mut group_of: HashMap<usize, usize> = HashMap::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for &mi in active {
+            let m = &manifolds[mi];
+            let d = if self.bodies[m.body_a].body_type == BodyType::Dynamic {
+                m.body_a
+            } else {
+                m.body_b
+            };
+            let root = find(&mut parent, d);
+            match group_of.entry(root) {
+                std::collections::hash_map::Entry::Occupied(e) => groups[*e.get()].push(mi),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(groups.len());
+                    groups.push(vec![mi]);
+                }
+            }
+        }
+
+        let mut islands: Vec<IslandWork> = Vec::with_capacity(groups.len());
+        for group in groups {
+            let mut body_idx: Vec<usize> = Vec::new();
+            for &mi in &group {
+                body_idx.push(manifolds[mi].body_a);
+                body_idx.push(manifolds[mi].body_b);
+            }
+            body_idx.sort_unstable();
+            body_idx.dedup();
+            let shard: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
+            let local = |g: usize| body_idx.binary_search(&g).expect("island body");
+            let island_manifolds: Vec<Manifold> = group
+                .iter()
+                .map(|&mi| {
+                    let mut mc = manifolds[mi].clone();
+                    mc.body_a = local(manifolds[mi].body_a);
+                    mc.body_b = local(manifolds[mi].body_b);
+                    mc
+                })
+                .collect();
+            let keys: Vec<(usize, usize)> = group
+                .iter()
+                .map(|&mi| {
+                    let m = &manifolds[mi];
+                    (m.body_a.min(m.body_b), m.body_a.max(m.body_b))
+                })
+                .collect();
+            islands.push(IslandWork {
+                body_idx,
+                bodies: shard,
+                manifolds: island_manifolds,
+                keys,
+                states: Vec::new(),
+                warm: HashMap::new(),
+            });
+        }
+        islands
+    }
+
+    /// Dispatch the island velocity solves (parallel via rayon when wide
+    /// enough), scatter bodies back, and merge warm caches.
+    fn dispatch_islands_velocity(
+        &mut self,
+        islands: &mut Vec<IslandWork>,
+        allow_restitution: bool,
+        sub_dt: f32,
+    ) {
+        const PAR_MIN_ISLANDS: usize = 2;
+        const PAR_MIN_MANIFOLDS: usize = 24;
+        if islands.is_empty() {
+            return;
+        }
+        let parallel = islands.len() >= PAR_MIN_ISLANDS
+            && islands.iter().map(|i| i.manifolds.len()).sum::<usize>() >= PAR_MIN_MANIFOLDS;
+        let warm_in = &self.warm_impulses;
+        let iters = self.velocity_iterations;
+        let wide_on = self.wide_solver;
+        let solve = |isl: &mut IslandWork| {
+            let (states, warm) = Self::solve_island_velocity(
+                &mut isl.bodies,
+                &isl.manifolds,
+                &isl.keys,
+                warm_in,
+                iters,
+                allow_restitution,
+                sub_dt,
+                wide_on,
+            );
+            isl.states = states;
+            isl.warm = warm;
+        };
+        if parallel {
+            islands.par_iter_mut().for_each(solve);
+        } else {
+            islands.iter_mut().for_each(solve);
+        }
+        let mut next: WarmCache = HashMap::new();
+        for isl in islands.iter() {
+            for (l, &g) in isl.body_idx.iter().enumerate() {
+                if self.bodies[g].body_type == BodyType::Dynamic {
+                    self.bodies[g] = isl.bodies[l].clone();
+                }
+            }
+            next.extend(isl.warm.iter().map(|(k, v)| (*k, *v)));
+        }
+        self.warm_impulses = next;
+    }
+
+    /// Contact velocity solve using the GPU for single-point manifolds
+    /// (G7, `gpu` feature). Multi-point manifolds are dispatched on CPU
+    /// islands. This is a Jacobi/GS hybrid (not bit-identical).
+    #[cfg(feature = "gpu")]
+    fn solve_contacts_velocity_gpu(
+        &mut self,
+        active: Vec<usize>,
+        manifolds: &[Manifold],
+        allow_restitution: bool,
+        sub_dt: f32,
+    ) -> Vec<IslandWork> {
+        // Build global states for ALL active manifolds (shared preamble).
+        let mut global_states: Vec<ManifoldState> = Vec::with_capacity(active.len());
+        for &mi in &active {
+            let m = &manifolds[mi];
+            let (i, j) = (m.body_a, m.body_b);
+            let key = (i.min(j), i.max(j));
+            let ctx = ManifoldCtx {
+                bodies: &mut self.bodies, warm_in: &self.warm_impulses,
+                allow_restitution, sub_dt, mi, i, j,
+            };
+            if let Some(st) = Self::build_manifold_state(&mut ctx, m, key) {
+                global_states.push(st);
+            }
+        }
+
+        // Split: single-point → GPU, multi-point → CPU islands.
+        let mut single_si: Vec<usize> = Vec::new();
+        let mut multi_mi: Vec<usize> = Vec::new();
+        for (si, st) in global_states.iter().enumerate() {
+            if st.count == 1 {
+                single_si.push(si);
+            } else {
+                multi_mi.push(st.mi);
+            }
+        }
+
+        // GPU solve single-point contacts.
+        let mut gpu_warm: WarmCache = HashMap::new();
+        if !single_si.is_empty() {
+            let gpu = self.gpu_solver.as_mut().unwrap();
+            let (batches, num_batches) = pack_single_point_batches(
+                &self.bodies, &global_states, manifolds, &single_si,
+            );
+            if num_batches > 0 {
+                gpu.upload_bodies(&self.bodies);
+                gpu.upload_batches(&batches);
+                gpu.solve(num_batches, self.velocity_iterations, allow_restitution);
+                gpu.download_bodies(&mut self.bodies);
+                let mut dl_batches = batches;
+                gpu.download_acc(&mut dl_batches);
+                write_back_acc(&mut global_states, &single_si, &dl_batches);
+                // Persist warm cache for single-point manifolds.
+                for &si in &single_si {
+                    let st = &global_states[si];
+                    let m = &manifolds[st.mi];
+                    let key = (m.body_a.min(m.body_b), m.body_a.max(m.body_b));
+                    let mut pts = [WarmPoint {
+                        la: Vec3::ZERO, lb: Vec3::ZERO, normal: Vec3::ZERO, impulse: 0.0,
+                    }; 4];
+                    for k in 0..st.count {
+                        pts[k] = WarmPoint {
+                            la: st.la[k], lb: st.lb[k],
+                            normal: m.normal, impulse: st.acc[k],
+                        };
+                    }
+                    gpu_warm.insert(key, (pts, st.count));
+                }
+            }
+        }
+
+        // CPU islands for multi-point manifolds. The island dispatch replaces
+        // `warm_impulses` with the multi-point cache, so the GPU entries are
+        // merged back in afterwards.
+        let islands = if multi_mi.is_empty() {
+            Vec::new()
+        } else {
+            let mut islands = self.partition_into_islands(&multi_mi, manifolds);
+            self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt);
+            islands
+        };
+        self.warm_impulses.extend(gpu_warm);
+        islands
+    }
+
     /// Velocity stage of the contact solver (G6 stage order, G7 island
     /// dispatch). Orchestrator: a sequential sleep/wake pre-pass (the only
     /// part mutating island state), a union-find partition over the FRESH
@@ -1644,11 +2047,6 @@ impl BuiltinPhysicsEngine {
         allow_restitution: bool,
         sub_dt: f32,
     ) -> Vec<IslandWork> {
-        // Parallel dispatch pays off only with real width; below that the
-        // same code runs sequentially over the same per-island structure.
-        const PAR_MIN_ISLANDS: usize = 2;
-        const PAR_MIN_MANIFOLDS: usize = 24;
-
         // --- Sequential pre-pass: sleep/wake policy + active filtering ---
         // Sleep: a contact needs work only if at least one side is an AWAKE
         // DYNAMIC body. Static geometry never wakes anything (a body asleep
@@ -1698,125 +2096,24 @@ impl BuiltinPhysicsEngine {
             return Vec::new();
         }
 
-        // --- Partition: union-find over the fresh active manifolds ---
-        // Only dynamic–dynamic contacts merge islands; a manifold against
-        // static geometry rides in its dynamic side's island.
-        fn find(parent: &mut [usize], mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            x
-        }
-        let n = self.bodies.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        for &mi in &active {
-            let m = &manifolds[mi];
-            let (a, b) = (m.body_a, m.body_b);
-            if self.bodies[a].body_type == BodyType::Dynamic
-                && self.bodies[b].body_type == BodyType::Dynamic
-            {
-                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-                if ra != rb {
-                    parent[rb] = ra;
-                }
-            }
-        }
-        // Group manifold indices by island root, in order of first appearance
-        // (`active` is in global manifold order → deterministic groups).
-        let mut group_of: HashMap<usize, usize> = HashMap::new();
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for &mi in &active {
-            let m = &manifolds[mi];
-            let d = if self.bodies[m.body_a].body_type == BodyType::Dynamic {
-                m.body_a
-            } else {
-                m.body_b
-            };
-            let root = find(&mut parent, d);
-            match group_of.entry(root) {
-                std::collections::hash_map::Entry::Occupied(e) => groups[*e.get()].push(mi),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(groups.len());
-                    groups.push(vec![mi]);
-                }
-            }
+        // --- GPU single-point path (G7) ---
+        // When a GPU solver is attached, the whole velocity solve for
+        // single-point manifolds moves to the GPU (`solve_contacts_velocity_gpu`),
+        // and multi-point manifolds keep the CPU island path. The GPU and CPU
+        // passes are NOT interleaved per Gauss-Seidel iteration (they run
+        // sequentially per substep) — a Jacobi/GS hybrid that is physically
+        // correct but not bit-identical to the pure CPU path (see PLAN.md).
+        #[cfg(feature = "gpu")]
+        if self.gpu_solver.is_some() {
+            return self.solve_contacts_velocity_gpu(active, manifolds, allow_restitution, sub_dt);
         }
 
-        // --- Build per-island work items: gather bodies, remap manifolds ---
-        let mut islands: Vec<IslandWork> = Vec::with_capacity(groups.len());
-        for group in groups {
-            let mut body_idx: Vec<usize> = Vec::new();
-            for &mi in &group {
-                body_idx.push(manifolds[mi].body_a);
-                body_idx.push(manifolds[mi].body_b);
-            }
-            body_idx.sort_unstable();
-            body_idx.dedup();
-            let shard: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
-            let local = |g: usize| body_idx.binary_search(&g).expect("island body");
-            let island_manifolds: Vec<Manifold> = group
-                .iter()
-                .map(|&mi| {
-                    let mut mc = manifolds[mi].clone();
-                    mc.body_a = local(manifolds[mi].body_a);
-                    mc.body_b = local(manifolds[mi].body_b);
-                    mc
-                })
-                .collect();
-            let keys: Vec<(usize, usize)> = group
-                .iter()
-                .map(|&mi| {
-                    let m = &manifolds[mi];
-                    (m.body_a.min(m.body_b), m.body_a.max(m.body_b))
-                })
-                .collect();
-            islands.push(IslandWork {
-                body_idx,
-                bodies: shard,
-                manifolds: island_manifolds,
-                keys,
-                states: Vec::new(),
-                warm: HashMap::new(),
-            });
-        }
-
-        // --- Dispatch: parallel across islands when the scene is wide ---
-        let parallel = islands.len() >= PAR_MIN_ISLANDS && active.len() >= PAR_MIN_MANIFOLDS;
-        let warm_in = &self.warm_impulses;
-        let iters = self.velocity_iterations;
-        let solve = |isl: &mut IslandWork| {
-            let (states, warm) = Self::solve_island_velocity(
-                &mut isl.bodies,
-                &isl.manifolds,
-                &isl.keys,
-                warm_in,
-                iters,
-                allow_restitution,
-                sub_dt,
-            );
-            isl.states = states;
-            isl.warm = warm;
-        };
-        if parallel {
-            islands.par_iter_mut().for_each(solve);
-        } else {
-            islands.iter_mut().for_each(solve);
-        }
-
-        // --- Scatter bodies back + merge the warm caches ---
-        // Cache keys are disjoint across islands by construction; write-back
-        // touches only dynamic bodies (statics and sleepers never move).
-        let mut next: WarmCache = HashMap::new();
-        for isl in &islands {
-            for (l, &g) in isl.body_idx.iter().enumerate() {
-                if self.bodies[g].body_type == BodyType::Dynamic {
-                    self.bodies[g] = isl.bodies[l].clone();
-                }
-            }
-            next.extend(isl.warm.iter().map(|(k, v)| (*k, *v)));
-        }
-        self.warm_impulses = next;
+        // --- Partition into islands + dispatch (G7) ---
+        // Islands are disjoint over dynamic bodies by construction, so
+        // concurrent solves are race-free and bit-identical for any thread
+        // count (Strong Confluence).
+        let mut islands = self.partition_into_islands(&active, manifolds);
+        self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt);
         islands
     }
 
@@ -1871,6 +2168,8 @@ impl BuiltinPhysicsEngine {
     /// restitution, cache persist), operating on an island-local body shard.
     /// All body indices in `manifolds` and the returned states are LOCAL;
     /// `keys` maps each local manifold to its global body-pair warm-cache key.
+    /// When `use_wide` is true, single-point manifolds are solved in
+    /// SIMD-wide batches (G7); multi-point (block LCP) stays scalar.
     // Solver loops index several parallel per-point arrays (manifold points,
     // warm cache, accumulators); range loops are the clearest form here.
     #[allow(clippy::needless_range_loop)]
@@ -1882,6 +2181,7 @@ impl BuiltinPhysicsEngine {
         velocity_iterations: u32,
         allow_restitution: bool,
         sub_dt: f32,
+        use_wide: bool,
     ) -> (Vec<ManifoldState>, WarmCache) {
         // G2b: warm-start cache matches points by proximity, not by index —
         // manifold point order changes frame to frame (sorted by depth).
@@ -2040,102 +2340,43 @@ impl BuiltinPhysicsEngine {
         }
 
         // --- Velocity solve: Gauss-Seidel iterations over ALL manifolds ---
+        // G7: single-point manifolds are packed into SIMD-wide batches
+        // (disjoint body sets, original GS order preserved — every contact
+        // stays in its place in the sequence); multi-point manifolds keep
+        // the scalar block-LCP path. Steps run in manifold order, so the
+        // computation is the same sequence either way.
+        let mut steps = if use_wide {
+            build_solver_steps(bodies, manifolds, &states)
+        } else {
+            Vec::new()
+        };
         for _ in 0..velocity_iterations {
-            for st in states.iter_mut() {
-                let m = &manifolds[st.mi];
-                let (i, j) = (st.i, st.j);
-                let n = m.normal;
-                let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-
-                // ---- Normal direction ----
-                // G4: multi-point manifolds are solved as an exact LCP block
-                // (scalar per-point GS oscillates between coupled points of
-                // one manifold — the rocking pump); single points keep the
-                // scalar projected update.
-                if st.count >= 2 {
-                    let mut pts = [Vec3::ZERO; 4];
-                    for k in 0..st.count {
-                        pts[k] = m.points[k].world_point;
-                    }
-                    solve_normal_block(bodies, i, j, n, &pts, &mut st.acc, &st.target, st.count);
-                } else {
-                    let k = 0;
-                    let p = m.points[k].world_point;
-                    let ra = p - bodies[i].position;
-                    let rb = p - bodies[j].position;
-                    let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-                    if k_eff >= 1e-10 {
-                        let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
-                        let vn = rel.dot(n);
-                        // Inelastic contact: restitution is a separate
-                        // one-shot stage (below), never accumulated. G6: the
-                        // target is the speculative approach limit (0 when
-                        // touching), not necessarily a full stop.
-                        let lambda = (st.target[k] - vn) / k_eff;
-                        let new_acc = (st.acc[k] + lambda).max(0.0);
-                        let delta = new_acc - st.acc[k];
-                        st.acc[k] = new_acc;
-                        if delta.abs() > 1e-12 {
-                            apply_impulse(bodies, i, j, n * delta, ra, rb);
+            if use_wide {
+                for step in &mut steps {
+                    match step {
+                        SolverStep::Wide(b) => {
+                            b.gather(bodies);
+                            b.solve_iteration();
+                            b.scatter(bodies);
+                        }
+                        SolverStep::Scalar(si) => {
+                            Self::solve_scalar_velocity_step(bodies, manifolds, &mut states[*si]);
                         }
                     }
                 }
-
-                // ---- Friction (Coulomb) along the FIXED tangent basis ----
-                // Accumulated 2D friction, clamped as a vector to µ·λn.
-                // (Re-deriving the tangent from slip velocity every
-                // iteration makes the contact "walk" — stacks drift.)
-                for k in 0..st.count {
-                    let p = m.points[k].world_point;
-                    let ra = p - bodies[i].position;
-                    let rb = p - bodies[j].position;
-                    let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
-                    let max_friction = st.mu * st.acc[k];
-                    let mut f_imp = Vec3::ZERO;
-                    for axis in 0..2 {
-                        let t = if axis == 0 { st.t1 } else { st.t2 };
-                        let ra_t = ra.cross(t);
-                        let rb_t = rb.cross(t);
-                        let k_t = total_inv
-                            + ra_t.dot(mul_inv_inertia(
-                                bodies[i].inertia,
-                                bodies[i].orientation,
-                                ra_t,
-                            ))
-                            + rb_t.dot(mul_inv_inertia(
-                                bodies[j].inertia,
-                                bodies[j].orientation,
-                                rb_t,
-                            ));
-                        if k_t < 1e-10 {
-                            continue;
-                        }
-                        let vt = rel.dot(t);
-                        let lambda_t = -vt / k_t;
-                        let (cur, other) = if axis == 0 {
-                            (st.acc_friction[k], st.acc_friction2[k])
-                        } else {
-                            (st.acc_friction2[k], st.acc_friction[k])
-                        };
-                        let new_t = cur + lambda_t;
-                        // Circular clamp of the combined friction vector.
-                        let len = (new_t * new_t + other * other).sqrt();
-                        let new_t = if len > max_friction && len > 1e-12 {
-                            new_t * (max_friction / len)
-                        } else {
-                            new_t
-                        };
-                        if axis == 0 {
-                            f_imp += t * (new_t - st.acc_friction[k]);
-                            st.acc_friction[k] = new_t;
-                        } else {
-                            f_imp += t * (new_t - st.acc_friction2[k]);
-                            st.acc_friction2[k] = new_t;
-                        }
-                    }
-                    if f_imp.length_squared() > 1e-24 {
-                        apply_impulse(bodies, i, j, f_imp, ra, rb);
-                    }
+            } else {
+                for st in states.iter_mut() {
+                    Self::solve_scalar_velocity_step(bodies, manifolds, st);
+                }
+            }
+        }
+        // Wide batches own the accumulated impulses of their lanes during
+        // the iterations; write them back so the cache persist below sees
+        // the final values.
+        if use_wide {
+            for step in &steps {
+                if let SolverStep::Wide(b) = step {
+                    b.write_back_acc(&mut states);
                 }
             }
         }
@@ -2145,40 +2386,22 @@ impl BuiltinPhysicsEngine {
         // bounce target. NOT accumulated, NOT warm-started — this is what
         // keeps spinning bodies from pumping energy through the bounce.
         if allow_restitution {
-            for st in &states {
-                let m = &manifolds[st.mi];
-                let (i, j) = (st.i, st.j);
-                let n = m.normal;
-                let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-                for k in 0..st.count {
-                    if st.bias[k] <= 0.0 {
-                        continue;
+            if use_wide {
+                for step in &mut steps {
+                    match step {
+                        SolverStep::Wide(b) => {
+                            b.gather(bodies);
+                            b.solve_restitution();
+                            b.scatter(bodies);
+                        }
+                        SolverStep::Scalar(si) => {
+                            Self::solve_scalar_restitution_step(bodies, manifolds, &states[*si]);
+                        }
                     }
-                    let p = m.points[k].world_point;
-                    let ra = p - bodies[i].position;
-                    let rb = p - bodies[j].position;
-                    let ra_n = ra.cross(n);
-                    let rb_n = rb.cross(n);
-                    let k_eff = total_inv
-                        + ra_n.dot(mul_inv_inertia(
-                            bodies[i].inertia,
-                            bodies[i].orientation,
-                            ra_n,
-                        ))
-                        + rb_n.dot(mul_inv_inertia(
-                            bodies[j].inertia,
-                            bodies[j].orientation,
-                            rb_n,
-                        ));
-                    if k_eff < 1e-10 {
-                        continue;
-                    }
-                    let vn =
-                        (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-                    let lambda = (st.bias[k] - vn) / k_eff;
-                    if lambda > 0.0 {
-                        apply_impulse(bodies, i, j, n * lambda, ra, rb);
-                    }
+                }
+            } else {
+                for st in &states {
+                    Self::solve_scalar_restitution_step(bodies, manifolds, st);
                 }
             }
         }
@@ -2206,6 +2429,159 @@ impl BuiltinPhysicsEngine {
             next.insert(keys[st.mi], (pts, st.count));
         }
         (states, next)
+    }
+
+    /// One scalar Gauss-Seidel velocity step for a single manifold: the
+    /// block-LCP normal solve (multi-point) or the projected scalar solve
+    /// (single-point), then Coulomb friction along the fixed tangent basis.
+    /// Extracted from the iteration loop so the G7 step sequence (wide
+    /// batches interleaved with scalar manifolds) reuses the exact same code.
+    // Solver loops index several parallel per-point arrays; range loops are
+    // the clearest form here.
+    #[allow(clippy::needless_range_loop)]
+    fn solve_scalar_velocity_step(
+        bodies: &mut [RigidBody],
+        manifolds: &[Manifold],
+        st: &mut ManifoldState,
+    ) {
+        let m = &manifolds[st.mi];
+        let (i, j) = (st.i, st.j);
+        let n = m.normal;
+        let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
+
+        // ---- Normal direction ----
+        // G4: multi-point manifolds are solved as an exact LCP block
+        // (scalar per-point GS oscillates between coupled points of one
+        // manifold — the rocking pump); single points keep the scalar
+        // projected update.
+        if st.count >= 2 {
+            let mut pts = [Vec3::ZERO; 4];
+            for k in 0..st.count {
+                pts[k] = m.points[k].world_point;
+            }
+            solve_normal_block(bodies, i, j, n, &pts, &mut st.acc, &st.target, st.count);
+        } else {
+            let k = 0;
+            let p = m.points[k].world_point;
+            let ra = p - bodies[i].position;
+            let rb = p - bodies[j].position;
+            let k_eff = effective_mass(bodies, i, j, n, ra, rb);
+            if k_eff >= 1e-10 {
+                let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
+                let vn = rel.dot(n);
+                // Inelastic contact: restitution is a separate one-shot stage
+                // (below), never accumulated. G6: the target is the
+                // speculative approach limit (0 when touching), not
+                // necessarily a full stop.
+                let lambda = (st.target[k] - vn) / k_eff;
+                let new_acc = (st.acc[k] + lambda).max(0.0);
+                let delta = new_acc - st.acc[k];
+                st.acc[k] = new_acc;
+                if delta.abs() > 1e-12 {
+                    apply_impulse(bodies, i, j, n * delta, ra, rb);
+                }
+            }
+        }
+
+        // Friction (Coulomb) along the FIXED tangent basis (extracted helper).
+        Self::solve_scalar_friction(bodies, i, j, st, m, total_inv);
+    }
+
+    /// One-shot restitution step for a single manifold (the scalar half of
+    /// the post-iteration stage; the wide half lives in `WideBatch`).
+    #[allow(clippy::needless_range_loop)]
+    fn solve_scalar_restitution_step(
+        bodies: &mut [RigidBody],
+        manifolds: &[Manifold],
+        st: &ManifoldState,
+    ) {
+        let m = &manifolds[st.mi];
+        let (i, j) = (st.i, st.j);
+        let n = m.normal;
+        let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
+        for k in 0..st.count {
+            if st.bias[k] <= 0.0 {
+                continue;
+            }
+            let p = m.points[k].world_point;
+            let ra = p - bodies[i].position;
+            let rb = p - bodies[j].position;
+            let ra_n = ra.cross(n);
+            let rb_n = rb.cross(n);
+            let k_eff = total_inv
+                + ra_n.dot(mul_inv_inertia(
+                    bodies[i].inertia,
+                    bodies[i].orientation,
+                    ra_n,
+                ))
+                + rb_n.dot(mul_inv_inertia(
+                    bodies[j].inertia,
+                    bodies[j].orientation,
+                    rb_n,
+                ));
+            if k_eff < 1e-10 {
+                continue;
+            }
+            let vn = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
+            let lambda = (st.bias[k] - vn) / k_eff;
+            if lambda > 0.0 {
+                apply_impulse(bodies, i, j, n * lambda, ra, rb);
+            }
+        }
+    }
+
+    /// Friction step for a single manifold (extracted to reduce bca
+    /// cognitive complexity of solve_scalar_velocity_step).
+    #[allow(clippy::needless_range_loop)]
+    fn solve_scalar_friction(
+        bodies: &mut [RigidBody],
+        i: usize,
+        j: usize,
+        st: &mut ManifoldState,
+        m: &Manifold,
+        total_inv: f32,
+    ) {
+        for k in 0..st.count {
+            let p = m.points[k].world_point;
+            let ra = p - bodies[i].position;
+            let rb = p - bodies[j].position;
+            let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
+            let max_friction = st.mu * st.acc[k];
+            let mut f_imp = Vec3::ZERO;
+            for axis in 0..2 {
+                let t = if axis == 0 { st.t1 } else { st.t2 };
+                let ra_t = ra.cross(t);
+                let rb_t = rb.cross(t);
+                let k_t = total_inv
+                    + ra_t.dot(mul_inv_inertia(bodies[i].inertia, bodies[i].orientation, ra_t))
+                    + rb_t.dot(mul_inv_inertia(bodies[j].inertia, bodies[j].orientation, rb_t));
+                if k_t < 1e-10 { continue; }
+                let vt = rel.dot(t);
+                let lambda_t = -vt / k_t;
+                let (cur, other) = if axis == 0 {
+                    (st.acc_friction[k], st.acc_friction2[k])
+                } else {
+                    (st.acc_friction2[k], st.acc_friction[k])
+                };
+                let new_t = cur + lambda_t;
+                let len = (new_t * new_t + other * other).sqrt();
+                let new_t = if len > max_friction && len > 1e-12 {
+                    new_t * (max_friction / len)
+                } else {
+                    new_t
+                };
+                if axis == 0 {
+                    f_imp += t * (new_t - st.acc_friction[k]);
+                    st.acc_friction[k] = new_t;
+                } else {
+                    f_imp += t * (new_t - st.acc_friction2[k]);
+                    st.acc_friction2[k] = new_t;
+                }
+            }
+            if f_imp.length_squared() > 1e-24 {
+                apply_impulse(bodies, i, j, f_imp, ra, rb);
+            }
+        }
     }
 
     /// Per-island NGS position solve on the local shard (stage doc lives on

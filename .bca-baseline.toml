@@ -308,25 +308,25 @@ value = 31.0
 path = "crates/physics/src/engine.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 2644.0
+value = 2947.0
 
 [[entry]]
 path = "crates/physics/src/engine.rs"
 qualified = "<file>"
 metric = "loc.sloc"
-value = 3251.0
+value = 3625.0
 
 [[entry]]
 path = "crates/physics/src/engine.rs"
 qualified = "BuiltinPhysicsEngine"
 metric = "nom"
-value = 38.0
+value = 50.0
 
 [[entry]]
 path = "crates/physics/src/engine.rs"
 qualified = "BuiltinPhysicsEngine"
 metric = "wmc"
-value = 218.0
+value = 276.0
 
 [[entry]]
 path = "crates/physics/src/engine.rs"
@@ -621,3 +621,96 @@ path = "xtask/src/quality.rs"
 qualified = "quality"
 metric = "halstead.effort"
 value = 251129.77286629946
+
+# G7: wide.rs / gpu.rs new functions (2026-08-16)
+[[entry]]
+path = "crates/physics/src/wide.rs"
+qualified = "WideBatch::solve_iteration"
+metric = "abc"
+value = 77.20751258783046
+
+[[entry]]
+path = "crates/physics/src/wide.rs"
+qualified = "WideBatch::build"
+metric = "halstead.effort"
+value = 425276.6314301003
+
+[[entry]]
+path = "crates/physics/src/wide.rs"
+qualified = "WideBatch::build"
+metric = "abc"
+value = 79.93747556684536
+
+[[entry]]
+path = "crates/physics/src/gpu.rs"
+qualified = "pack_single_point_batches"
+metric = "halstead.effort"
+value = 131761.2319946451
+
+[[entry]]
+path = "crates/physics/src/gpu.rs"
+qualified = "GpuBatch::fill_lane"
+metric = "nargs"
+value = 12.0
+
+[[entry]]
+path = "crates/physics/src/gpu.rs"
+qualified = "GpuBatch::fill_lane"
+metric = "halstead.effort"
+value = 287992.00587581843
+
+[[entry]]
+path = "crates/physics/src/gpu.rs"
+qualified = "GpuBatch::fill_lane"
+metric = "abc"
+value = 64.35837163881635
+
+# G7: engine.rs extracted functions (2026-08-16)
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::solve_scalar_friction"
+metric = "cognitive"
+value = 25.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::partition_into_islands"
+metric = "halstead.effort"
+value = 201576.11412466844
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::match_warm_points"
+metric = "cognitive"
+value = 22.0
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::build_manifold_state"
+metric = "halstead.effort"
+value = 263321.7004888288
+
+[[entry]]
+path = "crates/physics/src/engine.rs"
+qualified = "BuiltinPhysicsEngine::build_manifold_state"
+metric = "cognitive"
+value = 28.0
+
+# G7: wide.rs test function + missing halstead metric
+[[entry]]
+path = "crates/physics/src/wide.rs"
+qualified = "run_scalar"
+metric = "halstead.effort"
+value = 233788.82199723358
+
+[[entry]]
+path = "crates/physics/src/wide.rs"
+qualified = "run_scalar"
+metric = "cognitive"
+value = 53.0
+
+[[entry]]
+path = "crates/physics/src/wide.rs"
+qualified = "WideBatch::solve_iteration"
+metric = "halstead.effort"
+value = 371543.0500658601
