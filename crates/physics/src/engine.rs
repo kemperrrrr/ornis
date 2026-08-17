@@ -2489,6 +2489,7 @@ impl BuiltinPhysicsEngine {
 
     /// One-shot restitution step for a single manifold (the scalar half of
     /// the post-iteration stage; the wide half lives in `WideBatch`).
+    #[allow(clippy::needless_range_loop)]
     fn solve_scalar_restitution_step(
         bodies: &mut [RigidBody],
         manifolds: &[Manifold],

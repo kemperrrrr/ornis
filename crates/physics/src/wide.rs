@@ -52,25 +52,6 @@ impl Fx4 {
         self.0[l] = v;
     }
 
-    #[inline]
-    pub fn add(self, o: Self) -> Self {
-        Self([
-            self.0[0] + o.0[0],
-            self.0[1] + o.0[1],
-            self.0[2] + o.0[2],
-            self.0[3] + o.0[3],
-        ])
-    }
-
-    #[inline]
-    pub fn mul(self, o: Self) -> Self {
-        Self([
-            self.0[0] * o.0[0],
-            self.0[1] * o.0[1],
-            self.0[2] * o.0[2],
-            self.0[3] * o.0[3],
-        ])
-    }
 }
 
 /// One 4-wide Vec3 in SoA layout: lane `l` is `(x[l], y[l], z[l])`.
@@ -103,54 +84,7 @@ impl Vec3x4 {
         self.z.set_lane(l, v.z);
     }
 
-    #[inline]
-    pub fn add(self, o: Self) -> Self {
-        Self {
-            x: self.x.add(o.x),
-            y: self.y.add(o.y),
-            z: self.z.add(o.z),
-        }
-    }
 
-    #[inline]
-    pub fn mul(self, o: Self) -> Self {
-        Self {
-            x: self.x.mul(o.x),
-            y: self.y.mul(o.y),
-            z: self.z.mul(o.z),
-        }
-    }
-
-    #[inline]
-    pub fn cross(self, o: Self) -> Self {
-        Self {
-            x: self.y.mul(o.z).add(self.z.mul(o.y).mul_scalar(-1.0)),
-            y: self.z.mul(o.x).add(self.x.mul(o.z).mul_scalar(-1.0)),
-            z: self.x.mul(o.y).add(self.y.mul(o.x).mul_scalar(-1.0)),
-        }
-    }
-
-    #[inline]
-    pub fn mul_scalar(self, s: Fx4) -> Self {
-        Self {
-            x: self.x.mul(s),
-            y: self.y.mul(s),
-            z: self.z.mul(s),
-        }
-    }
-}
-
-impl Fx4 {
-    #[inline]
-    pub fn mul_scalar(self, s: f32) -> Self {
-        Self([
-            self.0[0] * s,
-            self.0[1] * s,
-            self.0[2] * s,
-            self.0[3] * s,
-        ])
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Wide batch
@@ -518,6 +452,10 @@ fn point_velocity(v: Vec3, w: Vec3, r: Vec3) -> Vec3 {
 /// One step of the solver sequence: either a SIMD-wide batch (single-point
 /// manifolds, disjoint bodies) or a scalar manifold (multi-point block LCP).
 /// Steps are ordered exactly like the scalar Gauss-Seidel sequence.
+// `WideBatch` is ~1.5 KB of SoA state while `Scalar` is a usize — the lint
+// fires, but the batch is built once per solve and moved, so boxing it
+// would only add indirection to the hot iteration loop.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SolverStep {
     Wide(WideBatch),
     Scalar(usize),
@@ -682,6 +620,7 @@ mod tests {
     }
 
     /// Runs the exact scalar single-point code used in solve_island_velocity.
+    #[allow(clippy::needless_range_loop)]
     fn run_scalar(
         bodies: &mut [RigidBody],
         manifolds: &[Manifold],
