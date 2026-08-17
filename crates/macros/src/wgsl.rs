@@ -24,6 +24,11 @@ impl WgslGen {
             If(i) => Self::if_expr(i),
             Block(b) => Self::block_expr(b),
             Assign(a) => Self::assign(a),
+            AssignOp(a) => Self::assign_op(a),
+            Index(ix) => format!("{}[{}]", Self::expr(&ix.expr), Self::expr(&ix.index)),
+            // Rust casts are type-coercion hints for the DSL; WGSL infers the
+            // type from context, so the cast itself is dropped.
+            Cast(c) => Self::expr(&c.expr),
             Return(r) => Self::ret(r),
             _ => syn::Error::new_spanned(e, "expression not supported in WGSL kernel")
                 .to_compile_error()
@@ -34,7 +39,19 @@ impl WgslGen {
     fn lit(l: &syn::ExprLit) -> String {
         use syn::Lit::*;
         match &l.lit {
-            Int(i) => i.to_string(),
+            Int(i) => {
+                // Rust integer suffixes are not valid WGSL; map the common
+                // ones to the WGSL `u`/`i` suffixes and drop the rest.
+                match i.base10_digits() {
+                    Ok(digits) => match i.suffix() {
+                        "u32" | "u64" | "usize" | "u16" | "u8" => format!("{digits}u"),
+                        "i32" | "i64" | "isize" | "i16" | "i8" => format!("{digits}i"),
+                        _ => digits.to_string(),
+                    },
+                    // Hex/octal/binary literals: pass through unchanged.
+                    Err(_) => i.to_string(),
+                }
+            }
             Float(f) => {
                 let base = f.base10_digits();
                 if base.contains('.') || base.contains('e') || base.contains('E') {
@@ -104,6 +121,28 @@ impl WgslGen {
         format!("{} = {}", Self::expr(&a.left), Self::expr(&a.right))
     }
 
+    fn assign_op(a: &syn::ExprAssignOp) -> String {
+        use syn::BinOp::*;
+        let op = match &a.op {
+            AddAssign(_) => "+=",
+            SubAssign(_) => "-=",
+            MulAssign(_) => "*=",
+            DivAssign(_) => "/=",
+            RemAssign(_) => "%=",
+            ShlAssign(_) => "<<=",
+            ShrAssign(_) => ">>=",
+            BitAndAssign(_) => "&=",
+            BitOrAssign(_) => "|=",
+            BitXorAssign(_) => "^=",
+            other => {
+                return syn::Error::new_spanned(other, "operator not supported in WGSL kernel")
+                    .to_compile_error()
+                    .to_string();
+            }
+        };
+        format!("{} {} {}", Self::expr(&a.left), op, Self::expr(&a.right))
+    }
+
     fn ret(r: &syn::ExprReturn) -> String {
         match &r.expr {
             Some(expr) => format!("return {}", Self::expr(expr)),
@@ -123,8 +162,9 @@ impl WgslGen {
             SubAssign(_) => "-=",
             MulAssign(_) => "*=",
             DivAssign(_) => "/=",
-            And(_) => "&",
-            Or(_) => "|",
+            // Rust `&&`/`||` are WGSL `&&`/`||` (short-circuit, not bitwise).
+            And(_) => "&&",
+            Or(_) => "||",
             Eq(_) => "==",
             Ne(_) => "!=",
             Lt(_) => "<",
@@ -172,6 +212,8 @@ impl WgslGen {
             | "determinant" | "inverse" | "sign" | "dpdx" | "dpdy" | "fwidth" => {
                 Some(format!("{}({})", fn_name, args.join(", ")))
             }
+            // Rust glam `length_squared` → WGSL dot(x, x).
+            "length_sq" => Some(format!("dot({0}, {0})", args[0])),
             _ => None,
         }
     }
@@ -377,18 +419,29 @@ impl WgslGen {
                 }
                 let pat = Self::pat(&local.pat);
                 let init = local.init.as_ref().map(|init| Self::expr(&init.expr));
-                if let Some(init_val) = init {
-                    format!("let {} = {}; ", pat, init_val)
+                // Rust `let mut` becomes WGSL `var` — the only WGSL binding
+                // kind that can be reassigned.
+                let kw = if let syn::Pat::Ident(pi) = local.pat.as_ref() && pi.mutability.is_some() {
+                    "var"
                 } else {
-                    format!("let {}; ", pat)
+                    "let"
+                };
+                if let Some(init_val) = init {
+                    format!("{kw} {pat} = {init_val}; ")
+                } else {
+                    format!("{kw} {pat}; ")
                 }
             }
             Stmt::Expr(expr, semi) => {
                 let e = Self::expr(expr);
+                // `return`/`return x` always emit as a terminated statement,
+                // even when they are the trailing (tail) expression.
+                if matches!(expr, syn::Expr::Return(_)) {
+                    format!("{e}; ")
                 // if/block expressions in WGSL are statements, not values
                 // — never wrap in `return` at this level; return is handled
                 // inside the branches via block() → is_tail
-                if matches!(expr, syn::Expr::If(_) | syn::Expr::Block(_)) {
+                } else if matches!(expr, syn::Expr::If(_) | syn::Expr::Block(_)) {
                     if semi.is_some() {
                         format!("{}; ", e)
                     } else {
@@ -489,6 +542,13 @@ fn convert_body_to_wgsl(func: &ItemFn) -> String {
 // Helper wrapper, used by this module's unit tests.
 #[allow(dead_code)]
 pub fn wgsl_body_from_fn(func: &ItemFn) -> String {
+    convert_body_to_wgsl(func)
+}
+
+/// Generate just the statement list of a function body as WGSL. Used by
+/// `#[gpu_pipeline]` in full-shader mode, where the body is embedded into a
+/// generated `fn main(...) { ... }` compute entry point.
+pub fn wgsl_main_body(func: &ItemFn) -> String {
     convert_body_to_wgsl(func)
 }
 
@@ -711,5 +771,80 @@ mod tests {
     fn pi_constant_passes_through() {
         let expr: syn::Expr = parse_quote!(PI);
         assert_eq!(rust_to_wgsl(&expr), "PI");
+    }
+
+    #[test]
+    fn index_expr_translates() {
+        let expr: syn::Expr = parse_quote!(buf[i]);
+        assert_eq!(rust_to_wgsl(&expr), "buf[i]");
+    }
+
+    #[test]
+    fn nested_index_field_translates() {
+        let expr: syn::Expr = parse_quote!(batch_buf[gid.x].acc[l]);
+        assert_eq!(rust_to_wgsl(&expr), "batch_buf[gid.x].acc[l]");
+    }
+
+    #[test]
+    fn cast_is_dropped() {
+        let expr: syn::Expr = parse_quote!(x as u32);
+        assert_eq!(rust_to_wgsl(&expr), "x");
+    }
+
+    #[test]
+    fn assign_op_translates() {
+        let expr: syn::Expr = parse_quote!(ba.velocity -= delta * n);
+        assert_eq!(rust_to_wgsl(&expr), "ba.velocity -= delta * n");
+    }
+
+    #[test]
+    fn logical_and_or_translate_to_short_circuit() {
+        let and: syn::Expr = parse_quote!(a > 0 && b < 1);
+        assert_eq!(rust_to_wgsl(&and), "a > 0 && b < 1");
+        let or: syn::Expr = parse_quote!(a > 0 || b < 1);
+        assert_eq!(rust_to_wgsl(&or), "a > 0 || b < 1");
+    }
+
+    #[test]
+    fn int_suffix_maps_to_wgsl() {
+        let u: syn::Expr = parse_quote!(0u32);
+        assert_eq!(rust_to_wgsl(&u), "0u");
+        let i: syn::Expr = parse_quote!(7i32);
+        assert_eq!(rust_to_wgsl(&i), "7i");
+        let plain: syn::Expr = parse_quote!(42);
+        assert_eq!(rust_to_wgsl(&plain), "42");
+    }
+
+    #[test]
+    fn mut_local_becomes_var() {
+        let func: ItemFn = parse_quote! {
+            fn test() {
+                let mut x = 1.0;
+                x += 2.0;
+            }
+        };
+        let body = wgsl_body_from_fn(&func);
+        assert!(body.contains("var x = 1.0;"));
+        assert!(body.contains("x += 2.0;"));
+    }
+
+    #[test]
+    fn early_return_in_if_block() {
+        let func: ItemFn = parse_quote! {
+            fn test(l: u32, count: u32) {
+                if l >= count { return; }
+                let y = 1.0;
+                y
+            }
+        };
+        let body = wgsl_body_from_fn(&func);
+        assert!(body.contains("if (l >= count) { return; }"));
+        assert!(body.contains("let y = 1.0;"));
+    }
+
+    #[test]
+    fn length_sq_maps_to_dot() {
+        let expr: syn::Expr = parse_quote!(length_sq(v));
+        assert_eq!(rust_to_wgsl(&expr), "dot(v, v)");
     }
 }

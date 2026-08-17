@@ -7,6 +7,7 @@ mod pipeline_config;
 mod smart_pipeline;
 mod static_profile;
 mod wgsl;
+mod wgsl_struct;
 
 use proc_macro::TokenStream;
 
@@ -18,6 +19,11 @@ pub fn derive_auto_pipeline(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Pack, attributes(pack))]
 pub fn derive_pack(input: TokenStream) -> TokenStream {
     pack::derive(input)
+}
+
+#[proc_macro_derive(WgslStruct)]
+pub fn derive_wgsl_struct(input: TokenStream) -> TokenStream {
+    wgsl_struct::derive(input)
 }
 
 #[proc_macro]
