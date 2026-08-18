@@ -43,9 +43,9 @@ fn vec3_kernel_wgsl() {
 #[test]
 fn full_shader_mode_generates_bindings_and_entry() {
     let source = scale_kernel::wgsl_source();
-    assert!(source.contains(
-        "@group(0) @binding(0) var<storage, read_write> body_buf: array<f32>;"
-    ));
+    assert!(
+        source.contains("@group(0) @binding(0) var<storage, read_write> body_buf: array<f32>;")
+    );
     assert!(source.contains("@group(0) @binding(1) var<uniform> params: vec4<u32>;"));
     assert!(source.contains("@compute @workgroup_size(4)"));
     assert!(source.contains("@builtin(workgroup_id) gid: vec3<u32>"));

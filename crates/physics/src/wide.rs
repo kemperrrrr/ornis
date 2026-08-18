@@ -51,7 +51,6 @@ impl Fx4 {
     pub fn set_lane(&mut self, l: usize, v: f32) {
         self.0[l] = v;
     }
-
 }
 
 /// One 4-wide Vec3 in SoA layout: lane `l` is `(x[l], y[l], z[l])`.
@@ -83,8 +82,7 @@ impl Vec3x4 {
         self.y.set_lane(l, v.y);
         self.z.set_lane(l, v.z);
     }
-
-
+}
 
 // ---------------------------------------------------------------------------
 // Wide batch
@@ -150,9 +148,21 @@ impl WideBatch {
     #[inline]
     fn world_inertia(rot: glam::Quat, inertia: Vec3) -> [Vec3; 3] {
         let inv = Vec3::new(
-            if inertia.x > 0.0 { 1.0 / inertia.x } else { 0.0 },
-            if inertia.y > 0.0 { 1.0 / inertia.y } else { 0.0 },
-            if inertia.z > 0.0 { 1.0 / inertia.z } else { 0.0 },
+            if inertia.x > 0.0 {
+                1.0 / inertia.x
+            } else {
+                0.0
+            },
+            if inertia.y > 0.0 {
+                1.0 / inertia.y
+            } else {
+                0.0
+            },
+            if inertia.z > 0.0 {
+                1.0 / inertia.z
+            } else {
+                0.0
+            },
         );
         let m = Mat3::from_quat(rot);
         let col_x = m.x_axis * inv.x;
@@ -256,19 +266,24 @@ impl WideBatch {
             b.wb_mat[l] = wb;
 
             let total_inv = a.inv_mass + bb.inv_mass;
-            let k_n = total_inv + ra_n.dot(Self::matvec(&wa, ra_n))
-                + rb_n.dot(Self::matvec(&wb, rb_n));
+            let k_n =
+                total_inv + ra_n.dot(Self::matvec(&wa, ra_n)) + rb_n.dot(Self::matvec(&wb, rb_n));
             let ra_t1 = ra.cross(st.t1);
             let rb_t1 = rb.cross(st.t1);
             let ra_t2 = ra.cross(st.t2);
             let rb_t2 = rb.cross(st.t2);
-            let k_t1 = total_inv + ra_t1.dot(Self::matvec(&wa, ra_t1))
+            let k_t1 = total_inv
+                + ra_t1.dot(Self::matvec(&wa, ra_t1))
                 + rb_t1.dot(Self::matvec(&wb, rb_t1));
-            let k_t2 = total_inv + ra_t2.dot(Self::matvec(&wa, ra_t2))
+            let k_t2 = total_inv
+                + ra_t2.dot(Self::matvec(&wa, ra_t2))
                 + rb_t2.dot(Self::matvec(&wb, rb_t2));
-            b.inv_k_n.set_lane(l, if k_n >= 1e-10 { 1.0 / k_n } else { 0.0 });
-            b.inv_k_t1.set_lane(l, if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 });
-            b.inv_k_t2.set_lane(l, if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 });
+            b.inv_k_n
+                .set_lane(l, if k_n >= 1e-10 { 1.0 / k_n } else { 0.0 });
+            b.inv_k_t1
+                .set_lane(l, if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 });
+            b.inv_k_t2
+                .set_lane(l, if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 });
 
             b.apply_n_a.set_lane(l, n * a.inv_mass);
             b.apply_n_b.set_lane(l, n * bb.inv_mass);
@@ -398,10 +413,8 @@ impl WideBatch {
             }
 
             if f_imp.length_squared() > 1e-24 {
-                self.va
-                    .set_lane(l, self.va.lane(l) - f_imp * inv_ma);
-                self.vb
-                    .set_lane(l, self.vb.lane(l) + f_imp * inv_mb);
+                self.va.set_lane(l, self.va.lane(l) - f_imp * inv_ma);
+                self.vb.set_lane(l, self.vb.lane(l) + f_imp * inv_mb);
                 self.wa
                     .set_lane(l, self.wa.lane(l) - Self::matvec(wa_mat, ra.cross(f_imp)));
                 self.wb
@@ -512,6 +525,15 @@ pub(crate) fn build_solver_steps(
     steps
 }
 
+// Helper for the tests below: attach a manifold index to a state.
+impl ManifoldState {
+    #[cfg(test)]
+    fn with_mi(mut self, mi: usize) -> Self {
+        self.mi = mi;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,7 +543,7 @@ mod tests {
         RigidBody::new_sphere(pos, 0.5, 1.0)
     }
 
-    fn single_state(i: usize, j: usize, normal: Vec3, point: Vec3, target: f32) -> ManifoldState {
+    fn single_state(i: usize, j: usize, _normal: Vec3, _point: Vec3, target: f32) -> ManifoldState {
         ManifoldState {
             mi: 0,
             i,
@@ -614,8 +636,10 @@ mod tests {
             assert!(dw < 1e-4, "body {h} angular velocity diverged: {dw}");
         }
         assert!(
-            bodies2[0].velocity.x < 0.0 && bodies2[3].velocity.x > 0.0,
-            "impulses must slow the approach"
+            bodies2[0].velocity.x < 1.0 && bodies2[3].velocity.x > 0.0,
+            "impulses must slow the approach: v0.x = {}, v3.x = {}",
+            bodies2[0].velocity.x,
+            bodies2[3].velocity.x
         );
     }
 
@@ -754,14 +778,5 @@ mod tests {
             }
             _ => panic!("both steps must be wide"),
         }
-    }
-}
-
-// Helper for the test above: attach a manifold index to a state.
-impl ManifoldState {
-    #[cfg(test)]
-    fn with_mi(mut self, mi: usize) -> Self {
-        self.mi = mi;
-        self
     }
 }

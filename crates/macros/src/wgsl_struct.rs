@@ -90,7 +90,11 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<(String, usize, usize)> {
                 }
             };
             // WGSL: vec2<T> aligns to 2×, vec3/vec4<T> to 4× the scalar.
-            let align = if len == 2 { 2 * elem_size } else { 4 * elem_size };
+            let align = if len == 2 {
+                2 * elem_size
+            } else {
+                4 * elem_size
+            };
             Ok((format!("vec{len}<{elem_wgsl}>"), len * elem_size, align))
         }
         _ => Err(syn::Error::new(
@@ -116,12 +120,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let fields = match &input.data {
         Data::Struct(s) => &s.fields,
         _ => {
-            return syn::Error::new(
-                input.ident.span(),
-                "WgslStruct: only supported on structs",
-            )
-            .to_compile_error()
-            .into();
+            return syn::Error::new(input.ident.span(), "WgslStruct: only supported on structs")
+                .to_compile_error()
+                .into();
         }
     };
     let Fields::Named(named) = fields else {
@@ -167,15 +168,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let decl_lit = proc_macro2::Literal::string(&decl_text);
     let stride_lit = proc_macro2::Literal::usize_suffixed(stride);
 
-    let offset_asserts = wgsl_fields
-        .iter()
-        .zip(&rust_field_idents)
-        .map(|((_, _, wgsl_offset), ident)| {
+    let offset_asserts = wgsl_fields.iter().zip(&rust_field_idents).map(
+        |((_, _, wgsl_offset), ident)| {
             let off = proc_macro2::Literal::usize_suffixed(*wgsl_offset);
             quote! {
                 const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #off) as usize];
             }
-        });
+        },
+    );
 
     let expanded = quote! {
         impl #name {

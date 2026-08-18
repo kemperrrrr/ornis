@@ -59,13 +59,10 @@ fn parse_u32(tt: &TokenTree) -> syn::Result<u32> {
     let lit = match tt {
         TokenTree::Literal(l) => l,
         other => {
-            return Err(syn::Error::new(
-                other.span(),
-                "expected an integer literal",
-            ));
+            return Err(syn::Error::new(other.span(), "expected an integer literal"));
         }
     };
-    let int: LitInt = syn::parse2(TokenStream2::from(lit.clone()))?;
+    let int: LitInt = syn::parse2(TokenStream2::from(TokenTree::from(lit.clone())))?;
     int.base10_parse()
 }
 
@@ -75,9 +72,9 @@ fn parse_binding_type(tt: &TokenTree) -> syn::Result<(String, String)> {
     match tt {
         TokenTree::Group(g) if g.delimiter() == Delimiter::Bracket => {
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-            let elem_tt = inner.first().ok_or_else(|| {
-                syn::Error::new(tt.span(), "expected a type inside `[..]`")
-            })?;
+            let elem_tt = inner
+                .first()
+                .ok_or_else(|| syn::Error::new(tt.span(), "expected a type inside `[..]`"))?;
             let len = inner
                 .get(2)
                 .ok_or_else(|| syn::Error::new(tt.span(), "expected `[Type; N]`"))
@@ -101,8 +98,7 @@ fn parse_binding_type(tt: &TokenTree) -> syn::Result<(String, String)> {
                 }
                 TokenTree::Group(g2) if g2.delimiter() == Delimiter::Bracket => {
                     // Nested scalar array: [[f32; 3]; 64] → array<vec3<f32>>.
-                    let (inner_ty, inner_elem) =
-                        parse_binding_type(&TokenTree::Group(g2.clone()))?;
+                    let (inner_ty, inner_elem) = parse_binding_type(&TokenTree::Group(g2.clone()))?;
                     (format!("array<{inner_ty}>"), inner_elem)
                 }
                 other => {
@@ -127,11 +123,7 @@ fn parse_binding_type(tt: &TokenTree) -> syn::Result<(String, String)> {
 
 /// Parse `storage(...)` / `uniform(...)` groups into a WGSL global
 /// declaration line. `binding_index` is the auto-assigned `@binding` number.
-fn parse_binding_group(
-    kind: &str,
-    ts: TokenStream2,
-    binding_index: usize,
-) -> syn::Result<String> {
+fn parse_binding_group(kind: &str, ts: TokenStream2, binding_index: usize) -> syn::Result<String> {
     let toks: Vec<TokenTree> = ts.into_iter().collect();
     let name = match toks.first() {
         Some(TokenTree::Ident(i)) => i.to_string(),
@@ -144,7 +136,8 @@ fn parse_binding_group(
     };
     if toks.len() < 3 || !is_punct(&toks[1], ':') {
         return Err(syn::Error::new(
-            toks.first().map_or_else(proc_macro2::Span::call_site, |t| t.span()),
+            toks.first()
+                .map_or_else(proc_macro2::Span::call_site, |t| t.span()),
             format!("expected `{kind}(name: Type, ...)`"),
         ));
     }
@@ -303,10 +296,7 @@ fn parse_config(args: TokenStream2) -> syn::Result<Option<ShaderConfig>> {
             }
             "builtin" => {
                 let group_tt = item.get(1).ok_or_else(|| {
-                    syn::Error::new(
-                        first.span(),
-                        "expected `builtin(name: semantic, ...)`",
-                    )
+                    syn::Error::new(first.span(), "expected `builtin(name: semantic, ...)`")
                 })?;
                 let TokenTree::Group(group) = group_tt else {
                     return Err(syn::Error::new(

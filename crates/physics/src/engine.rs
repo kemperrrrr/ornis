@@ -5,12 +5,12 @@ use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance;
+#[cfg(feature = "gpu")]
+use crate::gpu::{WgpuContactSolver, pack_single_point_batches, write_back_acc};
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;
 use crate::wide::{SolverStep, build_solver_steps};
-#[cfg(feature = "gpu")]
-use crate::gpu::{WgpuContactSolver, pack_single_point_batches, write_back_acc};
 
 pub trait PhysicsEngine: Send + Sync {
     fn step(&mut self, dt: f32);
@@ -1082,6 +1082,8 @@ struct IslandWork {
 
 /// Context for building a ManifoldState (packs the per-manifold parameters,
 /// keeping `build_manifold_state` below the bca nargs limit).
+// Only consumed by the `gpu` feature's GPU contact path today.
+#[allow(dead_code)]
 struct ManifoldCtx<'a> {
     bodies: &'a mut [RigidBody],
     warm_in: &'a WarmCache,
@@ -1684,6 +1686,8 @@ impl BuiltinPhysicsEngine {
     /// and shared by the CPU island path and the GPU single-point path.
     /// `key` is the sorted global body-pair for warm-cache lookup.
     #[allow(clippy::needless_range_loop)]
+    // Only called from the `gpu` feature's GPU contact path today.
+    #[allow(dead_code)]
     fn build_manifold_state(
         ctx: &mut ManifoldCtx,
         m: &Manifold,
@@ -1715,9 +1719,8 @@ impl BuiltinPhysicsEngine {
         }
 
         // Warm-start matching (extracted to reduce bca cognitive)
-        let (warm, matched) = Self::match_warm_points(
-            &la, &lb, m, key, ctx.warm_in, MATCH_TOL_SQ, count,
-        );
+        let (warm, matched) =
+            Self::match_warm_points(&la, &lb, m, key, ctx.warm_in, MATCH_TOL_SQ, count);
 
         // Restitution bias & speculative target
         let e = bodies[i].restitution.min(bodies[j].restitution);
@@ -1731,13 +1734,19 @@ impl BuiltinPhysicsEngine {
         }
         if allow_restitution {
             for k in 0..count {
-                if matched[k] || pen0[k] > RESTITUTION_MAX_PEN { continue; }
+                if matched[k] || pen0[k] > RESTITUTION_MAX_PEN {
+                    continue;
+                }
                 let p = m.points[k].world_point;
                 let ra = p - bodies[i].position;
                 let rb = p - bodies[j].position;
                 let vn0 = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-                if vn0 >= -RESTITUTION_THRESHOLD { continue; }
-                if pen0[k] < 0.0 && -pen0[k] > -vn0 * sub_dt { continue; }
+                if vn0 >= -RESTITUTION_THRESHOLD {
+                    continue;
+                }
+                if pen0[k] < 0.0 && -pen0[k] > -vn0 * sub_dt {
+                    continue;
+                }
                 bias[k] = -e * vn0;
             }
         }
@@ -1754,8 +1763,8 @@ impl BuiltinPhysicsEngine {
                     warm_applied[k] = 0.0;
                     continue;
                 }
-                let vn_pre = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra))
-                    .dot(n);
+                let vn_pre =
+                    (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
                 let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
                 warm_applied[k] = applied;
                 if applied > 0.0 {
@@ -1765,19 +1774,28 @@ impl BuiltinPhysicsEngine {
         }
 
         Some(ManifoldState {
-            mi: ctx.mi, i: ctx.i, j: ctx.j, count,
+            mi: ctx.mi,
+            i: ctx.i,
+            j: ctx.j,
+            count,
             acc: warm_applied,
             acc_friction: [0.0; 4],
             acc_friction2: [0.0; 4],
-            bias, target, mu,
+            bias,
+            target,
+            mu,
             t1: tangent_basis(n),
             t2: tangent_basis(n).cross(n),
-            la, lb, pen0,
+            la,
+            lb,
+            pen0,
         })
     }
 
     /// Warm-start matching helper (extracted to reduce bca complexity).
     #[allow(clippy::needless_range_loop)]
+    // Only called from `build_manifold_state` (the `gpu` feature path) today.
+    #[allow(dead_code)]
     fn match_warm_points(
         la: &[Vec3; 4],
         lb: &[Vec3; 4],
@@ -1794,8 +1812,12 @@ impl BuiltinPhysicsEngine {
             for k in 0..count {
                 let mut best: Option<(usize, f32)> = None;
                 for (c, cp) in cached_points.iter().enumerate().take(*cached_count) {
-                    if used[c] { continue; }
-                    if cp.normal.dot(m.normal) < 0.7 { continue; }
+                    if used[c] {
+                        continue;
+                    }
+                    if cp.normal.dot(m.normal) < 0.7 {
+                        continue;
+                    }
                     let d2 = (cp.la - la[k]).length_squared() + (cp.lb - lb[k]).length_squared();
                     if d2 < match_tol_sq && best.is_none_or(|(_, bd)| d2 < bd) {
                         best = Some((c, d2));
@@ -1814,11 +1836,7 @@ impl BuiltinPhysicsEngine {
     /// Partition `active` (manifold indices) into islands and build work
     /// items. Extracted so both the CPU path and the GPU hybrid path reuse
     /// the same island-building logic.
-    fn partition_into_islands(
-        &self,
-        active: &[usize],
-        manifolds: &[Manifold],
-    ) -> Vec<IslandWork> {
+    fn partition_into_islands(&self, active: &[usize], manifolds: &[Manifold]) -> Vec<IslandWork> {
         fn find(parent: &mut [usize], mut x: usize) -> usize {
             while parent[x] != x {
                 parent[x] = parent[parent[x]];
@@ -1951,6 +1969,9 @@ impl BuiltinPhysicsEngine {
     /// (G7, `gpu` feature). Multi-point manifolds are dispatched on CPU
     /// islands. This is a Jacobi/GS hybrid (not bit-identical).
     #[cfg(feature = "gpu")]
+    // Warm-point packing indexes parallel per-point arrays; a range loop is
+    // the clearest form here (same style as the scalar solver).
+    #[allow(clippy::needless_range_loop)]
     fn solve_contacts_velocity_gpu(
         &mut self,
         active: Vec<usize>,
@@ -1964,9 +1985,14 @@ impl BuiltinPhysicsEngine {
             let m = &manifolds[mi];
             let (i, j) = (m.body_a, m.body_b);
             let key = (i.min(j), i.max(j));
-            let ctx = ManifoldCtx {
-                bodies: &mut self.bodies, warm_in: &self.warm_impulses,
-                allow_restitution, sub_dt, mi, i, j,
+            let mut ctx = ManifoldCtx {
+                bodies: &mut self.bodies,
+                warm_in: &self.warm_impulses,
+                allow_restitution,
+                sub_dt,
+                mi,
+                i,
+                j,
             };
             if let Some(st) = Self::build_manifold_state(&mut ctx, m, key) {
                 global_states.push(st);
@@ -1988,9 +2014,8 @@ impl BuiltinPhysicsEngine {
         let mut gpu_warm: WarmCache = HashMap::new();
         if !single_si.is_empty() {
             let gpu = self.gpu_solver.as_mut().unwrap();
-            let (batches, num_batches) = pack_single_point_batches(
-                &self.bodies, &global_states, manifolds, &single_si,
-            );
+            let (batches, num_batches) =
+                pack_single_point_batches(&self.bodies, &global_states, manifolds, &single_si);
             if num_batches > 0 {
                 gpu.upload_bodies(&self.bodies);
                 gpu.upload_batches(&batches);
@@ -2005,12 +2030,17 @@ impl BuiltinPhysicsEngine {
                     let m = &manifolds[st.mi];
                     let key = (m.body_a.min(m.body_b), m.body_a.max(m.body_b));
                     let mut pts = [WarmPoint {
-                        la: Vec3::ZERO, lb: Vec3::ZERO, normal: Vec3::ZERO, impulse: 0.0,
+                        la: Vec3::ZERO,
+                        lb: Vec3::ZERO,
+                        normal: Vec3::ZERO,
+                        impulse: 0.0,
                     }; 4];
                     for k in 0..st.count {
                         pts[k] = WarmPoint {
-                            la: st.la[k], lb: st.lb[k],
-                            normal: m.normal, impulse: st.acc[k],
+                            la: st.la[k],
+                            lb: st.lb[k],
+                            normal: m.normal,
+                            impulse: st.acc[k],
                         };
                     }
                     gpu_warm.insert(key, (pts, st.count));
@@ -2172,7 +2202,10 @@ impl BuiltinPhysicsEngine {
     /// SIMD-wide batches (G7); multi-point (block LCP) stays scalar.
     // Solver loops index several parallel per-point arrays (manifold points,
     // warm cache, accumulators); range loops are the clearest form here.
+    // The 8th parameter (`use_wide`, G7) tips this over clippy's default
+    // 7-argument limit; packing them into a struct would only add churn.
     #[allow(clippy::needless_range_loop)]
+    #[allow(clippy::too_many_arguments)]
     fn solve_island_velocity(
         bodies: &mut [RigidBody],
         manifolds: &[Manifold],
@@ -2553,9 +2586,19 @@ impl BuiltinPhysicsEngine {
                 let ra_t = ra.cross(t);
                 let rb_t = rb.cross(t);
                 let k_t = total_inv
-                    + ra_t.dot(mul_inv_inertia(bodies[i].inertia, bodies[i].orientation, ra_t))
-                    + rb_t.dot(mul_inv_inertia(bodies[j].inertia, bodies[j].orientation, rb_t));
-                if k_t < 1e-10 { continue; }
+                    + ra_t.dot(mul_inv_inertia(
+                        bodies[i].inertia,
+                        bodies[i].orientation,
+                        ra_t,
+                    ))
+                    + rb_t.dot(mul_inv_inertia(
+                        bodies[j].inertia,
+                        bodies[j].orientation,
+                        rb_t,
+                    ));
+                if k_t < 1e-10 {
+                    continue;
+                }
                 let vt = rel.dot(t);
                 let lambda_t = -vt / k_t;
                 let (cur, other) = if axis == 0 {

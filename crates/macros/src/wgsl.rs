@@ -24,7 +24,6 @@ impl WgslGen {
             If(i) => Self::if_expr(i),
             Block(b) => Self::block_expr(b),
             Assign(a) => Self::assign(a),
-            AssignOp(a) => Self::assign_op(a),
             Index(ix) => format!("{}[{}]", Self::expr(&ix.expr), Self::expr(&ix.index)),
             // Rust casts are type-coercion hints for the DSL; WGSL infers the
             // type from context, so the cast itself is dropped.
@@ -40,16 +39,18 @@ impl WgslGen {
         use syn::Lit::*;
         match &l.lit {
             Int(i) => {
+                // Hex/octal/binary literals: pass through unchanged.
+                let repr = i.to_string();
+                if repr.starts_with("0x") || repr.starts_with("0o") || repr.starts_with("0b") {
+                    return repr;
+                }
                 // Rust integer suffixes are not valid WGSL; map the common
                 // ones to the WGSL `u`/`i` suffixes and drop the rest.
-                match i.base10_digits() {
-                    Ok(digits) => match i.suffix() {
-                        "u32" | "u64" | "usize" | "u16" | "u8" => format!("{digits}u"),
-                        "i32" | "i64" | "isize" | "i16" | "i8" => format!("{digits}i"),
-                        _ => digits.to_string(),
-                    },
-                    // Hex/octal/binary literals: pass through unchanged.
-                    Err(_) => i.to_string(),
+                let digits = i.base10_digits();
+                match i.suffix() {
+                    "u32" | "u64" | "usize" | "u16" | "u8" => format!("{digits}u"),
+                    "i32" | "i64" | "isize" | "i16" | "i8" => format!("{digits}i"),
+                    _ => digits.to_string(),
                 }
             }
             Float(f) => {
@@ -121,9 +122,9 @@ impl WgslGen {
         format!("{} = {}", Self::expr(&a.left), Self::expr(&a.right))
     }
 
-    fn assign_op(a: &syn::ExprAssignOp) -> String {
+    fn assign_op(b: &syn::ExprBinary) -> String {
         use syn::BinOp::*;
-        let op = match &a.op {
+        let op = match &b.op {
             AddAssign(_) => "+=",
             SubAssign(_) => "-=",
             MulAssign(_) => "*=",
@@ -140,7 +141,7 @@ impl WgslGen {
                     .to_string();
             }
         };
-        format!("{} {} {}", Self::expr(&a.left), op, Self::expr(&a.right))
+        format!("{} {} {}", Self::expr(&b.left), op, Self::expr(&b.right))
     }
 
     fn ret(r: &syn::ExprReturn) -> String {
@@ -158,10 +159,12 @@ impl WgslGen {
             Mul(_) => "*",
             Div(_) => "/",
             Rem(_) => "%",
-            AddAssign(_) => "+=",
-            SubAssign(_) => "-=",
-            MulAssign(_) => "*=",
-            DivAssign(_) => "/=",
+            // syn 2 parses compound assignments (`a += b`) as binary
+            // expressions with an assign-op `BinOp`.
+            AddAssign(_) | SubAssign(_) | MulAssign(_) | DivAssign(_) | RemAssign(_)
+            | ShlAssign(_) | ShrAssign(_) | BitAndAssign(_) | BitOrAssign(_) | BitXorAssign(_) => {
+                return Self::assign_op(b);
+            }
             // Rust `&&`/`||` are WGSL `&&`/`||` (short-circuit, not bitwise).
             And(_) => "&&",
             Or(_) => "||",
@@ -421,7 +424,9 @@ impl WgslGen {
                 let init = local.init.as_ref().map(|init| Self::expr(&init.expr));
                 // Rust `let mut` becomes WGSL `var` — the only WGSL binding
                 // kind that can be reassigned.
-                let kw = if let syn::Pat::Ident(pi) = local.pat.as_ref() && pi.mutability.is_some() {
+                let kw = if let syn::Pat::Ident(pi) = &local.pat
+                    && pi.mutability.is_some()
+                {
                     "var"
                 } else {
                     "let"

@@ -81,6 +81,14 @@ jobs:
         # the status badge reflect reality. An earlier version of this
         # file had `continue-on-error: true` on this step, which made
         # the job silently green whenever the gate failed — a footgun.
+        #
+        # `shell: bash` is set explicitly because the step pipes through
+        # `tee`: without pipefail the pipeline's exit code is tee's (0),
+        # and a failing gate shows green. The runner's default shell on
+        # this repo resolved to plain `bash -e` (no pipefail), so the
+        # default cannot be relied on — `shell: bash` on Linux maps to
+        # `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: cargo xtask quality --ci 2>&1 | tee target/quality.log
 
       # Artifact: full log, kept 7 days. Visible in the Actions UI
