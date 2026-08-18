@@ -1682,11 +1682,11 @@ impl BuiltinPhysicsEngine {
     }
 
     /// Build one ManifoldState entry for a manifold at global body indices
-    /// `i`/`j`. This is the preamble extracted from `solve_island_velocity`
-    /// and shared by the CPU island path and the GPU single-point path.
+    /// `i`/`j`. This is the preamble extracted from `solve_island_velocity`;
+    /// today only the GPU single-point path calls it (the CPU island path
+    /// keeps its own inline copy in `solve_island_velocity`).
     /// `key` is the sorted global body-pair for warm-cache lookup.
     #[allow(clippy::needless_range_loop)]
-    // Only called from the `gpu` feature's GPU contact path today.
     #[allow(dead_code)]
     fn build_manifold_state(
         ctx: &mut ManifoldCtx,
