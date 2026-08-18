@@ -75,8 +75,13 @@ jobs:
       # the agent can read.
       - name: Quality gate
         id: gate
+        # No `continue-on-error` here on purpose: the post-failure steps
+        # below use `if: steps.gate.outcome == 'failure'`, so they still
+        # run on failure, but the JOB must be red so the PR check and
+        # the status badge reflect reality. An earlier version of this
+        # file had `continue-on-error: true` on this step, which made
+        # the job silently green whenever the gate failed — a footgun.
         run: cargo xtask quality --ci 2>&1 | tee target/quality.log
-        continue-on-error: true
 
       # Artifact: full log, kept 7 days. Visible in the Actions UI
       # (not the agent's reach, but useful for humans debugging the
