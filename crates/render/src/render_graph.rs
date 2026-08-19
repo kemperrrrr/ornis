@@ -289,6 +289,10 @@ impl RenderGraph {
     }
 
     /// Starts declaring a pass; passes execute in insertion order.
+    ///
+    /// Compatibility shim (S3): production passes are declared as typed
+    /// systems — `impl GraphPass` + `SystemSet::add_system` — and the
+    /// builder remains for tests, tools and the migration period.
     pub fn add_pass(&mut self, name: impl Into<String>) -> PassBuilder<'_> {
         let id = PassId(self.passes.len() as u32);
         self.passes.push(PassNode {
@@ -558,6 +562,10 @@ impl<'a> PassContext<'a> {
 }
 
 /// Builder for declaring a pass.
+///
+/// Compatibility shim (S3): prefer declaring passes as typed systems
+/// (`impl GraphPass` + `SystemSet::add_system`); the builder stays for
+/// tests, tools and the migration period.
 #[derive(Debug)]
 pub struct PassBuilder<'a> {
     graph: &'a mut RenderGraph,

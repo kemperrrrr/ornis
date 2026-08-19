@@ -225,6 +225,20 @@ impl PooledTexture {
     }
 }
 
+/// Total bytes the pool will allocate for this layout at its surface
+/// size — the device-free counterpart of [`GraphExecutor::texture_budget`]
+/// (golden tests, S0 metrics and the S4 budget groundwork).
+pub fn planned_pool_bytes(layout: &GraphLayout) -> u64 {
+    layout
+        .slots
+        .iter()
+        .map(|slot| {
+            let (w, h) = slot.spec.size.resolve(layout.surface_size);
+            format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+        })
+        .sum()
+}
+
 /// Graph-driven frame over the `Renderer3D` passes:
 /// gbuffer → lighting → forward → composite.
 ///
@@ -868,5 +882,108 @@ mod tests {
                 );
             }
         }
+    }\n
+
+    // ── S3: golden layout tests — the pool must not change silently ────
+
+    fn slots_for(technique: Technique, bloom: bool) -> usize {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            technique,
+            bloom,
+        );
+        g3.graph_mut().layout().slots.len()
     }
-}
+
+    #[test]
+    fn golden_pool_slots_per_technique() {
+        // Pinned against B1-R7 measurements (surface format Rgba8Unorm so
+        // `hdr` shares the albedo spec group): 9 resources → 7 slots on the
+        // deferred/hybrid path; the bloom cascade adds exactly its three
+        // fraction levels (bloom0/1/2 have distinct TextureSpec keys).
+        assert_eq!(slots_for(Technique::Forward, false), 2);
+        assert_eq!(slots_for(Technique::Forward, true), 5);
+        assert_eq!(slots_for(Technique::Deferred, false), 7);
+        assert_eq!(slots_for(Technique::Deferred, true), 10);
+        assert_eq!(slots_for(Technique::Hybrid, false), 7);
+        assert_eq!(slots_for(Technique::Hybrid, true), 10);
+    }
+
+    #[test]
+    fn golden_bloom_adds_exactly_three_slots() {
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            assert_eq!(
+                slots_for(technique, true) - slots_for(technique, false),
+                3,
+                "bloom cascade must add exactly its three fraction levels"
+            );
+        }
+    }
+
+    #[test]
+    fn golden_dead_layers_are_unpooled() {
+        // Forward-only: the deferred HDR layer and the gbuffer targets are
+        // never touched → no lifetime window, no pool slot.
+        let mut fwd = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Forward,
+            true,
+        );
+        let ids = fwd.ids();
+        let layout = fwd.graph_mut().layout().clone();
+        for id in [ids.hdr, ids.albedo, ids.normal] {
+            let rl = &layout.resources[id.0 as usize];
+            assert_eq!(rl.first_use, usize::MAX, "{} must be dead", rl.name);
+            assert_eq!(rl.slot, None);
+        }
+        // No bloom → the cascade levels are dead.
+        let mut plain = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            false,
+        );
+        let ids = plain.ids();
+        let layout = plain.graph_mut().layout();
+        assert_eq!(layout.resources[ids.bloom0.0 as usize].slot, None);
+        assert_eq!(layout.resources[ids.bloom1.0 as usize].slot, None);
+        assert_eq!(layout.resources[ids.bloom2.0 as usize].slot, None);
+    }
+
+    #[test]
+    fn golden_hybrid_lifetimes() {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        let ids = g3.ids();
+        let layout = g3.graph_mut().layout();
+        let window = |id: ResourceId| {
+            let rl = &layout.resources[id.0 as usize];
+            (rl.first_use, rl.last_use)
+        };
+        // gbuffer=0, lighting=1, forward=2, bloom chain 3..8, composite=8.
+        assert_eq!(window(ids.depth), (0, 2), "depth: gbuffer → forward");
+        assert_eq!(window(ids.hdr), (1, 8));
+        assert_eq!(window(ids.hdr_fwd), (2, 8));
+        assert_eq!(window(ids.bloom0), (3, 8));
+    }
+
+    #[test]
+    fn golden_planned_pool_bytes() {
+        // Forward, no bloom, 1280×720: depth (D32, 4 B/px) + hdr_fwd
+        // (Rgba16, 8 B/px) = 12 B/px over the surface.
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Forward,
+            false,
+        );
+        let layout = g3.graph_mut().layout();
+        assert_eq!(planned_pool_bytes(layout), 12 * 1280 * 720);
+    }
+\n}\n
