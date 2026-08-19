@@ -523,6 +523,7 @@ fn annotate_stage_failure(name: &str, log: &str) {
             || t.starts_with("warning:")
             || t.starts_with('+')
             || t.starts_with('-')
+            || t.starts_with("-->")
     };
     let mut interesting: Vec<&str> = clean.lines().filter(|l| is_match(l)).collect();
     // GitHub surfaces only ~10 annotations per step: when the diff is large,
