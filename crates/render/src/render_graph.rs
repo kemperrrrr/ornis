@@ -8,7 +8,9 @@
 //! same specification share one slot (object-level aliasing).
 //!
 //! Model:
-//! - `RenderGraph::build()` → `GraphLayout` — pure logic, no GPU needed;
+//! - `RenderGraph::layout()` → cached `&GraphLayout` — pure logic, no GPU
+//!   needed; recomputed only after a mutation (`build()` is the owned
+//!   snapshot of the same cache);
 //! - `RenderGraph::execute()` yields one [`PassContext`] per pass
 //!   (insertion order; disabled passes are skipped);
 //! - creating real `wgpu::Texture` objects per slot is the executor's job
@@ -68,7 +70,7 @@ pub struct ResourceId(pub u32);
 pub struct PassId(pub u32);
 
 /// Per-resource information in a layout.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResourceLayout {
     pub id: ResourceId,
     pub name: String,
@@ -94,7 +96,7 @@ impl ResourceLayout {
 
 /// Pool slot: a group of resources with the same [`TextureSpec`] whose
 /// lifetime windows do not overlap.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PoolSlot {
     pub index: usize,
     pub spec: TextureSpec,
@@ -105,7 +107,7 @@ pub struct PoolSlot {
 }
 
 /// A pass in the executable layout.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PassLayout {
     pub id: PassId,
     pub name: String,
@@ -116,7 +118,7 @@ pub struct PassLayout {
 }
 
 /// Result of `RenderGraph::build()` — the computed frame layout.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GraphLayout {
     pub(crate) surface_size: (u32, u32),
     /// Passes in execution order (insertion order, disabled passes dropped).
@@ -212,6 +214,13 @@ pub struct RenderGraph {
     resources: Vec<ResourceNode>,
     passes: Vec<PassNode>,
     surface_size: (u32, u32),
+    /// Cached layout; `None` means dirty — the next [`RenderGraph::layout`]
+    /// recomputes. Every mutation resets this (S1: `compute_layout` must
+    /// stay off the per-frame hot path).
+    cached: Option<GraphLayout>,
+    /// How many times the layout has been computed over this graph's
+    /// lifetime. Diagnostics for the S1 cache (tests, benches, probes).
+    layout_computations: u32,
 }
 
 impl RenderGraph {
@@ -221,12 +230,15 @@ impl RenderGraph {
             resources: Vec::new(),
             passes: Vec::new(),
             surface_size,
+            cached: None,
+            layout_computations: 0,
         }
     }
 
     /// Updates the surface size (window resize) before the next `build()`.
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.surface_size = (width, height);
+        self.cached = None;
     }
 
     /// Registers a graph-owned resource (texture).
@@ -238,6 +250,7 @@ impl RenderGraph {
             imported: false,
             external: false,
         });
+        self.cached = None;
         id
     }
 
@@ -252,6 +265,7 @@ impl RenderGraph {
             imported: true,
             external: false,
         });
+        self.cached = None;
         id
     }
 
@@ -270,6 +284,7 @@ impl RenderGraph {
             imported: true,
             external: true,
         });
+        self.cached = None;
         id
     }
 
@@ -282,6 +297,7 @@ impl RenderGraph {
             writes: Vec::new(),
             enabled: true,
         });
+        self.cached = None;
         PassBuilder { graph: self, id }
     }
 
@@ -296,6 +312,7 @@ impl RenderGraph {
             .get_mut(id.0 as usize)
             .unwrap_or_else(|| panic!("unknown pass {id:?}"));
         node.enabled = enabled;
+        self.cached = None;
     }
 
     fn resolve_resource(&self, id: ResourceId, pass_name: &str) -> &ResourceNode {
@@ -304,13 +321,46 @@ impl RenderGraph {
             .unwrap_or_else(|| panic!("unknown resource {id:?} in pass '{pass_name}'"))
     }
 
-    /// Computes the frame layout (lifetimes + pool slots). Recomputes from
-    /// the current graph state on every call.
+    /// Returns the frame layout (lifetimes + pool slots), recomputing it
+    /// only when the graph changed since the last call. This is the hot-path
+    /// accessor: `RenderGraph3D::render` calls it every frame, and in
+    /// steady state (no resizes, no pass toggles) it is a cache hit.
     ///
     /// # Panics
-    /// Panics if invariants are violated (read-before-write, etc.).
-    pub fn build(&self) -> GraphLayout {
-        self.compute_layout()
+    /// Panics if invariants are violated (read-before-write, etc.) — the
+    /// panic fires on the first recomputation after the offending mutation,
+    /// not at the mutation site.
+    pub fn layout(&mut self) -> &GraphLayout {
+        if self.cached.is_none() {
+            let layout = self.compute_layout();
+            self.cached = Some(layout);
+            self.layout_computations += 1;
+        }
+        // Filled by the branch above (or by an earlier call).
+        self.cached.as_ref().expect("layout cache is filled above")
+    }
+
+    /// Snapshot of the cached layout as an owned value. Equivalent to
+    /// cloning [`RenderGraph::layout`]; prefer `layout()` on hot paths —
+    /// this clones the pass/resource/slot vectors.
+    ///
+    /// # Panics
+    /// Same as [`RenderGraph::layout`].
+    pub fn build(&mut self) -> GraphLayout {
+        self.layout().clone()
+    }
+
+    /// Forces the next [`RenderGraph::layout`] to recompute. Mutating
+    /// methods do this automatically; this is for benchmarks and tests
+    /// that drive recomputation explicitly.
+    pub fn invalidate(&mut self) {
+        self.cached = None;
+    }
+
+    /// How many times the layout has been computed over this graph's
+    /// lifetime (S1 cache diagnostics: stays flat while the cache holds).
+    pub fn layout_computations(&self) -> u32 {
+        self.layout_computations
     }
 
     fn compute_layout(&self) -> GraphLayout {
@@ -524,11 +574,12 @@ impl PassBuilder<'_> {
     ///
     /// # Panics
     /// Panics on an unknown resource or a read-before-write violation
-    /// (detected at `build()`).
+    /// (detected at `layout()`/`build()`).
     pub fn read(self, id: ResourceId) -> Self {
         self.graph
             .resolve_resource(id, &self.graph.passes[self.id.0 as usize].name);
         self.graph.passes[self.id.0 as usize].reads.push(id);
+        self.graph.cached = None;
         self
     }
 
@@ -539,6 +590,7 @@ impl PassBuilder<'_> {
         self.graph.passes[self.id.0 as usize]
             .writes
             .push((id, None));
+        self.graph.cached = None;
         self
     }
 
@@ -550,6 +602,7 @@ impl PassBuilder<'_> {
         self.graph.passes[self.id.0 as usize]
             .writes
             .push((id, Some(clear)));
+        self.graph.cached = None;
         self
     }
 }
@@ -754,5 +807,77 @@ mod tests {
             layout.passes[pid.0 as usize].writes,
             vec![(hdr, Some(wgpu::Color::BLACK))]
         );
+    }
+
+    // ── S1: GraphLayout cache ────────────────────────────────────────
+
+    fn two_pass_graph() -> (RenderGraph, ResourceId, ResourceId) {
+        let mut g = RenderGraph::new((320, 240));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba16Float, 1));
+        g.add_pass("p0").write(a);
+        g.add_pass("p1").read(a).write(b);
+        (g, a, b)
+    }
+
+    #[test]
+    fn layout_is_cached_until_mutation() {
+        let (mut g, _, _) = two_pass_graph();
+        assert_eq!(g.layout_computations(), 0, "nothing computed yet");
+        let _ = g.build();
+        let _ = g.build();
+        let _ = g.layout();
+        let _ = g.layout();
+        assert_eq!(
+            g.layout_computations(),
+            1,
+            "repeated access without mutations must be a cache hit"
+        );
+    }
+
+    #[test]
+    fn every_mutation_invalidates_cache() {
+        let (mut g, a, _) = two_pass_graph();
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 1);
+
+        g.set_surface_size(640, 480);
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 2, "resize invalidates");
+
+        // The builder chain covers both `add_pass` and `read`.
+        g.add_pass("p2").read(a);
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 3, "add_pass/read invalidates");
+
+        let p2 = PassId(2);
+        g.set_pass_enabled(p2, false);
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 4, "pass toggle invalidates");
+
+        g.create_resource("c", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 5, "create_resource invalidates");
+
+        g.import_resource("ext", spec(wgpu::TextureFormat::R32Float, 1));
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 6, "import_resource invalidates");
+
+        g.invalidate();
+        let _ = g.layout();
+        assert_eq!(g.layout_computations(), 7, "explicit invalidate works");
+    }
+
+    #[test]
+    fn build_snapshot_matches_cached_layout() {
+        let (mut g, a, b) = two_pass_graph();
+        let cached = g.layout().debug_dump();
+        let snapshot = g.build().debug_dump();
+        assert_eq!(cached, snapshot, "build() must mirror the cached layout");
+        assert_eq!(g.layout_computations(), 1);
+        // Snapshot ids are the same stable ResourceIds the graph handed out.
+        let snapshot = g.build();
+        assert_eq!(snapshot.resources[a.0 as usize].name, "a");
+        assert_eq!(snapshot.resources[b.0 as usize].name, "b");
     }
 }

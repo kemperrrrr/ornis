@@ -436,8 +436,25 @@ fn run_stage(
         }
     }
 
-    match command.status() {
-        Ok(status) if status.success() => {
+    // In CI the stage output is captured and re-printed so that a failure
+    // can also be surfaced as `::error::` workflow-command annotations
+    // (raw run logs live on an endpoint some sandboxes cannot reach; the
+    // annotations API is the transport that always works). Locally the
+    // stages keep streaming.
+    let ran = if ci_annotations() {
+        command.output().map(|out| {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            print!("{stdout}");
+            eprint!("{stderr}");
+            (out.status, format!("{stdout}{stderr}"))
+        })
+    } else {
+        command.status().map(|status| (status, String::new()))
+    };
+
+    match ran {
+        Ok((status, _log)) if status.success() => {
             eprintln!(
                 "── {name}: {} ──",
                 if informational { "INFO" } else { "PASS" }
@@ -452,7 +469,7 @@ fn run_stage(
                 note: String::new(),
             }
         }
-        Ok(status) => {
+        Ok((status, log)) => {
             if informational {
                 eprintln!("── {name}: INFO (exit {status} — outdated dependencies) ──");
                 StageResult {
@@ -462,6 +479,7 @@ fn run_stage(
                 }
             } else {
                 eprintln!("── {name}: FAIL (exit {status}) ──");
+                annotate_stage_failure(name, &log);
                 StageResult {
                     name: name.to_string(),
                     status: Status::Fail,
@@ -480,6 +498,99 @@ fn run_stage(
     }
 }
 
+/// Whether the gate runs inside a GitHub Actions step (workflow commands
+/// `::error::…` become check-run annotations there).
+fn ci_annotations() -> bool {
+    std::env::var_os("GITHUB_ACTIONS").is_some()
+}
+
+/// Emits the most relevant error lines of a failed stage as annotations
+/// (max 8: cargo/rustc errors, failing tests, fmt diffs, clippy warnings).
+fn annotate_stage_failure(name: &str, log: &str) {
+    if !ci_annotations() {
+        return;
+    }
+    // CI sets CARGO_TERM_COLOR=always: strip ANSI codes before matching,
+    // otherwise colored diagnostics break the prefix checks below.
+    let clean = strip_ansi(log);
+    let is_match = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("error")
+            || t.starts_with("test result:")
+            || t.starts_with("Diff in")
+            || t.contains("panicked")
+            || t.contains("FAILED")
+            || t.starts_with("warning:")
+            || t.starts_with('+')
+            || t.starts_with('-')
+    };
+    let mut interesting: Vec<&str> = clean.lines().filter(|l| is_match(l)).collect();
+    // GitHub surfaces only ~10 annotations per step: when the diff is large,
+    // drop `+`/`-` bodies and keep headers/diagnostics so nothing is hidden.
+    if interesting.len() > 15 {
+        interesting.retain(|l| {
+            let t = l.trim_start();
+            !t.starts_with('+') && !t.starts_with('-')
+        });
+    }
+    let start = interesting.len().saturating_sub(40);
+    let picked = &interesting[start..];
+    if picked.is_empty() {
+        annotate(
+            format!("quality-{}", name.replace(' ', "-")),
+            "stage failed with no recognized error lines — see the raw log",
+        );
+    }
+    for l in picked {
+        annotate(format!("quality-{}", name.replace(' ', "-")), l.trim());
+    }
+}
+
+/// Removes ANSI escape sequences (SGR and friends) from colored output.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                Some('[') => {
+                    for c2 in chars.by_ref() {
+                        // CSI sequences end at the first letter
+                        if c2.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                // two-byte escapes: drop the next char too
+                Some(_) => {}
+                None => break,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// One `::error::` workflow command (GitHub Actions annotations).
+fn annotate(title: String, message: &str) {
+    let esc = |s: &str| -> String {
+        s.replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+    };
+    let mut line = message.trim().to_string();
+    if line.len() > 220 {
+        // Truncate at a char boundary: `str::truncate` panics mid-UTF-8.
+        let mut end = 220;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+    }
+    eprintln!("::error title={}::{}", esc(&title), esc(&line));
+}
+
 fn print_summary(results: &[StageResult]) {
     eprintln!();
     eprintln!("╔════════════ QUALITY SUMMARY ════════════╗");
@@ -492,6 +603,19 @@ fn print_summary(results: &[StageResult]) {
         eprintln!("  {:<22} {:<4}{}", r.name, r.status.label(), note);
     }
     eprintln!("╚═════════════════════════════════════════╝");
+    if ci_annotations() {
+        for r in results.iter().filter(|r| r.status == Status::Fail) {
+            let note = if r.note.is_empty() {
+                "-".to_string()
+            } else {
+                r.note.clone()
+            };
+            annotate(
+                format!("quality-summary-{}", r.name.replace(' ', "-")),
+                &format!("stage FAIL ({note})"),
+            );
+        }
+    }
 }
 
 /// Whether a binary exists in PATH.

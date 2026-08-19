@@ -1,5 +1,6 @@
 pub mod composite;
 pub mod graph_frame;
+pub mod graph_passes;
 pub mod mesh;
 pub mod render_backend;
 pub mod render_graph;
@@ -7,6 +8,7 @@ pub mod renderer;
 pub mod scene;
 pub mod shader;
 pub mod shaders;
+pub mod system;
 pub mod transform;
 
 pub use composite::CompositePass as LegacyCompositePass;
@@ -27,5 +29,9 @@ pub use renderer::{
 pub use shader::{
     COMPOSITE_FRAGMENT, COMPOSITE_VERTEX, GBUFFER_FRAGMENT, GBUFFER_VERTEX, LIGHTING_FRAGMENT,
     LIGHTING_VERTEX, PBR_FRAGMENT, PBR_VERTEX,
+};
+pub use system::{
+    Access, AccessSet, ClearBlack, ClearTransparent, ClearValue, ClearWhite, Frame, GraphPass,
+    GraphResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,
 };
 pub use transform::Transform;

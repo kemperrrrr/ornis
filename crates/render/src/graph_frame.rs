@@ -10,11 +10,17 @@
 //! only owns GPU objects. On wgpu, barriers are handled by wgpu itself, so
 //! the executor is small by design.
 
-use crate::mesh::Mesh;
-use crate::render_graph::{
-    GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout, SizePolicy, TextureSpec,
+use crate::graph_passes::{
+    Albedo, Bloom0, Bloom1, Bloom2, BloomBright, BloomDown1Pass, BloomDown2Pass, BloomUp0Pass,
+    BloomUp1Pass, Composite, CompositeDeferred, CompositeDeferredBloom, CompositeForward,
+    CompositeForwardBloom, CompositeHybrid, CompositeHybridBloom, Depth, Forward, FromDeferred,
+    FromForward, GbufferPass, Hdr, HdrFwd, LightingPass, MaterialId, MaterialParams, Normal,
+    OwnsDepth, SharedDepth, Target, WorldPosition,
 };
-use crate::renderer::{CompositeInputs, GbufferTargets, Renderer3D};
+use crate::mesh::Mesh;
+use crate::render_graph::{GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout};
+use crate::renderer::Renderer3D;
+use crate::system::{Frame, SystemSet};
 use std::collections::HashMap;
 
 /// One pooled texture per render-graph slot.
@@ -24,10 +30,6 @@ struct PooledTexture {
     view: wgpu::TextureView,
     bytes: u64,
 }
-
-/// Bright-pass threshold for the first bloom downsample (luminance gate:
-/// only pixels brighter than this contribute to the bloom chain).
-const BLOOM_BRIGHT_THRESHOLD: f32 = 0.7;
 
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
@@ -234,6 +236,10 @@ pub struct RenderGraph3D {
     graph: RenderGraph,
     executor: GraphExecutor,
     ids: GraphIds,
+    /// Typed S2 systems: `type → ResourceId` registry + type-erased runners
+    /// for the passes declared as `GraphPass` implementations
+    /// (see [`crate::graph_passes`] and [`crate::system`]).
+    systems: SystemSet,
     bloom: bool,
     technique: Technique,
 }
@@ -328,93 +334,49 @@ impl RenderGraph3D {
         bloom: bool,
     ) -> Self {
         let mut graph = RenderGraph::new(surface_size);
-        let spec = |format| TextureSpec {
-            format,
-            samples: 1,
-            size: SizePolicy::MatchSurface,
-        };
-        let frac = |format, divisor| TextureSpec {
-            format,
-            samples: 1,
-            size: SizePolicy::Fraction(divisor),
-        };
+        // S2: resources are registered by type; specs/names (and the
+        // ResourceId order) mirror the imperative wiring exactly.
+        let mut systems = SystemSet::new();
         let ids = GraphIds {
-            albedo: graph.create_resource("albedo", spec(wgpu::TextureFormat::Rgba8Unorm)),
-            normal: graph.create_resource("normal", spec(wgpu::TextureFormat::Rg16Float)),
-            material_id: graph.create_resource("material_id", spec(wgpu::TextureFormat::R32Uint)),
-            world_position: graph
-                .create_resource("world_position", spec(wgpu::TextureFormat::Rg16Float)),
-            material_params: graph
-                .create_resource("material_params", spec(wgpu::TextureFormat::Rgba16Float)),
-            depth: graph.create_resource("depth", spec(wgpu::TextureFormat::Depth32Float)),
-            hdr: graph.create_resource("hdr", spec(surface_format)),
-            hdr_fwd: graph.create_resource("hdr_fwd", spec(wgpu::TextureFormat::Rgba16Float)),
-            target: graph.external_output("target"),
-            bloom0: graph.create_resource("bloom0", frac(wgpu::TextureFormat::Rgba16Float, 2)),
-            bloom1: graph.create_resource("bloom1", frac(wgpu::TextureFormat::Rgba16Float, 4)),
-            bloom2: graph.create_resource("bloom2", frac(wgpu::TextureFormat::Rgba16Float, 8)),
+            albedo: systems.register_resource::<Albedo>(&mut graph, surface_format),
+            normal: systems.register_resource::<Normal>(&mut graph, surface_format),
+            material_id: systems.register_resource::<MaterialId>(&mut graph, surface_format),
+            world_position: systems.register_resource::<WorldPosition>(&mut graph, surface_format),
+            material_params: systems
+                .register_resource::<MaterialParams>(&mut graph, surface_format),
+            depth: systems.register_resource::<Depth>(&mut graph, surface_format),
+            hdr: systems.register_resource::<Hdr>(&mut graph, surface_format),
+            hdr_fwd: systems.register_resource::<HdrFwd>(&mut graph, surface_format),
+            target: systems.register_resource::<Target>(&mut graph, surface_format),
+            bloom0: systems.register_resource::<Bloom0>(&mut graph, surface_format),
+            bloom1: systems.register_resource::<Bloom1>(&mut graph, surface_format),
+            bloom2: systems.register_resource::<Bloom2>(&mut graph, surface_format),
         };
         if technique.has_deferred() {
-            graph
-                .add_pass("gbuffer")
-                .write(ids.albedo)
-                .write(ids.normal)
-                .write(ids.material_id)
-                .write(ids.world_position)
-                .write(ids.material_params)
-                .write(ids.depth);
-            graph
-                .add_pass("lighting")
-                .read(ids.albedo)
-                .read(ids.normal)
-                .read(ids.material_id)
-                .read(ids.world_position)
-                .read(ids.material_params)
-                .read(ids.depth)
-                .write_clear(ids.hdr, wgpu::Color::BLACK);
+            systems.add_system(&mut graph, GbufferPass);
+            systems.add_system(&mut graph, LightingPass);
         }
         if technique.has_forward() {
-            // In forward-only mode the depth comes from this pass itself;
-            // in hybrid it was already filled by the gbuffer pass.
-            let pass = graph.add_pass("forward");
-            let pass = if technique == Technique::Forward {
-                pass.write_clear(ids.depth, wgpu::Color::WHITE)
+            // In forward-only mode the pass owns the depth buffer; in
+            // hybrid it was already filled by the gbuffer pass.
+            if technique == Technique::Forward {
+                systems.add_system(&mut graph, Forward::<OwnsDepth>);
             } else {
-                pass.read(ids.depth)
-            };
-            pass.write_clear(ids.hdr_fwd, wgpu::Color::TRANSPARENT);
+                systems.add_system(&mut graph, Forward::<SharedDepth>);
+            }
         }
-        // The bloom chain's bright-pass input is the HDR layer the active
-        // technique produced: `hdr` (deferred/hybrid) or `hdr_fwd`
-        // (forward-only).
-        let bloom_input = if technique.has_deferred() {
-            ids.hdr
-        } else {
-            ids.hdr_fwd
-        };
         if bloom {
-            // Bright-pass threshold: only the brightest pixels survive the
-            // first downsample; deeper levels pass everything (threshold 0).
-            graph
-                .add_pass("bloom_down0")
-                .read(bloom_input)
-                .write_clear(ids.bloom0, wgpu::Color::BLACK);
-            graph
-                .add_pass("bloom_down1")
-                .read(ids.bloom0)
-                .write_clear(ids.bloom1, wgpu::Color::BLACK);
-            graph
-                .add_pass("bloom_down2")
-                .read(ids.bloom1)
-                .write_clear(ids.bloom2, wgpu::Color::BLACK);
-            graph
-                .add_pass("bloom_up1")
-                .read(ids.bloom2)
-                .write(ids.bloom1);
-            graph
-                .add_pass("bloom_up0")
-                .read(ids.bloom1)
-                .write(ids.bloom0);
+            // The bright-pass input is the HDR layer the active technique
+            // produced: `hdr` (deferred/hybrid) or `hdr_fwd` (forward-only).
+            if technique.has_deferred() {
+                systems.add_system(&mut graph, BloomBright::<FromDeferred>);
+            } else {
+                systems.add_system(&mut graph, BloomBright::<FromForward>);
+            }
+            systems.add_system(&mut graph, BloomDown1Pass);
+            systems.add_system(&mut graph, BloomDown2Pass);
+            systems.add_system(&mut graph, BloomUp1Pass);
+            systems.add_system(&mut graph, BloomUp0Pass);
         }
         let mut composite = graph.add_pass("composite").write(ids.target);
         // The composite shader always bind two HDR inputs; the graph only
@@ -433,6 +395,7 @@ impl RenderGraph3D {
             graph,
             executor: GraphExecutor::new(),
             ids,
+            systems,
             bloom,
             technique,
         }
@@ -443,14 +406,26 @@ impl RenderGraph3D {
         self.ids
     }
 
+    /// Read access to the underlying graph (layout diagnostics, probes).
+    pub fn graph(&self) -> &RenderGraph {
+        &self.graph
+    }
+
+    /// Mutable access to the underlying graph. Any mutation invalidates
+    /// the layout cache (see `RenderGraph::layout`); intended for
+    /// benchmarks/tests that drive recomputation explicitly.
+    pub fn graph_mut(&mut self) -> &mut RenderGraph {
+        &mut self.graph
+    }
+
     /// Updates the surface size before the next render (window resize).
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.graph.set_surface_size(width, height);
     }
 
-    /// Textual layout dump for debugging/reporting.
-    pub fn layout_dump(&self) -> String {
-        self.graph.build().debug_dump()
+    /// Textual layout dump for debugging/reporting (uses the layout cache).
+    pub fn layout_dump(&mut self) -> String {
+        self.graph.layout().debug_dump()
     }
 
     /// Number of pooled GPU textures (vs. declared resources — the
@@ -480,8 +455,8 @@ impl RenderGraph3D {
             graph,
             executor,
             ids,
-            bloom,
-            technique,
+            systems,
+            ..
         } = self;
         let crate::render_backend::RenderContext {
             device,
@@ -489,129 +464,36 @@ impl RenderGraph3D {
             encoder,
             target,
         } = context;
-        let layout = graph.build();
+        // S1: the layout is cached — a steady-state frame (no resize/toggle)
+        // is a cache hit, `compute_layout` stays off the hot path.
+        let layout = graph.layout();
         executor.set_external_view(ids.target, target.clone());
-        executor.execute(device, encoder, &layout, |encoder, pass| {
-            match pass.pass().name.as_str() {
-                "gbuffer" | "lighting" => {
-                    // G-buffer targets are alive on exactly these passes.
-                    let g = GbufferTargets {
-                        albedo: pass.view_of(ids.albedo),
-                        normal: pass.view_of(ids.normal),
-                        material_id: pass.view_of(ids.material_id),
-                        world_position: pass.view_of(ids.world_position),
-                        material_params: pass.view_of(ids.material_params),
-                        depth: pass.view_of(ids.depth),
-                    };
-                    if pass.pass().name.as_str() == "gbuffer" {
-                        renderer.render_gbuffer(encoder, &g, mesh, instance_count);
-                    } else {
-                        renderer.render_lighting(device, encoder, &g, pass.view_of(ids.hdr));
-                    }
-                }
-                "forward" => renderer.render_forward(
-                    encoder,
-                    pass.view_of(ids.depth),
-                    pass.view_of(ids.hdr_fwd),
-                    mesh,
-                    instance_count,
-                    // In forward-only mode this pass owns the depth buffer
-                    // and must clear it; in hybrid the gbuffer pass did.
-                    *technique == Technique::Forward,
-                ),
-                "bloom_down0" => {
-                    // The bright-pass input is the HDR layer this technique
-                    // produced: `hdr` (deferred/hybrid) or `hdr_fwd`
-                    // (forward-only). The other layer is dead and has no
-                    // view to bind.
-                    let input = if technique.has_deferred() {
-                        pass.view_of(ids.hdr)
-                    } else {
-                        pass.view_of(ids.hdr_fwd)
-                    };
-                    renderer.render_bloom_down(
-                        device,
-                        queue,
-                        encoder,
-                        input,
-                        pass.view_of(ids.bloom0),
-                        BLOOM_BRIGHT_THRESHOLD,
-                    );
-                }
-                "bloom_down1" => renderer.render_bloom_down(
-                    device,
-                    queue,
-                    encoder,
-                    pass.view_of(ids.bloom0),
-                    pass.view_of(ids.bloom1),
-                    0.0,
-                ),
-                "bloom_down2" => renderer.render_bloom_down(
-                    device,
-                    queue,
-                    encoder,
-                    pass.view_of(ids.bloom1),
-                    pass.view_of(ids.bloom2),
-                    0.0,
-                ),
-                "bloom_up1" => renderer.render_bloom_up(
-                    device,
-                    encoder,
-                    pass.view_of(ids.bloom2),
-                    pass.view_of(ids.bloom1),
-                ),
-                "bloom_up0" => renderer.render_bloom_up(
-                    device,
-                    encoder,
-                    pass.view_of(ids.bloom1),
-                    pass.view_of(ids.bloom0),
-                ),
-                "composite" => {
-                    // The shader always reads two HDR inputs and picks the
-                    // mix by `mode`. A dead layer has no pool view, so its
-                    // slot receives the live layer instead — the mode tells
-                    // the shader which one to trust. Same for bloom: when
-                    // culled, `bloom0` is never written → bind the forward
-                    // target as a stub with zero intensity.
-                    let (hdr, hdr_fwd) = if technique.has_deferred() {
-                        if technique.has_forward() {
-                            (pass.view_of(ids.hdr), pass.view_of(ids.hdr_fwd))
-                        } else {
-                            // Deferred-only: forward is dead, duplicate hdr.
-                            (pass.view_of(ids.hdr), pass.view_of(ids.hdr))
-                        }
-                    } else {
-                        // Forward-only: hdr is dead, duplicate hdr_fwd.
-                        (pass.view_of(ids.hdr_fwd), pass.view_of(ids.hdr_fwd))
-                    };
-                    let (bloom, bloom_intensity) = if *bloom {
-                        (pass.view_of(ids.bloom0), 1.0)
-                    } else {
-                        (hdr_fwd, 0.0)
-                    };
-                    renderer.render_composite(
-                        device,
-                        queue,
-                        encoder,
-                        CompositeInputs {
-                            target: pass.view_of(ids.target),
-                            hdr,
-                            hdr_fwd,
-                            bloom,
-                            bloom_intensity,
-                            mode: technique.composite_mode(),
-                        },
-                    );
-                }
-                other => unreachable!("render graph 3d: unknown pass '{other}'"),
+        executor.execute(device, encoder, layout, |encoder, pass| {
+            // S2b: every pass is a typed system (conditional passes are
+            // mode families selected at registration); dispatch by PassId.
+            let mut frame = Frame {
+                device,
+                queue,
+                encoder,
+                renderer,
+                mesh,
+                instance_count,
+            };
+            if !systems.run_pass(pass.pass().id, &pass, &mut frame) {
+                unreachable!(
+                    "render graph 3d: pass '{}' is not a typed system",
+                    pass.pass().name
+                );
             }
         });
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_graph::{SizePolicy, TextureSpec};
 
     #[test]
     fn bytes_per_pixel_table() {
@@ -646,7 +528,7 @@ mod tests {
     #[test]
     fn technique_wires_expected_passes() {
         let pass_names = |technique: Technique| {
-            let graph =
+            let mut graph =
                 RenderGraph3D::new_with(wgpu::TextureFormat::Rgba8Unorm, (32, 32), technique, true);
             graph
                 .graph
@@ -700,7 +582,7 @@ mod tests {
     #[test]
     fn technique_bloom_input_follows_hdr_layer() {
         // Forward-only: bloom's bright-pass input is `hdr_fwd` (hdr dead).
-        let forward = RenderGraph3D::new_with(
+        let mut forward = RenderGraph3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Forward,
@@ -714,7 +596,7 @@ mod tests {
             .expect("bloom_down0 exists");
         assert_eq!(down0.reads, vec![forward.ids.hdr_fwd]);
         // Hybrid: bright-pass input is `hdr`.
-        let hybrid = RenderGraph3D::new_with(
+        let mut hybrid = RenderGraph3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Hybrid,
@@ -731,7 +613,7 @@ mod tests {
 
     #[test]
     fn technique_forward_owns_depth_in_forward_mode() {
-        let forward = RenderGraph3D::new_with(
+        let mut forward = RenderGraph3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Forward,
@@ -802,5 +684,183 @@ mod tests {
             format_bytes_per_pixel(spec.format) as u64 * 1280 * 720,
             7_372_800
         );
+    }
+
+    // ── S1: layout cache on the RenderGraph3D level ──────────────────
+
+    #[test]
+    fn layout_cache_reused_across_frames() {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        // Two "frames" without mutations → one computation.
+        let _ = g3.graph_mut().layout();
+        let dump_a = g3.layout_dump();
+        let _ = g3.graph_mut().layout();
+        let dump_b = g3.layout_dump();
+        assert_eq!(g3.graph().layout_computations(), 1);
+        assert_eq!(dump_a, dump_b, "layout must not change between frames");
+
+        // Window resize → recompute once, then cache again.
+        g3.set_surface_size(1920, 1080);
+        let _ = g3.layout_dump();
+        assert_eq!(g3.graph().layout_computations(), 2);
+        let _ = g3.layout_dump();
+        assert_eq!(g3.graph().layout_computations(), 2, "cached after resize");
+    }
+
+    // ── S2: typed systems must reproduce the imperative wiring ─────────
+
+    /// Verbatim pre-S2 resource registration — the reference the typed
+    /// registration (`register_resource`) has to match bit-for-bit.
+    fn imperative_resources(
+        graph: &mut RenderGraph,
+        surface_format: wgpu::TextureFormat,
+    ) -> GraphIds {
+        let spec = |format| TextureSpec {
+            format,
+            samples: 1,
+            size: SizePolicy::MatchSurface,
+        };
+        let frac = |format, divisor| TextureSpec {
+            format,
+            samples: 1,
+            size: SizePolicy::Fraction(divisor),
+        };
+        GraphIds {
+            albedo: graph.create_resource("albedo", spec(wgpu::TextureFormat::Rgba8Unorm)),
+            normal: graph.create_resource("normal", spec(wgpu::TextureFormat::Rg16Float)),
+            material_id: graph.create_resource("material_id", spec(wgpu::TextureFormat::R32Uint)),
+            world_position: graph
+                .create_resource("world_position", spec(wgpu::TextureFormat::Rg16Float)),
+            material_params: graph
+                .create_resource("material_params", spec(wgpu::TextureFormat::Rgba16Float)),
+            depth: graph.create_resource("depth", spec(wgpu::TextureFormat::Depth32Float)),
+            hdr: graph.create_resource("hdr", spec(surface_format)),
+            hdr_fwd: graph.create_resource("hdr_fwd", spec(wgpu::TextureFormat::Rgba16Float)),
+            target: graph.external_output("target"),
+            bloom0: graph.create_resource("bloom0", frac(wgpu::TextureFormat::Rgba16Float, 2)),
+            bloom1: graph.create_resource("bloom1", frac(wgpu::TextureFormat::Rgba16Float, 4)),
+            bloom2: graph.create_resource("bloom2", frac(wgpu::TextureFormat::Rgba16Float, 8)),
+        }
+    }
+
+    /// Verbatim pre-S2 pass wiring — the reference the typed systems
+    /// (`add_system`) and the conditional passes have to match.
+    fn imperative_passes(
+        graph: &mut RenderGraph,
+        ids: &GraphIds,
+        technique: Technique,
+        bloom: bool,
+    ) {
+        if technique.has_deferred() {
+            graph
+                .add_pass("gbuffer")
+                .write(ids.albedo)
+                .write(ids.normal)
+                .write(ids.material_id)
+                .write(ids.world_position)
+                .write(ids.material_params)
+                .write(ids.depth);
+            graph
+                .add_pass("lighting")
+                .read(ids.albedo)
+                .read(ids.normal)
+                .read(ids.material_id)
+                .read(ids.world_position)
+                .read(ids.material_params)
+                .read(ids.depth)
+                .write_clear(ids.hdr, wgpu::Color::BLACK);
+        }
+        if technique.has_forward() {
+            let pass = graph.add_pass("forward");
+            let pass = if technique == Technique::Forward {
+                pass.write_clear(ids.depth, wgpu::Color::WHITE)
+            } else {
+                pass.read(ids.depth)
+            };
+            pass.write_clear(ids.hdr_fwd, wgpu::Color::TRANSPARENT);
+        }
+        if bloom {
+            let bloom_input = if technique.has_deferred() {
+                ids.hdr
+            } else {
+                ids.hdr_fwd
+            };
+            graph
+                .add_pass("bloom_down0")
+                .read(bloom_input)
+                .write_clear(ids.bloom0, wgpu::Color::BLACK);
+            graph
+                .add_pass("bloom_down1")
+                .read(ids.bloom0)
+                .write_clear(ids.bloom1, wgpu::Color::BLACK);
+            graph
+                .add_pass("bloom_down2")
+                .read(ids.bloom1)
+                .write_clear(ids.bloom2, wgpu::Color::BLACK);
+            graph
+                .add_pass("bloom_up1")
+                .read(ids.bloom2)
+                .write(ids.bloom1);
+            graph
+                .add_pass("bloom_up0")
+                .read(ids.bloom1)
+                .write(ids.bloom0);
+        }
+        // The composite mode is a pure function of (technique, bloom):
+        // which HDR layers exist and whether the bloom chain feeds the mix.
+        match (technique, bloom) {
+            (Technique::Deferred, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>);
+            }
+            (Technique::Deferred, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeDeferred>);
+            }
+            (Technique::Forward, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>);
+            }
+            (Technique::Forward, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeForward>);
+            }
+            (Technique::Hybrid, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>);
+            }
+            (Technique::Hybrid, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeHybrid>);
+            }
+        }
+    }
+
+    /// The pre-S2 wiring, verbatim, as one graph: resources then passes.
+    fn imperative_wiring(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: bool,
+    ) -> RenderGraph {
+        let mut graph = RenderGraph::new(surface_size);
+        let ids = imperative_resources(&mut graph, surface_format);
+        imperative_passes(&mut graph, &ids, technique, bloom);
+        graph
+    }
+
+    #[test]
+    fn typed_wiring_matches_imperative_reference() {
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            for bloom in [false, true] {
+                let mut typed = RenderGraph3D::new_with(fmt, (1280, 720), technique, bloom);
+                let mut reference = imperative_wiring(fmt, (1280, 720), technique, bloom);
+                assert_eq!(
+                    typed.graph.build().debug_dump(),
+                    reference.build().debug_dump(),
+                    "typed wiring diverged: {technique:?} bloom={bloom}"
+                );
+            }
+        }
     }
 }
