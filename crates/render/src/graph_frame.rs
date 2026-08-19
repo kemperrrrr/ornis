@@ -274,7 +274,7 @@ impl Technique {
 
     /// Composite shader mode: 0 = deferred-only, 1 = forward-only,
     /// 2 = hybrid (deferred + forward over it).
-    fn composite_mode(&self) -> u32 {
+    pub fn composite_mode(&self) -> u32 {
         match self {
             Self::Forward => 1,
             Self::Deferred => 0,
@@ -378,18 +378,27 @@ impl RenderGraph3D {
             systems.add_system(&mut graph, BloomUp1Pass);
             systems.add_system(&mut graph, BloomUp0Pass);
         }
-        let mut composite = graph.add_pass("composite").write(ids.target);
-        // The composite shader always bind two HDR inputs; the graph only
-        // wires the ones this technique produces, and the executor feeds
-        // the live view into both slots.
-        if technique.has_deferred() {
-            composite = composite.read(ids.hdr);
-        }
-        if technique.has_forward() {
-            composite = composite.read(ids.hdr_fwd);
-        }
-        if bloom {
-            composite.read(ids.bloom0);
+        // The composite mode is a pure function of (technique, bloom):
+        // which HDR layers exist and whether the bloom chain feeds the mix.
+        match (technique, bloom) {
+            (Technique::Deferred, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>::new());
+            }
+            (Technique::Deferred, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeDeferred>::new());
+            }
+            (Technique::Forward, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>::new());
+            }
+            (Technique::Forward, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeForward>::new());
+            }
+            (Technique::Hybrid, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>::new());
+            }
+            (Technique::Hybrid, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeHybrid>::new());
+            }
         }
         Self {
             graph,
@@ -404,6 +413,16 @@ impl RenderGraph3D {
     /// Resource handles of this graph.
     pub fn ids(&self) -> GraphIds {
         self.ids
+    }
+
+    /// The technique this graph was wired for.
+    pub fn technique(&self) -> Technique {
+        self.technique
+    }
+
+    /// Whether the bloom cascade is wired into this graph.
+    pub fn bloom_enabled(&self) -> bool {
+        self.bloom
     }
 
     /// Read access to the underlying graph (layout diagnostics, probes).
@@ -810,27 +829,15 @@ mod tests {
                 .read(ids.bloom1)
                 .write(ids.bloom0);
         }
-        // The composite mode is a pure function of (technique, bloom):
-        // which HDR layers exist and whether the bloom chain feeds the mix.
-        match (technique, bloom) {
-            (Technique::Deferred, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>::new());
-            }
-            (Technique::Deferred, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeDeferred>::new());
-            }
-            (Technique::Forward, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>::new());
-            }
-            (Technique::Forward, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeForward>::new());
-            }
-            (Technique::Hybrid, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>::new());
-            }
-            (Technique::Hybrid, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeHybrid>::new());
-            }
+        let mut composite = graph.add_pass("composite").write(ids.target);
+        if technique.has_deferred() {
+            composite = composite.read(ids.hdr);
+        }
+        if technique.has_forward() {
+            composite = composite.read(ids.hdr_fwd);
+        }
+        if bloom {
+            composite.read(ids.bloom0);
         }
     }
 

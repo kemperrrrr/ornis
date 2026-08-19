@@ -320,6 +320,12 @@ impl<M: ForwardMode> Forward<M> {
         Self(PhantomData)
     }
 }
+
+impl<M: ForwardMode> Default for Forward<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<M: ForwardMode> GraphPass for Forward<M> {
     type Reads = M::Reads;
     type Writes = M::Writes;
@@ -369,6 +375,12 @@ pub struct BloomBright<I: BrightInput>(PhantomData<fn() -> I>);
 impl<I: BrightInput> BloomBright<I> {
     /// Value constructor: a bare struct path is not a value (E0423).
     pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<I: BrightInput> Default for BloomBright<I> {
+    fn default() -> Self {
         Self(PhantomData)
     }
 }
@@ -521,6 +533,12 @@ pub struct Composite<M: CompositeMode>(PhantomData<fn() -> M>);
 impl<M: CompositeMode> Composite<M> {
     /// Value constructor: a bare struct path is not a value (E0423).
     pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: CompositeMode> Default for Composite<M> {
+    fn default() -> Self {
         Self(PhantomData)
     }
 }
