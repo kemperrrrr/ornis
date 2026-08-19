@@ -882,7 +882,7 @@ mod tests {
                 );
             }
         }
-    }\n
+    }
 
     // ── S3: golden layout tests — the pool must not change silently ────
 
@@ -986,4 +986,4 @@ mod tests {
         let layout = g3.graph_mut().layout();
         assert_eq!(planned_pool_bytes(layout), 12 * 1280 * 720);
     }
-\n}\n
+}
