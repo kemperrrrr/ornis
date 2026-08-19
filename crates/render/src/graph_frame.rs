@@ -360,18 +360,18 @@ impl RenderGraph3D {
             // In forward-only mode the pass owns the depth buffer; in
             // hybrid it was already filled by the gbuffer pass.
             if technique == Technique::Forward {
-                systems.add_system(&mut graph, Forward::<OwnsDepth>);
+                systems.add_system(&mut graph, Forward::<OwnsDepth>::new());
             } else {
-                systems.add_system(&mut graph, Forward::<SharedDepth>);
+                systems.add_system(&mut graph, Forward::<SharedDepth>::new());
             }
         }
         if bloom {
             // The bright-pass input is the HDR layer the active technique
             // produced: `hdr` (deferred/hybrid) or `hdr_fwd` (forward-only).
             if technique.has_deferred() {
-                systems.add_system(&mut graph, BloomBright::<FromDeferred>);
+                systems.add_system(&mut graph, BloomBright::<FromDeferred>::new());
             } else {
-                systems.add_system(&mut graph, BloomBright::<FromForward>);
+                systems.add_system(&mut graph, BloomBright::<FromForward>::new());
             }
             systems.add_system(&mut graph, BloomDown1Pass);
             systems.add_system(&mut graph, BloomDown2Pass);
@@ -814,22 +814,22 @@ mod tests {
         // which HDR layers exist and whether the bloom chain feeds the mix.
         match (technique, bloom) {
             (Technique::Deferred, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>);
+                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>::new());
             }
             (Technique::Deferred, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeDeferred>);
+                systems.add_system(&mut graph, Composite::<CompositeDeferred>::new());
             }
             (Technique::Forward, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>);
+                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>::new());
             }
             (Technique::Forward, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeForward>);
+                systems.add_system(&mut graph, Composite::<CompositeForward>::new());
             }
             (Technique::Hybrid, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>);
+                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>::new());
             }
             (Technique::Hybrid, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeHybrid>);
+                systems.add_system(&mut graph, Composite::<CompositeHybrid>::new());
             }
         }
     }

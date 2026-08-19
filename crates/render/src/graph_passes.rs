@@ -314,6 +314,12 @@ impl ForwardMode for SharedDepth {
 
 /// The forward pass; `M` selects the depth-ownership mode.
 pub struct Forward<M: ForwardMode>(PhantomData<fn() -> M>);
+impl<M: ForwardMode> Forward<M> {
+    /// Value constructor: a bare struct path is not a value (E0423).
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<M: ForwardMode> GraphPass for Forward<M> {
     type Reads = M::Reads;
     type Writes = M::Writes;
@@ -360,6 +366,12 @@ impl BrightInput for FromForward {
 
 /// The bright-pass downsample (surface → 1/2); `I` selects the input.
 pub struct BloomBright<I: BrightInput>(PhantomData<fn() -> I>);
+impl<I: BrightInput> BloomBright<I> {
+    /// Value constructor: a bare struct path is not a value (E0423).
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<I: BrightInput> GraphPass for BloomBright<I> {
     type Reads = I::Reads;
     type Writes = (WriteClear<Bloom0, ClearBlack>,);
@@ -506,6 +518,12 @@ impl CompositeMode for CompositeForward {
 
 /// The composite pass; `M` is the (technique × bloom) mode.
 pub struct Composite<M: CompositeMode>(PhantomData<fn() -> M>);
+impl<M: CompositeMode> Composite<M> {
+    /// Value constructor: a bare struct path is not a value (E0423).
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<M: CompositeMode> GraphPass for Composite<M> {
     type Reads = M::Reads;
     type Writes = (Write<Target>,);
