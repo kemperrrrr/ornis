@@ -287,7 +287,7 @@ const BLOOM_BRIGHT_THRESHOLD: f32 = 0.7;
 
 /// Depth ownership of the forward pass: forward-only clears the depth
 /// itself; hybrid reads the one the gbuffer pass filled.
-pub trait ForwardMode: 'static {
+pub trait ForwardMode: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
     const OWNS_DEPTH: bool;
@@ -341,7 +341,7 @@ impl<M: ForwardMode> GraphPass for Forward<M> {
 // ── bloom_down0: the bright-pass input follows the technique ─────────
 
 /// Which HDR layer feeds the bright pass (the one this technique made).
-pub trait BrightInput: 'static {
+pub trait BrightInput: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> &'a wgpu::TextureView;
 }
@@ -393,7 +393,7 @@ impl<I: BrightInput> GraphPass for BloomBright<I> {
 // ── composite: six modes = (technique) × (bloom on/off) ──────────────
 
 /// Which HDR layers exist and whether the bloom chain feeds the mix.
-pub trait CompositeMode: 'static {
+pub trait CompositeMode: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     const SHADER_MODE: u32;
     const BLOOM: bool;
