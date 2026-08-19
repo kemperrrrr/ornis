@@ -274,7 +274,6 @@ impl GraphPass for BloomUp0Pass {
     }
 }
 
-
 // ── S2b: conditional passes as mode families ─────────────────────────
 // Access sets that depend on the graph configuration are selected at
 // registration: the configuration becomes a mode TYPE (a table of
@@ -298,7 +297,10 @@ pub trait ForwardMode: 'static {
 pub struct OwnsDepth;
 impl ForwardMode for OwnsDepth {
     type Reads = ();
-    type Writes = (WriteClear<Depth, ClearWhite>, WriteClear<HdrFwd, ClearTransparent>);
+    type Writes = (
+        WriteClear<Depth, ClearWhite>,
+        WriteClear<HdrFwd, ClearTransparent>,
+    );
     const OWNS_DEPTH: bool = true;
 }
 

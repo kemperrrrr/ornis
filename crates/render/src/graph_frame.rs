@@ -489,7 +489,6 @@ impl RenderGraph3D {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
