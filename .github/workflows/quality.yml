@@ -107,7 +107,7 @@ jobs:
       # (not the agent's reach, but useful for humans debugging the
       # gate itself or comparing two runs).
       - name: Upload failure log
-        if: steps.gate.outcome == 'failure'
+        if: failure() && steps.gate.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: quality-log
@@ -121,7 +121,7 @@ jobs:
       # tail of the raw log. The agent reads this via the PR comments
       # endpoint and iterates from it.
       - name: Build failure digest body
-        if: github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
         env:
           HEAD_REF: ${{ github.head_ref }}
           RUN_ID: ${{ github.run_id }}
@@ -151,7 +151,7 @@ jobs:
           } > target/comment-body.md
 
       - name: Post failure digest to PR
-        if: github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
