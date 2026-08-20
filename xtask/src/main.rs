@@ -25,27 +25,7 @@ fn main() {
     };
     match cmd.as_str() {
         "editor" => editor(&args[1..]),
-        "quality" => {
-            // A panic inside the gate is invisible in CI (logs are on a
-            // blocked endpoint; the exit-code note says only "101") —
-            // catch it and re-emit the panic message as an annotation.
-            let args = args[1..].to_vec();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                quality::quality(&args)
-            }));
-            if let Err(payload) = result {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic payload".to_string());
-                eprintln!(
-                    "::error title=xtask-panic::{}",
-                    msg.replace('\r', "%0D").replace('\n', "%0A").replace('%', "%25")
-                );
-                std::process::exit(101);
-            }
-        }
+        "quality" => quality::quality(&args[1..]),
         "bca" => bca::bca(&args[1..]),
         "fuzz" => quality::fuzz(&args[1..]),
         "mutants" => quality::mutants(&args[1..]),

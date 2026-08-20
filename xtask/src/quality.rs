@@ -108,6 +108,33 @@ pub fn quality(args: &[String]) {
         false,
     ));
 
+    // Maintainability / complexity gate (optional, external tool).
+    // If `bca` is not found, SKIP with install hint — does not fail the gate.
+    // License: bca is MPL-2.0, but used as external binary it does NOT affect
+    // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
+    n += 1;
+    if binary_exists("bca") {
+        results.push(run_stage(
+            n,
+            total,
+            "bca",
+            "bca check",
+            {
+                let mut c = Command::new("bca");
+                c.arg("check").current_dir(&root);
+                c
+            },
+            false,
+        ));
+    } else {
+        results.push(skip_stage(
+            n,
+            total,
+            "bca",
+            "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
+        ));
+    }
+
     n += 1;
     results.push(run_stage(
         n,
@@ -341,36 +368,6 @@ pub fn quality(args: &[String]) {
         }
     }
 
-    // Maintainability / complexity gate (optional, external tool).
-    // Runs LAST on purpose: bca floods GitHub annotations (~one per
-    // violation, even baseline-passed ones) and the check-run annotation
-    // cap would swallow the failure annotations of later stages.
-    // If `bca` is not found, SKIP with install hint — does not fail the gate.
-    // License: bca is MPL-2.0, but used as external binary it does NOT affect
-    // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
-    n += 1;
-    if binary_exists("bca") {
-        results.push(run_stage(
-            n,
-            total,
-            "bca",
-            "bca check",
-            {
-                let mut c = Command::new("bca");
-                c.arg("check").current_dir(&root);
-                c
-            },
-            false,
-        ));
-    } else {
-        results.push(skip_stage(
-            n,
-            total,
-            "bca",
-            "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
-        ));
-    }
-
     print_summary(&results);
     if results.iter().any(|r| r.status == Status::Fail) {
         exit(1);
@@ -448,25 +445,8 @@ fn run_stage(
         command.output().map(|out| {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            // Re-printing child output verbatim re-emits its workflow
-            // commands (::error …): a child like bca floods ~60 annotations
-            // and crowds out this gate's own stage diagnostics. Neutralize
-            // the command prefix so the lines stay readable in the log but
-            // create no annotations — the gate emits its own, curated set.
-            let neutralize = |text: String| {
-                text.lines()
-                    .map(|l| {
-                        if l.trim_start().starts_with("::") {
-                            format!("⟦wf⟧{l}")
-                        } else {
-                            l.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            print!("{}", neutralize(stdout));
-            eprint!("{}", neutralize(stderr));
+            print!("{stdout}");
+            eprint!("{stderr}");
             (out.status, format!("{stdout}{stderr}"))
         })
     } else {
@@ -536,16 +516,15 @@ fn annotate_stage_failure(name: &str, log: &str) {
     let is_match = |l: &str| {
         let t = l.trim_start();
         let lower = t.to_ascii_lowercase();
-        // case-insensitive: cargo-deny prefixes lines with timestamps
-        // ("… ERROR [license] …"), cargo-audit titlecases ("Error:")
-        lower.contains("error")
+        t.starts_with("error")
             // only failing test summaries — "ok" results flood the cap
             || (t.starts_with("test result:") && t.contains("FAILED"))
             || t.starts_with("Diff in")
             || t.contains("panicked")
             || t.contains("FAILED")
             // clippy/rustc lowercase vs cargo-audit capitalized "Warning:"
-            || lower.contains("warn")
+            || t.starts_with("warning:")
+            || t.starts_with("Warning:")
             || lower.contains("vulnerab")
             || t.starts_with('+')
             || t.starts_with('-')
