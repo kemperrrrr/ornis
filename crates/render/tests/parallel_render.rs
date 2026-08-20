@@ -108,7 +108,9 @@ fn parallel_recording_matches_sequential_pixels() {
     let renderer = Renderer3D::new(&device, &surface_config, 1);
     let mesh = ornis_render::create_sphere(&device, 1.0, 16, 12);
 
-    let material = OpenPBRMaterial::dielectric().base_color_rgb([0.8, 0.4, 0.2]).specular_roughness(0.5);
+    let material = OpenPBRMaterial::dielectric()
+        .base_color_rgb([0.8, 0.4, 0.2])
+        .specular_roughness(0.5);
     renderer.upload_materials(&queue, &[material]);
     let model = Mat4::from_scale_rotation_translation(Vec3::ONE, Quat::IDENTITY, Vec3::ZERO);
     let instance = InstanceData {
