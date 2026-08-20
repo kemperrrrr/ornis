@@ -221,8 +221,8 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct A;
     struct B;
@@ -273,10 +273,7 @@ mod tests {
     #[test]
     fn anti_dependency_orders_reader_first() {
         // i читает X, j пишет X → i раньше j (анти-зависимость).
-        let accesses = vec![
-            Access::new().reads::<A>(),
-            Access::new().writes::<A>(),
-        ];
+        let accesses = vec![Access::new().reads::<A>(), Access::new().writes::<A>()];
         assert_eq!(level_groups(&accesses), vec![vec![0], vec![1]]);
     }
 
@@ -304,7 +301,7 @@ mod tests {
     #[test]
     fn sequential_mode_is_registration_order() {
         let mut res = Resources::new();
-        res.insert(Mutex::new(Vec::new()));
+        res.insert(Mutex::new(Vec::<&'static str>::new()));
         let mut sched = Schedule::new();
         sched
             .add_system(Bump {
@@ -379,7 +376,7 @@ mod tests {
             let c = res.remove::<Counters>().unwrap();
             let mut events = c.events.into_inner().unwrap();
             events.sort();
-            (c.sum.into_inner().unwrap(), events)
+            (c.sum.into_inner(), events)
         };
 
         let (seq_sum, seq_events) = build(false);

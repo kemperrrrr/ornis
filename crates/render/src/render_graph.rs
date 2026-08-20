@@ -214,13 +214,7 @@ impl GraphLayout {
         for j in 1..n {
             let mut best = 0usize;
             for i in 0..j {
-                let conflict = writes[i]
-                    .iter()
-                    .any(|w| self.passes[j].reads.contains(w) || writes[j].contains(w))
-                    || writes[j]
-                        .iter()
-                        .any(|w| self.passes[i].reads.contains(w));
-                if conflict {
+                if Self::passes_conflict(&self.passes, &writes, i, j) {
                     best = best.max(level[i] + 1);
                 }
             }
@@ -234,6 +228,21 @@ impl GraphLayout {
             groups[*l].push(i);
         }
         groups
+    }
+
+    /// Do passes `i < j` conflict (registration order = priority):
+    /// i writes what j reads or writes (RaW/WaW), or j writes what i
+    /// reads (anti-dependency).
+    fn passes_conflict(
+        passes: &[PassLayout],
+        writes: &[Vec<ResourceId>],
+        i: usize,
+        j: usize,
+    ) -> bool {
+        writes[i]
+            .iter()
+            .any(|w| passes[j].reads.contains(w) || writes[j].contains(w))
+            || writes[j].iter().any(|w| passes[i].reads.contains(w))
     }
 
     /// Textual layout dump for debugging/reporting.
