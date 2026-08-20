@@ -565,7 +565,7 @@ fn annotate_stage_failure(name: &str, log: &str) {
 fn fmt_hunks(clean: &str) -> Vec<String> {
     let mut hunks: Vec<String> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
-    let mut flush = |current: &mut Vec<&str>, hunks: &mut Vec<String>| {
+    let flush = |current: &mut Vec<&str>, hunks: &mut Vec<String>| {
         if !current.is_empty() {
             hunks.push(current.join(" ⏎ "));
             current.clear();
