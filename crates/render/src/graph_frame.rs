@@ -546,23 +546,23 @@ impl RenderGraph3D {
         let layout = graph.layout();
         executor.set_external_view(ids.target, target.clone());
         let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
-                // S2b: every pass is a typed system (conditional passes
-                // are mode families); dispatch by original PassId.
-                let mut frame = Frame {
-                    device,
-                    queue,
-                    encoder: enc,
-                    renderer,
-                    mesh,
-                    instance_count,
-                };
-                if !systems.run_pass(pass.pass().id, pass, &mut frame) {
-                    unreachable!(
-                        "render graph 3d: pass '{}' is not a typed system",
-                        pass.pass().name
-                    );
-                }
+            // S2b: every pass is a typed system (conditional passes
+            // are mode families); dispatch by original PassId.
+            let mut frame = Frame {
+                device,
+                queue,
+                encoder: enc,
+                renderer,
+                mesh,
+                instance_count,
             };
+            if !systems.run_pass(pass.pass().id, pass, &mut frame) {
+                unreachable!(
+                    "render graph 3d: pass '{}' is not a typed system",
+                    pass.pass().name
+                );
+            }
+        };
         if *parallel_recording {
             executor.execute_parallel(device, queue, layout, dispatch);
         } else {

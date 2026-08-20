@@ -11,10 +11,17 @@ const SIZE: u32 = 128;
 const BPP: u32 = 4;
 
 async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::empty(),
+        backend_options: wgpu::BackendOptions::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        display: None,
+    });
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await?;
+        .await
+        .ok()?;
     adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await
@@ -186,8 +193,7 @@ fn parallel_recording_matches_sequential_pixels() {
     let seq_pixels = read_back(&device, &queue, &seq_tex);
     let par_pixels = read_back(&device, &queue, &par_tex);
     assert_eq!(
-        seq_pixels,
-        par_pixels,
+        seq_pixels, par_pixels,
         "parallel recording must be pixel-identical"
     );
 }
