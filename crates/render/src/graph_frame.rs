@@ -565,7 +565,7 @@ impl RenderGraph3D {
                     );
                 }
             };
-        if parallel_recording {
+        if *parallel_recording {
             executor.execute_parallel(device, queue, layout, dispatch);
         } else {
             executor.execute(device, encoder, layout, |encoder, pass| {
