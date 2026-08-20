@@ -196,6 +196,43 @@ impl GraphLayout {
             .sum()
     }
 
+    /// Parallel execution levels (S5b planning data): passes whose
+    /// declared accesses do not conflict share a level; levels are
+    /// ordered by dependencies (read-after-write, write-after-read,
+    /// write-after-write), passes within a level are independent and
+    /// safe to record in parallel. Deterministic — derived from the
+    /// registration order and the declared accesses, exactly like the
+    /// core [`crate::schedule::Schedule`].
+    pub fn levels(&self) -> Vec<Vec<usize>> {
+        let writes: Vec<Vec<ResourceId>> = self
+            .passes
+            .iter()
+            .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
+            .collect();
+        let n = self.passes.len();
+        let mut level = vec![0usize; n];
+        for j in 1..n {
+            let mut best = 0usize;
+            for i in 0..j {
+                let conflict = writes[i].iter().any(|w| {
+                    self.passes[j].reads.contains(w) || writes[j].contains(w)
+                }) || writes[j].iter().any(|w| self.passes[i].reads.contains(w));
+                if conflict {
+                    best = best.max(level[i] + 1);
+                }
+            }
+            level[j] = best;
+        }
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (i, l) in level.iter().enumerate() {
+            if groups.len() <= *l {
+                groups.resize_with(*l + 1, Vec::new);
+            }
+            groups[*l].push(i);
+        }
+        groups
+    }
+
     /// Textual layout dump for debugging/reporting.
     pub fn debug_dump(&self) -> String {
         let mut s = format!(
@@ -930,6 +967,22 @@ mod tests {
 
     fn ctx_pass_names(layout: &GraphLayout) -> Vec<String> {
         layout.passes.iter().map(|p| p.name.clone()).collect()
+    }
+
+    #[test]
+    fn independent_branches_share_levels() {
+        // p0→p1 (a→b) и p2→p3 (c→d) не делят ресурсов: уровни [p0,p2], [p1,p3].
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
+        let d = g.create_resource("d", spec(wgpu::TextureFormat::Rg16Float, 1));
+        g.add_pass("p0").write(a);
+        g.add_pass("p1").read(a).write(b);
+        g.add_pass("p2").write(c);
+        g.add_pass("p3").read(c).write(d);
+        let layout = g.build();
+        assert_eq!(layout.levels(), vec![vec![0, 2], vec![1, 3]]);
     }
 
     #[test]

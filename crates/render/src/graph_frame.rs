@@ -955,6 +955,27 @@ mod tests {
     }
 
     #[test]
+    fn production_graph_is_a_strict_chain() {
+        // Честная правда текущего конвейера: каждый пасс конфликтует с
+        // соседом по ресурсам, поэтому уровни параллельности — синглтоны.
+        // Параллельная запись команд включается, когда появятся
+        // независимые ветви (S5b); вывод уровней уже готов.
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        let levels = g3.graph_mut().layout().levels();
+        let pass_count = levels.iter().map(|l| l.len()).sum::<usize>();
+        assert_eq!(pass_count, 9, "hybrid + bloom: 9 passes");
+        assert!(
+            levels.iter().all(|l| l.len() == 1),
+            "strict chain expected, got {levels:?}"
+        );
+    }
+
+    #[test]
     fn budget_exceeded_is_actionable() {
         let mut g3 = RenderGraph3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,

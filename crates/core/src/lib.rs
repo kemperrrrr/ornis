@@ -9,6 +9,7 @@ pub mod material;
 mod page_table;
 pub mod pipeline;
 mod prefetch;
+pub mod schedule;
 mod smart_store;
 
 pub use cold_store::ColdComponentStore;
@@ -25,4 +26,5 @@ pub use pipeline::{
     TargetDiscriminant, lane_target_of, pipeline_enter, pipeline_exit,
 };
 pub use prefetch::prefetch_read;
+pub use schedule::{Access, Resources, Schedule, System};
 pub use smart_store::{Pack, SmartStore};
