@@ -1064,7 +1064,7 @@ mod tests {
         let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
         let d = g.create_resource("d", spec(wgpu::TextureFormat::Rg16Float, 1));
         let p0 = g.add_pass("p0").write(a).id();
-        let p1 = g.add_pass("p1").read(a).write(b).id();
+        g.add_pass("p1").read(a).write(b);
         let p2 = g.add_pass("p2").write(c).id();
         g.add_pass("p3").read(c).write(d);
         assert_eq!(g.build().levels(), vec![vec![0, 2], vec![1, 3]]);

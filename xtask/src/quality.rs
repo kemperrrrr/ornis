@@ -530,6 +530,7 @@ fn annotate_stage_failure(name: &str, log: &str) {
             || t.starts_with("warning:")
             || t.starts_with("Warning:")
             || lower.contains("vulnerab")
+            || t.contains("(limit ")
             || t.starts_with('+')
             || t.starts_with('-')
             || t.starts_with("-->")
