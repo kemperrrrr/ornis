@@ -108,33 +108,6 @@ pub fn quality(args: &[String]) {
         false,
     ));
 
-    // Maintainability / complexity gate (optional, external tool).
-    // If `bca` is not found, SKIP with install hint — does not fail the gate.
-    // License: bca is MPL-2.0, but used as external binary it does NOT affect
-    // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
-    n += 1;
-    if binary_exists("bca") {
-        results.push(run_stage(
-            n,
-            total,
-            "bca",
-            "bca check",
-            {
-                let mut c = Command::new("bca");
-                c.arg("check").current_dir(&root);
-                c
-            },
-            false,
-        ));
-    } else {
-        results.push(skip_stage(
-            n,
-            total,
-            "bca",
-            "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
-        ));
-    }
-
     n += 1;
     results.push(run_stage(
         n,
@@ -366,6 +339,36 @@ pub fn quality(args: &[String]) {
                 "cargo-fuzz or nightly toolchain missing",
             ));
         }
+    }
+
+    // Maintainability / complexity gate (optional, external tool).
+    // Runs LAST on purpose: bca floods GitHub annotations (~one per
+    // violation, even baseline-passed ones) and the check-run annotation
+    // cap would swallow the failure annotations of later stages.
+    // If `bca` is not found, SKIP with install hint — does not fail the gate.
+    // License: bca is MPL-2.0, but used as external binary it does NOT affect
+    // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
+    n += 1;
+    if binary_exists("bca") {
+        results.push(run_stage(
+            n,
+            total,
+            "bca",
+            "bca check",
+            {
+                let mut c = Command::new("bca");
+                c.arg("check").current_dir(&root);
+                c
+            },
+            false,
+        ));
+    } else {
+        results.push(skip_stage(
+            n,
+            total,
+            "bca",
+            "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
+        ));
     }
 
     print_summary(&results);
