@@ -24,6 +24,7 @@ use crate::render_graph::{
 };
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// One pooled texture per render-graph slot.
@@ -90,6 +91,50 @@ impl GraphExecutor {
                 },
             );
         }
+    }
+
+    /// S5b: parallel command recording. Passes within a layout level
+    /// record into their own encoders concurrently (rayon); levels run
+    /// sequentially; all buffers are submitted to `queue` in pass order
+    /// with a single submit — `queue.write_buffer` calls made while
+    /// recording keep the same before-submit semantics as the sequential
+    /// path, so the pixel result is identical.
+    ///
+    /// Invariant (pass authors): passes that write the same queue-backed
+    /// buffer (renderer-internal uniforms are not part of the declared
+    /// texture accesses) must land in different levels.
+    pub fn execute_parallel<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &'a GraphLayout,
+        run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder) + Sync,
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        let mut buffers: Vec<(usize, wgpu::CommandBuffer)> = Vec::new();
+        for level in layout.levels() {
+            let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
+                .par_iter()
+                .map(|&index| {
+                    let mut encoder = device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor { label: None },
+                    );
+                    let views = PassViews {
+                        layout,
+                        pool,
+                        externals,
+                        index,
+                    };
+                    run(index, &views, &mut encoder);
+                    (index, encoder.finish())
+                })
+                .collect();
+            buffers.append(&mut level_buffers);
+        }
+        buffers.sort_by_key(|(index, _)| *index);
+        queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
     }
 
     fn ensure_pool(&mut self, device: &wgpu::Device, layout: &GraphLayout) {
@@ -223,6 +268,9 @@ impl PooledTexture {
 pub struct RenderGraph3D {
     graph: RenderGraph,
     executor: GraphExecutor,
+    /// S5b: record independent passes in parallel (a level at a time,
+    /// e.g. lighting ∥ forward); sequential single-encoder path by default.
+    parallel_recording: bool,
     ids: GraphIds,
     /// Typed S2 systems: `type → ResourceId` registry + type-erased runners
     /// for the passes declared as `GraphPass` implementations
@@ -391,6 +439,7 @@ impl RenderGraph3D {
         Self {
             graph,
             executor: GraphExecutor::new(),
+            parallel_recording: false,
             ids,
             systems,
             bloom,
@@ -428,6 +477,20 @@ impl RenderGraph3D {
     /// Updates the surface size before the next render (window resize).
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.graph.set_surface_size(width, height);
+    }
+
+    /// Enables/disables parallel command recording (S5b). Off by
+    /// default: the sequential path records into the caller's single
+    /// encoder; with this on, each pass gets its own encoder, passes of
+    /// one parallel level record concurrently and all buffers submit in
+    /// pass order — pixel-identical to the sequential path.
+    pub fn set_parallel_recording(&mut self, parallel: bool) {
+        self.parallel_recording = parallel;
+    }
+
+    /// Whether parallel recording is on.
+    pub fn parallel_recording(&self) -> bool {
+        self.parallel_recording
     }
 
     /// Sets the S4 GPU memory budget for the transient pool; the next
@@ -468,6 +531,7 @@ impl RenderGraph3D {
         let Self {
             graph,
             executor,
+            parallel_recording,
             ids,
             systems,
             ..
@@ -482,24 +546,32 @@ impl RenderGraph3D {
         // is a cache hit, `compute_layout` stays off the hot path.
         let layout = graph.layout();
         executor.set_external_view(ids.target, target.clone());
-        executor.execute(device, encoder, layout, |encoder, pass| {
-            // S2b: every pass is a typed system (conditional passes are
-            // mode families selected at registration); dispatch by PassId.
-            let mut frame = Frame {
-                device,
-                queue,
-                encoder,
-                renderer,
-                mesh,
-                instance_count,
+        let dispatch =
+            |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
+                // S2b: every pass is a typed system (conditional passes
+                // are mode families); dispatch by original PassId.
+                let mut frame = Frame {
+                    device,
+                    queue,
+                    encoder: enc,
+                    renderer,
+                    mesh,
+                    instance_count,
+                };
+                if !systems.run_pass(pass.pass().id, pass, &mut frame) {
+                    unreachable!(
+                        "render graph 3d: pass '{}' is not a typed system",
+                        pass.pass().name
+                    );
+                }
             };
-            if !systems.run_pass(pass.pass().id, &pass, &mut frame) {
-                unreachable!(
-                    "render graph 3d: pass '{}' is not a typed system",
-                    pass.pass().name
-                );
-            }
-        });
+        if parallel_recording {
+            executor.execute_parallel(device, queue, layout, dispatch);
+        } else {
+            executor.execute(device, encoder, layout, |encoder, pass| {
+                dispatch(0, &pass, encoder);
+            });
+        }
     }
 }
 

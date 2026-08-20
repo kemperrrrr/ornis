@@ -18,6 +18,8 @@ ron = "0.8"
 pollster = "0.3"
 png = "0.17"
 proptest = "1"
+wgpu = "29"
+glam = "0.30"
 criterion = { version = "0.5", features = ["rayon"] }
 
 [[bench]]
