@@ -32,8 +32,18 @@ proptest! {
 
         let max_tail = if bloom { 3 } else { 1 };
         let drop_tail = drop_tail.min(max_tail);
-        let total = g3.graph_mut().layout().passes.len();
-        for i in 0..drop_tail.min(total) {
+        // Registration order = execution order, so trailing PassIds are the
+        // tail passes. Totals are static per config (GraphLayout.passes is
+        // pub(crate); an integration test counts them itself).
+        let total = match (technique, bloom) {
+            (Technique::Forward, false) => 2,
+            (Technique::Forward, true) => 7,
+            (Technique::Deferred, false) => 3,
+            (Technique::Deferred, true) => 8,
+            (Technique::Hybrid, false) => 4,
+            (Technique::Hybrid, true) => 9,
+        };
+        for i in 0..drop_tail {
             let idx = total - 1 - i;
             g3.graph_mut().set_pass_enabled(PassId(idx as u32), false);
         }

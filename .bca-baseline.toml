@@ -622,14 +622,15 @@ qualified = "RenderGraph::compute_layout"
 metric = "halstead.effort"
 value = 371174.5806529359
 
-# S1 layout cache (PLAN Приложение C, 2026-08-18): +2 поля (cached,
-# layout_computations) и методы layout()/invalidate() — осознанный рост
-# nom 30 → 31; структура остаётся маленькой, дальнейший рост недопустим.
+# S1 layout cache (2026-08-18): +2 поля, layout()/invalidate() — рост
+# nom 30 → 31. S4 budget (2026-08-19): +поле budget,
+# set_budget()/budget()/try_layout() — рост 31 → 35. Осознанные этапные
+# добавления API планировщика; структура остаётся маленькой.
 [[entry]]
 path = "crates/render/src/render_graph.rs"
 qualified = "RenderGraph"
 metric = "nom"
-value = 31.0
+value = 35.0
 
 [[entry]]
 path = "crates/render/src/renderer.rs"
