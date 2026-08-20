@@ -129,13 +129,15 @@ fn conflicts(a: &Access, b: &Access) -> bool {
 
 /// Уровни параллельности: системы без конфликтов внутри уровня;
 /// уровни упорядочены зависимостями. Детерминировано порядком регистрации.
-fn level_groups(accesses: &[Access]) -> Vec<Vec<usize>> {
+fn level_groups(accesses: &[Access], ordering: &[(usize, usize)]) -> Vec<Vec<usize>> {
     let n = accesses.len();
     let mut level = vec![0usize; n];
     for j in 1..n {
         let mut best = 0usize;
         for i in 0..j {
-            if conflicts(&accesses[i], &accesses[j]) {
+            let ordered = conflicts(&accesses[i], &accesses[j])
+                || ordering.contains(&(i, j));
+            if ordered {
                 best = best.max(level[i] + 1);
             }
         }
@@ -155,6 +157,10 @@ fn level_groups(accesses: &[Access]) -> Vec<Vec<usize>> {
 pub struct Schedule {
     systems: Vec<Box<dyn System>>,
     accesses: Vec<Access>,
+    /// S5c: явные рёбра порядка (индексы регистрации i < j) поверх
+    /// выведенных из доступов — например, для скрытых зависимостей
+    /// (общие queue-буферы), которых не видно в множествах доступа.
+    ordering: Vec<(usize, usize)>,
     parallel: bool,
 }
 
@@ -169,6 +175,7 @@ impl Schedule {
         Self {
             systems: Vec::new(),
             accesses: Vec::new(),
+            ordering: Vec::new(),
             parallel: true,
         }
     }
@@ -178,6 +185,39 @@ impl Schedule {
         self.accesses.push(system.access());
         self.systems.push(Box::new(system));
         self
+    }
+
+    /// S5c: объявляет, что система `before` обязана выполниться раньше
+    /// системы `after`, даже если их доступы не конфликтуют (скрытая
+    /// зависимость). Обе ищутся по `name()`.
+    ///
+    /// # Panics
+    /// Паникует, если имя не найдено (уникальность имён — на вызывающем)
+    /// или `after` зарегистрирована раньше `before`: порядок исполнения —
+    /// порядок регистрации (S3), явные рёбра только разбивают уровни.
+    pub fn order_before(&mut self, before: &str, after: &str) -> &mut Self {
+        let b = self.system_index(before);
+        let a = self.system_index(after);
+        assert!(
+            b < a,
+            "order_before('{before}', '{after}'): '{after}' is registered              earlier — register systems in execution order and use              order_before to split parallel levels"
+        );
+        if !self.ordering.contains(&(b, a)) {
+            self.ordering.push((b, a));
+        }
+        self
+    }
+
+    /// S5c: зеркальный [`Schedule::order_before`].
+    pub fn order_after(&mut self, after: &str, before: &str) -> &mut Self {
+        self.order_before(before, after)
+    }
+
+    fn system_index(&self, name: &str) -> usize {
+        self.systems
+            .iter()
+            .position(|sys| sys.name() == name)
+            .unwrap_or_else(|| panic!("schedule: no system named '{name}'"))
     }
 
     /// Параллельное (true, по умолчанию) или строго последовательное
@@ -199,7 +239,7 @@ impl Schedule {
 
     /// Уровни параллельности (индексы систем в порядке регистрации).
     pub fn level_groups(&self) -> Vec<Vec<usize>> {
-        level_groups(&self.accesses)
+        level_groups(&self.accesses, &self.ordering)
     }
 
     /// Исполняет расписание над миром.
@@ -385,6 +425,64 @@ mod tests {
         // Мультимножество событий совпадает; порядок внутри уровня
         // недетерминирован — потому сравниваем отсортированными.
         assert_eq!(seq_events, par_events);
+    }
+
+    #[test]
+    fn explicit_ordering_splits_a_level() {
+        // Два независимых писателя делят уровень; явное ребро разводит их.
+        let mut sched = Schedule::new();
+        struct Noop(&'static str, Access);
+        impl System for Noop {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn access(&self) -> Access {
+                self.1.clone()
+            }
+            fn run(&self, _: &Resources) {}
+        }
+        sched
+            .add_system(Noop("first", Access::new().writes::<A>()))
+            .add_system(Noop("second", Access::new().writes::<B>()));
+        assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
+        sched.order_before("first", "second");
+        assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "registered")]
+    fn explicit_ordering_rejects_backward_direction() {
+        let mut sched = Schedule::new();
+        struct Noop(&'static str);
+        impl System for Noop {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn access(&self) -> Access {
+                Access::new()
+            }
+            fn run(&self, _: &Resources) {}
+        }
+        sched.add_system(Noop("a")).add_system(Noop("b"));
+        sched.order_before("b", "a");
+    }
+
+    #[test]
+    #[should_panic(expected = "no system named")]
+    fn explicit_ordering_unknown_name_panics() {
+        let mut sched = Schedule::new();
+        struct Noop;
+        impl System for Noop {
+            fn name(&self) -> &'static str {
+                "only"
+            }
+            fn access(&self) -> Access {
+                Access::new()
+            }
+            fn run(&self, _: &Resources) {}
+        }
+        sched.add_system(Noop);
+        sched.order_before("only", "ghost");
     }
 
     #[test]

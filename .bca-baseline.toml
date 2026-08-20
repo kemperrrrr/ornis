@@ -630,7 +630,7 @@ value = 371174.5806529359
 path = "crates/render/src/render_graph.rs"
 qualified = "RenderGraph"
 metric = "nom"
-value = 35.0
+value = 39.0
 
 # S5a/S5b (2026-08-19): levels(), execute_parallel, бюджетный API и
 # golden/уровневые тесты выросли сверх ploc=900. graph_frame — точка
@@ -642,11 +642,12 @@ qualified = "<file>"
 metric = "loc.ploc"
 value = 1095.0
 
+# S5c (2026-08-19): +order_before/order_before_named и рёбра в layout.
 [[entry]]
 path = "crates/render/src/render_graph.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 1104.0
+value = 1204.0
 
 [[entry]]
 path = "crates/render/src/renderer.rs"

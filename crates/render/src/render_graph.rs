@@ -180,6 +180,9 @@ pub struct GraphLayout {
     pub(crate) slots: Vec<PoolSlot>,
     /// Live resources per pass (by index into `passes`).
     pub(crate) pass_alive: Vec<Vec<ResourceId>>,
+    /// S5c: explicit ordering edges (registration PassIds, both enabled),
+    /// a snapshot of `RenderGraph::ordering` at build time.
+    pub(crate) ordering: Vec<(PassId, PassId)>,
 }
 
 impl GraphLayout {
@@ -209,12 +212,22 @@ impl GraphLayout {
             .iter()
             .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
             .collect();
+        // S5c: явные рёбра в индексы layout (выключенные пассы — мимо).
+        let index_of =
+            |id: PassId| self.passes.iter().position(|p| p.id == id);
+        let edges: Vec<(usize, usize)> = self
+            .ordering
+            .iter()
+            .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
+            .collect();
         let n = self.passes.len();
         let mut level = vec![0usize; n];
         for j in 1..n {
             let mut best = 0usize;
             for (i, prev_level) in level.iter().enumerate().take(j) {
-                if Self::passes_conflict(&self.passes, &writes, i, j) {
+                let ordered = Self::passes_conflict(&self.passes, &writes, i, j)
+                    || edges.contains(&(i, j));
+                if ordered {
                     best = best.max(prev_level + 1);
                 }
             }
@@ -384,6 +397,10 @@ pub struct RenderGraph {
     /// recomputes. Every mutation resets this (S1: `compute_layout` must
     /// stay off the per-frame hot path).
     cached: Option<GraphLayout>,
+    /// S5c: явные рёбра порядка (PassId регистрации i < j) поверх
+    /// зависимостей из доступов — для скрытых зависимостей (общие
+    /// queue-буферы рендерера), невидимых в множествах доступа.
+    ordering: Vec<(PassId, PassId)>,
     /// S4 memory budget; unbounded by default.
     budget: Budget,
     /// How many times the layout has been computed over this graph's
@@ -399,6 +416,7 @@ impl RenderGraph {
             passes: Vec::new(),
             surface_size,
             cached: None,
+            ordering: Vec::new(),
             budget: Budget::unbounded(),
             layout_computations: 0,
         }
@@ -483,6 +501,45 @@ impl RenderGraph {
         });
         self.cached = None;
         PassBuilder { graph: self, id }
+    }
+
+    /// S5c: объявляет, что пасс `before` обязан выполниться раньше пасса
+    /// `after`, даже если их доступы не конфликтуют (скрытая зависимость,
+    /// например общий queue-записанный uniform-буфер). Влияет только на
+    /// разбиение на уровни параллельности ([`GraphLayout::levels`]);
+    /// порядок исполнения — порядок регистрации.
+    ///
+    /// # Panics
+    /// Паникует, если `after` зарегистрирован раньше `before` (порядок
+    /// исполнения неизменяем) или пасс неизвестен.
+    pub fn order_before(&mut self, before: PassId, after: PassId) {
+        assert!(
+            before.0 < after.0,
+            "order_before({before:?}, {after:?}): the second pass is registered              earlier — register passes in execution order; explicit edges              only split parallel levels"
+        );
+        if !self.ordering.contains(&(before, after)) {
+            self.ordering.push((before, after));
+        }
+        self.cached = None;
+    }
+
+    /// S5c: name-based [`RenderGraph::order_before`] (имя пасса из
+    /// `add_pass`).
+    ///
+    /// # Panics
+    /// Паникует при неизвестном имени или обратном порядке регистрации.
+    pub fn order_before_named(&mut self, before: &str, after: &str) {
+        let b = self.pass_id_of(before);
+        let a = self.pass_id_of(after);
+        self.order_before(b, a);
+    }
+
+    fn pass_id_of(&self, name: &str) -> PassId {
+        self.passes
+            .iter()
+            .position(|p| p.name == name)
+            .map(|i| PassId(i as u32))
+            .unwrap_or_else(|| panic!("render graph: no pass named '{name}'"))
     }
 
     /// Enables/disables a pass (culling): a disabled pass is dropped from
@@ -704,6 +761,7 @@ impl RenderGraph {
             resources,
             slots,
             pass_alive,
+            ordering: self.ordering.clone(),
         }
     }
 
@@ -995,6 +1053,48 @@ mod tests {
         g.add_pass("p3").read(c).write(d);
         let layout = g.build();
         assert_eq!(layout.levels(), vec![vec![0, 2], vec![1, 3]]);
+    }
+
+    #[test]
+    fn explicit_ordering_splits_shared_level() {
+        // p0→p1 и p2→p3 независимы: [[0,2],[1,3]]; ребро p0→p2 разводит
+        // первый уровень (скрытая зависимость без конфликта доступов).
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
+        let d = g.create_resource("d", spec(wgpu::TextureFormat::Rg16Float, 1));
+        let p0 = g.add_pass("p0").write(a).id();
+        let p1 = g.add_pass("p1").read(a).write(b).id();
+        let p2 = g.add_pass("p2").write(c).id();
+        g.add_pass("p3").read(c).write(d);
+        assert_eq!(g.build().levels(), vec![vec![0, 2], vec![1, 3]]);
+        g.order_before(p0, p2);
+        assert_eq!(
+            g.build().levels(),
+            vec![vec![0], vec![1, 2], vec![3]],
+            "explicit edge lifts p2 without touching p1's level"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "registered")]
+    fn explicit_ordering_rejects_backward() {
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let first = g.add_pass("first").write(a).id();
+        let second = g.add_pass("second").write(b).id();
+        g.order_before(second, first);
+    }
+
+    #[test]
+    #[should_panic(expected = "no pass named")]
+    fn explicit_ordering_unknown_name() {
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g.add_pass("real").write(a);
+        g.order_before_named("real", "ghost");
     }
 
     #[test]

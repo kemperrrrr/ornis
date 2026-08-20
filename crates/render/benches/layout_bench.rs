@@ -59,5 +59,20 @@ fn bench_layout_cache_hit(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_layout_compute, bench_layout_cache_hit);
+fn bench_levels(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout/levels");
+    for (name, technique) in [
+        ("hybrid_9_passes", Technique::Hybrid),
+        ("forward_7_passes", Technique::Forward),
+    ] {
+        let mut g3 = make(technique);
+        let layout = g3.graph_mut().layout().clone();
+        group.bench_function(name, |b| {
+            b.iter(|| black_box(layout.levels()))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_layout_compute, bench_layout_cache_hit, bench_levels);
 criterion_main!(benches);
