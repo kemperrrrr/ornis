@@ -24,6 +24,7 @@ use crate::render_graph::{
 };
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -110,16 +111,47 @@ impl GraphExecutor {
         layout: &'a GraphLayout,
         run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder) + Sync,
     ) {
-        self.ensure_pool(device, layout);
-        let pool = &self.pool;
-        let externals = &self.external_views;
-        let mut buffers: Vec<(usize, wgpu::CommandBuffer)> = Vec::new();
-        for level in layout.levels() {
-            let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
-                .par_iter()
-                .map(|&index| {
-                    let mut encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        // wgpu::CommandBuffer is not Send on wasm32 (deferred actions hold
+        // non-Send closures) and rayon needs threads — the wasm path runs
+        // the same per-pass encoders sequentially, submitting as it goes.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.ensure_pool(device, layout);
+            let pool = &self.pool;
+            let externals = &self.external_views;
+            let mut buffers: Vec<(usize, wgpu::CommandBuffer)> = Vec::new();
+            for level in layout.levels() {
+                let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
+                    .par_iter()
+                    .map(|&index| {
+                        let mut encoder = device.create_command_encoder(
+                            &wgpu::CommandEncoderDescriptor { label: None },
+                        );
+                        let views = PassViews {
+                            layout,
+                            pool,
+                            externals,
+                            index,
+                        };
+                        run(index, &views, &mut encoder);
+                        (index, encoder.finish())
+                    })
+                    .collect();
+                buffers.append(&mut level_buffers);
+            }
+            buffers.sort_by_key(|(index, _)| *index);
+            queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.ensure_pool(device, layout);
+            let pool = &self.pool;
+            let externals = &self.external_views;
+            for level in layout.levels() {
+                for &index in &level {
+                    let mut encoder = device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor { label: None },
+                    );
                     let views = PassViews {
                         layout,
                         pool,
@@ -127,13 +159,10 @@ impl GraphExecutor {
                         index,
                     };
                     run(index, &views, &mut encoder);
-                    (index, encoder.finish())
-                })
-                .collect();
-            buffers.append(&mut level_buffers);
+                    queue.submit(std::iter::once(encoder.finish()));
+                }
+            }
         }
-        buffers.sort_by_key(|(index, _)| *index);
-        queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
     }
 
     fn ensure_pool(&mut self, device: &wgpu::Device, layout: &GraphLayout) {
