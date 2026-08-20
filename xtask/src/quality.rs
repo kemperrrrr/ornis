@@ -445,8 +445,12 @@ fn run_stage(
         command.output().map(|out| {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            print!("{stdout}");
-            eprint!("{stderr}");
+            // Re-printing child output verbatim re-emits the child's
+            // workflow commands (::error …): bca floods ~60 annotations and
+            // crowds out this gate's curated diagnostics. Break the command
+            // prefix in the re-print — the gate emits its own annotations.
+            print!("{}", stdout.replace("::error", "::·error"));
+            eprint!("{}", stderr.replace("::error", "::·error"));
             (out.status, format!("{stdout}{stderr}"))
         })
     } else {
