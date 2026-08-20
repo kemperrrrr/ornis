@@ -46,8 +46,10 @@ jobs:
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
             /etc/apt/sources.list.d/*.list 2>/dev/null || true
           sudo apt-get update \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
-          sudo apt-get install -y libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
 
       - uses: dtolnay/rust-toolchain@1.97
         with:
