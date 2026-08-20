@@ -104,6 +104,7 @@ impl GraphExecutor {
     /// Invariant (pass authors): passes that write the same queue-backed
     /// buffer (renderer-internal uniforms are not part of the declared
     /// texture accesses) must land in different levels.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn execute_parallel<'a>(
         &'a mut self,
         device: &wgpu::Device,
@@ -111,10 +112,6 @@ impl GraphExecutor {
         layout: &'a GraphLayout,
         run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder) + Sync,
     ) {
-        // wgpu::CommandBuffer is not Send on wasm32 (deferred actions hold
-        // non-Send closures) and rayon needs threads — the wasm path runs
-        // the same per-pass encoders sequentially, submitting as it goes.
-        #[cfg(not(target_arch = "wasm32"))]
         {
             self.ensure_pool(device, layout);
             let pool = &self.pool;
@@ -142,25 +139,36 @@ impl GraphExecutor {
             buffers.sort_by_key(|(index, _)| *index);
             queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.ensure_pool(device, layout);
-            let pool = &self.pool;
-            let externals = &self.external_views;
-            for level in layout.levels() {
-                for &index in &level {
-                    let mut encoder = device.create_command_encoder(
-                        &wgpu::CommandEncoderDescriptor { label: None },
-                    );
-                    let views = PassViews {
-                        layout,
-                        pool,
-                        externals,
-                        index,
-                    };
-                    run(index, &views, &mut encoder);
-                    queue.submit(std::iter::once(encoder.finish()));
-                }
+    }
+
+    /// wasm32 twin of [`GraphExecutor::execute_parallel`]: wgpu types are
+    /// not `Sync` on the web backend (Rc inside) and there are no rayon
+    /// threads — the same per-pass encoders run sequentially, submitting
+    /// as they go. Signature drops the `Sync` bound so the shared
+    /// `render()` call site compiles for both targets.
+    #[cfg(target_arch = "wasm32")]
+    pub fn execute_parallel<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &'a GraphLayout,
+        run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder),
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        for level in layout.levels() {
+            for &index in &level {
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                let views = PassViews {
+                    layout,
+                    pool,
+                    externals,
+                    index,
+                };
+                run(index, &views, &mut encoder);
+                queue.submit(std::iter::once(encoder.finish()));
             }
         }
     }
