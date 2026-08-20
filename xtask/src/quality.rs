@@ -515,12 +515,17 @@ fn annotate_stage_failure(name: &str, log: &str) {
     let clean = strip_ansi(log);
     let is_match = |l: &str| {
         let t = l.trim_start();
+        let lower = t.to_ascii_lowercase();
         t.starts_with("error")
-            || t.starts_with("test result:")
+            // only failing test summaries — "ok" results flood the cap
+            || (t.starts_with("test result:") && t.contains("FAILED"))
             || t.starts_with("Diff in")
             || t.contains("panicked")
             || t.contains("FAILED")
+            // clippy/rustc lowercase vs cargo-audit capitalized "Warning:"
             || t.starts_with("warning:")
+            || t.starts_with("Warning:")
+            || lower.contains("vulnerab")
             || t.starts_with('+')
             || t.starts_with('-')
             || t.starts_with("-->")
