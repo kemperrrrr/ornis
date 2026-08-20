@@ -971,7 +971,11 @@ mod tests {
         let pass_count = levels.iter().map(|l| l.len()).sum::<usize>();
         assert_eq!(pass_count, 9, "hybrid + bloom: 9 passes");
         assert_eq!(levels[0], vec![0], "gbuffer first");
-        assert_eq!(levels[1], vec![1, 2], "lighting runs in parallel with forward");
+        assert_eq!(
+            levels[1],
+            vec![1, 2],
+            "lighting runs in parallel with forward"
+        );
         for (expected_level, pass) in levels.iter().skip(2).zip(3..9) {
             assert_eq!(*expected_level, vec![pass], "bloom chain + composite");
         }
