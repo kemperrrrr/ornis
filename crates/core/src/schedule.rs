@@ -280,7 +280,6 @@ mod tests {
     struct Bump {
         name: &'static str,
         access: Access,
-        log: Mutex<Vec<&'static str>>,
         target: &'static str,
     }
 
@@ -309,13 +308,11 @@ mod tests {
             .add_system(Bump {
                 name: "w",
                 access: Access::new().writes::<A>(),
-                log: Mutex::new(Vec::new()),
                 target: "w",
             })
             .add_system(Bump {
                 name: "r",
                 access: Access::new().reads::<A>().writes::<B>(),
-                log: Mutex::new(Vec::new()),
                 target: "r",
             });
         sched.set_parallel(false);
