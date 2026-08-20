@@ -27,6 +27,56 @@
 
 use std::collections::HashMap;
 
+/// Bytes per pixel for the texture formats used by the engine's renderer.
+pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::Rgba8Unorm
+        | wgpu::TextureFormat::Rgba8UnormSrgb
+        | wgpu::TextureFormat::Rg16Float
+        | wgpu::TextureFormat::R32Uint
+        | wgpu::TextureFormat::Depth32Float => 4,
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::Rgba32Float => 16,
+        other => unimplemented!("bytes per pixel for {other:?}"),
+    }
+}
+
+/// Builds the actionable budget error: top slots by bytes.
+fn budget_exceeded(budget: u64, required: u64, layout: &GraphLayout) -> BudgetExceeded {
+    let mut slots: Vec<&PoolSlot> = layout.slots.iter().collect();
+    slots.sort_by_key(|s| std::cmp::Reverse(slot_bytes(s, layout.surface_size)));
+    let offenders = slots
+        .iter()
+        .take(3)
+        .map(|s| {
+            let (w, h) = s.spec.size.resolve(layout.surface_size);
+            let names: Vec<&str> = s
+                .resources
+                .iter()
+                .map(|&id| layout.resources[id.0 as usize].name.as_str())
+                .collect();
+            format!(
+                "{} ({:?} {}x{}, {} B)",
+                names.join("/"),
+                s.spec.format,
+                w,
+                h,
+                slot_bytes(s, layout.surface_size)
+            )
+        })
+        .collect();
+    BudgetExceeded {
+        budget,
+        required,
+        offenders,
+    }
+}
+
+fn slot_bytes(slot: &PoolSlot, surface: (u32, u32)) -> u64 {
+    let (w, h) = slot.spec.size.resolve(surface);
+    format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+}
+
 /// Texture size policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SizePolicy {
@@ -132,6 +182,19 @@ pub struct GraphLayout {
 }
 
 impl GraphLayout {
+    /// Total bytes the pool will allocate at this layout's surface size —
+    /// the device-free counterpart of `GraphExecutor::texture_budget`
+    /// (golden tests, S0 metrics, the S4 budget check).
+    pub fn planned_pool_bytes(&self) -> u64 {
+        self.slots
+            .iter()
+            .map(|slot| {
+                let (w, h) = slot.spec.size.resolve(self.surface_size);
+                format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+            })
+            .sum()
+    }
+
     /// Textual layout dump for debugging/reporting.
     pub fn debug_dump(&self) -> String {
         let mut s = format!(

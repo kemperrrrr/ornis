@@ -18,7 +18,10 @@ use crate::graph_passes::{
     OwnsDepth, SharedDepth, Target, WorldPosition,
 };
 use crate::mesh::Mesh;
-use crate::render_graph::{GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout};
+use crate::render_graph::{
+    format_bytes_per_pixel, Budget, GraphLayout, PassLayout, RenderGraph, ResourceId,
+    ResourceLayout,
+};
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
 use std::collections::HashMap;
@@ -223,20 +226,6 @@ impl PooledTexture {
     fn view_ref(&self) -> &wgpu::TextureView {
         &self.view
     }
-}
-
-/// Total bytes the pool will allocate for this layout at its surface
-/// size — the device-free counterpart of [`GraphExecutor::texture_budget`]
-/// (golden tests, S0 metrics and the S4 budget groundwork).
-pub fn planned_pool_bytes(layout: &GraphLayout) -> u64 {
-    layout
-        .slots
-        .iter()
-        .map(|slot| {
-            let (w, h) = slot.spec.size.resolve(layout.surface_size);
-            format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
-        })
-        .sum()
 }
 
 /// Graph-driven frame over the `Renderer3D` passes:
@@ -454,6 +443,13 @@ impl RenderGraph3D {
     /// Updates the surface size before the next render (window resize).
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.graph.set_surface_size(width, height);
+    }
+
+    /// Sets the S4 GPU memory budget for the transient pool; the next
+    /// layout computation refuses (panic via `render`/`layout`, or a
+    /// `BudgetExceeded` from `graph_mut().try_layout()`) if exceeded.
+    pub fn set_budget(&mut self, budget: crate::render_graph::Budget) {
+        self.graph.set_budget(budget);
     }
 
     /// Textual layout dump for debugging/reporting (uses the layout cache).
@@ -974,6 +970,34 @@ mod tests {
     }
 
     #[test]
+    fn budget_exceeded_is_actionable() {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        let planned = g3.graph_mut().layout().planned_pool_bytes();
+        // Точный бюджет — укладывается.
+        g3.set_budget(Budget::gpu_textures(planned));
+        assert!(g3.graph_mut().try_layout().is_ok());
+        // На байт меньше — внятный отказ с конкретикой.
+        g3.set_budget(Budget::gpu_textures(planned - 1));
+        let err = g3.graph_mut().try_layout().unwrap_err();
+        assert_eq!(err.required, planned);
+        assert_eq!(err.budget, planned - 1);
+        let msg = err.to_string();
+        assert!(msg.contains("MiB"), "message: {msg}");
+        assert!(
+            msg.contains("bloom") || msg.contains("hdr"),
+            "offenders named: {msg}"
+        );
+        // Снятие бюджета возвращает поведение S3.
+        g3.set_budget(Budget::unbounded());
+        assert!(g3.graph_mut().try_layout().is_ok());
+    }
+
+    #[test]
     fn golden_planned_pool_bytes() {
         // Forward, no bloom, 1280×720: depth (D32, 4 B/px) + hdr_fwd
         // (Rgba16, 8 B/px) = 12 B/px over the surface.
@@ -984,6 +1008,6 @@ mod tests {
             false,
         );
         let layout = g3.graph_mut().layout();
-        assert_eq!(planned_pool_bytes(layout), 12 * 1280 * 720);
+        assert_eq!(layout.planned_pool_bytes(), 12 * 1280 * 720);
     }
 }

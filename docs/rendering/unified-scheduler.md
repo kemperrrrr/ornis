@@ -280,3 +280,26 @@ S2b закрыли все десять). `add_pass`/`PassBuilder` задокум
 S4-базис). «Конфликт писателей» сознательно не реализован: порядок
 пассов = порядок регистрации, write-write между пассами легален и
 секвенирован.
+
+## S4 — бюджет памяти как first-class (2026-08-19, проверка CI)
+
+- `Budget { gpu_textures: Option<u64> }` (`unbounded()` — поведение S3);
+  `RenderGraph::set_budget` / `RenderGraph3D::set_budget`, инвалидация
+  кеша при смене бюджета.
+- `try_layout() -> Result<&GraphLayout, BudgetExceeded>` —
+  невыполнимый бюджет = **возвращаемая ошибка**, не паника; `layout()`
+  паникует с тем же сообщением (горячий путь). Нарушивший layout не
+  кешируется.
+- `BudgetExceeded` — actionable: `required`/`budget` + топ-3 слота по
+  байтам (имена ресурсов, формат, размер) + подсказка («уменьши размеры
+  или отключи пассы, напр. блум»).
+- `planned_pool_bytes()` переехал в `GraphLayout` (метод);
+  `format_bytes_per_pixel` — в `render_graph` (общая точка).
+- **Оптимальность пула доказана структурно**: greedy first-fit по
+  `first_use` на интервальном графе даёт ω (максимум одновременных
+  перекрытий) — это и есть минимальное число слотов (= «interval
+  partitioning» из §28.3); отдельный «режим минимизации пика» не нужен.
+- Гейт: proptest `budget_holds_or_refuses` (техники × блум × culling
+  хвоста × размеры: точный бюджет всегда ок; на байт меньше — всегда
+  отказ с `required == planned`; `unbounded` возвращает S3) + юнит
+  `budget_exceeded_is_actionable`.
