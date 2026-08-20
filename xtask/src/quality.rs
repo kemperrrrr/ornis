@@ -532,6 +532,31 @@ fn annotate_stage_failure(name: &str, log: &str) {
             || (t.contains("expected") && t.contains("found"))
             || t.starts_with("note:")
     };
+    // rustfmt diffs: fold each hunk (header + body) into ONE annotation —
+    // GitHub surfaces only ~10 annotations, per-line bodies never fit.
+    if name == "fmt" {
+        let mut hunks: Vec<String> = Vec::new();
+        let mut current: Vec<&str> = Vec::new();
+        for l in clean.lines() {
+            let t = l.trim_start();
+            if t.starts_with("Diff in") {
+                if !current.is_empty() {
+                    hunks.push(current.join(" ⏎ "));
+                }
+                current.clear();
+                current.push(t);
+            } else if (t.starts_with('+') || t.starts_with('-')) && !current.is_empty() {
+                current.push(t.trim_end());
+            }
+        }
+        if !current.is_empty() {
+            hunks.push(current.join(" ⏎ "));
+        }
+        for hunk in &hunks {
+            annotate(format!("quality-{name}"), hunk);
+        }
+        return;
+    }
     let mut interesting: Vec<&str> = clean.lines().filter(|l| is_match(l)).collect();
     // GitHub surfaces only ~10 annotations per step: when the diff is large,
     // drop `+`/`-` bodies and keep headers/diagnostics so nothing is hidden.
