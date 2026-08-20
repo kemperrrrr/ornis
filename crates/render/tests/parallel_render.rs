@@ -84,9 +84,11 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture
     let slice = buffer.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
-        sender.send(r).is_ok();
+        let _ = sender.send(r);
     });
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll readback");
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll readback");
     receiver
         .recv()
         .expect("map callback")
@@ -190,7 +192,9 @@ fn parallel_recording_matches_sequential_pixels() {
     );
     queue.submit(std::iter::once(encoder.finish()));
 
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll render");
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll render");
 
     let seq_pixels = read_back(&device, &queue, &seq_tex);
     let par_pixels = read_back(&device, &queue, &par_tex);
