@@ -202,7 +202,7 @@ impl GraphLayout {
     /// write-after-write), passes within a level are independent and
     /// safe to record in parallel. Deterministic — derived from the
     /// registration order and the declared accesses, exactly like the
-    /// core [`crate::schedule::Schedule`].
+    /// core `ornis_core::schedule::Schedule`.
     pub fn levels(&self) -> Vec<Vec<usize>> {
         let writes: Vec<Vec<ResourceId>> = self
             .passes
