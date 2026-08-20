@@ -67,12 +67,15 @@ fn bench_levels(c: &mut Criterion) {
     ] {
         let mut g3 = make(technique);
         let layout = g3.graph_mut().layout().clone();
-        group.bench_function(name, |b| {
-            b.iter(|| black_box(layout.levels()))
-        });
+        group.bench_function(name, |b| b.iter(|| black_box(layout.levels())));
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_layout_compute, bench_layout_cache_hit, bench_levels);
+criterion_group!(
+    benches,
+    bench_layout_compute,
+    bench_layout_cache_hit,
+    bench_levels
+);
 criterion_main!(benches);

@@ -135,8 +135,8 @@ fn level_groups(accesses: &[Access], ordering: &[(usize, usize)]) -> Vec<Vec<usi
     for j in 1..n {
         let mut best = 0usize;
         for i in 0..j {
-            let ordered = conflicts(&accesses[i], &accesses[j])
-                || ordering.contains(&(i, j));
+            let ordered =
+                conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j));
             if ordered {
                 best = best.max(level[i] + 1);
             }
@@ -300,7 +300,7 @@ mod tests {
             reads_writes::<C>(false, true),
         ];
         // независимые писатели → один уровень
-        assert_eq!(level_groups(&accesses), vec![vec![0, 1, 2]]);
+        assert_eq!(level_groups(&accesses, &[]), vec![vec![0, 1, 2]]);
 
         let chain = vec![
             Access::new().writes::<A>(),
@@ -314,7 +314,7 @@ mod tests {
     fn anti_dependency_orders_reader_first() {
         // i читает X, j пишет X → i раньше j (анти-зависимость).
         let accesses = vec![Access::new().reads::<A>(), Access::new().writes::<A>()];
-        assert_eq!(level_groups(&accesses), vec![vec![0], vec![1]]);
+        assert_eq!(level_groups(&accesses, &[]), vec![vec![0], vec![1]]);
     }
 
     struct Bump {

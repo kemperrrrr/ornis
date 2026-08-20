@@ -213,8 +213,7 @@ impl GraphLayout {
             .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
             .collect();
         // S5c: явные рёбра в индексы layout (выключенные пассы — мимо).
-        let index_of =
-            |id: PassId| self.passes.iter().position(|p| p.id == id);
+        let index_of = |id: PassId| self.passes.iter().position(|p| p.id == id);
         let edges: Vec<(usize, usize)> = self
             .ordering
             .iter()
@@ -225,8 +224,8 @@ impl GraphLayout {
         for j in 1..n {
             let mut best = 0usize;
             for (i, prev_level) in level.iter().enumerate().take(j) {
-                let ordered = Self::passes_conflict(&self.passes, &writes, i, j)
-                    || edges.contains(&(i, j));
+                let ordered =
+                    Self::passes_conflict(&self.passes, &writes, i, j) || edges.contains(&(i, j));
                 if ordered {
                     best = best.max(prev_level + 1);
                 }
