@@ -4,9 +4,15 @@
 //! surface size) configurations.
 
 use ornis_render::{Budget, PassId, RenderGraph3D, Technique};
+use proptest::prelude::*;
 
 fn cfg(technique: Technique, bloom: bool, size: u32) -> RenderGraph3D {
-    RenderGraph3D::new_with(wgpu::TextureFormat::Rgba8Unorm, (size, size), technique, bloom)
+    RenderGraph3D::new_with(
+        wgpu::TextureFormat::Rgba8Unorm,
+        (size, size),
+        technique,
+        bloom,
+    )
 }
 
 proptest! {
