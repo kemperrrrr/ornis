@@ -19,8 +19,8 @@ proptest! {
         drop_tail in 0usize..4,
         size_idx in 0usize..3,
     ) {
-        let technique =
-            [Technique::Forward, Technique::Deferred, Technique::Hybrid][technique_idx];
+        let technique = [Technique::Forward, Technique::Deferred, Technique::Hybrid]
+            [technique_idx];
         let size = [64u32, 320, 1280][size_idx];
         let mut g3 = cfg(technique, bloom, size);
 

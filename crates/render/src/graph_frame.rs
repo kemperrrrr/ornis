@@ -19,8 +19,8 @@ use crate::graph_passes::{
 };
 use crate::mesh::Mesh;
 use crate::render_graph::{
-    format_bytes_per_pixel, Budget, GraphLayout, PassLayout, RenderGraph, ResourceId,
-    ResourceLayout,
+    Budget, GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout,
+    format_bytes_per_pixel,
 };
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
@@ -433,7 +433,7 @@ impl RenderGraph3D {
     /// Sets the S4 GPU memory budget for the transient pool; the next
     /// layout computation refuses (panic via `render`/`layout`, or a
     /// `BudgetExceeded` from `graph_mut().try_layout()`) if exceeded.
-    pub fn set_budget(&mut self, budget: crate::render_graph::Budget) {
+    pub fn set_budget(&mut self, budget: Budget) {
         self.graph.set_budget(budget);
     }
 

@@ -1363,7 +1363,7 @@ impl Renderer3D {
     /// Bytes allocated by the persistent textures of the legacy path
     /// (5 g-buffer MRTs + g-buffer depth + lighting target + forward color).
     pub fn texture_budget(&self) -> u64 {
-        let bpp = crate::graph_frame::format_bytes_per_pixel;
+        let bpp = crate::render_graph::format_bytes_per_pixel;
         let w = self.width as u64;
         let h = self.height as u64;
         let s = self.sample_count as u64;
