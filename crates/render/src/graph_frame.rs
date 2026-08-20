@@ -122,7 +122,9 @@ impl GraphExecutor {
                     .par_iter()
                     .map(|&index| {
                         let mut encoder = device
-                            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: None,
+                            });
                         let views = PassViews {
                             layout,
                             pool,
