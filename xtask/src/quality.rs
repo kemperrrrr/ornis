@@ -532,28 +532,10 @@ fn annotate_stage_failure(name: &str, log: &str) {
             || (t.contains("expected") && t.contains("found"))
             || t.starts_with("note:")
     };
-    // rustfmt diffs: fold each hunk (header + body) into ONE annotation —
-    // GitHub surfaces only ~10 annotations, per-line bodies never fit.
+    // rustfmt diffs: one annotation per hunk — bodies never fit the cap.
     if name == "fmt" {
-        let mut hunks: Vec<String> = Vec::new();
-        let mut current: Vec<&str> = Vec::new();
-        for l in clean.lines() {
-            let t = l.trim_start();
-            if t.starts_with("Diff in") {
-                if !current.is_empty() {
-                    hunks.push(current.join(" ⏎ "));
-                }
-                current.clear();
-                current.push(t);
-            } else if (t.starts_with('+') || t.starts_with('-')) && !current.is_empty() {
-                current.push(t.trim_end());
-            }
-        }
-        if !current.is_empty() {
-            hunks.push(current.join(" ⏎ "));
-        }
-        for hunk in &hunks {
-            annotate(format!("quality-{name}"), hunk);
+        for hunk in fmt_hunks(&clean) {
+            annotate(format!("quality-{name}"), &hunk);
         }
         return;
     }
@@ -577,6 +559,29 @@ fn annotate_stage_failure(name: &str, log: &str) {
     for l in picked {
         annotate(format!("quality-{}", name.replace(' ', "-")), l.trim());
     }
+}
+
+/// Folds rustfmt output into one message per hunk: "header ⏎ -old ⏎ +new".
+fn fmt_hunks(clean: &str) -> Vec<String> {
+    let mut hunks: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut flush = |current: &mut Vec<&str>, hunks: &mut Vec<String>| {
+        if !current.is_empty() {
+            hunks.push(current.join(" ⏎ "));
+            current.clear();
+        }
+    };
+    for l in clean.lines() {
+        let t = l.trim_start();
+        if t.starts_with("Diff in") {
+            flush(&mut current, &mut hunks);
+            current.push(t);
+        } else if (t.starts_with('+') || t.starts_with('-')) && !current.is_empty() {
+            current.push(t.trim_end());
+        }
+    }
+    flush(&mut current, &mut hunks);
+    hunks
 }
 
 /// Removes ANSI escape sequences (SGR and friends) from colored output.
