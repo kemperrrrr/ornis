@@ -135,8 +135,7 @@ fn level_groups(accesses: &[Access], ordering: &[(usize, usize)]) -> Vec<Vec<usi
     for j in 1..n {
         let mut best = 0usize;
         for i in 0..j {
-            let ordered =
-                conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j));
+            let ordered = conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j));
             if ordered {
                 best = best.max(level[i] + 1);
             }
@@ -307,7 +306,7 @@ mod tests {
             Access::new().reads::<A>().writes::<B>(),
             Access::new().reads::<B>().writes::<C>(),
         ];
-        assert_eq!(level_groups(&chain), vec![vec![0], vec![1], vec![2]]);
+        assert_eq!(level_groups(&chain, &[]), vec![vec![0], vec![1], vec![2]]);
     }
 
     #[test]
