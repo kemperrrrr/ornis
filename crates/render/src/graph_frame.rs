@@ -121,9 +121,8 @@ impl GraphExecutor {
                 let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
                     .par_iter()
                     .map(|&index| {
-                        let mut encoder = device.create_command_encoder(
-                            &wgpu::CommandEncoderDescriptor { label: None },
-                        );
+                        let mut encoder = device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                         let views = PassViews {
                             layout,
                             pool,
