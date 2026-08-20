@@ -448,8 +448,25 @@ fn run_stage(
         command.output().map(|out| {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            print!("{stdout}");
-            eprint!("{stderr}");
+            // Re-printing child output verbatim re-emits its workflow
+            // commands (::error …): a child like bca floods ~60 annotations
+            // and crowds out this gate's own stage diagnostics. Neutralize
+            // the command prefix so the lines stay readable in the log but
+            // create no annotations — the gate emits its own, curated set.
+            let neutralize = |text: String| {
+                text.lines()
+                    .map(|l| {
+                        if l.trim_start().starts_with("::") {
+                            format!("⟦wf⟧{l}")
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            print!("{}", neutralize(stdout));
+            eprint!("{}", neutralize(stderr));
             (out.status, format!("{stdout}{stderr}"))
         })
     } else {
