@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rayon = "1.10"
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
