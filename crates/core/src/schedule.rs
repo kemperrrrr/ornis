@@ -292,7 +292,9 @@ mod tests {
             self.access.clone()
         }
         fn run(&self, resources: &Resources) {
-            let counter = resources.get::<Mutex<Vec<&'static str>>>().expect("log resource");
+            let counter = resources
+                .get::<Mutex<Vec<&'static str>>>()
+                .expect("log resource");
             let mut log = counter.lock().expect("log lock");
             log.push(self.target);
         }

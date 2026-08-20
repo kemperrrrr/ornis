@@ -213,9 +213,9 @@ impl GraphLayout {
         let mut level = vec![0usize; n];
         for j in 1..n {
             let mut best = 0usize;
-            for i in 0..j {
+            for (i, prev_level) in level.iter().enumerate().take(j) {
                 if Self::passes_conflict(&self.passes, &writes, i, j) {
-                    best = best.max(level[i] + 1);
+                    best = best.max(prev_level + 1);
                 }
             }
             level[j] = best;
