@@ -34,21 +34,6 @@ struct PooledTexture {
     bytes: u64,
 }
 
-/// Bytes per pixel for the texture formats used by the engine's renderer.
-pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
-    match format {
-        wgpu::TextureFormat::Rgba8Unorm
-        | wgpu::TextureFormat::Rgba8UnormSrgb
-        | wgpu::TextureFormat::R32Uint
-        | wgpu::TextureFormat::Rg16Float
-        | wgpu::TextureFormat::Depth32Float
-        | wgpu::TextureFormat::Depth24Plus => 4,
-        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
-        wgpu::TextureFormat::Rgba32Float => 16,
-        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
-    }
-}
-
 /// Executes a [`GraphLayout`] on wgpu: lazily creates one texture per pool
 /// slot and hands every pass a [`PassViews`] resolver.
 #[derive(Debug, Default)]

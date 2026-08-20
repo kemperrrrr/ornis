@@ -32,12 +32,13 @@ pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
         wgpu::TextureFormat::Rgba8Unorm
         | wgpu::TextureFormat::Rgba8UnormSrgb
-        | wgpu::TextureFormat::Rg16Float
         | wgpu::TextureFormat::R32Uint
-        | wgpu::TextureFormat::Depth32Float => 4,
-        wgpu::TextureFormat::Rgba16Float => 8,
+        | wgpu::TextureFormat::Rg16Float
+        | wgpu::TextureFormat::Depth32Float
+        | wgpu::TextureFormat::Depth24Plus => 4,
+        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
         wgpu::TextureFormat::Rgba32Float => 16,
-        other => unimplemented!("bytes per pixel for {other:?}"),
+        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
     }
 }
 
@@ -271,6 +272,59 @@ struct PassNode {
     enabled: bool,
 }
 
+/// GPU memory budget for the transient pool (S4, IDEAS §28.3).
+///
+/// The scheduler either fits the pool into the budget or refuses with an
+/// actionable [`BudgetExceeded`]; `unbounded()` restores the S3 behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Byte cap for the pooled transient textures; `None` = unbounded.
+    pub gpu_textures: Option<u64>,
+}
+
+impl Budget {
+    /// No cap: the S3 behavior (any pool size passes).
+    pub fn unbounded() -> Self {
+        Self { gpu_textures: None }
+    }
+
+    /// Cap the transient texture pool at `bytes`.
+    pub fn gpu_textures(bytes: u64) -> Self {
+        Self {
+            gpu_textures: Some(bytes),
+        }
+    }
+}
+
+/// The transient pool does not fit the configured [`Budget`] (S4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetExceeded {
+    /// The configured cap.
+    pub budget: u64,
+    /// What the pool needs at this graph configuration.
+    pub required: u64,
+    /// Largest slots (bytes desc): what to shrink or disable first.
+    pub offenders: Vec<String>,
+}
+
+impl std::fmt::Display for BudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "transient pool needs {} ({:.1} MiB), budget {} ({:.1} MiB); largest slots: {}",
+            self.required,
+            self.required as f64 / (1024.0 * 1024.0),
+            self.budget,
+            self.budget as f64 / (1024.0 * 1024.0),
+            self.offenders.join("; ")
+        )?;
+        if !self.offenders.is_empty() {
+            write!(f, " — reduce resource sizes or disable passes (e.g. bloom)")?;
+        }
+        Ok(())
+    }
+}
+
 /// The pass graph being assembled.
 #[derive(Debug)]
 pub struct RenderGraph {
@@ -281,6 +335,8 @@ pub struct RenderGraph {
     /// recomputes. Every mutation resets this (S1: `compute_layout` must
     /// stay off the per-frame hot path).
     cached: Option<GraphLayout>,
+    /// S4 memory budget; unbounded by default.
+    budget: Budget,
     /// How many times the layout has been computed over this graph's
     /// lifetime. Diagnostics for the S1 cache (tests, benches, probes).
     layout_computations: u32,
@@ -294,6 +350,7 @@ impl RenderGraph {
             passes: Vec::new(),
             surface_size,
             cached: None,
+            budget: Budget::unbounded(),
             layout_computations: 0,
         }
     }
@@ -302,6 +359,17 @@ impl RenderGraph {
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.surface_size = (width, height);
         self.cached = None;
+    }
+
+    /// Sets the S4 memory budget; invalidates the cached layout.
+    pub fn set_budget(&mut self, budget: Budget) {
+        self.budget = budget;
+        self.cached = None;
+    }
+
+    /// The configured budget.
+    pub fn budget(&self) -> Budget {
+        self.budget
     }
 
     /// Registers a graph-owned resource (texture).
@@ -398,13 +466,30 @@ impl RenderGraph {
     /// panic fires on the first recomputation after the offending mutation,
     /// not at the mutation site.
     pub fn layout(&mut self) -> &GraphLayout {
+        self.try_layout()
+            .unwrap_or_else(|e| panic!("render graph budget exceeded: {e}"))
+    }
+
+    /// Like [`RenderGraph::layout`], but a budget violation is a returned
+    /// error instead of a panic (editors/tools; S4).
+    ///
+    /// # Errors
+    /// Returns [`BudgetExceeded`] when the pool does not fit the
+    /// configured [`Budget`]; nothing is cached in that case.
+    pub fn try_layout(&mut self) -> Result<&GraphLayout, BudgetExceeded> {
         if self.cached.is_none() {
             let layout = self.compute_layout();
+            if let Some(cap) = self.budget.gpu_textures {
+                let planned = layout.planned_pool_bytes();
+                if planned > cap {
+                    return Err(budget_exceeded(cap, planned, &layout));
+                }
+            }
             self.cached = Some(layout);
             self.layout_computations += 1;
         }
         // Filled by the branch above (or by an earlier call).
-        self.cached.as_ref().expect("layout cache is filled above")
+        Ok(self.cached.as_ref().expect("layout cache is filled above"))
     }
 
     /// Snapshot of the cached layout as an owned value. Equivalent to
