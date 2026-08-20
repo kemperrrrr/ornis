@@ -107,9 +107,9 @@ impl Access {
 
     /// Конфликтует ли запись с (чтение ∪ запись) другого доступа.
     fn writes_touch(&self, other: &Access) -> bool {
-        self.writes.iter().any(|w| {
-            other.reads.contains(w) || other.writes.contains(w)
-        })
+        self.writes
+            .iter()
+            .any(|w| other.reads.contains(w) || other.writes.contains(w))
     }
 }
 
@@ -156,6 +156,12 @@ pub struct Schedule {
     systems: Vec<Box<dyn System>>,
     accesses: Vec<Access>,
     parallel: bool,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Schedule {
@@ -289,9 +295,7 @@ mod tests {
             self.access.clone()
         }
         fn run(&self, resources: &Resources) {
-            let counter = resources
-                .get::<Mutex<Vec<&'static str>>>()
-                .expect("log resource");
+            let counter = resources.get::<Mutex<Vec<&'static str>>>().expect("log resource");
             let mut log = counter.lock().expect("log lock");
             log.push(self.target);
         }

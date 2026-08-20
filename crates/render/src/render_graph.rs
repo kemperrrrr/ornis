@@ -214,9 +214,12 @@ impl GraphLayout {
         for j in 1..n {
             let mut best = 0usize;
             for i in 0..j {
-                let conflict = writes[i].iter().any(|w| {
-                    self.passes[j].reads.contains(w) || writes[j].contains(w)
-                }) || writes[j].iter().any(|w| self.passes[i].reads.contains(w));
+                let conflict = writes[i]
+                    .iter()
+                    .any(|w| self.passes[j].reads.contains(w) || writes[j].contains(w))
+                    || writes[j]
+                        .iter()
+                        .any(|w| self.passes[i].reads.contains(w));
                 if conflict {
                     best = best.max(level[i] + 1);
                 }
