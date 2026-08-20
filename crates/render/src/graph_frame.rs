@@ -118,9 +118,8 @@ impl GraphExecutor {
             let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
                 .par_iter()
                 .map(|&index| {
-                    let mut encoder = device.create_command_encoder(
-                        &wgpu::CommandEncoderDescriptor { label: None },
-                    );
+                    let mut encoder = device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                     let views = PassViews {
                         layout,
                         pool,
@@ -546,8 +545,7 @@ impl RenderGraph3D {
         // is a cache hit, `compute_layout` stays off the hot path.
         let layout = graph.layout();
         executor.set_external_view(ids.target, target.clone());
-        let dispatch =
-            |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
+        let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
                 // S2b: every pass is a typed system (conditional passes
                 // are mode families); dispatch by original PassId.
                 let mut frame = Frame {

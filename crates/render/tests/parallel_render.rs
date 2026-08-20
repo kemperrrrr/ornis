@@ -40,11 +40,7 @@ fn target(device: &wgpu::Device, label: &str) -> (wgpu::Texture, wgpu::TextureVi
     (texture, view)
 }
 
-fn read_back(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-) -> Vec<u8> {
+fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
     let unpadded = SIZE * BPP;
     let padded = unpadded.div_ceil(256) * 256;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -82,7 +78,10 @@ fn read_back(
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).is_ok());
     device.poll(wgpu::PollType::Wait).expect("poll readback");
-    receiver.recv().expect("map callback").expect("map readback");
+    receiver
+        .recv()
+        .expect("map callback")
+        .expect("map readback");
     let data = slice.get_mapped_range().to_vec();
     buffer.unmap();
     data
@@ -119,7 +118,11 @@ fn parallel_recording_matches_sequential_pixels() {
         material_index: 0,
     };
     renderer.upload_instances(&queue, &[instance]);
-    renderer.set_lights(&queue, [0.1, 0.1, 0.1], &[([0.3, -1.0, 0.5], 1.0, [1.0, 1.0, 1.0])]);
+    renderer.set_lights(
+        &queue,
+        [0.1, 0.1, 0.1],
+        &[([0.3, -1.0, 0.5], 1.0, [1.0, 1.0, 1.0])],
+    );
 
     let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
     let proj = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 10.0);
@@ -182,5 +185,9 @@ fn parallel_recording_matches_sequential_pixels() {
 
     let seq_pixels = read_back(&device, &queue, &seq_tex);
     let par_pixels = read_back(&device, &queue, &par_tex);
-    assert_eq!(seq_pixels, par_pixels, "parallel recording must be pixel-identical");
+    assert_eq!(
+        seq_pixels,
+        par_pixels,
+        "parallel recording must be pixel-identical"
+    );
 }

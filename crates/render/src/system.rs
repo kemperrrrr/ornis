@@ -376,12 +376,7 @@ impl SystemSet {
 
     /// Runs the system registered for `pass_id`, if any. Returns `false`
     /// when the pass is not a typed system (imperative fallback).
-    pub fn run_pass(
-        &self,
-        pass_id: PassId,
-        views: &PassViews<'_>,
-        frame: &mut Frame<'_>,
-    ) -> bool {
+    pub fn run_pass(&self, pass_id: PassId, views: &PassViews<'_>, frame: &mut Frame<'_>) -> bool {
         let ids = &self.ids;
         let Some((_, entry)) = self.systems.iter().find(|(id, _)| *id == pass_id) else {
             return false;
