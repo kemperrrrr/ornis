@@ -241,6 +241,40 @@ impl GraphLayout {
             || writes[j].iter().any(|w| passes[i].reads.contains(w))
     }
 
+    /// Mermaid diagram of this layout — the debug projection (S6):
+    /// passes grouped into parallel-level subgraphs, resources as nodes,
+    /// write/read flows as edges. GitHub renders ```mermaid blocks
+    /// natively, so a layout drop pasted into a PR review becomes a
+    /// picture of the frame pipeline.
+    pub fn mermaid(&self) -> String {
+        let mut out = String::from("flowchart TD\n");
+        for (li, level) in self.levels().iter().enumerate() {
+            out.push_str(&format!("  subgraph L{li}[\"level {li}\"]\n"));
+            for &pi in level {
+                out.push_str(&format!("    P{pi}[\"{}\"]\n", self.passes[pi].name));
+            }
+            out.push_str("  end\n");
+        }
+        for rl in &self.resources {
+            if rl.first_use == usize::MAX {
+                continue;
+            }
+            out.push_str(&format!(
+                "  R{}[\"{} {}\"]\n",
+                rl.id.0, rl.name, format!("{:?}", rl.spec.format)
+            ));
+        }
+        for (pi, pass) in self.passes.iter().enumerate() {
+            for rid in &pass.reads {
+                out.push_str(&format!("  R{} --> P{pi}\n", rid.0));
+            }
+            for (rid, _) in &pass.writes {
+                out.push_str(&format!("  P{pi} --> R{}\n", rid.0));
+            }
+        }
+        out
+    }
+
     /// Textual layout dump for debugging/reporting.
     pub fn debug_dump(&self) -> String {
         let mut s = format!(
@@ -1078,6 +1112,33 @@ mod tests {
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g.add_pass("real").write(a);
         g.order_before_named("real", "ghost");
+    }
+
+    #[test]
+    fn mermaid_is_a_valid_projection() {
+        // S6: граф как отладочная проекция — уровни подграфами,
+        // ресурсы узлами, потоки рёбрами; GitHub рендерит нативно.
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rg16Float, 1));
+        g.add_pass("p0").write(a);
+        g.add_pass("p1").read(a).write(b);
+
+        let m = g.build().mermaid();
+        assert!(m.starts_with("flowchart TD\n"), "head: {m}");
+        assert!(m.contains("subgraph L0[\"level 0\"]"), "levels: {m}");
+        assert!(m.contains("P0[\"p0\"]"), "pass nodes: {m}");
+        assert!(m.contains("R0[\"a Rgba8Unorm\"]"), "resource nodes: {m}");
+        assert!(m.contains("P0 --> R0"), "write edges: {m}");
+        assert!(m.contains("R0 --> P1"), "read edges: {m}");
+        // Мёртвые ресурсы в проекцию не входят.
+        let mut g2 = RenderGraph::new((64, 64));
+        let dead = g2.create_resource("dead", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let live = g2.create_resource("live", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g2.add_pass("only").write(live);
+        let m2 = g2.build().mermaid();
+        assert!(!m2.contains("dead"), "dead resource hidden: {m2}");
+        assert!(!m2.contains(format!("R{}", dead.0).as_str()));
     }
 
     #[test]

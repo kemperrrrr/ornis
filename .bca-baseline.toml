@@ -648,7 +648,7 @@ value = 1095.0
 path = "crates/render/src/render_graph.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 1260.0
+value = 1320.0
 
 [[entry]]
 path = "crates/render/src/renderer.rs"

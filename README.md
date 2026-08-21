@@ -141,7 +141,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | OpenPBR-материал (20 vec4 параметров, все BSDF) | ✅ | `crates/render/src/material.rs` |
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
-| Render Graph: `RenderGraph3D` + `Technique` (forward/deferred/hybrid как конфигурация графа) + блум-каскад | ✅ | `crates/render/src/render_graph.rs`, `graph_frame.rs`; детали: `docs/rendering/render-graph.md` |
+| Render Graph: `RenderGraph3D` + `Technique` (forward/deferred/hybrid как конфигурация графа) + блум-каскад | ✅ |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, `mermaid()`-проекция (S6); `ornis-core::Schedule` + контракт шедулера | ✅ | `crates/render/src/render_graph.rs`, `graph_frame.rs`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 
