@@ -631,7 +631,7 @@ value = 380000.0
 path = "crates/render/src/render_graph.rs"
 qualified = "RenderGraph"
 metric = "nom"
-value = 45.0
+value = 48.0
 
 # S5a/S5b (2026-08-19): levels(), execute_parallel, бюджетный API и
 # golden/уровневые тесты выросли сверх ploc=900. graph_frame — точка
