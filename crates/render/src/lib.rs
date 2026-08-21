@@ -22,6 +22,7 @@ pub use render_graph::{
     Budget, BudgetExceeded, GraphLayout, PassContext, PassId, PassLayout, PoolSlot, RenderGraph,
     ResourceId, ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
 };
+pub use render_graph::GraphOrderError;
 pub use renderer::{
     CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,
     InstanceData, LightingPass, PerObjectGpu, Renderer3D,

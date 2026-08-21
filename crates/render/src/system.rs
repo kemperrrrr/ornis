@@ -123,6 +123,8 @@ pub struct AccessDesc {
 
 /// A type-level set of accesses: tuples of access markers, e.g.
 /// `(Read<Albedo>, Write<Hdr>)`. Collect order = declaration order.
+/// Arity is supported up to 6 (one `impl_access_tuple!` line below adds
+/// more if a pass ever needs it).
 pub trait AccessSet {
     fn collect_accesses(out: &mut Vec<AccessDesc>);
 }

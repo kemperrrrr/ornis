@@ -404,6 +404,34 @@ impl std::fmt::Display for BudgetExceeded {
     }
 }
 
+/// Errors of [`RenderGraph::try_order_before`] (S5c): an explicit
+/// ordering edge the registration order cannot satisfy, or an unknown
+/// pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphOrderError {
+    /// No pass is registered under this name.
+    UnknownPass { name: String },
+    /// `after` is registered earlier than `before`: execution order is
+    /// the registration order (S3) — explicit edges only split parallel
+    /// levels.
+    BackwardEdge { before: String, after: String },
+}
+
+impl std::fmt::Display for GraphOrderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GraphOrderError::UnknownPass { name } => write!(f, "no pass named '{name}'"),
+            GraphOrderError::BackwardEdge { before, after } => write!(
+                f,
+                "'{after}' is registered earlier than '{before}' — register passes in \
+                 execution order; explicit edges only split parallel levels"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphOrderError {}
+
 /// The pass graph being assembled.
 #[derive(Debug)]
 pub struct RenderGraph {
@@ -530,14 +558,29 @@ impl RenderGraph {
     /// Паникует, если `after` зарегистрирован раньше `before` (порядок
     /// исполнения неизменяем) или пасс неизвестен.
     pub fn order_before(&mut self, before: PassId, after: PassId) {
-        assert!(
-            before.0 < after.0,
-            "order_before({before:?}, {after:?}): the second pass is registered              earlier — register passes in execution order; explicit edges              only split parallel levels"
-        );
+        self.try_order_before(before, after)
+            .unwrap_or_else(|error| panic!("order_before({before:?}, {after:?}): {error}"));
+    }
+
+    /// Мягкая [`RenderGraph::order_before`]: ошибка — возвращаемый
+    /// [`GraphOrderError`], не паника. Заодно валидирует оба `PassId`
+    /// (раньше ребро с неизвестным id добавлялось молча и игнорировалось
+    /// при подсчёте уровней).
+    pub fn try_order_before(
+        &mut self,
+        before: PassId,
+        after: PassId,
+    ) -> Result<(), GraphOrderError> {
+        let before_name = self.pass_name(before)?;
+        let after_name = self.pass_name(after)?;
+        if before.0 >= after.0 {
+            return Err(GraphOrderError::BackwardEdge { before: before_name, after: after_name });
+        }
         if !self.ordering.contains(&(before, after)) {
             self.ordering.push((before, after));
         }
         self.cached = None;
+        Ok(())
     }
 
     /// S5c: name-based [`RenderGraph::order_before`] (имя пасса из
@@ -546,17 +589,34 @@ impl RenderGraph {
     /// # Panics
     /// Паникует при неизвестном имени или обратном порядке регистрации.
     pub fn order_before_named(&mut self, before: &str, after: &str) {
-        let b = self.pass_id_of(before);
-        let a = self.pass_id_of(after);
-        self.order_before(b, a);
+        self.try_order_before_named(before, after)
+            .unwrap_or_else(|error| panic!("order_before_named('{before}', '{after}'): {error}"));
     }
 
-    fn pass_id_of(&self, name: &str) -> PassId {
+    /// Мягкая [`RenderGraph::order_before_named`].
+    pub fn try_order_before_named(
+        &mut self,
+        before: &str,
+        after: &str,
+    ) -> Result<(), GraphOrderError> {
+        let b = self.try_pass_id_of(before)?;
+        let a = self.try_pass_id_of(after)?;
+        self.try_order_before(b, a)
+    }
+
+    fn try_pass_id_of(&self, name: &str) -> Result<PassId, GraphOrderError> {
         self.passes
             .iter()
             .position(|p| p.name == name)
             .map(|i| PassId(i as u32))
-            .unwrap_or_else(|| panic!("render graph: no pass named '{name}'"))
+            .ok_or_else(|| GraphOrderError::UnknownPass { name: name.to_owned() })
+    }
+
+    fn pass_name(&self, id: PassId) -> Result<String, GraphOrderError> {
+        self.passes
+            .get(id.0 as usize)
+            .map(|node| node.name.clone())
+            .ok_or_else(|| GraphOrderError::UnknownPass { name: format!("#{}", id.0) })
     }
 
     /// Enables/disables a pass (culling): a disabled pass is dropped from
@@ -1112,6 +1172,31 @@ mod tests {
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g.add_pass("real").write(a);
         g.order_before_named("real", "ghost");
+    }
+
+    #[test]
+    fn try_order_before_reports_errors_without_panicking() {
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let first = g.add_pass("first").write(a).id();
+        let second = g.add_pass("second").write(b).id();
+        assert!(matches!(
+            g.try_order_before(second, first),
+            Err(GraphOrderError::BackwardEdge { .. })
+        ));
+        assert_eq!(
+            g.try_order_before_named("first", "ghost").map(|_| ()),
+            Err(GraphOrderError::UnknownPass { name: "ghost".to_owned() })
+        );
+        // Id вне реестра — ошибка, а не молчаливое мусорное ребро.
+        assert!(matches!(
+            g.try_order_before(PassId(99), PassId(100)),
+            Err(GraphOrderError::UnknownPass { .. })
+        ));
+        assert_eq!(g.build().levels(), vec![vec![0, 1]]);
+        assert!(g.try_order_before(first, second).is_ok());
+        assert_eq!(g.build().levels(), vec![vec![0], vec![1]]);
     }
 
     #[test]
