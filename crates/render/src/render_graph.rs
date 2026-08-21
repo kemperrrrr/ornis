@@ -261,9 +261,7 @@ impl GraphLayout {
             }
             out.push_str(&format!(
                 "  R{}[\"{} {:?}\"]\n",
-                rl.id.0,
-                rl.name,
-                rl.spec.format
+                rl.id.0, rl.name, rl.spec.format
             ));
         }
         for (pi, pass) in self.passes.iter().enumerate() {
