@@ -219,27 +219,11 @@ impl GraphLayout {
             .iter()
             .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
             .collect();
-        let n = self.passes.len();
-        let mut level = vec![0usize; n];
-        for j in 1..n {
-            let mut best = 0usize;
-            for (i, prev_level) in level.iter().enumerate().take(j) {
-                let ordered =
-                    Self::passes_conflict(&self.passes, &writes, i, j) || edges.contains(&(i, j));
-                if ordered {
-                    best = best.max(prev_level + 1);
-                }
-            }
-            level[j] = best;
-        }
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for (i, l) in level.iter().enumerate() {
-            if groups.len() <= *l {
-                groups.resize_with(*l + 1, Vec::new);
-            }
-            groups[*l].push(i);
-        }
-        groups
+        // Единый движок уровней с `ornis-core::Schedule` (§28.2 — один
+        // шедулер на всё: та же функция считает уровни систем и пассов).
+        ornis_core::compute_levels(self.passes.len(), |i, j| {
+            Self::passes_conflict(&self.passes, &writes, i, j) || edges.contains(&(i, j))
+        })
     }
 
     /// Do passes `i < j` conflict (registration order = priority):

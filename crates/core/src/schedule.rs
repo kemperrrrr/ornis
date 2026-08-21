@@ -130,14 +130,24 @@ fn conflicts(a: &Access, b: &Access) -> bool {
 /// Уровни параллельности: системы без конфликтов внутри уровня;
 /// уровни упорядочены зависимостями. Детерминировано порядком регистрации.
 fn level_groups(accesses: &[Access], ordering: &[(usize, usize)]) -> Vec<Vec<usize>> {
-    let n = accesses.len();
+    compute_levels(accesses.len(), |i, j| {
+        conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j))
+    })
+}
+
+/// Движок уровней параллельности — единый для всех шедулеров (§28.2:
+/// «один scheduler на всё»; используется `Schedule` здесь и
+/// `GraphLayout::levels` рендер-графа). `ordered(i, j)` = есть
+/// зависимость i→j (i < j, порядок регистрации — тайбрейк); уровень j =
+/// 1 + максимум уровней предшественников, группы идут по возрастанию,
+/// внутри группы порядок регистрации.
+pub fn compute_levels(n: usize, ordered: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>> {
     let mut level = vec![0usize; n];
     for j in 1..n {
         let mut best = 0usize;
-        for i in 0..j {
-            let ordered = conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j));
-            if ordered {
-                best = best.max(level[i] + 1);
+        for (i, prev_level) in level.iter().enumerate().take(j) {
+            if ordered(i, j) {
+                best = best.max(prev_level + 1);
             }
         }
         level[j] = best;

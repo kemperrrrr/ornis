@@ -26,5 +26,5 @@ pub use pipeline::{
     TargetDiscriminant, lane_target_of, pipeline_enter, pipeline_exit,
 };
 pub use prefetch::prefetch_read;
-pub use schedule::{Access, Resources, Schedule, System};
+pub use schedule::{compute_levels, Access, Resources, Schedule, System};
 pub use smart_store::{Pack, SmartStore};

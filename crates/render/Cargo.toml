@@ -27,5 +27,9 @@ criterion = { version = "0.5", features = ["rayon"] }
 name = "layout_bench"
 harness = false
 
+[[bench]]
+name = "recording_bench"
+harness = false
+
 [lints]
 workspace = true
