@@ -19,8 +19,9 @@ pub use render_backend::{
     RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
 };
 pub use render_graph::{
-    Budget, BudgetExceeded, GraphLayout, PassContext, PassId, PassLayout, PoolSlot, RenderGraph,
-    ResourceId, ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
+    Budget, BudgetExceeded, GraphLayout, GraphOrderError, PassContext, PassId, PassLayout,
+    PoolSlot, RenderGraph, ResourceId, ResourceLayout, SizePolicy, TextureSpec,
+    format_bytes_per_pixel,
 };
 pub use renderer::{
     CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,

@@ -15,10 +15,27 @@
 //!
 //! Порядок регистрации — тайбрейк, как у пассов рендер-графа: любые два
 //! конфликтующих процесса идут в порядке добавления.
+//!
+//! # Принуждение объявленных доступов
+//!
+//! Условие «не трогать чужие ресурсы» больше не только на честном слове:
+//! пока исполняется система, [`Resources::get`]/[`Resources::contains`]
+//! проверяют, что ресурс объявлен в `access()` этой системы (чтение или
+//! запись; собственная запись покрывает чтение). Нарушение паникует с
+//! именем системы и типом ресурса. Проверка — thread-local стек активных
+//! деклараций (RAII, корректно откатывается при паниках и вложенных
+//! шедулерах); вне [`Schedule::run`] доступ свободен. По умолчанию
+//! включена в debug-сборках и выключена в release
+//! ([`Schedule::set_enforce_accesses`] переопределяет).
 
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
 
 /// Singleton resource container («мир»): одно значение на тип.
@@ -43,12 +60,22 @@ impl Resources {
     }
 
     /// Есть ли singleton типа `R`.
+    ///
+    /// # Panics
+    /// Паникует, если вызвана из системы, не декларировавшей `R`
+    /// (включённое принуждение доступов; см. модульную документацию).
     pub fn contains<R: Any + Send + Sync>(&self) -> bool {
+        assert_access_declared::<R>();
         self.map.contains_key(&TypeId::of::<R>())
     }
 
     /// Общий доступ к singleton типа `R`.
+    ///
+    /// # Panics
+    /// Паникует, если вызвана из системы, не декларировавшей `R`
+    /// (чтение или запись; включённое принуждение доступов).
     pub fn get<R: Any + Send + Sync>(&self) -> Option<&R> {
+        assert_access_declared::<R>();
         self.map
             .get(&TypeId::of::<R>())
             .and_then(|boxed| boxed.downcast_ref::<R>())
@@ -82,13 +109,15 @@ impl Resources {
 }
 
 /// Объявленные доступы системы: чтения/записи singleton-ресурсов по типам.
+/// Раньше назывался `Access` — переименован, чтобы не конфликтовать с
+/// типовым `ornis_render::Access` (ZST-маркеры `Read`/`Write` графа).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Access {
+pub struct SystemAccess {
     pub reads: Vec<TypeId>,
     pub writes: Vec<TypeId>,
 }
 
-impl Access {
+impl SystemAccess {
     pub fn new() -> Self {
         Self::default()
     }
@@ -106,7 +135,8 @@ impl Access {
     }
 
     /// Конфликтует ли запись с (чтение ∪ запись) другого доступа.
-    fn writes_touch(&self, other: &Access) -> bool {
+    #[cfg(test)]
+    fn writes_touch(&self, other: &SystemAccess) -> bool {
         self.writes
             .iter()
             .any(|w| other.reads.contains(w) || other.writes.contains(w))
@@ -116,20 +146,55 @@ impl Access {
 /// Система единого шедулера: доступы — данные, исполнение — над миром.
 pub trait System: Send + Sync {
     fn name(&self) -> &'static str;
-    fn access(&self) -> Access;
+    fn access(&self) -> SystemAccess;
     fn run(&self, resources: &Resources);
 }
+
+/// Ошибка [`Schedule::try_order_before`]: явный порядок, который не
+/// способен выполнить контракт шедулера.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderError {
+    /// Системы с таким именем нет (уникальность имён — на вызывающем).
+    UnknownSystem { name: String },
+    /// `after` зарегистрирован раньше `before`: порядок исполнения —
+    /// порядок регистрации (S3), явные рёбра только разбивают уровни.
+    BackwardEdge { before: String, after: String },
+}
+
+impl fmt::Display for OrderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OrderError::UnknownSystem { name } => write!(f, "no system named '{name}'"),
+            OrderError::BackwardEdge { before, after } => write!(
+                f,
+                "'{after}' is registered earlier than '{before}' — register systems in \
+                 execution order and use order_before to split parallel levels"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OrderError {}
 
 /// Конфликт двух систем (в порядке регистрации i < j): упорядочены, если
 /// i пишет то, что j читает/пишет (RaW/WaW), или j пишет то, что читает
 /// i (анти-зависимость, WaR).
-fn conflicts(a: &Access, b: &Access) -> bool {
+#[cfg(test)]
+fn conflicts(a: &SystemAccess, b: &SystemAccess) -> bool {
     a.writes_touch(b) || b.writes_touch(a)
 }
 
 /// Уровни параллельности: системы без конфликтов внутри уровня;
 /// уровни упорядочены зависимостями. Детерминировано порядком регистрации.
-fn level_groups(accesses: &[Access], ordering: &[(usize, usize)]) -> Vec<Vec<usize>> {
+///
+/// Эталонная Vec-реализация: продакшн-путь [`Schedule`] использует
+/// битсет-проекцию тех же конфликтов; тест `bitset_plan_matches_reference_model`
+/// пинит совпадение.
+#[cfg(test)]
+fn reference_level_groups(
+    accesses: &[SystemAccess],
+    ordering: &[(usize, usize)],
+) -> Vec<Vec<usize>> {
     compute_levels(accesses.len(), |i, j| {
         conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j))
     })
@@ -162,15 +227,122 @@ pub fn compute_levels(n: usize, ordered: impl Fn(usize, usize) -> bool) -> Vec<V
     groups
 }
 
+/// Уровневый план поверх битсетов: плотный индекс на distinct `TypeId`,
+/// пересечения вместо линейных `Vec::contains` в O(n²)-цикле, явные рёбра
+/// порядка — матрица смежности. Семантика конфликтов идентична Vec-эталону
+/// (RaW/WaW/WaR); совпадение пинится тестом `bitset_plan_matches_reference_model`.
+fn build_level_plan(
+    systems: usize,
+    accesses: &[SystemAccess],
+    ordering: &[(usize, usize)],
+) -> Vec<Vec<usize>> {
+    let mut resource_ids: HashMap<TypeId, u32> = HashMap::new();
+    let mut dense = |id: TypeId| -> usize {
+        let next = resource_ids.len() as u32;
+        *resource_ids.entry(id).or_insert(next) as usize
+    };
+    let reads: Vec<FixedBitSet> = accesses
+        .iter()
+        .map(|a| a.reads.iter().map(|&id| dense(id)).collect())
+        .collect();
+    let writes: Vec<FixedBitSet> = accesses
+        .iter()
+        .map(|a| a.writes.iter().map(|&id| dense(id)).collect())
+        .collect();
+    let mut successors = vec![FixedBitSet::with_capacity(systems); systems];
+    for &(before, after) in ordering {
+        if before < systems && after < systems {
+            successors[before].insert(after);
+        }
+    }
+    compute_levels(systems, |i, j| {
+        let disjoint_writes_read = writes[i].is_disjoint(&reads[j]);
+        let disjoint_writes_writes = writes[i].is_disjoint(&writes[j]);
+        let disjoint_read_writes = reads[i].is_disjoint(&writes[j]);
+        !(disjoint_writes_read && disjoint_writes_writes && disjoint_read_writes)
+            || successors[i].contains(j)
+    })
+}
+
+/// Активная декларация доступов исполняемой системы (принуждение).
+struct AccessFrame {
+    system: &'static str,
+    reads: Vec<TypeId>,
+    writes: Vec<TypeId>,
+}
+
+thread_local! {
+    /// Стек активных деклараций: пуст вне `Schedule::run` (или когда
+    /// принуждение выключено) — тогда `Resources` unrestricted.
+    static ACCESS_FRAMES: RefCell<Vec<AccessFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII-пуш декларации в [`ACCESS_FRAMES`]; снимается при выходе из
+/// области видимости, включая раскрутку паники (rayon переиспользует
+/// потоки — без RAII стек протухал бы).
+struct AccessFrameGuard;
+
+impl AccessFrameGuard {
+    fn push(system: &'static str, access: &SystemAccess) -> Self {
+        ACCESS_FRAMES.with(|frames| {
+            frames.borrow_mut().push(AccessFrame {
+                system,
+                reads: access.reads.clone(),
+                writes: access.writes.clone(),
+            });
+        });
+        AccessFrameGuard
+    }
+}
+
+impl Drop for AccessFrameGuard {
+    fn drop(&mut self) {
+        ACCESS_FRAMES.with(|frames| {
+            frames.borrow_mut().pop();
+        });
+    }
+}
+
+/// Проверяет `R` против декларации текущей исполняемой системы; вне
+/// [`Schedule::run`] — no-op. Нарушение = нарушение контракта
+/// детерминизма: недекларированный доступ может гоняться с системами
+/// того же параллельного уровня.
+fn assert_access_declared<R: Any + Send + Sync>() {
+    ACCESS_FRAMES.with(|frames| {
+        let frames = frames.borrow();
+        let Some(frame) = frames.last() else {
+            return;
+        };
+        let id = TypeId::of::<R>();
+        let declared = frame.reads.contains(&id) || frame.writes.contains(&id);
+        if !declared {
+            panic!(
+                "system '{}' reads resource '{}' that is not declared in its access set \
+                 (SystemAccess::reads/writes) — undeclared access breaks the deterministic \
+                 schedule contract",
+                frame.system,
+                std::any::type_name::<R>()
+            );
+        }
+    });
+}
+
 /// Расписание систем: порядок регистрации — тайбрейк конфликтов.
 pub struct Schedule {
     systems: Vec<Box<dyn System>>,
-    accesses: Vec<Access>,
+    accesses: Vec<SystemAccess>,
     /// S5c: явные рёбра порядка (индексы регистрации i < j) поверх
     /// выведенных из доступов — например, для скрытых зависимостей
     /// (общие queue-буферы), которых не видно в множествах доступа.
     ordering: Vec<(usize, usize)>,
     parallel: bool,
+    enforce_accesses: bool,
+    /// Кеш уровневого плана (зеркалит S1-кеш `GraphLayout` рендера):
+    /// пересчитывается только после `add_system`/`order_before`.
+    plan: Mutex<Option<Vec<Vec<usize>>>>,
+    /// Диагностика кеша: сколько раз план пересчитан (в steady state
+    /// не растёт; ср. `RenderGraph::layout_computations`).
+    level_computations: AtomicUsize,
 }
 
 impl Default for Schedule {
@@ -186,6 +358,9 @@ impl Schedule {
             accesses: Vec::new(),
             ordering: Vec::new(),
             parallel: true,
+            enforce_accesses: cfg!(debug_assertions),
+            plan: Mutex::new(None),
+            level_computations: AtomicUsize::new(0),
         }
     }
 
@@ -193,7 +368,15 @@ impl Schedule {
     pub fn add_system<S: System + 'static>(&mut self, system: S) -> &mut Self {
         self.accesses.push(system.access());
         self.systems.push(Box::new(system));
+        self.invalidate_plan();
         self
+    }
+
+    fn invalidate_plan(&mut self) {
+        *self
+            .plan
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// S5c: объявляет, что система `before` обязана выполниться раньше
@@ -205,16 +388,34 @@ impl Schedule {
     /// или `after` зарегистрирована раньше `before`: порядок исполнения —
     /// порядок регистрации (S3), явные рёбра только разбивают уровни.
     pub fn order_before(&mut self, before: &str, after: &str) -> &mut Self {
-        let b = self.system_index(before);
-        let a = self.system_index(after);
-        assert!(
-            b < a,
-            "order_before('{before}', '{after}'): '{after}' is registered              earlier — register systems in execution order and use              order_before to split parallel levels"
-        );
+        self.try_order_before(before, after)
+            .unwrap_or_else(|error| panic!("order_before('{before}', '{after}'): {error}"))
+    }
+
+    /// Мягкая [`Schedule::order_before`]: ошибка — возвращаемое
+    /// [`OrderError`], не паника (для динамических фронтендов фазы 6).
+    pub fn try_order_before(&mut self, before: &str, after: &str) -> Result<&mut Self, OrderError> {
+        let Some(b) = self.try_system_index(before) else {
+            return Err(OrderError::UnknownSystem {
+                name: before.to_owned(),
+            });
+        };
+        let Some(a) = self.try_system_index(after) else {
+            return Err(OrderError::UnknownSystem {
+                name: after.to_owned(),
+            });
+        };
+        if b >= a {
+            return Err(OrderError::BackwardEdge {
+                before: before.to_owned(),
+                after: after.to_owned(),
+            });
+        }
         if !self.ordering.contains(&(b, a)) {
             self.ordering.push((b, a));
+            self.invalidate_plan();
         }
-        self
+        Ok(self)
     }
 
     /// S5c: зеркальный [`Schedule::order_before`].
@@ -222,17 +423,26 @@ impl Schedule {
         self.order_before(before, after)
     }
 
-    fn system_index(&self, name: &str) -> usize {
-        self.systems
-            .iter()
-            .position(|sys| sys.name() == name)
-            .unwrap_or_else(|| panic!("schedule: no system named '{name}'"))
+    /// Мягкая [`Schedule::order_after`].
+    pub fn try_order_after(&mut self, after: &str, before: &str) -> Result<&mut Self, OrderError> {
+        self.try_order_before(before, after)
+    }
+
+    fn try_system_index(&self, name: &str) -> Option<usize> {
+        self.systems.iter().position(|sys| sys.name() == name)
     }
 
     /// Параллельное (true, по умолчанию) или строго последовательное
     /// (bit-identical порядок регистрации) исполнение.
     pub fn set_parallel(&mut self, parallel: bool) -> &mut Self {
         self.parallel = parallel;
+        self
+    }
+
+    /// Принуждение объявленных доступов (см. модульную документацию):
+    /// по умолчанию включено в debug-сборках, выключено в release.
+    pub fn set_enforce_accesses(&mut self, enforce: bool) -> &mut Self {
+        self.enforce_accesses = enforce;
         self
     }
 
@@ -248,21 +458,53 @@ impl Schedule {
 
     /// Уровни параллельности (индексы систем в порядке регистрации).
     pub fn level_groups(&self) -> Vec<Vec<usize>> {
-        level_groups(&self.accesses, &self.ordering)
+        self.cached_levels()
+    }
+
+    /// Сколько раз уровневый план пересчитан — диагностика кеша
+    /// (в steady state не растёт).
+    pub fn level_computations(&self) -> usize {
+        self.level_computations.load(AtomicOrdering::Relaxed)
+    }
+
+    fn cached_levels(&self) -> Vec<Vec<usize>> {
+        let mut plan = self
+            .plan
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(levels) = plan.as_ref() {
+            return levels.clone();
+        }
+        let levels = build_level_plan(self.systems.len(), &self.accesses, &self.ordering);
+        *plan = Some(levels.clone());
+        self.level_computations
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        levels
     }
 
     /// Исполняет расписание над миром.
     pub fn run(&self, resources: &Resources) {
         if !self.parallel {
-            for system in &self.systems {
-                system.run(resources);
+            for i in 0..self.systems.len() {
+                self.run_system(i, resources);
             }
             return;
         }
-        for group in self.level_groups() {
-            group.par_iter().for_each(|&i| {
-                self.systems[i].run(resources);
-            });
+        let levels = self.cached_levels();
+        for group in &levels {
+            group
+                .par_iter()
+                .for_each(|&i| self.run_system(i, resources));
+        }
+    }
+
+    fn run_system(&self, i: usize, resources: &Resources) {
+        let system = &self.systems[i];
+        if self.enforce_accesses {
+            let _frame = AccessFrameGuard::push(system.name(), &self.accesses[i]);
+            system.run(resources);
+        } else {
+            system.run(resources);
         }
     }
 }
@@ -277,8 +519,8 @@ mod tests {
     struct B;
     struct C;
 
-    fn reads_writes<R: Any + Send + Sync>(reads: bool, writes: bool) -> Access {
-        let mut a = Access::new();
+    fn reads_writes<R: Any + Send + Sync>(reads: bool, writes: bool) -> SystemAccess {
+        let mut a = SystemAccess::new();
         if reads {
             a = a.reads::<R>();
         }
@@ -286,6 +528,19 @@ mod tests {
             a = a.writes::<R>();
         }
         a
+    }
+
+    /// Тестовая система-заглушка с фиксированным именем и доступами.
+    struct NamedNoop(&'static str, SystemAccess);
+
+    impl System for NamedNoop {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn access(&self) -> SystemAccess {
+            self.1.clone()
+        }
+        fn run(&self, _: &Resources) {}
     }
 
     #[test]
@@ -309,26 +564,35 @@ mod tests {
             reads_writes::<C>(false, true),
         ];
         // независимые писатели → один уровень
-        assert_eq!(level_groups(&accesses, &[]), vec![vec![0, 1, 2]]);
+        assert_eq!(reference_level_groups(&accesses, &[]), vec![vec![0, 1, 2]]);
 
         let chain = vec![
-            Access::new().writes::<A>(),
-            Access::new().reads::<A>().writes::<B>(),
-            Access::new().reads::<B>().writes::<C>(),
+            SystemAccess::new().writes::<A>(),
+            SystemAccess::new().reads::<A>().writes::<B>(),
+            SystemAccess::new().reads::<B>().writes::<C>(),
         ];
-        assert_eq!(level_groups(&chain, &[]), vec![vec![0], vec![1], vec![2]]);
+        assert_eq!(
+            reference_level_groups(&chain, &[]),
+            vec![vec![0], vec![1], vec![2]]
+        );
     }
 
     #[test]
     fn anti_dependency_orders_reader_first() {
         // i читает X, j пишет X → i раньше j (анти-зависимость).
-        let accesses = vec![Access::new().reads::<A>(), Access::new().writes::<A>()];
-        assert_eq!(level_groups(&accesses, &[]), vec![vec![0], vec![1]]);
+        let accesses = vec![
+            SystemAccess::new().reads::<A>(),
+            SystemAccess::new().writes::<A>(),
+        ];
+        assert_eq!(
+            reference_level_groups(&accesses, &[]),
+            vec![vec![0], vec![1]]
+        );
     }
 
     struct Bump {
         name: &'static str,
-        access: Access,
+        access: SystemAccess,
         target: &'static str,
     }
 
@@ -336,7 +600,7 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name
         }
-        fn access(&self) -> Access {
+        fn access(&self) -> SystemAccess {
             self.access.clone()
         }
         fn run(&self, resources: &Resources) {
@@ -348,25 +612,31 @@ mod tests {
         }
     }
 
+    /// Тип лог-ресурса тестов ниже (декларируется как чтение).
+    type Log = Mutex<Vec<&'static str>>;
+
     #[test]
     fn sequential_mode_is_registration_order() {
         let mut res = Resources::new();
-        res.insert(Mutex::new(Vec::<&'static str>::new()));
+        res.insert(Log::default());
         let mut sched = Schedule::new();
         sched
             .add_system(Bump {
                 name: "w",
-                access: Access::new().writes::<A>(),
+                access: SystemAccess::new().writes::<A>().reads::<Log>(),
                 target: "w",
             })
             .add_system(Bump {
                 name: "r",
-                access: Access::new().reads::<A>().writes::<B>(),
+                access: SystemAccess::new()
+                    .reads::<A>()
+                    .writes::<B>()
+                    .reads::<Log>(),
                 target: "r",
             });
         sched.set_parallel(false);
         sched.run(&res);
-        let log = res.get::<Mutex<Vec<&'static str>>>().unwrap();
+        let log = res.get::<Log>().unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["w", "r"]);
     }
 
@@ -380,14 +650,14 @@ mod tests {
             events: Mutex<Vec<&'static str>>,
         }
         struct Add {
-            access: Access,
+            access: SystemAccess,
             name: &'static str,
         }
         impl System for Add {
             fn name(&self) -> &'static str {
                 self.name
             }
-            fn access(&self) -> Access {
+            fn access(&self) -> SystemAccess {
                 self.access.clone()
             }
             fn run(&self, resources: &Resources) {
@@ -404,19 +674,29 @@ mod tests {
             // ромб: источник → два независимых узла → сборщик
             sched
                 .add_system(Add {
-                    access: Access::new().writes::<A>(),
+                    access: SystemAccess::new().writes::<A>().reads::<Counters>(),
                     name: "src",
                 })
                 .add_system(Add {
-                    access: Access::new().reads::<A>().writes::<B>(),
+                    access: SystemAccess::new()
+                        .reads::<A>()
+                        .writes::<B>()
+                        .reads::<Counters>(),
                     name: "left",
                 })
                 .add_system(Add {
-                    access: Access::new().reads::<A>().writes::<C>(),
+                    access: SystemAccess::new()
+                        .reads::<A>()
+                        .writes::<C>()
+                        .reads::<Counters>(),
                     name: "right",
                 })
                 .add_system(Add {
-                    access: Access::new().reads::<B>().reads::<C>().writes::<A>(),
+                    access: SystemAccess::new()
+                        .reads::<B>()
+                        .reads::<C>()
+                        .writes::<A>()
+                        .reads::<Counters>(),
                     name: "sink",
                 });
             sched.set_parallel(parallel);
@@ -440,19 +720,9 @@ mod tests {
     fn explicit_ordering_splits_a_level() {
         // Два независимых писателя делят уровень; явное ребро разводит их.
         let mut sched = Schedule::new();
-        struct Noop(&'static str, Access);
-        impl System for Noop {
-            fn name(&self) -> &'static str {
-                self.0
-            }
-            fn access(&self) -> Access {
-                self.1.clone()
-            }
-            fn run(&self, _: &Resources) {}
-        }
         sched
-            .add_system(Noop("first", Access::new().writes::<A>()))
-            .add_system(Noop("second", Access::new().writes::<B>()));
+            .add_system(NamedNoop("first", SystemAccess::new().writes::<A>()))
+            .add_system(NamedNoop("second", SystemAccess::new().writes::<B>()));
         assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
         sched.order_before("first", "second");
         assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
@@ -462,17 +732,9 @@ mod tests {
     #[should_panic(expected = "registered")]
     fn explicit_ordering_rejects_backward_direction() {
         let mut sched = Schedule::new();
-        struct Noop(&'static str);
-        impl System for Noop {
-            fn name(&self) -> &'static str {
-                self.0
-            }
-            fn access(&self) -> Access {
-                Access::new()
-            }
-            fn run(&self, _: &Resources) {}
-        }
-        sched.add_system(Noop("a")).add_system(Noop("b"));
+        sched
+            .add_system(NamedNoop("a", SystemAccess::new()))
+            .add_system(NamedNoop("b", SystemAccess::new()));
         sched.order_before("b", "a");
     }
 
@@ -480,38 +742,181 @@ mod tests {
     #[should_panic(expected = "no system named")]
     fn explicit_ordering_unknown_name_panics() {
         let mut sched = Schedule::new();
-        struct Noop;
-        impl System for Noop {
-            fn name(&self) -> &'static str {
-                "only"
-            }
-            fn access(&self) -> Access {
-                Access::new()
-            }
-            fn run(&self, _: &Resources) {}
-        }
-        sched.add_system(Noop);
+        sched.add_system(NamedNoop("only", SystemAccess::new()));
         sched.order_before("only", "ghost");
+    }
+
+    #[test]
+    fn try_order_before_reports_errors_without_panicking() {
+        let mut sched = Schedule::new();
+        sched
+            .add_system(NamedNoop("a", SystemAccess::new().writes::<A>()))
+            .add_system(NamedNoop("b", SystemAccess::new().writes::<B>()));
+        assert!(matches!(
+            sched.try_order_before("b", "a"),
+            Err(OrderError::BackwardEdge { .. })
+        ));
+        assert_eq!(
+            sched.try_order_before("a", "ghost").map(|_| ()),
+            Err(OrderError::UnknownSystem {
+                name: "ghost".to_owned(),
+            })
+        );
+        // План не тронут ошибками; успешное ребро разбивает уровень.
+        assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
+        assert!(sched.try_order_before("a", "b").is_ok());
+        assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
     }
 
     #[test]
     fn schedule_levels_diamond() {
         let mut sched = Schedule::new();
-        struct Noop(Access);
-        impl System for Noop {
-            fn name(&self) -> &'static str {
-                "noop"
-            }
-            fn access(&self) -> Access {
-                self.0.clone()
-            }
-            fn run(&self, _: &Resources) {}
-        }
         sched
-            .add_system(Noop(Access::new().writes::<A>()))
-            .add_system(Noop(Access::new().reads::<A>().writes::<B>()))
-            .add_system(Noop(Access::new().reads::<A>().writes::<C>()))
-            .add_system(Noop(Access::new().reads::<B>().reads::<C>().writes::<A>()));
+            .add_system(NamedNoop("src", SystemAccess::new().writes::<A>()))
+            .add_system(NamedNoop(
+                "left",
+                SystemAccess::new().reads::<A>().writes::<B>(),
+            ))
+            .add_system(NamedNoop(
+                "right",
+                SystemAccess::new().reads::<A>().writes::<C>(),
+            ))
+            .add_system(NamedNoop(
+                "sink",
+                SystemAccess::new().reads::<B>().reads::<C>().writes::<A>(),
+            ));
         assert_eq!(sched.level_groups(), vec![vec![0], vec![1, 2], vec![3]]);
+    }
+
+    #[test]
+    fn level_plan_is_cached_until_mutation() {
+        let mut sched = Schedule::new();
+        for name in ["a", "b", "c"] {
+            sched.add_system(NamedNoop(name, SystemAccess::new().writes::<A>()));
+        }
+        let res = Resources::new();
+        assert_eq!(sched.level_computations(), 0);
+        sched.run(&res);
+        assert_eq!(sched.level_computations(), 1);
+        sched.run(&res);
+        sched.run(&res);
+        assert_eq!(
+            sched.level_computations(),
+            1,
+            "steady state reuses the cached plan"
+        );
+        sched.add_system(NamedNoop("d", SystemAccess::new().reads::<A>()));
+        sched.run(&res);
+        assert_eq!(
+            sched.level_computations(),
+            2,
+            "add_system invalidates the plan"
+        );
+        assert_eq!(
+            sched.level_groups(),
+            vec![vec![0], vec![1], vec![2], vec![3]]
+        );
+    }
+
+    #[test]
+    fn bitset_plan_matches_reference_model() {
+        // Псевдослучайные наборы доступов (LCG): битсет-план обязан
+        // совпадать с эталонной Vec-реализацией (конфликты → уровни).
+        let mut lcg = 0x5EED_600Du64;
+        let mut next = move || {
+            lcg = lcg
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            lcg
+        };
+        const NAMES: [&str; 12] = [
+            "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+        ];
+        let mut sched = Schedule::new();
+        let mut accesses: Vec<SystemAccess> = Vec::new();
+        for &name in NAMES.iter() {
+            let mut access = SystemAccess::new();
+            if next() % 2 == 0 {
+                access = access.reads::<A>();
+            }
+            if next() % 3 == 0 {
+                access = access.reads::<B>();
+            }
+            if next() % 2 == 0 {
+                access = access.writes::<C>();
+            }
+            if next() % 3 == 0 {
+                access = access.writes::<A>();
+            }
+            sched.add_system(NamedNoop(name, access.clone()));
+            accesses.push(access);
+        }
+        assert_eq!(
+            sched.level_groups(),
+            reference_level_groups(&accesses, &[]),
+            "bitset plan must match the reference model without explicit edges"
+        );
+        sched.order_before("s2", "s8");
+        assert_eq!(
+            sched.level_groups(),
+            reference_level_groups(&accesses, &[(2, 8)]),
+            "bitset plan must match the reference model with an explicit edge"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not declared")]
+    fn undeclared_read_panics_under_enforcement() {
+        struct Sneaky;
+        impl System for Sneaky {
+            fn name(&self) -> &'static str {
+                "sneaky"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new().writes::<A>()
+            }
+            fn run(&self, resources: &Resources) {
+                // Читает B, не декларировав его, — нарушение контракта.
+                let _ = resources.get::<B>();
+            }
+        }
+        let mut res = Resources::new();
+        res.insert(B);
+        let mut sched = Schedule::new();
+        sched.add_system(Sneaky).set_enforce_accesses(true);
+        sched.run(&res);
+    }
+
+    #[test]
+    fn declared_access_passes_enforcement() {
+        struct Honest;
+        impl System for Honest {
+            fn name(&self) -> &'static str {
+                "honest"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new().reads::<A>().writes::<B>()
+            }
+            fn run(&self, resources: &Resources) {
+                // B декларирован на запись — собственное чтение разрешено.
+                assert!(resources.get::<A>().is_some());
+                assert!(resources.get::<B>().is_some());
+            }
+        }
+        let mut res = Resources::new();
+        res.insert(A);
+        res.insert(B);
+        let mut sched = Schedule::new();
+        sched.add_system(Honest).set_enforce_accesses(true);
+        sched.run(&res);
+    }
+
+    #[test]
+    fn resources_are_unrestricted_outside_schedule() {
+        let mut res = Resources::new();
+        res.insert(B);
+        // Вне Schedule::run активных деклараций нет — доступ свободен.
+        assert!(res.contains::<B>());
+        assert!(res.get::<B>().is_some());
     }
 }
