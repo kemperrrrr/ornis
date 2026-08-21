@@ -173,3 +173,49 @@ pub struct PassContext<'a> {
 - **Фаза 4 — переключатель forward/hybrid/deferred как конфигурация графа** ✅: `Technique { Forward, Deferred, Hybrid }` (`graph_frame.rs`, ре-экспорт из `lib.rs`); `RenderGraph3D::new_with(format, size, technique, bloom)`. Проводка узлов: `gbuffer`/`lighting` при `has_deferred()`, `forward` при `has_forward()`; composite читает только живые слои, мёртвый слой дублируется живым view, шейдер различает по `mode` uniform (0/1/2). Forward-only: пасс сам владеет depth (`write_clear`, LoadOp::Clear(1.0)), блум читает живую HDR-текстуру (`hdr` для deferred/hybrid, `hdr_fwd` для forward-only).
 - **Верификация техник** (probe, 1280×720, 16 кадров): hybrid совпадает с legacy попиксельно; **deferred-only == legacy** (0 отличий — классический путь и есть deferred-цепочка); forward-only — **137 164 px** отличий, **2 слота / 10 598 400 B (−62%)**, собственный блум активен; бюджеты hybrid 29 491 200 B ≥ deferred 29 491 200 B ≥ forward 10 598 400 B; юнит-тесты **30/30** (+4: флаги техник, состав пассов, вход блума по слою, владение depth и мёртвые ресурсы при forward-only).
 - **Наблюдение**: deferred-only == legacy означает, что forward-слой в классическом пути ничего не добавляет на текущей сцене (все материалы opaque); прозрачность поверх deferred — отдельный будущий узел.
+
+## 10. Типизированные пассы (S2a/S2b/S3, 2026-08-19)
+
+Пасс объявляется системой с доступами в сигнатуре; проводка (reads/
+writes/clear), layout и пул выводятся из типов. Условные доступы —
+«режимами» (singleton-типы с таблицей фактов), тело у семейства одно.
+
+Как объявить свой пасс:
+
+```rust
+use ornis_render::graph_passes::{Bloom0, Bloom1};
+use ornis_render::system::{self, Frame, GraphPass, Read, SystemViews, Write};
+
+struct BloomMid;
+
+impl GraphPass for BloomMid {
+    type Reads = (Read<Bloom0>,);
+    type Writes = (Write<Bloom1>,);
+    fn name(&self) -> &'static str { "bloom_mid" }
+    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+        let (input,) = views.reads;
+        let (output,) = views.writes;
+        frame.renderer.render_bloom_down(
+            frame.device, frame.queue, frame.encoder, input, output, 0.0,
+        );
+    }
+}
+
+// регистрация (порядок = порядок исполнения):
+systems.add_system(&mut graph, BloomMid);
+```
+
+Диспетчеризация в `RenderGraph3D::render` — по `PassId`, строковых имён
+в исполнителе больше нет. Виды можно получать и по типу ресурса:
+`views.get::<Bloom0>()` (debug-проверка членства в объявленном наборе).
+
+`RenderGraph::add_pass`/`PassBuilder` — шим совместимости для тестов и
+инструментов; production-код объявляет пассы типами.
+
+Защита от тихих изменений пула — golden-тесты (`golden_pool_slots_per_
+technique`, `golden_bloom_adds_exactly_three_slots`,
+`golden_dead_layers_are_unpooled`, `golden_hybrid_lifetimes`): 9
+ресурсов → 7 слотов на deferred/hybrid, блум добавляет ровно свои три
+уровня (у bloom0/1/2 разные TextureSpec-ключи), мёртвые слои не
+пул-ятся. `planned_pool_bytes(layout)` считает байты пула без GPU —
+база для S0-метрик и S4-бюджета.

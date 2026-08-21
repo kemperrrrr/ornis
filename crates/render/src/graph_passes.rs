@@ -274,7 +274,6 @@ impl GraphPass for BloomUp0Pass {
     }
 }
 
-
 // ── S2b: conditional passes as mode families ─────────────────────────
 // Access sets that depend on the graph configuration are selected at
 // registration: the configuration becomes a mode TYPE (a table of
@@ -288,7 +287,7 @@ const BLOOM_BRIGHT_THRESHOLD: f32 = 0.7;
 
 /// Depth ownership of the forward pass: forward-only clears the depth
 /// itself; hybrid reads the one the gbuffer pass filled.
-pub trait ForwardMode: 'static {
+pub trait ForwardMode: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
     const OWNS_DEPTH: bool;
@@ -298,7 +297,10 @@ pub trait ForwardMode: 'static {
 pub struct OwnsDepth;
 impl ForwardMode for OwnsDepth {
     type Reads = ();
-    type Writes = (WriteClear<Depth, ClearWhite>, WriteClear<HdrFwd, ClearTransparent>);
+    type Writes = (
+        WriteClear<Depth, ClearWhite>,
+        WriteClear<HdrFwd, ClearTransparent>,
+    );
     const OWNS_DEPTH: bool = true;
 }
 
@@ -312,6 +314,18 @@ impl ForwardMode for SharedDepth {
 
 /// The forward pass; `M` selects the depth-ownership mode.
 pub struct Forward<M: ForwardMode>(PhantomData<fn() -> M>);
+impl<M: ForwardMode> Forward<M> {
+    /// Value constructor: a bare struct path is not a value (E0423).
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: ForwardMode> Default for Forward<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<M: ForwardMode> GraphPass for Forward<M> {
     type Reads = M::Reads;
     type Writes = M::Writes;
@@ -333,7 +347,7 @@ impl<M: ForwardMode> GraphPass for Forward<M> {
 // ── bloom_down0: the bright-pass input follows the technique ─────────
 
 /// Which HDR layer feeds the bright pass (the one this technique made).
-pub trait BrightInput: 'static {
+pub trait BrightInput: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> &'a wgpu::TextureView;
 }
@@ -358,6 +372,18 @@ impl BrightInput for FromForward {
 
 /// The bright-pass downsample (surface → 1/2); `I` selects the input.
 pub struct BloomBright<I: BrightInput>(PhantomData<fn() -> I>);
+impl<I: BrightInput> BloomBright<I> {
+    /// Value constructor: a bare struct path is not a value (E0423).
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<I: BrightInput> Default for BloomBright<I> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<I: BrightInput> GraphPass for BloomBright<I> {
     type Reads = I::Reads;
     type Writes = (WriteClear<Bloom0, ClearBlack>,);
@@ -379,7 +405,7 @@ impl<I: BrightInput> GraphPass for BloomBright<I> {
 // ── composite: six modes = (technique) × (bloom on/off) ──────────────
 
 /// Which HDR layers exist and whether the bloom chain feeds the mix.
-pub trait CompositeMode: 'static {
+pub trait CompositeMode: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     const SHADER_MODE: u32;
     const BLOOM: bool;
@@ -504,6 +530,18 @@ impl CompositeMode for CompositeForward {
 
 /// The composite pass; `M` is the (technique × bloom) mode.
 pub struct Composite<M: CompositeMode>(PhantomData<fn() -> M>);
+impl<M: CompositeMode> Composite<M> {
+    /// Value constructor: a bare struct path is not a value (E0423).
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: CompositeMode> Default for Composite<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
 impl<M: CompositeMode> GraphPass for Composite<M> {
     type Reads = M::Reads;
     type Writes = (Write<Target>,);

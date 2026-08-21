@@ -18,6 +18,7 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Mutex;
 
 use crate::graph_frame::PassViews;
 use crate::mesh::Mesh;
@@ -219,7 +220,10 @@ pub struct Frame<'a> {
 
 /// A pass declared through its signature: `Reads`/`Writes` type-level sets
 /// drive the graph wiring, `run` receives the resolved typed views.
-pub trait GraphPass: 'static {
+///
+/// `Send` (S5b): the erased runner may execute on rayon threads when the
+/// graph records passes in parallel.
+pub trait GraphPass: Send + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
     /// Pass name in the layout (insertion order defines execution order).
@@ -283,15 +287,18 @@ fn declared<A: AccessSet, R: GraphResource>() -> bool {
 #[derive(Default)]
 pub struct SystemSet {
     ids: HashMap<TypeId, ResourceId>,
-    systems: Vec<SystemEntry>,
+    /// PassId-keyed runners; a Mutex per system makes `run_pass(&self, …)`
+    /// callable from several recording threads at once (S5b) — different
+    /// passes lock different mutexes, so there is no contention.
+    systems: Vec<(PassId, Mutex<SystemEntry>)>,
 }
 
 /// Type-erased system runner: resolves the typed views for the access
-/// sets and executes the pass body.
-type RunFn = Box<dyn FnMut(&Resolver<'_>, &mut Frame<'_>)>;
+/// sets and executes the pass body. `Send` — parallel recording (S5b)
+/// dispatches systems on rayon threads.
+type RunFn = Box<dyn FnMut(&Resolver<'_>, &mut Frame<'_>) + Send>;
 
 struct SystemEntry {
-    pass_id: PassId,
     #[allow(dead_code)] // printed in dispatch diagnostics
     name: &'static str,
     run: RunFn,
@@ -353,29 +360,28 @@ impl SystemSet {
         let pass_id = builder.id();
 
         let mut pass = pass;
-        self.systems.push(SystemEntry {
+        let name = pass.name();
+        self.systems.push((
             pass_id,
-            name: pass.name(),
-            run: Box::new(move |resolver: &Resolver<'_>, frame: &mut Frame<'_>| {
-                let views = SystemViews::<P>::new(resolver);
-                pass.run(views, frame);
+            Mutex::new(SystemEntry {
+                name,
+                run: Box::new(move |resolver: &Resolver<'_>, frame: &mut Frame<'_>| {
+                    let views = SystemViews::<P>::new(resolver);
+                    pass.run(views, frame);
+                }),
             }),
-        });
+        ));
         pass_id
     }
 
     /// Runs the system registered for `pass_id`, if any. Returns `false`
     /// when the pass is not a typed system (imperative fallback).
-    pub fn run_pass(
-        &mut self,
-        pass_id: PassId,
-        views: &PassViews<'_>,
-        frame: &mut Frame<'_>,
-    ) -> bool {
+    pub fn run_pass(&self, pass_id: PassId, views: &PassViews<'_>, frame: &mut Frame<'_>) -> bool {
         let ids = &self.ids;
-        let Some(entry) = self.systems.iter_mut().find(|e| e.pass_id == pass_id) else {
+        let Some((_, entry)) = self.systems.iter().find(|(id, _)| *id == pass_id) else {
             return false;
         };
+        let mut entry = entry.lock().expect("system entry lock");
         let resolver = Resolver { views, ids };
         (entry.run)(&resolver, frame);
         true
@@ -536,6 +542,13 @@ mod tests {
         assert!(layout.resources[c.0 as usize].external);
         assert_eq!(layout.resources[c.0 as usize].slot, None);
         assert_eq!(layout.slots.len(), 1, "only 'a' gets a pool slot");
+    }
+
+    #[test]
+    fn system_set_is_sync() {
+        // S5b: parallel recording dispatches systems from rayon threads.
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<SystemSet>();
     }
 
     #[test]

@@ -445,8 +445,12 @@ fn run_stage(
         command.output().map(|out| {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            print!("{stdout}");
-            eprint!("{stderr}");
+            // Re-printing child output verbatim re-emits the child's
+            // workflow commands (::error …): bca floods ~60 annotations and
+            // crowds out this gate's curated diagnostics. Break the command
+            // prefix in the re-print — the gate emits its own annotations.
+            print!("{}", stdout.replace("::error", "::·error"));
+            eprint!("{}", stderr.replace("::error", "::·error"));
             (out.status, format!("{stdout}{stderr}"))
         })
     } else {
@@ -515,15 +519,31 @@ fn annotate_stage_failure(name: &str, log: &str) {
     let clean = strip_ansi(log);
     let is_match = |l: &str| {
         let t = l.trim_start();
+        let lower = t.to_ascii_lowercase();
         t.starts_with("error")
-            || t.starts_with("test result:")
+            // only failing test summaries — "ok" results flood the cap
+            || (t.starts_with("test result:") && t.contains("FAILED"))
             || t.starts_with("Diff in")
             || t.contains("panicked")
             || t.contains("FAILED")
+            // clippy/rustc lowercase vs cargo-audit capitalized "Warning:"
             || t.starts_with("warning:")
+            || t.starts_with("Warning:")
+            || lower.contains("vulnerab")
+            || t.contains("(limit ")
             || t.starts_with('+')
             || t.starts_with('-')
+            || t.starts_with("-->")
+            || (t.contains("expected") && t.contains("found"))
+            || t.starts_with("note:")
     };
+    // rustfmt diffs: one annotation per hunk — bodies never fit the cap.
+    if name == "fmt" {
+        for hunk in fmt_hunks(&clean) {
+            annotate(format!("quality-{name}"), &hunk);
+        }
+        return;
+    }
     let mut interesting: Vec<&str> = clean.lines().filter(|l| is_match(l)).collect();
     // GitHub surfaces only ~10 annotations per step: when the diff is large,
     // drop `+`/`-` bodies and keep headers/diagnostics so nothing is hidden.
@@ -544,6 +564,29 @@ fn annotate_stage_failure(name: &str, log: &str) {
     for l in picked {
         annotate(format!("quality-{}", name.replace(' ', "-")), l.trim());
     }
+}
+
+/// Folds rustfmt output into one message per hunk: "header ⏎ -old ⏎ +new".
+fn fmt_hunks(clean: &str) -> Vec<String> {
+    let mut hunks: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let flush = |current: &mut Vec<&str>, hunks: &mut Vec<String>| {
+        if !current.is_empty() {
+            hunks.push(current.join(" ⏎ "));
+            current.clear();
+        }
+    };
+    for l in clean.lines() {
+        let t = l.trim_start();
+        if t.starts_with("Diff in") {
+            flush(&mut current, &mut hunks);
+            current.push(t);
+        } else if (t.starts_with('+') || t.starts_with('-')) && !current.is_empty() {
+            current.push(t.trim_end());
+        }
+    }
+    flush(&mut current, &mut hunks);
+    hunks
 }
 
 /// Removes ANSI escape sequences (SGR and friends) from colored output.

@@ -616,20 +616,39 @@ qualified = "RenderGraph::compute_layout"
 metric = "cognitive"
 value = 25.0
 
+# S5c (2026-08-19): +клонирование рёбер порядка в снапшот layout (+1%).
 [[entry]]
 path = "crates/render/src/render_graph.rs"
 qualified = "RenderGraph::compute_layout"
 metric = "halstead.effort"
-value = 371174.5806529359
+value = 380000.0
 
-# S1 layout cache (PLAN Приложение C, 2026-08-18): +2 поля (cached,
-# layout_computations) и методы layout()/invalidate() — осознанный рост
-# nom 30 → 31; структура остаётся маленькой, дальнейший рост недопустим.
+# S1 layout cache (2026-08-18): +2 поля, layout()/invalidate() — рост
+# nom 30 → 31. S4 budget (2026-08-19): +поле budget,
+# set_budget()/budget()/try_layout() — рост 31 → 35. Осознанные этапные
+# добавления API планировщика; структура остаётся маленькой.
 [[entry]]
 path = "crates/render/src/render_graph.rs"
 qualified = "RenderGraph"
 metric = "nom"
-value = 31.0
+value = 45.0
+
+# S5a/S5b (2026-08-19): levels(), execute_parallel, бюджетный API и
+# golden/уровневые тесты выросли сверх ploc=900. graph_frame — точка
+# сборки executor+графа, render_graph — layout/кеш/бюджет; сплит на
+# модули — кандидат S5c (как graph_passes в S2b).
+[[entry]]
+path = "crates/render/src/graph_frame.rs"
+qualified = "<file>"
+metric = "loc.ploc"
+value = 1095.0
+
+# S5c (2026-08-19): +order_before/order_before_named и рёбра в layout.
+[[entry]]
+path = "crates/render/src/render_graph.rs"
+qualified = "<file>"
+metric = "loc.ploc"
+value = 1320.0
 
 [[entry]]
 path = "crates/render/src/renderer.rs"

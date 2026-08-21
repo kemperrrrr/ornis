@@ -27,6 +27,57 @@
 
 use std::collections::HashMap;
 
+/// Bytes per pixel for the texture formats used by the engine's renderer.
+pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::Rgba8Unorm
+        | wgpu::TextureFormat::Rgba8UnormSrgb
+        | wgpu::TextureFormat::R32Uint
+        | wgpu::TextureFormat::Rg16Float
+        | wgpu::TextureFormat::Depth32Float
+        | wgpu::TextureFormat::Depth24Plus => 4,
+        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
+        wgpu::TextureFormat::Rgba32Float => 16,
+        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
+    }
+}
+
+/// Builds the actionable budget error: top slots by bytes.
+fn budget_exceeded(budget: u64, required: u64, layout: &GraphLayout) -> BudgetExceeded {
+    let mut slots: Vec<&PoolSlot> = layout.slots.iter().collect();
+    slots.sort_by_key(|s| std::cmp::Reverse(slot_bytes(s, layout.surface_size)));
+    let offenders = slots
+        .iter()
+        .take(3)
+        .map(|s| {
+            let (w, h) = s.spec.size.resolve(layout.surface_size);
+            let names: Vec<&str> = s
+                .resources
+                .iter()
+                .map(|&id| layout.resources[id.0 as usize].name.as_str())
+                .collect();
+            format!(
+                "{} ({:?} {}x{}, {} B)",
+                names.join("/"),
+                s.spec.format,
+                w,
+                h,
+                slot_bytes(s, layout.surface_size)
+            )
+        })
+        .collect();
+    BudgetExceeded {
+        budget,
+        required,
+        offenders,
+    }
+}
+
+fn slot_bytes(slot: &PoolSlot, surface: (u32, u32)) -> u64 {
+    let (w, h) = slot.spec.size.resolve(surface);
+    format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+}
+
 /// Texture size policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SizePolicy {
@@ -129,9 +180,101 @@ pub struct GraphLayout {
     pub(crate) slots: Vec<PoolSlot>,
     /// Live resources per pass (by index into `passes`).
     pub(crate) pass_alive: Vec<Vec<ResourceId>>,
+    /// S5c: explicit ordering edges (registration PassIds, both enabled),
+    /// a snapshot of `RenderGraph::ordering` at build time.
+    pub(crate) ordering: Vec<(PassId, PassId)>,
 }
 
 impl GraphLayout {
+    /// Total bytes the pool will allocate at this layout's surface size —
+    /// the device-free counterpart of `GraphExecutor::texture_budget`
+    /// (golden tests, S0 metrics, the S4 budget check).
+    pub fn planned_pool_bytes(&self) -> u64 {
+        self.slots
+            .iter()
+            .map(|slot| {
+                let (w, h) = slot.spec.size.resolve(self.surface_size);
+                format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+            })
+            .sum()
+    }
+
+    /// Parallel execution levels (S5b planning data): passes whose
+    /// declared accesses do not conflict share a level; levels are
+    /// ordered by dependencies (read-after-write, write-after-read,
+    /// write-after-write), passes within a level are independent and
+    /// safe to record in parallel. Deterministic — derived from the
+    /// registration order and the declared accesses, exactly like the
+    /// core `ornis_core::schedule::Schedule`.
+    pub fn levels(&self) -> Vec<Vec<usize>> {
+        let writes: Vec<Vec<ResourceId>> = self
+            .passes
+            .iter()
+            .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
+            .collect();
+        // S5c: явные рёбра в индексы layout (выключенные пассы — мимо).
+        let index_of = |id: PassId| self.passes.iter().position(|p| p.id == id);
+        let edges: Vec<(usize, usize)> = self
+            .ordering
+            .iter()
+            .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
+            .collect();
+        // Единый движок уровней с `ornis-core::Schedule` (§28.2 — один
+        // шедулер на всё: та же функция считает уровни систем и пассов).
+        ornis_core::compute_levels(self.passes.len(), |i, j| {
+            Self::passes_conflict(&self.passes, &writes, i, j) || edges.contains(&(i, j))
+        })
+    }
+
+    /// Do passes `i < j` conflict (registration order = priority):
+    /// i writes what j reads or writes (RaW/WaW), or j writes what i
+    /// reads (anti-dependency).
+    fn passes_conflict(
+        passes: &[PassLayout],
+        writes: &[Vec<ResourceId>],
+        i: usize,
+        j: usize,
+    ) -> bool {
+        writes[i]
+            .iter()
+            .any(|w| passes[j].reads.contains(w) || writes[j].contains(w))
+            || writes[j].iter().any(|w| passes[i].reads.contains(w))
+    }
+
+    /// Mermaid diagram of this layout — the debug projection (S6):
+    /// passes grouped into parallel-level subgraphs, resources as nodes,
+    /// write/read flows as edges. GitHub renders ```mermaid blocks
+    /// natively, so a layout drop pasted into a PR review becomes a
+    /// picture of the frame pipeline.
+    pub fn mermaid(&self) -> String {
+        let mut out = String::from("flowchart TD\n");
+        for (li, level) in self.levels().iter().enumerate() {
+            out.push_str(&format!("  subgraph L{li}[\"level {li}\"]\n"));
+            for &pi in level {
+                out.push_str(&format!("    P{pi}[\"{}\"]\n", self.passes[pi].name));
+            }
+            out.push_str("  end\n");
+        }
+        for rl in &self.resources {
+            if rl.first_use == usize::MAX {
+                continue;
+            }
+            out.push_str(&format!(
+                "  R{}[\"{} {:?}\"]\n",
+                rl.id.0, rl.name, rl.spec.format
+            ));
+        }
+        for (pi, pass) in self.passes.iter().enumerate() {
+            for rid in &pass.reads {
+                out.push_str(&format!("  R{} --> P{pi}\n", rid.0));
+            }
+            for (rid, _) in &pass.writes {
+                out.push_str(&format!("  P{pi} --> R{}\n", rid.0));
+            }
+        }
+        out
+    }
+
     /// Textual layout dump for debugging/reporting.
     pub fn debug_dump(&self) -> String {
         let mut s = format!(
@@ -208,6 +351,59 @@ struct PassNode {
     enabled: bool,
 }
 
+/// GPU memory budget for the transient pool (S4, IDEAS §28.3).
+///
+/// The scheduler either fits the pool into the budget or refuses with an
+/// actionable [`BudgetExceeded`]; `unbounded()` restores the S3 behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Byte cap for the pooled transient textures; `None` = unbounded.
+    pub gpu_textures: Option<u64>,
+}
+
+impl Budget {
+    /// No cap: the S3 behavior (any pool size passes).
+    pub fn unbounded() -> Self {
+        Self { gpu_textures: None }
+    }
+
+    /// Cap the transient texture pool at `bytes`.
+    pub fn gpu_textures(bytes: u64) -> Self {
+        Self {
+            gpu_textures: Some(bytes),
+        }
+    }
+}
+
+/// The transient pool does not fit the configured [`Budget`] (S4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetExceeded {
+    /// The configured cap.
+    pub budget: u64,
+    /// What the pool needs at this graph configuration.
+    pub required: u64,
+    /// Largest slots (bytes desc): what to shrink or disable first.
+    pub offenders: Vec<String>,
+}
+
+impl std::fmt::Display for BudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "transient pool needs {} ({:.1} MiB), budget {} ({:.1} MiB); largest slots: {}",
+            self.required,
+            self.required as f64 / (1024.0 * 1024.0),
+            self.budget,
+            self.budget as f64 / (1024.0 * 1024.0),
+            self.offenders.join("; ")
+        )?;
+        if !self.offenders.is_empty() {
+            write!(f, " — reduce resource sizes or disable passes (e.g. bloom)")?;
+        }
+        Ok(())
+    }
+}
+
 /// The pass graph being assembled.
 #[derive(Debug)]
 pub struct RenderGraph {
@@ -218,6 +414,12 @@ pub struct RenderGraph {
     /// recomputes. Every mutation resets this (S1: `compute_layout` must
     /// stay off the per-frame hot path).
     cached: Option<GraphLayout>,
+    /// S5c: явные рёбра порядка (PassId регистрации i < j) поверх
+    /// зависимостей из доступов — для скрытых зависимостей (общие
+    /// queue-буферы рендерера), невидимых в множествах доступа.
+    ordering: Vec<(PassId, PassId)>,
+    /// S4 memory budget; unbounded by default.
+    budget: Budget,
     /// How many times the layout has been computed over this graph's
     /// lifetime. Diagnostics for the S1 cache (tests, benches, probes).
     layout_computations: u32,
@@ -231,6 +433,8 @@ impl RenderGraph {
             passes: Vec::new(),
             surface_size,
             cached: None,
+            ordering: Vec::new(),
+            budget: Budget::unbounded(),
             layout_computations: 0,
         }
     }
@@ -239,6 +443,17 @@ impl RenderGraph {
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.surface_size = (width, height);
         self.cached = None;
+    }
+
+    /// Sets the S4 memory budget; invalidates the cached layout.
+    pub fn set_budget(&mut self, budget: Budget) {
+        self.budget = budget;
+        self.cached = None;
+    }
+
+    /// The configured budget.
+    pub fn budget(&self) -> Budget {
+        self.budget
     }
 
     /// Registers a graph-owned resource (texture).
@@ -289,6 +504,10 @@ impl RenderGraph {
     }
 
     /// Starts declaring a pass; passes execute in insertion order.
+    ///
+    /// Compatibility shim (S3): production passes are declared as typed
+    /// systems — `impl GraphPass` + `SystemSet::add_system` — and the
+    /// builder remains for tests, tools and the migration period.
     pub fn add_pass(&mut self, name: impl Into<String>) -> PassBuilder<'_> {
         let id = PassId(self.passes.len() as u32);
         self.passes.push(PassNode {
@@ -299,6 +518,45 @@ impl RenderGraph {
         });
         self.cached = None;
         PassBuilder { graph: self, id }
+    }
+
+    /// S5c: объявляет, что пасс `before` обязан выполниться раньше пасса
+    /// `after`, даже если их доступы не конфликтуют (скрытая зависимость,
+    /// например общий queue-записанный uniform-буфер). Влияет только на
+    /// разбиение на уровни параллельности ([`GraphLayout::levels`]);
+    /// порядок исполнения — порядок регистрации.
+    ///
+    /// # Panics
+    /// Паникует, если `after` зарегистрирован раньше `before` (порядок
+    /// исполнения неизменяем) или пасс неизвестен.
+    pub fn order_before(&mut self, before: PassId, after: PassId) {
+        assert!(
+            before.0 < after.0,
+            "order_before({before:?}, {after:?}): the second pass is registered              earlier — register passes in execution order; explicit edges              only split parallel levels"
+        );
+        if !self.ordering.contains(&(before, after)) {
+            self.ordering.push((before, after));
+        }
+        self.cached = None;
+    }
+
+    /// S5c: name-based [`RenderGraph::order_before`] (имя пасса из
+    /// `add_pass`).
+    ///
+    /// # Panics
+    /// Паникует при неизвестном имени или обратном порядке регистрации.
+    pub fn order_before_named(&mut self, before: &str, after: &str) {
+        let b = self.pass_id_of(before);
+        let a = self.pass_id_of(after);
+        self.order_before(b, a);
+    }
+
+    fn pass_id_of(&self, name: &str) -> PassId {
+        self.passes
+            .iter()
+            .position(|p| p.name == name)
+            .map(|i| PassId(i as u32))
+            .unwrap_or_else(|| panic!("render graph: no pass named '{name}'"))
     }
 
     /// Enables/disables a pass (culling): a disabled pass is dropped from
@@ -331,13 +589,30 @@ impl RenderGraph {
     /// panic fires on the first recomputation after the offending mutation,
     /// not at the mutation site.
     pub fn layout(&mut self) -> &GraphLayout {
+        self.try_layout()
+            .unwrap_or_else(|e| panic!("render graph budget exceeded: {e}"))
+    }
+
+    /// Like [`RenderGraph::layout`], but a budget violation is a returned
+    /// error instead of a panic (editors/tools; S4).
+    ///
+    /// # Errors
+    /// Returns [`BudgetExceeded`] when the pool does not fit the
+    /// configured [`Budget`]; nothing is cached in that case.
+    pub fn try_layout(&mut self) -> Result<&GraphLayout, BudgetExceeded> {
         if self.cached.is_none() {
             let layout = self.compute_layout();
+            if let Some(cap) = self.budget.gpu_textures {
+                let planned = layout.planned_pool_bytes();
+                if planned > cap {
+                    return Err(budget_exceeded(cap, planned, &layout));
+                }
+            }
             self.cached = Some(layout);
             self.layout_computations += 1;
         }
         // Filled by the branch above (or by an earlier call).
-        self.cached.as_ref().expect("layout cache is filled above")
+        Ok(self.cached.as_ref().expect("layout cache is filled above"))
     }
 
     /// Snapshot of the cached layout as an owned value. Equivalent to
@@ -503,6 +778,7 @@ impl RenderGraph {
             resources,
             slots,
             pass_alive,
+            ordering: self.ordering.clone(),
         }
     }
 
@@ -558,6 +834,10 @@ impl<'a> PassContext<'a> {
 }
 
 /// Builder for declaring a pass.
+///
+/// Compatibility shim (S3): prefer declaring passes as typed systems
+/// (`impl GraphPass` + `SystemSet::add_system`); the builder stays for
+/// tests, tools and the migration period.
 #[derive(Debug)]
 pub struct PassBuilder<'a> {
     graph: &'a mut RenderGraph,
@@ -774,6 +1054,91 @@ mod tests {
 
     fn ctx_pass_names(layout: &GraphLayout) -> Vec<String> {
         layout.passes.iter().map(|p| p.name.clone()).collect()
+    }
+
+    #[test]
+    fn independent_branches_share_levels() {
+        // p0→p1 (a→b) и p2→p3 (c→d) не делят ресурсов: уровни [p0,p2], [p1,p3].
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
+        let d = g.create_resource("d", spec(wgpu::TextureFormat::Rg16Float, 1));
+        g.add_pass("p0").write(a);
+        g.add_pass("p1").read(a).write(b);
+        g.add_pass("p2").write(c);
+        g.add_pass("p3").read(c).write(d);
+        let layout = g.build();
+        assert_eq!(layout.levels(), vec![vec![0, 2], vec![1, 3]]);
+    }
+
+    #[test]
+    fn explicit_ordering_splits_shared_level() {
+        // p0→p1 и p2→p3 независимы: [[0,2],[1,3]]; ребро p0→p2 разводит
+        // первый уровень (скрытая зависимость без конфликта доступов).
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
+        let d = g.create_resource("d", spec(wgpu::TextureFormat::Rg16Float, 1));
+        let p0 = g.add_pass("p0").write(a).id();
+        g.add_pass("p1").read(a).write(b);
+        let p2 = g.add_pass("p2").write(c).id();
+        g.add_pass("p3").read(c).write(d);
+        assert_eq!(g.build().levels(), vec![vec![0, 2], vec![1, 3]]);
+        g.order_before(p0, p2);
+        assert_eq!(
+            g.build().levels(),
+            vec![vec![0], vec![1, 2], vec![3]],
+            "explicit edge lifts p2 without touching p1's level"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "registered")]
+    fn explicit_ordering_rejects_backward() {
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let first = g.add_pass("first").write(a).id();
+        let second = g.add_pass("second").write(b).id();
+        g.order_before(second, first);
+    }
+
+    #[test]
+    #[should_panic(expected = "no pass named")]
+    fn explicit_ordering_unknown_name() {
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g.add_pass("real").write(a);
+        g.order_before_named("real", "ghost");
+    }
+
+    #[test]
+    fn mermaid_is_a_valid_projection() {
+        // S6: граф как отладочная проекция — уровни подграфами,
+        // ресурсы узлами, потоки рёбрами; GitHub рендерит нативно.
+        let mut g = RenderGraph::new((64, 64));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rg16Float, 1));
+        g.add_pass("p0").write(a);
+        g.add_pass("p1").read(a).write(b);
+
+        let m = g.build().mermaid();
+        assert!(m.starts_with("flowchart TD\n"), "head: {m}");
+        assert!(m.contains("subgraph L0[\"level 0\"]"), "levels: {m}");
+        assert!(m.contains("P0[\"p0\"]"), "pass nodes: {m}");
+        assert!(m.contains("R0[\"a Rgba8Unorm\"]"), "resource nodes: {m}");
+        assert!(m.contains("P0 --> R0"), "write edges: {m}");
+        assert!(m.contains("R0 --> P1"), "read edges: {m}");
+        // Мёртвые ресурсы в проекцию не входят.
+        let mut g2 = RenderGraph::new((64, 64));
+        let dead = g2.create_resource("dead", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let live = g2.create_resource("live", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g2.add_pass("only").write(live);
+        let m2 = g2.build().mermaid();
+        assert!(!m2.contains("dead"), "dead resource hidden: {m2}");
+        assert!(!m2.contains(format!("R{}", dead.0).as_str()));
     }
 
     #[test]

@@ -18,9 +18,14 @@ use crate::graph_passes::{
     OwnsDepth, SharedDepth, Target, WorldPosition,
 };
 use crate::mesh::Mesh;
-use crate::render_graph::{GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout};
+use crate::render_graph::{
+    Budget, GraphLayout, PassLayout, RenderGraph, ResourceId, ResourceLayout,
+    format_bytes_per_pixel,
+};
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// One pooled texture per render-graph slot.
@@ -29,21 +34,6 @@ struct PooledTexture {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     bytes: u64,
-}
-
-/// Bytes per pixel for the texture formats used by the engine's renderer.
-pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
-    match format {
-        wgpu::TextureFormat::Rgba8Unorm
-        | wgpu::TextureFormat::Rgba8UnormSrgb
-        | wgpu::TextureFormat::R32Uint
-        | wgpu::TextureFormat::Rg16Float
-        | wgpu::TextureFormat::Depth32Float
-        | wgpu::TextureFormat::Depth24Plus => 4,
-        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
-        wgpu::TextureFormat::Rgba32Float => 16,
-        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
-    }
 }
 
 /// Executes a [`GraphLayout`] on wgpu: lazily creates one texture per pool
@@ -101,6 +91,84 @@ impl GraphExecutor {
                     index,
                 },
             );
+        }
+    }
+
+    /// S5b: parallel command recording. Passes within a layout level
+    /// record into their own encoders concurrently (rayon); levels run
+    /// sequentially; all buffers are submitted to `queue` in pass order
+    /// with a single submit — `queue.write_buffer` calls made while
+    /// recording keep the same before-submit semantics as the sequential
+    /// path, so the pixel result is identical.
+    ///
+    /// Invariant (pass authors): passes that write the same queue-backed
+    /// buffer (renderer-internal uniforms are not part of the declared
+    /// texture accesses) must land in different levels.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn execute_parallel<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &'a GraphLayout,
+        run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder) + Sync,
+    ) {
+        {
+            self.ensure_pool(device, layout);
+            let pool = &self.pool;
+            let externals = &self.external_views;
+            let mut buffers: Vec<(usize, wgpu::CommandBuffer)> = Vec::new();
+            for level in layout.levels() {
+                let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
+                    .par_iter()
+                    .map(|&index| {
+                        let desc = wgpu::CommandEncoderDescriptor { label: None };
+                        let mut encoder = device.create_command_encoder(&desc);
+                        let views = PassViews {
+                            layout,
+                            pool,
+                            externals,
+                            index,
+                        };
+                        run(index, &views, &mut encoder);
+                        (index, encoder.finish())
+                    })
+                    .collect();
+                buffers.append(&mut level_buffers);
+            }
+            buffers.sort_by_key(|(index, _)| *index);
+            queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
+        }
+    }
+
+    /// wasm32 twin of [`GraphExecutor::execute_parallel`]: wgpu types are
+    /// not `Sync` on the web backend (Rc inside) and there are no rayon
+    /// threads — the same per-pass encoders run sequentially, submitting
+    /// as they go. Signature drops the `Sync` bound so the shared
+    /// `render()` call site compiles for both targets.
+    #[cfg(target_arch = "wasm32")]
+    pub fn execute_parallel<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &'a GraphLayout,
+        run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder),
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        for level in layout.levels() {
+            for &index in &level {
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                let views = PassViews {
+                    layout,
+                    pool,
+                    externals,
+                    index,
+                };
+                run(index, &views, &mut encoder);
+                queue.submit(std::iter::once(encoder.finish()));
+            }
         }
     }
 
@@ -235,6 +303,9 @@ impl PooledTexture {
 pub struct RenderGraph3D {
     graph: RenderGraph,
     executor: GraphExecutor,
+    /// S5b: record independent passes in parallel (a level at a time,
+    /// e.g. lighting ∥ forward); sequential single-encoder path by default.
+    parallel_recording: bool,
     ids: GraphIds,
     /// Typed S2 systems: `type → ResourceId` registry + type-erased runners
     /// for the passes declared as `GraphPass` implementations
@@ -274,7 +345,7 @@ impl Technique {
 
     /// Composite shader mode: 0 = deferred-only, 1 = forward-only,
     /// 2 = hybrid (deferred + forward over it).
-    fn composite_mode(&self) -> u32 {
+    pub fn composite_mode(&self) -> u32 {
         match self {
             Self::Forward => 1,
             Self::Deferred => 0,
@@ -360,40 +431,50 @@ impl RenderGraph3D {
             // In forward-only mode the pass owns the depth buffer; in
             // hybrid it was already filled by the gbuffer pass.
             if technique == Technique::Forward {
-                systems.add_system(&mut graph, Forward::<OwnsDepth>);
+                systems.add_system(&mut graph, Forward::<OwnsDepth>::new());
             } else {
-                systems.add_system(&mut graph, Forward::<SharedDepth>);
+                systems.add_system(&mut graph, Forward::<SharedDepth>::new());
             }
         }
         if bloom {
             // The bright-pass input is the HDR layer the active technique
             // produced: `hdr` (deferred/hybrid) or `hdr_fwd` (forward-only).
             if technique.has_deferred() {
-                systems.add_system(&mut graph, BloomBright::<FromDeferred>);
+                systems.add_system(&mut graph, BloomBright::<FromDeferred>::new());
             } else {
-                systems.add_system(&mut graph, BloomBright::<FromForward>);
+                systems.add_system(&mut graph, BloomBright::<FromForward>::new());
             }
             systems.add_system(&mut graph, BloomDown1Pass);
             systems.add_system(&mut graph, BloomDown2Pass);
             systems.add_system(&mut graph, BloomUp1Pass);
             systems.add_system(&mut graph, BloomUp0Pass);
         }
-        let mut composite = graph.add_pass("composite").write(ids.target);
-        // The composite shader always bind two HDR inputs; the graph only
-        // wires the ones this technique produces, and the executor feeds
-        // the live view into both slots.
-        if technique.has_deferred() {
-            composite = composite.read(ids.hdr);
-        }
-        if technique.has_forward() {
-            composite = composite.read(ids.hdr_fwd);
-        }
-        if bloom {
-            composite.read(ids.bloom0);
+        // The composite mode is a pure function of (technique, bloom):
+        // which HDR layers exist and whether the bloom chain feeds the mix.
+        match (technique, bloom) {
+            (Technique::Deferred, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>::new());
+            }
+            (Technique::Deferred, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeDeferred>::new());
+            }
+            (Technique::Forward, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>::new());
+            }
+            (Technique::Forward, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeForward>::new());
+            }
+            (Technique::Hybrid, true) => {
+                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>::new());
+            }
+            (Technique::Hybrid, false) => {
+                systems.add_system(&mut graph, Composite::<CompositeHybrid>::new());
+            }
         }
         Self {
             graph,
             executor: GraphExecutor::new(),
+            parallel_recording: false,
             ids,
             systems,
             bloom,
@@ -404,6 +485,16 @@ impl RenderGraph3D {
     /// Resource handles of this graph.
     pub fn ids(&self) -> GraphIds {
         self.ids
+    }
+
+    /// The technique this graph was wired for.
+    pub fn technique(&self) -> Technique {
+        self.technique
+    }
+
+    /// Whether the bloom cascade is wired into this graph.
+    pub fn bloom_enabled(&self) -> bool {
+        self.bloom
     }
 
     /// Read access to the underlying graph (layout diagnostics, probes).
@@ -421,6 +512,27 @@ impl RenderGraph3D {
     /// Updates the surface size before the next render (window resize).
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.graph.set_surface_size(width, height);
+    }
+
+    /// Enables/disables parallel command recording (S5b). Off by
+    /// default: the sequential path records into the caller's single
+    /// encoder; with this on, each pass gets its own encoder, passes of
+    /// one parallel level record concurrently and all buffers submit in
+    /// pass order — pixel-identical to the sequential path.
+    pub fn set_parallel_recording(&mut self, parallel: bool) {
+        self.parallel_recording = parallel;
+    }
+
+    /// Whether parallel recording is on.
+    pub fn parallel_recording(&self) -> bool {
+        self.parallel_recording
+    }
+
+    /// Sets the S4 GPU memory budget for the transient pool; the next
+    /// layout computation refuses (panic via `render`/`layout`, or a
+    /// `BudgetExceeded` from `graph_mut().try_layout()`) if exceeded.
+    pub fn set_budget(&mut self, budget: Budget) {
+        self.graph.set_budget(budget);
     }
 
     /// Textual layout dump for debugging/reporting (uses the layout cache).
@@ -454,6 +566,7 @@ impl RenderGraph3D {
         let Self {
             graph,
             executor,
+            parallel_recording,
             ids,
             systems,
             ..
@@ -468,27 +581,33 @@ impl RenderGraph3D {
         // is a cache hit, `compute_layout` stays off the hot path.
         let layout = graph.layout();
         executor.set_external_view(ids.target, target.clone());
-        executor.execute(device, encoder, layout, |encoder, pass| {
-            // S2b: every pass is a typed system (conditional passes are
-            // mode families selected at registration); dispatch by PassId.
+        let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
+            // S2b: every pass is a typed system (conditional passes
+            // are mode families); dispatch by original PassId.
             let mut frame = Frame {
                 device,
                 queue,
-                encoder,
+                encoder: enc,
                 renderer,
                 mesh,
                 instance_count,
             };
-            if !systems.run_pass(pass.pass().id, &pass, &mut frame) {
+            if !systems.run_pass(pass.pass().id, pass, &mut frame) {
                 unreachable!(
                     "render graph 3d: pass '{}' is not a typed system",
                     pass.pass().name
                 );
             }
-        });
+        };
+        if *parallel_recording {
+            executor.execute_parallel(device, queue, layout, dispatch);
+        } else {
+            executor.execute(device, encoder, layout, |encoder, pass| {
+                dispatch(0, &pass, encoder);
+            });
+        }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -811,27 +930,15 @@ mod tests {
                 .read(ids.bloom1)
                 .write(ids.bloom0);
         }
-        // The composite mode is a pure function of (technique, bloom):
-        // which HDR layers exist and whether the bloom chain feeds the mix.
-        match (technique, bloom) {
-            (Technique::Deferred, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeDeferredBloom>);
-            }
-            (Technique::Deferred, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeDeferred>);
-            }
-            (Technique::Forward, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeForwardBloom>);
-            }
-            (Technique::Forward, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeForward>);
-            }
-            (Technique::Hybrid, true) => {
-                systems.add_system(&mut graph, Composite::<CompositeHybridBloom>);
-            }
-            (Technique::Hybrid, false) => {
-                systems.add_system(&mut graph, Composite::<CompositeHybrid>);
-            }
+        let mut composite = graph.add_pass("composite").write(ids.target);
+        if technique.has_deferred() {
+            composite = composite.read(ids.hdr);
+        }
+        if technique.has_forward() {
+            composite = composite.read(ids.hdr_fwd);
+        }
+        if bloom {
+            composite.read(ids.bloom0);
         }
     }
 
@@ -862,5 +969,163 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── S3: golden layout tests — the pool must not change silently ────
+
+    fn slots_for(technique: Technique, bloom: bool) -> usize {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            technique,
+            bloom,
+        );
+        g3.graph_mut().layout().slots.len()
+    }
+
+    #[test]
+    fn golden_pool_slots_per_technique() {
+        // Pinned against B1-R7 measurements (surface format Rgba8Unorm so
+        // `hdr` shares the albedo spec group): 9 resources → 7 slots on the
+        // deferred/hybrid path; the bloom cascade adds exactly its three
+        // fraction levels (bloom0/1/2 have distinct TextureSpec keys).
+        assert_eq!(slots_for(Technique::Forward, false), 2);
+        assert_eq!(slots_for(Technique::Forward, true), 5);
+        assert_eq!(slots_for(Technique::Deferred, false), 7);
+        assert_eq!(slots_for(Technique::Deferred, true), 10);
+        assert_eq!(slots_for(Technique::Hybrid, false), 7);
+        assert_eq!(slots_for(Technique::Hybrid, true), 10);
+    }
+
+    #[test]
+    fn golden_bloom_adds_exactly_three_slots() {
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            assert_eq!(
+                slots_for(technique, true) - slots_for(technique, false),
+                3,
+                "bloom cascade must add exactly its three fraction levels"
+            );
+        }
+    }
+
+    #[test]
+    fn golden_dead_layers_are_unpooled() {
+        // Forward-only: the deferred HDR layer and the gbuffer targets are
+        // never touched → no lifetime window, no pool slot.
+        let mut fwd = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Forward,
+            true,
+        );
+        let ids = fwd.ids();
+        let layout = fwd.graph_mut().layout().clone();
+        for id in [ids.hdr, ids.albedo, ids.normal] {
+            let rl = &layout.resources[id.0 as usize];
+            assert_eq!(rl.first_use, usize::MAX, "{} must be dead", rl.name);
+            assert_eq!(rl.slot, None);
+        }
+        // No bloom → the cascade levels are dead.
+        let mut plain = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            false,
+        );
+        let ids = plain.ids();
+        let layout = plain.graph_mut().layout();
+        assert_eq!(layout.resources[ids.bloom0.0 as usize].slot, None);
+        assert_eq!(layout.resources[ids.bloom1.0 as usize].slot, None);
+        assert_eq!(layout.resources[ids.bloom2.0 as usize].slot, None);
+    }
+
+    #[test]
+    fn golden_hybrid_lifetimes() {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        let ids = g3.ids();
+        let layout = g3.graph_mut().layout();
+        let window = |id: ResourceId| {
+            let rl = &layout.resources[id.0 as usize];
+            (rl.first_use, rl.last_use)
+        };
+        // gbuffer=0, lighting=1, forward=2, bloom chain 3..8, composite=8.
+        assert_eq!(window(ids.depth), (0, 2), "depth: gbuffer → forward");
+        assert_eq!(window(ids.hdr), (1, 8));
+        assert_eq!(window(ids.hdr_fwd), (2, 8));
+        assert_eq!(window(ids.bloom0), (3, 8));
+    }
+
+    #[test]
+    fn production_graph_levels() {
+        // Уровни hybrid+bloom (индексы пассов в порядке регистрации):
+        // gbuffer → {lighting, forward} — deferred-слои и forward-путь
+        // НЕ делят ресурсов, первый реальный параллелизм конвейера —
+        // затем цепочка блума и composite. Изначальное ожидание «строгая
+        // цепочка» опровергнуто самим тестом: lighting ∥ forward.
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        let levels = g3.graph_mut().layout().levels();
+        let pass_count = levels.iter().map(|l| l.len()).sum::<usize>();
+        assert_eq!(pass_count, 9, "hybrid + bloom: 9 passes");
+        assert_eq!(levels[0], vec![0], "gbuffer first");
+        assert_eq!(
+            levels[1],
+            vec![1, 2],
+            "lighting runs in parallel with forward"
+        );
+        for (expected_level, pass) in levels.iter().skip(2).zip(3..9) {
+            assert_eq!(*expected_level, vec![pass], "bloom chain + composite");
+        }
+    }
+
+    #[test]
+    fn budget_exceeded_is_actionable() {
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Hybrid,
+            true,
+        );
+        let planned = g3.graph_mut().layout().planned_pool_bytes();
+        // Точный бюджет — укладывается.
+        g3.set_budget(Budget::gpu_textures(planned));
+        assert!(g3.graph_mut().try_layout().is_ok());
+        // На байт меньше — внятный отказ с конкретикой.
+        g3.set_budget(Budget::gpu_textures(planned - 1));
+        let err = g3.graph_mut().try_layout().unwrap_err();
+        assert_eq!(err.required, planned);
+        assert_eq!(err.budget, planned - 1);
+        let msg = err.to_string();
+        assert!(msg.contains("MiB"), "message: {msg}");
+        assert!(
+            msg.contains("bloom") || msg.contains("hdr"),
+            "offenders named: {msg}"
+        );
+        // Снятие бюджета возвращает поведение S3.
+        g3.set_budget(Budget::unbounded());
+        assert!(g3.graph_mut().try_layout().is_ok());
+    }
+
+    #[test]
+    fn golden_planned_pool_bytes() {
+        // Forward, no bloom, 1280×720: depth (D32, 4 B/px) + hdr_fwd
+        // (Rgba16, 8 B/px) = 12 B/px over the surface.
+        let mut g3 = RenderGraph3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Forward,
+            false,
+        );
+        let layout = g3.graph_mut().layout();
+        assert_eq!(layout.planned_pool_bytes(), 12 * 1280 * 720);
     }
 }

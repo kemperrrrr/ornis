@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rayon = "1.10"
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
@@ -17,10 +18,17 @@ ron = "0.8"
 [dev-dependencies]
 pollster = "0.3"
 png = "0.17"
+proptest = "1"
+wgpu = "29"
+glam = "0.30"
 criterion = { version = "0.5", features = ["rayon"] }
 
 [[bench]]
 name = "layout_bench"
+harness = false
+
+[[bench]]
+name = "recording_bench"
 harness = false
 
 [lints]
