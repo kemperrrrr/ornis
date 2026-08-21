@@ -391,11 +391,7 @@ impl Schedule {
 
     /// Мягкая [`Schedule::order_before`]: ошибка — возвращаемое
     /// [`OrderError`], не паника (для динамических фронтендов фазы 6).
-    pub fn try_order_before(
-        &mut self,
-        before: &str,
-        after: &str,
-    ) -> Result<&mut Self, OrderError> {
+    pub fn try_order_before(&mut self, before: &str, after: &str) -> Result<&mut Self, OrderError> {
         let Some(b) = self.try_system_index(before) else {
             return Err(OrderError::UnknownSystem { name: before.to_owned() });
         };
@@ -421,11 +417,7 @@ impl Schedule {
     }
 
     /// Мягкая [`Schedule::order_after`].
-    pub fn try_order_after(
-        &mut self,
-        after: &str,
-        before: &str,
-    ) -> Result<&mut Self, OrderError> {
+    pub fn try_order_after(&mut self, after: &str, before: &str) -> Result<&mut Self, OrderError> {
         self.try_order_before(before, after)
     }
 
@@ -469,13 +461,17 @@ impl Schedule {
     }
 
     fn cached_levels(&self) -> Vec<Vec<usize>> {
-        let mut plan = self.plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut plan = self
+            .plan
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(levels) = plan.as_ref() {
             return levels.clone();
         }
         let levels = build_level_plan(self.systems.len(), &self.accesses, &self.ordering);
         *plan = Some(levels.clone());
-        self.level_computations.fetch_add(1, AtomicOrdering::Relaxed);
+        self.level_computations
+            .fetch_add(1, AtomicOrdering::Relaxed);
         levels
     }
 
@@ -489,7 +485,9 @@ impl Schedule {
         }
         let levels = self.cached_levels();
         for group in &levels {
-            group.par_iter().for_each(|&i| self.run_system(i, resources));
+            group
+                .par_iter()
+                .for_each(|&i| self.run_system(i, resources));
         }
     }
 
@@ -566,14 +564,23 @@ mod tests {
             SystemAccess::new().reads::<A>().writes::<B>(),
             SystemAccess::new().reads::<B>().writes::<C>(),
         ];
-        assert_eq!(reference_level_groups(&chain, &[]), vec![vec![0], vec![1], vec![2]]);
+        assert_eq!(
+            reference_level_groups(&chain, &[]),
+            vec![vec![0], vec![1], vec![2]]
+        );
     }
 
     #[test]
     fn anti_dependency_orders_reader_first() {
         // i читает X, j пишет X → i раньше j (анти-зависимость).
-        let accesses = vec![SystemAccess::new().reads::<A>(), SystemAccess::new().writes::<A>()];
-        assert_eq!(reference_level_groups(&accesses, &[]), vec![vec![0], vec![1]]);
+        let accesses = vec![
+            SystemAccess::new().reads::<A>(),
+            SystemAccess::new().writes::<A>(),
+        ];
+        assert_eq!(
+            reference_level_groups(&accesses, &[]),
+            vec![vec![0], vec![1]]
+        );
     }
 
     struct Bump {
@@ -614,7 +621,10 @@ mod tests {
             })
             .add_system(Bump {
                 name: "r",
-                access: SystemAccess::new().reads::<A>().writes::<B>().reads::<Log>(),
+                access: SystemAccess::new()
+                    .reads::<A>()
+                    .writes::<B>()
+                    .reads::<Log>(),
                 target: "r",
             });
         sched.set_parallel(false);
@@ -661,11 +671,17 @@ mod tests {
                     name: "src",
                 })
                 .add_system(Add {
-                    access: SystemAccess::new().reads::<A>().writes::<B>().reads::<Counters>(),
+                    access: SystemAccess::new()
+                        .reads::<A>()
+                        .writes::<B>()
+                        .reads::<Counters>(),
                     name: "left",
                 })
                 .add_system(Add {
-                    access: SystemAccess::new().reads::<A>().writes::<C>().reads::<Counters>(),
+                    access: SystemAccess::new()
+                        .reads::<A>()
+                        .writes::<C>()
+                        .reads::<Counters>(),
                     name: "right",
                 })
                 .add_system(Add {
@@ -729,7 +745,10 @@ mod tests {
         sched
             .add_system(NamedNoop("a", SystemAccess::new().writes::<A>()))
             .add_system(NamedNoop("b", SystemAccess::new().writes::<B>()));
-        assert!(matches!(sched.try_order_before("b", "a"), Err(OrderError::BackwardEdge { .. })));
+        assert!(matches!(
+            sched.try_order_before("b", "a"),
+            Err(OrderError::BackwardEdge { .. })
+        ));
         assert_eq!(
             sched.try_order_before("a", "ghost").map(|_| ()),
             Err(OrderError::UnknownSystem { name: "ghost".to_owned() })
@@ -766,11 +785,22 @@ mod tests {
         assert_eq!(sched.level_computations(), 1);
         sched.run(&res);
         sched.run(&res);
-        assert_eq!(sched.level_computations(), 1, "steady state reuses the cached plan");
+        assert_eq!(
+            sched.level_computations(),
+            1,
+            "steady state reuses the cached plan"
+        );
         sched.add_system(NamedNoop("d", SystemAccess::new().reads::<A>()));
         sched.run(&res);
-        assert_eq!(sched.level_computations(), 2, "add_system invalidates the plan");
-        assert_eq!(sched.level_groups(), vec![vec![0], vec![1], vec![2], vec![3]]);
+        assert_eq!(
+            sched.level_computations(),
+            2,
+            "add_system invalidates the plan"
+        );
+        assert_eq!(
+            sched.level_groups(),
+            vec![vec![0], vec![1], vec![2], vec![3]]
+        );
     }
 
     #[test]
@@ -784,7 +814,20 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             lcg
         };
-        const NAMES: [&str; 12] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"];
+        const NAMES: [&str; 12] = [
+            "s0",
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5",
+            "s6",
+            "s7",
+            "s8",
+            "s9",
+            "s10",
+            "s11",
+        ];
         let mut sched = Schedule::new();
         let mut accesses: Vec<SystemAccess> = Vec::new();
         for &name in NAMES.iter() {

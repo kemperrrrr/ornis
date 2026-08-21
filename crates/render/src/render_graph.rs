@@ -574,7 +574,10 @@ impl RenderGraph {
         let before_name = self.pass_name(before)?;
         let after_name = self.pass_name(after)?;
         if before.0 >= after.0 {
-            return Err(GraphOrderError::BackwardEdge { before: before_name, after: after_name });
+            return Err(GraphOrderError::BackwardEdge {
+                before: before_name,
+                after: after_name,
+            });
         }
         if !self.ordering.contains(&(before, after)) {
             self.ordering.push((before, after));
