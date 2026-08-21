@@ -23,8 +23,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/nousresearch/ornis"
-repository = "https://github.com/nousresearch/ornis"
 categories = ["game-engines", "graphics"]
 
 [package]
