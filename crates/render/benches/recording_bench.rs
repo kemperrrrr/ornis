@@ -12,9 +12,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::render_backend::RenderContext;
-use ornis_render::{
-    InstanceData, OpenPBRMaterial, RenderGraph3D, Renderer3D, Technique,
-};
+use ornis_render::{InstanceData, OpenPBRMaterial, RenderGraph3D, Renderer3D, Technique};
 
 const SIZE: u32 = 256;
 
@@ -136,9 +134,8 @@ fn bench_recording(c: &mut Criterion) {
     let mut group = c.benchmark_group("recording");
     group.bench_function("sequential", |b| {
         b.iter(|| {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: None,
-            });
+            let desc = wgpu::CommandEncoderDescriptor { label: None };
+            let mut encoder = device.create_command_encoder(&desc);
             black_box(&mut seq).render(
                 RenderContext {
                     device: &device,
@@ -155,9 +152,8 @@ fn bench_recording(c: &mut Criterion) {
     });
     group.bench_function("parallel", |b| {
         b.iter(|| {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: None,
-            });
+            let desc = wgpu::CommandEncoderDescriptor { label: None };
+            let mut encoder = device.create_command_encoder(&desc);
             black_box(&mut par).render(
                 RenderContext {
                     device: &device,
