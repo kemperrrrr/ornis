@@ -612,14 +612,18 @@ impl RenderGraph {
             .iter()
             .position(|p| p.name == name)
             .map(|i| PassId(i as u32))
-            .ok_or_else(|| GraphOrderError::UnknownPass { name: name.to_owned() })
+            .ok_or_else(|| GraphOrderError::UnknownPass {
+                name: name.to_owned(),
+            })
     }
 
     fn pass_name(&self, id: PassId) -> Result<String, GraphOrderError> {
         self.passes
             .get(id.0 as usize)
             .map(|node| node.name.clone())
-            .ok_or_else(|| GraphOrderError::UnknownPass { name: format!("#{}", id.0) })
+            .ok_or_else(|| GraphOrderError::UnknownPass {
+                name: format!("#{}", id.0),
+            })
     }
 
     /// Enables/disables a pass (culling): a disabled pass is dropped from
@@ -1190,7 +1194,9 @@ mod tests {
         ));
         assert_eq!(
             g.try_order_before_named("first", "ghost").map(|_| ()),
-            Err(GraphOrderError::UnknownPass { name: "ghost".to_owned() })
+            Err(GraphOrderError::UnknownPass {
+                name: "ghost".to_owned(),
+            })
         );
         // Id вне реестра — ошибка, а не молчаливое мусорное ребро.
         assert!(matches!(

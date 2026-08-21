@@ -373,7 +373,10 @@ impl Schedule {
     }
 
     fn invalidate_plan(&mut self) {
-        *self.plan.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .plan
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// S5c: объявляет, что система `before` обязана выполниться раньше
@@ -393,10 +396,14 @@ impl Schedule {
     /// [`OrderError`], не паника (для динамических фронтендов фазы 6).
     pub fn try_order_before(&mut self, before: &str, after: &str) -> Result<&mut Self, OrderError> {
         let Some(b) = self.try_system_index(before) else {
-            return Err(OrderError::UnknownSystem { name: before.to_owned() });
+            return Err(OrderError::UnknownSystem {
+                name: before.to_owned(),
+            });
         };
         let Some(a) = self.try_system_index(after) else {
-            return Err(OrderError::UnknownSystem { name: after.to_owned() });
+            return Err(OrderError::UnknownSystem {
+                name: after.to_owned(),
+            });
         };
         if b >= a {
             return Err(OrderError::BackwardEdge {
@@ -751,7 +758,9 @@ mod tests {
         ));
         assert_eq!(
             sched.try_order_before("a", "ghost").map(|_| ()),
-            Err(OrderError::UnknownSystem { name: "ghost".to_owned() })
+            Err(OrderError::UnknownSystem {
+                name: "ghost".to_owned(),
+            })
         );
         // План не тронут ошибками; успешное ребро разбивает уровень.
         assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
@@ -764,8 +773,14 @@ mod tests {
         let mut sched = Schedule::new();
         sched
             .add_system(NamedNoop("src", SystemAccess::new().writes::<A>()))
-            .add_system(NamedNoop("left", SystemAccess::new().reads::<A>().writes::<B>()))
-            .add_system(NamedNoop("right", SystemAccess::new().reads::<A>().writes::<C>()))
+            .add_system(NamedNoop(
+                "left",
+                SystemAccess::new().reads::<A>().writes::<B>(),
+            ))
+            .add_system(NamedNoop(
+                "right",
+                SystemAccess::new().reads::<A>().writes::<C>(),
+            ))
             .add_system(NamedNoop(
                 "sink",
                 SystemAccess::new().reads::<B>().reads::<C>().writes::<A>(),
@@ -815,18 +830,7 @@ mod tests {
             lcg
         };
         const NAMES: [&str; 12] = [
-            "s0",
-            "s1",
-            "s2",
-            "s3",
-            "s4",
-            "s5",
-            "s6",
-            "s7",
-            "s8",
-            "s9",
-            "s10",
-            "s11",
+            "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
         ];
         let mut sched = Schedule::new();
         let mut accesses: Vec<SystemAccess> = Vec::new();
