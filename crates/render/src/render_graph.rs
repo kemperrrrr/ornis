@@ -260,8 +260,10 @@ impl GraphLayout {
                 continue;
             }
             out.push_str(&format!(
-                "  R{}[\"{} {}\"]\n",
-                rl.id.0, rl.name, format!("{:?}", rl.spec.format)
+                "  R{}[\"{} {:?}\"]\n",
+                rl.id.0,
+                rl.name,
+                rl.spec.format
             ));
         }
         for (pi, pass) in self.passes.iter().enumerate() {
