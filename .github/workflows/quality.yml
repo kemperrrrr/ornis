@@ -156,3 +156,65 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body-path: target/comment-body.md
+
+      # Полный лог гейта — в серию PR-комментариев по ≤60k символов
+      # (лимит GitHub — 65536 на комментарий). Каждый прогон
+      # ПЕРЕЗАПИСЫВАЕТ прежние chunk-комментарии (PATCH), а не плодит
+      # новые: права те же, что уже выданы (pull-requests: write).
+      # Маркер <!--quality-log--> в начале тела — для поиска при чтении.
+      - name: Publish full log as chunked PR comments
+        if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+
+          API = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+          PR = os.environ['PR_NUMBER']
+          RUN = os.environ['RUN_ID']
+          TOKEN = os.environ['GH_TOKEN']
+          MARK = '<!--quality-log-->'
+
+          def call(method, url, body=None):
+              data = json.dumps(body).encode() if body is not None else None
+              req = urllib.request.Request(url, method=method, data=data, headers={
+                  'Authorization': f'Bearer {TOKEN}',
+                  'Accept': 'application/vnd.github+json',
+              })
+              with urllib.request.urlopen(req) as r:
+                  txt = r.read()
+              return json.loads(txt) if txt else None
+
+          log = open('target/quality.log', encoding='utf-8', errors='replace').read()
+          log = re.sub(r'\x1b\[[0-9;]*m', '', log)  # ANSI-коды xtask
+          chunks, buf = [], ''
+          for line in log.splitlines(keepends=True):
+              if buf and len(buf) + len(line) > 60000:
+                  chunks.append(buf)
+                  buf = line
+              else:
+                  buf += line
+          if buf:
+              chunks.append(buf)
+          n = len(chunks)
+          print(f'log: {len(log)} chars -> {n} chunks')
+
+          comments = call('GET', f'{API}/issues/{PR}/comments?per_page=100')
+          own = [c for c in comments if c['body'].startswith(MARK)]
+          own.sort(key=lambda c: int(re.search(r'part (\d+)/', c['body']).group(1))
+                   if re.search(r'part (\d+)/', c['body']) else 999)
+
+          for i, chunk in enumerate(chunks, 1):
+              body = (f'{MARK} Full quality.log (run {RUN}) — part {i}/{n}\n'
+                      '```text\n' + chunk + '\n```\n')
+              if i <= len(own):
+                  call('PATCH', own[i - 1]['url'], {'body': body})
+              else:
+                  call('POST', f'{API}/issues/{PR}/comments', {'body': body})
+          for c in own[n:]:  # лог стал короче — лишние части затираем
+              call('PATCH', c['url'], {'body': f'{MARK} (часть устарела — лог стал короче)'})
+          print('done')
+          PY
