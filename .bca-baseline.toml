@@ -208,11 +208,13 @@ qualified = "MaterialXConverter::extract_material"
 metric = "halstead.effort"
 value = 322209.48751207686
 
+# 2026-08-22: файл вырос 901→1274 ploc за счёт 19 новых тестов evaluator'а
+# в модуле tests внутри файла. Продуктовый код почти не менялся.
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 901.0
+value = 1274.0
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
@@ -316,11 +318,14 @@ qualified = "MaterialXParser::parse"
 metric = "cognitive"
 value = 30.0
 
+# 2026-08-22: расширение whitelist парсера MaterialX (~15 новых веток в
+# parse: constant/divide/clamp и др.) + обработка self-closing тегов.
+# Осознанный рост: плоский match по типам узлов. Было 25.
 [[entry]]
 path = "crates/materialx/src/parser.rs"
 qualified = "MaterialXParser::parse"
 metric = "cyclomatic"
-value = 25.0
+value = 29.0
 
 [[entry]]
 path = "crates/physics/examples/perf_probe.rs"
@@ -757,3 +762,26 @@ path = "xtask/src/quality.rs"
 qualified = "quality"
 metric = "halstead.effort"
 value = 297251.9405507586
+
+# 2026-08-22: добавлен NodeDefInput::from_bytes_start (по образцу Input) —
+# nodedef с инпутами раньше не парсились.
+[[entry]]
+path = "crates/materialx/src/parser.rs"
+qualified = "NodeDefInput::from_bytes_start"
+metric = "cyclomatic"
+value = 21.0
+
+# 2026-08-22: editor.js переписан из мёртвого мокапа в REST-бридж
+# (polling /api/scene, рендер иерархии, команды). Единая IIFE-обёртка —
+# рост halstead/nexits ожидаем; при дальнейшем росте разбить на функции.
+[[entry]]
+path = "editor/editor.js"
+qualified = "<anon@L7>"
+metric = "halstead.effort"
+value = 127906.11360221676
+
+[[entry]]
+path = "editor/editor.js"
+qualified = "<anon@L7>"
+metric = "nexits"
+value = 16.0
