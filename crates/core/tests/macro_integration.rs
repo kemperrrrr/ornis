@@ -112,6 +112,138 @@ fn smart_pipeline_attribute_compiles() {
     test_pipeline_hook();
 }
 
+// ===== smart_pipeline behavioral tests =====
+
+#[smart_pipeline]
+fn integrate_positions(store: &SmartStore, dt: f32) -> usize {
+    // Code before the loops must be preserved by the macro.
+    let started = dt > 0.0;
+    assert!(started);
+
+    let mut positions = store.write_lane::<Position>().expect("position lane");
+    let velocities = store.read_lane::<Velocity>().expect("velocity lane");
+
+    for (pos, vel) in positions.iter_mut().zip(velocities.iter()) {
+        pos.x += vel.x * dt;
+        pos.y += vel.y * dt;
+        pos.z += vel.z * dt;
+    }
+
+    // Code after the loop must run; the tail expression must be returned
+    // through the macro-generated wrapper.
+    positions.len()
+}
+
+fn store_with_moving_entities(n: usize) -> SmartStore {
+    let mut store = SmartStore::new();
+    store.register::<Position>();
+    store.register::<Velocity>();
+    for _ in 0..n {
+        let e = store.create_entity();
+        store.insert(
+            e,
+            Position {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        store.insert(
+            e,
+            Velocity {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+        );
+    }
+    store
+}
+
+#[test]
+fn smart_pipeline_two_lane_loop_updates_every_entity() {
+    let store = store_with_moving_entities(100);
+
+    let processed = integrate_positions(&store, 0.5);
+
+    assert_eq!(processed, 100);
+    let lane = store.read_lane::<Position>().unwrap();
+    for pos in lane.iter() {
+        assert_eq!((pos.x, pos.y, pos.z), (0.5, 1.0, 1.5));
+    }
+}
+
+#[smart_pipeline]
+fn shift_positions_twice(store: &SmartStore) -> f32 {
+    let mut positions = store.write_lane::<Position>().expect("position lane");
+
+    for pos in positions.iter_mut() {
+        pos.x += 1.0;
+    }
+
+    // Code between two loops must be preserved and executed.
+    let shift = positions.len() as f32 * 10.0;
+
+    for pos in positions.iter_mut() {
+        pos.x += shift;
+    }
+
+    shift
+}
+
+#[test]
+fn smart_pipeline_preserves_code_between_loops() {
+    let store = store_with_moving_entities(4);
+
+    let shift = shift_positions_twice(&store);
+
+    assert_eq!(shift, 40.0);
+    let lane = store.read_lane::<Position>().unwrap();
+    for pos in lane.iter() {
+        assert_eq!(pos.x, 1.0 + 40.0);
+    }
+}
+
+// `total` is mutated across iterations, so the loop must stay sequential —
+// and, critically, still iterate over every entity (not run its body once).
+#[allow(deprecated)] // the macro intentionally warns that the loops stay sequential
+#[smart_pipeline]
+fn sum_positions_x(store: &SmartStore) -> f32 {
+    let mut warmup = 0;
+    for i in 0..3 {
+        warmup += i;
+    }
+    assert_eq!(warmup, 3);
+
+    let mut total = 0.0;
+    let positions = store.read_lane::<Position>().expect("position lane");
+    for pos in positions.iter() {
+        total += pos.x;
+    }
+    total
+}
+
+#[test]
+fn smart_pipeline_non_parallelizable_loop_still_iterates() {
+    let mut store = SmartStore::new();
+    store.register::<Position>();
+    for i in 0..10 {
+        let e = store.create_entity();
+        store.insert(
+            e,
+            Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+    }
+
+    let total = sum_positions_x(&store);
+
+    assert_eq!(total, (0..10).sum::<i32>() as f32);
+}
+
 #[derive(Debug, Clone, DeriveAutoPipeline)]
 #[pack]
 struct TransformPacked {

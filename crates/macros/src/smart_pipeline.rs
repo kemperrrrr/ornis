@@ -1,471 +1,529 @@
+//! Implementation of the `#[smart_pipeline]` attribute macro.
+//!
+//! The macro rewrites a function working over `SmartStore` lanes:
+//!
+//! ```ignore
+//! #[smart_pipeline]
+//! fn integrate(store: &SmartStore, dt: f32) {
+//!     let mut positions = store.write_lane::<Position>().unwrap();
+//!     let velocities = store.read_lane::<Velocity>().unwrap();
+//!     for (pos, vel) in positions.iter_mut().zip(velocities.iter()) {
+//!         pos.x += vel.x * dt;
+//!     }
+//! }
+//! ```
+//!
+//! - Lane bindings (`let x = store.read_lane::<T>()` / `store.write_lane::<T>()`)
+//!   are detected via the turbofish type argument of the call.
+//! - `for` loops over lane iterators (`lane.iter()` / `lane.iter_mut()`,
+//!   optionally two of them combined with `.zip(..)`) are rewritten to
+//!   parallel Rayon iteration **in place**; the rest of the function body is
+//!   preserved verbatim.
+//! - Loops that cannot be proven parallel-safe (captured mutable state,
+//!   cross-iteration indexing, `break`/`continue`/`return`, unrecognized
+//!   iterator shapes) are left as ordinary sequential `for` loops and get a
+//!   compile-time warning (via the `deprecated`-note trick, which surfaces in
+//!   the IDE and the terminal).
+//!
+//! Known limitations (the analysis is syntactic, not type-directed):
+//! - At most two lanes per `zip` are parallelized; longer `zip` chains stay
+//!   sequential.
+//! - A loop body that captures another lane guard (e.g. calling
+//!   `other_lane.get(entity)` inside a parallel loop) will fail to compile
+//!   because `RwLock` guards are not `Sync`; hoist such accesses out of the
+//!   loop.
+//! - The lane variable must be bound by a plain `let` directly from
+//!   `store.read_lane::<T>()` / `store.write_lane::<T>()` (`.unwrap()` /
+//!   `.expect(..)` wrappers around the call are allowed).
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Block, Expr, ExprClosure, ExprForLoop, ExprIndex, ExprMethodCall, FnArg, Ident, ItemFn, Pat,
-    PatIdent, PatType, Type, TypePath, TypeReference, parse_macro_input,
+    BinOp, Expr, ExprAssign, ExprBinary, ExprClosure, ExprForLoop, ExprIndex, ExprMethodCall,
+    FnArg, Ident, ItemFn, Local, Pat, PatIdent, PatType, Type, TypePath, TypeReference,
+    parse_macro_input,
     visit::{self, Visit},
+    visit_mut::{self, VisitMut},
 };
 
-#[derive(Clone)]
-struct LaneAccess {
-    store_ident: Ident,
-    lane_type: Type,
-    is_mutable: bool,
+/// A `let` binding of a `SmartStore` lane guard.
+struct LaneBinding {
     var_name: Ident,
+    is_mutable: bool,
 }
 
-#[derive(Clone)]
-struct LoopAnalysis {
-    lanes: Vec<LaneAccess>,
-    body: Block,
-    iterator_vars: Vec<Ident>,
-    is_parallel_safe: bool,
-    safety_issues: Vec<String>,
+/// Extracts the single turbofish type argument of `read_lane::<T>()` /
+/// `write_lane::<T>()`. The turbofish lives in [`ExprMethodCall::turbofish`],
+/// not in `args`.
+fn turbofish_type(node: &ExprMethodCall) -> Result<Type, syn::Error> {
+    let error = || {
+        syn::Error::new_spanned(
+            node,
+            format!(
+                "#[smart_pipeline]: `{}` requires exactly one turbofish type argument, \
+                 e.g. `store.{}::<Position>()`",
+                node.method, node.method
+            ),
+        )
+    };
+    let turbofish = node.turbofish.as_ref().ok_or_else(error)?;
+    if turbofish.args.len() != 1 {
+        return Err(error());
+    }
+    match turbofish.args.first() {
+        Some(syn::GenericArgument::Type(ty)) => Ok(ty.clone()),
+        _ => Err(error()),
+    }
 }
 
+/// Collects the `SmartStore` parameter name and all lane guard bindings of
+/// the function. Also validates the turbofish of every `read_lane` /
+/// `write_lane` call on the store, accumulating errors instead of panicking.
 #[derive(Default)]
-struct SmartPipelineAnalyzer {
+struct LaneCollector {
     store_param: Option<Ident>,
-    dt_param: Option<Ident>,
-    lanes: Vec<LaneAccess>,
-    loops: Vec<LoopAnalysis>,
-    captured_mut_vars: Vec<Ident>,
-    safety_issues: Vec<String>,
-    in_closure: bool,
-    captured_vars: Vec<Ident>,
-    current_loop_vars: Vec<Ident>,
-    in_closure_body: bool,
-    in_loop_body: bool,
-    has_captured_mut: bool,
-    local_vars: Vec<Ident>,
+    lanes: Vec<LaneBinding>,
+    errors: Vec<syn::Error>,
 }
 
-impl Visit<'_> for SmartPipelineAnalyzer {
+impl LaneCollector {
+    fn is_store_receiver(&self, receiver: &Expr) -> bool {
+        match (&self.store_param, receiver) {
+            (Some(store), Expr::Path(p)) => p.path.is_ident(store),
+            _ => false,
+        }
+    }
+
+    /// If `expr` is `store.read_lane::<T>()` / `store.write_lane::<T>()`
+    /// (possibly wrapped in `.unwrap()` / `.expect(..)`), returns whether the
+    /// lane is mutable. Malformed turbofish is reported separately by
+    /// `visit_expr_method_call`, so here it simply yields `None`.
+    fn lane_binding_mutability(&self, expr: &Expr) -> Option<bool> {
+        let mut current = expr;
+        loop {
+            match current {
+                Expr::MethodCall(mc) => {
+                    if (mc.method == "read_lane" || mc.method == "write_lane")
+                        && self.is_store_receiver(&mc.receiver)
+                    {
+                        return turbofish_type(mc).ok().map(|_| mc.method == "write_lane");
+                    }
+                    current = &mc.receiver;
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+impl Visit<'_> for LaneCollector {
     fn visit_item_fn(&mut self, node: &ItemFn) {
         for arg in &node.sig.inputs {
             if let FnArg::Typed(PatType { pat, ty, .. }) = arg
                 && let Pat::Ident(PatIdent { ident, .. }) = &**pat
+                && let Type::Reference(TypeReference { elem, .. }) = &**ty
+                && let Type::Path(TypePath { path, .. }) = &**elem
+                && path
+                    .segments
+                    .last()
+                    .map(|s| s.ident == "SmartStore")
+                    .unwrap_or(false)
             {
-                if let Type::Reference(TypeReference { elem, .. }) = &**ty {
-                    if let Type::Path(TypePath { path, .. }) = &**elem {
-                        if path
-                            .segments
-                            .last()
-                            .map(|s| s.ident == "SmartStore")
-                            .unwrap_or(false)
-                        {
-                            self.store_param = Some(ident.clone());
-                        } else if path
-                            .segments
-                            .last()
-                            .map(|s| s.ident == "f32")
-                            .unwrap_or(false)
-                        {
-                            self.dt_param = Some(ident.clone());
-                        }
-                    }
-                } else if let Type::Path(TypePath { path, .. }) = &**ty
-                    && path
-                        .segments
-                        .last()
-                        .map(|s| s.ident == "f32")
-                        .unwrap_or(false)
-                {
-                    self.dt_param = Some(ident.clone());
-                }
+                self.store_param = Some(ident.clone());
             }
         }
         self.visit_block(&node.block);
     }
 
-    fn visit_expr_method_call(&mut self, node: &ExprMethodCall) {
-        if let Expr::Path(expr_path) = &*node.receiver
-            && expr_path.path.segments.len() == 1
+    fn visit_local(&mut self, node: &Local) {
+        if let Some(init) = &node.init
+            && let Pat::Ident(PatIdent { ident, .. }) = &node.pat
+            && let Some(is_mutable) = self.lane_binding_mutability(&init.expr)
         {
-            let store_ident = &expr_path.path.segments[0].ident;
-            let method_name = &node.method;
+            self.lanes.push(LaneBinding {
+                var_name: ident.clone(),
+                is_mutable,
+            });
+        }
+        visit::visit_local(self, node);
+    }
 
-            if method_name == "read_lane" || method_name == "write_lane" {
-                // Parse turbofish generic argument
-                if let syn::Expr::Path(type_path) = node.args.first().unwrap()
-                    && let Some(segment) = type_path.path.segments.first()
-                    && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                    && let Some(syn::GenericArgument::Type(ty)) = args.args.first()
-                {
-                    let lane_type = ty.clone();
-                    let is_mutable = method_name == "write_lane";
-                    let type_str = lane_type.to_token_stream().to_string();
-                    let var_name = format_ident!(
-                        "_lane_{}",
-                        type_str
-                            .replace("::", "_")
-                            .replace("<", "_")
-                            .replace(">", "")
-                            .replace(", ", "_")
-                            .replace(" ", "")
-                    );
-
-                    self.lanes.push(LaneAccess {
-                        store_ident: store_ident.clone(),
-                        lane_type,
-                        is_mutable,
-                        var_name: var_name.clone(),
-                    });
-                }
-            }
+    fn visit_expr_method_call(&mut self, node: &ExprMethodCall) {
+        if (node.method == "read_lane" || node.method == "write_lane")
+            && self.is_store_receiver(&node.receiver)
+            && let Err(error) = turbofish_type(node)
+        {
+            self.errors.push(error);
         }
         visit::visit_expr_method_call(self, node);
     }
+}
 
-    fn visit_expr_for_loop(&mut self, node: &ExprForLoop) {
-        let was_in_loop = self.in_loop_body;
-        self.in_loop_body = true;
-
-        let mut loop_vars = Vec::new();
-        if let Pat::Ident(PatIdent { ident, .. }) = &*node.pat {
-            loop_vars.push(ident.clone());
-            self.current_loop_vars.push(ident.clone());
-        } else if let Pat::Tuple(pat_tuple) = &*node.pat {
-            for elem in &pat_tuple.elems {
-                if let Pat::Ident(PatIdent { ident, .. }) = elem {
-                    loop_vars.push(ident.clone());
-                    self.current_loop_vars.push(ident.clone());
-                }
+/// Collects idents bound by a loop/closure pattern (`x`, `(a, b)`, `&mut x`).
+fn collect_pat_idents(pat: &Pat, out: &mut Vec<Ident>) {
+    match pat {
+        Pat::Ident(p) => out.push(p.ident.clone()),
+        Pat::Tuple(t) => {
+            for elem in &t.elems {
+                collect_pat_idents(elem, out);
             }
         }
+        Pat::Reference(r) => collect_pat_idents(&r.pat, out),
+        _ => {}
+    }
+}
 
-        let mut body_analyzer = SmartPipelineAnalyzer {
-            in_loop_body: true,
-            current_loop_vars: self.current_loop_vars.clone(),
-            local_vars: self.local_vars.clone(),
-            ..Default::default()
-        };
-        body_analyzer.visit_block(&node.body);
+/// Safety analysis of a single loop body: collects reasons why the loop
+/// cannot be executed in parallel. Conservative by design — a false positive
+/// only means the loop stays sequential.
+struct LoopBodyAnalyzer {
+    /// Idents that may legally be assigned inside the body: loop pattern
+    /// variables, body-local `let` bindings, closure params, nested loop vars.
+    assignable: Vec<Ident>,
+    /// Loop pattern variables (for cross-iteration index detection).
+    loop_vars: Vec<Ident>,
+    closure_depth: usize,
+    loop_depth: usize,
+    issues: Vec<String>,
+}
 
-        let mut safety_issues = body_analyzer.safety_issues;
-        safety_issues.extend(self.safety_issues.clone());
-
-        let is_parallel_safe = safety_issues.is_empty()
-            && !body_analyzer.has_captured_mut
-            && body_analyzer.captured_mut_vars.is_empty()
-            && !loop_vars.is_empty();
-
-        if let Expr::MethodCall(method_call) = &*node.expr {
-            if method_call.method == "zip" {
-                let mut lanes_in_zip = Vec::new();
-                self.extract_zip_lanes(&method_call.receiver, &mut lanes_in_zip);
-                if let Some(first_arg) = method_call.args.first() {
-                    self.extract_zip_lanes(first_arg, &mut lanes_in_zip);
-                }
-
-                self.loops.push(LoopAnalysis {
-                    lanes: lanes_in_zip,
-                    body: node.body.clone(),
-                    iterator_vars: loop_vars.clone(),
-                    is_parallel_safe,
-                    safety_issues,
-                });
-            } else {
-                self.loops.push(LoopAnalysis {
-                    lanes: Vec::new(),
-                    body: node.body.clone(),
-                    iterator_vars: loop_vars.clone(),
-                    is_parallel_safe: false,
-                    safety_issues: vec![
-                        "Only zip iterations over lanes are supported for parallelization"
-                            .to_string(),
-                    ],
-                });
-            }
-        } else {
-            self.loops.push(LoopAnalysis {
-                lanes: Vec::new(),
-                body: node.body.clone(),
-                iterator_vars: loop_vars.clone(),
-                is_parallel_safe: false,
-                safety_issues: vec![
-                    "Only zip iterations over lanes are supported for parallelization".to_string(),
-                ],
-            });
+impl LoopBodyAnalyzer {
+    fn new(loop_vars: Vec<Ident>) -> Self {
+        Self {
+            assignable: loop_vars.clone(),
+            loop_vars,
+            closure_depth: 0,
+            loop_depth: 0,
+            issues: Vec::new(),
         }
+    }
 
-        for _ in 0..loop_vars.len() {
-            self.current_loop_vars.pop();
+    fn check_assign_target(&mut self, target: &Expr) {
+        if let Expr::Path(p) = target
+            && let Some(ident) = p.path.get_ident()
+            && !self.assignable.contains(ident)
+        {
+            self.issues.push(format!(
+                "#[smart_pipeline]: variable `{ident}` is assigned inside the loop but declared \
+                 outside it - shared mutable state prevents parallelization; loop left sequential"
+            ));
         }
-        self.in_loop_body = was_in_loop;
+    }
+}
 
-        visit::visit_expr_for_loop(self, node);
+impl Visit<'_> for LoopBodyAnalyzer {
+    fn visit_local(&mut self, node: &Local) {
+        if let Pat::Ident(PatIdent { ident, .. }) = &node.pat {
+            self.assignable.push(ident.clone());
+        }
+        visit::visit_local(self, node);
     }
 
     fn visit_expr_closure(&mut self, node: &ExprClosure) {
-        let was_in_closure = self.in_closure;
-        let was_in_closure_body = self.in_closure_body;
-        let prev_captured = std::mem::take(&mut self.captured_vars);
-        let prev_local = std::mem::take(&mut self.local_vars);
-
-        self.in_closure = true;
-        self.in_closure_body = true;
-
-        // The closure's parameters become local vars
+        let before = self.assignable.len();
         for input in &node.inputs {
-            if let Pat::Ident(PatIdent { ident, .. }) = input {
-                self.local_vars.push(ident.clone());
-            }
+            collect_pat_idents(input, &mut self.assignable);
         }
-
-        // If it's a `move` closure, we can't easily track captures in syn 2.0
-        // Just analyze the body
-        visit::visit_expr(self, &node.body);
-
-        // Check for assignments to non-local variables (potential captures)
-        // This is a simplified check
-
-        self.in_closure = was_in_closure;
-        self.in_closure_body = was_in_closure_body;
-        self.captured_vars = prev_captured;
-        self.local_vars = prev_local;
+        self.closure_depth += 1;
+        visit::visit_expr_closure(self, node);
+        self.closure_depth -= 1;
+        self.assignable.truncate(before);
     }
 
-    fn visit_expr_assign(&mut self, node: &syn::ExprAssign) {
-        if (self.in_closure_body || self.in_loop_body)
-            && let Expr::Path(expr_path) = &*node.left
-            && let Some(ident) = expr_path.path.get_ident()
-        {
-            // Check if it's a non-local variable (potential capture)
-            if !self.local_vars.contains(ident) && !self.current_loop_vars.contains(ident) {
-                self.captured_mut_vars.push(ident.clone());
-                self.has_captured_mut = true;
-                self.safety_issues.push(format!(
-                            "Variable `{}` assigned inside closure/loop but not declared locally - likely a captured mutable variable, prevents parallelization",
-                            ident
-                        ));
-            }
-        }
+    fn visit_expr_for_loop(&mut self, node: &ExprForLoop) {
+        let before = self.assignable.len();
+        collect_pat_idents(&node.pat, &mut self.assignable);
+        self.loop_depth += 1;
+        visit::visit_expr_for_loop(self, node);
+        self.loop_depth -= 1;
+        self.assignable.truncate(before);
+    }
+
+    fn visit_expr_assign(&mut self, node: &ExprAssign) {
+        self.check_assign_target(&node.left);
         visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &ExprBinary) {
+        // Compound assignments (`+=`, `-=`, ...) are `Expr::Binary` in syn 2.
+        if matches!(
+            node.op,
+            BinOp::AddAssign(_)
+                | BinOp::SubAssign(_)
+                | BinOp::MulAssign(_)
+                | BinOp::DivAssign(_)
+                | BinOp::RemAssign(_)
+                | BinOp::BitXorAssign(_)
+                | BinOp::BitAndAssign(_)
+                | BinOp::BitOrAssign(_)
+                | BinOp::ShlAssign(_)
+                | BinOp::ShrAssign(_)
+        ) {
+            self.check_assign_target(&node.left);
+        }
+        visit::visit_expr_binary(self, node);
     }
 
     fn visit_expr_index(&mut self, node: &ExprIndex) {
         if let Expr::Path(expr_path) = &*node.expr
             && let Some(ident) = expr_path.path.get_ident()
-            && self.current_loop_vars.contains(ident)
+            && self.loop_vars.contains(ident)
             && let Expr::Binary(binary) = &*node.index
-            && matches!(binary.op, syn::BinOp::Add(_) | syn::BinOp::Sub(_))
+            && matches!(binary.op, BinOp::Add(_) | BinOp::Sub(_))
         {
-            self.safety_issues.push(format!(
-                "Cross-iteration dependency detected: `{}[{}]` - prevents parallelization",
-                ident,
+            self.issues.push(format!(
+                "#[smart_pipeline]: cross-iteration dependency `{ident}[{}]` prevents \
+                 parallelization; loop left sequential",
                 binary.to_token_stream()
             ));
         }
         visit::visit_expr_index(self, node);
     }
+
+    fn visit_expr_break(&mut self, node: &syn::ExprBreak) {
+        // `break`/`continue` of a nested loop or a closure is fine; only
+        // control flow targeting the analyzed loop itself (or a label)
+        // blocks the rewrite.
+        if node.label.is_some() || (self.closure_depth == 0 && self.loop_depth == 0) {
+            self.issues.push(
+                "#[smart_pipeline]: `break` in the loop body prevents parallelization; loop \
+                 left sequential"
+                    .to_string(),
+            );
+        }
+        visit::visit_expr_break(self, node);
+    }
+
+    fn visit_expr_continue(&mut self, node: &syn::ExprContinue) {
+        if node.label.is_some() || (self.closure_depth == 0 && self.loop_depth == 0) {
+            self.issues.push(
+                "#[smart_pipeline]: `continue` in the loop body prevents parallelization; loop \
+                 left sequential"
+                    .to_string(),
+            );
+        }
+        visit::visit_expr_continue(self, node);
+    }
+
+    fn visit_expr_return(&mut self, node: &syn::ExprReturn) {
+        if self.closure_depth == 0 {
+            self.issues.push(
+                "#[smart_pipeline]: `return` in the loop body prevents parallelization; loop \
+                 left sequential"
+                    .to_string(),
+            );
+        }
+        visit::visit_expr_return(self, node);
+    }
 }
 
-impl SmartPipelineAnalyzer {
-    fn extract_zip_lanes(&mut self, expr: &Expr, lanes: &mut Vec<LaneAccess>) {
-        if let Expr::MethodCall(mc) = expr {
-            if (mc.method == "iter" || mc.method == "iter_mut")
-                && let Expr::Path(p) = &*mc.receiver
-                && let Some(ident) = p.path.get_ident()
-            {
-                for lane in &self.lanes {
-                    if lane.var_name == *ident || lane.store_ident == *ident {
-                        lanes.push(lane.clone());
-                    }
-                }
-            }
-            self.extract_zip_lanes(&mc.receiver, lanes);
-            for arg in &mc.args {
-                self.extract_zip_lanes(arg, lanes);
-            }
-        } else if let Expr::Path(p) = expr {
-            if let Some(ident) = p.path.get_ident() {
-                for lane in &self.lanes {
-                    if lane.var_name == *ident || lane.store_ident == *ident {
-                        lanes.push(lane.clone());
-                    }
-                }
-            }
-        } else {
-            visit::visit_expr(self, expr);
+/// A lane iterator used by a `for` loop header.
+struct LaneIter {
+    var_name: Ident,
+    mutable: bool,
+}
+
+/// Rewrites parallel-safe `for` loops over lane iterators in place, leaving
+/// everything else untouched.
+struct LoopRewriter<'a> {
+    lanes: &'a [LaneBinding],
+    warnings: Vec<String>,
+}
+
+impl LoopRewriter<'_> {
+    fn find_lane(&self, ident: &Ident) -> Option<&LaneBinding> {
+        self.lanes.iter().find(|lane| lane.var_name == *ident)
+    }
+
+    /// `lane.iter()` / `lane.iter_mut()` where `lane` is a lane binding.
+    fn single_lane_iter(&self, expr: &Expr) -> Option<LaneIter> {
+        let Expr::MethodCall(mc) = expr else {
+            return None;
+        };
+        if mc.method != "iter" && mc.method != "iter_mut" {
+            return None;
         }
+        if !mc.args.is_empty() {
+            return None;
+        }
+        let Expr::Path(p) = &*mc.receiver else {
+            return None;
+        };
+        let ident = p.path.get_ident()?;
+        let lane = self.find_lane(ident)?;
+        Some(LaneIter {
+            var_name: ident.clone(),
+            mutable: mc.method == "iter_mut" && lane.is_mutable,
+        })
+    }
+
+    /// The iterator expression of a loop: either a single lane iterator or
+    /// `lane_a.iter*().zip(lane_b.iter*())`.
+    fn extract_lane_iters(&self, expr: &Expr) -> Option<Vec<LaneIter>> {
+        if let Expr::MethodCall(mc) = expr
+            && mc.method == "zip"
+            && mc.args.len() == 1
+        {
+            let mut iters = vec![self.single_lane_iter(&mc.receiver)?];
+            iters.push(self.single_lane_iter(&mc.args[0])?);
+            return Some(iters);
+        }
+        self.single_lane_iter(expr).map(|iter| vec![iter])
+    }
+
+    /// Returns the replacement expression for a parallel-safe loop, or the
+    /// list of reasons why it must stay sequential.
+    fn plan(&self, node: &ExprForLoop) -> Result<Expr, Vec<String>> {
+        let mut issues = Vec::new();
+
+        if node.label.is_some() {
+            issues.push(
+                "#[smart_pipeline]: labeled loop left sequential (labels cannot be rewritten \
+                 into a Rayon closure)"
+                    .to_string(),
+            );
+        }
+
+        let mut loop_vars = Vec::new();
+        collect_pat_idents(&node.pat, &mut loop_vars);
+        if loop_vars.is_empty() {
+            issues.push(
+                "#[smart_pipeline]: loop pattern binds no variables; loop left sequential"
+                    .to_string(),
+            );
+        }
+
+        let iters = self.extract_lane_iters(&node.expr);
+        if iters.is_none() {
+            issues.push(format!(
+                "#[smart_pipeline]: cannot parallelize loop over `{}` - expected \
+                 `lane.iter()`/`lane.iter_mut()`, optionally two lanes combined with \
+                 `.zip(..)`; loop left sequential",
+                node.expr.to_token_stream()
+            ));
+        }
+
+        let mut analyzer = LoopBodyAnalyzer::new(loop_vars);
+        analyzer.visit_block(&node.body);
+        issues.extend(analyzer.issues);
+
+        let iters = match iters {
+            Some(iters) if issues.is_empty() => iters,
+            _ => return Err(issues),
+        };
+
+        let pat = &node.pat;
+        let body = &node.body;
+        let expr: Expr = match iters.as_slice() {
+            [single] => {
+                let var = &single.var_name;
+                let method = par_iter_method(single.mutable);
+                syn::parse_quote! {{
+                    use ornis_core::rayon::prelude::*;
+                    #var.#method().for_each(|#pat| #body);
+                }}
+            }
+            [first, second] => {
+                let var0 = &first.var_name;
+                let var1 = &second.var_name;
+                let method0 = par_iter_method(first.mutable);
+                let method1 = par_iter_method(second.mutable);
+                syn::parse_quote! {{
+                    use ornis_core::rayon::prelude::*;
+                    #var0.#method0().zip(#var1.#method1()).for_each(|#pat| #body);
+                }}
+            }
+            _ => unreachable!("extract_lane_iters returns at most two lanes"),
+        };
+        Ok(expr)
+    }
+}
+
+fn par_iter_method(mutable: bool) -> Ident {
+    if mutable {
+        format_ident!("par_iter_mut")
+    } else {
+        format_ident!("par_iter")
+    }
+}
+
+impl VisitMut for LoopRewriter<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Expr::ForLoop(for_loop) = expr {
+            match self.plan(for_loop) {
+                Ok(replacement) => {
+                    *expr = replacement;
+                    // The loop body moved into the closure; nested loops in it
+                    // may still be rewritten.
+                    visit_mut::visit_expr_mut(self, expr);
+                    return;
+                }
+                Err(issues) => {
+                    // The loop stays an ordinary sequential `for` — header and
+                    // body untouched. Nested loops may still be rewritten.
+                    self.warnings.extend(issues);
+                }
+            }
+        }
+        visit_mut::visit_expr_mut(self, expr);
     }
 }
 
 pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
-    let vis = &input.vis;
-    let sig = &input.sig;
+    let mut input = parse_macro_input!(item as ItemFn);
 
-    let mut analyzer = SmartPipelineAnalyzer::default();
-    analyzer.visit_item_fn(&input);
+    let mut collector = LaneCollector::default();
+    collector.visit_item_fn(&input);
 
-    let mut warnings = Vec::new();
-    let mut has_parallel_loops = false;
-
-    for loop_analysis in &analyzer.loops {
-        if loop_analysis.is_parallel_safe && !loop_analysis.lanes.is_empty() {
-            has_parallel_loops = true;
+    if !collector.errors.is_empty() {
+        let mut errors = collector.errors.into_iter();
+        let mut combined = errors.next().expect("non-empty error list");
+        for error in errors {
+            combined.combine(error);
         }
-        for issue in &loop_analysis.safety_issues {
-            warnings.push(issue.clone());
-        }
+        return combined.to_compile_error().into();
     }
 
-    for issue in &analyzer.safety_issues {
-        warnings.push(issue.clone());
-    }
+    let mut rewriter = LoopRewriter {
+        lanes: &collector.lanes,
+        warnings: Vec::new(),
+    };
+    rewriter.visit_block_mut(&mut input.block);
 
-    for var in &analyzer.captured_mut_vars {
-        warnings.push(format!(
-            "Captured mutable variable `{}` prevents parallelization",
-            var
-        ));
-    }
-
-    if !has_parallel_loops && !analyzer.loops.is_empty() {
-        warnings.push("No parallelizable loops found in function body".to_string());
-    }
-
-    let warning_tokens: Vec<TokenStream2> = warnings
+    // Compile-time warnings via the deprecated-note trick: using a deprecated
+    // item emits a warning with the note, visible in the IDE and terminal.
+    let warning_tokens: Vec<TokenStream2> = rewriter
+        .warnings
         .iter()
         .map(|w| {
-            quote! { compile_warning!(#w); }
+            quote! {{
+                #[deprecated(note = #w)]
+                struct SmartPipelineSequentialLoop;
+                let _ = SmartPipelineSequentialLoop;
+            }}
         })
         .collect();
 
-    let lane_decls: Vec<TokenStream2> = analyzer
-        .lanes
-        .iter()
-        .map(|lane| {
-            let store = &lane.store_ident;
-            let ty = &lane.lane_type;
-            let var = &lane.var_name;
-            if lane.is_mutable {
-                quote! {
-                    let mut #var = #store.write_lane::<#ty>()
-                        .expect(concat!("lane not registered for ", stringify!(#ty)));
-                }
-            } else {
-                quote! {
-                    let #var = #store.read_lane::<#ty>()
-                        .expect(concat!("lane not registered for ", stringify!(#ty)));
-                }
-            }
-        })
-        .collect();
-
-    let mut loop_bodies = Vec::new();
-    for loop_analysis in &analyzer.loops {
-        if loop_analysis.is_parallel_safe && loop_analysis.lanes.len() >= 2 {
-            let (lane0, lane1) = (&loop_analysis.lanes[0], &loop_analysis.lanes[1]);
-            let var0 = &lane0.var_name;
-            let var1 = &lane1.var_name;
-            let iter0 = if lane0.is_mutable {
-                quote!(par_iter_mut)
-            } else {
-                quote!(par_iter)
-            };
-            let iter1 = if lane1.is_mutable {
-                quote!(par_iter_mut)
-            } else {
-                quote!(par_iter)
-            };
-
-            let (iter_var0, iter_var1) = if loop_analysis.iterator_vars.len() >= 2 {
-                (
-                    &loop_analysis.iterator_vars[0],
-                    &loop_analysis.iterator_vars[1],
-                )
-            } else {
-                (&format_ident!("item0"), &format_ident!("item1"))
-            };
-
-            let body = &loop_analysis.body;
-            let safety_comment = generate_safety_comment(loop_analysis);
-
-            loop_bodies.push(quote! {
-                #safety_comment
-                #var0.data.#iter0()
-                    .zip(#var1.data.#iter1())
-                    .for_each(|(#iter_var0, #iter_var1)| {
-                        #body
-                    });
-            });
-        } else if loop_analysis.is_parallel_safe && loop_analysis.lanes.len() == 1 {
-            let lane = &loop_analysis.lanes[0];
-            let var = &lane.var_name;
-            let iter = if lane.is_mutable {
-                quote!(par_iter_mut)
-            } else {
-                quote!(par_iter)
-            };
-            let iter_var = &loop_analysis.iterator_vars[0];
-            let body = &loop_analysis.body;
-
-            let safety_comment = generate_safety_comment(loop_analysis);
-
-            loop_bodies.push(quote! {
-                #safety_comment
-                #var.data.#iter().for_each(|#iter_var| {
-                    #body
-                });
-            });
-        } else {
-            let body = &loop_analysis.body;
-            loop_bodies.push(quote! { #body });
-        }
-    }
+    let attrs = &input.attrs;
+    let vis = &input.vis;
+    let sig = &input.sig;
+    let stmts = &input.block.stmts;
 
     let expanded = quote! {
+        #(#attrs)*
         #vis #sig {
             ornis_core::pipeline_enter();
             #(#warning_tokens)*
-            #(#lane_decls)*
-            #(#loop_bodies)*
+            // The body runs inside a block so the hook below also fires for
+            // functions with a tail expression; `return` still exits early
+            // (the exit hook is a no-op profiling marker).
+            #[allow(clippy::let_unit_value)]
+            let smart_pipeline_result = { #(#stmts)* };
             ornis_core::pipeline_exit();
+            smart_pipeline_result
         }
     };
 
     expanded.into()
-}
-
-fn generate_safety_comment(analysis: &LoopAnalysis) -> TokenStream2 {
-    let mut comments: Vec<String> = Vec::new();
-    comments.push(
-        "SAFETY: Parallel iteration verified safe by #[smart_pipeline] analysis:".to_string(),
-    );
-    comments
-        .push("  - All iterations are independent (no cross-iteration dependencies)".to_string());
-    comments.push("  - No captured mutable variables in closure".to_string());
-
-    for lane in &analysis.lanes {
-        let ty = lane.lane_type.to_token_stream().to_string();
-        let lane_comment = format!(
-            "  - `{}` implements Send + Sync (verified by Rayon bounds)",
-            ty
-        );
-        comments.push(lane_comment);
-    }
-
-    let _comment_str = comments.join("\n    // ");
-    quote! {
-        #[allow(unused_unsafe)]
-        unsafe {
-            // SAFETY: #comment_str
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // Proc macro tests need trybuild crate for proper compile-time testing
-    // These are disabled for now since they call the macro function directly
-    // and the generated code uses internal types (Position, Velocity) not available here.
-    // To enable: add trybuild dev-dependency and write compile-fail tests.
-    #[test]
-    fn placeholder() {
-        // Placeholder test to keep the module valid
-    }
 }
