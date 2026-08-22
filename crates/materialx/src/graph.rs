@@ -949,12 +949,103 @@ pub struct OpenPBRGraph;
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::parser::MaterialXParser;
+
+    /// The evaluator looks node definitions up by node *type* (`multiply`,
+    /// `clamp`, ...), so tests declare nodedefs whose name equals the type.
+    const NODEDEFS: &str = r#"
+  <nodedef name="output" node="output" />
+  <nodedef name="constant" node="constant" />
+  <nodedef name="add" node="add" />
+  <nodedef name="subtract" node="subtract" />
+  <nodedef name="multiply" node="multiply" />
+  <nodedef name="divide" node="divide" />
+  <nodedef name="invert" node="invert" />
+  <nodedef name="clamp" node="clamp" />
+  <nodedef name="max" node="max" />
+  <nodedef name="min" node="min" />
+  <nodedef name="power" node="power" />
+  <nodedef name="sqrt" node="sqrt" />
+  <nodedef name="ifgreater" node="ifgreater" />
+  <nodedef name="convert" node="convert" />
+  <nodedef name="combine2" node="combine2" />
+  <nodedef name="combine3" node="combine3" />
+  <nodedef name="combine4" node="combine4" />
+  <nodedef name="mix" node="mix" />
+  <nodedef name="layer" node="layer" />
+  <nodedef name="open_pbr_surface" node="open_pbr_surface" />
+  <nodedef name="open_pbr_anisotropy" node="open_pbr_anisotropy" />
+  <nodedef name="surface" node="surface" />
+  <nodedef name="dielectric_bsdf" node="dielectric_bsdf" />
+  <nodedef name="conductor_bsdf" node="conductor_bsdf" />
+  <nodedef name="oren_nayar_diffuse_bsdf" node="oren_nayar_diffuse_bsdf" />
+  <nodedef name="sheen_bsdf" node="sheen_bsdf" />
+  <nodedef name="thin_film_bsdf" node="thin_film_bsdf" />
+  <nodedef name="translucent_bsdf" node="translucent_bsdf" />
+  <nodedef name="subsurface_bsdf" node="subsurface_bsdf" />
+  <nodedef name="generalized_schlick_bsdf" node="generalized_schlick_bsdf" />
+  <nodedef name="uniform_edf" node="uniform_edf" />
+  <nodedef name="generalized_schlick_edf" node="generalized_schlick_edf" />
+  <nodedef name="anisotropic_vdf" node="anisotropic_vdf" />
+"#;
+
+    fn document(graph_body: &str) -> MaterialXDocument {
+        let content = format!(
+            r#"<?xml version="1.0"?>
+<materialx version="1.39">
+{}
+  <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
+{}
+  </nodegraph>
+</materialx>"#,
+            NODEDEFS, graph_body
+        );
+        MaterialXParser::new().parse(&content).unwrap()
+    }
+
+    /// Evaluate the graph and return the named outputs of its `out` node.
+    fn eval(graph_body: &str) -> EvaluatedGraph {
+        let converter = MaterialXConverter::new(document(graph_body));
+        let graph = &converter.document.nodegraphs[0];
+        GraphEvaluator::new(&converter, graph).evaluate().unwrap()
+    }
+
+    fn eval_err(graph_body: &str) -> CodegenError {
+        let converter = MaterialXConverter::new(document(graph_body));
+        let graph = &converter.document.nodegraphs[0];
+        GraphEvaluator::new(&converter, graph)
+            .evaluate()
+            .unwrap_err()
+    }
+
+    fn float(outputs: &EvaluatedGraph, name: &str) -> f32 {
+        match outputs.outputs.get(name) {
+            Some(OutputValue::Float(v)) => *v,
+            other => panic!("expected float output {name}, got {other:?}"),
+        }
+    }
+
+    fn color3(outputs: &EvaluatedGraph, name: &str) -> [f32; 3] {
+        match outputs.outputs.get(name) {
+            Some(OutputValue::Color3(v)) => *v,
+            other => panic!("expected color3 output {name}, got {other:?}"),
+        }
+    }
+
+    fn assert_close(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-6, "{a} != {b}");
+    }
 
     #[test]
     fn test_simple_materialx() {
-        let _mtlx = r#"
-<?xml version="1.0"?>
+        // The original test document: a surface shader fed by a dielectric
+        // BSDF and a uniform EDF. It needs nodedefs keyed by node type
+        // (see NODEDEFS) — without them evaluation fails with NodeDefNotFound.
+        let mtlx = format!(
+            r#"<?xml version="1.0"?>
 <materialx version="1.39">
+{}
   <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
     <output name="out" type="surfaceshader" nodename="shader_constructor" />
     <surface name="shader_constructor" type="surfaceshader">
@@ -973,14 +1064,337 @@ mod tests {
       <input name="color" type="color3" value="1.0, 1.0, 1.0" />
     </uniform_edf>
   </nodegraph>
-</materialx>
-        "#;
+</materialx>"#,
+            NODEDEFS
+        );
 
-        // This test requires nodedefs that are not provided in the MTLX
-        // let result = materialx_to_openpbr(mtlx);
-        // assert!(result.is_ok());
-        // let mat = result.unwrap();
-        // assert_eq!(mat.base_params[2], 0.0);
-        // assert_eq!(mat.specular_params[2], 1.5);
+        let result = materialx_to_openpbr(&mtlx);
+        assert!(result.is_ok());
+        // The `out` node carries no named inputs, so no material parameters
+        // are extracted and the result is the default PBR material.
+        let mat = result.unwrap();
+        assert_eq!(mat.base_params[2], 0.0);
+        assert_eq!(mat.specular_params[2], 1.5);
+    }
+
+    #[test]
+    fn test_math_ops_float() {
+        let outputs = eval(
+            r#"<constant name="two" type="float"><input name="value" type="float" value="2.0" /></constant>
+    <constant name="six" type="float"><input name="value" type="float" value="6.0" /></constant>
+    <add name="a" type="float"><input name="in1" type="float" nodename="two" /><input name="in2" type="float" nodename="six" /></add>
+    <subtract name="s" type="float"><input name="in1" type="float" nodename="two" /><input name="in2" type="float" nodename="six" /></subtract>
+    <multiply name="m" type="float"><input name="in1" type="float" nodename="two" /><input name="in2" type="float" nodename="six" /></multiply>
+    <divide name="d" type="float"><input name="in1" type="float" nodename="six" /><input name="in2" type="float" nodename="two" /></divide>
+    <output name="out" type="float">
+      <input name="add" type="float" nodename="a" />
+      <input name="sub" type="float" nodename="s" />
+      <input name="mul" type="float" nodename="m" />
+      <input name="div" type="float" nodename="d" />
+    </output>"#,
+        );
+
+        assert_close(float(&outputs, "add"), 8.0);
+        assert_close(float(&outputs, "sub"), -4.0);
+        assert_close(float(&outputs, "mul"), 12.0);
+        assert_close(float(&outputs, "div"), 3.0);
+    }
+
+    #[test]
+    fn test_math_ops_color3() {
+        let outputs = eval(
+            r#"<constant name="c1" type="color3"><input name="value" type="color3" value="1.0, 2.0, 3.0" /></constant>
+    <constant name="c2" type="color3"><input name="value" type="color3" value="0.5, 0.5, 2.0" /></constant>
+    <multiply name="m" type="color3"><input name="in1" type="color3" nodename="c1" /><input name="in2" type="color3" nodename="c2" /></multiply>
+    <subtract name="s" type="color3"><input name="in1" type="color3" nodename="c1" /><input name="in2" type="color3" nodename="c2" /></subtract>
+    <output name="out" type="color3">
+      <input name="mul" type="color3" nodename="m" />
+      <input name="sub" type="color3" nodename="s" />
+    </output>"#,
+        );
+
+        assert_eq!(color3(&outputs, "mul"), [0.5, 1.0, 6.0]);
+        assert_eq!(color3(&outputs, "sub"), [0.5, 1.5, 1.0]);
+    }
+
+    #[test]
+    fn test_unary_and_comparison_ops() {
+        let outputs = eval(
+            r#"<invert name="inv" type="float"><input name="in" type="float" value="0.25" /></invert>
+    <invert name="invc" type="color3"><input name="in" type="color3" value="0.2, 0.4, 0.6" /></invert>
+    <clamp name="cl" type="float"><input name="in" type="float" value="1.5" /><input name="low" type="float" value="0.0" /><input name="high" type="float" value="1.0" /></clamp>
+    <max name="mx" type="float"><input name="in1" type="float" value="0.3" /><input name="in2" type="float" value="0.6" /></max>
+    <min name="mn" type="float"><input name="in1" type="float" value="0.3" /><input name="in2" type="float" value="0.6" /></min>
+    <power name="pw" type="float"><input name="in" type="float" value="0.5" /><input name="exponent" type="float" value="2.0" /></power>
+    <sqrt name="sq" type="float"><input name="in" type="float" value="0.64" /></sqrt>
+    <ifgreater name="ifg" type="float"><input name="value1" type="float" value="2.0" /><input name="value2" type="float" value="1.0" /><input name="in1" type="float" value="0.9" /><input name="in2" type="float" value="0.1" /></ifgreater>
+    <convert name="cv" type="float"><input name="in" type="float" value="0.42" /></convert>
+    <output name="out" type="float">
+      <input name="inv" type="float" nodename="inv" />
+      <input name="invc" type="color3" nodename="invc" />
+      <input name="clamp" type="float" nodename="cl" />
+      <input name="max" type="float" nodename="mx" />
+      <input name="min" type="float" nodename="mn" />
+      <input name="power" type="float" nodename="pw" />
+      <input name="sqrt" type="float" nodename="sq" />
+      <input name="ifgreater" type="float" nodename="ifg" />
+      <input name="convert" type="float" nodename="cv" />
+    </output>"#,
+        );
+
+        assert_close(float(&outputs, "inv"), 0.75);
+        let invc = color3(&outputs, "invc");
+        for (got, want) in invc.iter().zip([0.8, 0.6, 0.4]) {
+            assert_close(*got, want);
+        }
+        assert_close(float(&outputs, "clamp"), 1.0);
+        assert_close(float(&outputs, "max"), 0.6);
+        assert_close(float(&outputs, "min"), 0.3);
+        assert_close(float(&outputs, "power"), 0.25);
+        assert_close(float(&outputs, "sqrt"), 0.8);
+        assert_close(float(&outputs, "ifgreater"), 0.9);
+        assert_close(float(&outputs, "convert"), 0.42);
+    }
+
+    #[test]
+    fn test_combine_and_mix() {
+        let outputs = eval(
+            r#"<constant name="x" type="float"><input name="value" type="float" value="0.1" /></constant>
+    <constant name="y" type="float"><input name="value" type="float" value="0.2" /></constant>
+    <constant name="z" type="float"><input name="value" type="float" value="0.3" /></constant>
+    <constant name="w" type="float"><input name="value" type="float" value="0.4" /></constant>
+    <combine2 name="c2" type="vector2"><input name="in1" type="float" nodename="x" /><input name="in2" type="float" nodename="y" /></combine2>
+    <combine3 name="c3" type="vector3"><input name="in1" type="float" nodename="x" /><input name="in2" type="float" nodename="y" /><input name="in3" type="float" nodename="z" /></combine3>
+    <combine4 name="c4" type="vector4"><input name="in1" type="float" nodename="x" /><input name="in2" type="float" nodename="y" /><input name="in3" type="float" nodename="z" /><input name="in4" type="float" nodename="w" /></combine4>
+    <mix name="mf" type="float"><input name="fg" type="float" value="1.0" /><input name="bg" type="float" value="0.0" /><input name="mix" type="float" value="0.25" /></mix>
+    <mix name="mc" type="color3"><input name="fg" type="color3" value="1.0, 1.0, 1.0" /><input name="bg" type="color3" value="0.0, 0.0, 0.0" /><input name="mix" type="float" value="0.5" /></mix>
+    <layer name="ly" type="float"><input name="fg" type="float" value="1.0" /><input name="bg" type="float" value="0.0" /><input name="mix" type="float" value="0.75" /></layer>
+    <open_pbr_anisotropy name="an" type="vector2"><input name="roughness" type="float" value="0.2" /><input name="anisotropy" type="float" value="0.8" /></open_pbr_anisotropy>
+    <output name="out" type="float">
+      <input name="c2" type="vector2" nodename="c2" />
+      <input name="c3" type="vector3" nodename="c3" />
+      <input name="c4" type="vector4" nodename="c4" />
+      <input name="mixf" type="float" nodename="mf" />
+      <input name="mixc" type="color3" nodename="mc" />
+      <input name="layer" type="float" nodename="ly" />
+      <input name="aniso" type="vector2" nodename="an" />
+    </output>"#,
+        );
+
+        match outputs.outputs.get("c2") {
+            Some(OutputValue::Vector2(v)) => assert_eq!(*v, [0.1, 0.2]),
+            other => panic!("expected vector2, got {other:?}"),
+        }
+        match outputs.outputs.get("c3") {
+            Some(OutputValue::Vector3(v)) => assert_eq!(*v, [0.1, 0.2, 0.3]),
+            other => panic!("expected vector3, got {other:?}"),
+        }
+        match outputs.outputs.get("c4") {
+            Some(OutputValue::Vector4(v)) => assert_eq!(*v, [0.1, 0.2, 0.3, 0.4]),
+            other => panic!("expected vector4, got {other:?}"),
+        }
+        assert_close(float(&outputs, "mixf"), 0.25);
+        assert_eq!(color3(&outputs, "mixc"), [0.5, 0.5, 0.5]);
+        assert_close(float(&outputs, "layer"), 0.75);
+        match outputs.outputs.get("aniso") {
+            Some(OutputValue::Vector2(v)) => assert_eq!(*v, [0.2, 0.8]),
+            other => panic!("expected vector2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_constant_types() {
+        let outputs = eval(
+            r#"<constant name="f" type="float"><parameter name="value" type="float" value="3.5" /></constant>
+    <constant name="c4" type="color4"><input name="value" type="color4" value="0.1, 0.2, 0.3, 0.4" /></constant>
+    <constant name="v2" type="vector2"><input name="value" type="vector2" value="1.0, 2.0" /></constant>
+    <constant name="v4" type="vector4"><input name="value" type="vector4" value="1.0, 2.0, 3.0, 4.0" /></constant>
+    <constant name="b" type="boolean"><input name="value" type="boolean" value="true" /></constant>
+    <constant name="s" type="string"><input name="value" type="string" value="R" /></constant>
+    <output name="out" type="float">
+      <input name="f" type="float" nodename="f" />
+      <input name="c4" type="color4" nodename="c4" />
+      <input name="v2" type="vector2" nodename="v2" />
+      <input name="v4" type="vector4" nodename="v4" />
+      <input name="b" type="boolean" nodename="b" />
+      <input name="s" type="string" nodename="s" />
+    </output>"#,
+        );
+
+        assert_close(float(&outputs, "f"), 3.5);
+        match outputs.outputs.get("c4") {
+            Some(OutputValue::Color4(v)) => assert_eq!(*v, [0.1, 0.2, 0.3, 0.4]),
+            other => panic!("expected color4, got {other:?}"),
+        }
+        match outputs.outputs.get("v2") {
+            Some(OutputValue::Vector2(v)) => assert_eq!(*v, [1.0, 2.0]),
+            other => panic!("expected vector2, got {other:?}"),
+        }
+        match outputs.outputs.get("v4") {
+            Some(OutputValue::Vector4(v)) => assert_eq!(*v, [1.0, 2.0, 3.0, 4.0]),
+            other => panic!("expected vector4, got {other:?}"),
+        }
+        match outputs.outputs.get("b") {
+            Some(OutputValue::Boolean(v)) => assert!(v),
+            other => panic!("expected boolean, got {other:?}"),
+        }
+        match outputs.outputs.get("s") {
+            Some(OutputValue::String(v)) => assert_eq!(v, "R"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    /// An input with neither a value nor a connection falls back to the
+    /// default declared by the nodedef.
+    #[test]
+    fn test_nodedef_default_input() {
+        let outputs = eval(
+            r#"<nodedef name="clamp" node="clamp">
+      <input name="low" type="float" value="0.75" />
+    </nodedef>
+    <clamp name="cl" type="float">
+      <input name="in" type="float" value="0.5" />
+      <input name="low" type="float" />
+      <input name="high" type="float" value="1.0" />
+    </clamp>
+    <output name="out" type="float"><input name="clamped" type="float" nodename="cl" /></output>"#,
+        );
+
+        // clamp(0.5, low=0.75 from the nodedef, high=1.0) = 0.75
+        assert_close(float(&outputs, "clamped"), 0.75);
+    }
+
+    #[test]
+    fn test_bsdf_edf_surface_nodes() {
+        let outputs = eval(
+            r#"<dielectric_bsdf name="d" type="BSDF"><input name="weight" type="float" value="1.0" /></dielectric_bsdf>
+    <oren_nayar_diffuse_bsdf name="o" type="BSDF"><input name="weight" type="float" value="1.0" /></oren_nayar_diffuse_bsdf>
+    <uniform_edf name="e" type="EDF"><input name="color" type="color3" value="1.0, 1.0, 1.0" /></uniform_edf>
+    <generalized_schlick_edf name="se" type="EDF"><input name="color" type="color3" value="1.0, 1.0, 1.0" /></generalized_schlick_edf>
+    <anisotropic_vdf name="v" type="VDF"><input name="color" type="color3" value="1.0, 1.0, 1.0" /></anisotropic_vdf>
+    <surface name="surf" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="d" /></surface>
+    <output name="out" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="d" /></output>"#,
+        );
+
+        match outputs.outputs.get("bsdf") {
+            Some(OutputValue::BSDF(v)) => assert_eq!(v, "dielectric"),
+            other => panic!("expected BSDF, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_missing_nodedef_is_error() {
+        // A graph whose nodes have no matching nodedef at all.
+        let content = r#"<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
+    <constant name="c" type="float"><input name="value" type="float" value="1.0" /></constant>
+    <output name="out" type="float"><input name="x" type="float" nodename="c" /></output>
+  </nodegraph>
+</materialx>"#;
+        let doc = MaterialXParser::new().parse(content).unwrap();
+        let converter = MaterialXConverter::new(doc);
+        let graph = &converter.document.nodegraphs[0];
+        let err = GraphEvaluator::new(&converter, graph)
+            .evaluate()
+            .unwrap_err();
+        assert!(matches!(err, CodegenError::NodeDefNotFound(_)), "{err:?}");
+    }
+
+    #[test]
+    fn test_cyclic_dependency_is_error() {
+        let err = eval_err(
+            r#"<multiply name="a" type="float"><input name="in1" type="float" nodename="b" /><input name="in2" type="float" value="1.0" /></multiply>
+    <multiply name="b" type="float"><input name="in1" type="float" nodename="a" /><input name="in2" type="float" value="1.0" /></multiply>
+    <output name="out" type="float"><input name="x" type="float" nodename="a" /></output>"#,
+        );
+        assert!(matches!(err, CodegenError::CyclicDependency), "{err:?}");
+    }
+
+    #[test]
+    fn test_unknown_node_type_is_error() {
+        let err = eval_err(
+            r#"<nodedef name="node" node="node" />
+    <node name="x" type="float" />
+    <output name="out" type="float"><input name="y" type="float" nodename="x" /></output>"#,
+        );
+        assert!(matches!(err, CodegenError::UnsupportedNode(_)), "{err:?}");
+    }
+
+    #[test]
+    fn test_missing_input_is_error() {
+        let err = eval_err(
+            r#"<multiply name="m" type="float" />
+    <output name="out" type="float"><input name="x" type="float" nodename="m" /></output>"#,
+        );
+        assert!(matches!(err, CodegenError::InputNotFound(_)), "{err:?}");
+    }
+
+    #[test]
+    fn test_bad_constant_value_is_error() {
+        let err = eval_err(
+            r#"<constant name="c" type="float"><input name="value" type="float" value="abc" /></constant>
+    <output name="out" type="float"><input name="x" type="float" nodename="c" /></output>"#,
+        );
+        assert!(matches!(err, CodegenError::TypeConversion(_)), "{err:?}");
+    }
+
+    #[test]
+    fn test_math_type_mismatch_is_error() {
+        let err = eval_err(
+            r#"<multiply name="m" type="float"><input name="in1" type="float" value="1.0" /><input name="in2" type="color3" value="1.0, 1.0, 1.0" /></multiply>
+    <output name="out" type="float"><input name="x" type="float" nodename="m" /></output>"#,
+        );
+        assert!(matches!(err, CodegenError::TypeConversion(_)), "{err:?}");
+    }
+
+    #[test]
+    fn test_openpbr_graph_not_found() {
+        let content = r#"<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="test" nodedef="ND_something_else">
+  </nodegraph>
+</materialx>"#;
+        let result = materialx_to_openpbr(content);
+        assert!(
+            matches!(result, Err(MaterialXError::Codegen(_))),
+            "{result:?}"
+        );
+    }
+
+    /// End-to-end: a math chain evaluated by `materialx_to_openpbr` lands in
+    /// the extracted `OpenPBRMaterial` fields.
+    #[test]
+    fn test_end_to_end_material_extraction() {
+        let mtlx = format!(
+            r#"<?xml version="1.0"?>
+<materialx version="1.39">
+{}
+  <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
+    <constant name="a" type="color3"><input name="value" type="color3" value="0.8, 0.4, 0.2" /></constant>
+    <constant name="b" type="color3"><input name="value" type="color3" value="0.5, 0.5, 0.5" /></constant>
+    <multiply name="m" type="color3"><input name="in1" type="color3" nodename="a" /><input name="in2" type="color3" nodename="b" /></multiply>
+    <subtract name="s" type="color3"><input name="in1" type="color3" nodename="a" /><input name="in2" type="color3" nodename="m" /></subtract>
+    <invert name="inv" type="float"><input name="in" type="float" value="0.25" /></invert>
+    <clamp name="cl" type="float"><input name="in" type="float" value="1.5" /><input name="low" type="float" value="0.0" /><input name="high" type="float" value="1.0" /></clamp>
+    <output name="out" type="surfaceshader">
+      <input name="base_color" type="color3" nodename="s" />
+      <input name="base_weight" type="float" nodename="inv" />
+      <input name="specular_roughness" type="float" nodename="cl" />
+    </output>
+  </nodegraph>
+</materialx>"#,
+            NODEDEFS
+        );
+
+        let mat = materialx_to_openpbr(&mtlx).unwrap();
+        // a - a*b per channel: (0.8, 0.4, 0.2) - (0.4, 0.2, 0.1)
+        assert_eq!(mat.base_color[0], 0.4f32);
+        assert_eq!(mat.base_color[1], 0.2f32);
+        assert_close(mat.base_color[2], 0.1);
+        // invert(0.25)
+        assert_close(mat.base_params[0], 0.75);
+        // clamp(1.5, 0, 1)
+        assert_close(mat.specular_params[1], 1.0);
     }
 }

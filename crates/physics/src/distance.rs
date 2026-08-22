@@ -416,3 +416,392 @@ pub(crate) fn cast_shape<'t>(
     }
     best
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPS: f32 = 1e-5;
+
+    fn sphere(radius: f32) -> Shape {
+        Shape::Sphere { radius }
+    }
+
+    fn cuboid(half: Vec3) -> Shape {
+        Shape::Box { half_extents: half }
+    }
+
+    fn capsule(radius: f32, half_height: f32) -> Shape {
+        Shape::Capsule {
+            radius,
+            half_height,
+        }
+    }
+
+    fn at(shape: &Shape, pos: Vec3) -> ShapeRef<'_> {
+        ShapeRef {
+            shape,
+            pos,
+            rot: Quat::IDENTITY,
+        }
+    }
+
+    fn at_rot(shape: &Shape, pos: Vec3, rot: Quat) -> ShapeRef<'_> {
+        ShapeRef { shape, pos, rot }
+    }
+
+    fn assert_vec3_close(got: Vec3, want: Vec3) {
+        assert!(
+            (got - want).length() < EPS,
+            "got {got:?}, want {want:?}"
+        );
+    }
+
+    // ── segment helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn point_segment_closest_clamps_to_endpoints() {
+        let a = Vec3::ZERO;
+        let b = Vec3::new(2.0, 0.0, 0.0);
+        assert_vec3_close(point_segment_closest(Vec3::new(1.0, 5.0, 0.0), a, b), Vec3::X);
+        // Past the ends: clamped to the endpoint.
+        assert_vec3_close(point_segment_closest(Vec3::new(-3.0, 1.0, 0.0), a, b), a);
+        assert_vec3_close(point_segment_closest(Vec3::new(9.0, 0.0, 0.0), a, b), b);
+    }
+
+    #[test]
+    fn point_segment_closest_degenerate_segment() {
+        let a = Vec3::new(1.0, 2.0, 3.0);
+        assert_vec3_close(point_segment_closest(Vec3::ZERO, a, a), a);
+    }
+
+    #[test]
+    fn seg_seg_closest_parallel_segments() {
+        // Two unit segments side by side along Y, 3 apart in X.
+        let (pa, pb) = seg_seg_closest(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(3.0, -1.0, 0.0),
+            Vec3::new(3.0, 1.0, 0.0),
+        );
+        assert!((pa - pb).length() - 3.0 < EPS);
+    }
+
+    #[test]
+    fn seg_seg_closest_degenerate_both() {
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 2.0, 0.0);
+        let (pa, pb) = seg_seg_closest(a, a, b, b);
+        assert_vec3_close(pa, a);
+        assert_vec3_close(pb, b);
+    }
+
+    // ── sphere vs sphere ───────────────────────────────────────────────
+
+    #[test]
+    fn sphere_sphere_separated() {
+        let (sa, sb) = (sphere(1.0), sphere(1.0));
+        let d = shape_distance(at(&sa, Vec3::ZERO), at(&sb, Vec3::new(4.0, 0.0, 0.0)));
+        assert!((d.dist - 2.0).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::X);
+        assert_vec3_close(d.point_b, Vec3::new(3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn sphere_sphere_touching() {
+        let (sa, sb) = (sphere(1.0), sphere(0.5));
+        let d = shape_distance(at(&sa, Vec3::ZERO), at(&sb, Vec3::new(1.5, 0.0, 0.0)));
+        assert!(d.dist.abs() < EPS);
+    }
+
+    #[test]
+    fn sphere_sphere_overlapping() {
+        let (sa, sb) = (sphere(1.0), sphere(1.0));
+        let d = shape_distance(at(&sa, Vec3::ZERO), at(&sb, Vec3::new(1.5, 0.0, 0.0)));
+        assert!((d.dist - (-0.5)).abs() < EPS);
+    }
+
+    #[test]
+    fn sphere_sphere_concentric() {
+        // Zero-length direction: falls back to +X, distance is -(ra + rb).
+        let (sa, sb) = (sphere(1.0), sphere(1.0));
+        let d = shape_distance(at(&sa, Vec3::ZERO), at(&sb, Vec3::ZERO));
+        assert!((d.dist - (-2.0)).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::X);
+        assert_vec3_close(d.point_b, -Vec3::X);
+    }
+
+    // ── sphere vs box ──────────────────────────────────────────────────
+
+    #[test]
+    fn sphere_box_face() {
+        let (s, b) = (sphere(0.5), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&s, Vec3::new(3.0, 0.0, 0.0)), at(&b, Vec3::ZERO));
+        assert!((d.dist - 1.5).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(2.5, 0.0, 0.0));
+        assert_vec3_close(d.point_b, Vec3::X);
+    }
+
+    #[test]
+    fn sphere_box_touching() {
+        let (s, b) = (sphere(1.0), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&s, Vec3::new(2.0, 0.0, 0.0)), at(&b, Vec3::ZERO));
+        assert!(d.dist.abs() < EPS);
+    }
+
+    #[test]
+    fn sphere_box_corner() {
+        // Sphere on the box's space diagonal: closest feature is the corner.
+        let (s, b) = (sphere(0.5), cuboid(Vec3::ONE));
+        let corner = Vec3::ONE;
+        let center = corner * 3.0;
+        let d = shape_distance(at(&s, center), at(&b, Vec3::ZERO));
+        let want = (center - corner).length() - 0.5;
+        assert!((d.dist - want).abs() < EPS);
+        assert_vec3_close(d.point_b, corner);
+    }
+
+    #[test]
+    fn sphere_box_center_inside() {
+        // Interior point is pushed to the nearest face, so the query reports
+        // (face distance - radius) — positive here, i.e. depth, not a signed
+        // penetration. Documents current behavior for CCD.
+        let (s, b) = (sphere(0.25), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&s, Vec3::new(0.5, 0.0, 0.0)), at(&b, Vec3::ZERO));
+        assert!((d.dist - 0.25).abs() < EPS);
+        assert_vec3_close(d.point_b, Vec3::X);
+    }
+
+    #[test]
+    fn sphere_box_rotated() {
+        // Box rotated 45° about Z: its +Y-facing corner sits at (0, sqrt(2)).
+        let (s, b) = (sphere(0.0), cuboid(Vec3::ONE));
+        let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let d = shape_distance(
+            at(&s, Vec3::new(0.0, 3.0, 0.0)),
+            at_rot(&b, Vec3::ZERO, rot),
+        );
+        let want = 3.0 - 2.0f32.sqrt();
+        assert!((d.dist - want).abs() < EPS);
+        assert_vec3_close(d.point_b, Vec3::new(0.0, 2.0f32.sqrt(), 0.0));
+    }
+
+    #[test]
+    fn box_sphere_swapped_witnesses() {
+        // The Box/Sphere arm must mirror the Sphere/Box one, witnesses swapped.
+        let (s, b) = (sphere(0.5), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&b, Vec3::ZERO), at(&s, Vec3::new(3.0, 0.0, 0.0)));
+        assert!((d.dist - 1.5).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::X);
+        assert_vec3_close(d.point_b, Vec3::new(2.5, 0.0, 0.0));
+    }
+
+    // ── sphere vs capsule ──────────────────────────────────────────────
+
+    #[test]
+    fn sphere_capsule_side() {
+        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let d = shape_distance(at(&s, Vec3::new(3.0, 0.0, 0.0)), at(&c, Vec3::ZERO));
+        assert!((d.dist - 2.0).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(2.5, 0.0, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(0.5, 0.0, 0.0));
+    }
+
+    #[test]
+    fn sphere_capsule_cap() {
+        // Above the cap: closest core point is the segment endpoint.
+        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let d = shape_distance(at(&s, Vec3::new(0.0, 3.0, 0.0)), at(&c, Vec3::ZERO));
+        assert!((d.dist - 1.0).abs() < EPS);
+        assert_vec3_close(d.point_b, Vec3::new(0.0, 1.5, 0.0));
+    }
+
+    #[test]
+    fn sphere_capsule_touching() {
+        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let d = shape_distance(at(&s, Vec3::new(1.0, 0.0, 0.0)), at(&c, Vec3::ZERO));
+        assert!(d.dist.abs() < EPS);
+    }
+
+    #[test]
+    fn capsule_sphere_swapped_witnesses() {
+        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let d = shape_distance(at(&c, Vec3::ZERO), at(&s, Vec3::new(3.0, 0.0, 0.0)));
+        assert!((d.dist - 2.0).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(0.5, 0.0, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(2.5, 0.0, 0.0));
+    }
+
+    // ── capsule vs capsule ─────────────────────────────────────────────
+
+    #[test]
+    fn capsule_capsule_parallel() {
+        let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
+        let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(3.0, 0.0, 0.0)));
+        assert!((d.dist - 2.0).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(0.5, d.point_a.y, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(2.5, d.point_b.y, 0.0));
+    }
+
+    #[test]
+    fn capsule_capsule_perpendicular() {
+        // a along Y at the origin, b along X two units above in Z.
+        let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
+        let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let d = shape_distance(at(&ca, Vec3::ZERO), at_rot(&cb, Vec3::new(0.0, 0.0, 2.0), rot));
+        assert!((d.dist - 1.0).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(0.0, 0.0, 0.5));
+        assert_vec3_close(d.point_b, Vec3::new(0.0, 0.0, 1.5));
+    }
+
+    #[test]
+    fn capsule_capsule_overlapping() {
+        let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
+        let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(0.5, 0.0, 0.0)));
+        assert!((d.dist - (-0.5)).abs() < EPS);
+    }
+
+    #[test]
+    fn capsule_capsule_degenerate_zero_half_height() {
+        // Zero half-height capsules behave as spheres.
+        let (ca, cb) = (capsule(0.5, 0.0), capsule(0.5, 0.0));
+        let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(2.0, 0.0, 0.0)));
+        assert!((d.dist - 1.0).abs() < EPS);
+    }
+
+    // ── box vs box ─────────────────────────────────────────────────────
+
+    #[test]
+    fn box_box_face_to_face() {
+        let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::new(3.0, 0.0, 0.0)));
+        assert!((d.dist - 1.0).abs() < EPS);
+        // Witnesses are the facing surfaces (tie-breaking picks a corner).
+        assert!((d.point_a.x - 1.0).abs() < EPS);
+        assert!((d.point_b.x - 2.0).abs() < EPS);
+        assert!((d.point_b.y - d.point_a.y).abs() < EPS);
+        assert!((d.point_b.z - d.point_a.z).abs() < EPS);
+    }
+
+    #[test]
+    fn box_box_corner_to_corner() {
+        let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::new(3.0, 3.0, 0.0)));
+        // Nearest corners (1,1,z) and (2,2,z): distance sqrt(2).
+        assert!((d.dist - 2.0f32.sqrt()).abs() < EPS);
+    }
+
+    #[test]
+    fn box_box_touching() {
+        let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::new(0.5, 0.5, 0.5)));
+        let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::new(1.5, 0.0, 0.0)));
+        assert!(d.dist.abs() < EPS);
+    }
+
+    #[test]
+    fn box_box_overlapping() {
+        // Overlap: vertex-inside-face snaps to the surface, distance bottoms
+        // out at zero (penetration witnesses are documented as best-effort).
+        let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::ONE));
+        let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::new(1.0, 0.0, 0.0)));
+        assert!(d.dist.abs() < EPS);
+    }
+
+    // ── box vs capsule ─────────────────────────────────────────────────
+
+    #[test]
+    fn box_capsule_side() {
+        let (b, c) = (cuboid(Vec3::ONE), capsule(0.5, 1.0));
+        let d = shape_distance(at(&b, Vec3::ZERO), at(&c, Vec3::new(3.0, 0.0, 0.0)));
+        // Face x=1 to core x=3 is 2, minus capsule radius.
+        assert!((d.dist - 1.5).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(1.0, d.point_a.y, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(2.5, d.point_b.y, 0.0));
+    }
+
+    #[test]
+    fn box_capsule_above_cap() {
+        let (b, c) = (cuboid(Vec3::ONE), capsule(0.5, 1.0));
+        let d = shape_distance(at(&b, Vec3::ZERO), at(&c, Vec3::new(0.0, 4.0, 0.0)));
+        // Core endpoint (0,3), box face y=1: gap 2 minus radius 0.5.
+        assert!((d.dist - 1.5).abs() < EPS);
+    }
+
+    #[test]
+    fn capsule_box_swapped_witnesses() {
+        let (b, c) = (cuboid(Vec3::ONE), capsule(0.5, 1.0));
+        let d = shape_distance(at(&c, Vec3::new(3.0, 0.0, 0.0)), at(&b, Vec3::ZERO));
+        assert!((d.dist - 1.5).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(2.5, d.point_a.y, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(1.0, d.point_b.y, 0.0));
+    }
+
+    // ── conservative advancement ───────────────────────────────────────
+
+    #[test]
+    fn cast_sphere_onto_box_stops_at_surface() {
+        let (s, b) = (sphere(1.0), cuboid(Vec3::ONE));
+        let hit = cast_shape(
+            at(&s, Vec3::ZERO),
+            Vec3::new(10.0, 0.0, 0.0),
+            [(7usize, at(&b, Vec3::new(5.0, 0.0, 0.0)))].into_iter(),
+        )
+        .expect("must hit");
+        // Gap at t=0 is 3 (sphere surface x=1, box face x=4).
+        assert!((hit.t - 3.0).abs() < 2e-3, "t = {}", hit.t);
+        assert!((hit.point.x - 4.0).abs() < 2e-3);
+        assert!((hit.normal.x - (-1.0)).abs() < 1e-3);
+        assert_eq!(hit.handle, 7);
+    }
+
+    #[test]
+    fn cast_away_from_target_misses() {
+        let (s, b) = (sphere(1.0), cuboid(Vec3::ONE));
+        let hit = cast_shape(
+            at(&s, Vec3::ZERO),
+            Vec3::new(-10.0, 0.0, 0.0),
+            [(0usize, at(&b, Vec3::new(5.0, 0.0, 0.0)))].into_iter(),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn cast_already_touching_reports_no_hit() {
+        // Resting contact at t=0 is the discrete solver's job, not the sweep's.
+        let (s, b) = (sphere(1.0), cuboid(Vec3::ONE));
+        let hit = cast_shape(
+            at(&s, Vec3::ZERO),
+            Vec3::new(10.0, 0.0, 0.0),
+            [(0usize, at(&b, Vec3::new(2.0, 0.0, 0.0)))].into_iter(),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn cast_zero_delta_is_none() {
+        let (s, b) = (sphere(1.0), cuboid(Vec3::ONE));
+        let hit = cast_shape(
+            at(&s, Vec3::ZERO),
+            Vec3::ZERO,
+            [(0usize, at(&b, Vec3::new(5.0, 0.0, 0.0)))].into_iter(),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn cast_picks_nearest_target() {
+        let (s, b) = (sphere(1.0), cuboid(Vec3::ONE));
+        let hit = cast_shape(
+            at(&s, Vec3::ZERO),
+            Vec3::new(20.0, 0.0, 0.0),
+            [
+                (1usize, at(&b, Vec3::new(9.0, 0.0, 0.0))),
+                (2usize, at(&b, Vec3::new(5.0, 0.0, 0.0))),
+            ]
+            .into_iter(),
+        )
+        .expect("must hit");
+        assert_eq!(hit.handle, 2);
+        assert!((hit.t - 3.0).abs() < 2e-3, "t = {}", hit.t);
+    }
+}
