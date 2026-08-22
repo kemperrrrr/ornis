@@ -457,7 +457,10 @@ mod tests {
         }
 
         let total: i32 = store.iter().sum();
-        assert_eq!(total, (0..12).map(|x| x + 1).sum());
+        // Аннотация обязательна: serde_json (зависимость ornis-core) добавляет
+        // `impl PartialEq<serde_json::Value> for i32` — без явного типа сумма
+        // в assert_eq! неоднозначна (E0283).
+        assert_eq!(total, (0..12).map(|x| x + 1).sum::<i32>());
     }
 
     #[test]
@@ -631,7 +634,7 @@ mod tests {
 
         assert_eq!(chunk_sizes, vec![4, 4, 4]);
         assert_eq!(seen, 13);
-        assert_eq!(store.iter().sum::<i32>(), (0..13).map(|x| x + 1).sum());
+        assert_eq!(store.iter().sum::<i32>(), (0..13).map(|x| x + 1).sum::<i32>());
     }
 
     #[test]

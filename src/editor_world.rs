@@ -99,7 +99,12 @@ impl EditorWorld {
 
     /// Spawn with default components: gray dielectric sphere (r=1) at origin.
     pub fn spawn(&mut self, name: Option<String>) -> Entity {
-        self.spawn_with(name, default_transform(), default_mesh(), default_material())
+        self.spawn_with(
+            name,
+            default_transform(),
+            default_mesh(),
+            default_material(),
+        )
     }
 
     pub fn spawn_with(
@@ -375,7 +380,10 @@ impl EditorWorld {
         let entity = self.resolve_entity(data)?;
         let material = parse_material(data.get("material").ok_or("missing 'material'")?)?;
         let payload = material_json(&material);
-        *self.materials.get_mut(entity).ok_or("entity has no Material")? = material;
+        *self
+            .materials
+            .get_mut(entity)
+            .ok_or("entity has no Material")? = material;
         self.version += 1;
         Ok(serde_json::json!({
             "id": entity.id(),
@@ -571,9 +579,7 @@ fn parse_f32s<const N: usize>(v: &Value) -> Result<[f32; N], String> {
 fn opt_f32s<const N: usize>(data: &Value, key: &str) -> Result<Option<[f32; N]>, String> {
     match data.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => parse_f32s(v)
-            .map(Some)
-            .map_err(|e| format!("'{key}': {e}")),
+        Some(v) => parse_f32s(v).map(Some).map_err(|e| format!("'{key}': {e}")),
     }
 }
 
@@ -773,10 +779,9 @@ mod tests {
 
     #[test]
     fn scene_ron_round_trip() {
-        let ron = fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"),
-        )
-        .expect("editor/scene.ron readable");
+        let ron =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
+                .expect("editor/scene.ron readable");
         let mut world = EditorWorld::new();
         let loaded = world.load_scene_ron(&ron).expect("scene loads");
         assert_eq!(loaded, 5);
@@ -876,12 +881,18 @@ mod tests {
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         assert_eq!(world.version, 1);
         world.handle_command(
-            &custom("set_transform", r#"{"id":0,"generation":0,"translation":[1,2,3]}"#),
+            &custom(
+                "set_transform",
+                r#"{"id":0,"generation":0,"translation":[1,2,3]}"#,
+            ),
             &ev_tx,
         );
         assert_eq!(world.version, 2);
         // Failed command: no bump.
-        world.handle_command(&custom("set_transform", r#"{"id":9,"generation":0}"#), &ev_tx);
+        world.handle_command(
+            &custom("set_transform", r#"{"id":9,"generation":0}"#),
+            &ev_tx,
+        );
         assert_eq!(world.version, 2);
         world.handle_command(
             &custom("rename_entity", r#"{"id":0,"generation":0,"name":"X"}"#),
@@ -889,7 +900,10 @@ mod tests {
         );
         assert_eq!(world.version, 3);
         world.handle_command(
-            &custom("set_material", r#"{"id":0,"generation":0,"material":{"kind":"metal"}}"#),
+            &custom(
+                "set_material",
+                r#"{"id":0,"generation":0,"material":{"kind":"metal"}}"#,
+            ),
             &ev_tx,
         );
         assert_eq!(world.version, 4);
@@ -984,7 +998,10 @@ mod tests {
         let (mut world, ev_tx, ev_rx) = world_and_events();
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         world.handle_command(
-            &custom("set_transform", r#"{"id":0,"generation":0,"translation":[3,0,0]}"#),
+            &custom(
+                "set_transform",
+                r#"{"id":0,"generation":0,"translation":[3,0,0]}"#,
+            ),
             &ev_tx,
         );
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
@@ -1086,7 +1103,10 @@ mod tests {
         world.handle_command(&custom("nonsense", ""), &ev_tx);
         // Non-existent entity.
         world.handle_command(
-            &custom("set_material", r#"{"id":3,"generation":0,"material":{"kind":"metal"}}"#),
+            &custom(
+                "set_material",
+                r#"{"id":3,"generation":0,"material":{"kind":"metal"}}"#,
+            ),
             &ev_tx,
         );
         // Unknown material kind: the entity must not be created.
@@ -1145,12 +1165,17 @@ mod tests {
         let (ev_tx, ev_rx) = unbounded();
         let handle = run(cmd_rx, ev_tx);
 
-        cmd_tx.send(custom("create_entity", r#"{"name":"Hero"}"#)).unwrap();
+        cmd_tx
+            .send(custom("create_entity", r#"{"name":"Hero"}"#))
+            .unwrap();
         // Wait for the scene snapshot reflecting the new entity.
         let mut seen_scene = None;
         for _ in 0..100 {
             while let Ok(ev) = ev_rx.try_recv() {
-                if let GameEvent::CustomEvent { cmd_type, json_data } = ev
+                if let GameEvent::CustomEvent {
+                    cmd_type,
+                    json_data,
+                } = ev
                     && cmd_type == "scene"
                 {
                     seen_scene = Some(json_data);

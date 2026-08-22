@@ -736,25 +736,44 @@ mod tests {
 
     #[test]
     fn composite_modes_encode_technique_and_bloom() {
-        assert_eq!(Composite::<CompositeDeferredBloom>::new().name(), "composite");
+        assert_eq!(
+            Composite::<CompositeDeferredBloom>::new().name(),
+            "composite"
+        );
         assert_eq!(Composite::<CompositeForward>::default().name(), "composite");
 
         // (mode constant, bloom flag, expected reads)
         let cases: [(u32, bool, &[&str]); 6] = [
-            (CompositeDeferredBloom::SHADER_MODE, CompositeDeferredBloom::BLOOM, &["hdr", "bloom0"]),
-            (CompositeDeferred::SHADER_MODE, CompositeDeferred::BLOOM, &["hdr"]),
+            (
+                CompositeDeferredBloom::SHADER_MODE,
+                CompositeDeferredBloom::BLOOM,
+                &["hdr", "bloom0"],
+            ),
+            (
+                CompositeDeferred::SHADER_MODE,
+                CompositeDeferred::BLOOM,
+                &["hdr"],
+            ),
             (
                 CompositeHybridBloom::SHADER_MODE,
                 CompositeHybridBloom::BLOOM,
                 &["hdr", "hdr_fwd", "bloom0"],
             ),
-            (CompositeHybrid::SHADER_MODE, CompositeHybrid::BLOOM, &["hdr", "hdr_fwd"]),
+            (
+                CompositeHybrid::SHADER_MODE,
+                CompositeHybrid::BLOOM,
+                &["hdr", "hdr_fwd"],
+            ),
             (
                 CompositeForwardBloom::SHADER_MODE,
                 CompositeForwardBloom::BLOOM,
                 &["hdr_fwd", "bloom0"],
             ),
-            (CompositeForward::SHADER_MODE, CompositeForward::BLOOM, &["hdr_fwd"]),
+            (
+                CompositeForward::SHADER_MODE,
+                CompositeForward::BLOOM,
+                &["hdr_fwd"],
+            ),
         ];
         let expected_modes = [0, 0, 2, 2, 1, 1];
         let expected_bloom = [true, false, true, false, true, false];
@@ -763,7 +782,10 @@ mod tests {
             assert_eq!(*bloom, expected_bloom[i], "case {i}");
         }
 
-        assert_eq!(reads_of::<Composite<CompositeDeferredBloom>>(), vec!["hdr", "bloom0"]);
+        assert_eq!(
+            reads_of::<Composite<CompositeDeferredBloom>>(),
+            vec!["hdr", "bloom0"]
+        );
         assert_eq!(reads_of::<Composite<CompositeDeferred>>(), vec!["hdr"]);
         assert_eq!(
             reads_of::<Composite<CompositeHybridBloom>>(),

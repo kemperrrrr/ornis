@@ -300,7 +300,9 @@ impl ComponentRegistry {
 
     /// Запись по типу.
     pub fn by_id(&self, type_id: TypeId) -> Option<&ComponentMeta> {
-        self.by_id.get(&type_id).map(|&id| &self.entries[id as usize])
+        self.by_id
+            .get(&type_id)
+            .map(|&id| &self.entries[id as usize])
     }
 
     /// Запись по протокольному имени.
@@ -492,7 +494,7 @@ mod tests {
     #[test]
     fn get_json_on_absent_component_is_ok_none() {
         let registry = registry_with_two();
-        let mut store = SmartStore::new();
+        let store = SmartStore::new();
         let entity = store.create_entity();
         let meta = registry.by_name("position").unwrap();
 
@@ -542,7 +544,9 @@ mod tests {
 
         pos.set_json(&mut store, entity, &json!({"x": 1.0, "y": 2.0}))
             .unwrap();
-        health.set_json(&mut store, entity, &json!({"hp": 100})).unwrap();
+        health
+            .set_json(&mut store, entity, &json!({"hp": 100}))
+            .unwrap();
 
         assert_eq!(pos.lane_len(&store), 1);
         assert_eq!(health.lane_len(&store), 1);
