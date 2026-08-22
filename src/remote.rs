@@ -85,6 +85,7 @@ fn serve(
 ) {
     let mut events_buffer: Vec<GameEvent> = Vec::new();
     let mut cached_status: String = r#"{"entity_count":0,"name":"Ornis Engine"}"#.to_string();
+    let mut cached_scene: String = r#"{"entity_count":0,"entities":[]}"#.to_string();
     let root = assets_root();
 
     loop {
@@ -92,7 +93,9 @@ fn serve(
             break;
         }
 
-        // Drain incoming game events into buffer
+        // Drain incoming game events into buffer.
+        // "status"/"scene" snapshots only refresh the endpoint caches — they
+        // are not user-facing events, so they skip the events buffer.
         while let Ok(ev) = game_rx.try_recv() {
             match &ev {
                 GameEvent::CustomEvent {
@@ -100,6 +103,14 @@ fn serve(
                     json_data,
                 } if cmd_type == "status" => {
                     cached_status = json_data.clone();
+                    continue;
+                }
+                GameEvent::CustomEvent {
+                    cmd_type,
+                    json_data,
+                } if cmd_type == "scene" => {
+                    cached_scene = json_data.clone();
+                    continue;
                 }
                 _ => {}
             }
@@ -119,6 +130,7 @@ fn serve(
         let response: Response<Cursor<Vec<u8>>> = match (method.as_str(), url.as_str()) {
             ("GET", "/") | ("GET", "/index.html") => serve_static(&root, "index.html"),
             ("GET", "/api/status") => json_response(&cached_status),
+            ("GET", "/api/scene") => json_response(&cached_scene),
             ("GET", "/api/events") => {
                 let body = format_events(&events_buffer);
                 events_buffer.clear();

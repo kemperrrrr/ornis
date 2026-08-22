@@ -96,6 +96,10 @@
             justify-content: space-between;
             width: 100%;
             position: relative;
+            box-sizing: border-box;
+            /* отступ от нижнего края, чтобы текст не срезался
+               скруглёнными углами окна */
+            padding: 0.6rem 1.2rem;
         }
 
         .left-upper,
@@ -252,6 +256,11 @@
         .hierarchy {
             padding: 0.5rem;
             padding-top: 1rem;
+        }
+
+        .hierarchy .hierarchy-empty {
+            padding: 0.2rem 0.5rem;
+            opacity: 0.6;
         }
 
         .hierarchy details.active>summary {

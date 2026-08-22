@@ -18,7 +18,7 @@
 <body>
     <div class="app">
         <div class="panel header">
-            <img src="./favicon.png" class="logo" alt="Bevy Logo" />
+            <img src="./Owl_bored.svg" class="logo" alt="Ornis Logo" />
             <span>File</span>
             <span>Edit</span>
             <span>View</span>
@@ -80,7 +80,7 @@
                 <input type="text" placeholder="Search" />
                 <button><svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 0 960 960" width="24"><use href="icons/search.svg#icon" /></svg></button>
             </div>
-            <div class="hierarchy">
+            <div class="hierarchy" id="hierarchy-panel">
                 <details open class="active">
                     <summary>
                         <div class="left">
@@ -369,14 +369,14 @@
                     <span class="file-name">song.midi</span>
                 </div>
                 <div class="file">
-                    <img class="file-icon" src="./favicon.png" />
+                    <img class="file-icon" src="./icons/file.svg" />
                     <span class="file-name">world.bsn</span>
                 </div>
             </div>
         </div>
     </div>
     <div class="footer">
-        <div class="left"><span>Bevy Editor v0.1.0 Alpha (a9df95c)</span><span>Rust v1.74.1 (a28077b28)</span>
+        <div class="left"><span>Bevy Editor v0.1.0 Alpha (a9df95c)</span><span>Rust v1.74.1 (a28077b28)</span><span id="status-entities">Entities: –</span>
         </div>
         <div class="center-container"><span>my_game v0.1.0 (7e7e14d)</span></div>
         <div class="right">
@@ -385,6 +385,7 @@
     </div>
 
     <script src="./sliders.js"></script>
+    <script src="./editor.js"></script>
 
     <script type="module" src="./viewport.js"></script>
 </body>

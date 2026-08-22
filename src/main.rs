@@ -1,5 +1,9 @@
 use crossbeam_channel::unbounded;
 
+// Compiled in both modes so its unit tests run under a plain `cargo test`;
+// in native mode nothing calls it yet (the native loop is a counter stub).
+#[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
+mod editor_world;
 mod ipc;
 mod remote;
 
@@ -17,8 +21,12 @@ mod remote;
 
 #[cfg(feature = "editor-only")]
 fn main() {
-    let (cmd_tx, _cmd_rx) = unbounded();
-    let (_ev_tx, ev_rx) = unbounded();
+    let (cmd_tx, cmd_rx) = unbounded();
+    let (ev_tx, ev_rx) = unbounded();
+
+    // Live ECS world on a dedicated thread: executes commands from
+    // POST /api/command and publishes status/scene snapshots + events.
+    editor_world::run(cmd_rx, ev_tx);
 
     // The binding keeps RemoteEditor alive until main ends (Drop stops the server).
     let _editor = remote::RemoteEditor::start(3420, cmd_tx, ev_rx);
@@ -28,6 +36,7 @@ fn main() {
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  Editor:  http://127.0.0.1:3420                               ║");
     println!("║  Status:  http://127.0.0.1:3420/api/status                    ║");
+    println!("║  Scene:   http://127.0.0.1:3420/api/scene                     ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  Press Ctrl+C to stop                                        ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
