@@ -634,7 +634,10 @@ mod tests {
 
         assert_eq!(chunk_sizes, vec![4, 4, 4]);
         assert_eq!(seen, 13);
-        assert_eq!(store.iter().sum::<i32>(), (0..13).map(|x| x + 1).sum::<i32>());
+        assert_eq!(
+            store.iter().sum::<i32>(),
+            (0..13).map(|x| x + 1).sum::<i32>()
+        );
     }
 
     #[test]
