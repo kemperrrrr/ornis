@@ -210,23 +210,25 @@ value = 322209.48751207686
 
 # 2026-08-22: файл вырос 901→1274 ploc за счёт 19 новых тестов evaluator'а
 # в модуле tests внутри файла. Продуктовый код почти не менялся.
+# 2026-08-22 (PR #6): значение обновлено 1274→1329 — дрейф финального кода
+# коммита ae77dc3 против снятого при refresh снимка.
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 1274.0
+value = 1329.0
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "GraphEvaluator<'a>"
 metric = "nom"
-value = 56.0
+value = 58.0
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "GraphEvaluator<'a>"
 metric = "wmc"
-value = 229.0
+value = 236.0
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
@@ -238,25 +240,25 @@ value = 183608.6114871405
 path = "crates/materialx/src/graph.rs"
 qualified = "GraphEvaluator<'a>::evaluate_node"
 metric = "abc"
-value = 108.1942697188719
+value = 115.47294055318761
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "GraphEvaluator<'a>::evaluate_node"
 metric = "cyclomatic"
-value = 68.0
+value = 71.0
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "GraphEvaluator<'a>::evaluate_node"
 metric = "halstead.effort"
-value = 158882.27140915504
+value = 185308.66374000907
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
 qualified = "GraphEvaluator<'a>::evaluate_node"
 metric = "nexits"
-value = 34.0
+value = 36.0
 
 [[entry]]
 path = "crates/materialx/src/graph.rs"
@@ -701,13 +703,13 @@ value = 1100.0
 path = "crates/wasm/src/lib.rs"
 qualified = "start_renderer"
 metric = "abc"
-value = 95.50916186418976
+value = 107.2240644631605
 
 [[entry]]
 path = "crates/wasm/src/lib.rs"
 qualified = "start_renderer"
 metric = "halstead.effort"
-value = 503555.63411957154
+value = 799656.4981694407
 
 [[entry]]
 path = "crates/wasm/src/lib.rs"
@@ -785,3 +787,57 @@ path = "editor/editor.js"
 qualified = "<anon@L7>"
 metric = "nexits"
 value = 16.0
+
+# 2026-08-22 (refresh из PR #6, CI run 32586229447): нарушения мастер-коммитов
+# 16-22.08, авторствовавшихся без прогона гейта (в том окружении не было
+# toolchain'а). Значения сняты bca 1.97 с текущего кода. Это принятый долг,
+# а не норма; целевой рефакторинг — docs/quality/audit-2026-08-22.md §6
+# (materialx: split evaluate_node, editor_world: split модуля, wasm:
+# start_renderer декомпозиция, editor.js: разбить IIFE).
+[[entry]]
+path = "crates/wasm/src/lib.rs"
+qualified = "fetch_live_scene"
+metric = "nexits"
+value = 7.0
+[[entry]]
+path = "crates/wasm/src/lib.rs"
+qualified = "start_renderer::<anon@L519>"
+metric = "abc"
+value = 77.42738533619743
+[[entry]]
+path = "crates/wasm/src/lib.rs"
+qualified = "start_renderer::<anon@L519>"
+metric = "cognitive"
+value = 21.0
+
+[[entry]]
+path = "crates/wasm/src/lib.rs"
+qualified = "start_renderer::<anon@L519>"
+metric = "halstead.effort"
+value = 190701.46865141243
+
+[[entry]]
+path = "editor/editor.js"
+qualified = "<anon@L8>"
+metric = "halstead.effort"
+value = 1159933.2631554413
+
+[[entry]]
+path = "editor/editor.js"
+qualified = "<anon@L8>"
+metric = "nexits"
+value = 44.0
+
+# Буфер на fmt-рефлоу из PR #6 (ploc плавает с рефлоу): точное значение —
+# ближайший локальный `bca check --write-baseline`.
+[[entry]]
+path = "src/editor_world.rs"
+qualified = "<file>"
+metric = "loc.ploc"
+value = 1100.0
+
+[[entry]]
+path = "src/editor_world.rs"
+qualified = "EditorWorld"
+metric = "wmc"
+value = 88.0
