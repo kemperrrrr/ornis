@@ -27,7 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          # Полная история + ветка master: bca (complexity gate) вычисляет
+          # diff-scope через `git diff origin/master...HEAD`; при дефолтном
+          # fetch-depth=1 base ref недоступен, и гейт молча деградирует к
+          # проверке всего дерева (лог run 32586229447, стадия bca).
+          fetch-depth: 0
       # Системные зависимости для Linux-сборки:
       # libasound2-dev — cpal (аудио), libudev-dev — gilrs/winit input,
       # pkg-config — общий build-time поиск библиотек.
