@@ -198,6 +198,7 @@ impl Node {
             node_type: String::new(),
             name: String::new(),
             version: String::new(),
+            nodename: String::new(),
             inputs: Vec::new(),
         };
 
@@ -214,6 +215,7 @@ impl Node {
             match key {
                 "name" => node.name = value.to_string(),
                 "version" => node.version = value.to_string(),
+                "nodename" => node.nodename = value.to_string(),
                 _ => {}
             }
         }
@@ -481,6 +483,28 @@ mod tests {
         assert_eq!(nd.inputs[0].uimin, "0.0");
         assert_eq!(nd.inputs[0].uisoftmax, "2.0");
         assert_eq!(nd.inputs[1].name, "low");
+    }
+
+    /// Regression: the `nodename` attribute on `<output>` (and node) elements
+    /// was silently dropped, severing output→node connections expressed via
+    /// the attribute instead of a child `<input>`.
+    #[test]
+    fn parses_output_nodename_attribute() {
+        let doc = parse(
+            r#"<nodegraph name="g">
+                <constant name="c" type="float" />
+                <output name="out" type="float" nodename="c" />
+            </nodegraph>"#,
+        )
+        .unwrap();
+
+        let graph = &doc.nodegraphs[0];
+        let output = &graph.nodes[1];
+        assert_eq!(output.node_type, "output");
+        assert_eq!(output.name, "out");
+        assert_eq!(output.nodename, "c");
+        // Nodes without the attribute default to an empty nodename.
+        assert_eq!(graph.nodes[0].nodename, "");
     }
 
     #[test]

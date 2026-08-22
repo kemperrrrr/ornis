@@ -60,6 +60,10 @@ pub struct Node {
     pub node_type: String,
     pub name: String,
     pub version: String,
+    /// Upstream node referenced by the `nodename` attribute. Only meaningful
+    /// for `<output>` elements, which commonly reference their source node
+    /// via the attribute instead of a child `<input>`.
+    pub nodename: String,
     pub inputs: Vec<Input>,
 }
 

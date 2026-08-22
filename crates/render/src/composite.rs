@@ -225,3 +225,178 @@ impl CompositePass {
         rpass.draw(0..4, 0..1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 2;
+    const BPP: u32 = 4;
+    const ROW: u32 = WIDTH * BPP; // 256, satisfies the copy alignment
+
+    /// None when no adapter is available (headless CI without lavapipe).
+    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                flags: wgpu::InstanceFlags::empty(),
+                backend_options: wgpu::BackendOptions::default(),
+                memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+                display: None,
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .ok()?;
+            adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await
+                .ok()
+        })
+    }
+
+    fn solid_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+        format: wgpu::TextureFormat,
+        rgba: [u8; 4],
+    ) -> wgpu::TextureView {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut data = vec![0u8; (ROW * HEIGHT) as usize];
+        for px in data.chunks_exact_mut(4) {
+            px.copy_from_slice(&rgba);
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ROW),
+                rows_per_image: Some(HEIGHT),
+            },
+            texture.size(),
+        );
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn compose_pixel(ui_rgba: [u8; 4]) -> Option<[u8; 4]> {
+        let (device, queue) = try_device()?;
+        let pass = CompositePass::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        // Opaque red PBR background (sRGB target format, as in production).
+        let pbr = solid_texture(
+            &device,
+            &queue,
+            "pbr",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            [255, 0, 0, 255],
+        );
+        let ui = solid_texture(
+            &device,
+            &queue,
+            "ui",
+            wgpu::TextureFormat::Rgba8Unorm,
+            ui_rgba,
+        );
+        let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("composite target"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("composite test encoder"),
+        });
+        pass.compose(&device, &mut encoder, &target, &pbr, &ui);
+
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite readback"),
+            size: (ROW * HEIGHT) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(ROW),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            target_texture.size(),
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
+        rx.recv().ok()?.ok()?;
+        let view = slice.get_mapped_range();
+        let pixel = [view[0], view[1], view[2], view[3]];
+        Some(pixel)
+    }
+
+    #[test]
+    fn opaque_ui_replaces_pbr_background() {
+        let Some(px) = compose_pixel([0, 255, 0, 255]) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        // ui.a = 1 -> pure UI green after the sRGB round trip.
+        assert!(px[0] < 10 && px[1] > 240 && px[2] < 10, "got {px:?}");
+    }
+
+    #[test]
+    fn transparent_ui_keeps_pbr_background() {
+        let Some(px) = compose_pixel([0, 255, 0, 0]) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        // ui.a = 0 -> untouched PBR red.
+        assert!(px[0] > 240 && px[1] < 10 && px[2] < 10, "got {px:?}");
+    }
+}

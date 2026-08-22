@@ -713,6 +713,7 @@ dependencies = [
  "glam",
  "ornis-core",
  "ornis-macros",
+ "rayon",
  "ron",
  "serde",
  "wgpu",

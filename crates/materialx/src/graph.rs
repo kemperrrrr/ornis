@@ -87,6 +87,18 @@ impl MaterialXConverter {
         for def in &document.nodedefs {
             node_defs.insert(def.name.clone(), def.clone());
         }
+        // Real-world nodedefs are named `ND_<node>_<type>` (e.g.
+        // `ND_multiply_float`), while the evaluator looks definitions up by
+        // node *type* (`multiply`). Index by the `node` attribute as well so
+        // the lookup actually hits. A definition keyed by `node` overrides an
+        // earlier one for the same type (later document order wins), including
+        // a legacy name-keyed entry: a real `ND_*` definition is more
+        // specific than one that merely happens to be named like the type.
+        for def in &document.nodedefs {
+            if !def.node.is_empty() {
+                node_defs.insert(def.node.clone(), def.clone());
+            }
+        }
 
         Self {
             document,
@@ -294,6 +306,13 @@ impl<'a> GraphEvaluator<'a> {
         let mut outputs = HashMap::new();
         for node in &self.graph.nodes {
             if node.node_type == "output" {
+                // `<output ... nodename="..."/>` references its source node
+                // via the attribute instead of a child `<input>`.
+                if !node.nodename.is_empty()
+                    && let Some(value) = self.node_values.get(&node.nodename)
+                {
+                    outputs.insert(node.name.clone(), value.clone());
+                }
                 for input in &node.inputs {
                     if let Some(value) = self.node_values.get(&input.nodename) {
                         outputs.insert(input.name.clone(), value.clone());
@@ -381,6 +400,16 @@ impl<'a> GraphEvaluator<'a> {
                     bsdf_input.clone()
                 } else if let Some(edf_input) = input_values.get("edf") {
                     edf_input.clone()
+                } else if !node.nodename.is_empty() {
+                    // Connection via the `nodename` attribute rather than a
+                    // child `<input>`: pass through the referenced node.
+                    let connected_node = self
+                        .graph
+                        .nodes
+                        .iter()
+                        .find(|n| n.name == node.nodename)
+                        .ok_or_else(|| CodegenError::InputNotFound(node.nodename.clone()))?;
+                    self.evaluate_node(connected_node)?
                 } else {
                     OutputValue::String("output".to_string())
                 }
@@ -952,42 +981,44 @@ mod tests {
     use super::*;
     use crate::parser::MaterialXParser;
 
-    /// The evaluator looks node definitions up by node *type* (`multiply`,
-    /// `clamp`, ...), so tests declare nodedefs whose name equals the type.
+    /// Nodedefs named realistically (`ND_<node>[_<type>]`), as in real .mtlx
+    /// libraries. The evaluator looks definitions up by node *type*
+    /// (`multiply`, `clamp`, ...), which only resolves because the converter
+    /// also indexes nodedefs by their `node` attribute.
     const NODEDEFS: &str = r#"
-  <nodedef name="output" node="output" />
-  <nodedef name="constant" node="constant" />
-  <nodedef name="add" node="add" />
-  <nodedef name="subtract" node="subtract" />
-  <nodedef name="multiply" node="multiply" />
-  <nodedef name="divide" node="divide" />
-  <nodedef name="invert" node="invert" />
-  <nodedef name="clamp" node="clamp" />
-  <nodedef name="max" node="max" />
-  <nodedef name="min" node="min" />
-  <nodedef name="power" node="power" />
-  <nodedef name="sqrt" node="sqrt" />
-  <nodedef name="ifgreater" node="ifgreater" />
-  <nodedef name="convert" node="convert" />
-  <nodedef name="combine2" node="combine2" />
-  <nodedef name="combine3" node="combine3" />
-  <nodedef name="combine4" node="combine4" />
-  <nodedef name="mix" node="mix" />
-  <nodedef name="layer" node="layer" />
-  <nodedef name="open_pbr_surface" node="open_pbr_surface" />
-  <nodedef name="open_pbr_anisotropy" node="open_pbr_anisotropy" />
-  <nodedef name="surface" node="surface" />
-  <nodedef name="dielectric_bsdf" node="dielectric_bsdf" />
-  <nodedef name="conductor_bsdf" node="conductor_bsdf" />
-  <nodedef name="oren_nayar_diffuse_bsdf" node="oren_nayar_diffuse_bsdf" />
-  <nodedef name="sheen_bsdf" node="sheen_bsdf" />
-  <nodedef name="thin_film_bsdf" node="thin_film_bsdf" />
-  <nodedef name="translucent_bsdf" node="translucent_bsdf" />
-  <nodedef name="subsurface_bsdf" node="subsurface_bsdf" />
-  <nodedef name="generalized_schlick_bsdf" node="generalized_schlick_bsdf" />
-  <nodedef name="uniform_edf" node="uniform_edf" />
-  <nodedef name="generalized_schlick_edf" node="generalized_schlick_edf" />
-  <nodedef name="anisotropic_vdf" node="anisotropic_vdf" />
+  <nodedef name="ND_output" node="output" />
+  <nodedef name="ND_constant" node="constant" />
+  <nodedef name="ND_add" node="add" />
+  <nodedef name="ND_subtract" node="subtract" />
+  <nodedef name="ND_multiply" node="multiply" />
+  <nodedef name="ND_divide" node="divide" />
+  <nodedef name="ND_invert" node="invert" />
+  <nodedef name="ND_clamp" node="clamp" />
+  <nodedef name="ND_max" node="max" />
+  <nodedef name="ND_min" node="min" />
+  <nodedef name="ND_power" node="power" />
+  <nodedef name="ND_sqrt" node="sqrt" />
+  <nodedef name="ND_ifgreater" node="ifgreater" />
+  <nodedef name="ND_convert" node="convert" />
+  <nodedef name="ND_combine2" node="combine2" />
+  <nodedef name="ND_combine3" node="combine3" />
+  <nodedef name="ND_combine4" node="combine4" />
+  <nodedef name="ND_mix" node="mix" />
+  <nodedef name="ND_layer" node="layer" />
+  <nodedef name="ND_open_pbr_surface" node="open_pbr_surface" />
+  <nodedef name="ND_open_pbr_anisotropy" node="open_pbr_anisotropy" />
+  <nodedef name="ND_surface" node="surface" />
+  <nodedef name="ND_dielectric_bsdf" node="dielectric_bsdf" />
+  <nodedef name="ND_conductor_bsdf" node="conductor_bsdf" />
+  <nodedef name="ND_oren_nayar_diffuse_bsdf" node="oren_nayar_diffuse_bsdf" />
+  <nodedef name="ND_sheen_bsdf" node="sheen_bsdf" />
+  <nodedef name="ND_thin_film_bsdf" node="thin_film_bsdf" />
+  <nodedef name="ND_translucent_bsdf" node="translucent_bsdf" />
+  <nodedef name="ND_subsurface_bsdf" node="subsurface_bsdf" />
+  <nodedef name="ND_generalized_schlick_bsdf" node="generalized_schlick_bsdf" />
+  <nodedef name="ND_uniform_edf" node="uniform_edf" />
+  <nodedef name="ND_generalized_schlick_edf" node="generalized_schlick_edf" />
+  <nodedef name="ND_anisotropic_vdf" node="anisotropic_vdf" />
 "#;
 
     fn document(graph_body: &str) -> MaterialXDocument {
@@ -1040,7 +1071,7 @@ mod tests {
     #[test]
     fn test_simple_materialx() {
         // The original test document: a surface shader fed by a dielectric
-        // BSDF and a uniform EDF. It needs nodedefs keyed by node type
+        // BSDF and a uniform EDF. It needs nodedefs resolvable by node type
         // (see NODEDEFS) — without them evaluation fails with NodeDefNotFound.
         let mtlx = format!(
             r#"<?xml version="1.0"?>
@@ -1070,8 +1101,9 @@ mod tests {
 
         let result = materialx_to_openpbr(&mtlx);
         assert!(result.is_ok());
-        // The `out` node carries no named inputs, so no material parameters
-        // are extracted and the result is the default PBR material.
+        // The `out` node connects to the surface via its `nodename`
+        // attribute; "out" is not a material parameter name, so no material
+        // parameters are extracted and the result is the default PBR material.
         let mat = result.unwrap();
         assert_eq!(mat.base_params[2], 0.0);
         assert_eq!(mat.specular_params[2], 1.5);
@@ -1245,11 +1277,13 @@ mod tests {
     }
 
     /// An input with neither a value nor a connection falls back to the
-    /// default declared by the nodedef.
+    /// default declared by the nodedef. The nodedef is named realistically
+    /// (`ND_clamp_float`), so the lookup resolves through its `node`
+    /// attribute, not its name.
     #[test]
     fn test_nodedef_default_input() {
         let outputs = eval(
-            r#"<nodedef name="clamp" node="clamp">
+            r#"<nodedef name="ND_clamp_float" node="clamp">
       <input name="low" type="float" value="0.75" />
     </nodedef>
     <clamp name="cl" type="float">
@@ -1262,6 +1296,56 @@ mod tests {
 
         // clamp(0.5, low=0.75 from the nodedef, high=1.0) = 0.75
         assert_close(float(&outputs, "clamped"), 0.75);
+    }
+
+    /// Legacy fallback: a nodedef whose *name* equals the node type is still
+    /// found, even when another nodedef declares the same type via `node`.
+    #[test]
+    fn test_nodedef_lookup_by_name_fallback() {
+        let outputs = eval(
+            r#"<nodedef name="clamp" node="clamp">
+      <input name="low" type="float" value="0.75" />
+    </nodedef>
+    <clamp name="cl" type="float">
+      <input name="in" type="float" value="0.5" />
+      <input name="low" type="float" />
+      <input name="high" type="float" value="1.0" />
+    </clamp>
+    <output name="out" type="float"><input name="clamped" type="float" nodename="cl" /></output>"#,
+        );
+
+        assert_close(float(&outputs, "clamped"), 0.75);
+    }
+
+    /// An `<output>` whose connection is expressed via the `nodename`
+    /// attribute (no child `<input>`) must resolve to the referenced node,
+    /// exposed under the output's own name.
+    #[test]
+    fn test_output_nodename_connection() {
+        let outputs = eval(
+            r#"<constant name="two" type="float"><input name="value" type="float" value="2.0" /></constant>
+    <constant name="six" type="float"><input name="value" type="float" value="6.0" /></constant>
+    <multiply name="m" type="float"><input name="in1" type="float" nodename="two" /><input name="in2" type="float" nodename="six" /></multiply>
+    <output name="result" type="float" nodename="m" />"#,
+        );
+
+        assert_close(float(&outputs, "result"), 12.0);
+    }
+
+    /// The `nodename` connection is followed transitively: the referenced
+    /// node's own subtree is evaluated as well.
+    #[test]
+    fn test_output_nodename_evaluates_upstream_graph() {
+        let outputs = eval(
+            r#"<constant name="c" type="color3"><input name="value" type="color3" value="0.8, 0.4, 0.2" /></constant>
+    <invert name="inv" type="color3"><input name="in" type="color3" nodename="c" /></invert>
+    <output name="base_color" type="color3" nodename="inv" />"#,
+        );
+
+        let color = color3(&outputs, "base_color");
+        for (got, want) in color.iter().zip([0.2, 0.6, 0.8]) {
+            assert_close(*got, want);
+        }
     }
 
     #[test]

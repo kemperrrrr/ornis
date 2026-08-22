@@ -557,3 +557,232 @@ impl<M: CompositeMode> GraphPass for Composite<M> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SURFACE: wgpu::TextureFormat = F::Rgba8UnormSrgb;
+
+    fn owned_spec<R: GraphResource>(format: F, size: SizePolicy) {
+        assert_eq!(R::kind(), ResourceKind::GraphOwned);
+        assert_eq!(
+            R::spec(SURFACE),
+            TextureSpec {
+                format,
+                samples: 1,
+                size,
+            }
+        );
+    }
+
+    /// Specs mirror the imperative wiring (graph_frame parity test); the
+    /// dump names are part of the contract.
+    #[test]
+    fn resource_names_and_specs() {
+        assert_eq!(Albedo::NAME, "albedo");
+        owned_spec::<Albedo>(F::Rgba8Unorm, SizePolicy::MatchSurface);
+        assert_eq!(Normal::NAME, "normal");
+        owned_spec::<Normal>(F::Rg16Float, SizePolicy::MatchSurface);
+        assert_eq!(MaterialId::NAME, "material_id");
+        owned_spec::<MaterialId>(F::R32Uint, SizePolicy::MatchSurface);
+        assert_eq!(WorldPosition::NAME, "world_position");
+        owned_spec::<WorldPosition>(F::Rg16Float, SizePolicy::MatchSurface);
+        assert_eq!(MaterialParams::NAME, "material_params");
+        owned_spec::<MaterialParams>(F::Rgba16Float, SizePolicy::MatchSurface);
+        assert_eq!(Depth::NAME, "depth");
+        owned_spec::<Depth>(F::Depth32Float, SizePolicy::MatchSurface);
+        assert_eq!(HdrFwd::NAME, "hdr_fwd");
+        owned_spec::<HdrFwd>(F::Rgba16Float, SizePolicy::MatchSurface);
+        assert_eq!(Bloom0::NAME, "bloom0");
+        owned_spec::<Bloom0>(F::Rgba16Float, SizePolicy::Fraction(2));
+        assert_eq!(Bloom1::NAME, "bloom1");
+        owned_spec::<Bloom1>(F::Rgba16Float, SizePolicy::Fraction(4));
+        assert_eq!(Bloom2::NAME, "bloom2");
+        owned_spec::<Bloom2>(F::Rgba16Float, SizePolicy::Fraction(8));
+    }
+
+    #[test]
+    fn hdr_mirrors_the_surface_format() {
+        assert_eq!(Hdr::NAME, "hdr");
+        assert_eq!(Hdr::kind(), ResourceKind::GraphOwned);
+        assert_eq!(Hdr::spec(F::Rgba8UnormSrgb).format, F::Rgba8UnormSrgb);
+        assert_eq!(Hdr::spec(F::Bgra8UnormSrgb).format, F::Bgra8UnormSrgb);
+        assert_eq!(Hdr::spec(SURFACE).size, SizePolicy::MatchSurface);
+    }
+
+    #[test]
+    fn target_is_external_output() {
+        assert_eq!(Target::NAME, "target");
+        assert_eq!(Target::kind(), ResourceKind::ExternalOutput);
+        assert_eq!(Target::spec(SURFACE).format, F::Rgba8Unorm);
+        assert_eq!(Target::spec(SURFACE).size, SizePolicy::MatchSurface);
+    }
+
+    #[test]
+    fn static_pass_names() {
+        assert_eq!(GbufferPass.name(), "gbuffer");
+        assert_eq!(LightingPass.name(), "lighting");
+        assert_eq!(BloomDown1Pass.name(), "bloom_down1");
+        assert_eq!(BloomDown2Pass.name(), "bloom_down2");
+        assert_eq!(BloomUp1Pass.name(), "bloom_up1");
+        assert_eq!(BloomUp0Pass.name(), "bloom_up0");
+    }
+
+    fn reads_of<P: GraphPass>() -> Vec<&'static str> {
+        let mut v = Vec::new();
+        P::Reads::collect_accesses(&mut v);
+        assert!(v.iter().all(|a| !a.write && a.clear.is_none()));
+        v.iter().map(|a| a.name).collect()
+    }
+
+    fn writes_of<P: GraphPass>() -> Vec<(&'static str, Option<wgpu::Color>)> {
+        let mut v = Vec::new();
+        P::Writes::collect_accesses(&mut v);
+        assert!(v.iter().all(|a| a.write));
+        v.iter().map(|a| (a.name, a.clear)).collect()
+    }
+
+    #[test]
+    fn gbuffer_writes_all_six_layers() {
+        assert!(reads_of::<GbufferPass>().is_empty());
+        assert_eq!(
+            writes_of::<GbufferPass>(),
+            vec![
+                ("albedo", None),
+                ("normal", None),
+                ("material_id", None),
+                ("world_position", None),
+                ("material_params", None),
+                ("depth", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn lighting_reads_gbuffer_and_clears_hdr_black() {
+        assert_eq!(
+            reads_of::<LightingPass>(),
+            vec![
+                "albedo",
+                "normal",
+                "material_id",
+                "world_position",
+                "material_params",
+                "depth"
+            ]
+        );
+        assert_eq!(
+            writes_of::<LightingPass>(),
+            vec![("hdr", Some(wgpu::Color::BLACK))]
+        );
+    }
+
+    #[test]
+    fn bloom_chain_wiring() {
+        assert_eq!(reads_of::<BloomDown1Pass>(), vec!["bloom0"]);
+        assert_eq!(
+            writes_of::<BloomDown1Pass>(),
+            vec![("bloom1", Some(wgpu::Color::BLACK))]
+        );
+        assert_eq!(reads_of::<BloomDown2Pass>(), vec!["bloom1"]);
+        assert_eq!(
+            writes_of::<BloomDown2Pass>(),
+            vec![("bloom2", Some(wgpu::Color::BLACK))]
+        );
+        assert_eq!(reads_of::<BloomUp1Pass>(), vec!["bloom2"]);
+        assert_eq!(writes_of::<BloomUp1Pass>(), vec![("bloom1", None)]);
+        assert_eq!(reads_of::<BloomUp0Pass>(), vec!["bloom1"]);
+        assert_eq!(writes_of::<BloomUp0Pass>(), vec![("bloom0", None)]);
+        assert_eq!(BLOOM_BRIGHT_THRESHOLD, 0.7);
+    }
+
+    #[test]
+    fn forward_modes_select_depth_ownership() {
+        const { assert!(OwnsDepth::OWNS_DEPTH) };
+        const { assert!(!SharedDepth::OWNS_DEPTH) };
+
+        assert_eq!(Forward::<OwnsDepth>::new().name(), "forward");
+        assert_eq!(Forward::<SharedDepth>::default().name(), "forward");
+
+        // Forward-only: owns and clears the depth (white = far plane).
+        assert!(reads_of::<Forward<OwnsDepth>>().is_empty());
+        assert_eq!(
+            writes_of::<Forward<OwnsDepth>>(),
+            vec![
+                ("depth", Some(wgpu::Color::WHITE)),
+                ("hdr_fwd", Some(wgpu::Color::TRANSPARENT)),
+            ]
+        );
+        // Hybrid: depth comes from the gbuffer pass.
+        assert_eq!(reads_of::<Forward<SharedDepth>>(), vec!["depth"]);
+        assert_eq!(
+            writes_of::<Forward<SharedDepth>>(),
+            vec![("hdr_fwd", Some(wgpu::Color::TRANSPARENT))]
+        );
+    }
+
+    #[test]
+    fn bright_pass_input_follows_technique() {
+        assert_eq!(BloomBright::<FromDeferred>::new().name(), "bloom_down0");
+        assert_eq!(BloomBright::<FromForward>::default().name(), "bloom_down0");
+        assert_eq!(reads_of::<BloomBright<FromDeferred>>(), vec!["hdr"]);
+        assert_eq!(reads_of::<BloomBright<FromForward>>(), vec!["hdr_fwd"]);
+        assert_eq!(
+            writes_of::<BloomBright<FromDeferred>>(),
+            vec![("bloom0", Some(wgpu::Color::BLACK))]
+        );
+    }
+
+    #[test]
+    fn composite_modes_encode_technique_and_bloom() {
+        assert_eq!(Composite::<CompositeDeferredBloom>::new().name(), "composite");
+        assert_eq!(Composite::<CompositeForward>::default().name(), "composite");
+
+        // (mode constant, bloom flag, expected reads)
+        let cases: [(u32, bool, &[&str]); 6] = [
+            (CompositeDeferredBloom::SHADER_MODE, CompositeDeferredBloom::BLOOM, &["hdr", "bloom0"]),
+            (CompositeDeferred::SHADER_MODE, CompositeDeferred::BLOOM, &["hdr"]),
+            (
+                CompositeHybridBloom::SHADER_MODE,
+                CompositeHybridBloom::BLOOM,
+                &["hdr", "hdr_fwd", "bloom0"],
+            ),
+            (CompositeHybrid::SHADER_MODE, CompositeHybrid::BLOOM, &["hdr", "hdr_fwd"]),
+            (
+                CompositeForwardBloom::SHADER_MODE,
+                CompositeForwardBloom::BLOOM,
+                &["hdr_fwd", "bloom0"],
+            ),
+            (CompositeForward::SHADER_MODE, CompositeForward::BLOOM, &["hdr_fwd"]),
+        ];
+        let expected_modes = [0, 0, 2, 2, 1, 1];
+        let expected_bloom = [true, false, true, false, true, false];
+        for (i, (mode, bloom, _)) in cases.iter().enumerate() {
+            assert_eq!(*mode, expected_modes[i], "case {i}");
+            assert_eq!(*bloom, expected_bloom[i], "case {i}");
+        }
+
+        assert_eq!(reads_of::<Composite<CompositeDeferredBloom>>(), vec!["hdr", "bloom0"]);
+        assert_eq!(reads_of::<Composite<CompositeDeferred>>(), vec!["hdr"]);
+        assert_eq!(
+            reads_of::<Composite<CompositeHybridBloom>>(),
+            vec!["hdr", "hdr_fwd", "bloom0"]
+        );
+        assert_eq!(
+            reads_of::<Composite<CompositeHybrid>>(),
+            vec!["hdr", "hdr_fwd"]
+        );
+        assert_eq!(
+            reads_of::<Composite<CompositeForwardBloom>>(),
+            vec!["hdr_fwd", "bloom0"]
+        );
+        assert_eq!(reads_of::<Composite<CompositeForward>>(), vec!["hdr_fwd"]);
+
+        // Every composite mode writes the swapchain target without a clear.
+        assert_eq!(
+            writes_of::<Composite<CompositeHybridBloom>>(),
+            vec![("target", None)]
+        );
+    }
+}

@@ -1880,6 +1880,7 @@ dependencies = [
  "raw-window-handle",
  "ron",
  "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

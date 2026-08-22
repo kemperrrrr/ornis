@@ -84,8 +84,11 @@ fn serve(
     game_rx: Receiver<GameEvent>,
 ) {
     let mut events_buffer: Vec<GameEvent> = Vec::new();
-    let mut cached_status: String = r#"{"entity_count":0,"name":"Ornis Engine"}"#.to_string();
-    let mut cached_scene: String = r#"{"entity_count":0,"entities":[]}"#.to_string();
+    let mut cached_status: String =
+        r#"{"entity_count":0,"name":"Ornis Engine","version":0}"#.to_string();
+    let mut cached_scene: String =
+        r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null}"#
+            .to_string();
     let root = assets_root();
 
     loop {

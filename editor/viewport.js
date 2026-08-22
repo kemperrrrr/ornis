@@ -5,6 +5,10 @@
         const canvasEl = document.getElementById('bevy');
         const viewportEl = document.querySelector('.viewport');
 
+        // Pointer events (orbit camera, handled inside the WASM module)
+        // need touch-action:none so the browser doesn't hijack drags.
+        if (canvasEl) canvasEl.style.touchAction = 'none';
+
         const resizeCanvas = () => {
             if (!viewportEl || !canvasEl) return;
             canvasEl.width = viewportEl.clientWidth;
