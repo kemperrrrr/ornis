@@ -167,7 +167,10 @@ cargo xtask bca --report      # html to target/bca/index.html
 
 ### Не начато
 
-- **Скриптинг (фаза 6)**: Rhai/Rune/Python, Batch API, hot reload — ❌
+- **Скриптинг (фаза 6)**: реестр компонентов (F0), `ScriptEngine`-трейт,
+  Rhai-адаптер, Batch API, hot reload — ❌ (рамка 2026-08-22: плагинный
+  шов + адаптеры вместо лесенки языков — см. PLAN.md и
+  [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов, hot reload — ❌
 - **NUMA-aware allocation** — ❌
 - **HVM2/Bend как compute-бэкенд** — ❌ (идея на будущее)
@@ -188,17 +191,24 @@ cargo xtask bca --report      # html to target/bca/index.html
 3. **Связь `editor.js` ↔ REST** — 🟡 частично: иерархия и футер живут на
    `/api/scene` и `/api/status` (polling), создание сущности из UI работает;
    редактирование компонентов (`set_transform`/`set_material`/`rename_entity`)
-   поддержано сервером, инспектор в UI — впереди.
+   поддержано сервером, инспектор в UI — впереди. Перспектива протокола
+   (решение D2, [audit-2026-08-22](docs/quality/audit-2026-08-22.md)):
+   per-type команды заменяются generic `SetComponent { type_name, json }`
+   через реестр компонентов — новый компонент движка станет редактируемым
+   без правок engine-side кода.
 4. **WASM-canvas ↔ живой ECS** — рендер не статичного `scene.ron`,
    а актуального состояния; ввод (мышь/клавиатура) из браузера в движок.
 5. Дальше: WebSocket-канал для событий и live-синхронизации вместо polling'а
    `/api/events`.
 
-### Фаза 6 — Скриптинг
+### Фаза 6 — Скриптинг (рамка пересмотрена 2026-08-22)
 
-Rhai → Batch API (`engine.batch_add(...)` — один FFI-вызов вместо 100k) →
-hot reload → Rune → Python (PyO3/RustPython). FFI-биндинги оборачивают
-переменные скриптов в прямые указатели на ячейки Sparse Set.
+Реестр компонентов (F0) → `ScriptEngine`-трейт (плагинный, как
+`PhysicsEngine`/`RenderBackend`) → Batch API по хендлам → первый
+адаптер Rhai → hot reload → прочие языки отдельными адаптерами
+(Rune/Python/WASM-компоненты) по правилу трёх. Подробно: фаза 6 в
+[`PLAN.md`](PLAN.md), решения F0/D1/D2 в
+[audit-2026-08-22](docs/quality/audit-2026-08-22.md).
 
 ### Фаза 7 — Asset Pipeline
 
@@ -239,7 +249,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 - [`README.md`](README.md) — текущее состояние, верифицированное по коду (этот файл)
 - [`PLAN.md`](PLAN.md) — план реализации: сделано / частично / дорожная карта
 - [`IDEAS.md`](IDEAS.md) — 26 архитектурных идей (перенесён без изменений)
-- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline и report от 2026-08-01
+- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline и report от 2026-08-01, [audit от 2026-08-22](docs/quality/audit-2026-08-22.md) (статический аудит ядра/планировщика + план унификации планировщика в `crates/schedule`)
 
 Прежние документы (`STRATEGY_PIVOT.md`, `implementation_plan.md`, `SUMMARY.md`,
 `ANALYSIS_DOCS_VS_CODE.md`, `GOSUB_INTEGRATION.md`) удалены из дерева при

@@ -16,6 +16,10 @@ bytemuck = { version = "1", features = ["derive"] }
 # runtime (see https://mutants.rs/attrs.html). Must be a regular
 # dependency, not dev, because the annotation sits on non-test code.
 mutants = "0.0.3"
+# F0 (audit 2026-08-22, §10): JSON-операции реестра компонентов —
+# без derive в основном коде (derive подключается тестами ниже).
+serde = "1.0"
+serde_json = "1"
 
 [features]
 default = []
@@ -24,6 +28,7 @@ gpu = []        # GpuExecutor in the dispatcher (CPU-fallback for now)
 lock-free = []  # experimental lock-free lanes
 
 [dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
 criterion = { version = "0.5", features = ["rayon"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 ornis-macros = { path = "../macros" }
