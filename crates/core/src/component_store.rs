@@ -446,7 +446,7 @@ mod tests {
         pos.insert(pair, 10.0);
         vel.insert(pair, 20.0);
 
-        let mut iter = pos.iter_zip(&vel);
+        let iter = pos.iter_zip(&vel);
         // The upper bound counts both ids, including the one about to be
         // skipped on the generation mismatch.
         assert_eq!(iter.size_hint(), (0, Some(2)));
