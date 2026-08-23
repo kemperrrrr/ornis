@@ -230,15 +230,20 @@ impl FrameLayout {
     pub fn mermaid(&self) -> String {
         let mut d = MermaidDiagram::new();
         for (li, level) in self.levels().iter().enumerate() {
-            let nodes: Vec<(String, String)> =
-                level.iter().map(|&pi| (format!("P{pi}"), self.passes[pi].name.clone())).collect();
+            let nodes: Vec<(String, String)> = level
+                .iter()
+                .map(|&pi| (format!("P{pi}"), self.passes[pi].name.clone()))
+                .collect();
             d.level(&format!("L{li}"), &format!("level {li}"), &nodes);
         }
         for rl in &self.resources {
             if rl.first_use == usize::MAX {
                 continue;
             }
-            d.node(&format!("R{}", rl.id.0), &format!("{} {:?}", rl.name, rl.spec.format));
+            d.node(
+                &format!("R{}", rl.id.0),
+                &format!("{} {:?}", rl.name, rl.spec.format),
+            );
         }
         for (pi, pass) in self.passes.iter().enumerate() {
             for rid in &pass.reads {

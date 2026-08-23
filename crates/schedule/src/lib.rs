@@ -283,7 +283,9 @@ pub struct MermaidDiagram {
 
 impl Default for MermaidDiagram {
     fn default() -> Self {
-        Self { out: String::from("flowchart TD\n") }
+        Self {
+            out: String::from("flowchart TD\n"),
+        }
     }
 }
 
@@ -296,7 +298,8 @@ impl MermaidDiagram {
     /// Уровень подграфом `subgraph {id}["{title}"]` с узлами
     /// `{node_id}["{label}"]` внутри.
     pub fn level(&mut self, id: &str, title: &str, nodes: &[(String, String)]) -> &mut Self {
-        self.out.push_str(&format!("  subgraph {id}[\"{title}\"]\n"));
+        self.out
+            .push_str(&format!("  subgraph {id}[\"{title}\"]\n"));
         for (node_id, label) in nodes {
             self.out.push_str(&format!("    {node_id}[\"{label}\"]\n"));
         }
