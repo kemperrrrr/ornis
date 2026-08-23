@@ -624,11 +624,14 @@ metric = "cognitive"
 value = 25.0
 
 # S5c (2026-08-19): +клонирование рёбер порядка в снапшот layout (+1%).
+# Фаза A (2026-08-23, бэклог #4): +поле levels в кеш GraphLayout (~+1k
+# effort против замера CI 380628.6); −снапшот ordering (dead code).
+# Округлённый буфер 381000.0.
 [[entry]]
 path = "crates/render/src/render_graph.rs"
 qualified = "RenderGraph::compute_layout"
 metric = "halstead.effort"
-value = 380000.0
+value = 381000.0
 
 # S1 layout cache (2026-08-18): +2 поля, layout()/invalidate() — рост
 # nom 30 → 31. S4 budget (2026-08-19): +поле budget,

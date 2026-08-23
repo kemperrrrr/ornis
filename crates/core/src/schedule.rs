@@ -381,7 +381,8 @@ impl Schedule {
     fn cached_levels(&self) -> Vec<Vec<usize>> {
         let reads: Vec<Vec<TypeId>> = self.accesses.iter().map(|a| a.reads.clone()).collect();
         let writes: Vec<Vec<TypeId>> = self.accesses.iter().map(|a| a.writes.clone()).collect();
-        self.plan.get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
+        self.plan
+            .get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
     }
 
     /// Исполняет расписание над миром.

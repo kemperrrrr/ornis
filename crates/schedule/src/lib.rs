@@ -239,12 +239,7 @@ impl PlanCache {
 /// регистрации 0..nodes (заметьте: он может отличаться от порядка
 /// обхода уровней, поэтому узлов посчитано отдельным параметром).
 /// На wasm rayon-потоков нет — всегда последовательный порядок.
-pub fn run_levels(
-    levels: &[Vec<usize>],
-    nodes: usize,
-    parallel: bool,
-    run: impl Fn(usize) + Sync,
-) {
+pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl Fn(usize) + Sync) {
     #[cfg(not(target_family = "wasm"))]
     {
         if parallel {

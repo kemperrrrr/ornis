@@ -182,9 +182,6 @@ pub struct GraphLayout {
     pub(crate) slots: Vec<PoolSlot>,
     /// Live resources per pass (by index into `passes`).
     pub(crate) pass_alive: Vec<Vec<ResourceId>>,
-    /// S5c: explicit ordering edges (registration PassIds, both enabled),
-    /// a snapshot of `RenderGraph::ordering` at build time.
-    pub(crate) ordering: Vec<(PassId, PassId)>,
     /// Parallel execution levels (bitset plan via `ornis-schedule`),
     /// computed once per build and cached in the layout (audit §4.3 —
     /// no recomputation per `levels()` call).
@@ -533,11 +530,7 @@ impl RenderGraph {
     /// [`OrderError`], не паника. Заодно валидирует оба `PassId`
     /// (раньше ребро с неизвестным id добавлялось молча и игнорировалось
     /// при подсчёте уровней).
-    pub fn try_order_before(
-        &mut self,
-        before: PassId,
-        after: PassId,
-    ) -> Result<(), OrderError> {
+    pub fn try_order_before(&mut self, before: PassId, after: PassId) -> Result<(), OrderError> {
         validate_indexed_edge(before.0 as usize, after.0 as usize, |i| {
             self.passes.get(i).map(|node| node.name.clone())
         })?;
@@ -559,11 +552,7 @@ impl RenderGraph {
     }
 
     /// Мягкая [`RenderGraph::order_before_named`].
-    pub fn try_order_before_named(
-        &mut self,
-        before: &str,
-        after: &str,
-    ) -> Result<(), OrderError> {
+    pub fn try_order_before_named(&mut self, before: &str, after: &str) -> Result<(), OrderError> {
         let (b, a) = resolve_named_edge(before, after, |name| {
             self.passes.iter().position(|p| p.name == name)
         })?;
@@ -790,7 +779,6 @@ impl RenderGraph {
             resources,
             slots,
             pass_alive,
-            ordering: self.ordering.clone(),
             levels,
         }
     }
