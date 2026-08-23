@@ -483,12 +483,13 @@ fn opt_string(data: &Value, key: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// A validated `create_entity` override: registry entry + boxed component.
+type ParsedOverrides = Vec<(&'static ComponentMeta, Box<dyn std::any::Any>)>;
+
 /// Deserialize component overrides of `create_entity`, registry-keyed.
 /// Everything is validated here — before the entity is spawned — so a
 /// bad payload leaves the world untouched (module-doc invariant).
-fn parse_overrides(
-    map: &serde_json::Map<String, Value>,
-) -> Result<Vec<(&'static ComponentMeta, Box<dyn std::any::Any>)>, String> {
+fn parse_overrides(map: &serde_json::Map<String, Value>) -> Result<ParsedOverrides, String> {
     let mut parsed = Vec::with_capacity(map.len());
     for (type_name, payload) in map {
         let meta = REGISTRY
@@ -620,8 +621,7 @@ mod tests {
         assert!((a - f64::from(expected)).abs() < 1e-6, "{a} != {expected}");
     }
 
-    const FULL_TRANSFORM: &str =
-        r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
+    const FULL_TRANSFORM: &str = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
 
     #[test]
     fn spawn_assigns_names_and_counts() {
@@ -675,13 +675,22 @@ mod tests {
         let red_components = &red["components"];
         assert_eq!(red_components.as_object().unwrap().len(), 4);
         assert_eq!(red_components["Name"], "Red Sphere");
-        assert_f32_seq(&red_components["Transform"]["translation"], &[-5.6, 0.0, 0.0]);
-        assert_f32_seq(&red_components["Transform"]["rotation"], &[0.0, 0.0, 0.0, 1.0]);
+        assert_f32_seq(
+            &red_components["Transform"]["translation"],
+            &[-5.6, 0.0, 0.0],
+        );
+        assert_f32_seq(
+            &red_components["Transform"]["rotation"],
+            &[0.0, 0.0, 0.0, 1.0],
+        );
         assert_f32_seq(&red_components["Transform"]["scale"], &[1.0, 1.0, 1.0]);
         assert_f32(&red_components["Mesh"]["Sphere"]["radius"], 1.0);
         assert_eq!(red_components["Mesh"]["Sphere"]["segments"], 32);
         assert_eq!(red_components["Mesh"]["Sphere"]["rings"], 24);
-        assert_f32_seq(&red_components["Material"]["Dielectric"]["base_color"], &[0.8, 0.2, 0.2]);
+        assert_f32_seq(
+            &red_components["Material"]["Dielectric"]["base_color"],
+            &[0.8, 0.2, 0.2],
+        );
         assert_f32(&red_components["Material"]["Dielectric"]["roughness"], 0.5);
 
         // Material variants survive the round trip.
@@ -726,7 +735,10 @@ mod tests {
         assert_f32_seq(&components["Transform"]["translation"], &[0.0, 0.0, 0.0]);
         assert_f32_seq(&components["Transform"]["rotation"], &[0.0, 0.0, 0.0, 1.0]);
         assert!(components["Mesh"]["Sphere"].is_object());
-        assert_f32_seq(&components["Material"]["Dielectric"]["base_color"], &[0.5, 0.5, 0.5]);
+        assert_f32_seq(
+            &components["Material"]["Dielectric"]["base_color"],
+            &[0.5, 0.5, 0.5],
+        );
         assert_eq!(entities[1]["components"]["Name"], "Hero");
     }
 
@@ -748,10 +760,16 @@ mod tests {
         assert_eq!(world.version, 0);
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         assert_eq!(world.version, 1);
-        world.handle_command(&set_component(0, Some(0), "Transform", FULL_TRANSFORM), &ev_tx);
+        world.handle_command(
+            &set_component(0, Some(0), "Transform", FULL_TRANSFORM),
+            &ev_tx,
+        );
         assert_eq!(world.version, 2);
         // Failed command (no such entity): no bump.
-        world.handle_command(&set_component(9, Some(0), "Transform", FULL_TRANSFORM), &ev_tx);
+        world.handle_command(
+            &set_component(9, Some(0), "Transform", FULL_TRANSFORM),
+            &ev_tx,
+        );
         assert_eq!(world.version, 2);
         world.handle_command(&set_component(0, Some(0), "Name", r#""X""#), &ev_tx);
         assert_eq!(world.version, 3);
@@ -830,7 +848,10 @@ mod tests {
         assert_f32_seq(&components["Transform"]["scale"], &[2.0, 2.0, 2.0]);
         assert_f32(&components["Mesh"]["Sphere"]["radius"], 2.0);
         assert_eq!(components["Mesh"]["Sphere"]["segments"], 16);
-        assert_f32_seq(&components["Material"]["Metal"]["base_color"], &[0.9, 0.7, 0.1]);
+        assert_f32_seq(
+            &components["Material"]["Metal"]["base_color"],
+            &[0.9, 0.7, 0.1],
+        );
         assert_f32(&components["Material"]["Metal"]["roughness"], 0.2);
 
         let created = custom_events(&drain_all(&ev_rx), "entity_created");
@@ -854,7 +875,10 @@ mod tests {
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         // Full replace: the payload is the whole component, field-level
         // merging is the client's job (editor.js keeps the snapshot).
-        world.handle_command(&set_component(0, Some(0), "Transform", FULL_TRANSFORM), &ev_tx);
+        world.handle_command(
+            &set_component(0, Some(0), "Transform", FULL_TRANSFORM),
+            &ev_tx,
+        );
 
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
         let transform = &scene["entities"][0]["components"]["Transform"];
@@ -977,7 +1001,10 @@ mod tests {
         );
         // Unknown component in create overrides: no entity must appear.
         world.handle_command(
-            &custom("create_entity", r#"{"components":{"Unobtainium":{"density":1}}}"#),
+            &custom(
+                "create_entity",
+                r#"{"components":{"Unobtainium":{"density":1}}}"#,
+            ),
             &ev_tx,
         );
         // Payload that is valid JSON but not an object.

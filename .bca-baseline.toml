@@ -816,17 +816,22 @@ qualified = "start_renderer::<anon@L519>"
 metric = "halstead.effort"
 value = 190701.46865141243
 
+# 2026-08-22: D2 (бэклог #15) — generic set_component через реестр F0;
+# editor.js переведён с пер-типовых команд на карту components и
+# variant-preserving отправку (buildTransform/buildMaterial). Рост токенов
+# и +2 return'а в общей IIFE — цена контрактного обновления; дальнейший
+# рост → разбить IIFE на функции (audit-2026-08-22.md §6.2).
 [[entry]]
 path = "editor/editor.js"
 qualified = "<anon@L8>"
 metric = "halstead.effort"
-value = 1159933.2631554413
+value = 1265047.177712852
 
 [[entry]]
 path = "editor/editor.js"
 qualified = "<anon@L8>"
 metric = "nexits"
-value = 44.0
+value = 46.0
 
 # Буфер на fmt-рефлоу из PR #6 (ploc плавает с рефлоу): точное значение —
 # ближайший локальный `bca check --write-baseline`.
