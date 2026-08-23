@@ -27,7 +27,9 @@
 
 use std::collections::HashMap;
 
-use ornis_schedule::{OrderError, bitset_level_plan, resolve_named_edge, validate_indexed_edge};
+use ornis_schedule::{
+    MermaidDiagram, OrderError, bitset_level_plan, resolve_named_edge, validate_indexed_edge,
+};
 
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
@@ -220,33 +222,33 @@ impl FrameLayout {
     /// write/read flows as edges. GitHub renders ```mermaid blocks
     /// natively, so a layout drop pasted into a PR review becomes a
     /// picture of the frame pipeline.
+    ///
+    /// Срез 1b (приближение к ликвидации графа): формируется общим
+    /// проектором [`MermaidDiagram`] — тот же байтовый формат, что
+    /// пинится тестом `mermaid_is_a_valid_projection`; та же картинка
+    /// доступна и верхнему планировщику (`Schedule::mermaid`).
     pub fn mermaid(&self) -> String {
-        let mut out = String::from("flowchart TD\n");
+        let mut d = MermaidDiagram::new();
         for (li, level) in self.levels().iter().enumerate() {
-            out.push_str(&format!("  subgraph L{li}[\"level {li}\"]\n"));
-            for &pi in level {
-                out.push_str(&format!("    P{pi}[\"{}\"]\n", self.passes[pi].name));
-            }
-            out.push_str("  end\n");
+            let nodes: Vec<(String, String)> =
+                level.iter().map(|&pi| (format!("P{pi}"), self.passes[pi].name.clone())).collect();
+            d.level(&format!("L{li}"), &format!("level {li}"), &nodes);
         }
         for rl in &self.resources {
             if rl.first_use == usize::MAX {
                 continue;
             }
-            out.push_str(&format!(
-                "  R{}[\"{} {:?}\"]\n",
-                rl.id.0, rl.name, rl.spec.format
-            ));
+            d.node(&format!("R{}", rl.id.0), &format!("{} {:?}", rl.name, rl.spec.format));
         }
         for (pi, pass) in self.passes.iter().enumerate() {
             for rid in &pass.reads {
-                out.push_str(&format!("  R{} --> P{pi}\n", rid.0));
+                d.edge(&format!("R{}", rid.0), &format!("P{pi}"));
             }
             for (rid, _) in &pass.writes {
-                out.push_str(&format!("  P{pi} --> R{}\n", rid.0));
+                d.edge(&format!("P{pi}"), &format!("R{}", rid.0));
             }
         }
-        out
+        d.render()
     }
 
     /// Textual layout dump for debugging/reporting.

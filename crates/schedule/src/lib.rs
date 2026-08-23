@@ -5,8 +5,9 @@
 //! доступов (ключи `K` в `reads`/`writes`), явные рёбра порядка с
 //! валидацией и единый [`OrderError`], уровни параллельности
 //! ([`compute_levels`] и битсет-вариант [`bitset_level_plan`]), кеш
-//! плана с диагностикой ([`PlanCache`]) и уровневый исполнитель
-//! ([`run_levels`]: sequential / rayon / wasm-последовательность).
+//! плана с диагностикой ([`PlanCache`]), уровневый исполнитель
+//! ([`run_levels`]: sequential / rayon / wasm-последовательность) и
+//! mermaid-проектор отладочных диаграмм плана ([`MermaidDiagram`]).
 //!
 //! Потребители держат доменные данные у себя и собирают срезы ключей:
 //! `ornis-core::schedule::Schedule` планирует системы по singleton-
@@ -264,6 +265,65 @@ pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl
     }
 }
 
+/// Отладочная mermaid-проекция уровневого плана — общий проектор
+/// (S6-проекция рендер-оболочки, обобщённая срезом 1b приближения к
+/// ликвидации графа, PLAN.md Прил. C). Доменно-нейтральная: узлы и
+/// рёбра — строковые идентификаторы/метки, которые собирает фронтенд
+/// (`ornis-render::FrameLayout` — `P{i}`/`R{j}` по индексам пассов и
+/// ресурсов, `ornis-core::schedule::Schedule` — `S{i}` по индексам
+/// систем). Уровни рисуются подграфами, потоки — рёбрами; GitHub
+/// рендерит ```mermaid блоки нативно, поэтому дамп плана в PR-ревью
+/// становится картинкой. Метки вставляются как есть — экранирование
+/// mermaid-синтаксиса (кавычки, скобки) остаётся на фронтенде, как и
+/// было у рендер-оболочки.
+#[derive(Debug, Clone)]
+pub struct MermaidDiagram {
+    out: String,
+}
+
+impl Default for MermaidDiagram {
+    fn default() -> Self {
+        Self { out: String::from("flowchart TD\n") }
+    }
+}
+
+impl MermaidDiagram {
+    /// Пустая диаграмма с заголовком `flowchart TD`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Уровень подграфом `subgraph {id}["{title}"]` с узлами
+    /// `{node_id}["{label}"]` внутри.
+    pub fn level(&mut self, id: &str, title: &str, nodes: &[(String, String)]) -> &mut Self {
+        self.out.push_str(&format!("  subgraph {id}[\"{title}\"]\n"));
+        for (node_id, label) in nodes {
+            self.out.push_str(&format!("    {node_id}[\"{label}\"]\n"));
+        }
+        self.out.push_str("  end\n");
+        self
+    }
+
+    /// Свободный узел верхнего уровня: `{id}["{label}"]`.
+    pub fn node(&mut self, id: &str, label: &str) -> &mut Self {
+        self.out.push_str(&format!("  {id}[\"{label}\"]\n"));
+        self
+    }
+
+    /// Ребро потока `{from} --> {to}` (семантику направления задаёт
+    /// фронтенд: чтение/запись ресурса, явное ребро порядка...).
+    pub fn edge(&mut self, from: &str, to: &str) -> &mut Self {
+        self.out.push_str(&format!("  {from} --> {to}\n"));
+        self
+    }
+
+    /// Текст диаграммы (без обрамляющих ```mermaid — их добавляет
+    /// место вставки).
+    pub fn render(&self) -> String {
+        self.out.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +522,20 @@ mod tests {
         let mut par = par_trace.lock().unwrap().clone();
         par.sort_unstable();
         assert_eq!(par, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn mermaid_diagram_renders_flowchart() {
+        // Байтовый golden общего проектора (срез 1b): уровень
+        // подграфом, свободный узел, ребро. Тот же формат пинит
+        // рендер-оболочка своим mermaid_is_a_valid_projection.
+        let mut d = MermaidDiagram::new();
+        d.level("L0", "level 0", &[("N0".into(), "alpha".into())])
+            .node("R0", "shared")
+            .edge("R0", "N0");
+        assert_eq!(
+            d.render(),
+            "flowchart TD\n  subgraph L0[\"level 0\"]\n    N0[\"alpha\"]\n  end\n  R0[\"shared\"]\n  R0 --> N0\n"
+        );
     }
 }

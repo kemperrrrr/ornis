@@ -86,7 +86,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 pub use ornis_schedule::{OrderError, compute_levels};
-use ornis_schedule::{PlanCache, bitset_level_plan, resolve_named_edge, run_levels};
+use ornis_schedule::{MermaidDiagram, PlanCache, bitset_level_plan, resolve_named_edge, run_levels};
 
 /// Singleton resource container («мир»): одно значение на тип.
 /// Мутация через внутреннюю изменяемость (`Mutex<T>`, атомики) —
@@ -550,6 +550,28 @@ impl Schedule {
         self.plan.computations()
     }
 
+    /// Mermaid-проекция уровневого плана — отладочная диаграмма поверх
+    /// общего проектора [`MermaidDiagram`] (срез 1b приближения к
+    /// ликвидации графа, PLAN.md Прил. C): системы — узлами `S{i}`
+    /// подграфами уровней, явные рёбра `order_before` — стрелками
+    /// потока. Та же картинка, что `FrameLayout::mermaid` рисует для
+    /// пассов рендера; GitHub рендерит ```mermaid нативно, поэтому
+    /// дамп расписания в ревью становится картинкой конвейера систем.
+    pub fn mermaid(&self) -> String {
+        let mut d = MermaidDiagram::new();
+        for (li, level) in self.levels().iter().enumerate() {
+            let nodes: Vec<(String, String)> = level
+                .iter()
+                .map(|&si| (format!("S{si}"), self.systems[si].name().to_string()))
+                .collect();
+            d.level(&format!("L{li}"), &format!("level {li}"), &nodes);
+        }
+        for &(a, b) in &self.ordering {
+            d.edge(&format!("S{a}"), &format!("S{b}"));
+        }
+        d.render()
+    }
+
     fn cached_levels(&self) -> Vec<Vec<usize>> {
         let reads: Vec<Vec<AccessKey>> =
             self.accesses.iter().map(SystemAccess::read_keys).collect();
@@ -860,6 +882,27 @@ mod tests {
                 SystemAccess::new().reads::<B>().reads::<C>().writes::<A>(),
             ));
         assert_eq!(sched.levels(), vec![vec![0], vec![1, 2], vec![3]]);
+    }
+
+    #[test]
+    fn mermaid_projects_levels_and_order_edges() {
+        // Срез 1b: проекция поверх общего ornis_schedule::MermaidDiagram —
+        // системы узлами подграфами уровней, рёбра order_before стрелками.
+        let mut sched = Schedule::new();
+        sched
+            .add_system(NamedNoop("writer", SystemAccess::new().writes::<A>()))
+            .add_system(NamedNoop("free", SystemAccess::new().writes::<B>()))
+            .add_system(NamedNoop("reader", SystemAccess::new().reads::<A>()));
+        assert!(sched.try_order_before("free", "reader").is_ok());
+        // writer ∥ free на нулевом уровне, reader на первом — по конфликту
+        // (RaW от writer) и по явному ребру (от free).
+        assert_eq!(sched.levels(), vec![vec![0, 1], vec![2]]);
+        let m = sched.mermaid();
+        assert!(m.starts_with("flowchart TD\n"), "head: {m}");
+        assert!(m.contains("subgraph L0[\"level 0\"]"), "levels: {m}");
+        assert!(m.contains("S0[\"writer\"]"), "system nodes: {m}");
+        assert!(m.contains("S2[\"reader\"]"), "system nodes: {m}");
+        assert!(m.contains("S1 --> S2"), "order edges: {m}");
     }
 
     #[test]
