@@ -5,9 +5,12 @@
 //! → `UiCommand`, engine events → `GET /api/events` ← `GameEvent`).
 //!
 //! The variant set is the protocol surface for the roadmap (engine↔editor
-//! command handler, `GET /api/scene`): today only `Custom`/`CustomEvent`
-//! actually travel; the rest are reserved for editor entity operations
-//! and marked `#[allow(dead_code)]`.
+//! command handler, `GET /api/scene`): `Custom`/`CustomEvent` carry
+//! entity-level commands (create/destroy/list), `SetComponent` is produced
+//! by `remote.rs` for `{"type":"set_component"}` posts and executed
+//! generically through the component registry (F0, audit §10 D2), and
+//! `ComponentUpdated` reports successful edits back. The remaining typed
+//! variants are reserved and marked `#[allow(dead_code)]`.
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -19,8 +22,12 @@ pub enum UiCommand {
     DestroyEntity {
         entity_id: u32,
     },
+    /// Generic component upsert by registry name: `json_data` is the
+    /// serde-canonical JSON of the whole component (full replace).
+    /// `generation: None` matches any alive entity with this id.
     SetComponent {
         entity_id: u32,
+        generation: Option<u32>,
         type_name: String,
         json_data: String,
     },
@@ -35,6 +42,8 @@ pub enum UiCommand {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // protocol surface for editor↔engine (roadmap)
 pub enum GameEvent {
+    /// Emitted after a successful `SetComponent`: `json_data` echoes the
+    /// applied payload (serde-canonical component JSON).
     ComponentUpdated {
         entity_id: u32,
         type_name: String,
@@ -132,6 +141,7 @@ mod tests {
         ui.send(UiCommand::DestroyEntity { entity_id: 42 });
         ui.send(UiCommand::SetComponent {
             entity_id: 0,
+            generation: Some(0),
             type_name: "UIStyle".into(),
             json_data: r#"{"color":[1,0,0,1]}"#.into(),
         });
@@ -146,10 +156,12 @@ mod tests {
         match cmd3 {
             UiCommand::SetComponent {
                 entity_id,
+                generation,
                 type_name,
                 json_data,
             } => {
                 assert_eq!(entity_id, 0);
+                assert_eq!(generation, Some(0));
                 assert_eq!(type_name, "UIStyle");
                 assert_eq!(json_data, r#"{"color":[1,0,0,1]}"#);
             }
@@ -197,6 +209,7 @@ mod tests {
         // UI → Game
         ui.send(UiCommand::SetComponent {
             entity_id: 1,
+            generation: None,
             type_name: "Health".into(),
             json_data: r#"{"hp":100}"#.into(),
         });

@@ -94,8 +94,16 @@
         return document.getElementById('hierarchy-panel');
     }
 
+    // Canonical scene shape: entity.components is a map keyed by the
+    // registry component name (serde-canonical payloads).
+    function entityNameOf(entity) {
+        var components = entity.components || {};
+        return components.Name || null;
+    }
+
     function entityLabel(entity) {
-        if (entity.name) return entity.name;
+        var name = entityNameOf(entity);
+        if (name) return name;
         return 'Entity ' + entity.id + ' (gen ' + entity.generation + ')';
     }
 
@@ -119,7 +127,7 @@
         var label = document.createElement('span');
         label.textContent = entityLabel(entity);
         label.title = 'id ' + entity.id + ', generation ' + entity.generation +
-            ' · components: ' + (entity.components || []).join(', ');
+            ' · components: ' + Object.keys(entity.components || {}).join(', ');
 
         left.appendChild(arrow);
         left.appendChild(icon);
@@ -202,8 +210,7 @@
         if (!hasLiveScene) return; // old server — keep the static mockup
         var entity = selectedKey ? findEntity(lastScene, selectedKey) : null;
         var key = entity
-            ? JSON.stringify([entity.id, entity.generation, entity.name,
-                entity.transform, entity.material])
+            ? JSON.stringify([entity.id, entity.generation, entity.components])
             : 'none';
         if (key === lastInspectorKey) return;
         if (activeDrag || inspectorHasFocus()) return;
@@ -302,14 +309,17 @@
         var input = document.createElement('input');
         input.type = 'text';
         input.placeholder = 'Name';
-        input.value = entity.name || '';
+        input.value = entityNameOf(entity) || '';
         input.addEventListener('change', function() {
             var name = input.value.trim();
-            if (!name || name === entity.name) return;
-            sendCommand('rename_entity', {
+            if (!name || name === entityNameOf(entity)) return;
+            // Name is a newtype component: its canonical payload is a
+            // bare JSON string.
+            sendCommand('set_component', {
                 id: entity.id,
                 generation: entity.generation,
-                name: name
+                component: 'Name',
+                value: name
             }).then(refreshScene).catch(function() {});
         });
         row.appendChild(icon);
@@ -318,7 +328,7 @@
     }
 
     function buildTransform(panel, entity) {
-        var transform = entity.transform;
+        var transform = (entity.components || {}).Transform;
         if (!transform || !Array.isArray(transform.translation)) return;
 
         var translation = transform.translation.slice(0, 3);
@@ -326,10 +336,17 @@
         var content = details.querySelector('.content');
 
         function sendNow() {
-            sendCommand('set_transform', {
+            // set_component replaces the WHOLE component: resend the
+            // other fields from the last scene snapshot.
+            sendCommand('set_component', {
                 id: entity.id,
                 generation: entity.generation,
-                translation: translation.slice()
+                component: 'Transform',
+                value: {
+                    translation: translation.slice(),
+                    rotation: transform.rotation,
+                    scale: transform.scale
+                }
             }).then(refreshScene).then(refreshStatus).catch(function() {});
         }
         var sendDebounced = debounce(sendNow, 300);
@@ -360,26 +377,36 @@
     }
 
     function buildMaterial(panel, entity) {
-        var material = entity.material;
+        var material = (entity.components || {}).Material;
         if (!material) return;
 
-        var baseColor = Array.isArray(material.base_color)
-            ? material.base_color.slice(0, 3) : [1, 1, 1];
-        var roughness = (typeof material.roughness === 'number')
-            ? material.roughness : 0.5;
+        // Canonical serde shape: {"Dielectric": {...}}, {"Metal": {...}}, …
+        var variantName = Object.keys(material)[0];
+        if (!variantName) return;
+        var variant = material[variantName];
+
+        var baseColor = Array.isArray(variant.base_color)
+            ? variant.base_color.slice(0, 3) : [1, 1, 1];
+        var roughness = (typeof variant.roughness === 'number')
+            ? variant.roughness : 0.5;
 
         var details = buildDetails('Material', 'icons/shapes.svg#icon', '#a156d6');
         var content = details.querySelector('.content');
 
         function sendNow() {
-            sendCommand('set_material', {
+            // Resend the whole variant: untouched fields are preserved,
+            // only base_color/roughness get the edited values.
+            var fields = {};
+            Object.keys(variant).forEach(function(key) { fields[key] = variant[key]; });
+            fields.base_color = baseColor.slice();
+            if ('roughness' in fields) fields.roughness = roughness;
+            var value = {};
+            value[variantName] = fields;
+            sendCommand('set_component', {
                 id: entity.id,
                 generation: entity.generation,
-                material: {
-                    kind: material.kind || 'dielectric',
-                    base_color: baseColor.slice(),
-                    roughness: roughness
-                }
+                component: 'Material',
+                value: value
             }).then(refreshScene).then(refreshStatus).catch(function() {});
         }
         var sendDebounced = debounce(sendNow, 300);

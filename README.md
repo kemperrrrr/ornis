@@ -151,7 +151,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Desktop: winit + wgpu (Vulkan/Metal/DX12) | ✅ | `src/main.rs`, нативный режим |
 | WASM + WebGPU в браузере | ✅ | `crates/wasm`; рендер `editor/scene.ron` проверен headless-скриншотами (5 сфер, pixel-identical нативному эталону) |
 | Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит статичную сцену из `scene.ron` |
-| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; команды `create_entity`/`set_transform`/`set_material`/`rename_entity`/`destroy_entity` принимаются через `POST /api/command`, невалидные команды → событие `error`. WASM-canvas по-прежнему рендерит статичный `scene.ron`; live-синхронизация рендера — впереди |
+| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. WASM-canvas по-прежнему рендерит статичный `scene.ron`; live-синхронизация рендера — впереди |
 | Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. WebSocket нет. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме — заглушка-счётчик в игровом цикле |
 | `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
 | Нативный UI-крейт | 🗑️ | удалён (август 2026): `crates/ui*`, форки, vello/boa-стек; нативный режим рендерит 3D-сцену без UI-overlay |
@@ -189,13 +189,13 @@ cargo xtask bca --report      # html to target/bca/index.html
    (version/сущности с transform/mesh/material/lights/camera/ambient),
    снапшот кешируется сервером; при старте мир загружает `editor/scene.ron`.
 3. **Связь `editor.js` ↔ REST** — 🟡 частично: иерархия и футер живут на
-   `/api/scene` и `/api/status` (polling), создание сущности из UI работает;
-   редактирование компонентов (`set_transform`/`set_material`/`rename_entity`)
-   поддержано сервером, инспектор в UI — впереди. Перспектива протокола
-   (решение D2, [audit-2026-08-22](docs/quality/audit-2026-08-22.md)):
-   per-type команды заменяются generic `SetComponent { type_name, json }`
-   через реестр компонентов — новый компонент движка станет редактируемым
-   без правок engine-side кода.
+   `/api/scene` и `/api/status` (polling), создание из UI работает;
+   редактирование компонентов — generic-командой `set_component` через
+   реестр компонентов (решение D2, реализовано; см.
+   [audit-2026-08-22](docs/quality/audit-2026-08-22.md)): сервер и UI
+   обмениваются serde-каноничным JSON, новый компонент движка становится
+   редактируемым регистрацией в реестре — без правок engine-side кода.
+   Инспектор UI уже сейчас правит name/transform/material через неё.
 4. **WASM-canvas ↔ живой ECS** — рендер не статичного `scene.ron`,
    а актуального состояния; ввод (мышь/клавиатура) из браузера в движок.
 5. Дальше: WebSocket-канал для событий и live-синхронизации вместо polling'а

@@ -78,6 +78,7 @@ type LaneLenFn = fn(&SmartStore) -> usize;
 type RemoveFn = fn(&mut SmartStore, Entity) -> Option<Box<dyn Any>>;
 type GetJsonFn = fn(&SmartStore, Entity) -> Result<Option<serde_json::Value>, RegistryError>;
 type SetJsonFn = fn(&mut SmartStore, Entity, &serde_json::Value) -> Result<(), RegistryError>;
+type ParseJsonFn = fn(&serde_json::Value) -> Result<Box<dyn Any>, RegistryError>;
 
 fn register_lane_thunk<T>(store: &mut SmartStore)
 where
@@ -147,6 +148,14 @@ where
     Ok(())
 }
 
+fn parse_json_thunk<T>(value: &serde_json::Value) -> Result<Box<dyn Any>, RegistryError>
+where
+    T: 'static + DeserializeOwned,
+{
+    let component: T = serde_json::from_value(value.clone()).map_err(RegistryError::from_json)?;
+    Ok(Box::new(component))
+}
+
 type GetJsonResult = Result<Option<serde_json::Value>, RegistryError>;
 type SetResult = Result<(), RegistryError>;
 
@@ -167,6 +176,7 @@ pub struct ComponentMeta {
     remove: RemoveFn,
     get_json: GetJsonFn,
     set_json: SetJsonFn,
+    parse_json: ParseJsonFn,
 }
 
 impl ComponentMeta {
@@ -235,6 +245,15 @@ impl ComponentMeta {
     ) -> Result<(), RegistryError> {
         (self.set_json)(store, entity, value)
     }
+
+    /// Десериализует компонент из JSON в `Box<dyn Any>` — без доступа к
+    /// миру. Пара с [`ComponentMeta::insert_any`] даёт семантику
+    /// «сначала разобрать, потом мутировать»: вызывающий валидирует все
+    /// payload'ы команды до единой записи в мир (инвариант «ошибка
+    /// команды не трогает мир» редакторского протокола).
+    pub fn parse_json(&self, value: &serde_json::Value) -> Result<Box<dyn Any>, RegistryError> {
+        (self.parse_json)(value)
+    }
 }
 
 /// Реестр компонентов: строится один раз на старте (`register::<T>(name)`
@@ -292,6 +311,7 @@ impl ComponentRegistry {
             remove: remove_thunk::<T>,
             get_json: get_json_thunk::<T>,
             set_json: set_json_thunk::<T>,
+            parse_json: parse_json_thunk::<T>,
         });
         self.by_id.insert(type_id, lane_id);
         self.by_name.insert(name, lane_id);
@@ -489,6 +509,25 @@ mod tests {
         assert!(matches!(negative, Err(RegistryError::Json(_))));
 
         assert!(!meta.contains(&store, entity));
+    }
+
+    #[test]
+    fn parse_json_validates_before_insert_any() {
+        let registry = registry_with_two();
+        let position = registry.by_name("position").unwrap();
+        let mut store = SmartStore::new();
+        let entity = store.create_entity();
+
+        // Разобранный бокс вставляется и читается обратно.
+        let boxed = position.parse_json(&json!({"x": 1.0, "y": 2.0})).unwrap();
+        assert!(position.insert_any(&mut store, entity, boxed));
+        let lane = store.read_lane::<Position>().unwrap();
+        assert_eq!(lane.get(entity), Some(&Position { x: 1.0, y: 2.0 }));
+
+        // Схема не сошлась — ошибка до всякой мутации мира.
+        let bad = position.parse_json(&json!({"x": "left", "y": 0.0}));
+        assert!(matches!(bad, Err(RegistryError::Json(_))));
+        assert_eq!(position.lane_len(&store), 1);
     }
 
     #[test]

@@ -146,13 +146,21 @@ fn serve(
                 if let Some(cmd) = cmd
                     && let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str())
                 {
-                    let json_data = cmd.get("data").map(|v| v.to_string()).unwrap_or_default();
-                    game_tx
-                        .send(UiCommand::Custom {
+                    let data = cmd.get("data");
+                    // `set_component` is the typed generic lane (registry):
+                    // malformed shapes are dropped like any garbage here.
+                    let command = if cmd_type == "set_component" {
+                        parse_set_component(data)
+                    } else {
+                        let json_data = data.map(|v| v.to_string()).unwrap_or_default();
+                        Some(UiCommand::Custom {
                             cmd_type: cmd_type.to_string(),
                             json_data,
                         })
-                        .ok();
+                    };
+                    if let Some(command) = command {
+                        game_tx.send(command).ok();
+                    }
                 }
                 json_response("{}")
             }
@@ -181,6 +189,27 @@ fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
         Ok(bytes) => Response::from_data(bytes).with_header(content_type(&full)),
         Err(_) => not_found(),
     }
+}
+
+/// Build the typed generic upsert from `data` of a `set_component` post:
+/// `{"id": u32, "generation"?: u32, "component": "Transform", "value": {…}}`.
+/// `None` on any schema violation — the world emits no ack, and the
+/// malformed post is dropped like any other garbage on this endpoint.
+fn parse_set_component(data: Option<&serde_json::Value>) -> Option<UiCommand> {
+    let data = data?;
+    let entity_id = data.get("id")?.as_u64()? as u32;
+    let generation = data
+        .get("generation")
+        .and_then(|v| v.as_u64())
+        .map(|g| g as u32);
+    let type_name = data.get("component")?.as_str()?.to_string();
+    let json_data = data.get("value")?.to_string();
+    Some(UiCommand::SetComponent {
+        entity_id,
+        generation,
+        type_name,
+        json_data,
+    })
 }
 
 fn json_response(body: &str) -> Response<Cursor<Vec<u8>>> {
