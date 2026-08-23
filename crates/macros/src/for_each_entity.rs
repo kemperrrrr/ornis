@@ -126,17 +126,33 @@ pub fn for_each_entity(input: TokenStream) -> TokenStream {
             }
         }
     } else {
-        // Multiple lanes: collect entities from bitset intersection, then iterate
+        // Multiple lanes: collect entities present in ALL lanes — zip the
+        // first two, filter by the rest — then iterate. Without the filter,
+        // the per-lane lookups below would panic on an entity missing from
+        // lane 3..N (partial ownership; audit §2.3, backlog #18).
         let first = &input.closure_args[0];
         let second = &input.closure_args[1];
         let lane0 = format_ident!("__lane_{}", first.name);
         let lane1 = format_ident!("__lane_{}", second.name);
 
+        let extra_lanes: Vec<_> = input
+            .closure_args
+            .iter()
+            .skip(2)
+            .map(|a| format_ident!("__lane_{}", a.name))
+            .collect();
+
         let collect_entities = quote! {
             let __entities: Vec<ornis_core::Entity> = {
                 let __lane_ref = &*#lane0;
                 let __lane_ref2 = &*#lane1;
-                __lane_ref.iter_zip(__lane_ref2).map(|(e, _, _)| e).collect()
+                // `contains` re-checks the generation, so lanes 3..N apply
+                // exactly the same staleness semantics as the zipped two.
+                __lane_ref
+                    .iter_zip(__lane_ref2)
+                    .map(|(e, _, _)| e)
+                    #(.filter(|e| #extra_lanes.contains(*e)))*
+                    .collect()
             };
         };
 
