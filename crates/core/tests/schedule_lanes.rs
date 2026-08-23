@@ -81,7 +81,7 @@ fn disjoint_lanes_share_one_level_over_common_store() {
             lane_writes::<Velocity>(),
             noop,
         ));
-    assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
+    assert_eq!(sched.levels(), vec![vec![0, 1]]);
 }
 
 /// Conflict-классы по лентам: RaW и WaW разводят системы по уровням,
@@ -93,21 +93,21 @@ fn lane_conflicts_split_levels() {
     sched
         .add_system(LaneSystem::new("w", lane_writes::<Position>(), noop))
         .add_system(LaneSystem::new("r", lane_reads::<Position>(), noop));
-    assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
+    assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
 
     // WaR: читатель первым (анти-зависимость).
     let mut sched = Schedule::new();
     sched
         .add_system(LaneSystem::new("r", lane_reads::<Position>(), noop))
         .add_system(LaneSystem::new("w", lane_writes::<Position>(), noop));
-    assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
+    assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
 
     // WaW: два писателя одной ленты.
     let mut sched = Schedule::new();
     sched
         .add_system(LaneSystem::new("w1", lane_writes::<Position>(), noop))
         .add_system(LaneSystem::new("w2", lane_writes::<Position>(), noop));
-    assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
+    assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
 }
 
 /// Критерий Фазы B аудита: система над двумя лентами возвращается в
@@ -133,7 +133,7 @@ fn two_lane_system_plans_without_manual_edges() {
             noop,
         ));
     assert_eq!(
-        sched.level_groups(),
+        sched.levels(),
         vec![vec![0, 3], vec![1], vec![2]],
         "<две ленты> в цепочке без ручных рёбер; ресурсная — параллельна источнику"
     );
@@ -155,7 +155,7 @@ fn resource_and_lane_namespaces_do_not_conflict() {
             lane_reads::<Position>(),
             noop,
         ));
-    assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
+    assert_eq!(sched.levels(), vec![vec![0, 1]]);
 }
 
 /// Типизированные и id-билдеры строят одинаковые декларации — id-путь,
@@ -228,7 +228,7 @@ fn lane_plan_matches_naive_model() {
         naive_conflicts(&accesses[i], &accesses[j])
     });
     assert_eq!(
-        sched.level_groups(),
+        sched.levels(),
         expected,
         "bitset-план с лентами обязан совпадать с наивной моделью"
     );

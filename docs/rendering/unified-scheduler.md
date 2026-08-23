@@ -4,6 +4,53 @@
 > (идея — [`IDEAS.md`](../../IDEAS.md) §28). Каждый прогон бенчей/тестов
 > обновляет числа в этом файле.
 
+## Карта планировщика (2026-08-23, бэклог #19)
+
+> Этот блок — точка входа; ниже по файлу — хронология этапов (S0→S6).
+
+**Движок один** — крейт `crates/schedule` (`ornis-schedule`): уровни
+(`compute_levels`, `bitset_level_plan<K>` с generic-ключом),
+единый `OrderError` + валидация рёбер (`resolve_named_edge`,
+`validate_indexed_edge`), кеш уровенного плана (`PlanCache`), исполнитель
+уровней (`run_levels` — rayon на нативе, последовательный на wasm).
+Доменов в нём нет: ни wgpu, ни ECS.
+
+**Фронтенда два** (осознанно, решение S6 ниже — полный роспуск
+`RenderGraph` отклонён с причинами):
+
+- `crates/core/src/schedule.rs` (`Schedule`) — системы над `Resources`:
+  ключи — `TypeId` singleton-ресурса и `TypeId` ленты `SmartStore`
+  (`reads_lane`/`writes_lane`, раздельные пространства имён);
+  TLS-enforcement объявленных доступов; кеш — `PlanCache`
+  (ленивая инвалидация).
+- `crates/render/src/render_graph.rs` (`RenderGraph`) — пассы над пулом
+  текстур: ключи — `ResourceId`; пул/лайфтаймы/бюджет S4/layout-кеш S1 —
+  доменные данные, уровни и рёбра — движок; исполнение записи команд —
+  `run_levels` (натив) и тот же контракт руками на wasm (движковый
+  wasm-путь исполняет 0..nodes; выключенные пассы отсутствуют в
+  `GraphLayout`, поэтому порядок регистрации корректен и там).
+
+**Куда класть новое** (антидрейф): семантика, общая для обоих
+фронтендов — только в движок; доменные данные (текстурный пул, ленты,
+physics-агрегаты) — только во фронтенд. Исполняемая страховка от
+дрейфа — паритет-тест `crates/render/tests/scheduler_parity.rs`:
+зеркальные топологии обязаны давать побитово одинаковые уровни.
+
+**Глоссарий двойных имён** (одно понятие — одно слово в каждом
+фронтенде; внутри фронтенда всегда его слово):
+
+| Понятие | `Schedule` (core) | `RenderGraph` (render) | Движок |
+|---|---|---|---|
+| Узел плана | система | пасс | node |
+| Доступы узла | `SystemAccess` (reads/writes + ленты) | типизированные `Access`-наборы (ZST-маркеры), проекция в layout | срезы `reads`/`writes` ключей `K` |
+| Ключ доступа | `TypeId` (ресурс / лента, раздельные пространства) | `ResourceId` | `K: Copy + Eq + Hash` |
+| Явные рёбра | `order_before(name, name)` | `order_before(PassId, PassId)` / `_named` | `resolve_named_edge` / `validate_indexed_edge` |
+| Уровни | `Schedule::levels()` | `GraphLayout::levels()` | `compute_levels` / `bitset_level_plan` |
+| Явные рёбра (данные) | `Schedule::ordering` | `RenderGraph::ordering` | матрица смежности в плане |
+| Кеш плана | `PlanCache` + `level_computations()` | S1-кеш layout (уровни вычисляются при build) + `layout_computations()` | `PlanCache` (политика на фронтенде) |
+| Исполнитель | `run_levels` (оба таргета) | `run_levels` (натив), flatten-цикл того же контракта (wasm) | `run_levels` |
+| Ошибка рёбер | `OrderError` (реэкспорт) | `OrderError` (реэкспорт) | `OrderError` |
+
 ## Что сделано (2026-08-18)
 
 ### S0 — базлайн-метрики

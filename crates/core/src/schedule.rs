@@ -485,7 +485,9 @@ impl Schedule {
     }
 
     /// Уровни параллельности (индексы систем в порядке регистрации).
-    pub fn level_groups(&self) -> Vec<Vec<usize>> {
+    /// Одно понятие под одним именем на обоих фронтендах движка
+    /// (зеркалит `GraphLayout::levels` рендера; канон, бэклог #19).
+    pub fn levels(&self) -> Vec<Vec<usize>> {
         self.cached_levels()
     }
 
@@ -742,9 +744,9 @@ mod tests {
         sched
             .add_system(NamedNoop("first", SystemAccess::new().writes::<A>()))
             .add_system(NamedNoop("second", SystemAccess::new().writes::<B>()));
-        assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
+        assert_eq!(sched.levels(), vec![vec![0, 1]]);
         sched.order_before("first", "second");
-        assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
+        assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
     }
 
     #[test]
@@ -782,9 +784,9 @@ mod tests {
             })
         );
         // План не тронут ошибками; успешное ребро разбивает уровень.
-        assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
+        assert_eq!(sched.levels(), vec![vec![0, 1]]);
         assert!(sched.try_order_before("a", "b").is_ok());
-        assert_eq!(sched.level_groups(), vec![vec![0], vec![1]]);
+        assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
     }
 
     #[test]
@@ -804,7 +806,7 @@ mod tests {
                 "sink",
                 SystemAccess::new().reads::<B>().reads::<C>().writes::<A>(),
             ));
-        assert_eq!(sched.level_groups(), vec![vec![0], vec![1, 2], vec![3]]);
+        assert_eq!(sched.levels(), vec![vec![0], vec![1, 2], vec![3]]);
     }
 
     #[test]
@@ -832,7 +834,7 @@ mod tests {
             "add_system invalidates the plan"
         );
         assert_eq!(
-            sched.level_groups(),
+            sched.levels(),
             vec![vec![0], vec![1], vec![2], vec![3]]
         );
     }
@@ -871,13 +873,13 @@ mod tests {
             accesses.push(access);
         }
         assert_eq!(
-            sched.level_groups(),
+            sched.levels(),
             reference_level_groups(&accesses, &[]),
             "bitset plan must match the reference model without explicit edges"
         );
         sched.order_before("s2", "s8");
         assert_eq!(
-            sched.level_groups(),
+            sched.levels(),
             reference_level_groups(&accesses, &[(2, 8)]),
             "bitset plan must match the reference model with an explicit edge"
         );
