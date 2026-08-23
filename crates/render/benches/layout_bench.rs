@@ -7,12 +7,12 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use ornis_render::{RenderGraph3D, Technique};
+use ornis_render::{RenderFrame3D, Technique};
 
 /// The three production wirings (bloom on — the heaviest variant):
 /// Forward 7 passes / Deferred 8 / Hybrid 9, 10–12 declared resources.
-fn make(technique: Technique) -> RenderGraph3D {
-    RenderGraph3D::new_with(
+fn make(technique: Technique) -> RenderFrame3D {
+    RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (1920, 1080),
         technique,
@@ -32,8 +32,8 @@ fn bench_layout_compute(c: &mut Criterion) {
             b.iter(|| {
                 // A mutation-driven recompute: the cost the cache removes
                 // from steady-state frames.
-                g3.graph_mut().invalidate();
-                black_box(g3.graph_mut().layout());
+                g3.plan_mut().invalidate();
+                black_box(g3.plan_mut().layout());
             });
         });
     }
@@ -48,11 +48,11 @@ fn bench_layout_cache_hit(c: &mut Criterion) {
         ("hybrid_9_passes", Technique::Hybrid),
     ] {
         let mut g3 = make(technique);
-        let _ = g3.graph_mut().layout(); // warm the cache
+        let _ = g3.plan_mut().layout(); // warm the cache
         group.bench_function(name, |b| {
             b.iter(|| {
                 // Steady-state frame: no mutations → cache hit.
-                black_box(g3.graph_mut().layout());
+                black_box(g3.plan_mut().layout());
             });
         });
     }
@@ -66,7 +66,7 @@ fn bench_levels(c: &mut Criterion) {
         ("forward_7_passes", Technique::Forward),
     ] {
         let mut g3 = make(technique);
-        let layout = g3.graph_mut().layout().clone();
+        let layout = g3.plan_mut().layout().clone();
         group.bench_function(name, |b| b.iter(|| black_box(layout.levels())));
     }
     group.finish();

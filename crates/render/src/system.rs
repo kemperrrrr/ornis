@@ -1,15 +1,15 @@
-//! Typed graph systems — S2 (PLAN.md, Приложение C; IDEAS §28.1).
+//! Typed plan systems — S2 (PLAN.md, Приложение C; IDEAS §28.1).
 //!
 //! Пасс объявляет доступы к ресурсам **в типах** через ZST-маркеры
 //! (`Read<R>` / `Write<R>` / `WriteClear<R, C>` в кортежах), а планировщик
 //! выводит из них проводку графа (reads/writes → lifetime → пул). Ресурс —
-//! это тип, реализующий [`GraphResource`]; соответствие «тип → ResourceId»
+//! это тип, реализующий [`FrameResource`]; соответствие «тип → ResourceId»
 //! держит [`SystemSet`]. Никаких строк и syn-разбора: идентичность ресурса —
 //! это тип (урок хрупкости `smart_pipeline`, см. анти-цели Приложения C).
 //!
 //! Границы S2: множества доступа статичны. Пассы, чьи доступы зависят от
 //! конфигурации (владение depth у forward, выбор входа блума, смешивание в
-//! composite), остаются на императивном пути в `graph_frame.rs` до решения
+//! composite), остаются на императивном пути в `frame_exec.rs` до решения
 //! S2b (вариантные типы против регистрации-как-выбора).
 //!
 //! Порядок пассов остаётся порядком регистрации (insertion order);
@@ -20,29 +20,29 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
-use crate::graph_frame::PassViews;
+use crate::frame_exec::PassViews;
 use crate::mesh::Mesh;
-use crate::render_graph::{PassId, RenderGraph, ResourceId, TextureSpec};
+use crate::frame_plan::{FramePlan, PassId, ResourceId, TextureSpec};
 use crate::renderer::Renderer3D;
 
-/// How a resource enters the graph (see `RenderGraph::{create_resource,
+/// How a resource enters the plan (see `FramePlan::{create_resource,
 /// import_resource, external_output}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
-    /// Created and owned by the graph (transient, pooled).
-    GraphOwned,
+    /// Created and owned by the plan (transient, pooled).
+    FrameOwned,
     /// Imported external input, read-only (e.g. an uploaded shadow map).
     Imported,
     /// Externally backed output (e.g. the swapchain view); never pooled.
     ExternalOutput,
 }
 
-/// A typed graph resource: a ZST marker type carrying the resource's
-/// identity. One type = one resource per graph.
-pub trait GraphResource: 'static {
-    /// Unique debug name (layout dumps, panics). Must be unique per graph.
+/// A typed plan resource: a ZST marker type carrying the resource's
+/// identity. One type = one resource per plan.
+pub trait FrameResource: 'static {
+    /// Unique debug name (layout dumps, panics). Must be unique per plan.
     const NAME: &'static str;
-    /// How the resource is registered in [`RenderGraph`].
+    /// How the resource is registered in [`FramePlan`].
     fn kind() -> ResourceKind;
     /// Texture spec; `surface_format` feeds resources that mirror the
     /// surface format (e.g. the HDR layer).
@@ -74,7 +74,7 @@ impl ClearValue for ClearTransparent {
 
 /// One declared access: which resource, read or write, optional clear.
 pub trait Access {
-    type Resource: GraphResource;
+    type Resource: FrameResource;
     const IS_WRITE: bool;
     fn clear() -> Option<wgpu::Color>;
 }
@@ -88,7 +88,7 @@ pub struct Write<R>(PhantomData<fn() -> R>);
 /// Write access marker with a clear value (ZST).
 pub struct WriteClear<R, C: ClearValue>(PhantomData<fn() -> (R, C)>);
 
-impl<R: GraphResource> Access for Read<R> {
+impl<R: FrameResource> Access for Read<R> {
     type Resource = R;
     const IS_WRITE: bool = false;
     fn clear() -> Option<wgpu::Color> {
@@ -96,7 +96,7 @@ impl<R: GraphResource> Access for Read<R> {
     }
 }
 
-impl<R: GraphResource> Access for Write<R> {
+impl<R: FrameResource> Access for Write<R> {
     type Resource = R;
     const IS_WRITE: bool = true;
     fn clear() -> Option<wgpu::Color> {
@@ -104,7 +104,7 @@ impl<R: GraphResource> Access for Write<R> {
     }
 }
 
-impl<R: GraphResource, C: ClearValue> Access for WriteClear<R, C> {
+impl<R: FrameResource, C: ClearValue> Access for WriteClear<R, C> {
     type Resource = R;
     const IS_WRITE: bool = true;
     fn clear() -> Option<wgpu::Color> {
@@ -112,7 +112,7 @@ impl<R: GraphResource, C: ClearValue> Access for WriteClear<R, C> {
     }
 }
 
-/// Runtime projection of one access (used to wire the pass into the graph).
+/// Runtime projection of one access (used to wire the pass into the plan).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AccessDesc {
     pub resource: TypeId,
@@ -162,7 +162,7 @@ macro_rules! impl_access_tuple {
                 $(
                     out.push(AccessDesc {
                         resource: TypeId::of::<$name::Resource>(),
-                        name: <$name::Resource as GraphResource>::NAME,
+                        name: <$name::Resource as FrameResource>::NAME,
                         write: $name::IS_WRITE,
                         clear: $name::clear(),
                     });
@@ -202,7 +202,7 @@ impl<'a> Resolver<'a> {
     /// the latter a wiring bug, not a runtime state). Debug builds also
     /// panic when `R` sits outside the pass's declared reads/writes —
     /// ground-truth enforcement in `PassViews::view_of` (бэклог #6).
-    pub fn view<R: GraphResource>(&self) -> &'a wgpu::TextureView {
+    pub fn view<R: FrameResource>(&self) -> &'a wgpu::TextureView {
         let id = self
             .ids
             .get(&TypeId::of::<R>())
@@ -223,11 +223,11 @@ pub struct Frame<'a> {
 }
 
 /// A pass declared through its signature: `Reads`/`Writes` type-level sets
-/// drive the graph wiring, `run` receives the resolved typed views.
+/// drive the plan wiring, `run` receives the resolved typed views.
 ///
 /// `Send` (S5b): the erased runner may execute on rayon threads when the
-/// graph records passes in parallel.
-pub trait GraphPass: Send + 'static {
+/// plan records passes in parallel.
+pub trait FramePass: Send + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
     /// Pass name in the layout (insertion order defines execution order).
@@ -243,13 +243,13 @@ pub trait GraphPass: Send + 'static {
 
 /// The typed views for one pass execution: one `&TextureView` per declared
 /// access, in declaration order, plus the resolver for type-based fetch.
-pub struct SystemViews<'a, P: GraphPass> {
-    pub reads: <<P as GraphPass>::Reads as ViewsFor<'a>>::Views,
-    pub writes: <<P as GraphPass>::Writes as ViewsFor<'a>>::Views,
+pub struct SystemViews<'a, P: FramePass> {
+    pub reads: <<P as FramePass>::Reads as ViewsFor<'a>>::Views,
+    pub writes: <<P as FramePass>::Writes as ViewsFor<'a>>::Views,
     resolver: Resolver<'a>,
 }
 
-impl<'a, P: GraphPass> SystemViews<'a, P> {
+impl<'a, P: FramePass> SystemViews<'a, P> {
     fn new(resolver: &Resolver<'a>) -> Self {
         Self {
             reads: <P::Reads as ViewsFor<'a>>::fetch(resolver),
@@ -267,7 +267,7 @@ impl<'a, P: GraphPass> SystemViews<'a, P> {
     /// # Panics (debug)
     /// Panics in debug builds when `R` is outside both declared sets —
     /// the same guarantee the compiler enforces for positional tuples.
-    pub fn get<R: GraphResource>(&self) -> &'a wgpu::TextureView {
+    pub fn get<R: FrameResource>(&self) -> &'a wgpu::TextureView {
         debug_assert!(
             declared::<P::Reads, R>() || declared::<P::Writes, R>(),
             "pass {} accesses resource '{}' outside its declared sets",
@@ -280,14 +280,14 @@ impl<'a, P: GraphPass> SystemViews<'a, P> {
 
 /// Whether access set `A` contains resource `R` (debug checks of
 /// [`SystemViews::get`]; compile-time membership is blocked by coherence).
-fn declared<A: AccessSet, R: GraphResource>() -> bool {
+fn declared<A: AccessSet, R: FrameResource>() -> bool {
     let mut out = Vec::new();
     A::collect_accesses(&mut out);
     out.iter().any(|d| d.resource == TypeId::of::<R>())
 }
 
 /// Registered typed resources and systems: the `types → ResourceId` map
-/// plus the type-erased system runners, parallel to the graph's passes.
+/// plus the type-erased system runners, parallel to the plan's passes.
 #[derive(Default)]
 pub struct SystemSet {
     ids: HashMap<TypeId, ResourceId>,
@@ -313,16 +313,16 @@ impl SystemSet {
         Self::default()
     }
 
-    /// Registers resource `R` in the graph and remembers its `ResourceId`.
-    pub fn register_resource<R: GraphResource>(
+    /// Registers resource `R` in the plan and remembers its `ResourceId`.
+    pub fn register_resource<R: FrameResource>(
         &mut self,
-        graph: &mut RenderGraph,
+        plan: &mut FramePlan,
         surface_format: wgpu::TextureFormat,
     ) -> ResourceId {
         let id = match R::kind() {
-            ResourceKind::GraphOwned => graph.create_resource(R::NAME, R::spec(surface_format)),
-            ResourceKind::Imported => graph.import_resource(R::NAME, R::spec(surface_format)),
-            ResourceKind::ExternalOutput => graph.external_output(R::NAME),
+            ResourceKind::FrameOwned => plan.create_resource(R::NAME, R::spec(surface_format)),
+            ResourceKind::Imported => plan.import_resource(R::NAME, R::spec(surface_format)),
+            ResourceKind::ExternalOutput => plan.external_output(R::NAME),
         };
         self.ids.insert(TypeId::of::<R>(), id);
         id
@@ -332,25 +332,25 @@ impl SystemSet {
     ///
     /// # Panics
     /// Panics if `R` was not registered.
-    pub fn resource_id<R: GraphResource>(&self) -> ResourceId {
+    pub fn resource_id<R: FrameResource>(&self) -> ResourceId {
         *self
             .ids
             .get(&TypeId::of::<R>())
             .unwrap_or_else(|| panic!("typed resource '{}' is not registered", R::NAME))
     }
 
-    /// Adds a pass to `graph`, wiring reads/writes from `P::Reads`/`P::Writes`.
+    /// Adds a pass to `plan`, wiring reads/writes from `P::Reads`/`P::Writes`.
     ///
     /// # Panics
     /// Panics if a declared resource was not registered (with the resource
-    /// name in the message), or on graph invariants (read-before-write).
-    pub fn add_system<P: GraphPass>(&mut self, graph: &mut RenderGraph, pass: P) -> PassId {
+    /// name in the message), or on plan invariants (read-before-write).
+    pub fn add_system<P: FramePass>(&mut self, plan: &mut FramePlan, pass: P) -> PassId {
         let mut reads = Vec::new();
         P::Reads::collect_accesses(&mut reads);
         let mut writes = Vec::new();
         P::Writes::collect_accesses(&mut writes);
 
-        let mut builder = graph.add_pass(pass.name());
+        let mut builder = plan.add_pass(pass.name());
         for d in &reads {
             builder = builder.read(self.resolve(d));
         }
@@ -402,13 +402,13 @@ impl SystemSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render_graph::SizePolicy;
+    use crate::frame_plan::SizePolicy;
 
     struct ResA;
-    impl GraphResource for ResA {
+    impl FrameResource for ResA {
         const NAME: &'static str = "a";
         fn kind() -> ResourceKind {
-            ResourceKind::GraphOwned
+            ResourceKind::FrameOwned
         }
         fn spec(_: wgpu::TextureFormat) -> TextureSpec {
             TextureSpec {
@@ -420,10 +420,10 @@ mod tests {
     }
 
     struct ResB;
-    impl GraphResource for ResB {
+    impl FrameResource for ResB {
         const NAME: &'static str = "b";
         fn kind() -> ResourceKind {
-            ResourceKind::GraphOwned
+            ResourceKind::FrameOwned
         }
         fn spec(_: wgpu::TextureFormat) -> TextureSpec {
             TextureSpec {
@@ -435,7 +435,7 @@ mod tests {
     }
 
     struct ExtC;
-    impl GraphResource for ExtC {
+    impl FrameResource for ExtC {
         const NAME: &'static str = "c";
         fn kind() -> ResourceKind {
             ResourceKind::ExternalOutput
@@ -484,18 +484,18 @@ mod tests {
 
     #[test]
     fn typed_wiring_matches_imperative_builder() {
-        // Same graph wired imperatively and through a typed system: the
+        // Same plan wired imperatively and through a typed system: the
         // layouts (lifetimes, slots) must be identical.
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
 
-        let mut imperative = RenderGraph::new((320, 240));
+        let mut imperative = FramePlan::new((320, 240));
         let a = imperative.create_resource("a", ResA::spec(fmt));
         let b = imperative.create_resource("b", ResB::spec(fmt));
         imperative.add_pass("p0").write(a);
         imperative.add_pass("p1").read(a).write(b);
 
         struct P0;
-        impl GraphPass for P0 {
+        impl FramePass for P0 {
             type Reads = ();
             type Writes = (Write<ResA>,);
             fn name(&self) -> &'static str {
@@ -507,7 +507,7 @@ mod tests {
         }
 
         struct P1;
-        impl GraphPass for P1 {
+        impl FramePass for P1 {
             type Reads = (Read<ResA>,);
             type Writes = (Write<ResB>,);
             fn name(&self) -> &'static str {
@@ -519,7 +519,7 @@ mod tests {
         }
 
         let mut systems = SystemSet::new();
-        let mut typed = RenderGraph::new((320, 240));
+        let mut typed = FramePlan::new((320, 240));
         systems.register_resource::<ResA>(&mut typed, fmt);
         systems.register_resource::<ResB>(&mut typed, fmt);
         systems.add_system(&mut typed, P0);
@@ -536,13 +536,13 @@ mod tests {
     fn external_output_kind_uses_external_wiring() {
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
         let mut systems = SystemSet::new();
-        let mut graph = RenderGraph::new((320, 240));
-        let a = systems.register_resource::<ResA>(&mut graph, fmt);
-        let c = systems.register_resource::<ExtC>(&mut graph, fmt);
+        let mut plan = FramePlan::new((320, 240));
+        let a = systems.register_resource::<ResA>(&mut plan, fmt);
+        let c = systems.register_resource::<ExtC>(&mut plan, fmt);
         // Layout: external output is never pooled.
-        graph.add_pass("p0").write(a);
-        graph.add_pass("p1").read(a).write(c);
-        let layout = graph.build();
+        plan.add_pass("p0").write(a);
+        plan.add_pass("p1").read(a).write(c);
+        let layout = plan.build();
         assert!(layout.resources[c.0 as usize].external);
         assert_eq!(layout.resources[c.0 as usize].slot, None);
         assert_eq!(layout.slots.len(), 1, "only 'a' gets a pool slot");
@@ -567,11 +567,11 @@ mod tests {
     #[should_panic(expected = "is not registered")]
     fn unregistered_resource_panics_with_name() {
         let mut systems = SystemSet::new();
-        let mut graph = RenderGraph::new((320, 240));
-        systems.register_resource::<ResA>(&mut graph, wgpu::TextureFormat::Rgba8Unorm);
+        let mut plan = FramePlan::new((320, 240));
+        systems.register_resource::<ResA>(&mut plan, wgpu::TextureFormat::Rgba8Unorm);
 
         struct P;
-        impl GraphPass for P {
+        impl FramePass for P {
             type Reads = (Read<ResB>,); // never registered
             type Writes = ();
             fn name(&self) -> &'static str {
@@ -581,6 +581,6 @@ mod tests {
                 unreachable!();
             }
         }
-        systems.add_system(&mut graph, P);
+        systems.add_system(&mut plan, P);
     }
 }

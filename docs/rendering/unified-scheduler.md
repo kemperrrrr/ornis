@@ -1,8 +1,19 @@
-# Unified Scheduler — S0/S1 (кеш GraphLayout)
+# Unified Scheduler — S0/S1 (кеш FrameLayout)
 
 > Рабочий документ этапов S0–S1 из **Приложения C** [`PLAN.md`](../../PLAN.md)
 > (идея — [`IDEAS.md`](../../IDEAS.md) §28). Каждый прогон бенчей/тестов
 > обновляет числа в этом файле.
+
+> **Переименование 2026-08-23** (срез 1 приближения к Фазе C): модули и
+> типы получили Фаза-C-долговечные имена — `render_graph.rs` →
+> `frame_plan.rs` (`RenderGraph` → `FramePlan`, `GraphLayout` →
+> `FrameLayout`), `graph_frame.rs` → `frame_exec.rs` (`GraphExecutor` →
+> `FrameExecutor`, `RenderGraph3D` → `RenderFrame3D`, `GraphIds` →
+> `FrameIds`), `graph_passes.rs` → `frame_passes.rs` (`GraphPass` →
+> `FramePass`, `GraphResource` → `FrameResource`, `ResourceKind::GraphOwned`
+> → `FrameOwned`), пример → `frame_plan_probe`. Датированные секции
+> хронологии ниже (S0–S5, Hardening 2026-08-21…) используют имена своего
+> дня; канон имён — карта и глоссарий под этим указателем.
 
 ## Карта планировщика (2026-08-23, бэклог #19)
 
@@ -16,18 +27,18 @@
 Доменов в нём нет: ни wgpu, ни ECS.
 
 **Фронтенда два** (осознанно, решение S6 ниже — полный роспуск
-`RenderGraph` отклонён с причинами):
+`FramePlan` (тогдашний `RenderGraph`) отклонён с причинами):
 
 - `crates/core/src/schedule.rs` (`Schedule`) — системы над `Resources`:
   ключи — `TypeId` singleton-ресурса и `TypeId` ленты `SmartStore`
   (`reads_lane`/`writes_lane`, раздельные пространства имён);
   TLS-enforcement объявленных доступов; кеш — `PlanCache`
   (ленивая инвалидация).
-- `crates/render/src/render_graph.rs` (`RenderGraph`) — пассы над пулом
+- `crates/render/src/frame_plan.rs` (`FramePlan`) — пассы над пулом
   текстур: ключи — `ResourceId`; пул/лайфтаймы/бюджет S4/layout-кеш S1 —
   доменные данные, уровни и рёбра — движок; исполнение записи команд —
   `run_levels` на обоих таргетах (на wasm движковый путь последователен,
-  0..nodes; выключенные пассы отсутствуют в `GraphLayout`, поэтому
+  0..nodes; выключенные пассы отсутствуют в `FrameLayout`, поэтому
   порядок регистрации корректен и совпадает с нативным); debug-enforcement
   объявленных доступов — на выдаче view (`PassViews::view_of` →
   `assert_pass_access_declared`, бэклог #6): «sneaky pass» паникует в
@@ -42,14 +53,14 @@ physics-агрегаты) — только во фронтенд. Исполня
 **Глоссарий двойных имён** (одно понятие — одно слово в каждом
 фронтенде; внутри фронтенда всегда его слово):
 
-| Понятие | `Schedule` (core) | `RenderGraph` (render) | Движок |
+| Понятие | `Schedule` (core) | `FramePlan` (render) | Движок |
 |---|---|---|---|
 | Узел плана | система | пасс | node |
 | Доступы узла | `SystemAccess` (reads/writes + ленты) | типизированные `Access`-наборы (ZST-маркеры), проекция в layout | срезы `reads`/`writes` ключей `K` |
 | Ключ доступа | `TypeId` (ресурс / лента, раздельные пространства) | `ResourceId` | `K: Copy + Eq + Hash` |
 | Явные рёбра | `order_before(name, name)` | `order_before(PassId, PassId)` / `_named` | `resolve_named_edge` / `validate_indexed_edge` |
-| Уровни | `Schedule::levels()` | `GraphLayout::levels()` | `compute_levels` / `bitset_level_plan` |
-| Явные рёбра (данные) | `Schedule::ordering` | `RenderGraph::ordering` | матрица смежности в плане |
+| Уровни | `Schedule::levels()` | `FrameLayout::levels()` | `compute_levels` / `bitset_level_plan` |
+| Явные рёбра (данные) | `Schedule::ordering` | `FramePlan::ordering` | матрица смежности в плане |
 | Кеш плана | `PlanCache` + `level_computations()` | S1-кеш layout (уровни вычисляются при build) + `layout_computations()` | `PlanCache` (политика на фронтенде) |
 | Исполнитель | `run_levels` (оба таргета) | `run_levels` (оба таргета; wasm — последовательный, без `Sync`-границы) | `run_levels` (cfg-пара сигнатур) |
 | Ошибка рёбер | `OrderError` (реэкспорт) | `OrderError` (реэкспорт) | `OrderError` |
@@ -559,15 +570,15 @@ enforcement` / `declared_access_passes_enforcement` /
 Симметрия с TLS-enforcement систем: `PassViews::view_of` — единая воронка
 выдачи view по `ResourceId` (типизированные `SystemViews` и императивные
 run-замыкания сходятся здесь) — в debug проверяет `id` против declared
-reads/writes пасса (`assert_pass_access_declared`, `render_graph.rs`);
+reads/writes пасса (`assert_pass_access_declared`, `frame_plan.rs`);
 нарушение — паника с именем пасса и ресурса, аналог `sneaky system` —
 `sneaky pass`. Release: `#[cfg(debug_assertions)]`, нулевая стоимость.
 Честный лимит: `queue.write_buffer` в renderer-uniforms не проходит через
 `view_of`, поэтому инвариант queue-backed буферов одного уровня — авторский
 контракт (класс ограничения — как у rayon-границы систем ниже). Тесты:
 `sneaky_pass_undeclared_access_panics`,
-`declared_pass_access_passes_enforcement` (`render_graph.rs`),
-`pass_views_undeclared_view_panics_in_debug` (`graph_frame.rs`).
+`declared_pass_access_passes_enforcement` (`frame_plan.rs`),
+`pass_views_undeclared_view_panics_in_debug` (`frame_exec.rs`).
 
 ### Системная сторона на rayon-границе (2026-08-23, бэклог #7)
 

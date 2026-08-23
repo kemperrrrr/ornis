@@ -12,7 +12,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::render_backend::RenderContext;
-use ornis_render::{InstanceData, OpenPBRMaterial, RenderGraph3D, Renderer3D, Technique};
+use ornis_render::{InstanceData, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique};
 
 const SIZE: u32 = 256;
 
@@ -95,13 +95,13 @@ fn bench_recording(c: &mut Criterion) {
 
     let view_seq = target_view(&device);
     let view_par = target_view(&device);
-    let mut seq = RenderGraph3D::new_with(
+    let mut seq = RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,
         true,
     );
-    let mut par = RenderGraph3D::new_with(
+    let mut par = RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,
@@ -110,11 +110,11 @@ fn bench_recording(c: &mut Criterion) {
     par.set_parallel_recording(true);
 
     // Warm both pools so texture allocation stays out of the measurement.
-    let warm = |graph: &mut RenderGraph3D, target: &wgpu::TextureView| {
+    let warm = |frame: &mut RenderFrame3D, target: &wgpu::TextureView| {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("warm"),
         });
-        graph.render(
+        frame.render(
             RenderContext {
                 device: &device,
                 queue: &queue,

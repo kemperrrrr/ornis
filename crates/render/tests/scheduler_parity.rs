@@ -1,12 +1,12 @@
 //! Паритет фронтендов планировщика (бэклог #19, антидрейф-канон): одна и
 //! та же топология доступов на `ornis_core::Schedule` (системы, ключи
-//! TypeId — ресурсы и ленты) и на `ornis_render::RenderGraph` (пассы,
+//! TypeId — ресурсы и ленты) и на `ornis_render::FramePlan` (пассы,
 //! ключи ResourceId) обязана давать побитово одинаковые уровни: оба
 //! потребителя считаются одним движком `ornis-schedule`. Семантический
 //! дрейф любой стороны = красный CI.
 
 use ornis_core::{Resources, Schedule, System, SystemAccess};
-use ornis_render::{RenderGraph, ResourceId, SizePolicy, TextureSpec};
+use ornis_render::{FramePlan, ResourceId, SizePolicy, TextureSpec};
 
 /// Ключи ресурсного пространства имён core (в этом файле — типы-маркеры,
 /// реальные singleton-ресурсы плану не нужны).
@@ -86,7 +86,7 @@ fn mirrored_levels(
     ];
     assert_eq!(reads.len(), writes.len(), "parallel access slices");
     // Доменное правило рендера «first touch must be a write»
-    // (`RenderGraph::build`): ресурс, чьё первое касание — чтение без
+    // (`FramePlan::build`): ресурс, чьё первое касание — чтение без
     // более ранней (включая собственную) записи, обязан быть импортом.
     // На уровни import не влияет (внепуловость, не семантика доступов),
     // core-сторона такого правила не знает — зеркалим честно.
@@ -103,13 +103,13 @@ fn mirrored_levels(
     }
     let spec = spec();
     let mut sched = Schedule::new();
-    let mut graph = RenderGraph::new((640, 480));
+    let mut plan = FramePlan::new((640, 480));
     let ids: Vec<ResourceId> = (0..8)
         .map(|i| {
             if import[i] {
-                graph.import_resource(format!("r{i}"), spec)
+                plan.import_resource(format!("r{i}"), spec)
             } else {
-                graph.create_resource(format!("r{i}"), spec)
+                plan.create_resource(format!("r{i}"), spec)
             }
         })
         .collect();
@@ -122,7 +122,7 @@ fn mirrored_levels(
             access = push_access(access, k, true);
         }
         sched.add_system(Stub(NAMES[i], access));
-        let mut pass = graph.add_pass(NAMES[i]);
+        let mut pass = plan.add_pass(NAMES[i]);
         for &k in &reads[i] {
             pass = pass.read(ids[k]);
         }
@@ -132,9 +132,9 @@ fn mirrored_levels(
     }
     for &(before, after) in edges {
         sched.order_before(before, after);
-        graph.order_before_named(before, after);
+        plan.order_before_named(before, after);
     }
-    (sched.levels(), graph.build().levels())
+    (sched.levels(), plan.build().levels())
 }
 
 /// Базовые конфликт-классы и явные рёбра: уровни фронтендов идентичны.

@@ -612,14 +612,25 @@ GPU-бит-идентичность не обещается (урок G7 — д�
 Уточнение (2026-08-23, после бэклога #4 аудита): с выносом механики в
 `crates/schedule` вопрос «ликвидировать граф» распался на два разных.
 **Граф-планировщик ликвидирован** — в `render_graph` не осталось своих
-уровней/конфликтов/рёбер/`OrderError` (`layout_levels`,
-`render_graph.rs:410` — адаптер вызова `bitset_level_plan`). Причины
-#2 и #4 выше относятся теперь только к **оболочке**: доменное состояние
-(пул, лайфтаймы `[first_use, last_use]`, бюджет S4, external views,
-encoders) и debug-проекция `mermaid()`/`debug_dump()`; её сворачивание
-в набор систем с типизированными ресурсами — задача Фазы C плана аудита
+уровней/конфликтов/рёбер/`OrderError` (`layout_levels` — адаптер вызова
+`bitset_level_plan`). Причины #2 и #4 выше относятся теперь только к
+**оболочке**: доменное состояние (пул, лайфтаймы `[first_use, last_use]`,
+бюджет S4, external views, encoders) и debug-проекция
+`mermaid()`/`debug_dump()`; её сворачивание в набор систем с
+типизированными ресурсами — задача Фазы C плана аудита
 (`docs/quality/audit-2026-08-22.md`, §7), а причина #1 («музейный второй
 движок layout») снята — движок один.
+
+Доводка имени (2026-08-23, тот же день): оболочка получила
+Фаза-C-долговечные имена — `render_graph.rs` → `frame_plan.rs`
+(`RenderGraph` → `FramePlan`, `GraphLayout` → `FrameLayout`),
+`graph_frame.rs` → `frame_exec.rs` (`GraphExecutor` → `FrameExecutor`,
+`RenderGraph3D` → `RenderFrame3D`, `GraphIds` → `FrameIds`),
+`graph_passes.rs` → `frame_passes.rs` (`GraphPass` → `FramePass`,
+`GraphResource` → `FrameResource`, `ResourceKind::GraphOwned` →
+`FrameOwned`); пример — `frame_plan_probe`. Карта имён —
+`docs/rendering/unified-scheduler.md` (блок «Переименование» в шапке).
+Датированные разделы этого документа (S1–S6) пишут именами своего дня.
 
 ### Anti-цели и оговорки
 

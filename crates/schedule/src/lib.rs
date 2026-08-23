@@ -10,7 +10,7 @@
 //!
 //! Потребители держат доменные данные у себя и собирают срезы ключей:
 //! `ornis-core::schedule::Schedule` планирует системы по singleton-
-//! ресурсам (ключ — `TypeId`), `ornis-render::RenderGraph` — пассы по
+//! ресурсам (ключ — `TypeId`), `ornis-render::FramePlan` — пассы по
 //! текстурным ресурсам (ключ — `ResourceId`). Пул текстур, лайфтаймы,
 //! бюджет S4, `Resources`/ECS остаются в доменных крейтах (анти-цели
 //! Фазы A: никаких wgpu и ECS в этом крейте).
@@ -255,7 +255,7 @@ pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl
 /// wasm-вариант [`run_levels`]: rayon-потоков нет — всегда строгий
 /// порядок регистрации 0..nodes, поэтому граница `Sync` с `run`
 /// снимается (GPU-типы web-бэкенда wgpu не `Sync`; потребитель —
-/// запись пассов `ormis-render::graph_frame`, бэклог #19).
+/// запись пассов `ormis-render::frame_exec`, бэклог #19).
 #[cfg(target_family = "wasm")]
 pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl Fn(usize)) {
     let _ = (levels, parallel);

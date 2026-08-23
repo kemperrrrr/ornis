@@ -45,7 +45,7 @@ pub struct InstanceData {
 }
 
 /// G-buffer texture views, fed either from persistent textures (legacy
-/// path) or from render-graph pool slots (graph path).
+/// path) or from render-plan pool slots (plan path).
 pub struct GbufferTargets<'a> {
     pub albedo: &'a wgpu::TextureView,
     pub normal: &'a wgpu::TextureView,
@@ -1363,7 +1363,7 @@ impl Renderer3D {
     /// Bytes allocated by the persistent textures of the legacy path
     /// (5 g-buffer MRTs + g-buffer depth + lighting target + forward color).
     pub fn texture_budget(&self) -> u64 {
-        let bpp = crate::render_graph::format_bytes_per_pixel;
+        let bpp = crate::frame_plan::format_bytes_per_pixel;
         let w = self.width as u64;
         let h = self.height as u64;
         let s = self.sample_count as u64;
@@ -1564,7 +1564,7 @@ impl Renderer3D {
         output: &wgpu::TextureView,
     ) {
         // The bind group is rebuilt per frame: gbuffer views come from the
-        // render-graph pool (transient) or from persistent textures.
+        // render-plan pool (transient) or from persistent textures.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting bind group (frame)"),
             layout: &self.lighting_pass.bind_group_layout,
@@ -1698,7 +1698,7 @@ impl Renderer3D {
     ) {
         // The bloom view is bound unconditionally; a zero intensity makes the
         // contribution null, so the legacy path (`render_scene`) stays
-        // pixel-identical to the graph path with bloom culled.
+        // pixel-identical to the plan path with bloom culled.
         queue.write_buffer(
             &self.bloom_pass.params_buffer,
             0,

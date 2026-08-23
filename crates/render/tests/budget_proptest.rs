@@ -3,11 +3,11 @@
 //! exceeds it. Runs against random (technique x bloom x tail-culling x
 //! surface size) configurations.
 
-use ornis_render::{Budget, PassId, RenderGraph3D, Technique};
+use ornis_render::{Budget, PassId, RenderFrame3D, Technique};
 use proptest::prelude::*;
 
-fn cfg(technique: Technique, bloom: bool, size: u32) -> RenderGraph3D {
-    RenderGraph3D::new_with(
+fn cfg(technique: Technique, bloom: bool, size: u32) -> RenderFrame3D {
+    RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (size, size),
         technique,
@@ -33,7 +33,7 @@ proptest! {
         let max_tail = if bloom { 3 } else { 1 };
         let drop_tail = drop_tail.min(max_tail);
         // Registration order = execution order, so trailing PassIds are the
-        // tail passes. Totals are static per config (GraphLayout.passes is
+        // tail passes. Totals are static per config (FrameLayout.passes is
         // pub(crate); an integration test counts them itself).
         let total = match (technique, bloom) {
             (Technique::Forward, false) => 2,

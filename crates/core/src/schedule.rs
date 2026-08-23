@@ -440,7 +440,7 @@ pub struct Schedule {
     parallel: bool,
     enforce_accesses: bool,
     /// Кеш уровневого плана с диагностикой (зеркалит S1-кеш
-    /// `GraphLayout` рендера): пересчитывается только после
+    /// `FrameLayout` рендера): пересчитывается только после
     /// `add_system`/`order_before`.
     plan: PlanCache,
 }
@@ -539,7 +539,7 @@ impl Schedule {
 
     /// Уровни параллельности (индексы систем в порядке регистрации).
     /// Одно понятие под одним именем на обоих фронтендах движка
-    /// (зеркалит `GraphLayout::levels` рендера; канон, бэклог #19).
+    /// (зеркалит `FrameLayout::levels` рендера; канон, бэклог #19).
     pub fn levels(&self) -> Vec<Vec<usize>> {
         self.cached_levels()
     }
