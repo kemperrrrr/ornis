@@ -965,8 +965,8 @@ mod tests {
         // пустым TLS-стеком — историческая брешь принуждения; захват с
         // установкой кадра закрывают её. `std::thread::scope` гарантирует
         // чужой поток (rayon-задача могла бы исполниться на вызывающем,
-        // где TLS и так заполнен); паника ребёнка докатывается до нити
-        // теста авто-join'ом scope.
+        // где TLS и так заполнен); join ловит панику ребёнка, а
+        // `resume_unwind` поднимает её payload с исходным сообщением.
         struct SneakySpawn;
         impl System for SneakySpawn {
             fn name(&self) -> &'static str {
@@ -978,11 +978,17 @@ mod tests {
             fn run(&self, resources: &Resources) {
                 let frame = capture_access_frame();
                 std::thread::scope(|scope| {
-                    scope.spawn(|| {
+                    let handle = scope.spawn(|| {
                         let _guard = frame.install();
                         // Читает B, не декларировав его, — с дочернего потока.
                         let _ = resources.get::<B>();
                     });
+                    // Авто-join scope перепаникует с обёрткой «a scoped
+                    // thread panicked» — поднимаем исходный payload,
+                    // чтобы should_panic видел причину, а не обёртку.
+                    if let Err(payload) = handle.join() {
+                        std::panic::resume_unwind(payload);
+                    }
                 });
             }
         }
