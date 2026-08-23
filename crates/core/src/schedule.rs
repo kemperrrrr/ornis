@@ -85,10 +85,10 @@ use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-pub use ornis_schedule::{OrderError, compute_levels};
 use ornis_schedule::{
     MermaidDiagram, PlanCache, bitset_level_plan, resolve_named_edge, run_levels,
 };
+pub use ornis_schedule::{OrderError, compute_levels};
 
 /// Singleton resource container («мир»): одно значение на тип.
 /// Мутация через внутреннюю изменяемость (`Mutex<T>`, атомики) —
