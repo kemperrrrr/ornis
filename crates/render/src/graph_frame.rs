@@ -24,9 +24,10 @@ use crate::render_graph::{
 };
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
+use ornis_schedule::run_levels;
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 
 /// One pooled texture per render-graph slot.
 #[derive(Debug)]
@@ -94,12 +95,15 @@ impl GraphExecutor {
         }
     }
 
-    /// S5b: parallel command recording. Passes within a layout level
-    /// record into their own encoders concurrently (rayon); levels run
-    /// sequentially; all buffers are submitted to `queue` in pass order
-    /// with a single submit — `queue.write_buffer` calls made while
+    /// S5b: parallel command recording. The shared level executor
+    /// (`ornis_schedule::run_levels`, бэклог #19 — исполнитель один с
+    /// `core::Schedule`) runs levels sequentially and passes inside a
+    /// level concurrently (rayon); every pass records into its own
+    /// encoder; all buffers are submitted to `queue` in registration
+    /// order with a single submit — `queue.write_buffer` calls made while
     /// recording keep the same before-submit semantics as the sequential
-    /// path, so the pixel result is identical.
+    /// path, so the pixel result is identical. Submission order is
+    /// registration order on both targets (wasm twin below).
     ///
     /// Invariant (pass authors): passes that write the same queue-backed
     /// buffer (renderer-internal uniforms are not part of the declared
@@ -112,39 +116,41 @@ impl GraphExecutor {
         layout: &'a GraphLayout,
         run: impl Fn(usize, &PassViews<'a>, &mut wgpu::CommandEncoder) + Sync,
     ) {
-        {
-            self.ensure_pool(device, layout);
-            let pool = &self.pool;
-            let externals = &self.external_views;
-            let mut buffers: Vec<(usize, wgpu::CommandBuffer)> = Vec::new();
-            for level in layout.levels() {
-                let mut level_buffers: Vec<(usize, wgpu::CommandBuffer)> = level
-                    .par_iter()
-                    .map(|&index| {
-                        let desc = wgpu::CommandEncoderDescriptor { label: None };
-                        let mut encoder = device.create_command_encoder(&desc);
-                        let views = PassViews {
-                            layout,
-                            pool,
-                            externals,
-                            index,
-                        };
-                        run(index, &views, &mut encoder);
-                        (index, encoder.finish())
-                    })
-                    .collect();
-                buffers.append(&mut level_buffers);
-            }
-            buffers.sort_by_key(|(index, _)| *index);
-            queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
-        }
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        let buffers = Mutex::new(Vec::new());
+        let levels = layout.levels();
+        run_levels(&levels, layout.passes.len(), true, |index| {
+            let desc = wgpu::CommandEncoderDescriptor { label: None };
+            let mut encoder = device.create_command_encoder(&desc);
+            let views = PassViews {
+                layout,
+                pool,
+                externals,
+                index,
+            };
+            run(index, &views, &mut encoder);
+            buffers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((index, encoder.finish()));
+        });
+        let mut buffers = buffers
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        buffers.sort_by_key(|(index, _)| *index);
+        queue.submit(buffers.into_iter().map(|(_, buffer)| buffer));
     }
 
     /// wasm32 twin of [`GraphExecutor::execute_parallel`]: wgpu types are
     /// not `Sync` on the web backend (Rc inside) and there are no rayon
-    /// threads — the same per-pass encoders run sequentially, submitting
-    /// as they go. Signature drops the `Sync` bound so the shared
-    /// `render()` call site compiles for both targets.
+    /// threads — the shared level executor (`run_levels`) runs the same
+    /// per-pass encoders sequentially in registration order (the layout
+    /// holds enabled passes only, so 0..nodes is correct and matches the
+    /// native submission order, бэклог #19), submitting as they go.
+    /// Signature drops the `Sync` bound so the shared `render()` call
+    /// site compiles for both targets.
     #[cfg(target_arch = "wasm32")]
     pub fn execute_parallel<'a>(
         &'a mut self,
@@ -156,20 +162,19 @@ impl GraphExecutor {
         self.ensure_pool(device, layout);
         let pool = &self.pool;
         let externals = &self.external_views;
-        for level in layout.levels() {
-            for &index in &level {
-                let mut encoder =
-                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                let views = PassViews {
-                    layout,
-                    pool,
-                    externals,
-                    index,
-                };
-                run(index, &views, &mut encoder);
-                queue.submit(std::iter::once(encoder.finish()));
-            }
-        }
+        let levels = layout.levels();
+        run_levels(&levels, layout.passes.len(), false, |index| {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let views = PassViews {
+                layout,
+                pool,
+                externals,
+                index,
+            };
+            run(index, &views, &mut encoder);
+            queue.submit(std::iter::once(encoder.finish()));
+        });
     }
 
     fn ensure_pool(&mut self, device: &wgpu::Device, layout: &GraphLayout) {

@@ -833,10 +833,7 @@ mod tests {
             2,
             "add_system invalidates the plan"
         );
-        assert_eq!(
-            sched.levels(),
-            vec![vec![0], vec![1], vec![2], vec![3]]
-        );
+        assert_eq!(sched.levels(), vec![vec![0], vec![1], vec![2], vec![3]]);
     }
 
     #[test]

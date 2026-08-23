@@ -715,7 +715,6 @@ dependencies = [
  "ornis-core",
  "ornis-macros",
  "ornis-schedule",
- "rayon",
  "ron",
  "serde",
  "wgpu",

@@ -1863,7 +1863,6 @@ dependencies = [
  "png",
  "pollster 0.3.0",
  "proptest",
- "rayon",
  "ron",
  "serde",
  "wgpu",

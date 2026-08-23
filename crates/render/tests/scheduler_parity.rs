@@ -85,10 +85,33 @@ fn mirrored_levels(
         "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
     ];
     assert_eq!(reads.len(), writes.len(), "parallel access slices");
+    // Доменное правило рендера «first touch must be a write»
+    // (`RenderGraph::build`): ресурс, чьё первое касание — чтение без
+    // более ранней (включая собственную) записи, обязан быть импортом.
+    // На уровни import не влияет (внепуловость, не семантика доступов),
+    // core-сторона такого правила не знает — зеркалим честно.
+    let mut import = [false; 8];
+    for key in 0..8 {
+        let first_use = (0..reads.len())
+            .find(|&i| reads[i].contains(&key) || writes[i].contains(&key));
+        if let Some(i) = first_use {
+            let written = (0..=i).any(|j| writes[j].contains(&key));
+            if reads[i].contains(&key) && !written {
+                import[key] = true;
+            }
+        }
+    }
+    let spec = spec();
     let mut sched = Schedule::new();
     let mut graph = RenderGraph::new((640, 480));
     let ids: Vec<ResourceId> = (0..8)
-        .map(|i| graph.create_resource(format!("r{i}"), spec()))
+        .map(|i| {
+            if import[i] {
+                graph.import_resource(format!("r{i}"), spec)
+            } else {
+                graph.create_resource(format!("r{i}"), spec)
+            }
+        })
         .collect();
     for i in 0..reads.len() {
         let mut access = SystemAccess::new();
@@ -118,11 +141,8 @@ fn mirrored_levels(
 #[test]
 fn fixed_topologies_match_across_frontends() {
     // Независимые писатели → один уровень.
-    let (core, render) = mirrored_levels(
-        &[vec![], vec![], vec![]],
-        &[vec![0], vec![1], vec![2]],
-        &[],
-    );
+    let (core, render) =
+        mirrored_levels(&[vec![], vec![], vec![]], &[vec![0], vec![1], vec![2]], &[]);
     assert_eq!(core, vec![vec![0, 1, 2]]);
     assert_eq!(core, render);
 
