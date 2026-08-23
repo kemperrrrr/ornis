@@ -91,13 +91,13 @@ fn mirrored_levels(
     // На уровни import не влияет (внепуловость, не семантика доступов),
     // core-сторона такого правила не знает — зеркалим честно.
     let mut import = [false; 8];
-    for key in 0..8 {
-        let first_use = (0..reads.len())
-            .find(|&i| reads[i].contains(&key) || writes[i].contains(&key));
+    for (key, slot) in import.iter_mut().enumerate() {
+        let first_use =
+            (0..reads.len()).find(|&i| reads[i].contains(&key) || writes[i].contains(&key));
         if let Some(i) = first_use {
             let written = (0..=i).any(|j| writes[j].contains(&key));
             if reads[i].contains(&key) && !written {
-                import[key] = true;
+                *slot = true;
             }
         }
     }

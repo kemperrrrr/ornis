@@ -235,21 +235,29 @@ impl PlanCache {
 }
 
 /// Уровневый исполнитель: уровни — строго последовательно, узлы внутри
-/// уровня — параллельно (rayon). `parallel = false` — строгий порядок
-/// регистрации 0..nodes (заметьте: он может отличаться от порядка
-/// обхода уровней, поэтому узлов посчитано отдельным параметром).
-/// На wasm rayon-потоков нет — всегда последовательный порядок.
+/// уровня — параллельно (rayon, поэтому `run` обязан быть `Sync`).
+/// `parallel = false` — строгий порядок регистрации 0..nodes (заметьте:
+/// он может отличаться от порядка обхода уровней, поэтому узлов
+/// посчитано отдельным параметром).
+#[cfg(not(target_family = "wasm"))]
 pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl Fn(usize) + Sync) {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        if parallel {
-            for group in levels {
-                group.par_iter().for_each(|&i| run(i));
-            }
-            return;
+    if parallel {
+        for group in levels {
+            group.par_iter().for_each(|&i| run(i));
         }
+        return;
     }
-    #[cfg(target_family = "wasm")]
+    for i in 0..nodes {
+        run(i);
+    }
+}
+
+/// wasm-вариант [`run_levels`]: rayon-потоков нет — всегда строгий
+/// порядок регистрации 0..nodes, поэтому граница `Sync` с `run`
+/// снимается (GPU-типы web-бэкенда wgpu не `Sync`; потребитель —
+/// запись пассов `ormis-render::graph_frame`, бэклог #19).
+#[cfg(target_family = "wasm")]
+pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl Fn(usize)) {
     let _ = (levels, parallel);
     for i in 0..nodes {
         run(i);
