@@ -188,7 +188,11 @@ impl EditorWorld {
 
     /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
     pub fn scene_json(&self) -> String {
-        let entities: Vec<Value> = self.alive.iter().map(|&e| self.entity_json(e)).collect();
+        let entities: Vec<Value> = self
+            .alive
+            .iter()
+            .map(|&e| entity_json(&self.store, e))
+            .collect();
         let lights = serde_json::to_value(&self.environment.lights).expect("LightDesc serializes");
         let camera = serde_json::to_value(&self.environment.camera).expect("CameraDesc serializes");
         serde_json::json!({
@@ -200,24 +204,6 @@ impl EditorWorld {
             "ambient": self.environment.ambient,
         })
         .to_string()
-    }
-
-    /// One entity entry: `id`/`generation` plus a map
-    /// «registry name → serde-canonical component JSON» — generic over the
-    /// registered component set (registry ops, no per-type code).
-    fn entity_json(&self, entity: Entity) -> Value {
-        let mut components = serde_json::Map::new();
-        for meta in REGISTRY.iter() {
-            // A serialization error is unreachable for plain data structs.
-            if let Ok(Some(value)) = meta.get_json(&self.store, entity) {
-                components.insert(meta.name().to_string(), value);
-            }
-        }
-        serde_json::json!({
-            "id": entity.id(),
-            "generation": entity.generation(),
-            "components": components,
-        })
     }
 
     /// JSON payload for `GET /api/status` (cached by the HTTP server).
@@ -265,7 +251,7 @@ impl EditorWorld {
             UiCommand::DestroyEntity { entity_id } => {
                 // The typed variant carries no generation; match any alive
                 // entity with this id.
-                if let Ok(entity) = self.resolve_alive(*entity_id, None) {
+                if let Ok(entity) = resolve_alive(&self.alive, *entity_id, None) {
                     self.despawn(entity.id(), entity.generation());
                     self.publish_state(ev_tx);
                 }
@@ -319,7 +305,7 @@ impl EditorWorld {
         type_name: &str,
         json_data: &str,
     ) -> Result<Value, String> {
-        let entity = self.resolve_alive(entity_id, generation)?;
+        let entity = resolve_alive(&self.alive, entity_id, generation)?;
         let meta = REGISTRY
             .by_name(type_name)
             .ok_or_else(|| format!("unknown component '{type_name}'"))?;
@@ -329,16 +315,6 @@ impl EditorWorld {
             .map_err(|e| e.to_string())?;
         self.version += 1;
         Ok(value)
-    }
-
-    /// Typed commands resolve an entity by id among the alive ones;
-    /// a supplied generation must match (id-only matches any generation).
-    fn resolve_alive(&self, id: u32, generation: Option<u32>) -> Result<Entity, String> {
-        self.alive
-            .iter()
-            .find(|e| e.id() == id && generation.is_none_or(|g| e.generation() == g))
-            .copied()
-            .ok_or_else(|| format!("entity {id} not found"))
     }
 
     fn handle_custom(&mut self, cmd_type: &str, json_data: &str, ev_tx: &Sender<GameEvent>) {
@@ -365,7 +341,7 @@ impl EditorWorld {
                 Err(e) => self.emit_error(ev_tx, cmd_type, &e),
             },
             "list_entities" => {
-                let payload = self.cmd_list_entities();
+                let payload = list_entities_json(self);
                 self.emit(ev_tx, "entity_list", payload);
             }
             other => self.emit_error(ev_tx, other, "unknown command"),
@@ -401,21 +377,6 @@ impl EditorWorld {
         Ok(serde_json::json!({"id": entity.id(), "generation": entity.generation()}).to_string())
     }
 
-    fn cmd_list_entities(&self) -> String {
-        let entities: Vec<Value> = self
-            .alive
-            .iter()
-            .map(|&e| {
-                serde_json::json!({
-                    "id": e.id(),
-                    "generation": e.generation(),
-                    "name": self.name_of(e),
-                })
-            })
-            .collect();
-        serde_json::json!({"count": entities.len(), "entities": entities}).to_string()
-    }
-
     /// Validate `id` + `generation` against the store's allocator.
     fn resolve_entity(&self, data: &Value) -> Result<Entity, String> {
         let id = data
@@ -432,6 +393,50 @@ impl EditorWorld {
         }
         Ok(entity)
     }
+}
+
+/// One entity entry: `id`/`generation` plus a map
+/// «registry name → serde-canonical component JSON» — generic over the
+/// registered component set (registry ops, no per-type code).
+fn entity_json(store: &SmartStore, entity: Entity) -> Value {
+    let mut components = serde_json::Map::new();
+    for meta in REGISTRY.iter() {
+        // A serialization error is unreachable for plain data structs.
+        if let Ok(Some(value)) = meta.get_json(store, entity) {
+            components.insert(meta.name().to_string(), value);
+        }
+    }
+    serde_json::json!({
+        "id": entity.id(),
+        "generation": entity.generation(),
+        "components": components,
+    })
+}
+
+/// Typed commands resolve an entity by id among the alive ones;
+/// a supplied generation must match (id-only matches any generation).
+fn resolve_alive(alive: &[Entity], id: u32, generation: Option<u32>) -> Result<Entity, String> {
+    alive
+        .iter()
+        .find(|e| e.id() == id && generation.is_none_or(|g| e.generation() == g))
+        .copied()
+        .ok_or_else(|| format!("entity {id} not found"))
+}
+
+/// `list_entities` payload: entity count plus `{id, generation, name}` rows.
+fn list_entities_json(world: &EditorWorld) -> String {
+    let entities: Vec<Value> = world
+        .alive
+        .iter()
+        .map(|&e| {
+            serde_json::json!({
+                "id": e.id(),
+                "generation": e.generation(),
+                "name": world.name_of(e),
+            })
+        })
+        .collect();
+    serde_json::json!({"count": entities.len(), "entities": entities}).to_string()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
