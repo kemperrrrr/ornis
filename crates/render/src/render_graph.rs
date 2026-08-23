@@ -27,6 +27,8 @@
 
 use std::collections::HashMap;
 
+use ornis_schedule::{OrderError, bitset_level_plan, resolve_named_edge, validate_indexed_edge};
+
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
@@ -183,6 +185,10 @@ pub struct GraphLayout {
     /// S5c: explicit ordering edges (registration PassIds, both enabled),
     /// a snapshot of `RenderGraph::ordering` at build time.
     pub(crate) ordering: Vec<(PassId, PassId)>,
+    /// Parallel execution levels (bitset plan via `ornis-schedule`),
+    /// computed once per build and cached in the layout (audit §4.3 —
+    /// no recomputation per `levels()` call).
+    pub(crate) levels: Vec<Vec<usize>>,
 }
 
 impl GraphLayout {
@@ -205,40 +211,11 @@ impl GraphLayout {
     /// write-after-write), passes within a level are independent and
     /// safe to record in parallel. Deterministic — derived from the
     /// registration order and the declared accesses, exactly like the
-    /// core `ornis_core::schedule::Schedule`.
+    /// core `ornis_core::schedule::Schedule`. Computed once per build
+    /// (bitset plan from `ornis-schedule`, audit §4.3) and cached in
+    /// this layout; the accessor clones the vec, as before.
     pub fn levels(&self) -> Vec<Vec<usize>> {
-        let writes: Vec<Vec<ResourceId>> = self
-            .passes
-            .iter()
-            .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
-            .collect();
-        // S5c: явные рёбра в индексы layout (выключенные пассы — мимо).
-        let index_of = |id: PassId| self.passes.iter().position(|p| p.id == id);
-        let edges: Vec<(usize, usize)> = self
-            .ordering
-            .iter()
-            .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
-            .collect();
-        // Единый движок уровней с `ornis-core::Schedule` (§28.2 — один
-        // шедулер на всё: та же функция считает уровни систем и пассов).
-        ornis_core::compute_levels(self.passes.len(), |i, j| {
-            Self::passes_conflict(&self.passes, &writes, i, j) || edges.contains(&(i, j))
-        })
-    }
-
-    /// Do passes `i < j` conflict (registration order = priority):
-    /// i writes what j reads or writes (RaW/WaW), or j writes what i
-    /// reads (anti-dependency).
-    fn passes_conflict(
-        passes: &[PassLayout],
-        writes: &[Vec<ResourceId>],
-        i: usize,
-        j: usize,
-    ) -> bool {
-        writes[i]
-            .iter()
-            .any(|w| passes[j].reads.contains(w) || writes[j].contains(w))
-            || writes[j].iter().any(|w| passes[i].reads.contains(w))
+        self.levels.clone()
     }
 
     /// Mermaid diagram of this layout — the debug projection (S6):
@@ -404,33 +381,23 @@ impl std::fmt::Display for BudgetExceeded {
     }
 }
 
-/// Errors of [`RenderGraph::try_order_before`] (S5c): an explicit
-/// ordering edge the registration order cannot satisfy, or an unknown
-/// pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphOrderError {
-    /// No pass is registered under this name.
-    UnknownPass { name: String },
-    /// `after` is registered earlier than `before`: execution order is
-    /// the registration order (S3) — explicit edges only split parallel
-    /// levels.
-    BackwardEdge { before: String, after: String },
+/// Parallel levels of a built layout: bitset plan (`ornis-schedule`)
+/// over per-pass access slices plus translated explicit edges
+/// (registration PassId → layout index; disabled passes are not in the
+/// layout, so their edges drop out).
+fn layout_levels(passes: &[PassLayout], ordering: &[(PassId, PassId)]) -> Vec<Vec<usize>> {
+    let reads: Vec<Vec<ResourceId>> = passes.iter().map(|p| p.reads.clone()).collect();
+    let writes: Vec<Vec<ResourceId>> = passes
+        .iter()
+        .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
+        .collect();
+    let index_of = |id: PassId| passes.iter().position(|p| p.id == id);
+    let edges: Vec<(usize, usize)> = ordering
+        .iter()
+        .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
+        .collect();
+    bitset_level_plan(&reads, &writes, &edges)
 }
-
-impl std::fmt::Display for GraphOrderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GraphOrderError::UnknownPass { name } => write!(f, "no pass named '{name}'"),
-            GraphOrderError::BackwardEdge { before, after } => write!(
-                f,
-                "'{after}' is registered earlier than '{before}' — register passes in \
-                 execution order; explicit edges only split parallel levels"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for GraphOrderError {}
 
 /// The pass graph being assembled.
 #[derive(Debug)]
@@ -563,22 +530,17 @@ impl RenderGraph {
     }
 
     /// Мягкая [`RenderGraph::order_before`]: ошибка — возвращаемый
-    /// [`GraphOrderError`], не паника. Заодно валидирует оба `PassId`
+    /// [`OrderError`], не паника. Заодно валидирует оба `PassId`
     /// (раньше ребро с неизвестным id добавлялось молча и игнорировалось
     /// при подсчёте уровней).
     pub fn try_order_before(
         &mut self,
         before: PassId,
         after: PassId,
-    ) -> Result<(), GraphOrderError> {
-        let before_name = self.pass_name(before)?;
-        let after_name = self.pass_name(after)?;
-        if before.0 >= after.0 {
-            return Err(GraphOrderError::BackwardEdge {
-                before: before_name,
-                after: after_name,
-            });
-        }
+    ) -> Result<(), OrderError> {
+        validate_indexed_edge(before.0 as usize, after.0 as usize, |i| {
+            self.passes.get(i).map(|node| node.name.clone())
+        })?;
         if !self.ordering.contains(&(before, after)) {
             self.ordering.push((before, after));
         }
@@ -601,29 +563,11 @@ impl RenderGraph {
         &mut self,
         before: &str,
         after: &str,
-    ) -> Result<(), GraphOrderError> {
-        let b = self.try_pass_id_of(before)?;
-        let a = self.try_pass_id_of(after)?;
-        self.try_order_before(b, a)
-    }
-
-    fn try_pass_id_of(&self, name: &str) -> Result<PassId, GraphOrderError> {
-        self.passes
-            .iter()
-            .position(|p| p.name == name)
-            .map(|i| PassId(i as u32))
-            .ok_or_else(|| GraphOrderError::UnknownPass {
-                name: name.to_owned(),
-            })
-    }
-
-    fn pass_name(&self, id: PassId) -> Result<String, GraphOrderError> {
-        self.passes
-            .get(id.0 as usize)
-            .map(|node| node.name.clone())
-            .ok_or_else(|| GraphOrderError::UnknownPass {
-                name: format!("#{}", id.0),
-            })
+    ) -> Result<(), OrderError> {
+        let (b, a) = resolve_named_edge(before, after, |name| {
+            self.passes.iter().position(|p| p.name == name)
+        })?;
+        self.try_order_before(PassId(b as u32), PassId(a as u32))
     }
 
     /// Enables/disables a pass (culling): a disabled pass is dropped from
@@ -839,6 +783,7 @@ impl RenderGraph {
             }
         }
 
+        let levels = layout_levels(&passes, &self.ordering);
         GraphLayout {
             surface_size: self.surface_size,
             passes,
@@ -846,6 +791,7 @@ impl RenderGraph {
             slots,
             pass_alive,
             ordering: self.ordering.clone(),
+            levels,
         }
     }
 
@@ -1173,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no pass named")]
+    #[should_panic(expected = "no node named")]
     fn explicit_ordering_unknown_name() {
         let mut g = RenderGraph::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
@@ -1190,18 +1136,18 @@ mod tests {
         let second = g.add_pass("second").write(b).id();
         assert!(matches!(
             g.try_order_before(second, first),
-            Err(GraphOrderError::BackwardEdge { .. })
+            Err(OrderError::BackwardEdge { .. })
         ));
         assert_eq!(
             g.try_order_before_named("first", "ghost").map(|_| ()),
-            Err(GraphOrderError::UnknownPass {
+            Err(OrderError::UnknownNode {
                 name: "ghost".to_owned(),
             })
         );
         // Id вне реестра — ошибка, а не молчаливое мусорное ребро.
         assert!(matches!(
             g.try_order_before(PassId(99), PassId(100)),
-            Err(GraphOrderError::UnknownPass { .. })
+            Err(OrderError::UnknownNode { .. })
         ));
         assert_eq!(g.build().levels(), vec![vec![0, 1]]);
         assert!(g.try_order_before(first, second).is_ok());

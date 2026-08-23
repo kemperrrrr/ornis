@@ -20,6 +20,8 @@ mutants = "0.0.3"
 # без derive в основном коде (derive подключается тестами ниже).
 serde = "1.0"
 serde_json = "1"
+# Фаза A (аудит §7): механика уровней/рёбер/кеша планировщика.
+ornis-schedule = { path = "../schedule" }
 
 [features]
 default = []

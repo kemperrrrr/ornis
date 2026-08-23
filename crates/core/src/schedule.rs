@@ -46,16 +46,19 @@
 //! шедулерах); вне [`Schedule::run`] доступ свободен. По умолчанию
 //! включена в debug-сборках и выключена в release
 //! ([`Schedule::set_enforce_accesses`] переопределяет).
+//!
+//! Механика уровней и конфликтов (включая битсет-план и кеш плана с
+//! диагностикой), единый [`OrderError`] и уровневый исполнитель живут в
+//! крейте `ornis-schedule` (Фаза A, аудит §7); здесь остаётся
+//! ECS-фронтенд: [`Resources`], [`SystemAccess`], [`System`] и
+//! TLS-enforcement объявленных доступов.
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fmt;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use fixedbitset::FixedBitSet;
-use rayon::prelude::*;
+pub use ornis_schedule::{OrderError, compute_levels};
+use ornis_schedule::{PlanCache, bitset_level_plan, resolve_named_edge, run_levels};
 
 /// Singleton resource container («мир»): одно значение на тип.
 /// Мутация через внутреннюю изменяемость (`Mutex<T>`, атомики) —
@@ -169,32 +172,6 @@ pub trait System: Send + Sync {
     fn run(&self, resources: &Resources);
 }
 
-/// Ошибка [`Schedule::try_order_before`]: явный порядок, который не
-/// способен выполнить контракт шедулера.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OrderError {
-    /// Системы с таким именем нет (уникальность имён — на вызывающем).
-    UnknownSystem { name: String },
-    /// `after` зарегистрирован раньше `before`: порядок исполнения —
-    /// порядок регистрации (S3), явные рёбра только разбивают уровни.
-    BackwardEdge { before: String, after: String },
-}
-
-impl fmt::Display for OrderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OrderError::UnknownSystem { name } => write!(f, "no system named '{name}'"),
-            OrderError::BackwardEdge { before, after } => write!(
-                f,
-                "'{after}' is registered earlier than '{before}' — register systems in \
-                 execution order and use order_before to split parallel levels"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for OrderError {}
-
 /// Конфликт двух систем (в порядке регистрации i < j): упорядочены, если
 /// i пишет то, что j читает/пишет (RaW/WaW), или j пишет то, что читает
 /// i (анти-зависимость, WaR).
@@ -216,70 +193,6 @@ fn reference_level_groups(
 ) -> Vec<Vec<usize>> {
     compute_levels(accesses.len(), |i, j| {
         conflicts(&accesses[i], &accesses[j]) || ordering.contains(&(i, j))
-    })
-}
-
-/// Движок уровней параллельности — единый для всех шедулеров (§28.2:
-/// «один scheduler на всё»; используется `Schedule` здесь и
-/// `GraphLayout::levels` рендер-графа). `ordered(i, j)` = есть
-/// зависимость i→j (i < j, порядок регистрации — тайбрейк); уровень j =
-/// 1 + максимум уровней предшественников, группы идут по возрастанию,
-/// внутри группы порядок регистрации.
-pub fn compute_levels(n: usize, ordered: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>> {
-    let mut level = vec![0usize; n];
-    for j in 1..n {
-        let mut best = 0usize;
-        for (i, prev_level) in level.iter().enumerate().take(j) {
-            if ordered(i, j) {
-                best = best.max(prev_level + 1);
-            }
-        }
-        level[j] = best;
-    }
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for (i, l) in level.iter().enumerate() {
-        if groups.len() <= *l {
-            groups.resize_with(*l + 1, Vec::new);
-        }
-        groups[*l].push(i);
-    }
-    groups
-}
-
-/// Уровневый план поверх битсетов: плотный индекс на distinct `TypeId`,
-/// пересечения вместо линейных `Vec::contains` в O(n²)-цикле, явные рёбра
-/// порядка — матрица смежности. Семантика конфликтов идентична Vec-эталону
-/// (RaW/WaW/WaR); совпадение пинится тестом `bitset_plan_matches_reference_model`.
-fn build_level_plan(
-    systems: usize,
-    accesses: &[SystemAccess],
-    ordering: &[(usize, usize)],
-) -> Vec<Vec<usize>> {
-    let mut resource_ids: HashMap<TypeId, u32> = HashMap::new();
-    let mut dense = |id: TypeId| -> usize {
-        let next = resource_ids.len() as u32;
-        *resource_ids.entry(id).or_insert(next) as usize
-    };
-    let reads: Vec<FixedBitSet> = accesses
-        .iter()
-        .map(|a| a.reads.iter().map(|&id| dense(id)).collect())
-        .collect();
-    let writes: Vec<FixedBitSet> = accesses
-        .iter()
-        .map(|a| a.writes.iter().map(|&id| dense(id)).collect())
-        .collect();
-    let mut successors = vec![FixedBitSet::with_capacity(systems); systems];
-    for &(before, after) in ordering {
-        if before < systems && after < systems {
-            successors[before].insert(after);
-        }
-    }
-    compute_levels(systems, |i, j| {
-        let disjoint_writes_read = writes[i].is_disjoint(&reads[j]);
-        let disjoint_writes_writes = writes[i].is_disjoint(&writes[j]);
-        let disjoint_read_writes = reads[i].is_disjoint(&writes[j]);
-        !(disjoint_writes_read && disjoint_writes_writes && disjoint_read_writes)
-            || successors[i].contains(j)
     })
 }
 
@@ -356,12 +269,10 @@ pub struct Schedule {
     ordering: Vec<(usize, usize)>,
     parallel: bool,
     enforce_accesses: bool,
-    /// Кеш уровневого плана (зеркалит S1-кеш `GraphLayout` рендера):
-    /// пересчитывается только после `add_system`/`order_before`.
-    plan: Mutex<Option<Vec<Vec<usize>>>>,
-    /// Диагностика кеша: сколько раз план пересчитан (в steady state
-    /// не растёт; ср. `RenderGraph::layout_computations`).
-    level_computations: AtomicUsize,
+    /// Кеш уровневого плана с диагностикой (зеркалит S1-кеш
+    /// `GraphLayout` рендера): пересчитывается только после
+    /// `add_system`/`order_before`.
+    plan: PlanCache,
 }
 
 impl Default for Schedule {
@@ -378,8 +289,7 @@ impl Schedule {
             ordering: Vec::new(),
             parallel: true,
             enforce_accesses: cfg!(debug_assertions),
-            plan: Mutex::new(None),
-            level_computations: AtomicUsize::new(0),
+            plan: PlanCache::new(),
         }
     }
 
@@ -392,10 +302,7 @@ impl Schedule {
     }
 
     fn invalidate_plan(&mut self) {
-        *self
-            .plan
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.plan.invalidate();
     }
 
     /// S5c: объявляет, что система `before` обязана выполниться раньше
@@ -414,22 +321,7 @@ impl Schedule {
     /// Мягкая [`Schedule::order_before`]: ошибка — возвращаемое
     /// [`OrderError`], не паника (для динамических фронтендов фазы 6).
     pub fn try_order_before(&mut self, before: &str, after: &str) -> Result<&mut Self, OrderError> {
-        let Some(b) = self.try_system_index(before) else {
-            return Err(OrderError::UnknownSystem {
-                name: before.to_owned(),
-            });
-        };
-        let Some(a) = self.try_system_index(after) else {
-            return Err(OrderError::UnknownSystem {
-                name: after.to_owned(),
-            });
-        };
-        if b >= a {
-            return Err(OrderError::BackwardEdge {
-                before: before.to_owned(),
-                after: after.to_owned(),
-            });
-        }
+        let (b, a) = resolve_named_edge(before, after, |name| self.try_system_index(name))?;
         if !self.ordering.contains(&(b, a)) {
             self.ordering.push((b, a));
             self.invalidate_plan();
@@ -483,38 +375,26 @@ impl Schedule {
     /// Сколько раз уровневый план пересчитан — диагностика кеша
     /// (в steady state не растёт).
     pub fn level_computations(&self) -> usize {
-        self.level_computations.load(AtomicOrdering::Relaxed)
+        self.plan.computations()
     }
 
     fn cached_levels(&self) -> Vec<Vec<usize>> {
-        let mut plan = self
-            .plan
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(levels) = plan.as_ref() {
-            return levels.clone();
-        }
-        let levels = build_level_plan(self.systems.len(), &self.accesses, &self.ordering);
-        *plan = Some(levels.clone());
-        self.level_computations
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        levels
+        let reads: Vec<Vec<TypeId>> = self.accesses.iter().map(|a| a.reads.clone()).collect();
+        let writes: Vec<Vec<TypeId>> = self.accesses.iter().map(|a| a.writes.clone()).collect();
+        self.plan.get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
     }
 
     /// Исполняет расписание над миром.
     pub fn run(&self, resources: &Resources) {
-        if !self.parallel {
-            for i in 0..self.systems.len() {
-                self.run_system(i, resources);
-            }
-            return;
-        }
-        let levels = self.cached_levels();
-        for group in &levels {
-            group
-                .par_iter()
-                .for_each(|&i| self.run_system(i, resources));
-        }
+        // Sequential режим не считает план вовсе (как и раньше).
+        let levels = if self.parallel {
+            self.cached_levels()
+        } else {
+            Vec::new()
+        };
+        run_levels(&levels, self.systems.len(), self.parallel, |i| {
+            self.run_system(i, resources);
+        });
     }
 
     fn run_system(&self, i: usize, resources: &Resources) {
@@ -758,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no system named")]
+    #[should_panic(expected = "no node named")]
     fn explicit_ordering_unknown_name_panics() {
         let mut sched = Schedule::new();
         sched.add_system(NamedNoop("only", SystemAccess::new()));
@@ -777,7 +657,7 @@ mod tests {
         ));
         assert_eq!(
             sched.try_order_before("a", "ghost").map(|_| ()),
-            Err(OrderError::UnknownSystem {
+            Err(OrderError::UnknownNode {
                 name: "ghost".to_owned(),
             })
         );

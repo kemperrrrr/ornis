@@ -1807,6 +1807,7 @@ dependencies = [
  "mutants",
  "ornis-macros",
  "ornis-physics",
+ "ornis-schedule",
  "proptest",
  "rayon",
 ]
@@ -1858,6 +1859,7 @@ dependencies = [
  "glam 0.30.10",
  "ornis-core",
  "ornis-macros",
+ "ornis-schedule",
  "png",
  "pollster 0.3.0",
  "proptest",
@@ -1865,6 +1867,14 @@ dependencies = [
  "ron",
  "serde",
  "wgpu",
+]
+
+[[package]]
+name = "ornis-schedule"
+version = "0.1.0"
+dependencies = [
+ "fixedbitset",
+ "rayon",
 ]
 
 [[package]]

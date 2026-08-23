@@ -1,0 +1,13 @@
+[package]
+name = "ornis-schedule"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fixedbitset = "0.5"
+rayon = "1.10"
+
+[lints]
+workspace = true

@@ -103,6 +103,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | `crates/physics` | Физика: трейт `PhysicsEngine`, Sweep-and-Prune, `RigidBody`, raycast | Активен (вынесен из core в августе 2026) |
 | `crates/macros` | Процедурные макросы: `smart_pipeline`, `for_each_entity`, `kernel`, `Pack` и др. | Активен |
 | `crates/render` | `Renderer3D`, OpenPBR-материал, WGSL-шейдеры, трейт `RenderBackend` | Активен |
+| `crates/schedule` | Механика планировщика: `compute_levels`, битсет-план конфликтов, единый `OrderError`, кеш `PlanCache`, исполнитель `run_levels` | Активен (Фаза A аудита, август 2026) |
 | `crates/wgpu_backend` | GPU-исполнение: command sync, smart buffer, PSO-кэш, роутер | Активен |
 | `crates/materialx` | Парсер `.mtlx` и конвертация в OpenPBR | Активен |
 | `crates/wasm` | WASM-обёртка для рендера сцены в браузере | Активен |
