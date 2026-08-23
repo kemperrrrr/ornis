@@ -325,8 +325,7 @@ pub(crate) fn assert_pass_access_declared(layout: &GraphLayout, pass_index: usiz
             "pass '{}' (index {pass_index}) accesses resource '{}' ({id:?}) that is not \
              declared in its access set (PassBuilder::read/write) — undeclared access breaks \
              the frame-graph scheduling contract",
-            pass.name,
-            resource.name
+            pass.name, resource.name
         );
     }
 }
