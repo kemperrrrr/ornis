@@ -71,8 +71,16 @@ fn lane_writes<T: 'static + Send + Sync>() -> SystemAccess {
 fn disjoint_lanes_share_one_level_over_common_store() {
     let mut sched = Schedule::new();
     sched
-        .add_system(LaneSystem::new("pos_writer", lane_writes::<Position>(), noop))
-        .add_system(LaneSystem::new("vel_writer", lane_writes::<Velocity>(), noop));
+        .add_system(LaneSystem::new(
+            "pos_writer",
+            lane_writes::<Position>(),
+            noop,
+        ))
+        .add_system(LaneSystem::new(
+            "vel_writer",
+            lane_writes::<Velocity>(),
+            noop,
+        ));
     assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
 }
 
@@ -119,7 +127,11 @@ fn two_lane_system_plans_without_manual_edges() {
             noop,
         ))
         .add_system(LaneSystem::new("sink", lane_reads::<Velocity>(), noop))
-        .add_system(LaneSystem::new("free", SystemAccess::new().writes::<ResourceA>(), noop));
+        .add_system(LaneSystem::new(
+            "free",
+            SystemAccess::new().writes::<ResourceA>(),
+            noop,
+        ));
     assert_eq!(
         sched.level_groups(),
         vec![vec![0, 3], vec![1], vec![2]],
@@ -133,8 +145,16 @@ fn two_lane_system_plans_without_manual_edges() {
 fn resource_and_lane_namespaces_do_not_conflict() {
     let mut sched = Schedule::new();
     sched
-        .add_system(LaneSystem::new("res_writer", SystemAccess::new().writes::<Position>(), noop))
-        .add_system(LaneSystem::new("lane_reader", lane_reads::<Position>(), noop));
+        .add_system(LaneSystem::new(
+            "res_writer",
+            SystemAccess::new().writes::<Position>(),
+            noop,
+        ))
+        .add_system(LaneSystem::new(
+            "lane_reader",
+            lane_reads::<Position>(),
+            noop,
+        ));
     assert_eq!(sched.level_groups(), vec![vec![0, 1]]);
 }
 
@@ -242,13 +262,19 @@ fn probe_write_position_lane(res: &Resources) {
 #[should_panic(expected = "reads lane")]
 fn undeclared_lane_read_panics_under_enforcement() {
     // Store-ресурс декларирован честно, лента — нет: ловит read_lane.
-    run_probe(SystemAccess::new().reads::<SmartStore>(), probe_read_position_lane);
+    run_probe(
+        SystemAccess::new().reads::<SmartStore>(),
+        probe_read_position_lane,
+    );
 }
 
 #[test]
 #[should_panic(expected = "writes lane")]
 fn undeclared_lane_write_panics_under_enforcement() {
-    run_probe(SystemAccess::new().reads::<SmartStore>(), probe_write_position_lane);
+    run_probe(
+        SystemAccess::new().reads::<SmartStore>(),
+        probe_write_position_lane,
+    );
 }
 
 #[test]
