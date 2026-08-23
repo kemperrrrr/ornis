@@ -2,7 +2,7 @@
 //!
 //! In `editor-only` there is no native winit loop to consume `UiCommand`s,
 //! so [`run`] spawns an `editor-world` thread that owns an [`EditorWorld`]
-//! (ornis-core `EntityAllocator` + `ComponentStore`s), executes commands
+//! (ornis-core `SmartStore` + the component registry), executes commands
 //! from `POST /api/command` and publishes `GameEvent`s back to the HTTP
 //! server (`status`/`scene` snapshots are cached by `remote.rs` for
 //! `GET /api/status` and `GET /api/scene`; the rest reach `GET /api/events`).
@@ -10,24 +10,38 @@
 //! At startup the world loads `editor/scene.ron` (via
 //! `ornis_render::scene::Scene::from_ron`), so the live world matches what
 //! the WASM viewport renders statically. Component payloads reuse the
-//! `ornis_render::scene` description types; the JSON contract of
+//! `ornis_render::scene` description types — **serde-canonical** JSON
+//! (externally-tagged enums), served generically through the component
+//! registry (F0, audit §10 D2). The JSON contract of
 //! [`EditorWorld::scene_json`] is:
 //!
 //! ```json
 //! {
 //!   "version": 5, "entity_count": 2,
 //!   "entities": [{
-//!     "id": 0, "generation": 0, "name": "Red Sphere",
-//!     "components": ["Name", "Transform", "Mesh", "Material"],
-//!     "transform": {"translation": [-5.6, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
-//!     "mesh": {"kind": "sphere", "radius": 1.0, "segments": 32, "rings": 24},
-//!     "material": {"kind": "dielectric", "base_color": [0.8, 0.2, 0.2], "roughness": 0.5}
+//!     "id": 0, "generation": 0,
+//!     "components": {
+//!       "Name": "Red Sphere",
+//!       "Transform": {"translation": [-5.6, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+//!       "Mesh": {"Sphere": {"radius": 1.0, "segments": 32, "rings": 24}},
+//!       "Material": {"Dielectric": {"base_color": [0.8, 0.2, 0.2], "roughness": 0.5}}
+//!     }
 //!   }],
-//!   "lights": [{"kind": "directional", "direction": [1, 1, 1], "intensity": 0.6, "color": [1, 1, 1]}],
+//!   "lights": [{"Directional": {"direction": [1, 1, 1], "intensity": 0.6, "color": [1, 1, 1]}}],
 //!   "camera": {"position": [0, 2.5, 9], "target": [0, 0, 0], "up": [0, 1, 0], "fov": 60.0, "near": 0.1, "far": 100.0},
 //!   "ambient": [0.10, 0.10, 0.15]
 //! }
 //! ```
+//!
+//! Commands (`POST /api/command`, body `{"type": …, "data": …}`):
+//!
+//! * `create_entity` — `{"name"?: string, "components"?: {"Transform": {…}, …}}`;
+//!   overrides are validated **before** the spawn, an invalid payload
+//!   leaves the world untouched;
+//! * `destroy_entity` — `{"id": u32, "generation": u32}`;
+//! * `set_component` — `{"id": u32, "generation"?: u32, "component": "Transform", "value": {…}}`;
+//!   generic upsert through the registry, full replace of the component;
+//! * `list_entities` — no payload.
 //!
 //! `version` is incremented on every mutation so clients can cheaply detect
 //! changes. Invalid commands never panic: they produce an `error` event and
@@ -35,19 +49,35 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ornis_core::{ComponentStore, Entity, EntityAllocator};
+use ornis_core::{ComponentMeta, ComponentRegistry, Entity, SmartStore};
 use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
 use crate::ipc::{GameEvent, UiCommand};
 
 /// Editor-side name component attached to every spawned entity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Newtype over `String`: its serde-canonical JSON is a plain string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Name(pub String);
+
+/// Components editable through the generic protocol (F0; audit §10 D2).
+/// Built once: registry ops cover `set_component`, scene snapshots and
+/// `create_entity` overrides — no per-type command code in the engine.
+/// Registration order is the snapshot order; treat it as protocol.
+static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
+    let mut registry = ComponentRegistry::new();
+    registry.register::<Name>("Name");
+    registry.register::<TransformDesc>("Transform");
+    registry.register::<MeshDesc>("Mesh");
+    registry.register::<MaterialDesc>("Material");
+    registry
+});
 
 /// World resource: lighting, camera and ambient light of the scene.
 #[derive(Debug, Clone)]
@@ -78,12 +108,8 @@ impl Default for SceneEnvironment {
 /// components, the environment resource and a mutation version counter.
 #[derive(Default)]
 pub struct EditorWorld {
-    allocator: EntityAllocator,
+    store: SmartStore,
     alive: Vec<Entity>,
-    names: ComponentStore<Name>,
-    transforms: ComponentStore<TransformDesc>,
-    meshes: ComponentStore<MeshDesc>,
-    materials: ComponentStore<MaterialDesc>,
     environment: SceneEnvironment,
     version: u64,
 }
@@ -99,7 +125,12 @@ impl EditorWorld {
 
     /// Spawn with default components: gray dielectric sphere (r=1) at origin.
     pub fn spawn(&mut self, name: Option<String>) -> Entity {
-        self.spawn_with(name, default_transform(), default_mesh(), default_material())
+        self.spawn_with(
+            name,
+            default_transform(),
+            default_mesh(),
+            default_material(),
+        )
     }
 
     pub fn spawn_with(
@@ -109,13 +140,13 @@ impl EditorWorld {
         mesh: MeshDesc,
         material: MaterialDesc,
     ) -> Entity {
-        let entity = self.allocator.allocate();
+        let entity = self.store.create_entity();
         self.alive.push(entity);
         let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
-        self.names.insert(entity, Name(name));
-        self.transforms.insert(entity, transform);
-        self.meshes.insert(entity, mesh);
-        self.materials.insert(entity, material);
+        self.store.insert(entity, Name(name));
+        self.store.insert(entity, transform);
+        self.store.insert(entity, mesh);
+        self.store.insert(entity, material);
         self.version += 1;
         entity
     }
@@ -123,21 +154,19 @@ impl EditorWorld {
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
-        if !self.allocator.is_alive(entity) {
+        if !self.store.is_alive(entity) {
             return None;
         }
         self.alive.retain(|e| *e != entity);
-        self.names.remove(entity);
-        self.transforms.remove(entity);
-        self.meshes.remove(entity);
-        self.materials.remove(entity);
-        self.allocator.deallocate(entity);
+        self.store.destroy_entity(entity);
         self.version += 1;
         Some(entity)
     }
 
-    pub fn name_of(&self, entity: Entity) -> Option<&str> {
-        self.names.get(entity).map(|n| n.0.as_str())
+    pub fn name_of(&self, entity: Entity) -> Option<String> {
+        self.store
+            .read_lane::<Name>()
+            .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
     }
 
     /// Load a RON scene into the world: each `EntityDesc` becomes an entity,
@@ -159,43 +188,19 @@ impl EditorWorld {
 
     /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
     pub fn scene_json(&self) -> String {
-        let mut entities: Vec<Value> = Vec::with_capacity(self.alive.len());
-        for &entity in &self.alive {
-            let mut components = Vec::new();
-            let mut name = Value::Null;
-            if let Some(n) = self.name_of(entity) {
-                components.push("Name");
-                name = Value::String(n.to_string());
-            }
-            let transform = self.transforms.get(entity).map(transform_json);
-            if transform.is_some() {
-                components.push("Transform");
-            }
-            let mesh = self.meshes.get(entity).map(mesh_json);
-            if mesh.is_some() {
-                components.push("Mesh");
-            }
-            let material = self.materials.get(entity).map(material_json);
-            if material.is_some() {
-                components.push("Material");
-            }
-            entities.push(serde_json::json!({
-                "id": entity.id(),
-                "generation": entity.generation(),
-                "name": name,
-                "components": components,
-                "transform": transform,
-                "mesh": mesh,
-                "material": material,
-            }));
-        }
-        let lights: Vec<Value> = self.environment.lights.iter().map(light_json).collect();
+        let entities: Vec<Value> = self
+            .alive
+            .iter()
+            .map(|&e| entity_json(&self.store, e))
+            .collect();
+        let lights = serde_json::to_value(&self.environment.lights).expect("LightDesc serializes");
+        let camera = serde_json::to_value(&self.environment.camera).expect("CameraDesc serializes");
         serde_json::json!({
             "version": self.version,
             "entity_count": self.entity_count(),
             "entities": entities,
             "lights": lights,
-            "camera": camera_json(&self.environment.camera),
+            "camera": camera,
             "ambient": self.environment.ambient,
         })
         .to_string()
@@ -246,8 +251,7 @@ impl EditorWorld {
             UiCommand::DestroyEntity { entity_id } => {
                 // The typed variant carries no generation; match any alive
                 // entity with this id.
-                let target = self.alive.iter().find(|e| e.id() == *entity_id).copied();
-                if let Some(entity) = target {
+                if let Ok(entity) = resolve_alive(&self.alive, *entity_id, None) {
                     self.despawn(entity.id(), entity.generation());
                     self.publish_state(ev_tx);
                 }
@@ -256,9 +260,61 @@ impl EditorWorld {
                 cmd_type,
                 json_data,
             } => self.handle_custom(cmd_type, json_data, ev_tx),
-            // SetComponent has no editable components yet on the server side.
-            UiCommand::SetComponent { .. } => {}
+            UiCommand::SetComponent {
+                entity_id,
+                generation,
+                type_name,
+                json_data,
+            } => self.handle_set_component(*entity_id, *generation, type_name, json_data, ev_tx),
         }
+    }
+
+    /// Typed `SetComponent` (remote maps the `set_component` POST here):
+    /// generic upsert through the component registry. Success emits the
+    /// typed `ComponentUpdated` event and publishes fresh snapshots; any
+    /// error (unknown entity/component, malformed JSON) is an `error`
+    /// event with the world left untouched.
+    fn handle_set_component(
+        &mut self,
+        entity_id: u32,
+        generation: Option<u32>,
+        type_name: &str,
+        json_data: &str,
+        ev_tx: &Sender<GameEvent>,
+    ) {
+        match self.set_component(entity_id, generation, type_name, json_data) {
+            Ok(value) => {
+                ev_tx
+                    .send(GameEvent::ComponentUpdated {
+                        entity_id,
+                        type_name: type_name.into(),
+                        json_data: value.to_string(),
+                    })
+                    .ok();
+                self.publish_state(ev_tx);
+            }
+            Err(e) => self.emit_error(ev_tx, "set_component", &e),
+        }
+    }
+
+    /// Validate and apply the upsert; returns the applied payload.
+    fn set_component(
+        &mut self,
+        entity_id: u32,
+        generation: Option<u32>,
+        type_name: &str,
+        json_data: &str,
+    ) -> Result<Value, String> {
+        let entity = resolve_alive(&self.alive, entity_id, generation)?;
+        let meta = REGISTRY
+            .by_name(type_name)
+            .ok_or_else(|| format!("unknown component '{type_name}'"))?;
+        let value: Value =
+            serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
+        meta.set_json(&mut self.store, entity, &value)
+            .map_err(|e| e.to_string())?;
+        self.version += 1;
+        Ok(value)
     }
 
     fn handle_custom(&mut self, cmd_type: &str, json_data: &str, ev_tx: &Sender<GameEvent>) {
@@ -284,29 +340,8 @@ impl EditorWorld {
                 }
                 Err(e) => self.emit_error(ev_tx, cmd_type, &e),
             },
-            "set_transform" => match self.cmd_set_transform(&data) {
-                Ok(payload) => {
-                    self.emit(ev_tx, "entity_updated", payload);
-                    self.publish_state(ev_tx);
-                }
-                Err(e) => self.emit_error(ev_tx, cmd_type, &e),
-            },
-            "set_material" => match self.cmd_set_material(&data) {
-                Ok(payload) => {
-                    self.emit(ev_tx, "entity_updated", payload);
-                    self.publish_state(ev_tx);
-                }
-                Err(e) => self.emit_error(ev_tx, cmd_type, &e),
-            },
-            "rename_entity" => match self.cmd_rename_entity(&data) {
-                Ok(payload) => {
-                    self.emit(ev_tx, "entity_updated", payload);
-                    self.publish_state(ev_tx);
-                }
-                Err(e) => self.emit_error(ev_tx, cmd_type, &e),
-            },
             "list_entities" => {
-                let payload = self.cmd_list_entities();
+                let payload = list_entities_json(self);
                 self.emit(ev_tx, "entity_list", payload);
             }
             other => self.emit_error(ev_tx, other, "unknown command"),
@@ -315,19 +350,19 @@ impl EditorWorld {
 
     fn cmd_create_entity(&mut self, data: &Value) -> Result<String, String> {
         let name = opt_string(data, "name")?;
-        let transform = match data.get("transform") {
-            None | Some(Value::Null) => default_transform(),
-            Some(v) => parse_transform(v)?,
+        // Optional component overrides by registry name. Everything is
+        // parsed BEFORE the spawn so a bad payload leaves the world (and
+        // its version) untouched.
+        let overrides = match data.get("components") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Object(map)) => parse_overrides(map)?,
+            Some(_) => return Err("'components': expected an object".into()),
         };
-        let mesh = match data.get("mesh") {
-            None | Some(Value::Null) => default_mesh(),
-            Some(v) => parse_mesh(v)?,
-        };
-        let material = match data.get("material") {
-            None | Some(Value::Null) => default_material(),
-            Some(v) => parse_material(v)?,
-        };
-        let entity = self.spawn_with(name, transform, mesh, material);
+        let entity = self.spawn(name);
+        for (meta, boxed) in overrides {
+            // Parsed from the same meta — the box type always matches.
+            meta.insert_any(&mut self.store, entity, boxed);
+        }
         Ok(serde_json::json!({
             "id": entity.id(),
             "generation": entity.generation(),
@@ -342,84 +377,7 @@ impl EditorWorld {
         Ok(serde_json::json!({"id": entity.id(), "generation": entity.generation()}).to_string())
     }
 
-    fn cmd_set_transform(&mut self, data: &Value) -> Result<String, String> {
-        let entity = self.resolve_entity(data)?;
-        // Parse first so a malformed payload changes nothing.
-        let translation = opt_f32s(data, "translation")?;
-        let rotation = opt_f32s(data, "rotation")?;
-        let scale = opt_f32s(data, "scale")?;
-        let t = self
-            .transforms
-            .get_mut(entity)
-            .ok_or("entity has no Transform")?;
-        if let Some(v) = translation {
-            t.translation = v;
-        }
-        if let Some(v) = rotation {
-            t.rotation = v;
-        }
-        if let Some(v) = scale {
-            t.scale = v;
-        }
-        self.version += 1;
-        Ok(serde_json::json!({
-            "id": entity.id(),
-            "generation": entity.generation(),
-            "component": "transform",
-            "transform": transform_json(t),
-        })
-        .to_string())
-    }
-
-    fn cmd_set_material(&mut self, data: &Value) -> Result<String, String> {
-        let entity = self.resolve_entity(data)?;
-        let material = parse_material(data.get("material").ok_or("missing 'material'")?)?;
-        let payload = material_json(&material);
-        *self.materials.get_mut(entity).ok_or("entity has no Material")? = material;
-        self.version += 1;
-        Ok(serde_json::json!({
-            "id": entity.id(),
-            "generation": entity.generation(),
-            "component": "material",
-            "material": payload,
-        })
-        .to_string())
-    }
-
-    fn cmd_rename_entity(&mut self, data: &Value) -> Result<String, String> {
-        let entity = self.resolve_entity(data)?;
-        let name = data
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or("missing or invalid 'name'")?
-            .to_string();
-        self.names.get_mut(entity).ok_or("entity has no Name")?.0 = name.clone();
-        self.version += 1;
-        Ok(serde_json::json!({
-            "id": entity.id(),
-            "generation": entity.generation(),
-            "component": "name",
-            "name": name,
-        })
-        .to_string())
-    }
-
-    fn cmd_list_entities(&self) -> String {
-        let entities: Vec<Value> = self
-            .alive
-            .iter()
-            .map(|&e| {
-                serde_json::json!({
-                    "id": e.id(),
-                    "generation": e.generation(),
-                    "name": self.name_of(e),
-                })
-            })
-            .collect();
-        serde_json::json!({"count": entities.len(), "entities": entities}).to_string()
-    }
-
-    /// Validate `id` + `generation` against the allocator.
+    /// Validate `id` + `generation` against the store's allocator.
     fn resolve_entity(&self, data: &Value) -> Result<Entity, String> {
         let id = data
             .get("id")
@@ -430,11 +388,55 @@ impl EditorWorld {
             .and_then(Value::as_u64)
             .ok_or("missing or invalid 'generation'")? as u32;
         let entity = Entity::new_with_gen(id, generation);
-        if !self.allocator.is_alive(entity) {
+        if !self.store.is_alive(entity) {
             return Err(format!("entity {id}:{generation} not found"));
         }
         Ok(entity)
     }
+}
+
+/// One entity entry: `id`/`generation` plus a map
+/// «registry name → serde-canonical component JSON» — generic over the
+/// registered component set (registry ops, no per-type code).
+fn entity_json(store: &SmartStore, entity: Entity) -> Value {
+    let mut components = serde_json::Map::new();
+    for meta in REGISTRY.iter() {
+        // A serialization error is unreachable for plain data structs.
+        if let Ok(Some(value)) = meta.get_json(store, entity) {
+            components.insert(meta.name().to_string(), value);
+        }
+    }
+    serde_json::json!({
+        "id": entity.id(),
+        "generation": entity.generation(),
+        "components": components,
+    })
+}
+
+/// Typed commands resolve an entity by id among the alive ones;
+/// a supplied generation must match (id-only matches any generation).
+fn resolve_alive(alive: &[Entity], id: u32, generation: Option<u32>) -> Result<Entity, String> {
+    alive
+        .iter()
+        .find(|e| e.id() == id && generation.is_none_or(|g| e.generation() == g))
+        .copied()
+        .ok_or_else(|| format!("entity {id} not found"))
+}
+
+/// `list_entities` payload: entity count plus `{id, generation, name}` rows.
+fn list_entities_json(world: &EditorWorld) -> String {
+    let entities: Vec<Value> = world
+        .alive
+        .iter()
+        .map(|&e| {
+            serde_json::json!({
+                "id": e.id(),
+                "generation": e.generation(),
+                "name": world.name_of(e),
+            })
+        })
+        .collect();
+    serde_json::json!({"count": entities.len(), "entities": entities}).to_string()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -464,86 +466,6 @@ fn default_material() -> MaterialDesc {
     }
 }
 
-fn transform_json(t: &TransformDesc) -> Value {
-    serde_json::json!({
-        "translation": t.translation,
-        "rotation": t.rotation,
-        "scale": t.scale,
-    })
-}
-
-fn mesh_json(m: &MeshDesc) -> Value {
-    match m {
-        MeshDesc::Sphere {
-            radius,
-            segments,
-            rings,
-        } => serde_json::json!({
-            "kind": "sphere",
-            "radius": radius,
-            "segments": segments,
-            "rings": rings,
-        }),
-    }
-}
-
-fn material_json(m: &MaterialDesc) -> Value {
-    match m {
-        MaterialDesc::Dielectric {
-            base_color,
-            roughness,
-        } => serde_json::json!({
-            "kind": "dielectric",
-            "base_color": base_color,
-            "roughness": roughness,
-        }),
-        MaterialDesc::Metal {
-            base_color,
-            roughness,
-        } => serde_json::json!({
-            "kind": "metal",
-            "base_color": base_color,
-            "roughness": roughness,
-        }),
-        MaterialDesc::Coat {
-            base_color,
-            coat_weight,
-            coat_roughness,
-        } => serde_json::json!({
-            "kind": "coat",
-            "base_color": base_color,
-            "coat_weight": coat_weight,
-            "coat_roughness": coat_roughness,
-        }),
-    }
-}
-
-fn light_json(l: &LightDesc) -> Value {
-    match l {
-        LightDesc::Directional {
-            direction,
-            intensity,
-            color,
-        } => serde_json::json!({
-            "kind": "directional",
-            "direction": direction,
-            "intensity": intensity,
-            "color": color,
-        }),
-    }
-}
-
-fn camera_json(c: &CameraDesc) -> Value {
-    serde_json::json!({
-        "position": c.position,
-        "target": c.target,
-        "up": c.up,
-        "fov": c.fov,
-        "near": c.near,
-        "far": c.far,
-    })
-}
-
 /// Parse the command payload; an empty body means `{}`.
 fn parse_data(json_data: &str) -> Result<Value, String> {
     if json_data.trim().is_empty() {
@@ -556,27 +478,6 @@ fn parse_data(json_data: &str) -> Result<Value, String> {
     Ok(v)
 }
 
-fn parse_f32s<const N: usize>(v: &Value) -> Result<[f32; N], String> {
-    let arr = v.as_array().ok_or("expected an array")?;
-    if arr.len() != N {
-        return Err(format!("expected {N} elements, got {}", arr.len()));
-    }
-    let mut out = [0.0; N];
-    for (i, x) in arr.iter().enumerate() {
-        out[i] = x.as_f64().ok_or("expected a number")? as f32;
-    }
-    Ok(out)
-}
-
-fn opt_f32s<const N: usize>(data: &Value, key: &str) -> Result<Option<[f32; N]>, String> {
-    match data.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => parse_f32s(v)
-            .map(Some)
-            .map_err(|e| format!("'{key}': {e}")),
-    }
-}
-
 fn opt_string(data: &Value, key: &str) -> Result<Option<String>, String> {
     match data.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -587,71 +488,22 @@ fn opt_string(data: &Value, key: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn f32_field(v: &Value, key: &str, default: f32) -> Result<f32, String> {
-    match v.get(key) {
-        None | Some(Value::Null) => Ok(default),
-        Some(x) => x
-            .as_f64()
-            .map(|f| f as f32)
-            .ok_or_else(|| format!("'{key}': expected a number")),
-    }
-}
+/// A validated `create_entity` override: registry entry + boxed component.
+type ParsedOverrides = Vec<(&'static ComponentMeta, Box<dyn std::any::Any>)>;
 
-fn u32_field(v: &Value, key: &str, default: u32) -> Result<u32, String> {
-    match v.get(key) {
-        None | Some(Value::Null) => Ok(default),
-        Some(x) => x
-            .as_u64()
-            .map(|f| f as u32)
-            .ok_or_else(|| format!("'{key}': expected a non-negative integer")),
+/// Deserialize component overrides of `create_entity`, registry-keyed.
+/// Everything is validated here — before the entity is spawned — so a
+/// bad payload leaves the world untouched (module-doc invariant).
+fn parse_overrides(map: &serde_json::Map<String, Value>) -> Result<ParsedOverrides, String> {
+    let mut parsed = Vec::with_capacity(map.len());
+    for (type_name, payload) in map {
+        let meta = REGISTRY
+            .by_name(type_name)
+            .ok_or_else(|| format!("unknown component '{type_name}'"))?;
+        let boxed = meta.parse_json(payload).map_err(|e| e.to_string())?;
+        parsed.push((meta, boxed));
     }
-}
-
-fn parse_transform(v: &Value) -> Result<TransformDesc, String> {
-    let mut t = default_transform();
-    if let Some(x) = opt_f32s(v, "translation")? {
-        t.translation = x;
-    }
-    if let Some(x) = opt_f32s(v, "rotation")? {
-        t.rotation = x;
-    }
-    if let Some(x) = opt_f32s(v, "scale")? {
-        t.scale = x;
-    }
-    Ok(t)
-}
-
-fn parse_mesh(v: &Value) -> Result<MeshDesc, String> {
-    let kind = opt_string(v, "kind")?.unwrap_or_else(|| "sphere".into());
-    match kind.as_str() {
-        "sphere" => Ok(MeshDesc::Sphere {
-            radius: f32_field(v, "radius", 1.0)?,
-            segments: u32_field(v, "segments", 32)?,
-            rings: u32_field(v, "rings", 24)?,
-        }),
-        other => Err(format!("unknown mesh kind '{other}'")),
-    }
-}
-
-fn parse_material(v: &Value) -> Result<MaterialDesc, String> {
-    let kind = opt_string(v, "kind")?.unwrap_or_else(|| "dielectric".into());
-    let base_color = opt_f32s(v, "base_color")?.unwrap_or([0.5, 0.5, 0.5]);
-    match kind.as_str() {
-        "dielectric" => Ok(MaterialDesc::Dielectric {
-            base_color,
-            roughness: f32_field(v, "roughness", 0.5)?,
-        }),
-        "metal" => Ok(MaterialDesc::Metal {
-            base_color,
-            roughness: f32_field(v, "roughness", 0.5)?,
-        }),
-        "coat" => Ok(MaterialDesc::Coat {
-            base_color,
-            coat_weight: f32_field(v, "coat_weight", 1.0)?,
-            coat_roughness: f32_field(v, "coat_roughness", 0.1)?,
-        }),
-        other => Err(format!("unknown material kind '{other}'")),
-    }
+    Ok(parsed)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -710,6 +562,21 @@ mod tests {
         }
     }
 
+    /// Typed generic upsert (remote maps `set_component` POSTs here).
+    fn set_component(
+        entity_id: u32,
+        generation: Option<u32>,
+        type_name: &str,
+        json: &str,
+    ) -> UiCommand {
+        UiCommand::SetComponent {
+            entity_id,
+            generation,
+            type_name: type_name.into(),
+            json_data: json.into(),
+        }
+    }
+
     /// Drain all pending events from the channel.
     fn drain_all(rx: &Receiver<GameEvent>) -> Vec<GameEvent> {
         std::iter::from_fn(|| rx.try_recv().ok()).collect()
@@ -724,6 +591,21 @@ mod tests {
                     cmd_type: t,
                     json_data,
                 } if t == cmd_type => Some(json_data.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Typed `ComponentUpdated` events as (entity_id, type_name, json_data).
+    fn component_updates(events: &[GameEvent]) -> Vec<(u32, String, String)> {
+        events
+            .iter()
+            .filter_map(|ev| match ev {
+                GameEvent::ComponentUpdated {
+                    entity_id,
+                    type_name,
+                    json_data,
+                } => Some((*entity_id, type_name.clone(), json_data.clone())),
                 _ => None,
             })
             .collect()
@@ -744,14 +626,16 @@ mod tests {
         assert!((a - f64::from(expected)).abs() < 1e-6, "{a} != {expected}");
     }
 
+    const FULL_TRANSFORM: &str = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
+
     #[test]
     fn spawn_assigns_names_and_counts() {
         let mut world = EditorWorld::new();
         let a = world.spawn(None);
         let b = world.spawn(Some("Hero".into()));
         assert_eq!(world.entity_count(), 2);
-        assert_eq!(world.name_of(a), Some("Entity 0"));
-        assert_eq!(world.name_of(b), Some("Hero"));
+        assert_eq!(world.name_of(a).as_deref(), Some("Entity 0"));
+        assert_eq!(world.name_of(b).as_deref(), Some("Hero"));
         assert_ne!(a.id(), b.id());
     }
 
@@ -768,15 +652,14 @@ mod tests {
         let c = world.spawn(None);
         assert_eq!(c.id(), a.id());
         assert_ne!(c.generation(), a.generation());
-        assert_eq!(world.name_of(b), Some("Entity 1"));
+        assert_eq!(world.name_of(b).as_deref(), Some("Entity 1"));
     }
 
     #[test]
     fn scene_ron_round_trip() {
-        let ron = fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"),
-        )
-        .expect("editor/scene.ron readable");
+        let ron =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
+                .expect("editor/scene.ron readable");
         let mut world = EditorWorld::new();
         let loaded = world.load_scene_ron(&ron).expect("scene loads");
         assert_eq!(loaded, 5);
@@ -789,41 +672,47 @@ mod tests {
         let entities = scene["entities"].as_array().unwrap();
         assert_eq!(entities.len(), 5);
 
+        // Canonical serde shapes: components keyed by registry name,
+        // enums externally tagged.
         let red = &entities[0];
         assert_eq!(red["id"], 0);
         assert_eq!(red["generation"], 0);
-        assert_eq!(red["name"], "Red Sphere");
-        assert_eq!(
-            red["components"],
-            serde_json::json!(["Name", "Transform", "Mesh", "Material"])
+        let red_components = &red["components"];
+        assert_eq!(red_components.as_object().unwrap().len(), 4);
+        assert_eq!(red_components["Name"], "Red Sphere");
+        assert_f32_seq(
+            &red_components["Transform"]["translation"],
+            &[-5.6, 0.0, 0.0],
         );
-        assert_f32_seq(&red["transform"]["translation"], &[-5.6, 0.0, 0.0]);
-        assert_f32_seq(&red["transform"]["rotation"], &[0.0, 0.0, 0.0, 1.0]);
-        assert_f32_seq(&red["transform"]["scale"], &[1.0, 1.0, 1.0]);
-        assert_eq!(red["mesh"]["kind"], "sphere");
-        assert_f32(&red["mesh"]["radius"], 1.0);
-        assert_eq!(red["mesh"]["segments"], 32);
-        assert_eq!(red["mesh"]["rings"], 24);
-        assert_eq!(red["material"]["kind"], "dielectric");
-        assert_f32_seq(&red["material"]["base_color"], &[0.8, 0.2, 0.2]);
-        assert_f32(&red["material"]["roughness"], 0.5);
+        assert_f32_seq(
+            &red_components["Transform"]["rotation"],
+            &[0.0, 0.0, 0.0, 1.0],
+        );
+        assert_f32_seq(&red_components["Transform"]["scale"], &[1.0, 1.0, 1.0]);
+        assert_f32(&red_components["Mesh"]["Sphere"]["radius"], 1.0);
+        assert_eq!(red_components["Mesh"]["Sphere"]["segments"], 32);
+        assert_eq!(red_components["Mesh"]["Sphere"]["rings"], 24);
+        assert_f32_seq(
+            &red_components["Material"]["Dielectric"]["base_color"],
+            &[0.8, 0.2, 0.2],
+        );
+        assert_f32(&red_components["Material"]["Dielectric"]["roughness"], 0.5);
 
         // Material variants survive the round trip.
-        assert_eq!(entities[3]["name"], "Gold Sphere");
-        assert_eq!(entities[3]["material"]["kind"], "metal");
-        assert_f32_seq(&entities[3]["material"]["base_color"], &[0.9, 0.7, 0.1]);
-        assert_eq!(entities[4]["name"], "Ceramic Sphere");
-        assert_eq!(entities[4]["material"]["kind"], "coat");
-        assert_f32(&entities[4]["material"]["coat_weight"], 1.0);
-        assert_f32(&entities[4]["material"]["coat_roughness"], 0.1);
+        let gold = &entities[3]["components"];
+        assert_eq!(gold["Name"], "Gold Sphere");
+        assert_f32_seq(&gold["Material"]["Metal"]["base_color"], &[0.9, 0.7, 0.1]);
+        let ceramic = &entities[4]["components"];
+        assert_eq!(ceramic["Name"], "Ceramic Sphere");
+        assert_f32(&ceramic["Material"]["Coat"]["coat_weight"], 1.0);
+        assert_f32(&ceramic["Material"]["Coat"]["coat_roughness"], 0.1);
 
-        // Environment resource.
+        // Environment resource: serde-canonical enum tagging here too.
         let lights = scene["lights"].as_array().unwrap();
         assert_eq!(lights.len(), 2);
-        assert_eq!(lights[0]["kind"], "directional");
-        assert_f32_seq(&lights[0]["direction"], &[1.0, 1.0, 1.0]);
-        assert_f32(&lights[0]["intensity"], 0.6);
-        assert_f32_seq(&lights[1]["color"], &[0.8, 0.8, 1.0]);
+        assert_f32_seq(&lights[0]["Directional"]["direction"], &[1.0, 1.0, 1.0]);
+        assert_f32(&lights[0]["Directional"]["intensity"], 0.6);
+        assert_f32_seq(&lights[1]["Directional"]["color"], &[0.8, 0.8, 1.0]);
         assert_f32_seq(&scene["camera"]["position"], &[0.0, 2.5, 9.0]);
         assert_f32(&scene["camera"]["fov"], 60.0);
         assert_f32(&scene["camera"]["near"], 0.1);
@@ -843,18 +732,19 @@ mod tests {
         assert_eq!(entities.len(), 2);
         assert_eq!(entities[0]["id"], 0);
         assert_eq!(entities[0]["generation"], 0);
-        assert_eq!(entities[0]["name"], "Entity 0");
-        assert_eq!(
-            entities[0]["components"],
-            serde_json::json!(["Name", "Transform", "Mesh", "Material"])
-        );
+
+        let components = &entities[0]["components"];
+        assert_eq!(components.as_object().unwrap().len(), 4);
+        assert_eq!(components["Name"], "Entity 0");
         // Default components: unit sphere at the origin, gray dielectric.
-        assert_f32_seq(&entities[0]["transform"]["translation"], &[0.0, 0.0, 0.0]);
-        assert_f32_seq(&entities[0]["transform"]["rotation"], &[0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(entities[0]["mesh"]["kind"], "sphere");
-        assert_eq!(entities[0]["material"]["kind"], "dielectric");
-        assert_f32_seq(&entities[0]["material"]["base_color"], &[0.5, 0.5, 0.5]);
-        assert_eq!(entities[1]["name"], "Hero");
+        assert_f32_seq(&components["Transform"]["translation"], &[0.0, 0.0, 0.0]);
+        assert_f32_seq(&components["Transform"]["rotation"], &[0.0, 0.0, 0.0, 1.0]);
+        assert!(components["Mesh"]["Sphere"].is_object());
+        assert_f32_seq(
+            &components["Material"]["Dielectric"]["base_color"],
+            &[0.5, 0.5, 0.5],
+        );
+        assert_eq!(entities[1]["components"]["Name"], "Hero");
     }
 
     #[test]
@@ -876,20 +766,25 @@ mod tests {
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         assert_eq!(world.version, 1);
         world.handle_command(
-            &custom("set_transform", r#"{"id":0,"generation":0,"translation":[1,2,3]}"#),
+            &set_component(0, Some(0), "Transform", FULL_TRANSFORM),
             &ev_tx,
         );
         assert_eq!(world.version, 2);
-        // Failed command: no bump.
-        world.handle_command(&custom("set_transform", r#"{"id":9,"generation":0}"#), &ev_tx);
-        assert_eq!(world.version, 2);
+        // Failed command (no such entity): no bump.
         world.handle_command(
-            &custom("rename_entity", r#"{"id":0,"generation":0,"name":"X"}"#),
+            &set_component(9, Some(0), "Transform", FULL_TRANSFORM),
             &ev_tx,
         );
+        assert_eq!(world.version, 2);
+        world.handle_command(&set_component(0, Some(0), "Name", r#""X""#), &ev_tx);
         assert_eq!(world.version, 3);
         world.handle_command(
-            &custom("set_material", r#"{"id":0,"generation":0,"material":{"kind":"metal"}}"#),
+            &set_component(
+                0,
+                Some(0),
+                "Material",
+                r#"{"Metal":{"base_color":[0.9,0.7,0.1],"roughness":0.2}}"#,
+            ),
             &ev_tx,
         );
         assert_eq!(world.version, 4);
@@ -927,22 +822,24 @@ mod tests {
         assert_eq!(scenes.len(), 1);
         let scene: Value = serde_json::from_str(&scenes[0]).unwrap();
         assert_eq!(scene["entity_count"], 1);
-        assert_eq!(scene["entities"][0]["name"], "Hero");
+        assert_eq!(scene["entities"][0]["components"]["Name"], "Hero");
 
         assert!(ev_rx.try_recv().is_err(), "no leftover events");
     }
 
     #[test]
-    fn create_entity_with_full_payload() {
+    fn create_entity_with_component_overrides() {
         let (mut world, ev_tx, ev_rx) = world_and_events();
         world.handle_command(
             &custom(
                 "create_entity",
                 r#"{
                     "name": "Metal Ball",
-                    "transform": {"translation": [1, 2, 3], "scale": [2, 2, 2]},
-                    "mesh": {"kind": "sphere", "radius": 2.0, "segments": 16, "rings": 8},
-                    "material": {"kind": "metal", "base_color": [0.9, 0.7, 0.1], "roughness": 0.2}
+                    "components": {
+                        "Transform": {"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[2,2,2]},
+                        "Mesh": {"Sphere":{"radius":2.0,"segments":16,"rings":8}},
+                        "Material": {"Metal":{"base_color":[0.9,0.7,0.1],"roughness":0.2}}
+                    }
                 }"#,
             ),
             &ev_tx,
@@ -950,19 +847,17 @@ mod tests {
         assert_eq!(world.entity_count(), 1);
 
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
-        let e = &scene["entities"][0];
-        assert_eq!(e["name"], "Metal Ball");
-        assert_f32_seq(&e["transform"]["translation"], &[1.0, 2.0, 3.0]);
-        // Unspecified transform fields keep their defaults.
-        assert_f32_seq(&e["transform"]["rotation"], &[0.0, 0.0, 0.0, 1.0]);
-        assert_f32_seq(&e["transform"]["scale"], &[2.0, 2.0, 2.0]);
-        assert_eq!(e["mesh"]["kind"], "sphere");
-        assert_f32(&e["mesh"]["radius"], 2.0);
-        assert_eq!(e["mesh"]["segments"], 16);
-        assert_eq!(e["mesh"]["rings"], 8);
-        assert_eq!(e["material"]["kind"], "metal");
-        assert_f32_seq(&e["material"]["base_color"], &[0.9, 0.7, 0.1]);
-        assert_f32(&e["material"]["roughness"], 0.2);
+        let components = &scene["entities"][0]["components"];
+        assert_eq!(components["Name"], "Metal Ball");
+        assert_f32_seq(&components["Transform"]["translation"], &[1.0, 2.0, 3.0]);
+        assert_f32_seq(&components["Transform"]["scale"], &[2.0, 2.0, 2.0]);
+        assert_f32(&components["Mesh"]["Sphere"]["radius"], 2.0);
+        assert_eq!(components["Mesh"]["Sphere"]["segments"], 16);
+        assert_f32_seq(
+            &components["Material"]["Metal"]["base_color"],
+            &[0.9, 0.7, 0.1],
+        );
+        assert_f32(&components["Material"]["Metal"]["roughness"], 0.2);
 
         let created = custom_events(&drain_all(&ev_rx), "entity_created");
         assert_eq!(created.len(), 1);
@@ -976,72 +871,87 @@ mod tests {
         let (mut world, ev_tx, _ev_rx) = world_and_events();
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
-        assert_eq!(scene["entities"][0]["name"], "Entity 0");
+        assert_eq!(scene["entities"][0]["components"]["Name"], "Entity 0");
     }
 
     #[test]
-    fn set_transform_updates_only_given_fields() {
+    fn set_component_replaces_component_generically() {
         let (mut world, ev_tx, ev_rx) = world_and_events();
         world.handle_command(&custom("create_entity", ""), &ev_tx);
+        // Full replace: the payload is the whole component, field-level
+        // merging is the client's job (editor.js keeps the snapshot).
         world.handle_command(
-            &custom("set_transform", r#"{"id":0,"generation":0,"translation":[3,0,0]}"#),
+            &set_component(0, Some(0), "Transform", FULL_TRANSFORM),
             &ev_tx,
         );
-        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
-        let t = &scene["entities"][0]["transform"];
-        assert_f32_seq(&t["translation"], &[3.0, 0.0, 0.0]);
-        assert_f32_seq(&t["rotation"], &[0.0, 0.0, 0.0, 1.0]);
-        assert_f32_seq(&t["scale"], &[1.0, 1.0, 1.0]);
 
-        let updated = custom_events(&drain_all(&ev_rx), "entity_updated");
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        let transform = &scene["entities"][0]["components"]["Transform"];
+        assert_f32_seq(&transform["translation"], &[1.0, 2.0, 3.0]);
+        assert_f32_seq(&transform["rotation"], &[0.0, 0.0, 0.0, 1.0]);
+        assert_f32_seq(&transform["scale"], &[1.0, 1.0, 1.0]);
+
+        let events = drain_all(&ev_rx);
+        let updated = component_updates(&events);
         assert_eq!(updated.len(), 1);
-        let updated: Value = serde_json::from_str(&updated[0]).unwrap();
-        assert_eq!(updated["id"], 0);
-        assert_eq!(updated["component"], "transform");
-        assert_f32_seq(&updated["transform"]["translation"], &[3.0, 0.0, 0.0]);
+        assert_eq!(updated[0].0, 0);
+        assert_eq!(updated[0].1, "Transform");
+        assert!(updated[0].2.contains("translation"));
     }
 
     #[test]
-    fn set_material_replaces_material() {
-        let (mut world, ev_tx, ev_rx) = world_and_events();
+    fn set_component_material_and_name() {
+        let (mut world, ev_tx, _ev_rx) = world_and_events();
         world.handle_command(&custom("create_entity", ""), &ev_tx);
         world.handle_command(
-            &custom(
-                "set_material",
-                r#"{"id":0,"generation":0,"material":{"kind":"coat","base_color":[1,1,1],
-                    "coat_weight":1.0,"coat_roughness":0.1}}"#,
+            &set_component(
+                0,
+                Some(0),
+                "Material",
+                r#"{"Coat":{"base_color":[1,1,1],"coat_weight":1.0,"coat_roughness":0.1}}"#,
             ),
             &ev_tx,
         );
-        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
-        let m = &scene["entities"][0]["material"];
-        assert_eq!(m["kind"], "coat");
-        assert_f32(&m["coat_weight"], 1.0);
-        assert_f32(&m["coat_roughness"], 0.1);
+        world.handle_command(&set_component(0, Some(0), "Name", r#""Warden""#), &ev_tx);
 
-        let updated = custom_events(&drain_all(&ev_rx), "entity_updated");
-        assert_eq!(updated.len(), 1);
-        let updated: Value = serde_json::from_str(&updated[0]).unwrap();
-        assert_eq!(updated["component"], "material");
-        assert_eq!(updated["material"]["kind"], "coat");
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        let components = &scene["entities"][0]["components"];
+        assert_f32(&components["Material"]["Coat"]["coat_weight"], 1.0);
+        assert_f32(&components["Material"]["Coat"]["coat_roughness"], 0.1);
+        assert_eq!(components["Name"], "Warden");
     }
 
     #[test]
-    fn rename_entity_updates_name() {
+    fn set_component_errors_leave_world_untouched() {
         let (mut world, ev_tx, ev_rx) = world_and_events();
-        world.handle_command(&custom("create_entity", r#"{"name":"Old"}"#), &ev_tx);
+        world.handle_command(&custom("create_entity", ""), &ev_tx);
+        let version = world.version;
+
+        // Unknown component type.
+        world.handle_command(&set_component(0, Some(0), "Collider", "{}"), &ev_tx);
+        // Malformed component JSON.
+        world.handle_command(&set_component(0, Some(0), "Transform", "{broken"), &ev_tx);
+        // Schema mismatch (rotation is missing).
         world.handle_command(
-            &custom("rename_entity", r#"{"id":0,"generation":0,"name":"New"}"#),
+            &set_component(0, Some(0), "Transform", r#"{"translation":[1,2,3]}"#),
             &ev_tx,
         );
-        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
-        assert_eq!(scene["entities"][0]["name"], "New");
+        // Stale generation does not match the alive entity.
+        world.handle_command(&set_component(0, Some(7), "Name", r#""Ghost""#), &ev_tx);
+        // Generation omitted: matches any alive entity with the id —
+        // this one SUCCEEDS, hence the separate version check below.
+        world.handle_command(&set_component(0, None, "Name", r#""Real""#), &ev_tx);
 
-        let updated = custom_events(&drain_all(&ev_rx), "entity_updated");
-        assert_eq!(updated.len(), 1);
-        let updated: Value = serde_json::from_str(&updated[0]).unwrap();
-        assert_eq!(updated["component"], "name");
-        assert_eq!(updated["name"], "New");
+        let events = drain_all(&ev_rx);
+        assert_eq!(custom_events(&events, "error").len(), 4);
+        assert_eq!(component_updates(&events).len(), 1);
+        assert_eq!(world.version, version + 1);
+
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        let components = &scene["entities"][0]["components"];
+        assert_eq!(components["Name"], "Real");
+        // The failed Transform write must not have landed.
+        assert_f32_seq(&components["Transform"]["translation"], &[0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -1084,14 +994,22 @@ mod tests {
         world.handle_command(&custom("create_entity", "{not json"), &ev_tx);
         // Unknown command type.
         world.handle_command(&custom("nonsense", ""), &ev_tx);
-        // Non-existent entity.
+        // set_component on a non-existent entity.
         world.handle_command(
-            &custom("set_material", r#"{"id":3,"generation":0,"material":{"kind":"metal"}}"#),
+            &set_component(
+                3,
+                None,
+                "Material",
+                r#"{"Metal":{"base_color":[1,1,1],"roughness":0.2}}"#,
+            ),
             &ev_tx,
         );
-        // Unknown material kind: the entity must not be created.
+        // Unknown component in create overrides: no entity must appear.
         world.handle_command(
-            &custom("create_entity", r#"{"material":{"kind":"unobtainium"}}"#),
+            &custom(
+                "create_entity",
+                r#"{"components":{"Unobtainium":{"density":1}}}"#,
+            ),
             &ev_tx,
         );
         // Payload that is valid JSON but not an object.
@@ -1145,12 +1063,17 @@ mod tests {
         let (ev_tx, ev_rx) = unbounded();
         let handle = run(cmd_rx, ev_tx);
 
-        cmd_tx.send(custom("create_entity", r#"{"name":"Hero"}"#)).unwrap();
+        cmd_tx
+            .send(custom("create_entity", r#"{"name":"Hero"}"#))
+            .unwrap();
         // Wait for the scene snapshot reflecting the new entity.
         let mut seen_scene = None;
         for _ in 0..100 {
             while let Ok(ev) = ev_rx.try_recv() {
-                if let GameEvent::CustomEvent { cmd_type, json_data } = ev
+                if let GameEvent::CustomEvent {
+                    cmd_type,
+                    json_data,
+                } = ev
                     && cmd_type == "scene"
                 {
                     seen_scene = Some(json_data);

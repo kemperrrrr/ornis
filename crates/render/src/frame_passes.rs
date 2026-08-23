@@ -1,17 +1,17 @@
-//! Typed resources and static passes for the 3D render graph — S2a
+//! Typed resources and static passes for the 3D frame plan — S2a
 //! (IDEAS §28.1, PLAN Приложение C).
 //!
-//! Resource identity is a type ([`GraphResource`]); passes with static
-//! access sets are [`GraphPass`] implementations whose wiring is derived
+//! Resource identity is a type ([`FrameResource`]); passes with static
+//! access sets are [`FramePass`] implementations whose wiring is derived
 //! from `Reads`/`Writes`. Specs and names mirror the imperative wiring
-//! exactly, so layout dumps (and the parity test in `graph_frame.rs`)
+//! exactly, so layout dumps (and the parity test in `frame_exec.rs`)
 //! stay identical. The conditional passes (forward, bloom_down0,
 //! composite) remain imperative until S2b.
 
-use crate::render_graph::{SizePolicy, TextureSpec};
+use crate::frame_plan::{SizePolicy, TextureSpec};
 use crate::renderer::{CompositeInputs, GbufferTargets};
 use crate::system::{
-    AccessSet, ClearBlack, ClearTransparent, ClearWhite, Frame, GraphPass, GraphResource, Read,
+    AccessSet, ClearBlack, ClearTransparent, ClearWhite, Frame, FramePass, FrameResource, Read,
     ResourceKind, SystemViews, ViewsFor, Write, WriteClear,
 };
 use std::marker::PhantomData;
@@ -25,10 +25,10 @@ use wgpu::TextureFormat as F;
 
 macro_rules! typed_resource {
     ($t:ident, $name:literal, owned, $format:expr) => {
-        impl GraphResource for $t {
+        impl FrameResource for $t {
             const NAME: &'static str = $name;
             fn kind() -> ResourceKind {
-                ResourceKind::GraphOwned
+                ResourceKind::FrameOwned
             }
             fn spec(_: wgpu::TextureFormat) -> TextureSpec {
                 TextureSpec {
@@ -40,10 +40,10 @@ macro_rules! typed_resource {
         }
     };
     ($t:ident, $name:literal, owned_fraction, $format:expr, $divisor:expr) => {
-        impl GraphResource for $t {
+        impl FrameResource for $t {
             const NAME: &'static str = $name;
             fn kind() -> ResourceKind {
-                ResourceKind::GraphOwned
+                ResourceKind::FrameOwned
             }
             fn spec(_: wgpu::TextureFormat) -> TextureSpec {
                 TextureSpec {
@@ -82,10 +82,10 @@ typed_resource!(Depth, "depth", owned, F::Depth32Float);
 
 /// HDR layer of the deferred path — mirrors the surface format.
 pub struct Hdr;
-impl GraphResource for Hdr {
+impl FrameResource for Hdr {
     const NAME: &'static str = "hdr";
     fn kind() -> ResourceKind {
-        ResourceKind::GraphOwned
+        ResourceKind::FrameOwned
     }
     fn spec(surface_format: wgpu::TextureFormat) -> TextureSpec {
         TextureSpec {
@@ -102,7 +102,7 @@ typed_resource!(HdrFwd, "hdr_fwd", owned, F::Rgba16Float);
 
 /// Swapchain target (externally backed view, never pooled).
 pub struct Target;
-impl GraphResource for Target {
+impl FrameResource for Target {
     const NAME: &'static str = "target";
     fn kind() -> ResourceKind {
         ResourceKind::ExternalOutput
@@ -135,7 +135,7 @@ typed_resource!(Bloom2, "bloom2", owned_fraction, F::Rgba16Float, 8);
 
 /// G-buffer pass: writes all six G-buffer layers.
 pub struct GbufferPass;
-impl GraphPass for GbufferPass {
+impl FramePass for GbufferPass {
     type Reads = ();
     type Writes = (
         Write<Albedo>,
@@ -166,7 +166,7 @@ impl GraphPass for GbufferPass {
 
 /// Lighting pass: resolves the G-buffer into the HDR layer.
 pub struct LightingPass;
-impl GraphPass for LightingPass {
+impl FramePass for LightingPass {
     type Reads = (
         Read<Albedo>,
         Read<Normal>,
@@ -198,7 +198,7 @@ impl GraphPass for LightingPass {
 
 /// Bloom downsample 1/2 → 1/4 (bright-pass already applied at 1/2).
 pub struct BloomDown1Pass;
-impl GraphPass for BloomDown1Pass {
+impl FramePass for BloomDown1Pass {
     type Reads = (Read<Bloom0>,);
     type Writes = (WriteClear<Bloom1, ClearBlack>,);
     fn name(&self) -> &'static str {
@@ -220,7 +220,7 @@ impl GraphPass for BloomDown1Pass {
 
 /// Bloom downsample 1/4 → 1/8.
 pub struct BloomDown2Pass;
-impl GraphPass for BloomDown2Pass {
+impl FramePass for BloomDown2Pass {
     type Reads = (Read<Bloom1>,);
     type Writes = (WriteClear<Bloom2, ClearBlack>,);
     fn name(&self) -> &'static str {
@@ -242,7 +242,7 @@ impl GraphPass for BloomDown2Pass {
 
 /// Bloom upsample 1/8 → 1/4.
 pub struct BloomUp1Pass;
-impl GraphPass for BloomUp1Pass {
+impl FramePass for BloomUp1Pass {
     type Reads = (Read<Bloom2>,);
     type Writes = (Write<Bloom1>,);
     fn name(&self) -> &'static str {
@@ -259,7 +259,7 @@ impl GraphPass for BloomUp1Pass {
 
 /// Bloom upsample 1/4 → 1/2.
 pub struct BloomUp0Pass;
-impl GraphPass for BloomUp0Pass {
+impl FramePass for BloomUp0Pass {
     type Reads = (Read<Bloom1>,);
     type Writes = (Write<Bloom0>,);
     fn name(&self) -> &'static str {
@@ -275,7 +275,7 @@ impl GraphPass for BloomUp0Pass {
 }
 
 // ── S2b: conditional passes as mode families ─────────────────────────
-// Access sets that depend on the graph configuration are selected at
+// Access sets that depend on the plan configuration are selected at
 // registration: the configuration becomes a mode TYPE (a table of
 // facts), the body stays one. Design: docs/rendering/unified-scheduler.md.
 
@@ -326,7 +326,7 @@ impl<M: ForwardMode> Default for Forward<M> {
         Self(PhantomData)
     }
 }
-impl<M: ForwardMode> GraphPass for Forward<M> {
+impl<M: ForwardMode> FramePass for Forward<M> {
     type Reads = M::Reads;
     type Writes = M::Writes;
     fn name(&self) -> &'static str {
@@ -384,7 +384,7 @@ impl<I: BrightInput> Default for BloomBright<I> {
         Self(PhantomData)
     }
 }
-impl<I: BrightInput> GraphPass for BloomBright<I> {
+impl<I: BrightInput> FramePass for BloomBright<I> {
     type Reads = I::Reads;
     type Writes = (WriteClear<Bloom0, ClearBlack>,);
     fn name(&self) -> &'static str {
@@ -542,7 +542,7 @@ impl<M: CompositeMode> Default for Composite<M> {
         Self(PhantomData)
     }
 }
-impl<M: CompositeMode> GraphPass for Composite<M> {
+impl<M: CompositeMode> FramePass for Composite<M> {
     type Reads = M::Reads;
     type Writes = (Write<Target>,);
     fn name(&self) -> &'static str {
@@ -564,8 +564,8 @@ mod tests {
 
     const SURFACE: wgpu::TextureFormat = F::Rgba8UnormSrgb;
 
-    fn owned_spec<R: GraphResource>(format: F, size: SizePolicy) {
-        assert_eq!(R::kind(), ResourceKind::GraphOwned);
+    fn owned_spec<R: FrameResource>(format: F, size: SizePolicy) {
+        assert_eq!(R::kind(), ResourceKind::FrameOwned);
         assert_eq!(
             R::spec(SURFACE),
             TextureSpec {
@@ -576,7 +576,7 @@ mod tests {
         );
     }
 
-    /// Specs mirror the imperative wiring (graph_frame parity test); the
+    /// Specs mirror the imperative wiring (frame_exec parity test); the
     /// dump names are part of the contract.
     #[test]
     fn resource_names_and_specs() {
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn hdr_mirrors_the_surface_format() {
         assert_eq!(Hdr::NAME, "hdr");
-        assert_eq!(Hdr::kind(), ResourceKind::GraphOwned);
+        assert_eq!(Hdr::kind(), ResourceKind::FrameOwned);
         assert_eq!(Hdr::spec(F::Rgba8UnormSrgb).format, F::Rgba8UnormSrgb);
         assert_eq!(Hdr::spec(F::Bgra8UnormSrgb).format, F::Bgra8UnormSrgb);
         assert_eq!(Hdr::spec(SURFACE).size, SizePolicy::MatchSurface);
@@ -629,14 +629,14 @@ mod tests {
         assert_eq!(BloomUp0Pass.name(), "bloom_up0");
     }
 
-    fn reads_of<P: GraphPass>() -> Vec<&'static str> {
+    fn reads_of<P: FramePass>() -> Vec<&'static str> {
         let mut v = Vec::new();
         P::Reads::collect_accesses(&mut v);
         assert!(v.iter().all(|a| !a.write && a.clear.is_none()));
         v.iter().map(|a| a.name).collect()
     }
 
-    fn writes_of<P: GraphPass>() -> Vec<(&'static str, Option<wgpu::Color>)> {
+    fn writes_of<P: FramePass>() -> Vec<(&'static str, Option<wgpu::Color>)> {
         let mut v = Vec::new();
         P::Writes::collect_accesses(&mut v);
         assert!(v.iter().all(|a| a.write));
@@ -736,25 +736,44 @@ mod tests {
 
     #[test]
     fn composite_modes_encode_technique_and_bloom() {
-        assert_eq!(Composite::<CompositeDeferredBloom>::new().name(), "composite");
+        assert_eq!(
+            Composite::<CompositeDeferredBloom>::new().name(),
+            "composite"
+        );
         assert_eq!(Composite::<CompositeForward>::default().name(), "composite");
 
         // (mode constant, bloom flag, expected reads)
         let cases: [(u32, bool, &[&str]); 6] = [
-            (CompositeDeferredBloom::SHADER_MODE, CompositeDeferredBloom::BLOOM, &["hdr", "bloom0"]),
-            (CompositeDeferred::SHADER_MODE, CompositeDeferred::BLOOM, &["hdr"]),
+            (
+                CompositeDeferredBloom::SHADER_MODE,
+                CompositeDeferredBloom::BLOOM,
+                &["hdr", "bloom0"],
+            ),
+            (
+                CompositeDeferred::SHADER_MODE,
+                CompositeDeferred::BLOOM,
+                &["hdr"],
+            ),
             (
                 CompositeHybridBloom::SHADER_MODE,
                 CompositeHybridBloom::BLOOM,
                 &["hdr", "hdr_fwd", "bloom0"],
             ),
-            (CompositeHybrid::SHADER_MODE, CompositeHybrid::BLOOM, &["hdr", "hdr_fwd"]),
+            (
+                CompositeHybrid::SHADER_MODE,
+                CompositeHybrid::BLOOM,
+                &["hdr", "hdr_fwd"],
+            ),
             (
                 CompositeForwardBloom::SHADER_MODE,
                 CompositeForwardBloom::BLOOM,
                 &["hdr_fwd", "bloom0"],
             ),
-            (CompositeForward::SHADER_MODE, CompositeForward::BLOOM, &["hdr_fwd"]),
+            (
+                CompositeForward::SHADER_MODE,
+                CompositeForward::BLOOM,
+                &["hdr_fwd"],
+            ),
         ];
         let expected_modes = [0, 0, 2, 2, 1, 1];
         let expected_bloom = [true, false, true, false, true, false];
@@ -763,7 +782,10 @@ mod tests {
             assert_eq!(*bloom, expected_bloom[i], "case {i}");
         }
 
-        assert_eq!(reads_of::<Composite<CompositeDeferredBloom>>(), vec!["hdr", "bloom0"]);
+        assert_eq!(
+            reads_of::<Composite<CompositeDeferredBloom>>(),
+            vec!["hdr", "bloom0"]
+        );
         assert_eq!(reads_of::<Composite<CompositeDeferred>>(), vec!["hdr"]);
         assert_eq!(
             reads_of::<Composite<CompositeHybridBloom>>(),

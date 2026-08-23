@@ -1,18 +1,18 @@
 //! Phase 1 verification: renders assets/scene.ron through the legacy
 //! `Renderer3D::render_scene` path AND through the render-graph path
-//! (`RenderGraph3D`), reads both back and asserts byte-identical pixels.
+//! (`RenderFrame3D`), reads both back and asserts byte-identical pixels.
 //!
 //! Run from the workspace root:
-//!   cargo run -p ornis-render --example render_graph_probe -- [scene.ron]
+//!   cargo run -p ornis-render --example frame_plan_probe -- [scene.ron]
 //!
-//! Writes target/render_graph_probe_{legacy,graph}.png and the graph
+//! Writes target/frame_plan_probe_{legacy,graph}.png and the graph
 //! layout dump (transient windows + pool slots) to stdout. Prints PASS and
 //! exits 0 when the two paths match pixel-for-pixel.
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::OpenPBRMaterial;
 use ornis_render::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
-use ornis_render::{InstanceData, RenderGraph3D, Renderer3D, Technique};
+use ornis_render::{InstanceData, RenderFrame3D, Renderer3D, Technique};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -78,7 +78,7 @@ async fn run(scene: &Scene) {
 
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("render_graph_probe"),
+            label: Some("frame_plan_probe"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -178,7 +178,7 @@ async fn run(scene: &Scene) {
     renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), cam.position);
 
     // ── Render: legacy path, then graph path ──────────────────────────
-    let mut graph3d = RenderGraph3D::new(format, (WIDTH, HEIGHT));
+    let mut graph3d = RenderFrame3D::new(format, (WIDTH, HEIGHT));
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("probe encoder"),
@@ -289,7 +289,7 @@ async fn run(scene: &Scene) {
 
     // ── Bloom: the same graph plus the bloom node chain ───────────────
     let (bloom_tex, bloom_view) = make_target("probe bloom target");
-    let mut graph3d_bloom = RenderGraph3D::new_with_bloom(format, (WIDTH, HEIGHT));
+    let mut graph3d_bloom = RenderFrame3D::new_with_bloom(format, (WIDTH, HEIGHT));
     let mut bloom_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("probe bloom encoder"),
     });
@@ -315,11 +315,7 @@ async fn run(scene: &Scene) {
         .filter(|(a, b)| a != b)
         .count();
     let bloom_active = bloom_diff > 0;
-    save_png(
-        "target/render_graph_probe_bloom.png",
-        &bloom_pixels,
-        unpadded,
-    );
+    save_png("target/frame_plan_probe_bloom.png", &bloom_pixels, unpadded);
 
     println!("--- bloom graph layout ---");
     println!("{}", graph3d_bloom.layout_dump());
@@ -337,10 +333,10 @@ async fn run(scene: &Scene) {
     let render_technique =
         |technique: Technique, bloom: bool, label: &str| -> (Vec<u8>, u32, usize, u64, String) {
             let (tex, view) = make_target(label);
-            let mut graph = RenderGraph3D::new_with(format, (WIDTH, HEIGHT), technique, bloom);
+            let mut frame = RenderFrame3D::new_with(format, (WIDTH, HEIGHT), technique, bloom);
             let mut encoder = device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-            graph.render(
+            frame.render(
                 ornis_render::render_backend::RenderContext {
                     device: &device,
                     queue: &queue,
@@ -353,9 +349,9 @@ async fn run(scene: &Scene) {
             );
             queue.submit(std::iter::once(encoder.finish()));
             let (pixels, unpadded) = read_target(&tex, label);
-            let dump = graph.layout_dump();
-            let slots = graph.pool_slots();
-            let budget = graph.texture_budget();
+            let dump = frame.layout_dump();
+            let slots = frame.pool_slots();
+            let budget = frame.texture_budget();
             (pixels, unpadded, slots, budget, dump)
         };
 
@@ -367,12 +363,12 @@ async fn run(scene: &Scene) {
     let (fwd_bloom, _fb_unpadded, fwd_b_slots, fwd_b_bytes, _fwd_b_dump) =
         render_technique(Technique::Forward, true, "probe forward bloom target");
     save_png(
-        "target/render_graph_probe_forward.png",
+        "target/frame_plan_probe_forward.png",
         &fwd_pixels,
         _fwd_unpadded,
     );
     save_png(
-        "target/render_graph_probe_deferred.png",
+        "target/frame_plan_probe_deferred.png",
         &def_pixels,
         _def_unpadded,
     );
@@ -410,15 +406,11 @@ async fn run(scene: &Scene) {
     let same = legacy_diff == 0;
 
     save_png(
-        "target/render_graph_probe_legacy.png",
+        "target/frame_plan_probe_legacy.png",
         &legacy_pixels,
         unpadded,
     );
-    save_png(
-        "target/render_graph_probe_graph.png",
-        &graph_pixels,
-        unpadded,
-    );
+    save_png("target/frame_plan_probe_graph.png", &graph_pixels, unpadded);
 
     println!("--- graph layout ---");
     println!("{}", graph3d.layout_dump());
@@ -488,7 +480,7 @@ async fn run(scene: &Scene) {
             std::process::exit(1);
         }
         println!(
-            "PNGs: target/render_graph_probe_{{legacy,graph,bloom,forward,deferred}}.png ({WIDTH}x{HEIGHT})"
+            "PNGs: target/frame_plan_probe_{{legacy,graph,bloom,forward,deferred}}.png ({WIDTH}x{HEIGHT})"
         );
     } else {
         println!(
@@ -497,7 +489,7 @@ async fn run(scene: &Scene) {
         );
         println!("bloom active: {bloom_active} ({bloom_diff} differing pixels vs no-bloom)");
         println!("frames identical: {all_frames_stable}, pool stable: {pool_stable}");
-        println!("PNGs: target/render_graph_probe_{{legacy,graph,bloom}}.png");
+        println!("PNGs: target/frame_plan_probe_{{legacy,graph,bloom}}.png");
         std::process::exit(1);
     }
 }

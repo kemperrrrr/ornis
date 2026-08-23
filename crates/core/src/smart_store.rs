@@ -231,9 +231,16 @@ impl SmartStore {
         }
     }
 
+    /// Читает горячую ленту компонента `T`.
+    ///
+    /// # Panics
+    /// При включённом schedule-принуждении — если лента не декларирована
+    /// ([`SystemAccess::reads_lane`](crate::SystemAccess) /
+    /// `writes_lane`; аудит §3.6).
     pub fn read_lane<T: 'static + Send + Sync>(
         &self,
     ) -> Option<std::sync::RwLockReadGuard<'_, ComponentStore<T>>> {
+        crate::schedule::assert_lane_access_declared::<T>(false);
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
         Some(
@@ -245,9 +252,16 @@ impl SmartStore {
         )
     }
 
+    /// Пишет в горячую ленту компонента `T`.
+    ///
+    /// # Panics
+    /// При включённом schedule-принуждении — если лента не декларирована
+    /// строго на запись ([`SystemAccess::writes_lane`](crate::SystemAccess);
+    /// `reads_lane` записи не покрывает).
     pub fn write_lane<T: 'static + Send + Sync>(
         &self,
     ) -> Option<std::sync::RwLockWriteGuard<'_, ComponentStore<T>>> {
+        crate::schedule::assert_lane_access_declared::<T>(true);
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
         Some(

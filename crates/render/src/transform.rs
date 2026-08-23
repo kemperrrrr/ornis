@@ -86,8 +86,7 @@ mod tests {
         // q and -q describe the same rotation; compare via transformed axis.
         let v = Vec3::X;
         assert!(
-            (rotation * v)
-                .abs_diff_eq(t.rotation * v, 1e-6),
+            (rotation * v).abs_diff_eq(t.rotation * v, 1e-6),
             "rotation mismatch"
         );
     }

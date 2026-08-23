@@ -451,10 +451,7 @@ mod tests {
     }
 
     fn assert_vec3_close(got: Vec3, want: Vec3) {
-        assert!(
-            (got - want).length() < EPS,
-            "got {got:?}, want {want:?}"
-        );
+        assert!((got - want).length() < EPS, "got {got:?}, want {want:?}");
     }
 
     // ── segment helpers ────────────────────────────────────────────────
@@ -463,7 +460,10 @@ mod tests {
     fn point_segment_closest_clamps_to_endpoints() {
         let a = Vec3::ZERO;
         let b = Vec3::new(2.0, 0.0, 0.0);
-        assert_vec3_close(point_segment_closest(Vec3::new(1.0, 5.0, 0.0), a, b), Vec3::X);
+        assert_vec3_close(
+            point_segment_closest(Vec3::new(1.0, 5.0, 0.0), a, b),
+            Vec3::X,
+        );
         // Past the ends: clamped to the endpoint.
         assert_vec3_close(point_segment_closest(Vec3::new(-3.0, 1.0, 0.0), a, b), a);
         assert_vec3_close(point_segment_closest(Vec3::new(9.0, 0.0, 0.0), a, b), b);
@@ -648,7 +648,10 @@ mod tests {
         // a along Y at the origin, b along X two units above in Z.
         let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
         let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-        let d = shape_distance(at(&ca, Vec3::ZERO), at_rot(&cb, Vec3::new(0.0, 0.0, 2.0), rot));
+        let d = shape_distance(
+            at(&ca, Vec3::ZERO),
+            at_rot(&cb, Vec3::new(0.0, 0.0, 2.0), rot),
+        );
         assert!((d.dist - 1.0).abs() < EPS);
         assert_vec3_close(d.point_a, Vec3::new(0.0, 0.0, 0.5));
         assert_vec3_close(d.point_b, Vec3::new(0.0, 0.0, 1.5));

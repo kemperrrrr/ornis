@@ -1,11 +1,11 @@
 //! S5b gate (PLAN Приложение C): parallel command recording must be
 //! pixel-identical to the sequential path. Runs headless — on CI via
 //! lavapipe, locally on any adapter; skipped when no adapter is found.
-//! The scene is one lit sphere (minimal setup from render_graph_probe).
+//! The scene is one lit sphere (minimal setup from frame_plan_probe).
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_render::render_backend::RenderContext;
-use ornis_render::{InstanceData, OpenPBRMaterial, RenderGraph3D, Renderer3D, Technique};
+use ornis_render::{InstanceData, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique};
 
 const SIZE: u32 = 128;
 const BPP: u32 = 4;
@@ -144,7 +144,7 @@ fn parallel_recording_matches_sequential_pixels() {
     let (par_tex, par_view) = target(&device, "parallel target");
 
     // Sequential: the default single-encoder path.
-    let mut seq = RenderGraph3D::new_with(
+    let mut seq = RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,
@@ -168,7 +168,7 @@ fn parallel_recording_matches_sequential_pixels() {
 
     // Parallel: a level at a time (lighting ∥ forward inside), own
     // encoders per pass, single ordered submit.
-    let mut par = RenderGraph3D::new_with(
+    let mut par = RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,

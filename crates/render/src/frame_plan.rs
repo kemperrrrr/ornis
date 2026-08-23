@@ -1,21 +1,21 @@
-//! Render graph — pass orchestration layer (Phase 0).
+//! Frame plan — pass orchestration layer (бывший «render graph», Phase 0).
 //!
-//! An immediate-mode graph in the spirit of Frostbite FrameGraph and
+//! An immediate-mode plan in the spirit of Frostbite FrameGraph and
 //! Ponies&Light: passes are declared in execution order, and each pass
-//! declares which resources it reads and writes. The graph computes
+//! declares which resources it reads and writes. The plan computes
 //! resource lifetimes (transient windows `[first_use, last_use]`) and
 //! assigns them to pool slots so that non-overlapping resources with the
 //! same specification share one slot (object-level aliasing).
 //!
 //! Model:
-//! - `RenderGraph::layout()` → cached `&GraphLayout` — pure logic, no GPU
+//! - `FramePlan::layout()` → cached `&FrameLayout` — pure logic, no GPU
 //!   needed; recomputed only after a mutation (`build()` is the owned
 //!   snapshot of the same cache);
-//! - `RenderGraph::execute()` yields one [`PassContext`] per pass
+//! - `FramePlan::execute()` yields one [`PassContext`] per pass
 //!   (insertion order; disabled passes are skipped);
 //! - creating real `wgpu::Texture` objects per slot is the executor's job
 //!   (Phase 1). On wgpu, barriers and layout transitions are handled by
-//!   wgpu itself, so the graph owns lifetimes and pooling, not
+//!   wgpu itself, so the plan owns lifetimes and pooling, not
 //!   synchronization.
 //!
 //! Invariants (panic with a clear message when violated):
@@ -26,6 +26,10 @@
 //!   (guaranteed by construction).
 
 use std::collections::HashMap;
+
+use ornis_schedule::{
+    MermaidDiagram, OrderError, bitset_level_plan, resolve_named_edge, validate_indexed_edge,
+};
 
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
@@ -43,7 +47,7 @@ pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
 }
 
 /// Builds the actionable budget error: top slots by bytes.
-fn budget_exceeded(budget: u64, required: u64, layout: &GraphLayout) -> BudgetExceeded {
+fn budget_exceeded(budget: u64, required: u64, layout: &FrameLayout) -> BudgetExceeded {
     let mut slots: Vec<&PoolSlot> = layout.slots.iter().collect();
     slots.sort_by_key(|s| std::cmp::Reverse(slot_bytes(s, layout.surface_size)));
     let offenders = slots
@@ -168,26 +172,27 @@ pub struct PassLayout {
     pub writes: Vec<(ResourceId, Option<wgpu::Color>)>,
 }
 
-/// Result of `RenderGraph::build()` — the computed frame layout.
+/// Result of `FramePlan::build()` — the computed frame layout.
 #[derive(Debug, Clone)]
-pub struct GraphLayout {
+pub struct FrameLayout {
     pub(crate) surface_size: (u32, u32),
     /// Passes in execution order (insertion order, disabled passes dropped).
     pub(crate) passes: Vec<PassLayout>,
-    /// Resources (parallel to `RenderGraph::resources`).
+    /// Resources (parallel to `FramePlan::resources`).
     pub(crate) resources: Vec<ResourceLayout>,
     /// Pool slots.
     pub(crate) slots: Vec<PoolSlot>,
     /// Live resources per pass (by index into `passes`).
     pub(crate) pass_alive: Vec<Vec<ResourceId>>,
-    /// S5c: explicit ordering edges (registration PassIds, both enabled),
-    /// a snapshot of `RenderGraph::ordering` at build time.
-    pub(crate) ordering: Vec<(PassId, PassId)>,
+    /// Parallel execution levels (bitset plan via `ornis-schedule`),
+    /// computed once per build and cached in the layout (audit §4.3 —
+    /// no recomputation per `levels()` call).
+    pub(crate) levels: Vec<Vec<usize>>,
 }
 
-impl GraphLayout {
+impl FrameLayout {
     /// Total bytes the pool will allocate at this layout's surface size —
-    /// the device-free counterpart of `GraphExecutor::texture_budget`
+    /// the device-free counterpart of `FrameExecutor::texture_budget`
     /// (golden tests, S0 metrics, the S4 budget check).
     pub fn planned_pool_bytes(&self) -> u64 {
         self.slots
@@ -205,40 +210,11 @@ impl GraphLayout {
     /// write-after-write), passes within a level are independent and
     /// safe to record in parallel. Deterministic — derived from the
     /// registration order and the declared accesses, exactly like the
-    /// core `ornis_core::schedule::Schedule`.
+    /// core `ornis_core::schedule::Schedule`. Computed once per build
+    /// (bitset plan from `ornis-schedule`, audit §4.3) and cached in
+    /// this layout; the accessor clones the vec, as before.
     pub fn levels(&self) -> Vec<Vec<usize>> {
-        let writes: Vec<Vec<ResourceId>> = self
-            .passes
-            .iter()
-            .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
-            .collect();
-        // S5c: явные рёбра в индексы layout (выключенные пассы — мимо).
-        let index_of = |id: PassId| self.passes.iter().position(|p| p.id == id);
-        let edges: Vec<(usize, usize)> = self
-            .ordering
-            .iter()
-            .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
-            .collect();
-        // Единый движок уровней с `ornis-core::Schedule` (§28.2 — один
-        // шедулер на всё: та же функция считает уровни систем и пассов).
-        ornis_core::compute_levels(self.passes.len(), |i, j| {
-            Self::passes_conflict(&self.passes, &writes, i, j) || edges.contains(&(i, j))
-        })
-    }
-
-    /// Do passes `i < j` conflict (registration order = priority):
-    /// i writes what j reads or writes (RaW/WaW), or j writes what i
-    /// reads (anti-dependency).
-    fn passes_conflict(
-        passes: &[PassLayout],
-        writes: &[Vec<ResourceId>],
-        i: usize,
-        j: usize,
-    ) -> bool {
-        writes[i]
-            .iter()
-            .any(|w| passes[j].reads.contains(w) || writes[j].contains(w))
-            || writes[j].iter().any(|w| passes[i].reads.contains(w))
+        self.levels.clone()
     }
 
     /// Mermaid diagram of this layout — the debug projection (S6):
@@ -246,39 +222,44 @@ impl GraphLayout {
     /// write/read flows as edges. GitHub renders ```mermaid blocks
     /// natively, so a layout drop pasted into a PR review becomes a
     /// picture of the frame pipeline.
+    ///
+    /// Срез 1b (приближение к ликвидации графа): формируется общим
+    /// проектором [`MermaidDiagram`] — тот же байтовый формат, что
+    /// пинится тестом `mermaid_is_a_valid_projection`; та же картинка
+    /// доступна и верхнему планировщику (`Schedule::mermaid`).
     pub fn mermaid(&self) -> String {
-        let mut out = String::from("flowchart TD\n");
+        let mut d = MermaidDiagram::new();
         for (li, level) in self.levels().iter().enumerate() {
-            out.push_str(&format!("  subgraph L{li}[\"level {li}\"]\n"));
-            for &pi in level {
-                out.push_str(&format!("    P{pi}[\"{}\"]\n", self.passes[pi].name));
-            }
-            out.push_str("  end\n");
+            let nodes: Vec<(String, String)> = level
+                .iter()
+                .map(|&pi| (format!("P{pi}"), self.passes[pi].name.clone()))
+                .collect();
+            d.level(&format!("L{li}"), &format!("level {li}"), &nodes);
         }
         for rl in &self.resources {
             if rl.first_use == usize::MAX {
                 continue;
             }
-            out.push_str(&format!(
-                "  R{}[\"{} {:?}\"]\n",
-                rl.id.0, rl.name, rl.spec.format
-            ));
+            d.node(
+                &format!("R{}", rl.id.0),
+                &format!("{} {:?}", rl.name, rl.spec.format),
+            );
         }
         for (pi, pass) in self.passes.iter().enumerate() {
             for rid in &pass.reads {
-                out.push_str(&format!("  R{} --> P{pi}\n", rid.0));
+                d.edge(&format!("R{}", rid.0), &format!("P{pi}"));
             }
             for (rid, _) in &pass.writes {
-                out.push_str(&format!("  P{pi} --> R{}\n", rid.0));
+                d.edge(&format!("P{pi}"), &format!("R{}", rid.0));
             }
         }
-        out
+        d.render()
     }
 
     /// Textual layout dump for debugging/reporting.
     pub fn debug_dump(&self) -> String {
         let mut s = format!(
-            "render graph: {} passes, {} resources, {} pool slots (surface {:?})\n",
+            "frame plan: {} passes, {} resources, {} pool slots (surface {:?})\n",
             self.passes.len(),
             self.resources.len(),
             self.slots.len(),
@@ -331,6 +312,31 @@ impl GraphLayout {
     }
 }
 
+/// Debug-enforcement объявленных доступов пасса — граница
+/// `PassViews::view_of` (бэклог #6, аудит §4.1): пасс запрашивает view по
+/// `ResourceId` вне своих declared reads/writes → паника с именем пасса и
+/// ресурса. Такой доступ — шаг вне расписания: он может гоняться с пассом
+/// того же уровня параллельной записи (`FrameExecutor::execute_parallel`).
+/// Пасс-аналог `assert_access_declared` для систем `core::Schedule`;
+/// write-декларация покрывает и чтение собственной записи (см.
+/// `Forward<OwnsDepth>` — читает собственно очищенный depth), как и в
+/// core. Только debug: в release проверка скомпилирована в ноль.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_pass_access_declared(layout: &FrameLayout, pass_index: usize, id: ResourceId) {
+    let pass = &layout.passes[pass_index];
+    let declared =
+        pass.reads.contains(&id) || pass.writes.iter().any(|(written, _)| *written == id);
+    if !declared {
+        let resource = &layout.resources[id.0 as usize];
+        panic!(
+            "pass '{}' (index {pass_index}) accesses resource '{}' ({id:?}) that is not \
+             declared in its access set (PassBuilder::read/write) — undeclared access breaks \
+             the frame-plan scheduling contract",
+            pass.name, resource.name
+        );
+    }
+}
+
 #[derive(Debug)]
 struct ResourceNode {
     name: String,
@@ -380,7 +386,7 @@ impl Budget {
 pub struct BudgetExceeded {
     /// The configured cap.
     pub budget: u64,
-    /// What the pool needs at this graph configuration.
+    /// What the pool needs at this plan configuration.
     pub required: u64,
     /// Largest slots (bytes desc): what to shrink or disable first.
     pub offenders: Vec<String>,
@@ -404,57 +410,47 @@ impl std::fmt::Display for BudgetExceeded {
     }
 }
 
-/// Errors of [`RenderGraph::try_order_before`] (S5c): an explicit
-/// ordering edge the registration order cannot satisfy, or an unknown
-/// pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphOrderError {
-    /// No pass is registered under this name.
-    UnknownPass { name: String },
-    /// `after` is registered earlier than `before`: execution order is
-    /// the registration order (S3) — explicit edges only split parallel
-    /// levels.
-    BackwardEdge { before: String, after: String },
+/// Parallel levels of a built layout: bitset plan (`ornis-schedule`)
+/// over per-pass access slices plus translated explicit edges
+/// (registration PassId → layout index; disabled passes are not in the
+/// layout, so their edges drop out).
+fn layout_levels(passes: &[PassLayout], ordering: &[(PassId, PassId)]) -> Vec<Vec<usize>> {
+    let reads: Vec<Vec<ResourceId>> = passes.iter().map(|p| p.reads.clone()).collect();
+    let writes: Vec<Vec<ResourceId>> = passes
+        .iter()
+        .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
+        .collect();
+    let index_of = |id: PassId| passes.iter().position(|p| p.id == id);
+    let edges: Vec<(usize, usize)> = ordering
+        .iter()
+        .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
+        .collect();
+    bitset_level_plan(&reads, &writes, &edges)
 }
 
-impl std::fmt::Display for GraphOrderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GraphOrderError::UnknownPass { name } => write!(f, "no pass named '{name}'"),
-            GraphOrderError::BackwardEdge { before, after } => write!(
-                f,
-                "'{after}' is registered earlier than '{before}' — register passes in \
-                 execution order; explicit edges only split parallel levels"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for GraphOrderError {}
-
-/// The pass graph being assembled.
+/// The pass plan being assembled.
 #[derive(Debug)]
-pub struct RenderGraph {
+pub struct FramePlan {
     resources: Vec<ResourceNode>,
     passes: Vec<PassNode>,
     surface_size: (u32, u32),
-    /// Cached layout; `None` means dirty — the next [`RenderGraph::layout`]
+    /// Cached layout; `None` means dirty — the next [`FramePlan::layout`]
     /// recomputes. Every mutation resets this (S1: `compute_layout` must
     /// stay off the per-frame hot path).
-    cached: Option<GraphLayout>,
+    cached: Option<FrameLayout>,
     /// S5c: явные рёбра порядка (PassId регистрации i < j) поверх
     /// зависимостей из доступов — для скрытых зависимостей (общие
     /// queue-буферы рендерера), невидимых в множествах доступа.
     ordering: Vec<(PassId, PassId)>,
     /// S4 memory budget; unbounded by default.
     budget: Budget,
-    /// How many times the layout has been computed over this graph's
+    /// How many times the layout has been computed over this plan's
     /// lifetime. Diagnostics for the S1 cache (tests, benches, probes).
     layout_computations: u32,
 }
 
-impl RenderGraph {
-    /// Creates an empty graph; `surface_size` feeds `SizePolicy::MatchSurface`.
+impl FramePlan {
+    /// Creates an empty plan; `surface_size` feeds `SizePolicy::MatchSurface`.
     pub fn new(surface_size: (u32, u32)) -> Self {
         Self {
             resources: Vec::new(),
@@ -484,7 +480,7 @@ impl RenderGraph {
         self.budget
     }
 
-    /// Registers a graph-owned resource (texture).
+    /// Registers a plan-owned resource (texture).
     pub fn create_resource(&mut self, name: impl Into<String>, spec: TextureSpec) -> ResourceId {
         let id = ResourceId(self.resources.len() as u32);
         self.resources.push(ResourceNode {
@@ -513,8 +509,8 @@ impl RenderGraph {
     }
 
     /// Registers an externally backed output (e.g. the swapchain image):
-    /// passes may write it, but the graph never pools it — the executor
-    /// must provide the view via `GraphExecutor::set_external_view`.
+    /// passes may write it, but the plan never pools it — the executor
+    /// must provide the view via `FrameExecutor::set_external_view`.
     pub fn external_output(&mut self, name: impl Into<String>) -> ResourceId {
         let id = ResourceId(self.resources.len() as u32);
         self.resources.push(ResourceNode {
@@ -534,7 +530,7 @@ impl RenderGraph {
     /// Starts declaring a pass; passes execute in insertion order.
     ///
     /// Compatibility shim (S3): production passes are declared as typed
-    /// systems — `impl GraphPass` + `SystemSet::add_system` — and the
+    /// systems — `impl FramePass` + `SystemSet::add_system` — and the
     /// builder remains for tests, tools and the migration period.
     pub fn add_pass(&mut self, name: impl Into<String>) -> PassBuilder<'_> {
         let id = PassId(self.passes.len() as u32);
@@ -545,13 +541,13 @@ impl RenderGraph {
             enabled: true,
         });
         self.cached = None;
-        PassBuilder { graph: self, id }
+        PassBuilder { plan: self, id }
     }
 
     /// S5c: объявляет, что пасс `before` обязан выполниться раньше пасса
     /// `after`, даже если их доступы не конфликтуют (скрытая зависимость,
     /// например общий queue-записанный uniform-буфер). Влияет только на
-    /// разбиение на уровни параллельности ([`GraphLayout::levels`]);
+    /// разбиение на уровни параллельности ([`FrameLayout::levels`]);
     /// порядок исполнения — порядок регистрации.
     ///
     /// # Panics
@@ -562,23 +558,14 @@ impl RenderGraph {
             .unwrap_or_else(|error| panic!("order_before({before:?}, {after:?}): {error}"));
     }
 
-    /// Мягкая [`RenderGraph::order_before`]: ошибка — возвращаемый
-    /// [`GraphOrderError`], не паника. Заодно валидирует оба `PassId`
+    /// Мягкая [`FramePlan::order_before`]: ошибка — возвращаемый
+    /// [`OrderError`], не паника. Заодно валидирует оба `PassId`
     /// (раньше ребро с неизвестным id добавлялось молча и игнорировалось
     /// при подсчёте уровней).
-    pub fn try_order_before(
-        &mut self,
-        before: PassId,
-        after: PassId,
-    ) -> Result<(), GraphOrderError> {
-        let before_name = self.pass_name(before)?;
-        let after_name = self.pass_name(after)?;
-        if before.0 >= after.0 {
-            return Err(GraphOrderError::BackwardEdge {
-                before: before_name,
-                after: after_name,
-            });
-        }
+    pub fn try_order_before(&mut self, before: PassId, after: PassId) -> Result<(), OrderError> {
+        validate_indexed_edge(before.0 as usize, after.0 as usize, |i| {
+            self.passes.get(i).map(|node| node.name.clone())
+        })?;
         if !self.ordering.contains(&(before, after)) {
             self.ordering.push((before, after));
         }
@@ -586,7 +573,7 @@ impl RenderGraph {
         Ok(())
     }
 
-    /// S5c: name-based [`RenderGraph::order_before`] (имя пасса из
+    /// S5c: name-based [`FramePlan::order_before`] (имя пасса из
     /// `add_pass`).
     ///
     /// # Panics
@@ -596,34 +583,12 @@ impl RenderGraph {
             .unwrap_or_else(|error| panic!("order_before_named('{before}', '{after}'): {error}"));
     }
 
-    /// Мягкая [`RenderGraph::order_before_named`].
-    pub fn try_order_before_named(
-        &mut self,
-        before: &str,
-        after: &str,
-    ) -> Result<(), GraphOrderError> {
-        let b = self.try_pass_id_of(before)?;
-        let a = self.try_pass_id_of(after)?;
-        self.try_order_before(b, a)
-    }
-
-    fn try_pass_id_of(&self, name: &str) -> Result<PassId, GraphOrderError> {
-        self.passes
-            .iter()
-            .position(|p| p.name == name)
-            .map(|i| PassId(i as u32))
-            .ok_or_else(|| GraphOrderError::UnknownPass {
-                name: name.to_owned(),
-            })
-    }
-
-    fn pass_name(&self, id: PassId) -> Result<String, GraphOrderError> {
-        self.passes
-            .get(id.0 as usize)
-            .map(|node| node.name.clone())
-            .ok_or_else(|| GraphOrderError::UnknownPass {
-                name: format!("#{}", id.0),
-            })
+    /// Мягкая [`FramePlan::order_before_named`].
+    pub fn try_order_before_named(&mut self, before: &str, after: &str) -> Result<(), OrderError> {
+        let (b, a) = resolve_named_edge(before, after, |name| {
+            self.passes.iter().position(|p| p.name == name)
+        })?;
+        self.try_order_before(PassId(b as u32), PassId(a as u32))
     }
 
     /// Enables/disables a pass (culling): a disabled pass is dropped from
@@ -647,26 +612,26 @@ impl RenderGraph {
     }
 
     /// Returns the frame layout (lifetimes + pool slots), recomputing it
-    /// only when the graph changed since the last call. This is the hot-path
-    /// accessor: `RenderGraph3D::render` calls it every frame, and in
+    /// only when the plan changed since the last call. This is the hot-path
+    /// accessor: `RenderFrame3D::render` calls it every frame, and in
     /// steady state (no resizes, no pass toggles) it is a cache hit.
     ///
     /// # Panics
     /// Panics if invariants are violated (read-before-write, etc.) — the
     /// panic fires on the first recomputation after the offending mutation,
     /// not at the mutation site.
-    pub fn layout(&mut self) -> &GraphLayout {
+    pub fn layout(&mut self) -> &FrameLayout {
         self.try_layout()
-            .unwrap_or_else(|e| panic!("render graph budget exceeded: {e}"))
+            .unwrap_or_else(|e| panic!("frame plan budget exceeded: {e}"))
     }
 
-    /// Like [`RenderGraph::layout`], but a budget violation is a returned
+    /// Like [`FramePlan::layout`], but a budget violation is a returned
     /// error instead of a panic (editors/tools; S4).
     ///
     /// # Errors
     /// Returns [`BudgetExceeded`] when the pool does not fit the
     /// configured [`Budget`]; nothing is cached in that case.
-    pub fn try_layout(&mut self) -> Result<&GraphLayout, BudgetExceeded> {
+    pub fn try_layout(&mut self) -> Result<&FrameLayout, BudgetExceeded> {
         if self.cached.is_none() {
             let layout = self.compute_layout();
             if let Some(cap) = self.budget.gpu_textures {
@@ -683,29 +648,29 @@ impl RenderGraph {
     }
 
     /// Snapshot of the cached layout as an owned value. Equivalent to
-    /// cloning [`RenderGraph::layout`]; prefer `layout()` on hot paths —
+    /// cloning [`FramePlan::layout`]; prefer `layout()` on hot paths —
     /// this clones the pass/resource/slot vectors.
     ///
     /// # Panics
-    /// Same as [`RenderGraph::layout`].
-    pub fn build(&mut self) -> GraphLayout {
+    /// Same as [`FramePlan::layout`].
+    pub fn build(&mut self) -> FrameLayout {
         self.layout().clone()
     }
 
-    /// Forces the next [`RenderGraph::layout`] to recompute. Mutating
+    /// Forces the next [`FramePlan::layout`] to recompute. Mutating
     /// methods do this automatically; this is for benchmarks and tests
     /// that drive recomputation explicitly.
     pub fn invalidate(&mut self) {
         self.cached = None;
     }
 
-    /// How many times the layout has been computed over this graph's
+    /// How many times the layout has been computed over this plan's
     /// lifetime (S1 cache diagnostics: stays flat while the cache holds).
     pub fn layout_computations(&self) -> u32 {
         self.layout_computations
     }
 
-    fn compute_layout(&self) -> GraphLayout {
+    fn compute_layout(&self) -> FrameLayout {
         let enabled: Vec<usize> = self
             .passes
             .iter()
@@ -839,22 +804,23 @@ impl RenderGraph {
             }
         }
 
-        GraphLayout {
+        let levels = layout_levels(&passes, &self.ordering);
+        FrameLayout {
             surface_size: self.surface_size,
             passes,
             resources,
             slots,
             pass_alive,
-            ordering: self.ordering.clone(),
+            levels,
         }
     }
 
-    /// Executes the graph: for each pass in layout order, `run` is invoked
+    /// Executes the plan: for each pass in layout order, `run` is invoked
     /// with a [`PassContext`] (live resources and their slots).
     ///
     /// # Panics
     /// Panics if the layout has not been computed yet (call `build()` first).
-    pub fn execute(&self, layout: &GraphLayout, mut run: impl FnMut(PassContext<'_>)) {
+    pub fn execute(&self, layout: &FrameLayout, mut run: impl FnMut(PassContext<'_>)) {
         for index in 0..layout.passes.len() {
             run(PassContext { layout, index });
         }
@@ -864,7 +830,7 @@ impl RenderGraph {
 /// Context of the pass being executed: live resources and their pool slots.
 #[derive(Debug)]
 pub struct PassContext<'a> {
-    layout: &'a GraphLayout,
+    layout: &'a FrameLayout,
     index: usize,
 }
 
@@ -903,11 +869,11 @@ impl<'a> PassContext<'a> {
 /// Builder for declaring a pass.
 ///
 /// Compatibility shim (S3): prefer declaring passes as typed systems
-/// (`impl GraphPass` + `SystemSet::add_system`); the builder stays for
+/// (`impl FramePass` + `SystemSet::add_system`); the builder stays for
 /// tests, tools and the migration period.
 #[derive(Debug)]
 pub struct PassBuilder<'a> {
-    graph: &'a mut RenderGraph,
+    plan: &'a mut FramePlan,
     id: PassId,
 }
 
@@ -923,33 +889,31 @@ impl PassBuilder<'_> {
     /// Panics on an unknown resource or a read-before-write violation
     /// (detected at `layout()`/`build()`).
     pub fn read(self, id: ResourceId) -> Self {
-        self.graph
-            .resolve_resource(id, &self.graph.passes[self.id.0 as usize].name);
-        self.graph.passes[self.id.0 as usize].reads.push(id);
-        self.graph.cached = None;
+        self.plan
+            .resolve_resource(id, &self.plan.passes[self.id.0 as usize].name);
+        self.plan.passes[self.id.0 as usize].reads.push(id);
+        self.plan.cached = None;
         self
     }
 
     /// Declares a resource as written by the pass (no clear).
     pub fn write(self, id: ResourceId) -> Self {
-        self.graph
-            .resolve_resource(id, &self.graph.passes[self.id.0 as usize].name);
-        self.graph.passes[self.id.0 as usize]
-            .writes
-            .push((id, None));
-        self.graph.cached = None;
+        self.plan
+            .resolve_resource(id, &self.plan.passes[self.id.0 as usize].name);
+        self.plan.passes[self.id.0 as usize].writes.push((id, None));
+        self.plan.cached = None;
         self
     }
 
     /// Declares a resource as written by the pass with a clear value
     /// (typically the frame background).
     pub fn write_clear(self, id: ResourceId, clear: wgpu::Color) -> Self {
-        self.graph
-            .resolve_resource(id, &self.graph.passes[self.id.0 as usize].name);
-        self.graph.passes[self.id.0 as usize]
+        self.plan
+            .resolve_resource(id, &self.plan.passes[self.id.0 as usize].name);
+        self.plan.passes[self.id.0 as usize]
             .writes
             .push((id, Some(clear)));
-        self.graph.cached = None;
+        self.plan.cached = None;
         self
     }
 }
@@ -968,7 +932,7 @@ mod tests {
 
     #[test]
     fn lifetime_window_basic() {
-        let mut g = RenderGraph::new((1920, 1080));
+        let mut g = FramePlan::new((1920, 1080));
         let albedo = g.create_resource("albedo", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let hdr = g.create_resource("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1));
         let depth = g.create_resource("depth", spec(wgpu::TextureFormat::Depth32Float, 1));
@@ -1000,7 +964,7 @@ mod tests {
     #[test]
     fn transient_slot_reuse_same_spec() {
         // a lives [0,1], b lives [2,3], same spec → one slot (aliasing).
-        let mut g = RenderGraph::new((320, 240));
+        let mut g = FramePlan::new((320, 240));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
 
@@ -1023,7 +987,7 @@ mod tests {
     #[test]
     fn overlapping_resources_need_distinct_slots() {
         // a [0,1], b [1,2] — overlap on pass 1 → two slots.
-        let mut g = RenderGraph::new((320, 240));
+        let mut g = FramePlan::new((320, 240));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
 
@@ -1042,7 +1006,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "before any write")]
     fn read_before_write_panics() {
-        let mut g = RenderGraph::new((320, 240));
+        let mut g = FramePlan::new((320, 240));
         let x = g.create_resource("x", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g.add_pass("p0").read(x);
         g.add_pass("p1").write(x);
@@ -1050,15 +1014,48 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "'sneaky' (index 1) accesses resource 'b'")]
+    fn sneaky_pass_undeclared_access_panics() {
+        // Бэклог #6 (аудит §4.1, критерий выхода Фазы B «sneaky pass»):
+        // пасс запрашивает ресурс вне своих declared reads/writes →
+        // debug-паника с именем пасса и ресурса (симметрия со
+        // `sneaky`-системой `core::Schedule`).
+        let mut g = FramePlan::new((320, 240));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g.add_pass("writer").write(a).write(b);
+        g.add_pass("sneaky").read(a);
+        let layout = g.build();
+        // Пасс 1 декларировал только read(a); peek в `b` — вне набора.
+        assert_pass_access_declared(&layout, 1, b);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn declared_pass_access_passes_enforcement() {
+        // Честный пасс: read-декларация покрывает view; write-декларация
+        // покрывает и чтение собственной записи (own-write read), как и в
+        // core `declared_access_passes_enforcement` — обе проверки молчат.
+        let mut g = FramePlan::new((320, 240));
+        let x = g.create_resource("x", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g.add_pass("writer").write(x);
+        g.add_pass("reader").read(x);
+        let layout = g.build();
+        assert_pass_access_declared(&layout, 0, x);
+        assert_pass_access_declared(&layout, 1, x);
+    }
+
+    #[test]
     #[should_panic(expected = "unknown resource")]
     fn unknown_resource_panics() {
-        let mut g = RenderGraph::new((320, 240));
+        let mut g = FramePlan::new((320, 240));
         g.add_pass("p0").read(ResourceId(99));
     }
 
     #[test]
     fn imported_resource_may_be_read_first() {
-        let mut g = RenderGraph::new((320, 240));
+        let mut g = FramePlan::new((320, 240));
         let shadow = g.import_resource("shadow", spec(wgpu::TextureFormat::R32Float, 1));
         g.add_pass("p0").read(shadow);
         g.add_pass("p1").read(shadow);
@@ -1070,7 +1067,7 @@ mod tests {
 
     #[test]
     fn disabled_pass_culls_its_resources() {
-        let mut g = RenderGraph::new((320, 240));
+        let mut g = FramePlan::new((320, 240));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let p1 = g.add_pass("p1").write(a).id();
@@ -1092,7 +1089,7 @@ mod tests {
 
     #[test]
     fn execute_delivers_live_resources_and_slots() {
-        let mut g = RenderGraph::new((640, 480));
+        let mut g = FramePlan::new((640, 480));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba16Float, 1));
         g.add_pass("gbuffer").write(a);
@@ -1119,14 +1116,14 @@ mod tests {
         );
     }
 
-    fn ctx_pass_names(layout: &GraphLayout) -> Vec<String> {
+    fn ctx_pass_names(layout: &FrameLayout) -> Vec<String> {
         layout.passes.iter().map(|p| p.name.clone()).collect()
     }
 
     #[test]
     fn independent_branches_share_levels() {
         // p0→p1 (a→b) и p2→p3 (c→d) не делят ресурсов: уровни [p0,p2], [p1,p3].
-        let mut g = RenderGraph::new((64, 64));
+        let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
@@ -1143,7 +1140,7 @@ mod tests {
     fn explicit_ordering_splits_shared_level() {
         // p0→p1 и p2→p3 независимы: [[0,2],[1,3]]; ребро p0→p2 разводит
         // первый уровень (скрытая зависимость без конфликта доступов).
-        let mut g = RenderGraph::new((64, 64));
+        let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let c = g.create_resource("c", spec(wgpu::TextureFormat::Rg16Float, 1));
@@ -1164,7 +1161,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "registered")]
     fn explicit_ordering_rejects_backward() {
-        let mut g = RenderGraph::new((64, 64));
+        let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let first = g.add_pass("first").write(a).id();
@@ -1173,9 +1170,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no pass named")]
+    #[should_panic(expected = "no node named")]
     fn explicit_ordering_unknown_name() {
-        let mut g = RenderGraph::new((64, 64));
+        let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g.add_pass("real").write(a);
         g.order_before_named("real", "ghost");
@@ -1183,25 +1180,25 @@ mod tests {
 
     #[test]
     fn try_order_before_reports_errors_without_panicking() {
-        let mut g = RenderGraph::new((64, 64));
+        let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let first = g.add_pass("first").write(a).id();
         let second = g.add_pass("second").write(b).id();
         assert!(matches!(
             g.try_order_before(second, first),
-            Err(GraphOrderError::BackwardEdge { .. })
+            Err(OrderError::BackwardEdge { .. })
         ));
         assert_eq!(
             g.try_order_before_named("first", "ghost").map(|_| ()),
-            Err(GraphOrderError::UnknownPass {
+            Err(OrderError::UnknownNode {
                 name: "ghost".to_owned(),
             })
         );
         // Id вне реестра — ошибка, а не молчаливое мусорное ребро.
         assert!(matches!(
             g.try_order_before(PassId(99), PassId(100)),
-            Err(GraphOrderError::UnknownPass { .. })
+            Err(OrderError::UnknownNode { .. })
         ));
         assert_eq!(g.build().levels(), vec![vec![0, 1]]);
         assert!(g.try_order_before(first, second).is_ok());
@@ -1212,7 +1209,7 @@ mod tests {
     fn mermaid_is_a_valid_projection() {
         // S6: граф как отладочная проекция — уровни подграфами,
         // ресурсы узлами, потоки рёбрами; GitHub рендерит нативно.
-        let mut g = RenderGraph::new((64, 64));
+        let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rg16Float, 1));
         g.add_pass("p0").write(a);
@@ -1226,7 +1223,7 @@ mod tests {
         assert!(m.contains("P0 --> R0"), "write edges: {m}");
         assert!(m.contains("R0 --> P1"), "read edges: {m}");
         // Мёртвые ресурсы в проекцию не входят.
-        let mut g2 = RenderGraph::new((64, 64));
+        let mut g2 = FramePlan::new((64, 64));
         let dead = g2.create_resource("dead", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let live = g2.create_resource("live", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g2.add_pass("only").write(live);
@@ -1237,7 +1234,7 @@ mod tests {
 
     #[test]
     fn debug_dump_lists_structure() {
-        let mut g = RenderGraph::new((1280, 720));
+        let mut g = FramePlan::new((1280, 720));
         let albedo = g.create_resource("albedo", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let hdr = g.create_resource("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1));
         g.add_pass("gbuffer").write(albedo);
@@ -1253,7 +1250,7 @@ mod tests {
 
     #[test]
     fn clear_value_is_carried_to_layout() {
-        let mut g = RenderGraph::new((640, 480));
+        let mut g = FramePlan::new((640, 480));
         let hdr = g.create_resource("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1));
         let pid = {
             let builder = g.add_pass("lighting");
@@ -1268,10 +1265,10 @@ mod tests {
         );
     }
 
-    // ── S1: GraphLayout cache ────────────────────────────────────────
+    // ── S1: FrameLayout cache ────────────────────────────────────────
 
-    fn two_pass_graph() -> (RenderGraph, ResourceId, ResourceId) {
-        let mut g = RenderGraph::new((320, 240));
+    fn two_pass_plan() -> (FramePlan, ResourceId, ResourceId) {
+        let mut g = FramePlan::new((320, 240));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba16Float, 1));
         g.add_pass("p0").write(a);
@@ -1281,7 +1278,7 @@ mod tests {
 
     #[test]
     fn layout_is_cached_until_mutation() {
-        let (mut g, _, _) = two_pass_graph();
+        let (mut g, _, _) = two_pass_plan();
         assert_eq!(g.layout_computations(), 0, "nothing computed yet");
         let _ = g.build();
         let _ = g.build();
@@ -1296,7 +1293,7 @@ mod tests {
 
     #[test]
     fn every_mutation_invalidates_cache() {
-        let (mut g, a, _) = two_pass_graph();
+        let (mut g, a, _) = two_pass_plan();
         let _ = g.layout();
         assert_eq!(g.layout_computations(), 1);
 
@@ -1329,12 +1326,12 @@ mod tests {
 
     #[test]
     fn build_snapshot_matches_cached_layout() {
-        let (mut g, a, b) = two_pass_graph();
+        let (mut g, a, b) = two_pass_plan();
         let cached = g.layout().debug_dump();
         let snapshot = g.build().debug_dump();
         assert_eq!(cached, snapshot, "build() must mirror the cached layout");
         assert_eq!(g.layout_computations(), 1);
-        // Snapshot ids are the same stable ResourceIds the graph handed out.
+        // Snapshot ids are the same stable ResourceIds the plan handed out.
         let snapshot = g.build();
         assert_eq!(snapshot.resources[a.0 as usize].name, "a");
         assert_eq!(snapshot.resources[b.0 as usize].name, "b");

@@ -3,6 +3,13 @@
 > ⚠️ **Статус: ЧЕРНОВИК ДЛЯ РЕВЬЮ.** Не коммитить до ревью. Правки — дописывать в конец.
 > Дата: 2026-08-10.
 > Источник: исследование Hermes (дисциплина web-research), первоисточники в разделе «Источники».
+>
+> **Переименование 2026-08-23**: модули/типы — `render_graph.rs` → `frame_plan.rs`
+> (`RenderGraph` → `FramePlan`, `GraphLayout` → `FrameLayout`), `graph_frame.rs` →
+> `frame_exec.rs` (`GraphExecutor` → `FrameExecutor`, `RenderGraph3D` → `RenderFrame3D`),
+> `graph_passes.rs` → `frame_passes.rs` (`GraphPass` → `FramePass`, `GraphResource` →
+> `FrameResource`); пример — `frame_plan_probe`. Датированные фаза-логи ниже используют
+> имена своего дня; живой рецепт §10 переведён на новые.
 
 ---
 
@@ -183,12 +190,12 @@ writes/clear), layout и пул выводятся из типов. Условн
 Как объявить свой пасс:
 
 ```rust
-use ornis_render::graph_passes::{Bloom0, Bloom1};
-use ornis_render::system::{self, Frame, GraphPass, Read, SystemViews, Write};
+use ornis_render::frame_passes::{Bloom0, Bloom1};
+use ornis_render::system::{self, Frame, FramePass, Read, SystemViews, Write};
 
 struct BloomMid;
 
-impl GraphPass for BloomMid {
+impl FramePass for BloomMid {
     type Reads = (Read<Bloom0>,);
     type Writes = (Write<Bloom1>,);
     fn name(&self) -> &'static str { "bloom_mid" }
@@ -202,14 +209,14 @@ impl GraphPass for BloomMid {
 }
 
 // регистрация (порядок = порядок исполнения):
-systems.add_system(&mut graph, BloomMid);
+systems.add_system(&mut plan, BloomMid);
 ```
 
-Диспетчеризация в `RenderGraph3D::render` — по `PassId`, строковых имён
+Диспетчеризация в `RenderFrame3D::render` — по `PassId`, строковых имён
 в исполнителе больше нет. Виды можно получать и по типу ресурса:
 `views.get::<Bloom0>()` (debug-проверка членства в объявленном наборе).
 
-`RenderGraph::add_pass`/`PassBuilder` — шим совместимости для тестов и
+`FramePlan::add_pass`/`PassBuilder` — шим совместимости для тестов и
 инструментов; production-код объявляет пассы типами.
 
 Защита от тихих изменений пула — golden-тесты (`golden_pool_slots_per_

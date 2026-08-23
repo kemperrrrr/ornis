@@ -33,6 +33,10 @@ cargo xtask editor        # или: cargo editor
 запускает бинарь `ornis` в режиме `editor-only`, который поднимает
 HTTP-сервер на порту 3420 и раздаёт фронтенд из `editor/`.
 
+Нативный режим (`cargo run` без фичи) сервер **не поднимает** — движку
+редактор не нужен; браузерный редактор рядом с нативным окном доступен
+по явному флагу: `cargo run -- --remote-editor`.
+
 ## Качество
 
 Единая точка входа — `cargo xtask quality`:
@@ -99,6 +103,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | `crates/physics` | Физика: трейт `PhysicsEngine`, Sweep-and-Prune, `RigidBody`, raycast | Активен (вынесен из core в августе 2026) |
 | `crates/macros` | Процедурные макросы: `smart_pipeline`, `for_each_entity`, `kernel`, `Pack` и др. | Активен |
 | `crates/render` | `Renderer3D`, OpenPBR-материал, WGSL-шейдеры, трейт `RenderBackend` | Активен |
+| `crates/schedule` | Механика планировщика: `compute_levels`, битсет-план конфликтов, единый `OrderError`, кеш `PlanCache`, исполнитель `run_levels` | Активен (Фаза A аудита, август 2026) |
 | `crates/wgpu_backend` | GPU-исполнение: command sync, smart buffer, PSO-кэш, роутер | Активен |
 | `crates/materialx` | Парсер `.mtlx` и конвертация в OpenPBR | Активен |
 | `crates/wasm` | WASM-обёртка для рендера сцены в браузере | Активен |
@@ -141,8 +146,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | OpenPBR-материал (20 vec4 параметров, все BSDF) | ✅ | `crates/render/src/material.rs` |
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
-| Render Graph: `RenderGraph3D` + `Technique` (forward/deferred/hybrid как конфигурация графа) + блум-каскад | ✅ |
-| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, `mermaid()`-проекция (S6); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов, кеш уровневого плана (битсеты), `try_order_before` | ✅ | `crates/render/src/render_graph.rs`, `graph_frame.rs`; детали: `docs/rendering/render-graph.md` |
+| Frame Plan (бывш. Render Graph; модули `frame_plan.rs`/`frame_exec.rs`, rename от 2026-08-23): `RenderFrame3D` + `Technique` (forward/deferred/hybrid как конфигурация плана) + блум-каскад | ✅ |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | ✅ | `crates/render/src/frame_plan.rs`, `frame_exec.rs`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 
@@ -151,8 +156,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Desktop: winit + wgpu (Vulkan/Metal/DX12) | ✅ | `src/main.rs`, нативный режим |
 | WASM + WebGPU в браузере | ✅ | `crates/wasm`; рендер `editor/scene.ron` проверен headless-скриншотами (5 сфер, pixel-identical нативному эталону) |
 | Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит статичную сцену из `scene.ron` |
-| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; команды `create_entity`/`set_transform`/`set_material`/`rename_entity`/`destroy_entity` принимаются через `POST /api/command`, невалидные команды → событие `error`. WASM-canvas по-прежнему рендерит статичный `scene.ron`; live-синхронизация рендера — впереди |
-| Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. WebSocket нет. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме — заглушка-счётчик в игровом цикле |
+| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. WASM-canvas по-прежнему рендерит статичный `scene.ron`; live-синхронизация рендера — впереди |
+| Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. WebSocket нет. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
 | `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
 | Нативный UI-крейт | 🗑️ | удалён (август 2026): `crates/ui*`, форки, vello/boa-стек; нативный режим рендерит 3D-сцену без UI-overlay |
 
@@ -167,7 +172,10 @@ cargo xtask bca --report      # html to target/bca/index.html
 
 ### Не начато
 
-- **Скриптинг (фаза 6)**: Rhai/Rune/Python, Batch API, hot reload — ❌
+- **Скриптинг (фаза 6)**: реестр компонентов (F0), `ScriptEngine`-трейт,
+  Rhai-адаптер, Batch API, hot reload — ❌ (рамка 2026-08-22: плагинный
+  шов + адаптеры вместо лесенки языков — см. PLAN.md и
+  [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов, hot reload — ❌
 - **NUMA-aware allocation** — ❌
 - **HVM2/Bend как compute-бэкенд** — ❌ (идея на будущее)
@@ -186,19 +194,26 @@ cargo xtask bca --report      # html to target/bca/index.html
    (version/сущности с transform/mesh/material/lights/camera/ambient),
    снапшот кешируется сервером; при старте мир загружает `editor/scene.ron`.
 3. **Связь `editor.js` ↔ REST** — 🟡 частично: иерархия и футер живут на
-   `/api/scene` и `/api/status` (polling), создание сущности из UI работает;
-   редактирование компонентов (`set_transform`/`set_material`/`rename_entity`)
-   поддержано сервером, инспектор в UI — впереди.
+   `/api/scene` и `/api/status` (polling), создание из UI работает;
+   редактирование компонентов — generic-командой `set_component` через
+   реестр компонентов (решение D2, реализовано; см.
+   [audit-2026-08-22](docs/quality/audit-2026-08-22.md)): сервер и UI
+   обмениваются serde-каноничным JSON, новый компонент движка становится
+   редактируемым регистрацией в реестре — без правок engine-side кода.
+   Инспектор UI уже сейчас правит name/transform/material через неё.
 4. **WASM-canvas ↔ живой ECS** — рендер не статичного `scene.ron`,
    а актуального состояния; ввод (мышь/клавиатура) из браузера в движок.
 5. Дальше: WebSocket-канал для событий и live-синхронизации вместо polling'а
    `/api/events`.
 
-### Фаза 6 — Скриптинг
+### Фаза 6 — Скриптинг (рамка пересмотрена 2026-08-22)
 
-Rhai → Batch API (`engine.batch_add(...)` — один FFI-вызов вместо 100k) →
-hot reload → Rune → Python (PyO3/RustPython). FFI-биндинги оборачивают
-переменные скриптов в прямые указатели на ячейки Sparse Set.
+Реестр компонентов (F0) → `ScriptEngine`-трейт (плагинный, как
+`PhysicsEngine`/`RenderBackend`) → Batch API по хендлам → первый
+адаптер Rhai → hot reload → прочие языки отдельными адаптерами
+(Rune/Python/WASM-компоненты) по правилу трёх. Подробно: фаза 6 в
+[`PLAN.md`](PLAN.md), решения F0/D1/D2 в
+[audit-2026-08-22](docs/quality/audit-2026-08-22.md).
 
 ### Фаза 7 — Asset Pipeline
 
@@ -239,7 +254,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 - [`README.md`](README.md) — текущее состояние, верифицированное по коду (этот файл)
 - [`PLAN.md`](PLAN.md) — план реализации: сделано / частично / дорожная карта
 - [`IDEAS.md`](IDEAS.md) — 26 архитектурных идей (перенесён без изменений)
-- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline и report от 2026-08-01
+- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline и report от 2026-08-01, [audit от 2026-08-22](docs/quality/audit-2026-08-22.md) (статический аудит ядра/планировщика + план унификации планировщика в `crates/schedule`)
 
 Прежние документы (`STRATEGY_PIVOT.md`, `implementation_plan.md`, `SUMMARY.md`,
 `ANALYSIS_DOCS_VS_CODE.md`, `GOSUB_INTEGRATION.md`) удалены из дерева при

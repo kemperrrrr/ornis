@@ -66,6 +66,19 @@ impl Parse for ForEachInput {
 
 pub fn for_each_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ForEachInput);
+    let expanded = if input.closure_args.len() == 1 {
+        expand_single_lane(&input)
+    } else {
+        expand_multi_lane(&input)
+    };
+    expanded.into()
+}
+
+/// Guard acquisitions for every declared lane: read guards for `&T`,
+/// write guards for `&mut T`.
+fn lane_guards(
+    input: &ForEachInput,
+) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
     let store = &input.store;
 
     let read_lanes: Vec<_> = input
@@ -98,75 +111,97 @@ pub fn for_each_entity(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let expanded = if input.closure_args.len() == 1 {
-        // Single lane: iterate directly, no intersection needed
-        let arg = &input.closure_args[0];
-        let lane = format_ident!("__lane_{}", arg.name);
-        let body = &input.body;
-        let pat_name = &arg.name;
-        if arg.mutable {
-            quote! {
-                {
-                    #(#read_lanes)*
-                    #(#write_lanes)*
-                    for #pat_name in #lane.iter_mut() {
-                        #body
-                    }
-                }
-            }
-        } else {
-            quote! {
-                {
-                    #(#read_lanes)*
-                    #(#write_lanes)*
-                    for #pat_name in #lane.iter() {
-                        #body
-                    }
-                }
-            }
-        }
-    } else {
-        // Multiple lanes: collect entities from bitset intersection, then iterate
-        let first = &input.closure_args[0];
-        let second = &input.closure_args[1];
-        let lane0 = format_ident!("__lane_{}", first.name);
-        let lane1 = format_ident!("__lane_{}", second.name);
+    (read_lanes, write_lanes)
+}
 
-        let collect_entities = quote! {
-            let __entities: Vec<ornis_core::Entity> = {
-                let __lane_ref = &*#lane0;
-                let __lane_ref2 = &*#lane1;
-                __lane_ref.iter_zip(__lane_ref2).map(|(e, _, _)| e).collect()
-            };
-        };
+/// Single lane: iterate directly, no intersection needed.
+fn expand_single_lane(input: &ForEachInput) -> proc_macro2::TokenStream {
+    let (read_lanes, write_lanes) = lane_guards(input);
 
-        let lookups: Vec<_> = input
-            .closure_args
-            .iter()
-            .map(|a| {
-                let name = &a.name;
-                let lane = format_ident!("__lane_{}", name);
-                if a.mutable {
-                    quote! { let #name = #lane.get_mut(entity).unwrap(); }
-                } else {
-                    quote! { let #name = #lane.get(entity).unwrap(); }
-                }
-            })
-            .collect();
-
-        let body = &input.body;
+    let arg = &input.closure_args[0];
+    let lane = format_ident!("__lane_{}", arg.name);
+    let pat_name = &arg.name;
+    let body = &input.body;
+    if arg.mutable {
         quote! {
             {
                 #(#read_lanes)*
                 #(#write_lanes)*
-                #collect_entities
-                for entity in __entities {
-                    #(#lookups)*
+                for #pat_name in #lane.iter_mut() {
                     #body
                 }
             }
         }
+    } else {
+        quote! {
+            {
+                #(#read_lanes)*
+                #(#write_lanes)*
+                for #pat_name in #lane.iter() {
+                    #body
+                }
+            }
+        }
+    }
+}
+
+/// Multiple lanes: collect entities present in ALL lanes — zip the first
+/// two, filter by the rest — then iterate. Without the filter, the
+/// per-lane lookups below would panic on an entity missing from
+/// lane 3..N (partial ownership; audit §2.3, backlog #18).
+fn expand_multi_lane(input: &ForEachInput) -> proc_macro2::TokenStream {
+    let (read_lanes, write_lanes) = lane_guards(input);
+
+    let first = &input.closure_args[0];
+    let second = &input.closure_args[1];
+    let lane0 = format_ident!("__lane_{}", first.name);
+    let lane1 = format_ident!("__lane_{}", second.name);
+
+    let extra_lanes: Vec<_> = input
+        .closure_args
+        .iter()
+        .skip(2)
+        .map(|a| format_ident!("__lane_{}", a.name))
+        .collect();
+
+    let collect_entities = quote! {
+        let __entities: Vec<ornis_core::Entity> = {
+            let __lane_ref = &*#lane0;
+            let __lane_ref2 = &*#lane1;
+            // `contains` re-checks the generation, so lanes 3..N apply
+            // exactly the same staleness semantics as the zipped two.
+            __lane_ref
+                .iter_zip(__lane_ref2)
+                .map(|(e, _, _)| e)
+                #(.filter(|e| #extra_lanes.contains(*e)))*
+                .collect()
+        };
     };
 
-    expanded.into()
+    let lookups: Vec<_> = input
+        .closure_args
+        .iter()
+        .map(|a| {
+            let name = &a.name;
+            let lane = format_ident!("__lane_{}", name);
+            if a.mutable {
+                quote! { let #name = #lane.get_mut(entity).unwrap(); }
+            } else {
+                quote! { let #name = #lane.get(entity).unwrap(); }
+            }
+        })
+        .collect();
+
+    let body = &input.body;
+    quote! {
+        {
+            #(#read_lanes)*
+            #(#write_lanes)*
+            #collect_entities
+            for entity in __entities {
+                #(#lookups)*
+                #body
+            }
+        }
+    }
 }

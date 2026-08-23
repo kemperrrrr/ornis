@@ -2,18 +2,22 @@
 //! remote editor (see `src/remote.rs`). Kept free of web-sys/wgpu types so
 //! it compiles — and is unit-tested — on native targets.
 //!
-//! The server may answer with a reduced variant that lacks the
-//! `transform`/`mesh`/`material` entity fields (no live world yet). Those
-//! fields are required here, so parsing such a payload fails and the caller
-//! falls back to the static `scene.ron` path.
+//! Since the D2 rewrite (audit 2026-08-22 §6.2) the contract is generic:
+//! every entity carries a `components` map keyed by the registry name,
+//! and payloads are serde-canonical forms of the component types from
+//! `ornis_render::scene` (externally-tagged enums) — both sides use the
+//! same types, no per-variant mirror code. The server may answer with a
+//! reduced variant whose entities lack `components` (no live world yet) —
+//! parsing such a payload fails here and the caller falls back to the
+//! static `scene.ron` path.
 
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
 use serde::Deserialize;
 
-/// Root object of the `/api/scene` response. Unknown fields (`entity_count`,
-/// entity `id`/`generation`/`name`, …) are ignored by serde.
+/// Root object of the `/api/scene` response. Unknown fields
+/// (`entity_count`, entity `id`/`generation`, …) are ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiScene {
     /// Server-side scene version; the client re-uploads GPU data only when
@@ -22,58 +26,30 @@ pub struct ApiScene {
     #[serde(default)]
     pub entities: Vec<ApiEntity>,
     #[serde(default)]
-    pub lights: Vec<ApiLight>,
+    pub lights: Vec<LightDesc>,
     pub camera: CameraDesc,
     #[serde(default)]
     pub ambient: [f32; 3],
 }
 
-/// Entity entry. `transform`, `mesh` and `material` are mandatory: their
-/// absence means the server has no live world, and the parse error is the
-/// signal to fall back to `scene.ron`.
+/// Entity entry: `id`/`generation` (ignored here) plus the components map.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiEntity {
+    pub components: RenderComponents,
+}
+
+/// The components the renderer needs. They are mandatory: an entity
+/// without them means the server has no live world, and the parse error
+/// is the fallback signal. Other registry entries (`Name`, future types)
+/// are ignored by serde.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenderComponents {
+    #[serde(rename = "Transform")]
     pub transform: TransformDesc,
-    pub mesh: ApiMesh,
-    pub material: ApiMaterial,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum ApiMesh {
-    Sphere {
-        radius: f32,
-        segments: u32,
-        rings: u32,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum ApiMaterial {
-    Dielectric {
-        base_color: [f32; 3],
-        roughness: f32,
-    },
-    Metal {
-        base_color: [f32; 3],
-        roughness: f32,
-    },
-    Coat {
-        base_color: [f32; 3],
-        coat_weight: f32,
-        coat_roughness: f32,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum ApiLight {
-    Directional {
-        direction: [f32; 3],
-        intensity: f32,
-        color: [f32; 3],
-    },
+    #[serde(rename = "Mesh")]
+    pub mesh: MeshDesc,
+    #[serde(rename = "Material")]
+    pub material: MaterialDesc,
 }
 
 /// A successfully parsed `/api/scene` payload converted into the render
@@ -88,60 +64,14 @@ impl ApiScene {
         let entities = self
             .entities
             .into_iter()
-            .map(|e| EntityDesc {
-                name: String::new(),
-                transform: e.transform,
-                mesh: match e.mesh {
-                    ApiMesh::Sphere {
-                        radius,
-                        segments,
-                        rings,
-                    } => MeshDesc::Sphere {
-                        radius,
-                        segments,
-                        rings,
-                    },
-                },
-                material: match e.material {
-                    ApiMaterial::Dielectric {
-                        base_color,
-                        roughness,
-                    } => MaterialDesc::Dielectric {
-                        base_color,
-                        roughness,
-                    },
-                    ApiMaterial::Metal {
-                        base_color,
-                        roughness,
-                    } => MaterialDesc::Metal {
-                        base_color,
-                        roughness,
-                    },
-                    ApiMaterial::Coat {
-                        base_color,
-                        coat_weight,
-                        coat_roughness,
-                    } => MaterialDesc::Coat {
-                        base_color,
-                        coat_weight,
-                        coat_roughness,
-                    },
-                },
-            })
-            .collect();
-        let lights = self
-            .lights
-            .into_iter()
-            .map(|l| match l {
-                ApiLight::Directional {
-                    direction,
-                    intensity,
-                    color,
-                } => LightDesc::Directional {
-                    direction,
-                    intensity,
-                    color,
-                },
+            .map(|e| {
+                let components = e.components;
+                EntityDesc {
+                    name: String::new(),
+                    transform: components.transform,
+                    mesh: components.mesh,
+                    material: components.material,
+                }
             })
             .collect();
         LiveScene {
@@ -149,7 +79,7 @@ impl ApiScene {
             scene: Scene {
                 name: "live".to_string(),
                 entities,
-                lights,
+                lights: self.lights,
                 camera: self.camera,
                 ambient: self.ambient,
             },
@@ -159,7 +89,7 @@ impl ApiScene {
 
 /// Parse a `/api/scene` JSON body. Returns `Err` for malformed JSON and —
 /// intentionally — for the reduced server variant without per-entity
-/// transform/mesh/material, so the caller can fall back to `scene.ron`.
+/// `components`, so the caller can fall back to `scene.ron`.
 pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
     Ok(serde_json::from_str::<ApiScene>(json)?.into_live())
 }
@@ -168,16 +98,19 @@ pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
 mod tests {
     use super::*;
 
-    /// The full contract payload, verbatim from the API spec.
+    /// The full contract payload, in the canonical generic form.
     const FULL_CONTRACT: &str = r#"{
         "version": 5, "entity_count": 2,
         "entities": [{
-            "id": 0, "generation": 0, "name": "Red Sphere",
-            "transform": {"translation":[-5.6,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-            "mesh": {"kind":"sphere","radius":1.0,"segments":32,"rings":24},
-            "material": {"kind":"dielectric","base_color":[0.8,0.2,0.2],"roughness":0.5}
+            "id": 0, "generation": 0,
+            "components": {
+                "Name": "Red Sphere",
+                "Transform": {"translation":[-5.6,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                "Mesh": {"Sphere": {"radius":1.0,"segments":32,"rings":24}},
+                "Material": {"Dielectric": {"base_color":[0.8,0.2,0.2],"roughness":0.5}}
+            }
         }],
-        "lights": [{"kind":"directional","direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}],
+        "lights": [{"Directional": {"direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}}],
         "camera": {"position":[0,2.5,9],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0},
         "ambient": [0.10,0.10,0.15]
     }"#;
@@ -209,12 +142,12 @@ mod tests {
 
     #[test]
     fn rejects_reduced_variant_without_entity_fields() {
-        // Server without a live world: entities lack transform/mesh/material.
+        // Server without a live world: entities lack `components`.
         // Parse must fail so the caller falls back to the scene.ron path.
         let reduced = r#"{
             "version": 3, "entity_count": 1,
-            "entities": [{"id": 0, "generation": 0, "name": "Cube"}],
-            "lights": [{"kind":"directional","direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}],
+            "entities": [{"id": 0, "generation": 0}],
+            "lights": [{"Directional": {"direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}}],
             "camera": {"position":[0,2.5,9],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0},
             "ambient": [0.10,0.10,0.15]
         }"#;
@@ -227,14 +160,18 @@ mod tests {
             "version": 7,
             "entities": [
                 {
-                    "transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-                    "mesh": {"kind":"sphere","radius":2.0,"segments":48,"rings":32},
-                    "material": {"kind":"coat","base_color":[0.1,0.2,0.9],"coat_weight":0.8,"coat_roughness":0.1}
+                    "components": {
+                        "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                        "Mesh": {"Sphere": {"radius":2.0,"segments":48,"rings":32}},
+                        "Material": {"Coat": {"base_color":[0.1,0.2,0.9],"coat_weight":0.8,"coat_roughness":0.1}}
+                    }
                 },
                 {
-                    "transform": {"translation":[3,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-                    "mesh": {"kind":"sphere","radius":0.5,"segments":16,"rings":12},
-                    "material": {"kind":"metal","base_color":[0.9,0.8,0.3],"roughness":0.2}
+                    "components": {
+                        "Transform": {"translation":[3,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                        "Mesh": {"Sphere": {"radius":0.5,"segments":16,"rings":12}},
+                        "Material": {"Metal": {"base_color":[0.9,0.8,0.3],"roughness":0.2}}
+                    }
                 }
             ],
             "lights": [],
@@ -266,13 +203,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_mesh_and_material_kinds() {
+    fn rejects_unknown_enum_variants() {
         let unknown_mesh = r#"{
             "version": 1,
             "entities": [{
-                "transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-                "mesh": {"kind":"torus","radius":1.0},
-                "material": {"kind":"dielectric","base_color":[1,1,1],"roughness":0.5}
+                "components": {
+                    "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                    "Mesh": {"Torus": {"radius":1.0}},
+                    "Material": {"Dielectric": {"base_color":[1,1,1],"roughness":0.5}}
+                }
             }],
             "lights": [],
             "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}
@@ -282,9 +221,11 @@ mod tests {
         let unknown_material = r#"{
             "version": 1,
             "entities": [{
-                "transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-                "mesh": {"kind":"sphere","radius":1.0,"segments":32,"rings":24},
-                "material": {"kind":"hair","base_color":[1,1,1]}
+                "components": {
+                    "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                    "Mesh": {"Sphere": {"radius":1.0,"segments":32,"rings":24}},
+                    "Material": {"Hair": {"base_color":[1,1,1]}}
+                }
             }],
             "lights": [],
             "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}

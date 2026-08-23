@@ -19,6 +19,13 @@ struct Velocity {
     z: f32,
 }
 
+#[derive(Debug, Clone, DeriveAutoPipeline)]
+struct Force {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
 #[test]
 fn derive_auto_pipeline_registers() {
     let mut store = SmartStore::new();
@@ -100,6 +107,81 @@ fn for_each_entity_macro_two_lanes() {
 
     let lane = store.read_lane::<Position>().unwrap();
     assert!((lane.get(e).unwrap().x - 1.5).abs() < 1e-6);
+}
+
+/// Regression (audit §2.3, backlog #18): with three lanes and partial
+/// ownership, an entity missing a component from lane 3 must be skipped
+/// by the intersection — not panic the loop on `get(entity).unwrap()`,
+/// which is what the pre-fix codegen (zip of only the first two lanes)
+/// did.
+#[test]
+fn for_each_entity_macro_three_lanes_skips_partial_ownership() {
+    let mut store = SmartStore::new();
+    store.register::<Position>();
+    store.register::<Velocity>();
+    store.register::<Force>();
+
+    // Full set: must be visited and updated.
+    let full = store.create_entity();
+    store.insert(
+        full,
+        Position {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    store.insert(
+        full,
+        Velocity {
+            x: 0.5,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    store.insert(
+        full,
+        Force {
+            x: 2.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+
+    // Position+Velocity, but no Force: pre-fix this entity entered the
+    // zip of the first two lanes and panicked the loop; now it must be
+    // silently excluded and left untouched.
+    let partial = store.create_entity();
+    store.insert(
+        partial,
+        Position {
+            x: 10.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    store.insert(
+        partial,
+        Velocity {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+
+    let mut visited = 0usize;
+    for_each_entity!(store, |pos: &mut Position,
+                             vel: &mut Velocity,
+                             force: &Force| {
+        visited += 1;
+        vel.x += force.x;
+        pos.x += vel.x;
+    });
+
+    assert_eq!(visited, 1);
+    let pos_lane = store.read_lane::<Position>().unwrap();
+    assert_eq!(pos_lane.get(full).unwrap().x, 3.5); // 1.0 + 0.5 + 2.0
+    assert_eq!(pos_lane.get(partial).unwrap().x, 10.0);
 }
 
 #[smart_pipeline]

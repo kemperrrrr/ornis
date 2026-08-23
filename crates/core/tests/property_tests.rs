@@ -1,8 +1,9 @@
 //! Property tests for the ECS core (proptest, quality-gate level 2).
 //!
 //! We check invariants, not examples: sparse-set ComponentStore
-//! (insert/remove/get/iter against a HashMap model), generational
-//! EntityAllocator (slot recycling, stale handles), PageTable
+//! (insert/remove/get/iter/iter_zip against a HashMap model),
+//! generational EntityAllocator (slot recycling, stale handles),
+//! PageTable
 //! (sparse indices over a large range) and pure AABB/Ray geometry.
 //!
 //! The case count is bounded so `cargo test` stays fast.
@@ -39,6 +40,31 @@ fn store_ops_strategy() -> impl Strategy<Value = Vec<StoreOp>> {
         ],
         0..128,
     )
+}
+
+/// Applies an operation log to a store and its HashMap model — the same
+/// semantics as `store_matches_hashmap_model`: one slot per id, the last
+/// insert wins, remove applies only to a live (same-generation) handle.
+fn apply_ops(
+    store: &mut ComponentStore<u64>,
+    model: &mut HashMap<u32, (u32, u64)>,
+    ops: &[StoreOp],
+) {
+    for op in ops {
+        match *op {
+            StoreOp::Insert(e, v) => {
+                store.insert(e, v);
+                model.insert(e.id(), (e.generation(), v));
+            }
+            StoreOp::Remove(e) => {
+                store.remove(e);
+                let live_generation = model.get(&e.id()).map(|(g, _)| *g);
+                if live_generation == Some(e.generation()) {
+                    model.remove(&e.id());
+                }
+            }
+        }
+    }
 }
 
 proptest! {
@@ -141,6 +167,48 @@ proptest! {
             let e = Entity::new_with_gen(*id, *g);
             prop_assert_eq!(store.get(e), Some(value));
         }
+    }
+
+    /// Model-based: `iter_zip` over two random stores yields exactly the
+    /// pairs whose id is live in both models at the same generation.
+    /// A recycled id with divergent generations is skipped — never
+    /// matched — and skips never abort the iteration, which the exact
+    /// count check below would catch.
+    #[test]
+    fn zip_matches_model(ops_a in store_ops_strategy(), ops_b in store_ops_strategy()) {
+        let mut store_a: ComponentStore<u64> = ComponentStore::new();
+        let mut store_b: ComponentStore<u64> = ComponentStore::new();
+        let mut model_a: HashMap<u32, (u32, u64)> = HashMap::new();
+        let mut model_b: HashMap<u32, (u32, u64)> = HashMap::new();
+        apply_ops(&mut store_a, &mut model_a, &ops_a);
+        apply_ops(&mut store_b, &mut model_b, &ops_b);
+
+        let zipped: HashMap<(u32, u32), (u64, u64)> = store_a
+            .iter_zip(&store_b)
+            .map(|(e, a, b)| ((e.id(), e.generation()), (*a, *b)))
+            .collect();
+
+        for (id, (gen_a, value_a)) in &model_a {
+            match model_b.get(id) {
+                Some((gen_b, value_b)) if gen_b == gen_a => {
+                    prop_assert_eq!(zipped.get(&(*id, *gen_a)), Some(&(*value_a, *value_b)));
+                }
+                _ => {
+                    // Absent from the other store or a divergent
+                    // generation: no pair may surface for this id.
+                    prop_assert!(zipped.keys().all(|(zid, _)| zid != id));
+                }
+            }
+        }
+        // …and nothing beyond the models: the cardinality must match
+        // exactly (no silent drops, no duplicates).
+        let expected = model_a
+            .iter()
+            .filter(|(id, (gen_a, _))| {
+                model_b.get(*id).is_some_and(|(gen_b, _)| gen_b == gen_a)
+            })
+            .count();
+        prop_assert_eq!(zipped.len(), expected);
     }
 
     // ── EntityAllocator: generational indices ────────────────────────

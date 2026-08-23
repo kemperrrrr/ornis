@@ -187,12 +187,11 @@ impl<T> ComponentStore<T> {
     ) -> impl Iterator<Item = (Entity, &'a T)> + 'a {
         let bits = self.bitset.difference(exclude);
         bits.filter_map(move |id| {
+            // A set bit without a sparse entry is unreachable via the public
+            // API (insert/remove keep both structures in sync); if that
+            // invariant ever breaks, skip the id rather than truncate.
             let dense_idx = (self.sparse.get(id)).copied()?;
-            let entity = self.entities[dense_idx];
-            if entity.generation() != self.entities[dense_idx].generation() {
-                return None;
-            }
-            Some((entity, &self.data[dense_idx]))
+            Some((self.entities[dense_idx], &self.data[dense_idx]))
         })
     }
 
@@ -245,6 +244,32 @@ pub struct ZipIter<'a, 'b, A, B> {
     store_b: &'b ComponentStore<B>,
 }
 
+impl<'a, 'b, A, B> ZipIter<'a, 'b, A, B> {
+    /// Looks up the component pair for one entity id. `None` means "skip
+    /// this id" — never "stop iterating":
+    ///
+    /// * a set bit without a sparse entry is unreachable via the public
+    ///   API (insert/remove keep both structures in sync), but if that
+    ///   invariant ever breaks, the id is skipped defensively instead of
+    ///   silently aborting the whole iteration;
+    /// * a recycled slot may hold different generations in the two stores
+    ///   (one store missed the component cleanup on destroy): no live
+    ///   entity owns both halves, so the pair is skipped.
+    fn lookup(&self, id: usize) -> Option<(Entity, &'a A, &'b B)> {
+        let dense_a = self.store_a.sparse.get(id).copied()?;
+        let entity = self.store_a.entities[dense_a];
+        let dense_b = self.store_b.sparse.get(id).copied()?;
+        if entity.generation() != self.store_b.entities[dense_b].generation() {
+            return None;
+        }
+        Some((
+            entity,
+            &self.store_a.data[dense_a],
+            &self.store_b.data[dense_b],
+        ))
+    }
+}
+
 impl<'a, 'b, A, B> Iterator for ZipIter<'a, 'b, A, B> {
     type Item = (Entity, &'a A, &'b B);
 
@@ -252,27 +277,18 @@ impl<'a, 'b, A, B> Iterator for ZipIter<'a, 'b, A, B> {
         while self.cursor < self.entity_ids.len() {
             let id = self.entity_ids[self.cursor] as usize;
             self.cursor += 1;
-            let dense_a = (self.store_a.sparse.get(id)).copied()?;
-            let entity = self.store_a.entities[dense_a];
-            if entity.generation() != self.store_a.entities[dense_a].generation() {
-                continue;
+            if let Some(item) = self.lookup(id) {
+                return Some(item);
             }
-            let dense_b = (self.store_b.sparse.get(id)).copied()?;
-            if entity.generation() != self.store_b.entities[dense_b].generation() {
-                continue;
-            }
-            return Some((
-                entity,
-                &self.store_a.data[dense_a],
-                &self.store_b.data[dense_b],
-            ));
         }
         None
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        // Skips (generation mismatches, defensive sparse misses) make the
+        // remaining id count an upper bound only — the lower bound is 0.
         let remaining = self.entity_ids.len() - self.cursor;
-        (remaining, Some(remaining))
+        (0, Some(remaining))
     }
 }
 
@@ -412,6 +428,37 @@ mod tests {
     }
 
     #[test]
+    fn zip_iter_skips_generation_mismatch() {
+        let mut pos: ComponentStore<f32> = ComponentStore::new();
+        let mut vel: ComponentStore<f32> = ComponentStore::new();
+
+        // Recycled slot: id 0 is gen 0 in `vel` but gen 1 in `pos` (the
+        // destroy path re-seated the entity in pos without ever removing
+        // the stale component from vel). No live entity owns both halves,
+        // so the zip must skip id 0 entirely.
+        vel.insert(Entity::new_with_gen(0, 0), 1.0);
+        pos.insert(Entity::new_with_gen(0, 1), 2.0);
+
+        // A genuine pair at a higher id: a skip must not abort the
+        // iteration — ids come from the bitset intersection in ascending
+        // order, so the stale id 0 is met first.
+        let pair = Entity::new_with_gen(5, 0);
+        pos.insert(pair, 10.0);
+        vel.insert(pair, 20.0);
+
+        let iter = pos.iter_zip(&vel);
+        // The upper bound counts both ids, including the one about to be
+        // skipped on the generation mismatch.
+        assert_eq!(iter.size_hint(), (0, Some(2)));
+
+        let results: Vec<_> = iter.collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, pair);
+        assert_eq!(*results[0].1, 10.0);
+        assert_eq!(*results[0].2, 20.0);
+    }
+
+    #[test]
     fn without_filter() {
         let mut alloc = EntityAllocator::new();
         let mut store = ComponentStore::new();
@@ -457,7 +504,10 @@ mod tests {
         }
 
         let total: i32 = store.iter().sum();
-        assert_eq!(total, (0..12).map(|x| x + 1).sum());
+        // Аннотация обязательна: serde_json (зависимость ornis-core) добавляет
+        // `impl PartialEq<serde_json::Value> for i32` — без явного типа сумма
+        // в assert_eq! неоднозначна (E0283).
+        assert_eq!(total, (0..12).map(|x| x + 1).sum::<i32>());
     }
 
     #[test]
@@ -597,11 +647,14 @@ mod tests {
         }
 
         let mut iter = pos.iter_zip(&vel);
-        assert_eq!(iter.size_hint(), (5, Some(5)));
+        // The upper bound tracks the remaining entity ids; the lower bound
+        // is 0 because entries may be skipped (see
+        // zip_iter_skips_generation_mismatch).
+        assert_eq!(iter.size_hint(), (0, Some(5)));
 
         assert!(iter.next().is_some());
         assert!(iter.next().is_some());
-        assert_eq!(iter.size_hint(), (3, Some(3)));
+        assert_eq!(iter.size_hint(), (0, Some(3)));
     }
 
     #[test]
@@ -631,7 +684,10 @@ mod tests {
 
         assert_eq!(chunk_sizes, vec![4, 4, 4]);
         assert_eq!(seen, 13);
-        assert_eq!(store.iter().sum::<i32>(), (0..13).map(|x| x + 1).sum());
+        assert_eq!(
+            store.iter().sum::<i32>(),
+            (0..13).map(|x| x + 1).sum::<i32>()
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ members = [
     "crates/wgpu_backend",
     "crates/audio",
     "crates/render",
+    "crates/schedule",
     "crates/materialx",
     "crates/wasm",
     "xtask",
@@ -39,6 +40,7 @@ wgpu = "29"
 winit = "0.30"
 pollster = "0.3"
 tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"
 glam = "0.30"

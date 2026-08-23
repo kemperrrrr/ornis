@@ -194,7 +194,11 @@ mod tests {
         let config = RenderBackendConfig::default();
         let mut backend = create_render_backend(&device, &config);
 
-        backend.set_camera(&queue, &glam::Mat4::IDENTITY.to_cols_array_2d(), [0.0, 0.0, 3.0]);
+        backend.set_camera(
+            &queue,
+            &glam::Mat4::IDENTITY.to_cols_array_2d(),
+            [0.0, 0.0, 3.0],
+        );
         backend.set_lights(
             &queue,
             [0.1, 0.1, 0.1],

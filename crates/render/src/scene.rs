@@ -219,10 +219,8 @@ Scene(
         assert!(Scene::from_ron("not a scene at all").is_err());
         // Unknown material variant.
         assert!(
-            Scene::from_ron(
-                &FULL_SCENE_RON.replace("Dielectric(base_color", "Glass(base_color")
-            )
-            .is_err()
+            Scene::from_ron(&FULL_SCENE_RON.replace("Dielectric(base_color", "Glass(base_color"))
+                .is_err()
         );
     }
 

@@ -3,11 +3,11 @@
 //! exceeds it. Runs against random (technique x bloom x tail-culling x
 //! surface size) configurations.
 
-use ornis_render::{Budget, PassId, RenderGraph3D, Technique};
+use ornis_render::{Budget, PassId, RenderFrame3D, Technique};
 use proptest::prelude::*;
 
-fn cfg(technique: Technique, bloom: bool, size: u32) -> RenderGraph3D {
-    RenderGraph3D::new_with(
+fn cfg(technique: Technique, bloom: bool, size: u32) -> RenderFrame3D {
+    RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (size, size),
         technique,
@@ -33,7 +33,7 @@ proptest! {
         let max_tail = if bloom { 3 } else { 1 };
         let drop_tail = drop_tail.min(max_tail);
         // Registration order = execution order, so trailing PassIds are the
-        // tail passes. Totals are static per config (GraphLayout.passes is
+        // tail passes. Totals are static per config (FrameLayout.passes is
         // pub(crate); an integration test counts them itself).
         let total = match (technique, bloom) {
             (Technique::Forward, false) => 2,
@@ -45,19 +45,19 @@ proptest! {
         };
         for i in 0..drop_tail {
             let idx = total - 1 - i;
-            g3.graph_mut().set_pass_enabled(PassId(idx as u32), false);
+            g3.plan_mut().set_pass_enabled(PassId(idx as u32), false);
         }
 
-        let planned = g3.graph_mut().try_layout().unwrap().planned_pool_bytes();
+        let planned = g3.plan_mut().try_layout().unwrap().planned_pool_bytes();
 
         // Exact budget always fits.
         g3.set_budget(Budget::gpu_textures(planned));
-        prop_assert!(g3.graph_mut().try_layout().is_ok());
+        prop_assert!(g3.plan_mut().try_layout().is_ok());
 
         // One byte less always refuses, with the real requirement.
         if planned > 0 {
             g3.set_budget(Budget::gpu_textures(planned - 1));
-            let err = g3.graph_mut().try_layout().unwrap_err();
+            let err = g3.plan_mut().try_layout().unwrap_err();
             prop_assert_eq!(err.required, planned);
             prop_assert_eq!(err.budget, planned - 1);
             prop_assert!(!err.offenders.is_empty());
@@ -65,6 +65,6 @@ proptest! {
 
         // Unbounded restores the S3 behavior.
         g3.set_budget(Budget::unbounded());
-        prop_assert!(g3.graph_mut().try_layout().is_ok());
+        prop_assert!(g3.plan_mut().try_layout().is_ok());
     }
 }

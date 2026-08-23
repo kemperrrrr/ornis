@@ -1,8 +1,82 @@
-# Unified Scheduler — S0/S1 (кеш GraphLayout)
+# Unified Scheduler — S0/S1 (кеш FrameLayout)
 
 > Рабочий документ этапов S0–S1 из **Приложения C** [`PLAN.md`](../../PLAN.md)
 > (идея — [`IDEAS.md`](../../IDEAS.md) §28). Каждый прогон бенчей/тестов
 > обновляет числа в этом файле.
+
+> **Переименование 2026-08-23** (срез 1 приближения к Фазе C): модули и
+> типы получили Фаза-C-долговечные имена — `render_graph.rs` →
+> `frame_plan.rs` (`RenderGraph` → `FramePlan`, `GraphLayout` →
+> `FrameLayout`), `graph_frame.rs` → `frame_exec.rs` (`GraphExecutor` →
+> `FrameExecutor`, `RenderGraph3D` → `RenderFrame3D`, `GraphIds` →
+> `FrameIds`), `graph_passes.rs` → `frame_passes.rs` (`GraphPass` →
+> `FramePass`, `GraphResource` → `FrameResource`, `ResourceKind::GraphOwned`
+> → `FrameOwned`), пример → `frame_plan_probe`. Датированные секции
+> хронологии ниже (S0–S5, Hardening 2026-08-21…) используют имена своего
+> дня; канон имён — карта и глоссарий под этим указателем.
+
+> **Срез 1b (2026-08-23)**: отладочная mermaid-проекция обобщена в
+> движок — `ornis-schedule::MermaidDiagram` (уровни подграфами, потоки
+> рёбрами; доменно-нейтральные строковые id/метки собирает фронтенд).
+> Поверх него два адаптера: `FrameLayout::mermaid()` (байтовый формат
+> прежний, пинится golden-тестом `mermaid_is_a_valid_projection`) и
+> новая `Schedule::mermaid()` (системы `S{i}` подграфами уровней, рёбра
+> `order_before` — стрелками). У оболочки остаётся доменный
+> `debug_dump()` (пул/слоты/спеки).
+
+## Карта планировщика (2026-08-23, бэклог #19)
+
+> Этот блок — точка входа; ниже по файлу — хронология этапов (S0→S6).
+
+**Движок один** — крейт `crates/schedule` (`ornis-schedule`): уровни
+(`compute_levels`, `bitset_level_plan<K>` с generic-ключом),
+единый `OrderError` + валидация рёбер (`resolve_named_edge`,
+`validate_indexed_edge`), кеш уровенного плана (`PlanCache`), исполнитель
+уровней (`run_levels` — rayon на нативе, последовательный на wasm),
+mermaid-проектор отладочных диаграмм (`MermaidDiagram`, срез 1b).
+Доменов в нём нет: ни wgpu, ни ECS.
+
+**Фронтенда два** (осознанно, решение S6 ниже — полный роспуск
+`FramePlan` (тогдашний `RenderGraph`) отклонён с причинами):
+
+- `crates/core/src/schedule.rs` (`Schedule`) — системы над `Resources`:
+  ключи — `TypeId` singleton-ресурса и `TypeId` ленты `SmartStore`
+  (`reads_lane`/`writes_lane`, раздельные пространства имён);
+  TLS-enforcement объявленных доступов; кеш — `PlanCache`
+  (ленивая инвалидация); отладочная проекция — `Schedule::mermaid()`
+  (срез 1b).
+- `crates/render/src/frame_plan.rs` (`FramePlan`) — пассы над пулом
+  текстур: ключи — `ResourceId`; пул/лайфтаймы/бюджет S4/layout-кеш S1 —
+  доменные данные, уровни и рёбра — движок; исполнение записи команд —
+  `run_levels` на обоих таргетах (на wasm движковый путь последователен,
+  0..nodes; выключенные пассы отсутствуют в `FrameLayout`, поэтому
+  порядок регистрации корректен и совпадает с нативным); debug-enforcement
+  объявленных доступов — на выдаче view (`PassViews::view_of` →
+  `assert_pass_access_declared`, бэклог #6): «sneaky pass» паникует в
+  debug, release-путь без стоимости; debug-проекция
+  `FrameLayout::mermaid()` — адаптер общего проектора среза 1b
+  (формат байт-в-байт прежний, пинится golden-тестом).
+
+**Куда класть новое** (антидрейф): семантика, общая для обоих
+фронтендов — только в движок; доменные данные (текстурный пул, ленты,
+physics-агрегаты) — только во фронтенд. Исполняемая страховка от
+дрейфа — паритет-тест `crates/render/tests/scheduler_parity.rs`:
+зеркальные топологии обязаны давать побитово одинаковые уровни.
+
+**Глоссарий двойных имён** (одно понятие — одно слово в каждом
+фронтенде; внутри фронтенда всегда его слово):
+
+| Понятие | `Schedule` (core) | `FramePlan` (render) | Движок |
+|---|---|---|---|
+| Узел плана | система | пасс | node |
+| Доступы узла | `SystemAccess` (reads/writes + ленты) | типизированные `Access`-наборы (ZST-маркеры), проекция в layout | срезы `reads`/`writes` ключей `K` |
+| Ключ доступа | `TypeId` (ресурс / лента, раздельные пространства) | `ResourceId` | `K: Copy + Eq + Hash` |
+| Явные рёбра | `order_before(name, name)` | `order_before(PassId, PassId)` / `_named` | `resolve_named_edge` / `validate_indexed_edge` |
+| Уровни | `Schedule::levels()` | `FrameLayout::levels()` | `compute_levels` / `bitset_level_plan` |
+| Явные рёбра (данные) | `Schedule::ordering` | `FramePlan::ordering` | матрица смежности в плане |
+| Кеш плана | `PlanCache` + `level_computations()` | S1-кеш layout (уровни вычисляются при build) + `layout_computations()` | `PlanCache` (политика на фронтенде) |
+| Исполнитель | `run_levels` (оба таргета) | `run_levels` (оба таргета; wasm — последовательный, без `Sync`-границы) | `run_levels` (cfg-пара сигнатур) |
+| Ошибка рёбер | `OrderError` (реэкспорт) | `OrderError` (реэкспорт) | `OrderError` |
 
 ## Что сделано (2026-08-18)
 
@@ -353,6 +427,33 @@ S4-базис). «Конфликт писателей» сознательно �
   отложена (регистрация = порядок); потребность появится с динамическими
   пассами (data-фронтенд фазы 6).
 
+## S5d — гранулярность лент SmartStore в плане систем (2026-08-23, бэклог #5 аудита)
+
+- `SystemAccess::reads_lane/writes_lane::<T>()` — декларации доступа к
+  горячим лентам `SmartStore` по `TypeId` компонента; `*_lane_id(TypeId)`
+  — варианты под динамические фронтенды через реестр F0
+  (`ComponentMeta::type_id`). Протокол решает негатив §3.6
+  (`docs/quality/audit-2026-08-22.md`): `SmartStore` как один
+  singleton-ресурс сериализовал бы все системы, а без деклараций
+  зависимости по компонентам были невидимы планировщику.
+- Ключевое пространство планировщика раздельно: `TypeId` ресурса и
+  `TypeId` ленты — разные ключи (`AccessKey` в `schedule.rs`), ложного
+  конфликта «один тип как ресурс и как компонент» нет. Битсет-план
+  `ornis-schedule` generic и не менялся.
+- Каноничная форма системы над лентами: `.reads::<SmartStore>()` (сам
+  store — общий singleton, read-read не конфликтует) + ленты по
+  компонентам. Дизъюнктные ленты — параллельные системы без ручных
+  `order_before` (критерий Фазы B аудита; тест
+  `two_lane_system_plans_without_manual_edges`).
+- Enforcement на границе `SmartStore::read_lane/write_lane` (TLS-стек
+  активных деклараций): чтение покрывается `reads_lane` или
+  `writes_lane`, запись — строго `writes_lane` (write-гард доказывает
+  намерение, в отличие от незримой мутации через `&Resources`). Cold- и
+  lock-free ленты — отдельные пространства имён, протоколом не покрыты.
+  Тесты: `crates/core/tests/schedule_lanes.rs` — RaW/WaR/WaW по лентам,
+  разделение пространств, id-эквивалентность типизированным билдерам,
+  LCG-дифференциальный план против наивной модели, паники enforcement.
+
 ## S5 — закрытие (2026-08-19, без GPU-машины)
 
 - **Единый движок уровней**: `ornis-core::compute_levels(n, ordered(i,j))`
@@ -361,6 +462,10 @@ S4-базис). «Конфликт писателей» сознательно �
   Дублирование S5a/S5c устранено: «один scheduler на всё» теперь буква
   кода, а не только паттерн. Два фронтенда остаются осознанно:
   texture-ключевой (пул видов графа) и generic-ресурсный (`Resources`).
+  > 2026-08-23 (Фаза A аудита): движок вынесен в крейт `ornis-schedule`
+  > (`compute_levels`, битсет-план, единый `OrderError`, `PlanCache`,
+  > исполнитель `run_levels`); `ornis_core::compute_levels` остаётся
+  > реэкспортом, контракт ниже действует для нового пути.
 - **Bench записи**: `recording_bench` (lavapipe/headless) — sequential vs
   parallel `render()` + одинаковый submit; меряет CPU-сторону записи,
   которую и оптимизирует S5b. Compile-checked в гейте; числа — ручной
@@ -386,8 +491,10 @@ scheduler'ом», соблюдает контракт:
    `AccessDesc`-образные данные (типовой фронтенд: типы → `AccessDesc`;
    скриптовый фазы 6: манифест → `AccessDesc`), а не похоронены в коде
    систем.
-2. **Уровни — только через общий движок** `ornis-core::compute_levels`;
-   собственная реализация уровней запрещена (движок один с закрытия S5).
+2. **Уровни — только через общий движок** `ornis-schedule`
+   (`compute_levels`/`bitset_level_plan`; реэкспорт
+   `ornis-core::compute_levels` сохраняется); собственная реализация
+   уровней запрещена (движок один с закрытия S5).
 3. **Тайбрейк конфликтов — порядок регистрации** (RaW/WaR/WaW поверх).
 4. **Явный порядок (`order_before`) только разбивает уровни
    параллельности**, исполнение не пересортировывает.
@@ -470,3 +577,35 @@ enforcement` / `declared_access_passes_enforcement` /
 существующие тесты шедулера обновлены под декларирование лог-ресурсов
 (они и раньше читали его не декларировав — принуждение сразу нашло
 нарушителей в собственных тестах).
+
+### Пасс-сторона принуждения (2026-08-23, бэклог #6)
+
+Симметрия с TLS-enforcement систем: `PassViews::view_of` — единая воронка
+выдачи view по `ResourceId` (типизированные `SystemViews` и императивные
+run-замыкания сходятся здесь) — в debug проверяет `id` против declared
+reads/writes пасса (`assert_pass_access_declared`, `frame_plan.rs`);
+нарушение — паника с именем пасса и ресурса, аналог `sneaky system` —
+`sneaky pass`. Release: `#[cfg(debug_assertions)]`, нулевая стоимость.
+Честный лимит: `queue.write_buffer` в renderer-uniforms не проходит через
+`view_of`, поэтому инвариант queue-backed буферов одного уровня — авторский
+контракт (класс ограничения — как у rayon-границы систем ниже). Тесты:
+`sneaky_pass_undeclared_access_panics`,
+`declared_pass_access_passes_enforcement` (`frame_plan.rs`),
+`pass_views_undeclared_view_panics_in_debug` (`frame_exec.rs`).
+
+### Системная сторона на rayon-границе (2026-08-23, бэклог #7)
+
+TLS-кадр принуждения действовал только в потоке `System::run`; дочерние
+задачи системы стартовали с пустым стеком (аудит §3.3) — брешь ровно на
+главном паттерне движка (`#[smart_pipeline]` генерирует `par_iter`).
+Закрыто переносом кадра: `capture_access_frame` захватывает верхнюю
+декларацию до входа в параллельную секцию, `AccessFrameCapture::install`
+перевешивает её в рабочий поток (RAII, пустой снимок — no-op); макрос
+генерирует пару вокруг `par_iter`-тел автоматически (обе ветви — одна
+лента и zip), вложенные циклы наследуют кадр транзитивно. Ручной
+`rayon`/`std`-параллелизм без захвата — задокументированный лимит (как и
+debug-only по умолчанию). Тесты:
+`undeclared_access_in_child_thread_panics_with_captured_frame`,
+`declared_access_in_child_thread_passes_with_captured_frame`,
+`capture_outside_schedule_run_is_noop`. Фаза B аудита с этим закрыта
+целиком: ленты (#5) ✅, пассы (#6) ✅, rayon (#7) ✅.

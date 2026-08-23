@@ -672,6 +672,7 @@ dependencies = [
  "fixedbitset",
  "glam",
  "mutants",
+ "ornis-schedule",
  "rayon",
 ]
 
@@ -713,10 +714,18 @@ dependencies = [
  "glam",
  "ornis-core",
  "ornis-macros",
- "rayon",
+ "ornis-schedule",
  "ron",
  "serde",
  "wgpu",
+]
+
+[[package]]
+name = "ornis-schedule"
+version = "0.1.0"
+dependencies = [
+ "fixedbitset",
+ "rayon",
 ]
 
 [[package]]
