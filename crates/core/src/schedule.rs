@@ -63,6 +63,18 @@
 //! ресурсов с их незримой внутренней изменяемостью). Cold- и lock-free
 //! ленты — отдельные пространства имён, протоколом не покрыты.
 //!
+//! # Параллелизм внутри систем (аудит §3.3, бэклог #7)
+//!
+//! TLS-стек действует в потоке, исполняющем `System::run`; дочерние задачи
+//! системы начинаются с пустого стека. Закрытие бреши — перенос кадра:
+//! [`capture_access_frame`] до входа в параллельную секцию и
+//! [`AccessFrameCapture::install`] в каждой дочерней задаче. Макрос
+//! `#[smart_pipeline]` генерирует эту пару вокруг `par_iter`-тел
+//! автоматически (главный паттерн движка покрыт). Документированный
+//! лимит: ручной параллелизм (`rayon::scope`/`spawn`) внутри системы
+//! **без** захвата по-прежнему вне проверки, и проверка по умолчанию
+//! debug-only (оба ограничения — требование «задокументировать» из §3.3).
+//!
 //! Механика уровней и конфликтов (включая битсет-план и кеш плана с
 //! диагностикой), единый [`OrderError`] и уровневый исполнитель живут в
 //! крейте `ornis-schedule` (Фаза A, аудит §7); здесь остаётся
@@ -276,6 +288,10 @@ fn reference_level_groups(
 }
 
 /// Активная декларация доступов исполняемой системы (принуждение).
+///
+/// `Clone` — снимок верхнего кадра переносится в дочерние параллельные
+/// задачи системы ([`AccessFrameCapture`], аудит §3.3, бэклог #7).
+#[derive(Clone)]
 struct AccessFrame {
     system: &'static str,
     reads: Vec<TypeId>,
@@ -290,10 +306,14 @@ thread_local! {
     static ACCESS_FRAMES: RefCell<Vec<AccessFrame>> = const { RefCell::new(Vec::new()) };
 }
 
-/// RAII-пуш декларации в [`ACCESS_FRAMES`]; снимается при выходе из
-/// области видимости, включая раскрутку паники (rayon переиспользует
-/// потоки — без RAII стек протухал бы).
-struct AccessFrameGuard;
+/// RAII-пуш декларации в thread-local стек `ACCESS_FRAMES`; снимается при
+/// выходе из области видимости, включая раскрутку паники (rayon
+/// переиспользует потоки — без RAII стек протухал бы).
+///
+/// Гард принадлежит принуждению планировщика: создаётся только парой
+/// push-точек (`Schedule::run_system`, [`AccessFrameCapture::install`]);
+/// ручная конструкция сломала бы парность push/pop стека.
+pub struct AccessFrameGuard;
 
 impl AccessFrameGuard {
     fn push(system: &'static str, access: &SystemAccess) -> Self {
@@ -315,6 +335,39 @@ impl Drop for AccessFrameGuard {
         ACCESS_FRAMES.with(|frames| {
             frames.borrow_mut().pop();
         });
+    }
+}
+
+/// Снимок верхней активной декларации доступов для переноса принуждения в
+/// параллельные дочерние задачи системы (аудит §3.3, бэклог #7).
+///
+/// `#[smart_pipeline]` генерирует захват и установку вокруг тел
+/// `par_iter`-циклов автоматически. Для ручного параллелизма внутри
+/// `System::run` (`rayon::scope`/`spawn`, `std::thread::scope`): захват
+/// до входа в параллельную секцию, установка — в каждой дочерней задаче;
+/// тогда дочерний поток наследует декларацию системы, и недекларированный
+/// доступ паникует так же, как в потоке системы.
+///
+/// `Send + Sync` (&'static str + TypeId): снимок разделяется по ссылке
+/// в `for_each`-замыканиях rayon. Пуст вне [`Schedule::run`] (или при
+/// выключенном принуждении доступов) — тогда [`install`](Self::install)
+/// возвращает `None` и поведение дочерних потоков не меняется.
+pub struct AccessFrameCapture(Option<AccessFrame>);
+
+/// Захватывает верхнюю активную декларацию доступов — точка входа,
+/// описанная у [`AccessFrameCapture`].
+pub fn capture_access_frame() -> AccessFrameCapture {
+    ACCESS_FRAMES.with(|frames| AccessFrameCapture(frames.borrow().last().cloned()))
+}
+
+impl AccessFrameCapture {
+    /// Перевешивает снятую декларацию в TLS текущего (рабочего) потока;
+    /// гард снимает её при выходе из области видимости, включая раскрутку
+    /// паники. Пустой снимок → `None`: одна TLS-загрузка, ноль аллокаций.
+    pub fn install(&self) -> Option<AccessFrameGuard> {
+        let frame = self.0.clone()?;
+        ACCESS_FRAMES.with(|frames| frames.borrow_mut().push(frame));
+        Some(AccessFrameGuard)
     }
 }
 
@@ -903,6 +956,80 @@ mod tests {
         let mut sched = Schedule::new();
         sched.add_system(Sneaky).set_enforce_accesses(true);
         sched.run(&res);
+    }
+
+    #[test]
+    #[should_panic(expected = "not declared")]
+    fn undeclared_access_in_child_thread_panics_with_captured_frame() {
+        // Бэклог #7 (аудит §3.3): дочерний поток системы стартует с
+        // пустым TLS-стеком — историческая брешь принуждения; захват с
+        // установкой кадра закрывают её. `std::thread::scope` гарантирует
+        // чужой поток (rayon-задача могла бы исполниться на вызывающем,
+        // где TLS и так заполнен); паника ребёнка докатывается до нити
+        // теста авто-join'ом scope.
+        struct SneakySpawn;
+        impl System for SneakySpawn {
+            fn name(&self) -> &'static str {
+                "sneaky_spawn"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new().writes::<A>()
+            }
+            fn run(&self, resources: &Resources) {
+                let frame = capture_access_frame();
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let _guard = frame.install();
+                        // Читает B, не декларировав его, — с дочернего потока.
+                        let _ = resources.get::<B>();
+                    });
+                });
+            }
+        }
+        let mut res = Resources::new();
+        res.insert(B);
+        let mut sched = Schedule::new();
+        sched.add_system(SneakySpawn).set_enforce_accesses(true);
+        sched.run(&res);
+    }
+
+    #[test]
+    fn declared_access_in_child_thread_passes_with_captured_frame() {
+        // Перенос кадра — не нарушение: own-write read декларирован,
+        // дочерний поток проверку проходит (перенос не создаёт ложных
+        // срабатываний).
+        struct HonestSpawn;
+        impl System for HonestSpawn {
+            fn name(&self) -> &'static str {
+                "honest_spawn"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new().writes::<A>()
+            }
+            fn run(&self, resources: &Resources) {
+                let frame = capture_access_frame();
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let _guard = frame.install();
+                        assert!(resources.get::<A>().is_some());
+                    });
+                });
+            }
+        }
+        let mut res = Resources::new();
+        res.insert(A);
+        let mut sched = Schedule::new();
+        sched.add_system(HonestSpawn).set_enforce_accesses(true);
+        sched.run(&res);
+    }
+
+    #[test]
+    fn capture_outside_schedule_run_is_noop() {
+        // Вне `Schedule::run` (и при выключенном принуждении) стек пуст:
+        // снимок пуст, install → None, поведение дочерних потоков не
+        // меняется — документированный «выключенный» путь.
+        let frame = capture_access_frame();
+        assert!(frame.install().is_none());
     }
 
     #[test]

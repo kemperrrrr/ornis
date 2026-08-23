@@ -419,9 +419,17 @@ impl LoopRewriter<'_> {
             [single] => {
                 let var = &single.var_name;
                 let method = par_iter_method(single.mutable);
+                // Аудит §3.3, бэклог #7: захват TLS-фрейма доступов до
+                // входа в параллельную секцию и установка в каждой задаче
+                // — принуждение действует и на rayon-потоках. Пустой
+                // снимок (вне Schedule::run) — no-op, стоимость ноль.
                 syn::parse_quote! {{
                     use ornis_core::rayon::prelude::*;
-                    #var.#method().for_each(|#pat| #body);
+                    let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
+                    #var.#method().for_each(|#pat| {
+                        let _ornis_frame_guard = __ornis_access_frame.install();
+                        #body
+                    });
                 }}
             }
             [first, second] => {
@@ -429,9 +437,14 @@ impl LoopRewriter<'_> {
                 let var1 = &second.var_name;
                 let method0 = par_iter_method(first.mutable);
                 let method1 = par_iter_method(second.mutable);
+                // См. одноленточную ветвь: захват/установка фрейма (#7).
                 syn::parse_quote! {{
                     use ornis_core::rayon::prelude::*;
-                    #var0.#method0().zip(#var1.#method1()).for_each(|#pat| #body);
+                    let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
+                    #var0.#method0().zip(#var1.#method1()).for_each(|#pat| {
+                        let _ornis_frame_guard = __ornis_access_frame.install();
+                        #body
+                    });
                 }}
             }
             _ => unreachable!("extract_lane_iters returns at most two lanes"),

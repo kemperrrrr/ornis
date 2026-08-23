@@ -564,7 +564,24 @@ reads/writes пасса (`assert_pass_access_declared`, `render_graph.rs`);
 `sneaky pass`. Release: `#[cfg(debug_assertions)]`, нулевая стоимость.
 Честный лимит: `queue.write_buffer` в renderer-uniforms не проходит через
 `view_of`, поэтому инвариант queue-backed буферов одного уровня — авторский
-контракт, тот же класс ограничения, что rayon-уход систем (§3.3 аудита,
-бэклог #7). Тесты: `sneaky_pass_undeclared_access_panics`,
+контракт (класс ограничения — как у rayon-границы систем ниже). Тесты:
+`sneaky_pass_undeclared_access_panics`,
 `declared_pass_access_passes_enforcement` (`render_graph.rs`),
 `pass_views_undeclared_view_panics_in_debug` (`graph_frame.rs`).
+
+### Системная сторона на rayon-границе (2026-08-23, бэклог #7)
+
+TLS-кадр принуждения действовал только в потоке `System::run`; дочерние
+задачи системы стартовали с пустым стеком (аудит §3.3) — брешь ровно на
+главном паттерне движка (`#[smart_pipeline]` генерирует `par_iter`).
+Закрыто переносом кадра: `capture_access_frame` захватывает верхнюю
+декларацию до входа в параллельную секцию, `AccessFrameCapture::install`
+перевешивает её в рабочий поток (RAII, пустой снимок — no-op); макрос
+генерирует пару вокруг `par_iter`-тел автоматически (обе ветви — одна
+лента и zip), вложенные циклы наследуют кадр транзитивно. Ручной
+`rayon`/`std`-параллелизм без захвата — задокументированный лимит (как и
+debug-only по умолчанию). Тесты:
+`undeclared_access_in_child_thread_panics_with_captured_frame`,
+`declared_access_in_child_thread_passes_with_captured_frame`,
+`capture_outside_schedule_run_is_noop`. Фаза B аудита с этим закрыта
+целиком: ленты (#5) ✅, пассы (#6) ✅, rayon (#7) ✅.
