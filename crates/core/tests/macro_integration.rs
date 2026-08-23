@@ -170,7 +170,9 @@ fn for_each_entity_macro_three_lanes_skips_partial_ownership() {
     );
 
     let mut visited = 0usize;
-    for_each_entity!(store, |pos: &mut Position, vel: &mut Velocity, force: &Force| {
+    for_each_entity!(store, |pos: &mut Position,
+                             vel: &mut Velocity,
+                             force: &Force| {
         visited += 1;
         vel.x += force.x;
         pos.x += vel.x;
