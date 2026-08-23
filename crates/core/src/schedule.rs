@@ -47,6 +47,22 @@
 //! включена в debug-сборках и выключена в release
 //! ([`Schedule::set_enforce_accesses`] переопределяет).
 //!
+//! # Гранулярность лент `SmartStore` (аудит §3.6, бэклог #5)
+//!
+//! Хранилище компонентов — обычный singleton в [`Resources`]; декларация
+//! `reads::<SmartStore>()` выдаёт системам сам store (общее чтение,
+//! конфликта нет). Гранулярность компонентов декларируется отдельно:
+//! [`SystemAccess::reads_lane`]/[`SystemAccess::writes_lane`] по `TypeId`
+//! компонента — конфликты выводятся по лентам, системы над дизъюнктными
+//! лентами идут параллельно, ручные `order_before` не нужны. Ресурсы и
+//! ленты — раздельные пространства имён ключей планировщика (один тип
+//! может быть и ресурсом, и компонентом без ложного конфликта).
+//! Принуждение — на границе `SmartStore::read_lane/write_lane`: чтение
+//! покрывается `reads_lane` или `writes_lane`, запись — строго
+//! `writes_lane` (write-гард доказывает намерение писать — в отличие от
+//! ресурсов с их незримой внутренней изменяемостью). Cold- и lock-free
+//! ленты — отдельные пространства имён, протоколом не покрыты.
+//!
 //! Механика уровней и конфликтов (включая битсет-план и кеш плана с
 //! диагностикой), единый [`OrderError`] и уровневый исполнитель живут в
 //! крейте `ornis-schedule` (Фаза A, аудит §7); здесь остаётся
@@ -130,13 +146,19 @@ impl Resources {
     }
 }
 
-/// Объявленные доступы системы: чтения/записи singleton-ресурсов по типам.
-/// Раньше назывался `Access` — переименован, чтобы не конфликтовать с
-/// типовым `ornis_render::Access` (ZST-маркеры `Read`/`Write` графа).
+/// Объявленные доступы системы: singleton-ресурсы (`reads`/`writes`) и
+/// горячие ленты компонентов `SmartStore` (`reads_lanes`/`writes_lanes`)
+/// по типам. Раньше назывался `Access` — переименован, чтобы не
+/// конфликтовать с типовым `ornis_render::Access` (ZST-маркеры
+/// `Read`/`Write` графа).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemAccess {
     pub reads: Vec<TypeId>,
     pub writes: Vec<TypeId>,
+    /// Ленты компонентов, читаемые системой (`TypeId` компонента).
+    pub reads_lanes: Vec<TypeId>,
+    /// Ленты компонентов, записываемые системой (`TypeId` компонента).
+    pub writes_lanes: Vec<TypeId>,
 }
 
 impl SystemAccess {
@@ -156,12 +178,69 @@ impl SystemAccess {
         self
     }
 
+    /// Добавляет ленту компонента `T` в набор чтений.
+    pub fn reads_lane<T: 'static + Send + Sync>(mut self) -> Self {
+        self.reads_lanes.push(TypeId::of::<T>());
+        self
+    }
+
+    /// Добавляет ленту компонента `T` в набор записей.
+    pub fn writes_lane<T: 'static + Send + Sync>(mut self) -> Self {
+        self.writes_lanes.push(TypeId::of::<T>());
+        self
+    }
+
+    /// [`SystemAccess::reads_lane`] по известному `TypeId` — для
+    /// динамических фронтендов через реестр ([`ComponentMeta::type_id`]).
+    ///
+    /// [`ComponentMeta::type_id`]: crate::ComponentMeta::type_id
+    pub fn reads_lane_id(mut self, id: TypeId) -> Self {
+        self.reads_lanes.push(id);
+        self
+    }
+
+    /// [`SystemAccess::writes_lane`] по известному `TypeId`.
+    pub fn writes_lane_id(mut self, id: TypeId) -> Self {
+        self.writes_lanes.push(id);
+        self
+    }
+
     /// Конфликтует ли запись с (чтение ∪ запись) другого доступа.
     #[cfg(test)]
     fn writes_touch(&self, other: &SystemAccess) -> bool {
         self.writes
             .iter()
             .any(|w| other.reads.contains(w) || other.writes.contains(w))
+    }
+}
+
+/// Ключ планировщика уровней: singleton-ресурсы и ленты компонентов — два
+/// раздельных пространства имён. Один и тот же тип может быть ресурсом у
+/// одной системы и компонентом у другой; без разделения пространств это
+/// давало бы ложный конфликт (аудит §3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AccessKey {
+    Resource(TypeId),
+    Lane(TypeId),
+}
+
+impl SystemAccess {
+    /// Проекция чтений в ключи планировщика (ресурсы + ленты).
+    fn read_keys(&self) -> Vec<AccessKey> {
+        self.reads
+            .iter()
+            .map(|&id| AccessKey::Resource(id))
+            .chain(self.reads_lanes.iter().map(|&id| AccessKey::Lane(id)))
+            .collect()
+    }
+
+    /// Проекция записей в ключи планировщика (ресурсы + ленты).
+    fn write_keys(&self) -> Vec<AccessKey> {
+        self.writes
+            .iter()
+            .map(|&id| AccessKey::Resource(id))
+            .chain(self.writes_lanes.iter().map(|&id| AccessKey::Lane(id)))
+            .collect()
     }
 }
 
@@ -201,6 +280,8 @@ struct AccessFrame {
     system: &'static str,
     reads: Vec<TypeId>,
     writes: Vec<TypeId>,
+    reads_lanes: Vec<TypeId>,
+    writes_lanes: Vec<TypeId>,
 }
 
 thread_local! {
@@ -221,6 +302,8 @@ impl AccessFrameGuard {
                 system,
                 reads: access.reads.clone(),
                 writes: access.writes.clone(),
+                reads_lanes: access.reads_lanes.clone(),
+                writes_lanes: access.writes_lanes.clone(),
             });
         });
         AccessFrameGuard
@@ -254,6 +337,40 @@ fn assert_access_declared<R: Any + Send + Sync>() {
                  schedule contract",
                 frame.system,
                 std::any::type_name::<R>()
+            );
+        }
+    });
+}
+
+/// Проверяет ленту компонента `T` против декларации текущей исполняемой
+/// системы — граница `SmartStore::read_lane`/`write_lane` (аудит §3.6).
+/// Вне [`Schedule::run`] (и при выключенном принуждении стек пуст) — no-op.
+/// Чтение покрывается `reads_lane` или `writes_lane`; запись — строго
+/// `writes_lane`: write-гард доказывает намерение писать, в отличие от
+/// ресурсов, где мутация происходит через незримую внутреннюю
+/// изменяемость. Cold- и lock-free ленты — отдельные пространства имён и
+/// этим протоколом не покрываются (экспериментальные механизмы).
+pub(crate) fn assert_lane_access_declared<T: 'static>(for_write: bool) {
+    ACCESS_FRAMES.with(|frames| {
+        let frames = frames.borrow();
+        let Some(frame) = frames.last() else {
+            return;
+        };
+        let id = TypeId::of::<T>();
+        let declared = if for_write {
+            frame.writes_lanes.contains(&id)
+        } else {
+            frame.reads_lanes.contains(&id) || frame.writes_lanes.contains(&id)
+        };
+        if !declared {
+            let verb = if for_write { "writes" } else { "reads" };
+            panic!(
+                "system '{}' {} lane '{}' that is not declared in its access set \
+                 (SystemAccess::reads_lane/writes_lane) — undeclared access breaks the \
+                 deterministic schedule contract",
+                frame.system,
+                verb,
+                std::any::type_name::<T>()
             );
         }
     });
@@ -379,8 +496,10 @@ impl Schedule {
     }
 
     fn cached_levels(&self) -> Vec<Vec<usize>> {
-        let reads: Vec<Vec<TypeId>> = self.accesses.iter().map(|a| a.reads.clone()).collect();
-        let writes: Vec<Vec<TypeId>> = self.accesses.iter().map(|a| a.writes.clone()).collect();
+        let reads: Vec<Vec<AccessKey>> =
+            self.accesses.iter().map(SystemAccess::read_keys).collect();
+        let writes: Vec<Vec<AccessKey>> =
+            self.accesses.iter().map(SystemAccess::write_keys).collect();
         self.plan
             .get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
     }
