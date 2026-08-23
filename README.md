@@ -147,7 +147,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
 | Render Graph: `RenderGraph3D` + `Technique` (forward/deferred/hybrid как конфигурация графа) + блум-каскад | ✅ |
-| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, `mermaid()`-проекция (S6); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов, кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | ✅ | `crates/render/src/render_graph.rs`, `graph_frame.rs`; детали: `docs/rendering/render-graph.md` |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, `mermaid()`-проекция (S6); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | ✅ | `crates/render/src/render_graph.rs`, `graph_frame.rs`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 

@@ -107,7 +107,12 @@ impl GraphExecutor {
     ///
     /// Invariant (pass authors): passes that write the same queue-backed
     /// buffer (renderer-internal uniforms are not part of the declared
-    /// texture accesses) must land in different levels.
+    /// texture accesses) must land in different levels. The texture side
+    /// of the contract is now enforced — `PassViews::view_of` panics in
+    /// debug on a `ResourceId` outside the pass's declared reads/writes
+    /// (бэклог #6); `queue.write_buffer` calls never flow through
+    /// `view_of`, so this buffer-side invariant stays an author contract,
+    /// like the rayon limitation of system enforcement (audit §3.3).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn execute_parallel<'a>(
         &'a mut self,
@@ -270,8 +275,15 @@ impl<'a> PassViews<'a> {
     ///
     /// # Panics
     /// Panics if the resource is not alive on this pass, if its external
-    /// view is not set, or if its slot texture was never created.
+    /// view is not set, or if its slot texture was never created. Debug
+    /// builds additionally panic when `id` sits outside the pass's declared
+    /// reads/writes (бэклог #6, `assert_pass_access_declared`) — the
+    /// pass-level counterpart of the system TLS enforcement in
+    /// `core::Schedule`, covering both the typed and the imperative
+    /// frontends at the ground-truth `ResourceId` layer.
     pub fn view_of(&self, id: ResourceId) -> &'a wgpu::TextureView {
+        #[cfg(debug_assertions)]
+        crate::render_graph::assert_pass_access_declared(self.layout, self.index, id);
         let rl = self.resource(id);
         assert!(
             rl.alive_at(self.index),
@@ -1132,5 +1144,36 @@ mod tests {
         );
         let layout = g3.graph_mut().layout();
         assert_eq!(layout.planned_pool_bytes(), 12 * 1280 * 720);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "'sneaky' (index 1) accesses resource 'b'")]
+    fn pass_views_undeclared_view_panics_in_debug() {
+        // Бэклог #6 / аудит §4.1 — «sneaky pass» по реальному пути выдачи
+        // view: `PassViews::view_of` по ResourceId вне declared
+        // reads/writes паникует с именем пасса и ресурса ещё до обращения
+        // к пулу (пустой пул — device-free ground truth).
+        let mut graph = RenderGraph::new((64, 64));
+        let tex = TextureSpec {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            samples: 1,
+            size: SizePolicy::MatchSurface,
+        };
+        let a = graph.create_resource("a", tex);
+        let b = graph.create_resource("b", tex);
+        graph.add_pass("writer").write(a).write(b);
+        graph.add_pass("sneaky").read(a);
+        let layout = graph.build();
+        let pool: Vec<Option<PooledTexture>> = Vec::new();
+        let externals = HashMap::new();
+        let views = PassViews {
+            layout: &layout,
+            pool: &pool,
+            externals: &externals,
+            index: 1,
+        };
+        // «sneaky» декларировал только read(a); view(b) — вне набора.
+        let _ = views.view_of(b);
     }
 }

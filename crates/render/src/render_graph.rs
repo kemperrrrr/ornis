@@ -305,6 +305,32 @@ impl GraphLayout {
     }
 }
 
+/// Debug-enforcement объявленных доступов пасса — граница
+/// `PassViews::view_of` (бэклог #6, аудит §4.1): пасс запрашивает view по
+/// `ResourceId` вне своих declared reads/writes → паника с именем пасса и
+/// ресурса. Такой доступ — шаг вне расписания: он может гоняться с пассом
+/// того же уровня параллельной записи (`GraphExecutor::execute_parallel`).
+/// Пасс-аналог `assert_access_declared` для систем `core::Schedule`;
+/// write-декларация покрывает и чтение собственной записи (см.
+/// `Forward<OwnsDepth>` — читает собственно очищенный depth), как и в
+/// core. Только debug: в release проверка скомпилирована в ноль.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_pass_access_declared(layout: &GraphLayout, pass_index: usize, id: ResourceId) {
+    let pass = &layout.passes[pass_index];
+    let declared =
+        pass.reads.contains(&id) || pass.writes.iter().any(|(written, _)| *written == id);
+    if !declared {
+        let resource = &layout.resources[id.0 as usize];
+        panic!(
+            "pass '{}' (index {pass_index}) accesses resource '{}' ({id:?}) that is not \
+             declared in its access set (PassBuilder::read/write) — undeclared access breaks \
+             the frame-graph scheduling contract",
+            pass.name,
+            resource.name
+        );
+    }
+}
+
 #[derive(Debug)]
 struct ResourceNode {
     name: String,
@@ -981,6 +1007,39 @@ mod tests {
         g.add_pass("p0").read(x);
         g.add_pass("p1").write(x);
         g.build();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "'sneaky' (index 1) accesses resource 'b'")]
+    fn sneaky_pass_undeclared_access_panics() {
+        // Бэклог #6 (аудит §4.1, критерий выхода Фазы B «sneaky pass»):
+        // пасс запрашивает ресурс вне своих declared reads/writes →
+        // debug-паника с именем пасса и ресурса (симметрия со
+        // `sneaky`-системой `core::Schedule`).
+        let mut g = RenderGraph::new((320, 240));
+        let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g.add_pass("writer").write(a).write(b);
+        g.add_pass("sneaky").read(a);
+        let layout = g.build();
+        // Пасс 1 декларировал только read(a); peek в `b` — вне набора.
+        assert_pass_access_declared(&layout, 1, b);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn declared_pass_access_passes_enforcement() {
+        // Честный пасс: read-декларация покрывает view; write-декларация
+        // покрывает и чтение собственной записи (own-write read), как и в
+        // core `declared_access_passes_enforcement` — обе проверки молчат.
+        let mut g = RenderGraph::new((320, 240));
+        let x = g.create_resource("x", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        g.add_pass("writer").write(x);
+        g.add_pass("reader").read(x);
+        let layout = g.build();
+        assert_pass_access_declared(&layout, 0, x);
+        assert_pass_access_declared(&layout, 1, x);
     }
 
     #[test]

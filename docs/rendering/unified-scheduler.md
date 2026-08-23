@@ -28,7 +28,10 @@
   доменные данные, уровни и рёбра — движок; исполнение записи команд —
   `run_levels` на обоих таргетах (на wasm движковый путь последователен,
   0..nodes; выключенные пассы отсутствуют в `GraphLayout`, поэтому
-  порядок регистрации корректен и совпадает с нативным).
+  порядок регистрации корректен и совпадает с нативным); debug-enforcement
+  объявленных доступов — на выдаче view (`PassViews::view_of` →
+  `assert_pass_access_declared`, бэклог #6): «sneaky pass» паникует в
+  debug, release-путь без стоимости.
 
 **Куда класть новое** (антидрейф): семантика, общая для обоих
 фронтендов — только в движок; доменные данные (текстурный пул, ленты,
@@ -550,3 +553,18 @@ enforcement` / `declared_access_passes_enforcement` /
 существующие тесты шедулера обновлены под декларирование лог-ресурсов
 (они и раньше читали его не декларировав — принуждение сразу нашло
 нарушителей в собственных тестах).
+
+### Пасс-сторона принуждения (2026-08-23, бэклог #6)
+
+Симметрия с TLS-enforcement систем: `PassViews::view_of` — единая воронка
+выдачи view по `ResourceId` (типизированные `SystemViews` и императивные
+run-замыкания сходятся здесь) — в debug проверяет `id` против declared
+reads/writes пасса (`assert_pass_access_declared`, `render_graph.rs`);
+нарушение — паника с именем пасса и ресурса, аналог `sneaky system` —
+`sneaky pass`. Release: `#[cfg(debug_assertions)]`, нулевая стоимость.
+Честный лимит: `queue.write_buffer` в renderer-uniforms не проходит через
+`view_of`, поэтому инвариант queue-backed буферов одного уровня — авторский
+контракт, тот же класс ограничения, что rayon-уход систем (§3.3 аудита,
+бэклог #7). Тесты: `sneaky_pass_undeclared_access_panics`,
+`declared_pass_access_passes_enforcement` (`render_graph.rs`),
+`pass_views_undeclared_view_panics_in_debug` (`graph_frame.rs`).

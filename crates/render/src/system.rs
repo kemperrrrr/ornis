@@ -199,7 +199,9 @@ impl<'a> Resolver<'a> {
     /// # Panics
     /// Panics if `R` was never registered in the [`SystemSet`], or if the
     /// resource is not alive on this pass (the declared access set makes
-    /// the latter a wiring bug, not a runtime state).
+    /// the latter a wiring bug, not a runtime state). Debug builds also
+    /// panic when `R` sits outside the pass's declared reads/writes —
+    /// ground-truth enforcement in `PassViews::view_of` (бэклог #6).
     pub fn view<R: GraphResource>(&self) -> &'a wgpu::TextureView {
         let id = self
             .ids
