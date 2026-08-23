@@ -569,14 +569,22 @@ qualified = "run_scalar"
 metric = "halstead.effort"
 value = 233788.82199723358
 
+# Переименование среза 1 приближения к ликвидации графа (2026-08-23):
+# render_graph_probe → frame_plan_probe, graph_frame → frame_exec,
+# render_graph → frame_plan; типы RenderGraph3D → RenderFrame3D,
+# RenderGraph → FramePlan. Значения — замеры CI рана 32646937150 под
+# новыми ключами. Метрики, вернувшиеся под лимиты после #19 (тела
+# параллельного исполнения переехали из RenderFrame3D::render в
+# run_levels), сняты: new_with abc (≤60 сейчас), render halstead.effort
+# и её анонимное замыкание cognitive (бывш. <anon@L494>).
 [[entry]]
-path = "crates/render/examples/render_graph_probe.rs"
+path = "crates/render/examples/frame_plan_probe.rs"
 qualified = "run"
 metric = "abc"
 value = 127.01574705523721
 
 [[entry]]
-path = "crates/render/examples/render_graph_probe.rs"
+path = "crates/render/examples/frame_plan_probe.rs"
 qualified = "run"
 metric = "halstead.effort"
 value = 1039796.1215504105
@@ -594,32 +602,14 @@ metric = "halstead.effort"
 value = 399777.502319214
 
 [[entry]]
-path = "crates/render/src/graph_frame.rs"
-qualified = "RenderGraph3D::new_with"
-metric = "abc"
-value = 70.43436661176133
-
-[[entry]]
-path = "crates/render/src/graph_frame.rs"
-qualified = "RenderGraph3D::new_with"
+path = "crates/render/src/frame_exec.rs"
+qualified = "RenderFrame3D::new_with"
 metric = "halstead.effort"
-value = 133845.5161472772
+value = 124748.21141083367
 
 [[entry]]
-path = "crates/render/src/graph_frame.rs"
-qualified = "RenderGraph3D::render"
-metric = "halstead.effort"
-value = 145097.21316931504
-
-[[entry]]
-path = "crates/render/src/graph_frame.rs"
-qualified = "RenderGraph3D::render::<anon@L494>"
-metric = "cognitive"
-value = 23.0
-
-[[entry]]
-path = "crates/render/src/render_graph.rs"
-qualified = "RenderGraph::compute_layout"
+path = "crates/render/src/frame_plan.rs"
+qualified = "FramePlan::compute_layout"
 metric = "cognitive"
 value = 25.0
 
@@ -627,9 +617,10 @@ value = 25.0
 # Фаза A (2026-08-23, бэклог #4): +поле levels в кеш GraphLayout (~+1k
 # effort против замера CI 380628.6); −снапшот ordering (dead code).
 # Округлённый буфер 381000.0.
+# Rename (2026-08-23): FramePlan::compute_layout; замер CI 372264.2 ≤ буфер.
 [[entry]]
-path = "crates/render/src/render_graph.rs"
-qualified = "RenderGraph::compute_layout"
+path = "crates/render/src/frame_plan.rs"
+qualified = "FramePlan::compute_layout"
 metric = "halstead.effort"
 value = 381000.0
 
@@ -637,28 +628,31 @@ value = 381000.0
 # nom 30 → 31. S4 budget (2026-08-19): +поле budget,
 # set_budget()/budget()/try_layout() — рост 31 → 35. Осознанные этапные
 # добавления API планировщика; структура остаётся маленькой.
+# #19 (2026-08-23): планировочные методы вышли из FramePlan в канон
+# Schedule::levels — 48 → 45 по замеру CI 32646937150; ключ переименован.
 [[entry]]
-path = "crates/render/src/render_graph.rs"
-qualified = "RenderGraph"
+path = "crates/render/src/frame_plan.rs"
+qualified = "FramePlan"
 metric = "nom"
-value = 48.0
+value = 45.0
 
-# S5a/S5b (2026-08-19): levels(), execute_parallel, бюджетный API и
-# golden/уровневые тесты выросли сверх ploc=900. graph_frame — точка
-# сборки executor+графа, render_graph — layout/кеш/бюджет; сплит на
-# модули — кандидат S5c (как graph_passes в S2b).
+# Rename (2026-08-23): ключ graph_frame → frame_exec; замер CI 917
+# (после #5/#19 файл сильно уменьшился против старого потолка 1095).
+# fmt-коллапсы среза 1 снимают ещё ~16 строк, буфер 917 сохранён.
 [[entry]]
-path = "crates/render/src/graph_frame.rs"
+path = "crates/render/src/frame_exec.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 1095.0
+value = 917.0
 
-# S5c (2026-08-19): +order_before/order_before_named и рёбра в layout.
+# Rename (2026-08-23): ключ render_graph → frame_plan; замер CI 987
+# (потолок 1320 завышен после выноса планировщика в crates/schedule (#4)
+# и лент доступа (#5)); −2 строки от fmt-коллапса при записи.
 [[entry]]
-path = "crates/render/src/render_graph.rs"
+path = "crates/render/src/frame_plan.rs"
 qualified = "<file>"
 metric = "loc.ploc"
-value = 1320.0
+value = 987.0
 
 [[entry]]
 path = "crates/render/src/renderer.rs"

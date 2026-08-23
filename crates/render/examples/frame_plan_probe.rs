@@ -315,11 +315,7 @@ async fn run(scene: &Scene) {
         .filter(|(a, b)| a != b)
         .count();
     let bloom_active = bloom_diff > 0;
-    save_png(
-        "target/frame_plan_probe_bloom.png",
-        &bloom_pixels,
-        unpadded,
-    );
+    save_png("target/frame_plan_probe_bloom.png", &bloom_pixels, unpadded);
 
     println!("--- bloom graph layout ---");
     println!("{}", graph3d_bloom.layout_dump());
@@ -414,11 +410,7 @@ async fn run(scene: &Scene) {
         &legacy_pixels,
         unpadded,
     );
-    save_png(
-        "target/frame_plan_probe_graph.png",
-        &graph_pixels,
-        unpadded,
-    );
+    save_png("target/frame_plan_probe_graph.png", &graph_pixels, unpadded);
 
     println!("--- graph layout ---");
     println!("{}", graph3d.layout_dump());

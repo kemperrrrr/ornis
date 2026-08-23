@@ -45,19 +45,19 @@ proptest! {
         };
         for i in 0..drop_tail {
             let idx = total - 1 - i;
-            g3.graph_mut().set_pass_enabled(PassId(idx as u32), false);
+            g3.plan_mut().set_pass_enabled(PassId(idx as u32), false);
         }
 
-        let planned = g3.graph_mut().try_layout().unwrap().planned_pool_bytes();
+        let planned = g3.plan_mut().try_layout().unwrap().planned_pool_bytes();
 
         // Exact budget always fits.
         g3.set_budget(Budget::gpu_textures(planned));
-        prop_assert!(g3.graph_mut().try_layout().is_ok());
+        prop_assert!(g3.plan_mut().try_layout().is_ok());
 
         // One byte less always refuses, with the real requirement.
         if planned > 0 {
             g3.set_budget(Budget::gpu_textures(planned - 1));
-            let err = g3.graph_mut().try_layout().unwrap_err();
+            let err = g3.plan_mut().try_layout().unwrap_err();
             prop_assert_eq!(err.required, planned);
             prop_assert_eq!(err.budget, planned - 1);
             prop_assert!(!err.offenders.is_empty());
@@ -65,6 +65,6 @@ proptest! {
 
         // Unbounded restores the S3 behavior.
         g3.set_budget(Budget::unbounded());
-        prop_assert!(g3.graph_mut().try_layout().is_ok());
+        prop_assert!(g3.plan_mut().try_layout().is_ok());
     }
 }

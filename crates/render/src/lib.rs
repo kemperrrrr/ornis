@@ -13,6 +13,10 @@ pub mod transform;
 
 pub use composite::CompositePass as LegacyCompositePass;
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
+pub use frame_plan::{
+    Budget, BudgetExceeded, FrameLayout, FramePlan, PassContext, PassId, PassLayout, PoolSlot,
+    ResourceId, ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
+};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Единая ошибка явных рёбер порядка (Фаза A, аудит §4.2) — тот же тип,
@@ -20,10 +24,6 @@ pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBR
 pub use ornis_schedule::OrderError;
 pub use render_backend::{
     RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
-};
-pub use frame_plan::{
-    Budget, BudgetExceeded, FrameLayout, FramePlan, PassContext, PassId, PassLayout, PoolSlot,
-    ResourceId, ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
 };
 pub use renderer::{
     CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,

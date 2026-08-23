@@ -21,8 +21,8 @@ use std::marker::PhantomData;
 use std::sync::Mutex;
 
 use crate::frame_exec::PassViews;
-use crate::mesh::Mesh;
 use crate::frame_plan::{FramePlan, PassId, ResourceId, TextureSpec};
+use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 
 /// How a resource enters the plan (see `FramePlan::{create_resource,

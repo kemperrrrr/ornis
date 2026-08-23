@@ -17,10 +17,10 @@ use crate::frame_passes::{
     FromForward, GbufferPass, Hdr, HdrFwd, LightingPass, MaterialId, MaterialParams, Normal,
     OwnsDepth, SharedDepth, Target, WorldPosition,
 };
-use crate::mesh::Mesh;
 use crate::frame_plan::{
     Budget, FrameLayout, FramePlan, PassLayout, ResourceId, ResourceLayout, format_bytes_per_pixel,
 };
+use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
 use ornis_schedule::run_levels;
@@ -429,8 +429,7 @@ impl RenderFrame3D {
             normal: systems.register_resource::<Normal>(&mut plan, surface_format),
             material_id: systems.register_resource::<MaterialId>(&mut plan, surface_format),
             world_position: systems.register_resource::<WorldPosition>(&mut plan, surface_format),
-            material_params: systems
-                .register_resource::<MaterialParams>(&mut plan, surface_format),
+            material_params: systems.register_resource::<MaterialParams>(&mut plan, surface_format),
             depth: systems.register_resource::<Depth>(&mut plan, surface_format),
             hdr: systems.register_resource::<Hdr>(&mut plan, surface_format),
             hdr_fwd: systems.register_resource::<HdrFwd>(&mut plan, surface_format),
@@ -665,8 +664,7 @@ mod tests {
         let pass_names = |technique: Technique| {
             let mut plan =
                 RenderFrame3D::new_with(wgpu::TextureFormat::Rgba8Unorm, (32, 32), technique, true);
-            plan
-                .plan
+            plan.plan
                 .build()
                 .passes
                 .iter()
@@ -851,10 +849,7 @@ mod tests {
 
     /// Verbatim pre-S2 resource registration — the reference the typed
     /// registration (`register_resource`) has to match bit-for-bit.
-    fn imperative_resources(
-        plan: &mut FramePlan,
-        surface_format: wgpu::TextureFormat,
-    ) -> FrameIds {
+    fn imperative_resources(plan: &mut FramePlan, surface_format: wgpu::TextureFormat) -> FrameIds {
         let spec = |format| TextureSpec {
             format,
             samples: 1,
@@ -885,23 +880,16 @@ mod tests {
 
     /// Verbatim pre-S2 pass wiring — the reference the typed systems
     /// (`add_system`) and the conditional passes have to match.
-    fn imperative_passes(
-        plan: &mut FramePlan,
-        ids: &FrameIds,
-        technique: Technique,
-        bloom: bool,
-    ) {
+    fn imperative_passes(plan: &mut FramePlan, ids: &FrameIds, technique: Technique, bloom: bool) {
         if technique.has_deferred() {
-            plan
-                .add_pass("gbuffer")
+            plan.add_pass("gbuffer")
                 .write(ids.albedo)
                 .write(ids.normal)
                 .write(ids.material_id)
                 .write(ids.world_position)
                 .write(ids.material_params)
                 .write(ids.depth);
-            plan
-                .add_pass("lighting")
+            plan.add_pass("lighting")
                 .read(ids.albedo)
                 .read(ids.normal)
                 .read(ids.material_id)
@@ -925,24 +913,19 @@ mod tests {
             } else {
                 ids.hdr_fwd
             };
-            plan
-                .add_pass("bloom_down0")
+            plan.add_pass("bloom_down0")
                 .read(bloom_input)
                 .write_clear(ids.bloom0, wgpu::Color::BLACK);
-            plan
-                .add_pass("bloom_down1")
+            plan.add_pass("bloom_down1")
                 .read(ids.bloom0)
                 .write_clear(ids.bloom1, wgpu::Color::BLACK);
-            plan
-                .add_pass("bloom_down2")
+            plan.add_pass("bloom_down2")
                 .read(ids.bloom1)
                 .write_clear(ids.bloom2, wgpu::Color::BLACK);
-            plan
-                .add_pass("bloom_up1")
+            plan.add_pass("bloom_up1")
                 .read(ids.bloom2)
                 .write(ids.bloom1);
-            plan
-                .add_pass("bloom_up0")
+            plan.add_pass("bloom_up0")
                 .read(ids.bloom1)
                 .write(ids.bloom0);
         }

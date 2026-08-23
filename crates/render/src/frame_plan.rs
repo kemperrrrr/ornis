@@ -893,9 +893,7 @@ impl PassBuilder<'_> {
     pub fn write(self, id: ResourceId) -> Self {
         self.plan
             .resolve_resource(id, &self.plan.passes[self.id.0 as usize].name);
-        self.plan.passes[self.id.0 as usize]
-            .writes
-            .push((id, None));
+        self.plan.passes[self.id.0 as usize].writes.push((id, None));
         self.plan.cached = None;
         self
     }
@@ -1262,7 +1260,7 @@ mod tests {
 
     // ── S1: FrameLayout cache ────────────────────────────────────────
 
-    fn two_pass_graph() -> (FramePlan, ResourceId, ResourceId) {
+    fn two_pass_plan() -> (FramePlan, ResourceId, ResourceId) {
         let mut g = FramePlan::new((320, 240));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba16Float, 1));
@@ -1273,7 +1271,7 @@ mod tests {
 
     #[test]
     fn layout_is_cached_until_mutation() {
-        let (mut g, _, _) = two_pass_graph();
+        let (mut g, _, _) = two_pass_plan();
         assert_eq!(g.layout_computations(), 0, "nothing computed yet");
         let _ = g.build();
         let _ = g.build();
@@ -1288,7 +1286,7 @@ mod tests {
 
     #[test]
     fn every_mutation_invalidates_cache() {
-        let (mut g, a, _) = two_pass_graph();
+        let (mut g, a, _) = two_pass_plan();
         let _ = g.layout();
         assert_eq!(g.layout_computations(), 1);
 
@@ -1321,7 +1319,7 @@ mod tests {
 
     #[test]
     fn build_snapshot_matches_cached_layout() {
-        let (mut g, a, b) = two_pass_graph();
+        let (mut g, a, b) = two_pass_plan();
         let cached = g.layout().debug_dump();
         let snapshot = g.build().debug_dump();
         assert_eq!(cached, snapshot, "build() must mirror the cached layout");
