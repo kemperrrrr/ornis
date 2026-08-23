@@ -52,7 +52,8 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Run with: cargo run
 // winit window, wgpu rendering, a 3D scene of spheres (OpenPBR).
-// RemoteEditor also runs on port 3420.
+// The browser editor server is opt-in here: `cargo run -- --remote-editor`
+// serves it on port 3420 (off by default — audit §6.2, backlog #16).
 // The native UI overlay was removed with the ornis-ui crate — the editor
 // lives in the browser (see editor-only mode / cargo xtask editor).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -351,8 +352,12 @@ impl ApplicationHandler for GameApp {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (cmd_tx, cmd_rx) = unbounded();
             let (ev_tx, ev_rx) = unbounded();
-            let editor = remote::RemoteEditor::start(3420, cmd_tx, ev_rx);
-            self.remote_editor = Some(editor);
+            // The remote editor server is a dev-tool: opt-in in native
+            // mode; when off, the channels simply idle (`process_remote_commands`
+            // polls an empty/disconnected receiver, sends are `.ok()`-dropped).
+            if remote_editor_requested() {
+                self.remote_editor = Some(remote::RemoteEditor::start(3420, cmd_tx, ev_rx));
+            }
             match Self::initialize(event_loop, cmd_rx, ev_tx) {
                 Ok(ctx) => {
                     self.context = Some(ctx);
@@ -411,6 +416,15 @@ impl ApplicationHandler for GameApp {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.context = None;
     }
+}
+
+/// Native mode: the remote editor HTTP server is opt-in (`--remote-editor`,
+/// serves on port 3420), not on by default — the engine binary runs fine
+/// without the editor dev-tool (audit §6.2, backlog #16). The `editor-only`
+/// mode always serves it: that mode IS the editor.
+#[cfg(not(feature = "editor-only"))]
+fn remote_editor_requested() -> bool {
+    std::env::args().any(|a| a == "--remote-editor")
 }
 
 #[cfg(not(feature = "editor-only"))]
