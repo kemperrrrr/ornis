@@ -3064,18 +3064,40 @@ mod tests {
         let half = Vec3::new(1.0, 1.0, 1.0);
         let q = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
         let aabb = Shape::Box { half_extents: half }.aabb(Vec3::ZERO, q);
-        // The rotated corner (1,1,1) -> (0, 1.414, 1) must be inside the bounding AABB.
-        let corner = q * Vec3::splat(1.0);
-        assert!(
-            aabb.contains_point(corner),
-            "corner {corner:?} not inside {aabb:?}"
-        );
-        // Y half-extent grows to sqrt(2) after the 45° rotation.
+        // ALL EIGHT rotated corners must lie inside the AABB — not just one.
+        // The previous version checked only `q * Vec3::splat(1.0)`, which
+        // for a unit-cube half-extent is numerically identical to the
+        // (buggy) `orientation.mul_vec3(half).abs()` formula the
+        // production code used to compute, so the assertion was
+        // tautological and passed even with an under-sized AABB (night
+        // gate, 2026-08-24: fixed real OBB->AABB bug in `Shape::aabb`,
+        // see its comment for the derivation).
+        for sx in [-1.0f32, 1.0] {
+            for sy in [-1.0f32, 1.0] {
+                for sz in [-1.0f32, 1.0] {
+                    let corner = q * (half * Vec3::new(sx, sy, sz));
+                    assert!(
+                        aabb.contains_point(corner),
+                        "corner {corner:?} not inside {aabb:?}"
+                    );
+                }
+            }
+        }
+        // Both X and Y half-extents grow to sqrt(2) after a 45° Z rotation
+        // of a unit cube (Z is the rotation axis, so its extent is
+        // unchanged). The buggy formula zeroed the X extent here.
+        let half_x = (aabb.max.x - aabb.min.x) * 0.5;
         let half_y = (aabb.max.y - aabb.min.y) * 0.5;
+        let half_z = (aabb.max.z - aabb.min.z) * 0.5;
+        assert!(
+            (half_x - 2f32.sqrt()).abs() < 1e-3,
+            "OBB->AABB x-extent, got {half_x}"
+        );
         assert!(
             (half_y - 2f32.sqrt()).abs() < 1e-3,
             "OBB->AABB y-extent, got {half_y}"
         );
+        assert!((half_z - 1.0).abs() < 1e-3, "OBB->AABB z-extent, got {half_z}");
     }
 
     #[test]
