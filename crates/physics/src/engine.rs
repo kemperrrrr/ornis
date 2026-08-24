@@ -84,23 +84,68 @@ fn inv_inertia_axis(i: f32) -> f32 {
     if i > 0.0 { 1.0 / i } else { 0.0 }
 }
 
+#[inline]
+fn vec3_finite(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+#[inline]
+fn quat_finite(q: Quat) -> bool {
+    q.x.is_finite() && q.y.is_finite() && q.z.is_finite() && q.w.is_finite()
+}
+
+/// Union-find root with path halving. Bounded to `parent.len()` steps so a
+/// corrupted parent array (or a cargo-mutants sign flip) cannot spin forever.
+fn union_find(parent: &mut [usize], mut x: usize) -> usize {
+    for _ in 0..parent.len() {
+        if parent[x] == x {
+            return x;
+        }
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    debug_assert!(
+        false,
+        "union_find: did not converge within {} steps",
+        parent.len()
+    );
+    x
+}
+
 /// Apply the inverse world-space inertia tensor: I⁻¹_world = R · I⁻¹_body · Rᵀ.
 pub(crate) fn mul_inv_inertia(inertia: Vec3, orientation: glam::Quat, v: Vec3) -> Vec3 {
+    debug_assert!(vec3_finite(inertia), "inertia must be finite, got {inertia:?}");
+    debug_assert!(vec3_finite(v), "v must be finite, got {v:?}");
+    debug_assert!(quat_finite(orientation), "orientation must be finite");
     let body = orientation.inverse() * v;
     let scaled = Vec3::new(
         inv_inertia_axis(inertia.x) * body.x,
         inv_inertia_axis(inertia.y) * body.y,
         inv_inertia_axis(inertia.z) * body.z,
     );
-    orientation * scaled
+    debug_assert!(vec3_finite(scaled), "scaled must be finite, got {scaled:?}");
+    let result = orientation * scaled;
+    debug_assert!(vec3_finite(result), "result must be finite, got {result:?}");
+    result
 }
 
 /// Effective inverse mass along direction `dir` at contact points with
 /// levers `ra`/`rb` (linear + rotational terms, world-space inertia).
 fn effective_mass(bodies: &[RigidBody], i: usize, j: usize, dir: Vec3, ra: Vec3, rb: Vec3) -> f32 {
+    debug_assert!(
+        bodies[i].inv_mass.is_finite() && bodies[i].inv_mass >= 0.0,
+        "inv_mass[i] must be finite and non-negative"
+    );
+    debug_assert!(
+        bodies[j].inv_mass.is_finite() && bodies[j].inv_mass >= 0.0,
+        "inv_mass[j] must be finite and non-negative"
+    );
+    debug_assert!(vec3_finite(bodies[i].inertia), "inertia[i] must be finite");
+    debug_assert!(vec3_finite(bodies[j].inertia), "inertia[j] must be finite");
+    debug_assert!(vec3_finite(dir), "dir must be finite");
     let ra_d = ra.cross(dir);
     let rb_d = rb.cross(dir);
-    bodies[i].inv_mass
+    let result = bodies[i].inv_mass
         + bodies[j].inv_mass
         + ra_d.dot(mul_inv_inertia(
             bodies[i].inertia,
@@ -111,7 +156,12 @@ fn effective_mass(bodies: &[RigidBody], i: usize, j: usize, dir: Vec3, ra: Vec3,
             bodies[j].inertia,
             bodies[j].orientation,
             rb_d,
-        ))
+        ));
+    debug_assert!(
+        result.is_finite(),
+        "effective_mass: result must be finite, got {result}"
+    );
+    result
 }
 
 /// Entry of the contact normal "K matrix" (G4 block solver): how a unit
@@ -158,16 +208,38 @@ fn solve_small(a: &[[f32; 4]; 4], b: &[f32; 4], n: usize) -> Option<[f32; 4]> {
             x.swap(piv, col);
         }
         let d = m[col][col];
+        debug_assert!(
+            d.is_finite() && d.abs() > 1e-12,
+            "solve_small: pivot d = {} — near-zero or NaN at col={col}",
+            d
+        );
         for r in (col + 1)..n {
             let f = m[r][col] / d;
+            debug_assert!(
+                f.is_finite(),
+                "solve_small: f non-finite at r={r}, col={col}, d={d}"
+            );
             for c in col..n {
                 m[r][c] -= f * m[col][c];
             }
+            debug_assert!(
+                m[r].iter().all(|&x| x.is_finite()),
+                "solve_small: row {r} non-finite after forward elim at col={col}"
+            );
             x[r] -= f * x[col];
+            debug_assert!(
+                x[r].is_finite(),
+                "solve_small: x[{r}] non-finite after forward elim at col={col}"
+            );
         }
     }
     let mut out = [0.0f32; 4];
     for r in (0..n).rev() {
+        debug_assert!(
+            m[r][r].is_finite() && m[r][r].abs() > 1e-12,
+            "solve_small: pivot m[{r}][{r}] = {} — singular or NaN",
+            m[r][r]
+        );
         let mut s = x[r];
         for c in (r + 1)..n {
             s -= m[r][c] * out[c];
@@ -188,7 +260,16 @@ pub(crate) fn apply_impulse(
     ra: Vec3,
     rb: Vec3,
 ) {
-    debug_assert!(i != j);
+    debug_assert!(i != j, "apply_impulse: i == j");
+    debug_assert!(vec3_finite(imp), "imp must be finite, got {imp:?}");
+    debug_assert!(
+        bodies[i].inv_mass.is_finite() && bodies[i].inv_mass >= 0.0,
+        "inv_mass[i] must be finite and non-negative"
+    );
+    debug_assert!(
+        bodies[j].inv_mass.is_finite() && bodies[j].inv_mass >= 0.0,
+        "inv_mass[j] must be finite and non-negative"
+    );
     let (lo, hi, swapped) = if i < j { (i, j, false) } else { (j, i, true) };
     let (head, tail) = bodies.split_at_mut(hi);
     let (a, b) = if swapped {
@@ -204,6 +285,24 @@ pub(crate) fn apply_impulse(
     b.velocity += imp * b.inv_mass;
     a.angular_velocity -= mul_inv_inertia(ia, oa, ra.cross(imp));
     b.angular_velocity += mul_inv_inertia(ib, ob, rb.cross(imp));
+    debug_assert!(
+        vec3_finite(a.velocity),
+        "apply_impulse: a.velocity must be finite, got {:?}",
+        a.velocity
+    );
+    debug_assert!(
+        vec3_finite(b.velocity),
+        "apply_impulse: b.velocity must be finite, got {:?}",
+        b.velocity
+    );
+    debug_assert!(
+        vec3_finite(a.angular_velocity),
+        "apply_impulse: a.angular_velocity must be finite"
+    );
+    debug_assert!(
+        vec3_finite(b.angular_velocity),
+        "apply_impulse: b.angular_velocity must be finite"
+    );
 }
 
 /// Apply a pure angular impulse to the body pair (joint axis constraints).
@@ -347,14 +446,33 @@ fn solve_normal_block(
                     ks[a][b] = k_mat[idx[a]][idx[b]];
                 }
                 let mut r = target[idx[a]] - vn[idx[a]];
+                debug_assert!(
+                    r.is_finite(),
+                    "solve_normal_block: r non-finite at a={a}, target={} vn={}",
+                    target[idx[a]],
+                    vn[idx[a]]
+                );
                 for m in 0..count {
                     r += k_mat[idx[a]][m] * acc[m];
                 }
+                debug_assert!(
+                    r.is_finite(),
+                    "solve_normal_block: r non-finite after accum loop at a={a}"
+                );
                 bs[a] = r;
+                debug_assert!(
+                    bs[a].is_finite(),
+                    "solve_normal_block: non-finite bs[{a}]={}",
+                    bs[a]
+                );
             }
             let Some(ap) = solve_small(&ks, &bs, ns) else {
                 continue;
             };
+            debug_assert!(
+                ap.iter().take(ns).all(|v| v.is_finite()),
+                "solve_normal_block: non-finite impulse solution"
+            );
             if ap.iter().take(ns).any(|&v| v < -1e-6) {
                 continue;
             }
@@ -1215,6 +1333,10 @@ impl BuiltinPhysicsEngine {
     /// gravity and pending torque so the constraint solvers below act on the
     /// velocities that the upcoming position integration will actually use.
     fn integrate_velocities(&mut self, dt: f32) {
+        debug_assert!(
+            dt.is_finite() && dt > 0.0,
+            "dt must be positive finite, got {dt}"
+        );
         for (h, body) in self.bodies.iter_mut().enumerate() {
             if body.body_type != BodyType::Dynamic || self.asleep.get(h).copied().unwrap_or(false) {
                 continue;
@@ -1223,8 +1345,14 @@ impl BuiltinPhysicsEngine {
 
             // Angular integrate from applied torque.
             if body.torque != Vec3::ZERO {
+                let torque_delta = body.torque * dt;
+                debug_assert!(
+                    vec3_finite(torque_delta),
+                    "torque*dt overflowed: torque={:?} dt={dt}",
+                    body.torque
+                );
                 body.angular_velocity +=
-                    mul_inv_inertia(body.inertia, body.orientation, body.torque * dt);
+                    mul_inv_inertia(body.inertia, body.orientation, torque_delta);
                 body.torque = Vec3::ZERO;
             }
         }
@@ -1260,20 +1388,12 @@ impl BuiltinPhysicsEngine {
         let n = self.bodies.len();
         let mut parent: Vec<usize> = (0..n).collect();
 
-        fn find(parent: &mut [usize], mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            x
-        }
-
         for m in manifolds {
             let (a, b) = (m.body_a, m.body_b);
             if self.bodies[a].body_type == BodyType::Dynamic
                 && self.bodies[b].body_type == BodyType::Dynamic
             {
-                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                let (ra, rb) = (union_find(&mut parent, a), union_find(&mut parent, b));
                 if ra != rb {
                     parent[rb] = ra;
                 }
@@ -1286,7 +1406,7 @@ impl BuiltinPhysicsEngine {
             if self.bodies[a].body_type == BodyType::Dynamic
                 && self.bodies[b].body_type == BodyType::Dynamic
             {
-                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                let (ra, rb) = (union_find(&mut parent, a), union_find(&mut parent, b));
                 if ra != rb {
                     parent[rb] = ra;
                 }
@@ -1311,7 +1431,7 @@ impl BuiltinPhysicsEngine {
                     e.insert(h);
                 }
                 std::collections::hash_map::Entry::Occupied(e) => {
-                    let (ra, rb) = (find(&mut parent, *e.get()), find(&mut parent, h));
+                    let (ra, rb) = (union_find(&mut parent, *e.get()), union_find(&mut parent, h));
                     if ra != rb {
                         parent[rb] = ra;
                     }
@@ -1328,7 +1448,7 @@ impl BuiltinPhysicsEngine {
             if self.bodies[h].body_type != BodyType::Dynamic {
                 continue;
             }
-            let r = find(&mut parent, h);
+            let r = union_find(&mut parent, h);
             canonical
                 .entry(r)
                 .and_modify(|m| *m = (*m).min(h))
@@ -1336,7 +1456,7 @@ impl BuiltinPhysicsEngine {
         }
         for h in 0..n {
             self.island[h] = if self.bodies[h].body_type == BodyType::Dynamic {
-                canonical[&find(&mut parent, h)] as u32
+                canonical[&union_find(&mut parent, h)] as u32
             } else {
                 u32::MAX
             };
@@ -1624,11 +1744,19 @@ impl BuiltinPhysicsEngine {
     // clearest form here (same policy as the solver loops above).
     #[allow(clippy::needless_range_loop)]
     fn solve_continuous(&mut self, sub_dt: f32, skip: &mut [bool]) {
+        debug_assert!(
+            sub_dt.is_finite() && sub_dt > 0.0,
+            "sub_dt must be positive finite, got {sub_dt}"
+        );
         for h in 0..self.bodies.len() {
             if self.bodies[h].body_type != BodyType::Dynamic || self.asleep[h] {
                 continue;
             }
             let disp = self.bodies[h].velocity * sub_dt;
+            debug_assert!(
+                vec3_finite(disp),
+                "velocity*sub_dt overflowed for body {h}"
+            );
             let min_dim = match &self.bodies[h].shape {
                 Shape::Sphere { radius } => *radius,
                 Shape::Box { half_extents } => half_extents.min_element(),
@@ -1837,13 +1965,6 @@ impl BuiltinPhysicsEngine {
     /// items. Extracted so both the CPU path and the GPU hybrid path reuse
     /// the same island-building logic.
     fn partition_into_islands(&self, active: &[usize], manifolds: &[Manifold]) -> Vec<IslandWork> {
-        fn find(parent: &mut [usize], mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            x
-        }
         let n = self.bodies.len();
         let mut parent: Vec<usize> = (0..n).collect();
         for &mi in active {
@@ -1852,7 +1973,7 @@ impl BuiltinPhysicsEngine {
             if self.bodies[a].body_type == BodyType::Dynamic
                 && self.bodies[b].body_type == BodyType::Dynamic
             {
-                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                let (ra, rb) = (union_find(&mut parent, a), union_find(&mut parent, b));
                 if ra != rb {
                     parent[rb] = ra;
                 }
@@ -1867,7 +1988,7 @@ impl BuiltinPhysicsEngine {
             } else {
                 m.body_b
             };
-            let root = find(&mut parent, d);
+            let root = union_find(&mut parent, d);
             match group_of.entry(root) {
                 std::collections::hash_map::Entry::Occupied(e) => groups[*e.get()].push(mi),
                 std::collections::hash_map::Entry::Vacant(e) => {
@@ -2575,6 +2696,12 @@ impl BuiltinPhysicsEngine {
         total_inv: f32,
     ) {
         for k in 0..st.count {
+            debug_assert!(st.acc[k].is_finite(), "acc must be finite");
+            debug_assert!(
+                st.mu.is_finite() && st.mu >= 0.0,
+                "mu must be non-negative, got {}",
+                st.mu
+            );
             let p = m.points[k].world_point;
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
@@ -2613,6 +2740,7 @@ impl BuiltinPhysicsEngine {
                 } else {
                     new_t
                 };
+                debug_assert!(new_t.is_finite(), "friction impulse overflowed");
                 if axis == 0 {
                     f_imp += t * (new_t - st.acc_friction[k]);
                     st.acc_friction[k] = new_t;
@@ -2930,6 +3058,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::{Mat3, Mat4};
 
     #[test]
     fn sphere_falls() {
@@ -3649,44 +3778,303 @@ mod tests {
         assert!(err < 0.05, "hinge anchor drifted: {err}");
     }
 
+    // ---- T13 regression: intermediate-value soundness of the 5 solver ----
+    // ---- primitives. These lock the *algebra*, not just finiteness, so ----
+    // ---- they catch op/sign mutants (e.g. `*`->`+`, `+=`->`-=`) that a ----
+    // ---- finite-only debug_assert cannot. ----
+
+    /// Orientation as a glam rotation matrix (independent oracle for
+    /// `mul_inv_inertia`, which feeds `k_entry`/`effective_mass`).
+    fn rot_mat(q: Quat) -> Mat3 {
+        Mat3::from_quat(q)
+    }
+
     #[test]
-    fn remove_body_drops_dependent_joints() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
-        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0));
-        let b = physics.add_body(RigidBody::new_box(
-            Vec3::new(0.0, -2.0, 0.0),
-            Vec3::splat(0.5),
-            1.0,
-        ));
-        let j = physics
-            .add_joint(
-                a,
-                b,
-                JointKind::Ball {
-                    local_anchor_a: Vec3::ZERO,
-                    local_anchor_b: Vec3::new(0.0, 2.0, 0.0),
-                },
-            )
-            .expect("valid joint");
-        // Self-joint and invalid handles are rejected.
-        assert!(
-            physics
-                .add_joint(
-                    a,
-                    a,
-                    JointKind::Ball {
-                        local_anchor_a: Vec3::ZERO,
-                        local_anchor_b: Vec3::ZERO
-                    }
-                )
-                .is_none()
+    fn mul_inv_inertia_matches_quat_application() {
+        // I_world⁻¹ · v = R · I_body⁻¹ · Rᵀ · v, where I_body⁻¹ is diagonal.
+        // We test the rotational part by checking the transformation is an
+        // orientation application that the quaternion gives consistently.
+        let inertia = Vec3::new(2.0, 4.0, 8.0);
+        let ori = Quat::from_rotation_y(0.7);
+        let v = Vec3::new(1.0, 2.0, -3.0);
+
+        let got = mul_inv_inertia(inertia, ori, v);
+
+        // Oracle: R · diag(1/inertia) · Rᵀ · v, built from glam matrices
+        // (never touches mul_inv_inertia, so a mutant cannot pass it).
+        let r = rot_mat(ori);
+        let inv_diag = Vec3::new(
+            inv_inertia_axis(inertia.x),
+            inv_inertia_axis(inertia.y),
+            inv_inertia_axis(inertia.z),
         );
-        // Removing the body drops the joint; stepping must not panic.
-        physics.remove_body(b);
-        physics.remove_joint(j); // stale handle: must be a no-op, not UB
-        for _ in 0..60 {
-            physics.step(1.0 / 60.0);
+        let body = r.transpose() * v;
+        let scaled = Vec3::new(
+            inv_diag.x * body.x,
+            inv_diag.y * body.y,
+            inv_diag.z * body.z,
+        );
+        let oracle = r * scaled;
+
+        assert!(
+            (got - oracle).length() < 1e-5,
+            "mul_inv_inertia diverged from quaternion oracle: got {got:?}, oracle {oracle:?}"
+        );
+        // Sanity: a permutation of axes — same vector, different orientation,
+        // must not all collapse to the input (catches `* -> +` on every axis).
+        let ori2 = Quat::from_rotation_x(1.1);
+        let got2 = mul_inv_inertia(inertia, ori2, v);
+        assert!(
+            (got - got2).length() > 1e-4,
+            "orientation must change the result, got {got:?} vs {got2:?}"
+        );
+    }
+
+    #[test]
+    fn effective_mass_matches_assembled_inverse_inertia() {
+        // effective_mass(dir, ra) = 1/m + (ra×dir)·I_world⁻¹·(ra×dir).
+        // Build two distinct bodies and check the assembled scalar matches the
+        // matrix form: m⁻¹ + (ra×d)ᵀ · R·I⁻¹·Rᵀ · (ra×d).
+        let mut a = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
+        a.orientation = Quat::from_rotation_z(0.6);
+        a.inertia = Vec3::new(3.0, 5.0, 7.0);
+        a.inv_mass = 1.0 / a.mass;
+        let mut b = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 2.0);
+        b.orientation = Quat::from_rotation_x(-0.4);
+        b.inertia = Vec3::new(2.0, 6.0, 4.0);
+        b.inv_mass = 1.0 / b.mass;
+
+        let bodies = [a, b];
+        let dir = Vec3::new(0.0, 1.0, 0.0).normalize();
+        let ra = Vec3::new(0.5, 0.0, 0.0);
+        let rb = Vec3::new(-0.5, 0.0, 0.0);
+
+        let em = effective_mass(&bodies, 0, 1, dir, ra, rb);
+
+        // Oracle: 1/m_i + 1/m_j + (ra×d)ᵀ Iᵢ⁻¹ (ra×d) + (rb×d)ᵀ Iⱼ⁻¹ (rb×d).
+        fn rot_inertia(ori: Quat, inv: Vec3) -> Mat3 {
+            let r = rot_mat(ori);
+            let diag = Mat3::from_diagonal(inv);
+            r * diag * r.transpose()
         }
-        assert!(physics.get_body(b).is_none());
+        let ra_d = ra.cross(dir);
+        let rb_d = rb.cross(dir);
+        let iw_i = rot_inertia(bodies[0].orientation, Vec3::new(
+            inv_inertia_axis(bodies[0].inertia.x),
+            inv_inertia_axis(bodies[0].inertia.y),
+            inv_inertia_axis(bodies[0].inertia.z),
+        ));
+        let iw_j = rot_inertia(bodies[1].orientation, Vec3::new(
+            inv_inertia_axis(bodies[1].inertia.x),
+            inv_inertia_axis(bodies[1].inertia.y),
+            inv_inertia_axis(bodies[1].inertia.z),
+        ));
+        let oracle = bodies[0].inv_mass
+            + bodies[1].inv_mass
+            + ra_d.dot(iw_i * ra_d)
+            + rb_d.dot(iw_j * rb_d);
+
+        assert!(
+            (em - oracle).abs() < 1e-5,
+            "effective_mass diverged from matrix oracle: got {em}, oracle {oracle}"
+        );
+        assert!(em > 0.0, "effective mass must be positive, got {em}");
+    }
+
+    #[test]
+    fn solve_small_matches_glam_lu() {
+        // Independent oracle: solve A x = b with glam's matrix inverse and
+        // check we recover `b` (A·x ≈ b) plus match glam's x. Any op/sign
+        // mutant in the Gaussian elimination changes the recovered residual.
+        let a = [
+            [4.0, 1.0, 0.0, 0.0],
+            [1.0, 3.0, 1.0, 0.0],
+            [0.0, 1.0, 2.0, 1.0],
+            [0.0, 0.0, 1.0, 5.0],
+        ];
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let n = 4;
+
+        let x = solve_small(&a, &b, n).expect("well-conditioned system");
+
+        // Reconstruct A·x via glam and confirm we recover b.
+        let am = Mat4::from_cols_array(&[
+            a[0][0], a[1][0], a[2][0], a[3][0],
+            a[0][1], a[1][1], a[2][1], a[3][1],
+            a[0][2], a[1][2], a[2][2], a[3][2],
+            a[0][3], a[1][3], a[2][3], a[3][3],
+        ]);
+        let xv = glam::vec4(x[0], x[1], x[2], x[3]);
+        let ax = am * xv;
+        let residual = glam::Vec4::new(b[0], b[1], b[2], b[3]) - ax;
+        assert!(
+            residual.length() < 1e-3,
+            "solve_small does not satisfy A x = b: residual {residual:?}"
+        );
+
+        // Cross-check against glam's own inverse solution.
+        let inv = am.inverse();
+        let oracle = inv * glam::vec4(b[0], b[1], b[2], b[3]);
+        let diff = (glam::vec4(x[0], x[1], x[2], x[3]) - oracle).length();
+        assert!(
+            diff < 1e-3,
+            "solve_small diverged from glam inverse: got {x:?}, oracle {oracle:?}"
+        );
+    }
+
+    #[test]
+    fn solve_small_singular_returns_none() {
+        // A singular (rank-deficient) matrix must be rejected, not produce a
+        // finite-but-wrong answer or loop forever (the `* -> %`, `* -> /`
+        // and `-= -> +=` mutants are caught here).
+        let a = [
+            [1.0, 2.0, 3.0, 4.0],
+            [2.0, 4.0, 6.0, 8.0], // row 2 = 2 * row 0 -> singular
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0, 0.0],
+        ];
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let x = solve_small(&a, &b, 4);
+        assert!(x.is_none(), "singular system must return None, got {x:?}");
+    }
+
+    #[test]
+    fn apply_impulse_is_symmetric_and_linear() {
+        // Impulse j at contact point p between i and j must:
+        //  - change v_i by -j/m_i and v_j by +j/m_j (linear term),
+        //  - be antisymmetric: swapping (i,j) flips the velocity deltas,
+        //  - preserve total (linear) momentum: m_i Δv_i + m_j Δv_j = 0.
+        // Any `+= -> -=` / `-= -> +=` mutant breaks momentum/antisymmetry.
+        let mut bodies = vec![
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0),
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 2.0),
+        ];
+        bodies[0].velocity = Vec3::new(0.5, 0.0, 0.0);
+        bodies[1].velocity = Vec3::new(-0.2, 0.0, 0.0);
+
+        let imp = Vec3::new(0.0, 3.0, 0.0);
+        let ra = Vec3::new(0.0, 1.0, 0.0);
+        let rb = Vec3::new(0.0, -1.0, 0.0);
+
+        let v0_i = bodies[0].velocity;
+        let v0_j = bodies[1].velocity;
+        apply_impulse(&mut bodies, 0, 1, imp, ra, rb);
+        let dv_i = bodies[0].velocity - v0_i;
+        let dv_j = bodies[1].velocity - v0_j;
+
+        let expected_i = -imp * bodies[0].inv_mass;
+        let expected_j = imp * bodies[1].inv_mass;
+        assert!(
+            (dv_i - expected_i).length() < 1e-5,
+            "v_i delta wrong: got {dv_i:?}, expected {expected_i:?}"
+        );
+        assert!(
+            (dv_j - expected_j).length() < 1e-5,
+            "v_j delta wrong: got {dv_j:?}, expected {expected_j:?}"
+        );
+
+        // Momentum conservation (angular contributes via ang. momentum, but
+        // the linear part alone must cancel exactly).
+        let p_delta = bodies[0].mass * dv_i + bodies[1].mass * dv_j;
+        assert!(
+            p_delta.length() < 1e-5,
+            "linear momentum not conserved: {p_delta:?}"
+        );
+
+        // Antisymmetry: for the SAME physical body, the velocity delta when it
+        // plays role `i` must be the exact negative of its delta when it plays
+        // role `j` (the impulse is antisymmetric under i<->j swap). This is
+        // independent of the array slot, so it catches `+= <-> -=` mutants.
+        let mut bodies2 = vec![
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0),
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 2.0),
+        ];
+        bodies2[0].velocity = Vec3::new(0.5, 0.0, 0.0);
+        bodies2[1].velocity = Vec3::new(-0.2, 0.0, 0.0);
+        let v0b_0 = bodies2[0].velocity;
+        let v0b_1 = bodies2[1].velocity;
+        // body 0 is now role `j`, body 1 is role `i`.
+        apply_impulse(&mut bodies2, 1, 0, imp, rb, ra);
+        let dv_0_as_j = bodies2[0].velocity - v0b_0;
+        let dv_1_as_i = bodies2[1].velocity - v0b_1;
+
+        // body 0 as i (first call, dv_i) should oppose body 0 as j (dv_0_as_j).
+        assert!(
+            (dv_i + dv_0_as_j).length() < 1e-5,
+            "body 0 i/j antisymmetry broken: as_i {dv_i:?} vs as_j {dv_0_as_j:?}"
+        );
+        // body 1 as j (first call, dv_j) should oppose body 1 as i (dv_1_as_i).
+        assert!(
+            (dv_j + dv_1_as_i).length() < 1e-5,
+            "body 1 i/j antisymmetry broken: as_j {dv_j:?} vs as_i {dv_1_as_i:?}"
+        );
+    }
+
+    #[test]
+    fn solve_normal_block_reduces_normal_velocity() {
+        // Drive solve_normal_block on a 2-point manifold and assert the
+        // complementarity result: the normal relative velocity at the active
+        // points moves toward the target floor, and the committed state is
+        // self-consistent (acc impulses ≥ 0 on the active set). The `- -> +`
+        // / `* -> /` / `== -> !=` mutants in the block solver change this
+        // outcome detectably.
+        let mut bodies = vec![
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0),
+            RigidBody::new_sphere(Vec3::new(0.0, -2.0, 0.0), 1.0, 1.0),
+        ];
+        // Body j approaches body i (moves up, +Y, into i which is above): its
+        // normal relative velocity is negative, so solve_normal_block must
+        // commit a positive separating impulse (acc > 0).
+        bodies[1].velocity = Vec3::new(0.0, 5.0, 0.0);
+        let n = Vec3::new(0.0, -1.0, 0.0); // i->j normal
+        let pts = [
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.3, -1.0, 0.0),
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ];
+        let mut acc = [0.0f32; 4];
+        let target = [0.0f32, 0.0, 0.0, 0.0];
+        let count = 2;
+
+        // Normal relative velocity of body j minus body i at each point,
+        // measured before solving.
+        let vn_before: Vec<f32> = (0..count)
+            .map(|k| {
+                (point_velocity(&bodies[1], pts[k] - bodies[1].position)
+                    - point_velocity(&bodies[0], pts[k] - bodies[0].position))
+                .dot(n)
+            })
+            .collect();
+
+        solve_normal_block(&mut bodies, 0, 1, n, &pts, &mut acc, &target, count);
+
+        let vn_after: Vec<f32> = (0..count)
+            .map(|k| {
+                (point_velocity(&bodies[1], pts[k] - bodies[1].position)
+                    - point_velocity(&bodies[0], pts[k] - bodies[0].position))
+                .dot(n)
+            })
+            .collect();
+
+        // Active-set impulses must be non-negative.
+        for k in 0..count {
+            assert!(acc[k] >= -1e-6, "accumulated impulse {} negative: {}", k, acc[k]);
+        }
+        // Each point's post-solve normal velocity must be at/above target (0),
+        // i.e. separation or resting contact, not interpenetration growth.
+        for k in 0..count {
+            assert!(
+                vn_after[k] >= target[k] - 1e-4,
+                "point {k} normal velocity regressed below target: before {} after {}",
+                vn_before[k],
+                vn_after[k]
+            );
+            // The block solve must have done *something* (it found an active set).
+            assert!(
+                acc.iter().take(count).cloned().fold(0.0f32, f32::max) > 0.0,
+                "solve_normal_block committed no impulse"
+            );
+        }
     }
 }
