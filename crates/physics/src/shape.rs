@@ -18,8 +18,20 @@ impl Shape {
                 AABB::new(position - r, position + r)
             }
             Shape::Box { half_extents } => {
-                // OBB -> AABB: axis-aligned extent is the rotated |half_extents|.
-                let r = orientation.mul_vec3(*half_extents).abs();
+                // OBB -> AABB: the world-axis half-extent along axis i is
+                // sum_j |R_ij| * half_extents_j (Ericson, RTCD §4.2.6),
+                // i.e. |R| @ half_extents with an ELEMENT-WISE absolute
+                // value of the rotation matrix — NOT |R @ half_extents|.
+                // The two only coincide at 0/90/180/270° rotations; at
+                // e.g. 45° the naive `orientation.mul_vec3(..).abs()`
+                // under-reports the AABB (measured: a unit-cube box
+                // rotated 45° about Z needs a sqrt(2) half-extent on x
+                // AND y, but the naive formula zeroes the x component).
+                // An under-sized AABB can miss broadphase pairs entirely.
+                let basis_x = (orientation * Vec3::X).abs() * half_extents.x;
+                let basis_y = (orientation * Vec3::Y).abs() * half_extents.y;
+                let basis_z = (orientation * Vec3::Z).abs() * half_extents.z;
+                let r = basis_x + basis_y + basis_z;
                 AABB::new(position - r, position + r)
             }
             Shape::Capsule {
@@ -75,4 +87,99 @@ impl Shape {
 #[inline]
 fn right2(v: f32) -> f32 {
     v * v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Shape` has no unit tests at all (night gate, 2026-08-24: 50 missed
+    /// mutants in `Shape::inertia` alone — every arithmetic op and shape
+    /// arm was free to mutate). These are golden reference values computed
+    /// independently from the closed-form formulas, not "run the same code
+    /// with a tolerance" — they catch `*`<->`/`, `+`<->`-`, coefficient
+    /// swaps (0.4/0.5/0.25/(1/12)/(1/3)) and axis-mismatch mutations.
+    const EPS: f32 = 1e-5;
+
+    fn assert_vec3_close(got: Vec3, want: Vec3) {
+        assert!((got - want).length() < EPS, "got {got:?}, want {want:?}");
+    }
+
+    #[test]
+    fn sphere_inertia_is_isotropic_and_matches_formula() {
+        // I = (2/5) m r^2, same on all three axes.
+        let shape = Shape::Sphere { radius: 3.0 };
+        let i = shape.inertia(2.0);
+        assert_vec3_close(i, Vec3::splat(7.2));
+    }
+
+    #[test]
+    fn box_inertia_matches_closed_form_per_axis() {
+        // I_x = (m/12)(h_y^2 + h_z^2), and cyclic; asymmetric half-extents
+        // so a swapped axis or coefficient cannot hide behind symmetry.
+        let shape = Shape::Box {
+            half_extents: Vec3::new(1.0, 2.0, 3.0),
+        };
+        let i = shape.inertia(6.0);
+        assert_vec3_close(i, Vec3::new(6.5, 5.0, 2.5));
+    }
+
+    #[test]
+    fn capsule_inertia_matches_closed_form_and_is_symmetric_about_axis() {
+        // Symmetric about the local +Y axis: i_x == i_z != i_y.
+        let shape = Shape::Capsule {
+            radius: 1.0,
+            half_height: 2.0,
+        };
+        let i = shape.inertia(3.0);
+        assert_vec3_close(i, Vec3::new(5.75, 1.5, 5.75));
+        assert_eq!(i.x, i.z, "capsule inertia must be symmetric about +Y");
+    }
+
+    #[test]
+    fn sphere_aabb_is_centered_cube() {
+        let shape = Shape::Sphere { radius: 2.0 };
+        let aabb = shape.aabb(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY);
+        assert_vec3_close(aabb.min, Vec3::new(-1.0, 0.0, 1.0));
+        assert_vec3_close(aabb.max, Vec3::new(3.0, 4.0, 5.0));
+    }
+
+    #[test]
+    fn box_aabb_at_identity_matches_half_extents() {
+        let shape = Shape::Box {
+            half_extents: Vec3::new(1.0, 2.0, 3.0),
+        };
+        let aabb = shape.aabb(Vec3::ZERO, Quat::IDENTITY);
+        assert_vec3_close(aabb.min, Vec3::new(-1.0, -2.0, -3.0));
+        assert_vec3_close(aabb.max, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn box_aabb_grows_when_rotated_45_degrees() {
+        // A unit cube rotated 45° about Z: the AABB half-extent on x/y
+        // grows to half_extent * sqrt(2), z unchanged. Exact known value
+        // pins the rotation being applied to the extents at all (a mutant
+        // dropping the rotation entirely would keep the AABB at (1, 1, 1)).
+        let shape = Shape::Box {
+            half_extents: Vec3::splat(1.0),
+        };
+        let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let aabb = shape.aabb(Vec3::ZERO, rot);
+        let expected = std::f32::consts::SQRT_2;
+        assert!((aabb.max.x - expected).abs() < 1e-4, "{:?}", aabb.max);
+        assert!((aabb.max.y - expected).abs() < 1e-4, "{:?}", aabb.max);
+        assert!((aabb.max.z - 1.0).abs() < 1e-4, "{:?}", aabb.max);
+    }
+
+    #[test]
+    fn capsule_aabb_extends_along_local_y_plus_radius() {
+        let shape = Shape::Capsule {
+            radius: 0.5,
+            half_height: 2.0,
+        };
+        let aabb = shape.aabb(Vec3::ZERO, Quat::IDENTITY);
+        // Along Y: half_height + radius. On X/Z: just the radius shell.
+        assert_vec3_close(aabb.min, Vec3::new(-0.5, -2.5, -0.5));
+        assert_vec3_close(aabb.max, Vec3::new(0.5, 2.5, 0.5));
+    }
 }

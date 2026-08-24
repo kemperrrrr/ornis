@@ -484,7 +484,16 @@ mod tests {
             Vec3::new(3.0, -1.0, 0.0),
             Vec3::new(3.0, 1.0, 0.0),
         );
-        assert!((pa - pb).length() - 3.0 < EPS);
+        // Was `(pa - pb).length() - 3.0 < EPS` (missing `.abs()`, night gate
+        // 2026-08-24): a one-sided comparison only bounds the distance from
+        // above, so any length <= 3.0 + EPS passes — including 0.0. That
+        // toothless assert is exactly why `seg_seg_closest` mutations went
+        // uncaught (missed.txt: `/`->`%`, `<`->`<=`/`==`, `&&`->`||` all
+        // survived here). Two-sided `.abs()` closes the zombie.
+        assert!(
+            ((pa - pb).length() - 3.0).abs() < EPS,
+            "expected the two closest points 3 units apart, got {pa:?} / {pb:?}"
+        );
     }
 
     #[test]
@@ -494,6 +503,60 @@ mod tests {
         let (pa, pb) = seg_seg_closest(a, a, b, b);
         assert_vec3_close(pa, a);
         assert_vec3_close(pb, b);
+    }
+
+    /// Regression for missed mutants (night gate 2026-08-24) in the
+    /// `a < 1e-12` branch of `seg_seg_closest`: segment A degenerate to a
+    /// point, segment B a real segment. Pins the exact clamped-`t`
+    /// projection (`f / e`), catching `/`->`*`, `<`->`<=`/`==` on the
+    /// guard, and the point returned for A.
+    #[test]
+    fn seg_seg_closest_degenerate_a_projects_onto_b() {
+        let point = Vec3::new(0.0, 0.0, 0.0);
+        let (pa, pb) = seg_seg_closest(
+            point,
+            point,
+            Vec3::new(-5.0, 1.0, 0.0),
+            Vec3::new(5.0, 1.0, 0.0),
+        );
+        assert_vec3_close(pa, point);
+        // Closest point on B to the origin: projection clamps to (0, 1, 0).
+        assert_vec3_close(pb, Vec3::new(0.0, 1.0, 0.0));
+    }
+
+    /// Mirror of the above for the `e < 1e-12` branch (segment B
+    /// degenerate, A real) — same mutation surface, opposite operand.
+    #[test]
+    fn seg_seg_closest_degenerate_b_projects_onto_a() {
+        let point = Vec3::new(2.0, 3.0, 0.0);
+        let (pa, pb) = seg_seg_closest(
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            point,
+            point,
+        );
+        assert_vec3_close(pa, Vec3::new(2.0, 0.0, 0.0));
+        assert_vec3_close(pb, point);
+    }
+
+    /// General (non-degenerate) case with an exact known answer: two
+    /// perpendicular segments whose closest points are NOT at either
+    /// endpoint, exercising the `denom`/general-case branch and the
+    /// re-clamp when `t` falls outside `[0, 1]` (`solve_small`-adjacent
+    /// arithmetic: `b`, `denom`, `s`, `t`). `missed.txt` flagged `*`<->`+`
+    /// and sign mutations here as uncaught by the looser tests above.
+    #[test]
+    fn seg_seg_closest_perpendicular_segments_exact() {
+        // A: x-axis segment through the origin. B: a vertical segment
+        // offset in z, crossing x=1 in its interior.
+        let (pa, pb) = seg_seg_closest(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(1.0, -3.0, 5.0),
+            Vec3::new(1.0, 3.0, 5.0),
+        );
+        assert_vec3_close(pa, Vec3::new(1.0, 0.0, 0.0));
+        assert_vec3_close(pb, Vec3::new(1.0, 0.0, 5.0));
     }
 
     // ── sphere vs sphere ───────────────────────────────────────────────
