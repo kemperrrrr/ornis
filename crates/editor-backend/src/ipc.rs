@@ -66,7 +66,7 @@ pub enum GameEvent {
 /// Clone it freely — all clones share the same channel endpoints.
 ///
 // reserved: two-way channel for the future editor↔engine protocol;
-/// remote.rs currently works with the raw channels directly.
+// remote.rs currently works with the raw channels directly.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct IpcChannel {

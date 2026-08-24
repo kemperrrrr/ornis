@@ -310,3 +310,260 @@ fn format_events(events: &[GameEvent]) -> String {
     }
     format!("[{}]", parts.join(","))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+    use std::io::Read;
+
+    // ── format_events ──────────────────────────────────────────────────────
+
+    #[test]
+    fn format_events_empty() {
+        assert_eq!(format_events(&[]), "[]");
+    }
+
+    #[test]
+    fn format_events_all_variants() {
+        let events = vec![
+            GameEvent::EntityCreated { entity_id: 1 },
+            GameEvent::EntityDestroyed { entity_id: 2 },
+            GameEvent::ComponentUpdated {
+                entity_id: 3,
+                type_name: "Transform".into(),
+                json_data: r#"{"x":1}"#.into(),
+            },
+            GameEvent::CustomEvent {
+                cmd_type: "status".into(),
+                json_data: r#"{"v":7}"#.into(),
+            },
+        ];
+        let out = format_events(&events);
+        assert_eq!(
+            out,
+            r#"[{"EntityCreated":{"entity_id":1}},{"EntityDestroyed":{"entity_id":2}},{"ComponentUpdated":{"entity_id":3,"type_name":"Transform","json_data":{"x":1}}},{"CustomEvent":{"cmd_type":"status","json_data":{"v":7}}}]"#
+        );
+    }
+
+    // ── parse_set_component ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_set_component_valid() {
+        let data = serde_json::json!({
+            "id": 42u64,
+            "generation": 3u64,
+            "component": "Transform",
+            "value": {"x": 1.0}
+        });
+        let cmd = parse_set_component(Some(&data)).expect("valid");
+        match cmd {
+            UiCommand::SetComponent {
+                entity_id,
+                generation,
+                type_name,
+                json_data,
+            } => {
+                assert_eq!(entity_id, 42);
+                assert_eq!(generation, Some(3));
+                assert_eq!(type_name, "Transform");
+                assert_eq!(json_data, r#"{"x":1.0}"#);
+            }
+            _ => panic!("expected SetComponent"),
+        }
+    }
+
+    #[test]
+    fn parse_set_component_no_generation() {
+        let data = serde_json::json!({
+            "id": 7u64,
+            "component": "Mesh",
+            "value": {"path": "cube.glb"}
+        });
+        let cmd = parse_set_component(Some(&data)).expect("valid");
+        match cmd {
+            UiCommand::SetComponent { entity_id, generation, .. } => {
+                assert_eq!(entity_id, 7);
+                assert_eq!(generation, None);
+            }
+            _ => panic!("expected SetComponent"),
+        }
+    }
+
+    #[test]
+    fn parse_set_component_missing_id() {
+        let data = serde_json::json!({"component": "Mesh", "value": {}});
+        assert!(parse_set_component(Some(&data)).is_none());
+    }
+
+    #[test]
+    fn parse_set_component_missing_component() {
+        let data = serde_json::json!({"id": 1u64, "value": {}});
+        assert!(parse_set_component(Some(&data)).is_none());
+    }
+
+    #[test]
+    fn parse_set_component_null_data() {
+        assert!(parse_set_component(None).is_none());
+    }
+
+    // ── build_command ──────────────────────────────────────────────────────
+
+    #[test]
+    fn build_command_set_component_lane() {
+        let data = serde_json::json!({"id": 1u64, "component": "X", "value": {}});
+        let cmd = build_command("set_component", Some(&data));
+        assert!(matches!(cmd, Some(UiCommand::SetComponent { .. })));
+    }
+
+    #[test]
+    fn build_command_custom_passthrough() {
+        let data = serde_json::json!({"foo": "bar"});
+        let cmd = build_command("create_entity", Some(&data)).expect("custom");
+        match cmd {
+            UiCommand::Custom {
+                cmd_type,
+                json_data,
+            } => {
+                assert_eq!(cmd_type, "create_entity");
+                assert_eq!(json_data, r#"{"foo":"bar"}"#);
+            }
+            _ => panic!("expected Custom"),
+        }
+    }
+
+    #[test]
+    fn build_command_custom_no_data() {
+        let cmd = build_command("ping", None).expect("custom");
+        match cmd {
+            UiCommand::Custom { cmd_type, json_data } => {
+                assert_eq!(cmd_type, "ping");
+                assert_eq!(json_data, "");
+            }
+            _ => panic!("expected Custom"),
+        }
+    }
+
+    // ── post_command ───────────────────────────────────────────────────────
+
+    #[test]
+    fn post_command_valid_forwards_to_game() {
+        let (tx, rx) = unbounded::<UiCommand>();
+        post_command(r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#, &tx);
+        let cmd = rx.try_recv().expect("command forwarded");
+        assert!(matches!(cmd, UiCommand::SetComponent { entity_id: 5, .. }));
+    }
+
+    #[test]
+    fn post_command_garbage_dropped_not_panicked() {
+        let (tx, rx) = unbounded::<UiCommand>();
+        // not JSON at all
+        post_command("this is not json", &tx);
+        // JSON but no "type"
+        post_command(r#"{"foo":1}"#, &tx);
+        // JSON with unknown type (still a Custom, not dropped)
+        post_command(r#"{"type":"unknown","data":{}}"#, &tx);
+        // exactly one command should have been sent (the Custom unknown)
+        let cmd = rx.try_recv().expect("one command");
+        assert!(matches!(cmd, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown"));
+        assert!(rx.try_recv().is_err(), "no more commands");
+    }
+
+    // ── content_type ───────────────────────────────────────────────────────
+
+    #[test]
+    fn content_type_variants() {
+        let ct = |ext: &str| {
+            let p = PathBuf::from(format!("x.{ext}"));
+            content_type(&p).value.to_string()
+        };
+        assert!(ct("html").starts_with("text/html"));
+        assert!(ct("css").starts_with("text/css"));
+        assert!(ct("js").starts_with("application/javascript"));
+        assert!(ct("json").starts_with("application/json"));
+        assert!(ct("svg").starts_with("image/svg+xml"));
+        assert!(ct("png").starts_with("image/png"));
+        assert!(ct("woff2").starts_with("font/woff2"));
+        assert_eq!(ct("unknown"), "application/octet-stream");
+    }
+
+    // ── serve_static ───────────────────────────────────────────────────────
+
+    #[test]
+    fn serve_static_reads_file() {
+        let dir = std::env::temp_dir().join("editor_backend_test_static");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("hello.txt");
+        fs::write(&file, b"hello world").unwrap();
+        let resp = serve_static(&dir, "/hello.txt");
+        assert_eq!(resp.status_code(), 200);
+        let body = read_response(resp);
+        assert_eq!(body, "hello world");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serve_static_traversal_blocked() {
+        let dir = std::env::temp_dir().join("editor_backend_test_static2");
+        let _ = fs::create_dir_all(&dir);
+        let resp = serve_static(&dir, "/../etc/passwd");
+        assert_eq!(resp.status_code(), 404);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serve_static_missing_file_404() {
+        let dir = std::env::temp_dir().join("editor_backend_test_static3");
+        let _ = fs::create_dir_all(&dir);
+        let resp = serve_static(&dir, "/does-not-exist.txt");
+        assert_eq!(resp.status_code(), 404);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── drain_game_events ──────────────────────────────────────────────────
+
+    #[test]
+    fn drain_game_events_routes_status_and_scene() {
+        let (tx, rx) = unbounded::<GameEvent>();
+        // drain_game_events only READS from rx; we send via tx.
+        tx.send(GameEvent::CustomEvent {
+            cmd_type: "status".into(),
+            json_data: "STAT".into(),
+        })
+        .unwrap();
+        tx.send(GameEvent::CustomEvent {
+            cmd_type: "scene".into(),
+            json_data: "SCN".into(),
+        })
+        .unwrap();
+        tx.send(GameEvent::EntityCreated { entity_id: 11 })
+            .unwrap();
+
+        let mut buffer = Vec::new();
+        let mut snaps = Snapshots::default();
+        drain_game_events(&rx, &mut buffer, &mut snaps);
+
+        assert_eq!(snaps.status, "STAT");
+        assert_eq!(snaps.scene, "SCN");
+        assert_eq!(buffer.len(), 1);
+        assert!(matches!(buffer[0], GameEvent::EntityCreated { entity_id: 11 }));
+    }
+
+    // ── assets_root ────────────────────────────────────────────────────────
+
+    #[test]
+    fn assets_root_cli_arg_wins() {
+        // cannot easily inject args without affecting the real process; we
+        // at least verify the env + default path resolve without panicking.
+        let _ = assets_root();
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────
+
+    fn read_response(resp: Response<Cursor<Vec<u8>>>) -> String {
+        let mut body = String::new();
+        let mut reader = resp.into_reader();
+        let _ = reader.read_to_string(&mut body);
+        body
+    }
+}

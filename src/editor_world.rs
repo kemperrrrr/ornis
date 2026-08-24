@@ -59,7 +59,7 @@ use serde_json::Value;
 use ornis_core::{ComponentMeta, ComponentRegistry, Entity, SmartStore};
 use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
-use crate::ipc::{GameEvent, UiCommand};
+use editor_backend::ipc::{GameEvent, UiCommand};
 
 /// Editor-side name component attached to every spawned entity.
 /// Newtype over `String`: its serde-canonical JSON is a plain string.

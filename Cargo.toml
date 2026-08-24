@@ -10,6 +10,7 @@ members = [
     "crates/schedule",
     "crates/materialx",
     "crates/wasm",
+    "crates/editor-backend",
     "xtask",
 ]
 
@@ -36,6 +37,7 @@ license.workspace = true
 [dependencies]
 ornis-core = { path = "crates/core" }
 ornis-render = { path = "crates/render" }
+editor-backend = { path = "crates/editor-backend" }
 wgpu = "29"
 winit = "0.30"
 pollster = "0.3"

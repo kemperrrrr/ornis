@@ -712,6 +712,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "editor-backend"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "glam 0.30.10",
+ "serde",
+ "serde_json",
+ "tiny_http",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1770,6 +1781,7 @@ name = "ornis"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "editor-backend",
  "glam 0.30.10",
  "ornis-core",
  "ornis-render",

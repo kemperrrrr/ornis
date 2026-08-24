@@ -1,11 +1,10 @@
 use crossbeam_channel::unbounded;
+use editor_backend::{GameEvent, RemoteEditor, UiCommand};
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // in native mode nothing calls it yet (the native loop is a counter stub).
 #[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
 mod editor_world;
-mod ipc;
-mod remote;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // "BROWSER-ONLY EDITOR" MODE (editor-only)
@@ -29,7 +28,7 @@ fn main() {
     editor_world::run(cmd_rx, ev_tx);
 
     // The binding keeps RemoteEditor alive until main ends (Drop stops the server).
-    let _editor = remote::RemoteEditor::start(3420, cmd_tx, ev_rx);
+    let _editor = RemoteEditor::start(3420, cmd_tx, ev_rx);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║           Ornis Engine — Browser Editor Mode                 ║");
@@ -72,8 +71,6 @@ mod native {
         InstanceData, Mesh, OpenPBRMaterial, RenderBackend, RenderBackendConfig,
         create_render_backend, create_sphere,
     };
-
-    pub use crate::ipc::{GameEvent, UiCommand};
 }
 
 #[cfg(not(feature = "editor-only"))]
@@ -82,7 +79,7 @@ use native::*;
 #[cfg(not(feature = "editor-only"))]
 struct GameApp {
     context: Option<GameContext>,
-    remote_editor: Option<remote::RemoteEditor>,
+    remote_editor: Option<RemoteEditor>,
 }
 
 #[cfg(not(feature = "editor-only"))]
@@ -356,7 +353,7 @@ impl ApplicationHandler for GameApp {
             // mode; when off, the channels simply idle (`process_remote_commands`
             // polls an empty/disconnected receiver, sends are `.ok()`-dropped).
             if remote_editor_requested() {
-                self.remote_editor = Some(remote::RemoteEditor::start(3420, cmd_tx, ev_rx));
+                self.remote_editor = Some(RemoteEditor::start(3420, cmd_tx, ev_rx));
             }
             match Self::initialize(event_loop, cmd_rx, ev_tx) {
                 Ok(ctx) => {
