@@ -1774,6 +1774,7 @@ dependencies = [
  "ornis-core",
  "ornis-render",
  "pollster 0.3.0",
+ "serde",
  "serde_json",
  "tiny_http",
  "wgpu",
@@ -1810,6 +1811,8 @@ dependencies = [
  "ornis-schedule",
  "proptest",
  "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
