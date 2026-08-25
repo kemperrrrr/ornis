@@ -621,3 +621,160 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     expanded.into()
 }
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use quote::ToTokens;
+
+    fn generics_of(src: &str) -> (Generics, Ident) {
+        let item: syn::DeriveInput = syn::parse_str(src).expect("parse struct");
+        let name = item.ident.clone();
+        (item.generics, name)
+    }
+
+    #[test]
+    fn plain_struct_is_send_and_sync() {
+        let (g, name) = generics_of("struct Foo { x: f32 }");
+        let (send, sync) = check_send_sync_bounds(&g, &name);
+        assert!(send && sync);
+    }
+
+    #[test]
+    fn explicit_send_sync_bounds_detected() {
+        let (g, name) = generics_of("struct Foo<T: Send + Sync> { t: T }");
+        let (send, sync) = check_send_sync_bounds(&g, &name);
+        // Bounds are on T, not on Foo itself — the function checks whether
+        // *the struct's own generic params* carry the bounds.
+        assert!(send && sync);
+    }
+
+    #[test]
+    fn unbounded_generic_lacks_send_sync() {
+        let (g, name) = generics_of("struct Foo<T> { t: T }");
+        let (send, sync) = check_send_sync_bounds(&g, &name);
+        assert!(!send && !sync);
+    }
+
+    #[test]
+    fn where_clause_can_restore_send_sync() {
+        // The where-clause path matches only *plain* paths: the code uses
+        // `path.is_ident(type_name)`, which is false for `Foo<T>` (generic
+        // args make is_ident fail). Document that with a non-generic type.
+        let item: syn::ItemStruct =
+            syn::parse_str("struct Foo { t: std::marker::PhantomData<u8> }").expect("parse");
+        let mut generics = item.generics;
+        generics
+            .where_clause
+            .get_or_insert_with(|| syn::parse_quote!(where Foo: Send + Sync));
+        let (send, sync) = check_send_sync_bounds(&generics, &item.ident);
+        assert!(send && sync);
+    }
+
+    #[test]
+    fn generic_where_clause_is_not_detected() {
+        // Known limitation (documented by this test): a where-clause on a
+        // GENERIC struct (`where Foo<T>: Send`) is not recognized because
+        // is_ident rejects paths with arguments.
+        let item: syn::ItemStruct = syn::parse_str("struct Foo<T> { t: T }").expect("parse");
+        let mut generics = item.generics;
+        generics
+            .where_clause
+            .get_or_insert_with(|| syn::parse_quote!(where Foo<T>: Send + Sync));
+        let (send, sync) = check_send_sync_bounds(&generics, &item.ident);
+        assert!(!send && !sync);
+    }
+
+    #[test]
+    fn threshold_small_pod_type() {
+        let profile = ProfileResult {
+            type_profile: TypeProfile {
+                size_estimate: 12,
+                has_heap_types: false,
+                has_gpu_types: false,
+                recursive_type: false,
+            },
+            method_profiles: vec![],
+            generics: Default::default(),
+            type_name: syn::parse_str("Foo").unwrap(),
+            attrs: vec![],
+        };
+        // Base 10_000 for a small POD struct with no methods.
+        assert_eq!(compute_threshold(&profile), 10_000);
+    }
+
+    #[test]
+    fn threshold_heap_types_force_cpu() {
+        let profile = ProfileResult {
+            type_profile: TypeProfile {
+                size_estimate: 12,
+                has_heap_types: true,
+                has_gpu_types: false,
+                recursive_type: false,
+            },
+            method_profiles: vec![],
+            generics: Default::default(),
+            type_name: syn::parse_str("Foo").unwrap(),
+            attrs: vec![],
+        };
+        assert_eq!(compute_threshold(&profile), 1_000_000);
+    }
+
+    #[test]
+    fn threshold_many_branches_force_cpu() {
+        let method = MethodProfile {
+            branch_count: 11,
+            ..Default::default()
+        };
+        let profile = ProfileResult {
+            type_profile: TypeProfile {
+                size_estimate: 12,
+                has_heap_types: false,
+                has_gpu_types: false,
+                recursive_type: false,
+            },
+            method_profiles: vec![method],
+            generics: Default::default(),
+            type_name: syn::parse_str("Foo").unwrap(),
+            attrs: vec![],
+        };
+        assert_eq!(compute_threshold(&profile), 1_000_000);
+    }
+
+    #[test]
+    fn threshold_size_multipliers() {
+        let mk = |size: usize| ProfileResult {
+            type_profile: TypeProfile {
+                size_estimate: size,
+                has_heap_types: false,
+                has_gpu_types: false,
+                recursive_type: false,
+            },
+            method_profiles: vec![],
+            generics: Default::default(),
+            type_name: syn::parse_str("Foo").unwrap(),
+            attrs: vec![],
+        };
+        assert_eq!(compute_threshold(&mk(65)), 20_000); // >64 → ×2
+        assert_eq!(compute_threshold(&mk(129)), 50_000); // >128 → ×5
+        assert_eq!(compute_threshold(&mk(257)), 100_000); // >256 → ×10
+    }
+
+    #[test]
+    fn lane_target_tokens_for_gpu_profile() {
+        let profile = ProfileResult {
+            type_profile: TypeProfile {
+                size_estimate: 12,
+                has_heap_types: false,
+                has_gpu_types: true,
+                recursive_type: false,
+            },
+            method_profiles: vec![],
+            generics: Default::default(),
+            type_name: syn::parse_str("Foo").unwrap(),
+            attrs: vec![],
+        };
+        let tokens = compute_lane_target(&profile).to_token_stream().to_string();
+        assert!(tokens.contains("Gpu"), "got: {tokens}");
+    }
+}

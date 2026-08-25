@@ -77,6 +77,73 @@ fn turbofish_type(node: &ExprMethodCall) -> Result<Type, syn::Error> {
     }
 }
 
+#[cfg(test)]
+mod turbofish_tests {
+    use super::*;
+    use quote::ToTokens;
+
+    fn method_call(src: &str) -> ExprMethodCall {
+        let expr: syn::Expr = syn::parse_str(src).expect("parse expr");
+        match expr {
+            syn::Expr::MethodCall(mc) => mc,
+            _ => panic!("expected method call"),
+        }
+    }
+
+    #[test]
+    fn turbofish_extracts_type() {
+        let mc = method_call("store.read_lane::<Position>()");
+        let ty = turbofish_type(&mc).expect("turbofish present");
+        assert_eq!(ty.to_token_stream().to_string(), "Position");
+    }
+
+    #[test]
+    fn turbofish_write_lane_works() {
+        let mc = method_call("store.write_lane::<Vec3>()");
+        let ty = turbofish_type(&mc).expect("ok");
+        assert_eq!(ty.to_token_stream().to_string(), "Vec3");
+    }
+
+    #[test]
+    fn turbofish_missing_is_error() {
+        let mc = method_call("store.read_lane()");
+        match turbofish_type(&mc) {
+            Err(err) => assert!(err.to_string().contains("turbofish"), "got: {err}"),
+            Ok(_) => panic!("expected error for missing turbofish"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected method call")]
+    fn non_method_call_panics_helper() {
+        // Guard for the test helper itself.
+        let _ = method_call("1 + 2");
+    }
+
+    #[test]
+    fn lifetime_argument_is_rejected() {
+        // A turbofish with a non-type argument must error.
+        let src = "store.read_lane::<'a>()";
+        let expr: syn::Expr = syn::parse_str(src).expect("parses");
+        if let syn::Expr::MethodCall(mc) = expr {
+            assert!(turbofish_type(&mc).is_err());
+        } else {
+            panic!("expected method call");
+        }
+    }
+
+    #[test]
+    fn two_arguments_are_rejected() {
+        let src = "store.read_lane::<A, B>()";
+        let expr: syn::Expr = syn::parse_str(src).expect("parses");
+        if let syn::Expr::MethodCall(mc) = expr {
+            assert!(turbofish_type(&mc).is_err());
+        } else {
+            panic!("expected method call");
+        }
+    }
+}
+
 /// Collects the `SmartStore` parameter name and all lane guard bindings of
 /// the function. Also validates the turbofish of every `read_lane` /
 /// `write_lane` call on the store, accumulating errors instead of panicking.
