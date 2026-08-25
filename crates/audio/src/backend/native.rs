@@ -156,9 +156,14 @@ fn run_audio_thread(
 }
 
 fn pan_sample(sample: f32, azimuth: f32) -> (f32, f32) {
-    let angle = (azimuth + 1.0) * std::f32::consts::FRAC_PI_4;
-    let left = (angle.cos() * sample).clamp(-1.0, 1.0);
-    let right = (angle.sin() * sample).clamp(-1.0, 1.0);
+    // azimuth is a true geometric angle in radians, [-π/2, π/2], where
+    // -π/2 = hard left, 0 = center, +π/2 = hard right. Map to equal-power
+    // pan: phi = azimuth/2 + π/4, then (L, R) = (cos phi, sin phi) * sample.
+    // This keeps total energy constant across the pan (center is -3 dB per
+    // channel, which is correct for equal-power) and never inverts a channel.
+    let phi = azimuth / 2.0 + std::f32::consts::FRAC_PI_4;
+    let left = (phi.cos() * sample).clamp(-1.0, 1.0);
+    let right = (phi.sin() * sample).clamp(-1.0, 1.0);
     (left, right)
 }
 
@@ -215,5 +220,152 @@ fn mix(active_sounds: &mut Vec<MixInput>, output: &mut [f32], output_channels: u
         if output_channels > 1 {
             frame[1] = right;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{AudioClip, AudioSource};
+
+    #[test]
+    fn pan_sample_centered() {
+        // azimuth 0 (ahead) -> equal-power: both channels = sample / sqrt(2).
+        let expected = 0.5f32 * std::f32::consts::FRAC_1_SQRT_2; // ~0.35355
+        let (l, r) = pan_sample(0.5, 0.0);
+        assert!((l - expected).abs() < 1e-5, "left = {l}");
+        assert!((r - expected).abs() < 1e-5, "right = {r}");
+        // Centered: L == R.
+        assert!((l - r).abs() < 1e-5, "L != R: {l} vs {r}");
+    }
+
+    #[test]
+    fn pan_sample_full_left() {
+        // azimuth -π/2 -> hard left (L = sample, R = 0).
+        let (l, r) = pan_sample(0.5, -std::f32::consts::FRAC_PI_2);
+        assert!((l - 0.5).abs() < 1e-5, "left = {l}");
+        assert!(r.abs() < 1e-5, "right = {r}");
+    }
+
+    #[test]
+    fn pan_sample_full_right() {
+        // azimuth +π/2 -> hard right (L = 0, R = sample).
+        let (l, r) = pan_sample(0.5, std::f32::consts::FRAC_PI_2);
+        assert!(l.abs() < 1e-5, "left = {l}");
+        assert!((r - 0.5).abs() < 1e-5, "right = {r}");
+    }
+
+    #[test]
+    fn pan_sample_never_inverts() {
+        // Across the full valid range, neither channel may go negative for a
+        // positive sample (the old formula inverted L at wide right angles).
+        let sample = 0.5f32;
+        for i in 0..=20 {
+            let az = -std::f32::consts::FRAC_PI_2
+                + (i as f32 / 20.0) * std::f32::consts::PI;
+            let (l, r) = pan_sample(sample, az);
+            assert!(l >= -1e-6, "L inverted at azimuth={az}: {l}");
+            assert!(r >= -1e-6, "R inverted at azimuth={az}: {r}");
+            // Energy preserved: L^2 + R^2 == sample^2 (equal-power).
+            let energy = l * l + r * r;
+            assert!((energy - sample * sample).abs() < 1e-4, "energy {energy} at {az}");
+        }
+    }
+
+    #[test]
+    fn distance_attenuation_inside_reference() {
+        // At or below reference distance -> full gain (1.0).
+        assert_eq!(distance_attenuation(0.0, 1.0, 1.0), 1.0);
+        assert_eq!(distance_attenuation(1.0, 1.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn distance_attenuation_falls_off() {
+        // Beyond reference, gain decreases but stays in [0, 1].
+        let near = distance_attenuation(2.0, 1.0, 1.0);
+        let far = distance_attenuation(10.0, 1.0, 1.0);
+        assert!(near < 1.0 && near > far, "near={near}, far={far}");
+        assert!(far > 0.0 && far < 1.0, "far = {far}");
+        // Clamped to [0, 1].
+        let clamped = distance_attenuation(1e9, 1.0, 1.0);
+        assert!(clamped >= 0.0 && clamped <= 1.0);
+    }
+
+    #[test]
+    fn mix_non_spatial_stereo() {
+        let clip = AudioClip {
+            sample_rate: 48000,
+            channels: 1,
+            samples: std::sync::Arc::new(vec![0.5f32; 4]),
+        };
+        let src = AudioSource::new();
+        let mut input = MixInput::new(&clip, &src, None);
+
+        let mut out = vec![0.0f32; 4]; // 2 frames x 2 channels
+        mix(&mut vec![input], &mut out, 2);
+
+        // Non-spatial: same sample on both channels, volume 1.0.
+        assert_eq!(out[0], 0.5);
+        assert_eq!(out[1], 0.5);
+        assert_eq!(out[2], 0.5);
+        assert_eq!(out[3], 0.5);
+    }
+
+    #[test]
+    fn mix_volume_applied() {
+        let clip = AudioClip {
+            sample_rate: 48000,
+            channels: 1,
+            samples: std::sync::Arc::new(vec![1.0f32; 2]),
+        };
+        let mut src = AudioSource::new();
+        src.volume = 0.5;
+        let mut input = MixInput::new(&clip, &src, None);
+
+        let mut out = vec![0.0f32; 2];
+        mix(&mut vec![input], &mut out, 1);
+        assert_eq!(out[0], 0.5);
+    }
+
+    #[test]
+    fn mix_looping_restarts_cursor() {
+        let clip = AudioClip {
+            sample_rate: 48000,
+            channels: 1,
+            samples: std::sync::Arc::new(vec![0.25f32; 2]),
+        };
+        let mut src = AudioSource::new();
+        src.looping = true;
+        let mut input = MixInput::new(&clip, &src, None);
+
+        // Output longer than the clip: looping must wrap the cursor and
+        // keep producing samples instead of dropping the sound.
+        let mut out = vec![0.0f32; 4];
+        mix(&mut vec![input], &mut out, 1);
+        assert_eq!(out[0], 0.25);
+        assert_eq!(out[1], 0.25);
+        assert_eq!(out[2], 0.25);
+        assert_eq!(out[3], 0.25);
+    }
+
+    #[test]
+    fn mix_non_looping_stops_at_end() {
+        let clip = AudioClip {
+            sample_rate: 48000,
+            channels: 1,
+            samples: std::sync::Arc::new(vec![0.25f32; 2]),
+        };
+        let src = AudioSource::new(); // looping = false
+        let mut input = MixInput::new(&clip, &src, None);
+
+        // Output longer than clip: sound should be removed after 2 frames.
+        let mut out = vec![0.0f32; 4];
+        let mut sounds = vec![input];
+        mix(&mut sounds, &mut out, 1);
+        assert_eq!(out[0], 0.25);
+        assert_eq!(out[1], 0.25);
+        assert_eq!(out[2], 0.0);
+        assert_eq!(out[3], 0.0);
+        assert!(sounds.is_empty(), "sound should have been dropped");
     }
 }

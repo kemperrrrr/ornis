@@ -4,7 +4,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::{AudioBufferSourceNode, AudioContext, GainNode, PannerNode};
 
-use crate::source::MixInput;
+use crate::source::{MixInput, SpatialParams};
 
 type SourceId = usize;
 
@@ -83,8 +83,9 @@ impl AudioBackend {
             match self.context.create_panner() {
                 Ok(p) => {
                     if let Some(sp) = &input.spatial {
-                        let _ = p.position_x().set_value(sp.azimuth);
-                        let _ = p.position_z().set_value(-sp.distance);
+                        let (x, z) = panner_position(sp);
+                        let _ = p.position_x().set_value(x);
+                        let _ = p.position_z().set_value(z);
                     }
                     Some(p)
                 }
@@ -124,16 +125,7 @@ impl AudioBackend {
             return;
         }
 
-        let active_weak = Rc::downgrade(&self.active);
-        let stop_id = id;
-        let on_ended = Closure::wrap(Box::new(move || {
-            if let Some(active) = active_weak.upgrade() {
-                active.borrow_mut().retain(|(sid, _, _, _)| *sid != stop_id);
-            }
-        }) as Box<dyn FnMut()>);
-        let _ = source.set_onended(Some(on_ended.as_ref().unchecked_ref()));
-        on_ended.forget();
-
+        attach_on_ended(&source, &self.active, id);
         self.active.borrow_mut().push((id, source, gain, panner));
     }
 
@@ -165,4 +157,34 @@ impl Drop for AudioBackend {
         self.clear();
         let _ = self.context.close();
     }
+}
+
+/// Map a `SpatialParams` to a Web Audio `PannerNode` world position.
+///
+/// `azimuth` is a true geometric angle in radians ([-π/2, π/2], 0 = ahead).
+/// The listener faces +z, so a source at `azimuth` with `distance` sits at
+/// `(distance·sin azimuth, -distance·cos azimuth)` — matching the native
+/// backend's equal-power pan.
+fn panner_position(sp: &SpatialParams) -> (f32, f32) {
+    (
+        sp.distance * sp.azimuth.sin(),
+        -sp.distance * sp.azimuth.cos(),
+    )
+}
+
+/// Register an `onended` callback that removes the finished source from the
+/// active list (identified by `stop_id`).
+fn attach_on_ended(
+    source: &AudioBufferSourceNode,
+    active: &Rc<RefCell<Vec<(SourceId, AudioBufferSourceNode, GainNode, Option<PannerNode>)>>>,
+    stop_id: SourceId,
+) {
+    let active_weak = Rc::downgrade(active);
+    let on_ended = Closure::wrap(Box::new(move || {
+        if let Some(active) = active_weak.upgrade() {
+            active.borrow_mut().retain(|(sid, _, _, _)| *sid != stop_id);
+        }
+    }) as Box<dyn FnMut()>);
+    let _ = source.set_onended(Some(on_ended.as_ref().unchecked_ref()));
+    on_ended.forget();
 }

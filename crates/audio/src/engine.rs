@@ -70,7 +70,7 @@ impl AudioEngine {
                                 let diff = *pos - self._listener_pos;
                                 let distance = diff.length();
                                 let azimuth = if distance > 0.001 {
-                                    (diff.x / distance).asin().clamp(-1.0, 1.0)
+                                    (diff.x / distance).asin()
                                 } else {
                                     0.0
                                 };
