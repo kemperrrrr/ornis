@@ -17,6 +17,7 @@ glam = { version = "0.28", optional = true }
 [dev-dependencies]
 ornis-core = { path = "../core" }
 glam = "0.28"
+trybuild = "1"
 
 [lints]
 workspace = true

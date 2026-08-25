@@ -1,0 +1,5 @@
+error: #[derive(Pack)] requires named fields
+ --> tests/ui/pack_rejects_tuple_struct.rs:5:19
+  |
+5 | struct TupleStruct(f32, f32);
+  |                   ^^^^^^^^^^

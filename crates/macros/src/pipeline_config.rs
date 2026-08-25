@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use syn::{
     Attribute, Data, DataStruct, DeriveInput, Expr, ExprCall, ExprField, ExprForLoop, ExprIf,
     ExprLoop, ExprMatch, ExprMethodCall, ExprWhile, Fields, FieldsNamed, GenericArgument,
-    GenericParam, Generics, ImplItem, ItemImpl, PathArguments, Type, TypeParamBound,
-    WherePredicate, parse_macro_input, visit, visit::Visit,
+    GenericParam, Generics, ImplItem, ItemImpl, PathArguments, Type, TypeParam, TypeParamBound,
+    WhereClause, WherePredicate, parse_macro_input, visit, visit::Visit,
 };
 
 #[derive(Default)]
@@ -399,24 +399,57 @@ impl<'ast> Visit<'ast> for TypeAnalyzer {
     }
 }
 
+fn trait_is_name(bound: &TypeParamBound, name: &str) -> bool {
+    matches!(bound, TypeParamBound::Trait(tb) if tb.path.is_ident(name))
+}
+
+/// Returns (has_send, has_sync) declared on a single generic type parameter's
+/// own bounds (`struct Foo<T: Send + Sync>`).
+fn param_send_sync(t: &TypeParam) -> (bool, bool) {
+    let mut found_send = false;
+    let mut found_sync = false;
+    for bound in &t.bounds {
+        if trait_is_name(bound, "Send") {
+            found_send = true;
+        }
+        if trait_is_name(bound, "Sync") {
+            found_sync = true;
+        }
+    }
+    (found_send, found_sync)
+}
+
+/// Returns (has_send, has_sync) declared by a where-clause that names the type
+/// directly (`where Foo: Send`, `where Foo<T>: Send`). Compares the leading
+/// path segment so generic structs are recognized too.
+fn where_clause_send_sync(wc: &WhereClause, type_name: &Ident) -> (bool, bool) {
+    let mut has_send = false;
+    let mut has_sync = false;
+    for predicate in &wc.predicates {
+        if let WherePredicate::Type(wt) = predicate
+            && let Type::Path(tp) = &wt.bounded_ty
+            && tp.path.segments.first().is_some_and(|s| s.ident == *type_name)
+        {
+            for bound in &wt.bounds {
+                if trait_is_name(bound, "Send") {
+                    has_send = true;
+                }
+                if trait_is_name(bound, "Sync") {
+                    has_sync = true;
+                }
+            }
+        }
+    }
+    (has_send, has_sync)
+}
+
 fn check_send_sync_bounds(generics: &Generics, type_name: &Ident) -> (bool, bool) {
     let mut has_send = true;
     let mut has_sync = true;
 
     for param in &generics.params {
         if let GenericParam::Type(t) = param {
-            let mut found_send = false;
-            let mut found_sync = false;
-            for bound in &t.bounds {
-                if let TypeParamBound::Trait(trait_bound) = bound {
-                    if trait_bound.path.is_ident("Send") {
-                        found_send = true;
-                    }
-                    if trait_bound.path.is_ident("Sync") {
-                        found_sync = true;
-                    }
-                }
-            }
+            let (found_send, found_sync) = param_send_sync(t);
             if !found_send {
                 has_send = false;
             }
@@ -427,23 +460,9 @@ fn check_send_sync_bounds(generics: &Generics, type_name: &Ident) -> (bool, bool
     }
 
     if let Some(wc) = &generics.where_clause {
-        for predicate in &wc.predicates {
-            if let WherePredicate::Type(wt) = predicate
-                && let Type::Path(tp) = &wt.bounded_ty
-                && tp.path.is_ident(type_name)
-            {
-                for bound in &wt.bounds {
-                    if let TypeParamBound::Trait(trait_bound) = bound {
-                        if trait_bound.path.is_ident("Send") {
-                            has_send = true;
-                        }
-                        if trait_bound.path.is_ident("Sync") {
-                            has_sync = true;
-                        }
-                    }
-                }
-            }
-        }
+        let (w_send, w_sync) = where_clause_send_sync(wc, type_name);
+        has_send |= w_send;
+        has_sync |= w_sync;
     }
 
     (has_send, has_sync)
@@ -672,17 +691,18 @@ mod config_tests {
     }
 
     #[test]
-    fn generic_where_clause_is_not_detected() {
-        // Known limitation (documented by this test): a where-clause on a
-        // GENERIC struct (`where Foo<T>: Send`) is not recognized because
-        // is_ident rejects paths with arguments.
+    fn generic_where_clause_is_detected() {
+        // Regression: `where Foo<T>: Send` was previously NOT recognized
+        // because path.is_ident() rejects paths with generic arguments.
+        // The check now compares the leading segment, so generic components
+        // with where-clauses route correctly.
         let item: syn::ItemStruct = syn::parse_str("struct Foo<T> { t: T }").expect("parse");
         let mut generics = item.generics;
         generics
             .where_clause
             .get_or_insert_with(|| syn::parse_quote!(where Foo<T>: Send + Sync));
         let (send, sync) = check_send_sync_bounds(&generics, &item.ident);
-        assert!(!send && !sync);
+        assert!(send && sync);
     }
 
     #[test]

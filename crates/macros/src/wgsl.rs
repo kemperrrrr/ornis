@@ -21,8 +21,8 @@ impl WgslGen {
             Paren(p) => format!("({})", Self::expr(&p.expr)),
             Call(c) => Self::call(c),
             MethodCall(m) => Self::method_call(m),
-            If(i) => Self::if_expr(i),
-            Block(b) => Self::block_expr(b),
+            If(i) => wgsl_flow::if_expr(i),
+            Block(b) => wgsl_flow::block_expr(b),
             Assign(a) => Self::assign(a),
             Index(ix) => format!("{}[{}]", Self::expr(&ix.expr), Self::expr(&ix.index)),
             // Rust casts are type-coercion hints for the DSL; WGSL infers the
@@ -356,15 +356,28 @@ impl WgslGen {
         format!("{}.{}({})", args[0], method, args[1..].join(", "))
     }
 
-    fn if_expr(i: &syn::ExprIf) -> String {
-        let cond = Self::expr(&i.cond);
-        let then_body = Self::block(&i.then_branch);
+    fn block_expr(b: &syn::ExprBlock) -> String {
+        wgsl_flow::block_expr(b)
+    }
+}
+
+/// Control-flow WGSL translation (if / block / statement / pattern).
+///
+/// Kept in a separate module so the `WgslGen` class's weighted-method-count
+/// stays bounded — these helpers are pure functions over `syn` nodes that
+/// call back into `WgslGen` for base expression translation.
+mod wgsl_flow {
+    use syn::{ExprBlock, ExprIf, Block, Stmt, Pat};
+
+    pub(super) fn if_expr(i: &ExprIf) -> String {
+        let cond = crate::wgsl::WgslGen::expr(&i.cond);
+        let then_body = block(&i.then_branch);
         let then_trimmed = then_body.trim();
 
         if let Some(ref else_branch) = i.else_branch {
             let else_body = match &*else_branch.1 {
-                syn::Expr::Block(block) => Self::block(&block.block),
-                syn::Expr::If(inner_if) => Self::if_expr(inner_if),
+                syn::Expr::Block(blk) => block(&blk.block),
+                syn::Expr::If(inner_if) => if_expr(inner_if),
                 _ => "".to_string(),
             };
             let else_trimmed = else_body.trim();
@@ -377,98 +390,100 @@ impl WgslGen {
         }
     }
 
-    fn block_expr(b: &syn::ExprBlock) -> String {
-        Self::block(&b.block)
+    pub(super) fn block_expr(b: &ExprBlock) -> String {
+        block(&b.block)
     }
 
-    fn block(block: &syn::Block) -> String {
+    pub(super) fn block(block: &Block) -> String {
         let count = block.stmts.len();
         block
             .stmts
             .iter()
             .enumerate()
-            .map(|(i, s)| Self::stmt(s, i == count - 1))
+            .map(|(i, s)| stmt(s, i == count - 1))
             .collect::<Vec<_>>()
             .join(" ")
     }
 
-    fn stmt(s: &Stmt, is_tail: bool) -> String {
+    pub(super) fn stmt(s: &Stmt, is_tail: bool) -> String {
         match s {
-            Stmt::Local(local) => {
-                // Handle `let x = if/else { .. } else { .. };` — wrap if/else into var+if
-                if let Some(init) = &local.init
-                    && let syn::Expr::If(if_expr) = init.expr.as_ref()
-                {
-                    let pat = Self::pat(&local.pat);
-                    let cond = Self::expr(&if_expr.cond);
-                    let then_val = Self::last_expr_in_block(&if_expr.then_branch);
-                    let else_val = if_expr
-                        .else_branch
-                        .as_ref()
-                        .and_then(|(_, else_expr)| {
-                            if let syn::Expr::Block(block) = else_expr.as_ref() {
-                                Some(Self::last_expr_in_block(&block.block))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-                    // Convert: let x = if c { a } else { b };
-                    // To WGSL: var x = b; if (c) { x = a; }
-                    return format!(
-                        "var {} = {}; if ({}) {{ {} = {}; }} ",
-                        pat, else_val, cond, pat, then_val
-                    );
-                }
-                let pat = Self::pat(&local.pat);
-                let init = local.init.as_ref().map(|init| Self::expr(&init.expr));
-                // Rust `let mut` becomes WGSL `var` — the only WGSL binding
-                // kind that can be reassigned.
-                let kw = if let syn::Pat::Ident(pi) = &local.pat
-                    && pi.mutability.is_some()
-                {
-                    "var"
-                } else {
-                    "let"
-                };
-                if let Some(init_val) = init {
-                    format!("{kw} {pat} = {init_val}; ")
-                } else {
-                    format!("{kw} {pat}; ")
-                }
-            }
-            Stmt::Expr(expr, semi) => {
-                let e = Self::expr(expr);
-                // `return`/`return x` always emit as a terminated statement,
-                // even when they are the trailing (tail) expression.
-                if matches!(expr, syn::Expr::Return(_)) {
-                    format!("{e}; ")
-                // if/block expressions in WGSL are statements, not values
-                // — never wrap in `return` at this level; return is handled
-                // inside the branches via block() → is_tail
-                } else if matches!(expr, syn::Expr::If(_) | syn::Expr::Block(_)) {
-                    if semi.is_some() {
-                        format!("{}; ", e)
-                    } else {
-                        format!("{} ", e)
-                    }
-                } else if semi.is_some() || !is_tail {
-                    format!("{}; ", e)
-                } else {
-                    format!("return {}; ", e)
-                }
-            }
+            Stmt::Local(local) => local_stmt(local),
+            Stmt::Expr(expr, semi) => expr_stmt(expr, *semi, is_tail),
             _ => String::new(),
         }
     }
 
-    fn last_expr_in_block(block: &syn::Block) -> String {
+    /// Translate a `let` / `let mut` binding. `let mut` maps to WGSL `var`
+    /// (the only reassignable binding kind); plain `let` maps to `let`.
+    fn local_stmt(local: &syn::Local) -> String {
+        // Handle `let x = if/else { .. } else { .. };` — wrap if/else into var+if
+        if let Some(init) = &local.init
+            && let syn::Expr::If(if_expr) = init.expr.as_ref()
+        {
+            let p = pat(&local.pat);
+            let cond = crate::wgsl::WgslGen::expr(&if_expr.cond);
+            let then_val = last_expr_in_block(&if_expr.then_branch);
+            let else_val = if_expr
+                .else_branch
+                .as_ref()
+                .and_then(|(_, else_expr)| {
+                    if let syn::Expr::Block(block) = else_expr.as_ref() {
+                        Some(last_expr_in_block(&block.block))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            // Convert: let x = if c { a } else { b };
+            // To WGSL: var x = b; if (c) { x = a; }
+            return format!("var {} = {}; if ({}) {{ {} = {}; }} ", p, else_val, cond, p, then_val);
+        }
+        let p = pat(&local.pat);
+        let init = local.init.as_ref().map(|init| crate::wgsl::WgslGen::expr(&init.expr));
+        // Rust `let mut` becomes WGSL `var` — the only WGSL binding kind that
+        // can be reassigned.
+        let kw = if let syn::Pat::Ident(pi) = &local.pat
+            && pi.mutability.is_some()
+        {
+            "var"
+        } else {
+            "let"
+        };
+        if let Some(init_val) = init {
+            format!("{kw} {p} = {init_val}; ")
+        } else {
+            format!("{kw} {p}; ")
+        }
+    }
+
+    /// Translate an expression used as a statement. `return` is always
+    /// terminated; if/block expressions are emitted bare (they are statements
+    /// in WGSL, not tail values); otherwise the trailing expression becomes
+    /// `return ...;` and non-trailing ones get a semicolon.
+    fn expr_stmt(expr: &syn::Expr, semi: Option<syn::token::Semi>, is_tail: bool) -> String {
+        let e = crate::wgsl::WgslGen::expr(expr);
+        if matches!(expr, syn::Expr::Return(_)) {
+            format!("{e}; ")
+        } else if matches!(expr, syn::Expr::If(_) | syn::Expr::Block(_)) {
+            if semi.is_some() {
+                format!("{}; ", e)
+            } else {
+                format!("{} ", e)
+            }
+        } else if semi.is_some() || !is_tail {
+            format!("{}; ", e)
+        } else {
+            format!("return {}; ", e)
+        }
+    }
+
+    pub(super) fn last_expr_in_block(block: &Block) -> String {
         block
             .stmts
             .last()
             .and_then(|s| {
                 if let Stmt::Expr(e, _) = s {
-                    Some(Self::expr(e))
+                    Some(crate::wgsl::WgslGen::expr(e))
                 } else {
                     None
                 }
@@ -476,7 +491,7 @@ impl WgslGen {
             .unwrap_or_default()
     }
 
-    fn pat(p: &syn::Pat) -> String {
+    pub(super) fn pat(p: &Pat) -> String {
         match p {
             syn::Pat::Ident(pi) => pi.ident.to_string(),
             _ => "_".to_string(),
@@ -537,7 +552,7 @@ fn convert_body_to_wgsl(func: &ItemFn) -> String {
     let mut out = String::new();
     let count = func.block.stmts.len();
     for (i, stmt) in func.block.stmts.iter().enumerate() {
-        out.push_str(&WgslGen::stmt(stmt, i == count - 1));
+        out.push_str(&wgsl_flow::stmt(stmt, i == count - 1));
     }
     out
 }
