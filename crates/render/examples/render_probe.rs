@@ -9,7 +9,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::OpenPBRMaterial;
-use ornis_render::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
+use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_render::{
     InstanceData, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
 };
@@ -22,23 +22,32 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         MaterialDesc::Dielectric {
             base_color,
             roughness,
-        } => OpenPBRMaterial::dielectric()
-            .base_color_rgb(*base_color)
-            .specular_roughness(*roughness),
+        } => {
+            let mut mat = OpenPBRMaterial::dielectric();
+            mat.base.color_rgb(*base_color);
+            mat.specular.roughness(*roughness);
+            mat
+        }
         MaterialDesc::Metal {
             base_color,
             roughness,
-        } => OpenPBRMaterial::metal()
-            .base_color_rgb(*base_color)
-            .specular_roughness(*roughness),
+        } => {
+            let mut mat = OpenPBRMaterial::metal();
+            mat.base.color_rgb(*base_color);
+            mat.specular.roughness(*roughness);
+            mat
+        }
         MaterialDesc::Coat {
             base_color,
             coat_weight,
             coat_roughness,
-        } => OpenPBRMaterial::coat()
-            .base_color_rgb(*base_color)
-            .coat_weight(*coat_weight)
-            .coat_roughness(*coat_roughness),
+        } => {
+            let mut mat = OpenPBRMaterial::coat();
+            mat.base.color_rgb(*base_color);
+            mat.coat.weight(*coat_weight);
+            mat.coat.roughness(*coat_roughness);
+            mat
+        }
     }
 }
 
@@ -63,8 +72,8 @@ fn main() {
     pollster::block_on(run(&scene, &out_path));
 }
 
-async fn run(scene: &Scene, out_path: &str) {
-    // ── Headless device ───────────────────────────────────────────────
+/// Headless adapter + device for offscreen probing.
+async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),
@@ -81,20 +90,23 @@ async fn run(scene: &Scene, out_path: &str) {
         .expect("adapter");
     println!("adapter: {:?}", adapter.get_info().name);
 
-    let (device, queue) = adapter
+    adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("render_probe"),
+            label: Some(label),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
         })
         .await
-        .expect("device");
+        .expect("device")
+}
 
-    // ── Offscreen target (same format the browser surface uses) ───────
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+fn make_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("probe target"),
         size: wgpu::Extent3d {
             width: WIDTH,
@@ -108,35 +120,22 @@ async fn run(scene: &Scene, out_path: &str) {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
 
-    let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: WIDTH,
-        height: HEIGHT,
-        present_mode: wgpu::PresentMode::AutoNoVsync,
-        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
-
-    let backend_config = RenderBackendConfig {
-        surface_config: surface_config.clone(),
-        sample_count: 1,
-        max_objects: 256,
-        max_materials: 64,
-    };
-    let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
-
-    // ── Scene → GPU data ──────────────────────────────────────────────
+/// Shared mesh from the first entity plus per-entity material/instance data.
+fn build_scene_data(
+    device: &wgpu::Device,
+    scene: &Scene,
+) -> (ornis_render::Mesh, Vec<OpenPBRMaterial>, Vec<InstanceData>) {
     let first = scene.entities.first().expect("scene has no entities");
     let mesh = match &first.mesh {
         MeshDesc::Sphere {
             radius,
             segments,
             rings,
-        } => ornis_render::create_sphere(&device, *radius, *segments, *rings),
+        } => ornis_render::create_sphere(device, *radius, *segments, *rings),
     };
     println!(
         "mesh: {} vertices, {} indices",
@@ -160,8 +159,11 @@ async fn run(scene: &Scene, out_path: &str) {
             material_index: i as u32,
         });
     }
+    (mesh, materials, instances)
+}
 
-    let lights: Vec<([f32; 3], f32, [f32; 3])> = scene
+fn lights_of(scene: &Scene) -> Vec<([f32; 3], f32, [f32; 3])> {
+    scene
         .lights
         .iter()
         .map(|l| match l {
@@ -171,14 +173,10 @@ async fn run(scene: &Scene, out_path: &str) {
                 color,
             } => (*direction, *intensity, *color),
         })
-        .collect();
+        .collect()
+}
 
-    renderer.upload_materials(&queue, &materials);
-    renderer.upload_instances(&queue, &instances);
-    renderer.set_lights(&queue, scene.ambient, &lights);
-
-    // ── Camera ────────────────────────────────────────────────────────
-    let cam = &scene.camera;
+fn camera_view_proj(cam: &CameraDesc) -> (Mat4, Mat4, [[f32; 4]; 4]) {
     let aspect = WIDTH as f32 / HEIGHT as f32;
     let view = Mat4::look_at_rh(
         Vec3::from(cam.position),
@@ -186,39 +184,17 @@ async fn run(scene: &Scene, out_path: &str) {
         Vec3::from(cam.up),
     );
     let proj = Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
-    let view_proj = proj * view;
-    renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), cam.position);
+    (view, proj, (proj * view).to_cols_array_2d())
+}
 
-    // ── Validation dump ───────────────────────────────────────────────
-    println!("fov_deg={} fov_rad={}", cam.fov, cam.fov.to_radians());
-    println!("view = {:.3?}", view.to_cols_array_2d());
-    println!("proj = {:.3?}", proj.to_cols_array_2d());
-    for (i, inst) in instances.iter().take(2).enumerate() {
-        let m = inst.model_matrix.to_cols_array_2d();
-        println!(
-            "instance[{i}] translation = {:.3?}, scale_col0_len = {:.3}",
-            [m[3][0], m[3][1], m[3][2]],
-            (m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]).sqrt()
-        );
-    }
-
-    // ── Render ────────────────────────────────────────────────────────
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("probe encoder"),
-    });
-    renderer.render_scene(
-        RenderContext {
-            device: &device,
-            queue: &queue,
-            encoder: &mut encoder,
-            target: &target_view,
-        },
-        &mesh,
-        instances.len() as u32,
-    );
-
-    // ── Readback ──────────────────────────────────────────────────────
-    let bytes_per_pixel = 4u32;
+/// Copy the rendered texture into a tightly-packed RGBA byte buffer.
+fn read_back_pixels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mut encoder: wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
+    bytes_per_pixel: u32,
+) -> Vec<u8> {
     let unpadded_bytes_per_row = WIDTH * bytes_per_pixel;
     let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -229,7 +205,7 @@ async fn run(scene: &Scene, out_path: &str) {
     });
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &target_texture,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -265,18 +241,22 @@ async fn run(scene: &Scene, out_path: &str) {
     }
     drop(data);
     readback.unmap();
+    pixels
+}
 
-    // ── Save PNG ──────────────────────────────────────────────────────
-    let file = std::fs::File::create(out_path).expect("create png");
+fn save_png(path: &str, pixels: &[u8]) {
+    let file = std::fs::File::create(path).expect("create png");
     let mut encoder_png = png::Encoder::new(std::io::BufWriter::new(file), WIDTH, HEIGHT);
     encoder_png.set_color(png::ColorType::Rgba);
     encoder_png.set_depth(png::BitDepth::Eight);
     let mut writer = encoder_png.write_header().expect("png header");
-    writer.write_image_data(&pixels).expect("png data");
-    println!("saved {out_path} ({WIDTH}x{HEIGHT})");
+    writer.write_image_data(pixels).expect("png data");
+    println!("saved {path} ({WIDTH}x{HEIGHT})");
+}
 
-    // Quick pixel sanity: sample the center and the horizontal strip
-    // where the 5 spheres should be (y ≈ 55% of height).
+/// Quick pixel sanity: sample the center and the horizontal strip where the
+/// 5 spheres should be (y ≈ 55% of height).
+fn log_pixel_samples(pixels: &[u8], bytes_per_pixel: u32) {
     let sample = |x: u32, y: u32| {
         let off = ((y * WIDTH + x) * bytes_per_pixel) as usize;
         [
@@ -292,4 +272,82 @@ async fn run(scene: &Scene, out_path: &str) {
         println!("pixel({x},{mid_y}) = {:?}", sample(x, mid_y));
     }
     println!("pixel(center) = {:?}", sample(WIDTH / 2, HEIGHT / 2));
+}
+
+fn print_instance_dump(instances: &[InstanceData]) {
+    for (i, inst) in instances.iter().take(2).enumerate() {
+        let m = inst.model_matrix.to_cols_array_2d();
+        println!(
+            "instance[{i}] translation = {:.3?}, scale_col0_len = {:.3}",
+            [m[3][0], m[3][1], m[3][2]],
+            (m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]).sqrt()
+        );
+    }
+}
+
+async fn run(scene: &Scene, out_path: &str) {
+    // ── Headless device ───────────────────────────────────────────────
+    let (device, queue) = create_headless_device("render_probe").await;
+
+    // ── Offscreen target (same format the browser surface uses) ───────
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (target_texture, target_view) = make_target(&device, format);
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: WIDTH,
+        height: HEIGHT,
+        present_mode: wgpu::PresentMode::AutoNoVsync,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+
+    let backend_config = RenderBackendConfig {
+        surface_config: surface_config.clone(),
+        sample_count: 1,
+        max_objects: 256,
+        max_materials: 64,
+    };
+    let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
+
+    // ── Scene → GPU data ──────────────────────────────────────────────
+    let (mesh, materials, instances) = build_scene_data(&device, scene);
+    renderer.upload_materials(&queue, &materials);
+    renderer.upload_instances(&queue, &instances);
+    renderer.set_lights(&queue, scene.ambient, &lights_of(scene));
+
+    // ── Camera ────────────────────────────────────────────────────────
+    let cam = &scene.camera;
+    let (view, proj, view_proj) = camera_view_proj(cam);
+    renderer.set_camera(&queue, &view_proj, cam.position);
+
+    // ── Validation dump ───────────────────────────────────────────────
+    println!("fov_deg={} fov_rad={}", cam.fov, cam.fov.to_radians());
+    println!("view = {:.3?}", view.to_cols_array_2d());
+    println!("proj = {:.3?}", proj.to_cols_array_2d());
+    print_instance_dump(&instances);
+
+    // ── Render ────────────────────────────────────────────────────────
+    let bytes_per_pixel = 4u32;
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("probe encoder"),
+    });
+    renderer.render_scene(
+        RenderContext {
+            device: &device,
+            queue: &queue,
+            encoder: &mut encoder,
+            target: &target_view,
+        },
+        &mesh,
+        instances.len() as u32,
+    );
+    let pixels = read_back_pixels(&device, &queue, encoder, &target_texture, bytes_per_pixel);
+
+    // ── Save PNG ──────────────────────────────────────────────────────
+    save_png(out_path, &pixels);
+
+    // Quick pixel sanity samples.
+    log_pixel_samples(&pixels, bytes_per_pixel);
 }

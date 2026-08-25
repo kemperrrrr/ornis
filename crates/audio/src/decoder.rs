@@ -180,8 +180,7 @@ mod tests {
     use super::*;
 
     fn fixture_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/sample-3s.wav")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-3s.wav")
     }
 
     #[test]

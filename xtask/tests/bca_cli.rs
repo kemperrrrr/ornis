@@ -69,19 +69,25 @@ fn check_passes_against_committed_baseline() {
 }
 
 #[test]
-fn check_fails_without_baseline_ratchet() {
+fn empty_baseline_is_green_when_codebase_is_clean() {
     if !bca_available() {
         eprintln!("skipped: `bca` not in PATH");
         return;
     }
-    // An empty-but-valid baseline leaves every violation unbaselined,
-    // which must fail the gate (exit 2, not 0 and not a tool error 1).
-    // This proves the committed baseline is what keeps the gate green.
+    // Since the complexity-debt elimination round the codebase has zero
+    // threshold violations, so even an empty baseline must keep the gate
+    // green (exit 0). This doubles as a canary: if it starts failing, new
+    // code reintroduced a violation that the committed baseline no longer
+    // hides — exactly what the ratchet is for.
     let empty = scratch("empty-baseline").join("baseline.toml");
     std::fs::write(&empty, "version = 6\n\n[provenance]\ntier = \"hard\"\n")
         .expect("write empty baseline");
     let status = run_bca(&["check", "--baseline", empty.to_str().expect("utf8 path")]);
-    assert_eq!(status.code(), Some(2), "empty baseline must gate at exit 2");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "clean codebase must pass with an empty baseline"
+    );
 }
 
 #[test]
@@ -90,8 +96,10 @@ fn write_baseline_produces_version_6_file() {
         eprintln!("skipped: `bca` not in PATH");
         return;
     }
-    // `--write-baseline <path>` must produce a version-6 baseline with
-    // entries — the format `bca check --baseline` consumes on the next run.
+    // `--write-baseline <path>` must produce a version-6 baseline in the
+    // format `bca check --baseline` consumes on the next run. With the
+    // codebase clean the entry list is legitimately empty; what matters is
+    // the file format and that re-checking against it still exits 0.
     let out = scratch("write-baseline").join("baseline.toml");
     let status = run_bca(&[
         "check",
@@ -104,7 +112,12 @@ fn write_baseline_produces_version_6_file() {
     );
     let text = std::fs::read_to_string(&out).expect("baseline written");
     assert!(text.contains("version = 6"), "baseline must be version 6");
-    assert!(text.contains("[[entry]]"), "baseline must contain entries");
+    let recheck = run_bca(&["check", "--baseline", out.to_str().expect("utf8 path")]);
+    assert_eq!(
+        recheck.code(),
+        Some(0),
+        "regenerated baseline must keep the gate green"
+    );
 }
 
 #[test]

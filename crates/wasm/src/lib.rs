@@ -83,18 +83,7 @@ async fn load_scene_ron() -> String {
 /// without per-entity transform/mesh/material — so the caller can fall back
 /// to the static scene.ron path.
 async fn fetch_live_scene() -> Option<LiveScene> {
-    let window = web_sys::window()?;
-    let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("/api/scene"))
-        .await
-        .ok()?;
-    let resp: web_sys::Response = resp_value.dyn_into().ok()?;
-    if !resp.ok() {
-        return None;
-    }
-    let text = wasm_bindgen_futures::JsFuture::from(resp.text().ok()?)
-        .await
-        .ok()?
-        .as_string()?;
+    let text = fetch_api_text("/api/scene").await?;
     match scene_api::parse_scene_json(&text) {
         Ok(live) => Some(live),
         Err(e) => {
@@ -201,23 +190,32 @@ fn build_gpu_scene(device: &wgpu::Device, scene: &Scene) -> GpuScene {
             MaterialDesc::Dielectric {
                 base_color,
                 roughness,
-            } => OpenPBRMaterial::dielectric()
-                .base_color_rgb(*base_color)
-                .specular_roughness(*roughness),
+            } => {
+                let mut mat = OpenPBRMaterial::dielectric();
+                mat.base.color_rgb(*base_color);
+                mat.specular.roughness(*roughness);
+                mat
+            }
             MaterialDesc::Metal {
                 base_color,
                 roughness,
-            } => OpenPBRMaterial::metal()
-                .base_color_rgb(*base_color)
-                .specular_roughness(*roughness),
+            } => {
+                let mut mat = OpenPBRMaterial::metal();
+                mat.base.color_rgb(*base_color);
+                mat.specular.roughness(*roughness);
+                mat
+            }
             MaterialDesc::Coat {
                 base_color,
                 coat_weight,
                 coat_roughness,
-            } => OpenPBRMaterial::coat()
-                .base_color_rgb(*base_color)
-                .coat_weight(*coat_weight)
-                .coat_roughness(*coat_roughness),
+            } => {
+                let mut mat = OpenPBRMaterial::coat();
+                mat.base.color_rgb(*base_color);
+                mat.coat.weight(*coat_weight);
+                mat.coat.roughness(*coat_roughness);
+                mat
+            }
         };
         materials.push(material);
 
@@ -320,37 +318,53 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, orbit: &Rc<RefCell
     on_wheel.forget();
 }
 
-/// Initialize WebGPU on a canvas, load the scene (live /api/scene with
-/// scene.ron fallback) and start the render loop.
-#[wasm_bindgen]
-pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
-    console::log_1(&format!("[ornis-wasm] init canvas={}", canvas_id).into());
-
+/// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
+fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
     let window = web_sys::window().ok_or("no window")?;
     let document = window.document().ok_or("no document")?;
-    let canvas: web_sys::HtmlCanvasElement = document
-        .get_element_by_id(&canvas_id)
-        .ok_or("canvas not found")?
-        .dyn_into()?;
+    document
+        .get_element_by_id(canvas_id)
+        .ok_or_else(|| JsValue::from_str("canvas not found"))?
+        .dyn_into()
+        .map_err(Into::into)
+}
 
-    // Resize canvas to match viewport
-    let resize = |c: &web_sys::HtmlCanvasElement| {
-        let parent = c.parent_element().unwrap();
-        c.set_width(parent.client_width() as u32);
-        c.set_height(parent.client_height() as u32);
-    };
-    resize(&canvas);
+/// Resize the canvas to fill its parent element.
+fn resize_canvas_to_parent(canvas: &web_sys::HtmlCanvasElement) {
+    if let Some(parent) = canvas.parent_element() {
+        canvas.set_width(parent.client_width() as u32);
+        canvas.set_height(parent.client_height() as u32);
+    }
+}
 
-    // ── wgpu WebGPU setup ─────────────────────────────────────────────
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+fn make_instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::BROWSER_WEBGPU,
         flags: wgpu::InstanceFlags::empty(),
         backend_options: wgpu::BackendOptions::default(),
         memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         display: None,
-    });
+    })
+}
 
-    let surface = unsafe {
+/// Everything the render loop needs from WebGPU initialization.
+struct GpuContext {
+    // SAFETY invariant: the phantom window lifetime is pinned to `'static`;
+    // the canvas handle is owned (`CanvasWindow(canvas.clone())`) and lives
+    // as long as the page.
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+}
+
+async fn init_webgpu(
+    instance: &wgpu::Instance,
+    canvas: &web_sys::HtmlCanvasElement,
+) -> Result<GpuContext, JsValue> {
+    // SAFETY: the canvas outlives the surface — both are kept alive for the
+    // lifetime of the page (the loop closure is mem::forget'ed).
+    let surface: wgpu::Surface<'static> = unsafe {
         instance
             .create_surface_unsafe(
                 wgpu::SurfaceTargetUnsafe::from_window(&CanvasWindow(canvas.clone()))
@@ -366,7 +380,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
             ..Default::default()
         })
         .await
-        .map_err(|_| "adapter not found")?;
+        .map_err(|_| JsValue::from_str("adapter not found"))?;
 
     // WebGPU spec defaults: max_storage_buffers_per_shader_stage = 8, which is
     // what Renderer3D's bind groups need (camera + per-object + materials +
@@ -399,28 +413,10 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         .into(),
     );
 
-    let surface_caps = surface.get_capabilities(&adapter);
-    let surface_format = surface_caps
-        .formats
-        .iter()
-        .copied()
-        .find(|f| {
-            matches!(
-                f,
-                wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb
-            )
-        })
-        .unwrap_or_else(|| {
-            surface_caps
-                .formats
-                .first()
-                .copied()
-                .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb)
-        });
-
-    let mut config = wgpu::SurfaceConfiguration {
+    let caps = surface.get_capabilities(&adapter);
+    let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: surface_format,
+        format: pick_surface_format(&caps),
         width: canvas.width().max(1),
         height: canvas.height().max(1),
         present_mode: wgpu::PresentMode::AutoNoVsync,
@@ -433,165 +429,138 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     console::log_1(
         &format!(
             "[ornis-wasm] WebGPU ready, format={:?}, surface={}x{}",
-            surface_format, config.width, config.height
+            config.format, config.width, config.height
         )
         .into(),
     );
 
-    // ── Scene: live /api/scene first, scene.ron as fallback ───────────
-    let live = fetch_live_scene().await;
-    let live_mode = live.is_some();
-    let (scene, initial_version) = match live {
-        Some(live) => {
-            console::log_1(
-                &format!(
-                    "[ornis-wasm] live scene from /api/scene: version={}, {} entities, {} lights",
-                    live.version,
-                    live.scene.entities.len(),
-                    live.scene.lights.len()
-                )
-                .into(),
-            );
-            (live.scene, live.version)
-        }
-        None => {
-            console::log_1(
-                &"[ornis-wasm] /api/scene unavailable or reduced, falling back to scene.ron".into(),
-            );
-            let ron_text = load_scene_ron().await;
-            let scene = Scene::from_ron(&ron_text).map_err(|e| format!("scene parse: {:?}", e))?;
-            console::log_1(
-                &format!(
-                    "[ornis-wasm] scene '{}' loaded: {} entities, {} lights",
-                    scene.name,
-                    scene.entities.len(),
-                    scene.lights.len()
-                )
-                .into(),
-            );
-            (scene, 0)
-        }
-    };
+    Ok(GpuContext {
+        surface,
+        device,
+        queue,
+        config,
+    })
+}
 
-    let gpu_scene = build_gpu_scene(&device, &scene);
+/// Pick an sRGB swap-chain format when available, else the first supported.
+fn pick_surface_format(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureFormat {
+    caps.formats
+        .iter()
+        .copied()
+        .find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb
+            )
+        })
+        .unwrap_or_else(|| {
+            caps.formats
+                .first()
+                .copied()
+                .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb)
+        })
+}
 
-    // ── Renderer3D via the RenderBackend trait ────────────────────────
-    let backend_config = RenderBackendConfig {
-        surface_config: config.clone(),
-        sample_count: 1,
-        max_objects: 256,
-        max_materials: 64,
-    };
-    let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
+/// Load the initial scene: live `/api/scene` first, `scene.ron` as fallback.
+/// Returns the scene, its version, and whether live polling should run.
+async fn load_initial_scene() -> Result<(Scene, u64, bool), JsValue> {
+    if let Some(live) = fetch_live_scene().await {
+        console::log_1(
+            &format!(
+                "[ornis-wasm] live scene from /api/scene: version={}, {} entities, {} lights",
+                live.version,
+                live.scene.entities.len(),
+                live.scene.lights.len()
+            )
+            .into(),
+        );
+        let LiveScene { scene, version } = live;
+        return Ok((scene, version, true));
+    }
 
-    renderer.upload_materials(&queue, &gpu_scene.materials);
-    renderer.upload_instances(&queue, &gpu_scene.instances);
-    renderer.set_lights(&queue, scene.ambient, &gpu_scene.lights);
+    console::log_1(
+        &"[ornis-wasm] /api/scene unavailable or reduced, falling back to scene.ron".into(),
+    );
+    let ron_text = load_scene_ron().await;
+    let scene = Scene::from_ron(&ron_text).map_err(|e| format!("scene parse: {:?}", e))?;
+    console::log_1(
+        &format!(
+            "[ornis-wasm] scene '{}' loaded: {} entities, {} lights",
+            scene.name,
+            scene.entities.len(),
+            scene.lights.len()
+        )
+        .into(),
+    );
+    Ok((scene, 0, false))
+}
 
-    let mut instance_count = gpu_scene.instances.len() as u32;
-    let mut mesh = gpu_scene.mesh;
-    let mut mesh_params = gpu_scene.mesh_params;
+/// Mutable state carried across animation frames by the render loop.
+struct FrameState<'a> {
+    surface: wgpu::Surface<'a>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    renderer: Box<dyn RenderBackend>,
+    mesh: ornis_render::Mesh,
+    mesh_params: (u32, u32),
+    instance_count: u32,
+    orbit: Rc<RefCell<OrbitCamera>>,
+}
 
-    // Client-side orbit camera, initialized from the scene camera.
-    let orbit = Rc::new(RefCell::new(OrbitCamera::from_desc(&scene.camera)));
-    attach_orbit_controls(&canvas, &orbit);
-
-    // Live-update plumbing (single-threaded): the render loop spawns a
-    // fetch every LIVE_POLL_INTERVAL_FRAMES; the fetch task deposits the
-    // parsed scene into `pending_scene` and the loop applies it on the next
-    // frame, so the renderer/device are only ever touched by the loop.
-    let pending_scene: Rc<RefCell<Option<LiveScene>>> = Rc::new(RefCell::new(None));
-    let fetch_in_flight = Rc::new(Cell::new(false));
-    // Version of the scene already uploaded to the renderer. 0 means "no
-    // live version applied" (static scene.ron mode never polls anyway).
-    let applied_version = Rc::new(Cell::new(initial_version));
-
-    // ── Render loop ───────────────────────────────────────────────────
-    let f = Rc::new(RefCell::new(None as Option<Closure<dyn FnMut()>>));
-    let f_clone = f.clone();
-
-    let window_for_loop = window.clone();
-    let canvas_for_loop = canvas.clone();
-
-    let mut frame_count: u64 = 0;
-
-    let f_inner = f.clone();
-    *f_clone.borrow_mut() = Some(Closure::new(move || {
-        // Handle resize
-        let pw = canvas_for_loop
+impl<'a> FrameState<'a> {
+    /// Match the canvas (and surface) size to its parent element.
+    fn handle_resize(&mut self, canvas: &web_sys::HtmlCanvasElement) {
+        let pw = canvas
             .parent_element()
             .map(|p| p.client_width() as u32)
-            .unwrap_or(canvas_for_loop.width())
+            .unwrap_or(canvas.width())
             .max(1);
-        let ph = canvas_for_loop
+        let ph = canvas
             .parent_element()
             .map(|p| p.client_height() as u32)
-            .unwrap_or(canvas_for_loop.height())
+            .unwrap_or(canvas.height())
             .max(1);
-        if canvas_for_loop.width() != pw || canvas_for_loop.height() != ph {
-            canvas_for_loop.set_width(pw);
-            canvas_for_loop.set_height(ph);
-            config.width = pw;
-            config.height = ph;
-            surface.configure(&device, &config);
-            renderer.resize(&device, pw, ph);
+        if canvas.width() != pw || canvas.height() != ph {
+            canvas.set_width(pw);
+            canvas.set_height(ph);
+            self.config.width = pw;
+            self.config.height = ph;
+            self.surface.configure(&self.device, &self.config);
+            self.renderer.resize(&self.device, pw, ph);
             console::log_1(&format!("[ornis-wasm] resized surface to {}x{}", pw, ph).into());
         }
+    }
 
-        // ── Live scene polling (~1/s) ────────────────────────────────
-        if live_mode
-            && frame_count.is_multiple_of(LIVE_POLL_INTERVAL_FRAMES)
-            && !fetch_in_flight.get()
-        {
-            fetch_in_flight.set(true);
-            let pending_scene = pending_scene.clone();
-            let fetch_in_flight = fetch_in_flight.clone();
-            let applied_version = applied_version.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(live) = fetch_live_scene().await
-                    && live.version != applied_version.get()
-                {
-                    console::log_1(
-                        &format!(
-                            "[ornis-wasm] /api/scene changed: v{} -> v{}",
-                            applied_version.get(),
-                            live.version
-                        )
-                        .into(),
-                    );
-                    *pending_scene.borrow_mut() = Some(live);
-                }
-                fetch_in_flight.set(false);
-            });
+    /// Rebuild materials/instances (and the shared mesh if tessellation
+    /// changed) for a freshly polled live scene and re-upload. No
+    /// device/surface recreation.
+    fn apply_live_scene(&mut self, live: &LiveScene, applied_version: &Cell<u64>) {
+        let gpu = build_gpu_scene(&self.device, &live.scene);
+        if gpu.mesh_params != self.mesh_params {
+            self.mesh = gpu.mesh;
+            self.mesh_params = gpu.mesh_params;
         }
+        self.renderer.upload_materials(&self.queue, &gpu.materials);
+        self.renderer.upload_instances(&self.queue, &gpu.instances);
+        self.renderer
+            .set_lights(&self.queue, live.scene.ambient, &gpu.lights);
+        self.instance_count = gpu.instances.len() as u32;
+        applied_version.set(live.version);
+        console::log_1(
+            &format!(
+                "[ornis-wasm] live scene v{} applied ({} instances)",
+                live.version, self.instance_count
+            )
+            .into(),
+        );
+    }
 
-        // Apply a freshly polled scene: rebuild materials/instances (and the
-        // shared mesh if its tessellation changed) and re-upload. No
-        // device/surface recreation.
-        if let Some(live) = pending_scene.borrow_mut().take() {
-            let gpu = build_gpu_scene(&device, &live.scene);
-            if gpu.mesh_params != mesh_params {
-                mesh = gpu.mesh;
-                mesh_params = gpu.mesh_params;
-            }
-            renderer.upload_materials(&queue, &gpu.materials);
-            renderer.upload_instances(&queue, &gpu.instances);
-            renderer.set_lights(&queue, live.scene.ambient, &gpu.lights);
-            instance_count = gpu.instances.len() as u32;
-            applied_version.set(live.version);
-            console::log_1(
-                &format!(
-                    "[ornis-wasm] live scene v{} applied ({} instances)",
-                    live.version, instance_count
-                )
-                .into(),
-            );
-        }
-
-        // Camera for the current aspect ratio, from the orbit state.
-        let aspect = config.width as f32 / config.height as f32;
+    /// Upload the orbit-derived camera for the current aspect ratio.
+    fn update_camera(&mut self) {
+        let aspect = self.config.width as f32 / self.config.height as f32;
         let (cam_pos, cam_target, cam_up, fov, near, far) = {
-            let orbit = orbit.borrow();
+            let orbit = self.orbit.borrow();
             (
                 orbit.position(),
                 orbit.target,
@@ -604,54 +573,221 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
         let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
-        renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), cam_pos.to_array());
+        self.renderer
+            .set_camera(&self.queue, &view_proj.to_cols_array_2d(), cam_pos.to_array());
+    }
 
-        match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                let view = frame
+    /// Draw one frame into the given swap-chain view.
+    fn draw(&mut self, target_view: &wgpu::TextureView) {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_encoder"),
+        });
+        self.renderer.render_scene(
+            RenderContext {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                target: target_view,
+            },
+            &self.mesh,
+            self.instance_count,
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Reconfigure a surface whose configuration was lost or outdated.
+    fn reconfigure(&mut self) {
+        self.surface.configure(&self.device, &self.config);
+    }
+}
+
+/// Log milestone frame counts: the very first frame and periodic heartbeats.
+fn log_frame_milestone(frame_count: u64, config: &wgpu::SurfaceConfiguration, instances: u32) {
+    if frame_count == 1 {
+        console::log_1(
+            &format!(
+                "[ornis-wasm] first frame rendered ({}x{}, {} instances)",
+                config.width, config.height, instances
+            )
+            .into(),
+        );
+    } else if frame_count.is_multiple_of(600) {
+        console::log_1(&format!("[ornis-wasm] frame {frame_count} rendered").into());
+    }
+}
+
+/// Kick off a `/api/scene` poll unless one is already in flight. Deposits a
+/// changed parsed scene into `pending_scene`; cleared on completion.
+fn poll_live_scene(
+    pending_scene: &Rc<RefCell<Option<LiveScene>>>,
+    fetch_in_flight: &Rc<Cell<bool>>,
+    applied_version: &Rc<Cell<u64>>,
+) {
+    fetch_in_flight.set(true);
+    let pending_scene = pending_scene.clone();
+    let fetch_in_flight = fetch_in_flight.clone();
+    let applied_version = applied_version.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Some(live) = fetch_live_scene().await
+            && live.version != applied_version.get()
+        {
+            console::log_1(
+                &format!(
+                    "[ornis-wasm] /api/scene changed: v{} -> v{}",
+                    applied_version.get(),
+                    live.version
+                )
+                .into(),
+            );
+            *pending_scene.borrow_mut() = Some(live);
+        }
+        fetch_in_flight.set(false);
+    });
+}
+
+/// Non-GPU handles shared with the render-loop closure.
+struct LoopHandles {
+    window: web_sys::Window,
+    canvas: web_sys::HtmlCanvasElement,
+    pending_scene: Rc<RefCell<Option<LiveScene>>>,
+    fetch_in_flight: Rc<Cell<bool>>,
+    live_mode: bool,
+}
+
+#[wasm_bindgen]
+pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
+    console::log_1(&format!("[ornis-wasm] init canvas={}", canvas_id).into());
+
+    let canvas = get_canvas(&canvas_id)?;
+    resize_canvas_to_parent(&canvas);
+
+    let instance = make_instance();
+    let ctx = init_webgpu(&instance, &canvas).await?;
+
+    let (scene, initial_version, live_mode) = load_initial_scene().await?;
+    let gpu_scene = build_gpu_scene(&ctx.device, &scene);
+
+    let renderer: Box<dyn RenderBackend> = create_render_backend(
+        &ctx.device,
+        &RenderBackendConfig {
+            surface_config: ctx.config.clone(),
+            sample_count: 1,
+            max_objects: 256,
+            max_materials: 64,
+        },
+    );
+
+    // Client-side orbit camera, initialized from the scene camera.
+    let orbit = Rc::new(RefCell::new(OrbitCamera::from_desc(&scene.camera)));
+    attach_orbit_controls(&canvas, &orbit);
+
+    // Live-update plumbing (single-threaded): the render loop spawns a
+    // fetch every LIVE_POLL_INTERVAL_FRAMES; the fetch task deposits the
+    // parsed scene into `pending_scene` and the loop applies it on the next
+    // frame, so the renderer/device are only ever touched by the loop.
+    let handles = LoopHandles {
+        window: web_sys::window().ok_or("no window")?,
+        canvas,
+        pending_scene: Rc::new(RefCell::new(None)),
+        fetch_in_flight: Rc::new(Cell::new(false)),
+        live_mode,
+    };
+
+    spawn_render_loop(
+        handles,
+        ctx,
+        renderer,
+        gpu_scene,
+        orbit,
+        initial_version,
+        scene.ambient,
+    )?;
+    Ok(())
+}
+
+/// Build and leak the requestAnimationFrame closure driving the render loop.
+/// The closures are leaked intentionally so the JS callback stays valid.
+#[allow(clippy::too_many_arguments)]
+fn spawn_render_loop(
+    handles: LoopHandles,
+    ctx: GpuContext,
+    mut renderer: Box<dyn RenderBackend>,
+    gpu_scene: GpuScene,
+    orbit: Rc<RefCell<OrbitCamera>>,
+    initial_version: u64,
+    ambient: [f32; 3],
+) -> Result<(), JsValue> {
+    renderer.upload_materials(&ctx.queue, &gpu_scene.materials);
+    renderer.upload_instances(&ctx.queue, &gpu_scene.instances);
+    renderer.set_lights(&ctx.queue, ambient, &gpu_scene.lights);
+
+    let applied_version = Rc::new(Cell::new(initial_version));
+
+    let mut frame = FrameState {
+        surface: ctx.surface,
+        device: ctx.device,
+        queue: ctx.queue,
+        config: ctx.config,
+        renderer,
+        mesh: gpu_scene.mesh,
+        mesh_params: gpu_scene.mesh_params,
+        instance_count: gpu_scene.instances.len() as u32,
+        orbit,
+    };
+
+    let LoopHandles {
+        window,
+        canvas,
+        pending_scene,
+        fetch_in_flight,
+        live_mode,
+    } = handles;
+
+    let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let f_clone = f.clone();
+
+    let window_for_loop = window.clone();
+    let mut frame_count: u64 = 0;
+    let f_inner = f.clone();
+
+    *f_clone.borrow_mut() = Some(Closure::new(move || {
+        frame.handle_resize(&canvas);
+
+        // ── Live scene polling (~1/s) ────────────────────────────────
+        if live_mode
+            && frame_count.is_multiple_of(LIVE_POLL_INTERVAL_FRAMES)
+            && !fetch_in_flight.get()
+        {
+            poll_live_scene(&pending_scene, &fetch_in_flight, &applied_version);
+        }
+
+        // Apply a freshly polled scene, if any.
+        if let Some(live) = pending_scene.borrow_mut().take() {
+            frame.apply_live_scene(&live, &applied_version);
+        }
+
+        frame.update_camera();
+
+        match frame.surface.get_current_texture() {
+            // Surface lost its configuration — reconfigure and retry next frame.
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                frame.reconfigure();
+            }
+            // Skip frame, will retry next animation frame.
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => {}
+            wgpu::CurrentSurfaceTexture::Success(presentable)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(presentable) => {
+                let view = presentable
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("render_encoder"),
-                });
-
-                renderer.render_scene(
-                    RenderContext {
-                        device: &device,
-                        queue: &queue,
-                        encoder: &mut encoder,
-                        target: &view,
-                    },
-                    &mesh,
-                    instance_count,
-                );
-
-                queue.submit(std::iter::once(encoder.finish()));
-                frame.present();
+                frame.draw(&view);
+                presentable.present();
 
                 frame_count += 1;
-                if frame_count == 1 {
-                    console::log_1(
-                        &format!(
-                            "[ornis-wasm] first frame rendered ({}x{}, {} instances)",
-                            config.width, config.height, instance_count
-                        )
-                        .into(),
-                    );
-                } else if frame_count.is_multiple_of(600) {
-                    console::log_1(&format!("[ornis-wasm] frame {} rendered", frame_count).into());
-                }
-            }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                // Surface lost its configuration — reconfigure and retry next frame
-                surface.configure(&device, &config);
-            }
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => {
-                // Skip frame, will retry next animation frame
+                log_frame_milestone(frame_count, &frame.config, frame.instance_count);
             }
         }
 
@@ -663,9 +799,25 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
 
     window.request_animation_frame(f_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref())?;
 
-    // Prevent dropping the closure so the JS callback stays valid
     std::mem::forget(f);
     std::mem::forget(f_clone);
 
     Ok(())
+}
+
+/// Fetch a URL and return its response body as a string, or `None` on any
+/// network / status / decoding failure.
+async fn fetch_api_text(url: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
+        .await
+        .ok()?;
+    let resp: web_sys::Response = resp_value.dyn_into().ok()?;
+    if !resp.ok() {
+        return None;
+    }
+    let text = wasm_bindgen_futures::JsFuture::from(resp.text().ok()?)
+        .await
+        .ok()?;
+    text.as_string()
 }

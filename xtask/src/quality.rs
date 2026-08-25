@@ -35,341 +35,317 @@ struct StageResult {
     note: String,
 }
 
-pub fn quality(args: &[String]) {
-    let mut full = false;
-    let mut bench = false;
-    let mut ci = false;
-    let mut everything = false;
-    for a in args {
-        match a.as_str() {
-            "--full" => full = true,
-            "--bench" => bench = true,
-            "--ci" => ci = true,
-            "--everything" => everything = true,
-            "-h" | "--help" => quality_usage(0),
-            other => {
-                eprintln!("xtask quality: unknown flag '{other}'");
-                quality_usage(2);
+/// Depth flags for the quality gate.
+#[derive(Default)]
+struct QualityFlags {
+    full: bool,
+    bench: bool,
+    ci: bool,
+    everything: bool,
+}
+
+impl QualityFlags {
+    fn parse(args: &[String]) -> Self {
+        let mut f = Self::default();
+        for a in args {
+            match a.as_str() {
+                "--full" => f.full = true,
+                "--bench" => f.bench = true,
+                "--ci" => f.ci = true,
+                "--everything" => f.everything = true,
+                "-h" | "--help" => quality_usage(0),
+                other => {
+                    eprintln!("xtask quality: unknown flag '{other}'");
+                    quality_usage(2);
+                }
             }
         }
+        // --everything implies all levels: level 2 (coverage + bench
+        // compile-check), criterion, the CI set (doc + wasm check) and
+        // the deep static-analysis stages (mutants, fuzz smoke).
+        if f.everything {
+            f.full = true;
+            f.bench = true;
+            f.ci = true;
+        }
+        f
     }
-    // --everything implies all levels: level 2 (coverage + bench
-    // compile-check), criterion, the CI set (doc + wasm check) and
-    // the deep static-analysis stages (mutants, fuzz smoke).
-    if everything {
-        full = true;
-        bench = true;
-        ci = true;
+
+    /// The total is computed up-front so the stage numbering stays
+    /// honest even when a deep stage is skipped (tool not installed).
+    /// Level 1 now: fmt, clippy, bca, test, test (physics gpu),
+    /// clippy (physics gpu), audit, deny, outdated = 9
+    fn total_stages(&self) -> usize {
+        9 + usize::from(self.ci) * 2
+            + usize::from(self.full) * 2
+            + usize::from(self.bench)
+            + usize::from(self.everything) * 2
+    }
+}
+
+/// Running stage counter shared by the per-level runners.
+struct StageList<'a> {
+    root: &'a std::path::Path,
+    total: usize,
+    n: usize,
+    results: Vec<StageResult>,
+}
+
+impl<'a> StageList<'a> {
+    fn new(root: &'a std::path::Path, total: usize) -> Self {
+        Self {
+            root,
+            total,
+            n: 0,
+            results: Vec::new(),
+        }
     }
 
-    let root = crate::workspace_root();
-    let mut results: Vec<StageResult> = Vec::new();
-    // The total is computed up-front so the stage numbering stays
-    // honest even when a deep stage is skipped (tool not installed).
-    // Level 1 now: fmt, clippy, bca, test, test (physics gpu),
-    // clippy (physics gpu), audit, deny, outdated = 9
-    let total = 9
-        + usize::from(ci) * 2
-        + usize::from(full) * 2
-        + usize::from(bench)
-        + usize::from(everything) * 2;
-    let mut n = 0usize;
+    fn run(&mut self, name: &str, desc: &str, command: Command, informational: bool) {
+        self.n += 1;
+        let result = run_stage(self.n, self.total, name, desc, command, informational);
+        self.results.push(result);
+    }
 
-    // ── Level 1 (mandatory set) ───────────────────────────────
+    fn skip(&mut self, name: &str, note: &str) {
+        self.n += 1;
+        let result = skip_stage(self.n, self.total, name, note);
+        self.results.push(result);
+    }
 
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    fn cargo(&self, args: &[&str]) -> Command {
+        cmd(self.root, "cargo", args)
+    }
+
+    fn bca(&self) -> Command {
+        let mut c = Command::new("bca");
+        c.arg("check").current_dir(self.root);
+        c
+    }
+}
+
+/// ── Level 1 (mandatory set) ───────────────────────────────
+fn level1(stages: &mut StageList<'_>) {
+    stages.run(
         "fmt",
         "cargo fmt --all -- --check",
-        cmd(&root, "cargo", &["fmt", "--all", "--", "--check"]),
+        stages.cargo(&["fmt", "--all", "--", "--check"]),
         false,
-    ));
+    );
 
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    stages.run(
         "clippy",
         "cargo clippy --workspace --all-targets -- -D warnings",
-        cmd(
-            &root,
-            "cargo",
-            &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        ),
+        stages.cargo(&[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
         false,
-    ));
+    );
 
     // Maintainability / complexity gate (optional, external tool).
     // If `bca` is not found, SKIP with install hint — does not fail the gate.
     // License: bca is MPL-2.0, but used as external binary it does NOT affect
     // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
-    n += 1;
     if binary_exists("bca") {
-        results.push(run_stage(
-            n,
-            total,
-            "bca",
-            "bca check",
-            {
-                let mut c = Command::new("bca");
-                c.arg("check").current_dir(&root);
-                c
-            },
-            false,
-        ));
+        stages.run("bca", "bca check", stages.bca(), false);
     } else {
-        results.push(skip_stage(
-            n,
-            total,
+        stages.skip(
             "bca",
             "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
-        ));
+        );
     }
 
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    stages.run(
         "test",
         "cargo test --workspace",
-        cmd(&root, "cargo", &["test", "--workspace"]),
+        stages.cargo(&["test", "--workspace"]),
         false,
-    ));
+    );
 
     // Physics GPU solver (feature `gpu`): the shader is generated from Rust
     // via ornis-macros. This stage validates the generated WGSL with naga and
     // runs the solver against the CPU reference on a software adapter
     // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
     // so the gate stays green on machines without GPU drivers.
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    stages.run(
         "test (physics gpu)",
         "cargo test -p ornis-physics --features gpu",
-        cmd(
-            &root,
-            "cargo",
-            &["test", "-p", "ornis-physics", "--features", "gpu"],
-        ),
+        stages.cargo(&["test", "-p", "ornis-physics", "--features", "gpu"]),
         false,
-    ));
+    );
 
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    stages.run(
         "clippy (physics gpu)",
         "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
-        cmd(
-            &root,
-            "cargo",
-            &[
-                "clippy",
-                "-p",
-                "ornis-physics",
-                "--features",
-                "gpu",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        ),
+        stages.cargo(&[
+            "clippy",
+            "-p",
+            "ornis-physics",
+            "--features",
+            "gpu",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
         false,
-    ));
+    );
 
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
-        "audit",
-        "cargo audit",
-        cmd(&root, "cargo", &["audit"]),
-        false,
-    ));
+    stages.run("audit", "cargo audit", stages.cargo(&["audit"]), false);
 
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    stages.run(
         "deny",
         "cargo deny check",
-        cmd(&root, "cargo", &["deny", "check"]),
+        stages.cargo(&["deny", "check"]),
         false,
-    ));
+    );
 
     // Informational stage: cargo-outdated returns a non-zero code when
     // dependencies are outdated — that is not a reason to fail the gate.
-    n += 1;
-    results.push(run_stage(
-        n,
-        total,
+    stages.run(
         "outdated (info)",
         "cargo outdated --workspace",
-        cmd(&root, "cargo", &["outdated", "--workspace"]),
+        stages.cargo(&["outdated", "--workspace"]),
         true,
-    ));
+    );
+}
 
-    // ── Level 2 (--full) ───────────────────────────────────────────
+/// ── Level 2 (--full): coverage + bench compile check ──────
+fn full_stages(stages: &mut StageList<'_>) {
+    stages.run(
+        "coverage (llvm-cov)",
+        "cargo llvm-cov --workspace --html --output-dir target/llvm-cov",
+        stages.cargo(&[
+            "llvm-cov",
+            "--workspace",
+            "--html",
+            "--output-dir",
+            "target/llvm-cov",
+        ]),
+        false,
+    );
 
-    if full {
-        n += 1;
-        results.push(run_stage(
-            n,
-            total,
-            "coverage (llvm-cov)",
-            "cargo llvm-cov --workspace --html --output-dir target/llvm-cov",
-            cmd(
-                &root,
-                "cargo",
-                &[
-                    "llvm-cov",
-                    "--workspace",
-                    "--html",
-                    "--output-dir",
-                    "target/llvm-cov",
-                ],
-            ),
+    stages.run(
+        "bench compile-check",
+        "cargo bench --workspace --no-run",
+        stages.cargo(&["bench", "--workspace", "--no-run"]),
+        false,
+    );
+}
+
+fn bench_stage(stages: &mut StageList<'_>) {
+    stages.run(
+        "criterion benches",
+        "cargo bench --workspace",
+        stages.cargo(&["bench", "--workspace"]),
+        false,
+    );
+}
+
+/// ── CI set (--ci): rustdoc + wasm target check ────────────
+/// These two stages mirror what the GitHub Actions quality job
+/// runs; --ci makes the local gate identical to CI by construction.
+fn ci_stages(stages: &mut StageList<'_>) {
+    stages.run(
+        "doc",
+        "cargo doc --workspace --no-deps",
+        stages.cargo(&["doc", "--workspace", "--no-deps"]),
+        false,
+    );
+
+    if wasm_target_installed() {
+        stages.run(
+            "wasm-check",
+            "cargo check -p ornis-wasm --target wasm32-unknown-unknown",
+            stages.cargo(&[
+                "check",
+                "-p",
+                "ornis-wasm",
+                "--target",
+                "wasm32-unknown-unknown",
+            ]),
             false,
-        ));
+        );
+    } else {
+        stages.skip(
+            "wasm-check",
+            "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
+        );
+    }
+}
 
-        n += 1;
-        results.push(run_stage(
-            n,
-            total,
-            "bench compile-check",
-            "cargo bench --workspace --no-run",
-            cmd(&root, "cargo", &["bench", "--workspace", "--no-run"]),
+/// ── Deep static analysis (--everything) ────────────────────
+/// Long-running stages, only under the explicit deep flag.
+fn deep_stages(stages: &mut StageList<'_>) {
+    if cargo_subcommand_exists("mutants") {
+        stages.run(
+            "mutants (ornis-core)",
+            "cargo mutants -p ornis-core --features lock-free --timeout 300",
+            stages.cargo(&[
+                "mutants",
+                "-p",
+                "ornis-core",
+                "--features",
+                "lock-free",
+                "--timeout",
+                "300",
+            ]),
             false,
-        ));
+        );
+    } else {
+        stages.skip("mutants (ornis-core)", "cargo-mutants not installed");
     }
 
-    if bench {
-        n += 1;
-        results.push(run_stage(
-            n,
-            total,
-            "criterion benches",
-            "cargo bench --workspace",
-            cmd(&root, "cargo", &["bench", "--workspace"]),
+    if cargo_subcommand_exists("fuzz") && nightly_available() {
+        stages.run(
+            "fuzz smoke (scene_ron)",
+            "cargo +nightly fuzz run scene_ron -- -runs=200",
+            stages.cargo(&["+nightly", "fuzz", "run", "scene_ron", "--", "-runs=200"]),
             false,
-        ));
+        );
+    } else {
+        stages.skip(
+            "fuzz smoke (scene_ron)",
+            "cargo-fuzz or nightly toolchain missing",
+        );
+    }
+}
+
+pub fn quality(args: &[String]) {
+    let flags = QualityFlags::parse(args);
+
+    let root = crate::workspace_root();
+    let mut stages = StageList::new(&root, flags.total_stages());
+
+    // ── Level 1 (mandatory set) ───────────────────────────────
+    level1(&mut stages);
+
+    // ── Level 2 (--full) ──────────────────────────────────────
+    if flags.full {
+        full_stages(&mut stages);
     }
 
-    // ── CI set (--ci): rustdoc + wasm target check ─────────────
-    // These two stages mirror what the GitHub Actions quality job
-    // runs; --ci makes the local gate identical to CI by construction.
-    if ci {
-        n += 1;
-        results.push(run_stage(
-            n,
-            total,
-            "doc",
-            "cargo doc --workspace --no-deps",
-            cmd(&root, "cargo", &["doc", "--workspace", "--no-deps"]),
-            false,
-        ));
-
-        n += 1;
-        if wasm_target_installed() {
-            results.push(run_stage(
-                n,
-                total,
-                "wasm-check",
-                "cargo check -p ornis-wasm --target wasm32-unknown-unknown",
-                cmd(
-                    &root,
-                    "cargo",
-                    &[
-                        "check",
-                        "-p",
-                        "ornis-wasm",
-                        "--target",
-                        "wasm32-unknown-unknown",
-                    ],
-                ),
-                false,
-            ));
-        } else {
-            results.push(skip_stage(
-                n,
-                total,
-                "wasm-check",
-                "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
-            ));
-        }
+    if flags.bench {
+        bench_stage(&mut stages);
     }
 
-    // ── Deep static analysis (--everything) ─────────────────────
-    // Long-running stages, only under the explicit deep flag.
-    if everything {
-        n += 1;
-        if cargo_subcommand_exists("mutants") {
-            results.push(run_stage(
-                n,
-                total,
-                "mutants (ornis-core)",
-                "cargo mutants -p ornis-core --features lock-free --timeout 300",
-                cmd(
-                    &root,
-                    "cargo",
-                    &[
-                        "mutants",
-                        "-p",
-                        "ornis-core",
-                        "--features",
-                        "lock-free",
-                        "--timeout",
-                        "300",
-                    ],
-                ),
-                false,
-            ));
-        } else {
-            results.push(skip_stage(
-                n,
-                total,
-                "mutants (ornis-core)",
-                "cargo-mutants not installed",
-            ));
-        }
-
-        n += 1;
-        if cargo_subcommand_exists("fuzz") && nightly_available() {
-            results.push(run_stage(
-                n,
-                total,
-                "fuzz smoke (scene_ron)",
-                "cargo +nightly fuzz run scene_ron -- -runs=200",
-                cmd(
-                    &root,
-                    "cargo",
-                    &["+nightly", "fuzz", "run", "scene_ron", "--", "-runs=200"],
-                ),
-                false,
-            ));
-        } else {
-            results.push(skip_stage(
-                n,
-                total,
-                "fuzz smoke (scene_ron)",
-                "cargo-fuzz or nightly toolchain missing",
-            ));
-        }
+    // ── CI set (--ci) ─────────────────────────────────────────
+    if flags.ci {
+        ci_stages(&mut stages);
     }
 
-    print_summary(&results);
-    if results.iter().any(|r| r.status == Status::Fail) {
+    // ── Deep static analysis (--everything) ───────────────────
+    if flags.everything {
+        deep_stages(&mut stages);
+    }
+
+    print_summary(&stages.results);
+    if stages.results.iter().any(|r| r.status == Status::Fail) {
         exit(1);
     }
 }

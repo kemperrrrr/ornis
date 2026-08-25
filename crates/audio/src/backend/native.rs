@@ -270,13 +270,18 @@ mod tests {
         let mut prev_l = f32::INFINITY;
         let mut prev_r = f32::NEG_INFINITY;
         for i in 0..=20 {
-            let az = -std::f32::consts::FRAC_PI_2
-                + (i as f32 / 20.0) * std::f32::consts::PI;
+            let az = -std::f32::consts::FRAC_PI_2 + (i as f32 / 20.0) * std::f32::consts::PI;
             let (l, r) = pan_sample(sample, az);
             assert!(l >= -1e-6, "L inverted at azimuth={az}: {l}");
             assert!(r >= -1e-6, "R inverted at azimuth={az}: {r}");
-            assert!(l <= prev_l + 1e-6, "L not monotonic at {az}: {prev_l} -> {l}");
-            assert!(r >= prev_r - 1e-6, "R not monotonic at {az}: {prev_r} -> {r}");
+            assert!(
+                l <= prev_l + 1e-6,
+                "L not monotonic at {az}: {prev_l} -> {l}"
+            );
+            assert!(
+                r >= prev_r - 1e-6,
+                "R not monotonic at {az}: {prev_r} -> {r}"
+            );
             prev_l = l;
             prev_r = r;
         }

@@ -449,6 +449,168 @@ pub struct FramePlan {
     layout_computations: u32,
 }
 
+/// Layout projections of the enabled passes.
+fn collect_enabled_passes(plan: &FramePlan) -> Vec<PassLayout> {
+    let enabled: Vec<usize> = plan
+        .passes
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.enabled)
+        .map(|(i, _)| i)
+        .collect();
+    enabled
+        .iter()
+        .map(|&i| {
+            let node = &plan.passes[i];
+            PassLayout {
+                id: PassId(i as u32),
+                name: node.name.clone(),
+                reads: node.reads.clone(),
+                writes: node.writes.clone(),
+            }
+        })
+        .collect()
+}
+
+fn init_resource_layout(plan: &FramePlan) -> Vec<ResourceLayout> {
+    plan.resources
+        .iter()
+        .enumerate()
+        .map(|(i, node)| ResourceLayout {
+            id: ResourceId(i as u32),
+            name: node.name.clone(),
+            spec: node.spec,
+            first_use: usize::MAX,
+            last_use: 0,
+            slot: None,
+            external: node.external,
+        })
+        .collect()
+}
+
+/// Lifetimes over enabled passes.
+fn compute_resource_lifetimes(passes: &[PassLayout], resources: &mut [ResourceLayout]) {
+    for (pi, pass) in passes.iter().enumerate() {
+        for rid in pass.reads.iter().chain(pass.writes.iter().map(|(r, _)| r)) {
+            let rl = &mut resources[rid.0 as usize];
+            rl.first_use = rl.first_use.min(pi);
+            rl.last_use = rl.last_use.max(pi);
+        }
+    }
+}
+
+/// "First touch must be a write" rule (imported resources exempt).
+fn validate_first_touch_is_write(
+    passes: &[PassLayout],
+    nodes: &[ResourceNode],
+    resources: &[ResourceLayout],
+) {
+    for (pi, pass) in passes.iter().enumerate() {
+        for &rid in &pass.reads {
+            let node = &nodes[rid.0 as usize];
+            let rl = &resources[rid.0 as usize];
+            if !node.imported && rl.first_use == pi {
+                let written_earlier = pass.writes.iter().any(|(w, _)| *w == rid);
+                let first_write = passes[..pi]
+                    .iter()
+                    .any(|p| p.writes.iter().any(|(w, _)| *w == rid));
+                if !written_earlier && !first_write {
+                    panic!(
+                        "resource '{}' is read in pass '{}' (index {pi}) before any write; \
+                         use import_resource() for external inputs, or write it in an earlier pass",
+                        node.name, pass.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Interval partitioning: greedy first-fit over slots with a free window
+/// and a matching spec. External resources are never pooled.
+fn assign_pool_slots(resources: &mut [ResourceLayout]) -> Vec<PoolSlot> {
+    let mut used: Vec<ResourceId> = resources
+        .iter()
+        .filter(|rl| rl.first_use != usize::MAX && !rl.external)
+        .map(|rl| rl.id)
+        .collect();
+    used.sort_by_key(|&id| {
+        (
+            resources[id.0 as usize].first_use,
+            resources[id.0 as usize].last_use,
+        )
+    });
+
+    let mut slots: Vec<PoolSlot> = Vec::new();
+    for id in used {
+        let (spec, first_use, last_use) = {
+            let rl = &resources[id.0 as usize];
+            (rl.spec, rl.first_use, rl.last_use)
+        };
+        match slots
+            .iter()
+            .position(|s| s.spec == spec && s.last_pass < first_use)
+        {
+            Some(i) => {
+                slots[i].resources.push(id);
+                slots[i].last_pass = last_use;
+                resources[id.0 as usize].slot = Some(i);
+            }
+            None => {
+                let i = slots.len();
+                slots.push(PoolSlot {
+                    index: i,
+                    spec,
+                    resources: vec![id],
+                    first_pass: first_use,
+                    last_pass: last_use,
+                });
+                resources[id.0 as usize].slot = Some(i);
+            }
+        }
+    }
+    slots
+}
+
+fn live_resources_per_pass(
+    passes: &[PassLayout],
+    resources: &[ResourceLayout],
+) -> Vec<Vec<ResourceId>> {
+    (0..passes.len())
+        .map(|pi| {
+            resources
+                .iter()
+                .filter(|rl| rl.alive_at(pi))
+                .map(|rl| rl.id)
+                .collect()
+        })
+        .collect()
+}
+
+/// Internal invariant check: a slot must not be shared within one pass.
+fn validate_no_slot_aliasing(pass_alive: &[Vec<ResourceId>], resources: &[ResourceLayout]) {
+    for (pi, alive) in pass_alive.iter().enumerate() {
+        let mut seen: HashMap<usize, ResourceId> = HashMap::new();
+        for &rid in alive {
+            let rl = &resources[rid.0 as usize];
+            let Some(slot) = rl.slot else {
+                continue;
+            };
+            if let Some(prev) = seen.insert(slot, rid) {
+                panic!(
+                    "layout bug: pass {pi} aliases slot #{slot} for resources {prev:?} and {rid:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Executes the plan: for each pass in layout order, `run` is invoked
+/// with a [`PassContext`] (live resources and their slots).
+///
+/// # Panics
+/// Panics if the layout has not been computed yet (call `build()` first).
+
 impl FramePlan {
     /// Creates an empty plan; `surface_size` feeds `SizePolicy::MatchSurface`.
     pub fn new(surface_size: (u32, u32)) -> Self {
@@ -671,138 +833,15 @@ impl FramePlan {
     }
 
     fn compute_layout(&self) -> FrameLayout {
-        let enabled: Vec<usize> = self
-            .passes
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.enabled)
-            .map(|(i, _)| i)
-            .collect();
+        let passes = collect_enabled_passes(self);
+        let mut resources = init_resource_layout(self);
 
-        let passes: Vec<PassLayout> = enabled
-            .iter()
-            .map(|&i| {
-                let node = &self.passes[i];
-                PassLayout {
-                    id: PassId(i as u32),
-                    name: node.name.clone(),
-                    reads: node.reads.clone(),
-                    writes: node.writes.clone(),
-                }
-            })
-            .collect();
+        compute_resource_lifetimes(&passes, &mut resources);
+        validate_first_touch_is_write(&passes, &self.resources, &resources);
 
-        let mut resources: Vec<ResourceLayout> = self
-            .resources
-            .iter()
-            .enumerate()
-            .map(|(i, node)| ResourceLayout {
-                id: ResourceId(i as u32),
-                name: node.name.clone(),
-                spec: node.spec,
-                first_use: usize::MAX,
-                last_use: 0,
-                slot: None,
-                external: node.external,
-            })
-            .collect();
-
-        // Lifetimes over enabled passes.
-        for (pi, pass) in passes.iter().enumerate() {
-            for rid in pass.reads.iter().chain(pass.writes.iter().map(|(r, _)| r)) {
-                let rl = &mut resources[rid.0 as usize];
-                rl.first_use = rl.first_use.min(pi);
-                rl.last_use = rl.last_use.max(pi);
-            }
-        }
-
-        // "First touch must be a write" rule (imported resources exempt).
-        for (pi, pass) in passes.iter().enumerate() {
-            for &rid in &pass.reads {
-                let node = &self.resources[rid.0 as usize];
-                let rl = &resources[rid.0 as usize];
-                if !node.imported && rl.first_use == pi {
-                    let written_earlier = pass.writes.iter().any(|(w, _)| *w == rid);
-                    let first_write = passes[..pi]
-                        .iter()
-                        .any(|p| p.writes.iter().any(|(w, _)| *w == rid));
-                    if !written_earlier && !first_write {
-                        panic!(
-                            "resource '{}' is read in pass '{}' (index {pi}) before any write; \
-                             use import_resource() for external inputs, or write it in an earlier pass",
-                            node.name, pass.name
-                        );
-                    }
-                }
-            }
-        }
-
-        // Interval partitioning: greedy first-fit over slots with a free
-        // window and a matching spec. External resources are never pooled.
-        let mut used: Vec<ResourceId> = resources
-            .iter()
-            .filter(|rl| rl.first_use != usize::MAX && !rl.external)
-            .map(|rl| rl.id)
-            .collect();
-        used.sort_by_key(|&id| {
-            (
-                resources[id.0 as usize].first_use,
-                resources[id.0 as usize].last_use,
-            )
-        });
-
-        let mut slots: Vec<PoolSlot> = Vec::new();
-        for id in used {
-            let rl = &resources[id.0 as usize];
-            match slots
-                .iter()
-                .position(|s| s.spec == rl.spec && s.last_pass < rl.first_use)
-            {
-                Some(i) => {
-                    slots[i].resources.push(id);
-                    slots[i].last_pass = rl.last_use;
-                    resources[id.0 as usize].slot = Some(i);
-                }
-                None => {
-                    let i = slots.len();
-                    slots.push(PoolSlot {
-                        index: i,
-                        spec: rl.spec,
-                        resources: vec![id],
-                        first_pass: rl.first_use,
-                        last_pass: rl.last_use,
-                    });
-                    resources[id.0 as usize].slot = Some(i);
-                }
-            }
-        }
-
-        // Live resources per pass.
-        let pass_alive: Vec<Vec<ResourceId>> = (0..passes.len())
-            .map(|pi| {
-                resources
-                    .iter()
-                    .filter(|rl| rl.alive_at(pi))
-                    .map(|rl| rl.id)
-                    .collect()
-            })
-            .collect();
-
-        // Internal invariant check: a slot must not be shared within one pass.
-        for (pi, alive) in pass_alive.iter().enumerate() {
-            let mut seen: HashMap<usize, ResourceId> = HashMap::new();
-            for &rid in alive {
-                let rl = &resources[rid.0 as usize];
-                let Some(slot) = rl.slot else {
-                    continue;
-                };
-                if let Some(prev) = seen.insert(slot, rid) {
-                    panic!(
-                        "layout bug: pass {pi} aliases slot #{slot} for resources {prev:?} and {rid:?}"
-                    );
-                }
-            }
-        }
+        let slots = assign_pool_slots(&mut resources);
+        let pass_alive = live_resources_per_pass(&passes, &resources);
+        validate_no_slot_aliasing(&pass_alive, &resources);
 
         let levels = layout_levels(&passes, &self.ordering);
         FrameLayout {
@@ -815,11 +854,6 @@ impl FramePlan {
         }
     }
 
-    /// Executes the plan: for each pass in layout order, `run` is invoked
-    /// with a [`PassContext`] (live resources and their slots).
-    ///
-    /// # Panics
-    /// Panics if the layout has not been computed yet (call `build()` first).
     pub fn execute(&self, layout: &FrameLayout, mut run: impl FnMut(PassContext<'_>)) {
         for index in 0..layout.passes.len() {
             run(PassContext { layout, index });

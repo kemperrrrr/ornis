@@ -140,6 +140,14 @@ pub struct CompositeResources {
     pub sampler: wgpu::Sampler,
 }
 
+/// The four core GPU buffers (camera / per-object / material / lighting).
+struct CoreBuffers {
+    camera: wgpu::Buffer,
+    per_object: wgpu::Buffer,
+    material: wgpu::Buffer,
+    lighting: wgpu::Buffer,
+}
+
 pub struct Renderer3D {
     camera_buffer: wgpu::Buffer,
     per_object_buffer: wgpu::Buffer,
@@ -179,6 +187,79 @@ impl Renderer3D {
         let width = surface_config.width.max(1);
         let height = surface_config.height.max(1);
 
+        let buffers = Self::create_core_buffers(device, max_objects, max_materials);
+        let (bind_group_layout, bind_group) = Self::create_pbr_bind_group(device, &buffers);
+        let pipeline =
+            Self::create_pbr_pipeline(device, surface_config, sample_count, &bind_group_layout);
+        let (pbr_texture, pbr_texture_view) =
+            Self::create_render_target(device, width, height, format, sample_count);
+
+        let gbuffer = Self::create_gbuffer(device, width, height, sample_count);
+        let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
+            Self::create_gbuffer_pipeline(
+                device,
+                &gbuffer,
+                &buffers.camera,
+                &buffers.per_object,
+                &buffers.material,
+                sample_count,
+            );
+        let lighting_pass = Self::create_lighting_pass(device, &pbr_texture_view, sample_count);
+        let forward_pass = Self::create_forward_pass(
+            device,
+            &buffers.camera,
+            &buffers.per_object,
+            &buffers.material,
+            &buffers.lighting,
+            width,
+            height,
+            sample_count,
+        );
+        let composite_pass = Self::create_composite_pass(device, format);
+        let bloom_pass = Self::create_bloom_pass(device);
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Self {
+            camera_buffer: buffers.camera,
+            per_object_buffer: buffers.per_object,
+            material_buffer: buffers.material,
+            lighting_buffer: buffers.lighting,
+            _bind_group_layout: bind_group_layout,
+            _bind_group: bind_group,
+            _pipeline: pipeline,
+            pbr_texture,
+            pbr_texture_view,
+            sample_count,
+            max_objects,
+            max_materials,
+            format,
+            width,
+            height,
+            gbuffer,
+            gbuffer_pipeline,
+            gbuffer_bind_group_layout,
+            gbuffer_bind_group,
+            lighting_pass,
+            forward_pass,
+            composite_pass,
+            composite_sampler,
+            bloom_pass,
+        }
+    }
+
+    fn create_core_buffers(
+        device: &wgpu::Device,
+        max_objects: u32,
+        max_materials: u32,
+    ) -> CoreBuffers {
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera buffer"),
             contents: bytemuck::bytes_of(&CameraUniform {
@@ -228,6 +309,18 @@ impl Renderer3D {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        CoreBuffers {
+            camera: camera_buffer,
+            per_object: per_object_buffer,
+            material: material_buffer,
+            lighting: lighting_buffer,
+        }
+    }
+
+    fn create_pbr_bind_group(
+        device: &wgpu::Device,
+        buffers: &CoreBuffers,
+    ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pbr bind group layout"),
             entries: &[
@@ -280,23 +373,32 @@ impl Renderer3D {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
+                    resource: buffers.camera.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: per_object_buffer.as_entire_binding(),
+                    resource: buffers.per_object.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: material_buffer.as_entire_binding(),
+                    resource: buffers.material.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: lighting_buffer.as_entire_binding(),
+                    resource: buffers.lighting.as_entire_binding(),
                 },
             ],
         });
 
+        (bind_group_layout, bind_group)
+    }
+
+    fn create_pbr_pipeline(
+        device: &wgpu::Device,
+        surface_config: &wgpu::SurfaceConfiguration,
+        sample_count: u32,
+        bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pbr vertex"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_vertex())),
@@ -309,11 +411,11 @@ impl Renderer3D {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pbr pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(bind_group_layout)],
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("pbr render pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -355,8 +457,16 @@ impl Renderer3D {
             },
             multiview_mask: None,
             cache: None,
-        });
+        })
+    }
 
+    fn create_render_target(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
         let pbr_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pbr render target"),
             size: wgpu::Extent3d {
@@ -371,67 +481,8 @@ impl Renderer3D {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let pbr_texture_view = pbr_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let gbuffer = Self::create_gbuffer(device, width, height, sample_count);
-        let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
-            Self::create_gbuffer_pipeline(
-                device,
-                &gbuffer,
-                &camera_buffer,
-                &per_object_buffer,
-                &material_buffer,
-                sample_count,
-            );
-        let lighting_pass = Self::create_lighting_pass(device, &pbr_texture_view, sample_count);
-        let forward_pass = Self::create_forward_pass(
-            device,
-            &camera_buffer,
-            &per_object_buffer,
-            &material_buffer,
-            &lighting_buffer,
-            width,
-            height,
-            sample_count,
-        );
-        let composite_pass = Self::create_composite_pass(device, format);
-        let bloom_pass = Self::create_bloom_pass(device);
-        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
-        Self {
-            camera_buffer,
-            per_object_buffer,
-            material_buffer,
-            lighting_buffer,
-            _bind_group_layout: bind_group_layout,
-            _bind_group: bind_group,
-            _pipeline: pipeline,
-            pbr_texture,
-            pbr_texture_view,
-            sample_count,
-            max_objects,
-            max_materials,
-            format,
-            width,
-            height,
-            gbuffer,
-            gbuffer_pipeline,
-            gbuffer_bind_group_layout,
-            gbuffer_bind_group,
-            lighting_pass,
-            forward_pass,
-            composite_pass,
-            composite_sampler,
-            bloom_pass,
-        }
+        let view = pbr_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (pbr_texture, view)
     }
 
     fn create_gbuffer(

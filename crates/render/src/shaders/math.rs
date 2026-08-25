@@ -190,11 +190,11 @@ fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
     glam::Vec3::new(r, g, b)
 }
 
+/// Coat darkening, part 1: the base albedo darkening under a coated
+/// surface (Kcoat attenuation of the underlying BRDF response).
 #[kernel]
-fn coat_darkening(
+fn coat_base_darkening(
     coat_ior: f32,
-    coat_weight: f32,
-    coat_darkening: f32,
     base_metalness: f32,
     base_color: glam::Vec3,
     base_weight: f32,
@@ -216,8 +216,13 @@ fn coat_darkening(
     let one_minus_Ebase_Kcoat = glam::Vec3::splat(1.0) - Ebase_Kcoat;
     let base_darkening =
         glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6));
+    base_darkening
+}
 
-    let mix_factor = coat_weight * coat_darkening;
+/// Coat darkening, part 2: blend between clean and darkened albedo by the
+/// coat weight/darkening product.
+#[kernel]
+fn coat_blend_darkened(base_darkening: glam::Vec3, mix_factor: f32) -> glam::Vec3 {
     glam::Vec3::splat(1.0).lerp(base_darkening, mix_factor)
 }
 
@@ -345,7 +350,7 @@ mod tests {
 
     #[test]
     fn all_wgsl_sources_compile() {
-        let funcs: [&str; 19] = [
+        let funcs: [&str; 20] = [
             luminance::wgsl_source(),
             aces_tonemap::wgsl_source(),
             fresnel0_from_ior::wgsl_source(),
@@ -362,7 +367,8 @@ mod tests {
             transmission_color_to_extinction::wgsl_source(),
             subsurface_brdf::wgsl_source(),
             srgb_to_linear::wgsl_source(),
-            coat_darkening::wgsl_source(),
+            coat_base_darkening::wgsl_source(),
+            coat_blend_darkened::wgsl_source(),
             thin_film_modulation::wgsl_source(),
             octahedral_encode::wgsl_source(),
         ];

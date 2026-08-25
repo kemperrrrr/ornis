@@ -362,10 +362,8 @@ fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     return (A + B * cos_phi * sin(alpha_max) * tan_beta) * INV_PI;
 }
 
-fn coat_darkening(
+fn coat_base_darkening(
     coat_ior: f32,
-    coat_weight: f32,
-    coat_darkening: f32,
     base_metalness: f32,
     base_color: vec3<f32>,
     base_weight: f32,
@@ -385,9 +383,12 @@ fn coat_darkening(
     let Ebase_Kcoat = Ebase * Kcoat;
     let one_minus_Kcoat = 1.0 - Kcoat;
     let one_minus_Ebase_Kcoat = vec3<f32>(1.0) - Ebase_Kcoat;
-    let base_darkening = vec3<f32>(one_minus_Kcoat) / max(one_minus_Ebase_Kcoat, vec3<f32>(1e-6));
+    let base_darkening =
+        vec3<f32>(one_minus_Kcoat) / max(one_minus_Ebase_Kcoat, vec3<f32>(1e-6));
+    return base_darkening;
+}
 
-    let mix_factor = coat_weight * coat_darkening;
+fn coat_blend_darkened(base_darkening: vec3<f32>, mix_factor: f32) -> vec3<f32> {
     return mix(vec3<f32>(1.0), base_darkening, vec3<f32>(mix_factor));
 }
 
@@ -520,11 +521,12 @@ fn evaluate_coat_layer(
     let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
 
-    let darkening = coat_darkening(
-        coat_ior, coat_weight, coat_darkening,
-        base_metalness, base_color, base_weight, specular_weight,
-        subsurface_weight, subsurface_color
+    let mix_factor = coat_weight * coat_darkening;
+    let base_darkening = coat_base_darkening(
+        coat_ior, base_metalness, base_color, base_weight,
+        specular_weight, subsurface_weight, subsurface_color
     );
+    let darkening = coat_blend_darkened(base_darkening, mix_factor);
 
     let coat_albedo_approx = coat_color * coat_weight * luminance(coat_F0);
     return coat_color * coat_brdf * coat_weight + darkening * coat_albedo_approx;
@@ -947,10 +949,8 @@ fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     return (A + B * cos_phi * sin(alpha_max) * tan_beta) * INV_PI;
 }
 
-fn coat_darkening(
+fn coat_base_darkening(
     coat_ior: f32,
-    coat_weight: f32,
-    coat_darkening: f32,
     base_metalness: f32,
     base_color: vec3<f32>,
     base_weight: f32,
@@ -970,9 +970,12 @@ fn coat_darkening(
     let Ebase_Kcoat = Ebase * Kcoat;
     let one_minus_Kcoat = 1.0 - Kcoat;
     let one_minus_Ebase_Kcoat = vec3<f32>(1.0) - Ebase_Kcoat;
-    let base_darkening = vec3<f32>(one_minus_Kcoat) / max(one_minus_Ebase_Kcoat, vec3<f32>(1e-6));
+    let base_darkening =
+        vec3<f32>(one_minus_Kcoat) / max(one_minus_Ebase_Kcoat, vec3<f32>(1e-6));
+    return base_darkening;
+}
 
-    let mix_factor = coat_weight * coat_darkening;
+fn coat_blend_darkened(base_darkening: vec3<f32>, mix_factor: f32) -> vec3<f32> {
     return mix(vec3<f32>(1.0), base_darkening, vec3<f32>(mix_factor));
 }
 
@@ -1096,11 +1099,12 @@ fn evaluate_coat_layer(
     let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
 
-    let darkening = coat_darkening(
-        coat_ior, coat_weight, coat_darkening,
-        base_metalness, base_color, base_weight, specular_weight,
-        subsurface_weight, subsurface_color
+    let mix_factor = coat_weight * coat_darkening;
+    let base_darkening = coat_base_darkening(
+        coat_ior, base_metalness, base_color, base_weight,
+        specular_weight, subsurface_weight, subsurface_color
     );
+    let darkening = coat_blend_darkened(base_darkening, mix_factor);
 
     let coat_albedo_approx = coat_color * coat_weight * luminance(coat_F0);
     return coat_color * coat_brdf * coat_weight + darkening * coat_albedo_approx;

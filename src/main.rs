@@ -201,20 +201,36 @@ impl GameApp {
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let materials = vec![
-            OpenPBRMaterial::dielectric().base_color_rgb([0.8, 0.2, 0.2]),
-            OpenPBRMaterial::dielectric()
-                .base_color_rgb([0.2, 0.8, 0.2])
-                .specular_roughness(0.7),
-            OpenPBRMaterial::dielectric()
-                .base_color_rgb([0.2, 0.2, 0.8])
-                .specular_roughness(0.1),
-            OpenPBRMaterial::metal()
-                .base_color_rgb([0.9, 0.7, 0.1])
-                .specular_roughness(0.2),
-            OpenPBRMaterial::coat()
-                .base_color_rgb([0.9, 0.9, 0.9])
-                .coat_weight(1.0)
-                .coat_roughness(0.1),
+            {
+                let mut mat = OpenPBRMaterial::dielectric();
+                mat.base.color_rgb([0.8, 0.2, 0.2]);
+                mat
+            },
+            {
+                let mut mat = OpenPBRMaterial::dielectric();
+                mat.base.color_rgb([0.2, 0.8, 0.2]);
+                mat.specular.roughness(0.7);
+                mat
+            },
+            {
+                let mut mat = OpenPBRMaterial::dielectric();
+                mat.base.color_rgb([0.2, 0.2, 0.8]);
+                mat.specular.roughness(0.1);
+                mat
+            },
+            {
+                let mut mat = OpenPBRMaterial::metal();
+                mat.base.color_rgb([0.9, 0.7, 0.1]);
+                mat.specular.roughness(0.2);
+                mat
+            },
+            {
+                let mut mat = OpenPBRMaterial::coat();
+                mat.base.color_rgb([0.9, 0.9, 0.9]);
+                mat.coat.weight(1.0);
+                mat.coat.roughness(0.1);
+                mat
+            }
         ];
 
         let spacing = 2.8;

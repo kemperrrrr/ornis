@@ -229,7 +229,11 @@ mod tests {
         let mock = mock.downcast_ref::<MockBackend>().expect("backend is mock");
         assert_eq!(mock.plays.len(), 1);
         let sp = mock.plays[0].spatial.as_ref().expect("spatial source");
-        assert!((sp.distance - 5.0).abs() < 1e-3, "distance = {}", sp.distance);
+        assert!(
+            (sp.distance - 5.0).abs() < 1e-3,
+            "distance = {}",
+            sp.distance
+        );
         assert!((sp.azimuth - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
     }
 
@@ -252,7 +256,11 @@ mod tests {
         let mock = mock.downcast_ref::<MockBackend>().expect("backend is mock");
         assert_eq!(mock.plays.len(), 1);
         // Source volume is 1.0, listener gain 0.5 -> mixed volume 0.5.
-        assert!((mock.plays[0].volume - 0.5).abs() < 1e-6, "volume = {}", mock.plays[0].volume);
+        assert!(
+            (mock.plays[0].volume - 0.5).abs() < 1e-6,
+            "volume = {}",
+            mock.plays[0].volume
+        );
     }
 
     #[test]

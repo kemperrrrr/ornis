@@ -16,6 +16,7 @@ pub struct Dispatcher {
     gpu_available: bool,
 }
 
+/// High-level dispatcher that combines CPU and GPU execution
 impl Dispatcher {
     /// Create a new dispatcher with a CPU threshold and GPU availability
     pub fn new(cpu_threshold: usize, gpu_available: bool) -> Self {

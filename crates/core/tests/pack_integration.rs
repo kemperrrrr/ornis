@@ -7,7 +7,7 @@
 //! generated wrapper lane types.
 
 use ornis_core::{Entity, Pack, SmartStore};
-use ornis_macros::{for_each_entity, Pack};
+use ornis_macros::{Pack, for_each_entity};
 
 #[derive(Clone, Pack)]
 struct Transform {
@@ -42,8 +42,18 @@ fn pack_for_each_packed_mutates_fields() {
 
     let a = store.create_entity();
     let b = store.create_entity();
-    Transform { x: 0.0, y: 0.0, z: 0.0 }.pack_insert(&mut store, a);
-    Transform { x: 0.0, y: 0.0, z: 0.0 }.pack_insert(&mut store, b);
+    Transform {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    }
+    .pack_insert(&mut store, a);
+    Transform {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    }
+    .pack_insert(&mut store, b);
 
     // `for_each_packed` walks every entity owning `Transform` and hands the
     // closure `&mut PackMut` — field accessors per lane (SoA).
@@ -72,7 +82,12 @@ fn pack_lanes_compatible_with_for_each_entity() {
     Transform::pack_register(&mut store);
 
     let e = store.create_entity();
-    Transform { x: 5.0, y: 6.0, z: 7.0 }.pack_insert(&mut store, e);
+    Transform {
+        x: 5.0,
+        y: 6.0,
+        z: 7.0,
+    }
+    .pack_insert(&mut store, e);
 
     // `Transform__x__PackLane__0` is the generated wrapper for field `x`.
     let mut seen = Vec::new();

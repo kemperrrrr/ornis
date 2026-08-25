@@ -477,11 +477,12 @@ fn evaluate_coat_layer(
     let coat_D = ggx_ndf_aniso(NoH, H, T, B, coat_alpha_u, coat_alpha_v);
     let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
-    let darkening = coat_darkening(
-        coat_ior, coat_weight, coat_dark,
-        base_metalness, base_color, base_weight, specular_weight,
-        subsurface_weight, subsurface_color
+    let mix_factor = coat_weight * coat_dark;
+    let base_darkening = coat_base_darkening(
+        coat_ior, base_metalness, base_color, base_weight,
+        specular_weight, subsurface_weight, subsurface_color
     );
+    let darkening = coat_blend_darkened(base_darkening, mix_factor);
     let coat_albedo_approx = coat_color * coat_weight * luminance(coat_F0);
     return coat_color * coat_brdf * coat_weight + darkening * coat_albedo_approx;
 }
@@ -714,7 +715,8 @@ pub fn lighting_fragment() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
-        math::coat_darkening::wgsl_source(),
+        math::coat_base_darkening::wgsl_source(),
+        math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
         math::sheen_brdf::wgsl_source(),
         math::transmission_color_to_extinction::wgsl_source(),
@@ -896,11 +898,12 @@ fn evaluate_coat_layer(
     let coat_D = ggx_ndf_aniso(NoH, H, T, B, coat_alpha_u, coat_alpha_v);
     let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
-    let darkening = coat_darkening(
-        coat_ior, coat_weight, coat_dark,
-        base_metalness, base_color, base_weight, specular_weight,
-        subsurface_weight, subsurface_color
+    let mix_factor = coat_weight * coat_dark;
+    let base_darkening = coat_base_darkening(
+        coat_ior, base_metalness, base_color, base_weight,
+        specular_weight, subsurface_weight, subsurface_color
     );
+    let darkening = coat_blend_darkened(base_darkening, mix_factor);
     let coat_albedo_approx = coat_color * coat_weight * luminance(coat_F0);
     return coat_color * coat_brdf * coat_weight + darkening * coat_albedo_approx;
 }
@@ -1119,7 +1122,8 @@ pub fn pbr_fragment() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
-        math::coat_darkening::wgsl_source(),
+        math::coat_base_darkening::wgsl_source(),
+        math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
         math::sheen_brdf::wgsl_source(),
         math::transmission_color_to_extinction::wgsl_source(),
