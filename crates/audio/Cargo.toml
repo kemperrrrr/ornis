@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 ornis-core = { path = "../core" }
 cpal = "0.15"
-symphonia = { version = "0.5", default-features = false, features = ["wav", "ogg", "mp3", "flac"] }
+symphonia = { version = "0.5", default-features = false, features = ["wav", "ogg", "mp3", "flac", "pcm"] }
 crossbeam-channel = "0.5"
 glam = "0.30"
 

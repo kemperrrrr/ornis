@@ -174,3 +174,59 @@ pub fn decode_bytes(data: &[u8], extension: &str) -> Result<AudioClip, DecodeErr
         samples: Arc::new(all_samples),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sample-3s.wav")
+    }
+
+    #[test]
+    fn decode_file_reads_real_wav() {
+        let clip = decode_file(fixture_path()).expect("decode sample-3s.wav");
+        // Header: PCM 16-bit, 2 channels, 44100 Hz.
+        assert_eq!(clip.sample_rate, 44100);
+        assert_eq!(clip.channels, 2);
+        // 563712 bytes of 16-bit stereo PCM = 281856 interleaved f32 samples
+        // (563712 / (2 channels * 2 bytes-per-sample) * 2 channels).
+        assert_eq!(clip.samples.len(), 281856);
+        // Duration ~3.19 s (281856 / 2 channels / 44100).
+        let dur = clip.duration_secs();
+        assert!(dur > 3.0 && dur < 3.5, "duration was {dur}");
+        // Samples are normalized f32 in [-1, 1].
+        let max_abs = clip.samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs <= 1.0, "sample out of range: {max_abs}");
+    }
+
+    #[test]
+    fn decode_bytes_matches_file() {
+        let bytes = std::fs::read(fixture_path()).expect("read fixture");
+        let clip = decode_bytes(&bytes, "wav").expect("decode bytes");
+        assert_eq!(clip.sample_rate, 44100);
+        assert_eq!(clip.channels, 2);
+        assert_eq!(clip.samples.len(), 281856);
+    }
+
+    #[test]
+    fn decode_bytes_rejects_garbage() {
+        // Not a valid audio container at all.
+        let junk = b"this is definitely not audio data, just some text";
+        let err = decode_bytes(junk, "wav");
+        assert!(err.is_err(), "garbage should fail to decode");
+        match err {
+            Err(DecodeError::Format(_)) | Err(DecodeError::Unsupported) => {}
+            other => panic!("expected Format or Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_file_missing_path_errors() {
+        let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/does-not-exist.wav");
+        let err = decode_file(missing);
+        assert!(matches!(err, Err(DecodeError::Io(_))));
+    }
+}
