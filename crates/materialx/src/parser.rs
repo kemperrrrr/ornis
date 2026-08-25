@@ -3,7 +3,7 @@
 use crate::nodes::NodeDefInput;
 use crate::{Input, MaterialXDocument, MaterialXError, Node, NodeDef, NodeGraph};
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 
 /// Every element that denotes a shading node inside a `<nodegraph>`.
 /// Kept in sync with the node types `GraphEvaluator` can execute; the same
@@ -57,6 +57,76 @@ impl Default for MaterialXParser {
     }
 }
 
+/// Streaming parse state threaded through the Start/End event handlers.
+struct ParseState {
+    document: MaterialXDocument,
+    current_nodedef: Option<NodeDef>,
+    current_nodegraph: Option<NodeGraph>,
+    current_node: Option<Node>,
+    in_nodegraph: bool,
+}
+
+impl ParseState {
+    fn new() -> Self {
+        Self {
+            document: MaterialXDocument::default(),
+            current_nodedef: None,
+            current_nodegraph: None,
+            current_node: None,
+            in_nodegraph: false,
+        }
+    }
+
+    fn handle_start(&mut self, e: &BytesStart) -> Result<(), MaterialXError> {
+        match e.name().as_ref() {
+            b"nodedef" => {
+                self.current_nodedef = Some(NodeDef::from_bytes_start(e)?);
+            }
+            b"nodegraph" => {
+                self.in_nodegraph = true;
+                self.current_nodegraph = Some(NodeGraph::from_bytes_start(e)?);
+            }
+            b"input" | b"parameter" => {
+                if let Some(node) = &mut self.current_node {
+                    node.inputs.push(Input::from_bytes_start(e)?);
+                } else if let Some(nodedef) = &mut self.current_nodedef {
+                    nodedef.inputs.push(NodeDefInput::from_bytes_start(e)?);
+                }
+            }
+            name if is_node_element(name) && self.in_nodegraph => {
+                self.current_node = Some(Node::from_bytes_start(e)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_end(&mut self, e: &BytesEnd) {
+        match e.name().as_ref() {
+            b"nodedef" => {
+                if let Some(nd) = self.current_nodedef.take() {
+                    self.document.nodedefs.push(nd);
+                }
+            }
+            b"nodegraph" => {
+                self.in_nodegraph = false;
+                if let Some(ng) = self.current_nodegraph.take() {
+                    self.document.nodegraphs.push(ng);
+                }
+            }
+            name if is_node_element(name) => {
+                if self.in_nodegraph
+                    && let Some(node) = self.current_node.take()
+                    && let Some(graph) = &mut self.current_nodegraph
+                {
+                    graph.nodes.push(node);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 impl MaterialXParser {
     pub fn new() -> Self {
         Self
@@ -69,58 +139,13 @@ impl MaterialXParser {
         // without this they surface as `Event::Empty` and are dropped.
         reader.config_mut().expand_empty_elements = true;
 
-        let mut document = MaterialXDocument::default();
-        let mut current_nodedef: Option<NodeDef> = None;
-        let mut current_nodegraph: Option<NodeGraph> = None;
-        let mut current_node: Option<Node> = None;
-        let mut in_nodegraph = false;
-
+        let mut state = ParseState::new();
         let mut buf = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                    b"nodedef" => {
-                        current_nodedef = Some(NodeDef::from_bytes_start(e)?);
-                    }
-                    b"nodegraph" => {
-                        in_nodegraph = true;
-                        current_nodegraph = Some(NodeGraph::from_bytes_start(e)?);
-                    }
-                    b"input" | b"parameter" => {
-                        if let Some(node) = &mut current_node {
-                            node.inputs.push(Input::from_bytes_start(e)?);
-                        } else if let Some(nodedef) = &mut current_nodedef {
-                            nodedef.inputs.push(NodeDefInput::from_bytes_start(e)?);
-                        }
-                    }
-                    name if is_node_element(name) && in_nodegraph => {
-                        current_node = Some(Node::from_bytes_start(e)?);
-                    }
-                    _ => {}
-                },
-                Ok(Event::End(ref e)) => match e.name().as_ref() {
-                    b"nodedef" => {
-                        if let Some(nd) = current_nodedef.take() {
-                            document.nodedefs.push(nd);
-                        }
-                    }
-                    b"nodegraph" => {
-                        in_nodegraph = false;
-                        if let Some(ng) = current_nodegraph.take() {
-                            document.nodegraphs.push(ng);
-                        }
-                    }
-                    name if is_node_element(name) => {
-                        if in_nodegraph
-                            && let Some(node) = current_node.take()
-                            && let Some(graph) = &mut current_nodegraph
-                        {
-                            graph.nodes.push(node);
-                        }
-                    }
-                    _ => {}
-                },
+                Ok(Event::Start(ref e)) => state.handle_start(e)?,
+                Ok(Event::End(ref e)) => state.handle_end(e),
                 Ok(Event::Eof) => break,
                 Ok(_) => {}
                 Err(e) => return Err(MaterialXError::Xml(e)),
@@ -128,7 +153,7 @@ impl MaterialXParser {
             buf.clear();
         }
 
-        Ok(document)
+        Ok(state.document)
     }
 }
 
@@ -254,24 +279,33 @@ impl NodeDefInput {
                 "name" => input.name = value.to_string(),
                 "type" => input.input_type = value.to_string(),
                 "value" => input.value = value.to_string(),
-                "uimin" => input.uimin = value.to_string(),
-                "uimax" => input.uimax = value.to_string(),
                 "uisoftmin" => input.uisoftmin = value.to_string(),
                 "uisoftmax" => input.uisoftmax = value.to_string(),
-                "uiname" => input.uiname = value.to_string(),
-                "uifolder" => input.uifolder = value.to_string(),
-                "uiadvanced" => input.uiadvanced = value.to_string(),
-                "doc" => input.doc = value.to_string(),
-                "hint" => input.hint = value.to_string(),
-                "uniform" => input.uniform = value.to_string(),
-                "defaultgeomprop" => input.defaultgeomprop = value.to_string(),
-                "interfacename" => input.interfacename = value.to_string(),
-                "string" => input.string = value.to_string(),
-                _ => {}
+                _ => input.set_meta_attr(key, value),
             }
         }
 
         Ok(input)
+    }
+
+    /// Apply the metadata/UI attributes common to `<input>` and `<parameter>`.
+    fn set_meta_attr(&mut self, key: &str, value: &str) {
+        match key {
+            "uimin" => self.uimin = value.to_string(),
+            "uimax" => self.uimax = value.to_string(),
+            "uisoftmin" => self.uisoftmin = value.to_string(),
+            "uisoftmax" => self.uisoftmax = value.to_string(),
+            "uiname" => self.uiname = value.to_string(),
+            "uifolder" => self.uifolder = value.to_string(),
+            "uiadvanced" => self.uiadvanced = value.to_string(),
+            "doc" => self.doc = value.to_string(),
+            "hint" => self.hint = value.to_string(),
+            "uniform" => self.uniform = value.to_string(),
+            "defaultgeomprop" => self.defaultgeomprop = value.to_string(),
+            "interfacename" => self.interfacename = value.to_string(),
+            "string" => self.string = value.to_string(),
+            _ => {}
+        }
     }
 }
 
@@ -307,22 +341,29 @@ impl Input {
                 "value" => input.value = value.to_string(),
                 "nodename" => input.nodename = value.to_string(),
                 "output" => input.output = value.to_string(),
-                "uimin" => input.uimin = value.to_string(),
-                "uimax" => input.uimax = value.to_string(),
-                "uiname" => input.uiname = value.to_string(),
-                "uifolder" => input.uifolder = value.to_string(),
-                "uiadvanced" => input.uiadvanced = value.to_string(),
-                "doc" => input.doc = value.to_string(),
-                "hint" => input.hint = value.to_string(),
-                "uniform" => input.uniform = value.to_string(),
-                "defaultgeomprop" => input.defaultgeomprop = value.to_string(),
-                "interfacename" => input.interfacename = value.to_string(),
-                "string" => input.string = value.to_string(),
-                _ => {}
+                _ => input.set_meta_attr(key, value),
             }
         }
 
         Ok(input)
+    }
+
+    /// Apply the metadata/UI attributes common to `<input>` and `<parameter>`.
+    fn set_meta_attr(&mut self, key: &str, value: &str) {
+        match key {
+            "uimin" => self.uimin = value.to_string(),
+            "uimax" => self.uimax = value.to_string(),
+            "uiname" => self.uiname = value.to_string(),
+            "uifolder" => self.uifolder = value.to_string(),
+            "uiadvanced" => self.uiadvanced = value.to_string(),
+            "doc" => self.doc = value.to_string(),
+            "hint" => self.hint = value.to_string(),
+            "uniform" => self.uniform = value.to_string(),
+            "defaultgeomprop" => self.defaultgeomprop = value.to_string(),
+            "interfacename" => self.interfacename = value.to_string(),
+            "string" => self.string = value.to_string(),
+            _ => {}
+        }
     }
 }
 

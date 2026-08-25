@@ -129,136 +129,194 @@ impl MaterialXConverter {
         evaluated: &EvaluatedGraph,
     ) -> Result<OpenPBRMaterial, CodegenError> {
         let mut material = OpenPBRMaterial::pbr();
+        material = self.extract_base(evaluated, material);
+        material = self.extract_specular(evaluated, material);
+        material = self.extract_transmission(evaluated, material);
+        material = self.extract_subsurface(evaluated, material);
+        material = self.extract_fuzz(evaluated, material);
+        material = self.extract_coat(evaluated, material);
+        material = self.extract_thin_film(evaluated, material);
+        material = self.extract_emission(evaluated, material);
+        material = self.extract_geometry(evaluated, material);
+        Ok(material)
+    }
 
+    fn extract_base(&self, evaluated: &EvaluatedGraph, mut m: OpenPBRMaterial) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("base_weight") {
-            material = material.base_weight(*v);
+            m.base.weight(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("base_color") {
-            material = material.base_color_rgb(*v);
+            m.base.color_rgb(*v);
         } else if let Some(OutputValue::Color4(v)) = evaluated.outputs.get("base_color") {
-            material = material.base_color(v[0], v[1], v[2], v[3]);
+            m.base.color(v[0], v[1], v[2], v[3]);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("base_diffuse_roughness") {
-            material = material.base_diffuse_roughness(*v);
+            m.base.diffuse_roughness(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("base_metalness") {
-            material = material.base_metalness(*v);
+            m.base.metalness(*v);
         }
+        m
+    }
 
+    fn extract_specular(
+        &self,
+        evaluated: &EvaluatedGraph,
+        mut m: OpenPBRMaterial,
+    ) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("specular_weight") {
-            material = material.specular_weight(*v);
+            m.specular.weight(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("specular_color") {
-            material = material.specular_edge_tint_rgb(*v);
+            m.specular.edge_tint_rgb(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("specular_roughness") {
-            material = material.specular_roughness(*v);
+            m.specular.roughness(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("specular_ior") {
-            material = material.specular_ior(*v);
+            m.specular.ior(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("specular_anisotropy") {
-            material = material.specular_anisotropy(*v);
+            m.specular.anisotropy(*v);
         }
+        m
+    }
 
+    fn extract_transmission(
+        &self,
+        evaluated: &EvaluatedGraph,
+        mut m: OpenPBRMaterial,
+    ) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("transmission_weight") {
-            material = material.transmission_weight(*v);
+            m.transmission.weight(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("transmission_color") {
-            material = material.transmission_color_rgb(*v);
+            m.transmission.color_rgb(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("transmission_depth") {
-            material = material.transmission_depth(*v);
+            m.transmission.depth(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("transmission_dispersion_scale")
         {
-            material = material.transmission_dispersion_scale(*v);
+            m.transmission.dispersion_scale(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("transmission_dispersion_abbe") {
-            material = material.transmission_dispersion_abbe(*v);
+            m.transmission.dispersion_abbe(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("transmission_scatter") {
-            material = material.transmission_scatter_color(v[0], v[1], v[2]);
+            m.transmission.scatter_color(v[0], v[1], v[2]);
         }
         if let Some(OutputValue::Float(v)) =
             evaluated.outputs.get("transmission_scatter_anisotropy")
         {
-            material = material.transmission_scatter_anisotropy(*v);
+            m.transmission.scatter_anisotropy(*v);
         }
+        m
+    }
 
+    fn extract_subsurface(
+        &self,
+        evaluated: &EvaluatedGraph,
+        mut m: OpenPBRMaterial,
+    ) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("subsurface_weight") {
-            material = material.subsurface_weight(*v);
+            m.subsurface.weight(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("subsurface_color") {
-            material = material.subsurface_color_rgb(*v);
+            m.subsurface.color_rgb(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("subsurface_radius") {
-            material = material.subsurface_radius(*v);
+            m.subsurface.radius(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("subsurface_radius_scale") {
-            material = material
-                .subsurface_radius_scale_g(v[1])
-                .subsurface_radius_scale_b(v[2]);
+            m.subsurface.radius_scale_g(v[1]);
+            m.subsurface.radius_scale_b(v[2]);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("subsurface_scatter_anisotropy")
         {
-            material = material.subsurface_scatter_anisotropy(*v);
+            m.subsurface.scatter_anisotropy(*v);
         }
+        m
+    }
 
+    fn extract_fuzz(&self, evaluated: &EvaluatedGraph, mut m: OpenPBRMaterial) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("fuzz_weight") {
-            material = material.fuzz_weight(*v);
+            m.fuzz.weight(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("fuzz_color") {
-            material = material.fuzz_color_rgb(*v);
+            m.fuzz.color_rgb(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("fuzz_roughness") {
-            material = material.fuzz_roughness(*v);
+            m.fuzz.roughness(*v);
         }
+        m
+    }
 
+    fn extract_coat(&self, evaluated: &EvaluatedGraph, mut m: OpenPBRMaterial) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("coat_weight") {
-            material = material.coat_weight(*v);
+            m.coat.weight(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("coat_color") {
-            material = material.coat_color_rgb(*v);
+            m.coat.color_rgb(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("coat_roughness") {
-            material = material.coat_roughness(*v);
+            m.coat.roughness(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("coat_anisotropy") {
-            material = material.coat_anisotropy(*v);
+            m.coat.anisotropy(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("coat_ior") {
-            material = material.coat_ior(*v);
+            m.coat.ior(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("coat_darkening") {
-            material = material.coat_darkening(*v);
+            m.coat.darkening(*v);
         }
+        m
+    }
 
+    fn extract_thin_film(
+        &self,
+        evaluated: &EvaluatedGraph,
+        mut m: OpenPBRMaterial,
+    ) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("thin_film_weight") {
-            material = material.thin_film_weight(*v);
+            m.thin_film.weight(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("thin_film_thickness") {
-            material = material.thin_film_thickness_um(*v);
+            m.thin_film.thickness_um(*v);
         }
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("thin_film_ior") {
-            material = material.thin_film_ior(*v);
+            m.thin_film.ior(*v);
         }
+        m
+    }
 
+    fn extract_emission(
+        &self,
+        evaluated: &EvaluatedGraph,
+        mut m: OpenPBRMaterial,
+    ) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("emission_luminance") {
-            material = material.emission_luminance(*v);
+            m.emission.luminance(*v);
         }
         if let Some(OutputValue::Color3(v)) = evaluated.outputs.get("emission_color") {
-            material = material.emission_color_rgb(*v);
+            m.emission.color_rgb(*v);
         }
+        m
+    }
 
+    fn extract_geometry(
+        &self,
+        evaluated: &EvaluatedGraph,
+        mut m: OpenPBRMaterial,
+    ) -> OpenPBRMaterial {
         if let Some(OutputValue::Float(v)) = evaluated.outputs.get("geometry_opacity") {
-            material = material.opacity(*v);
+            m.geometry.opacity(*v);
         }
         if let Some(OutputValue::Boolean(v)) = evaluated.outputs.get("geometry_thin_walled") {
-            material = material.thin_walled(*v);
+            m.geometry.thin_walled(*v);
         }
-
-        Ok(material)
+        m
     }
 }
 
@@ -325,18 +383,7 @@ impl<'a> GraphEvaluator<'a> {
     }
 
     fn evaluate_node(&mut self, node: &Node) -> Result<OutputValue, CodegenError> {
-        match self.visited.get(&node.name) {
-            Some(VisitState::Visiting) => return Err(CodegenError::CyclicDependency),
-            Some(VisitState::Visited) => {
-                return self
-                    .node_values
-                    .get(&node.name)
-                    .cloned()
-                    .ok_or_else(|| CodegenError::InputNotFound(node.name.clone()));
-            }
-            None => {}
-        }
-
+        self.check_visit_state(node)?;
         self.visited.insert(node.name.clone(), VisitState::Visiting);
 
         let node_def = self
@@ -345,607 +392,556 @@ impl<'a> GraphEvaluator<'a> {
             .get(&node.node_type)
             .ok_or_else(|| CodegenError::NodeDefNotFound(node.node_type.clone()))?;
 
-        let mut input_values = HashMap::new();
-        for input in &node.inputs {
-            let value = if !input.nodename.is_empty() {
-                let connected_node = self
-                    .graph
-                    .nodes
-                    .iter()
-                    .find(|n| n.name == input.nodename)
-                    .ok_or_else(|| CodegenError::InputNotFound(input.nodename.clone()))?;
-                self.evaluate_node(connected_node)?
-            } else if !input.value.is_empty() {
-                self.parse_constant(&input.value, &input.input_type)?
-            } else if let Some(def) = node_def.inputs.iter().find(|d| d.name == input.name) {
-                self.parse_constant(&def.value, &def.input_type)?
-            } else {
-                return Err(CodegenError::InputNotFound(input.name.clone()));
-            };
-            input_values.insert(input.name.clone(), value);
-        }
-
-        let result = match node.node_type.as_str() {
-            "open_pbr_surface" => OutputValue::String("surface".to_string()),
-            "surface" => OutputValue::BSDF(node.name.clone()),
-            "oren_nayar_diffuse_bsdf" => self.eval_oren_nayar(&input_values)?,
-            "dielectric_bsdf" => self.eval_dielectric_bsdf(&input_values)?,
-            "generalized_schlick_bsdf" => self.eval_schlick_bsdf(&input_values)?,
-            "sheen_bsdf" => self.eval_sheen_bsdf(&input_values)?,
-            "thin_film_bsdf" => self.eval_thin_film_bsdf(&input_values)?,
-            "translucent_bsdf" => self.eval_translucent_bsdf(&input_values)?,
-            "subsurface_bsdf" => self.eval_subsurface_bsdf(&input_values)?,
-            "anisotropic_vdf" => self.eval_anisotropic_vdf(&input_values)?,
-            "uniform_edf" => self.eval_uniform_edf(&input_values)?,
-            "generalized_schlick_edf" => self.eval_schlick_edf(&input_values)?,
-            "mix" => self.eval_mix(&input_values)?,
-            "layer" => self.eval_layer(&input_values)?,
-            "open_pbr_anisotropy" => self.eval_anisotropy(&input_values)?,
-            "multiply" | "add" | "divide" | "subtract" => {
-                self.eval_math(&node.node_type, &input_values)?
-            }
-            "invert" => self.eval_invert(&input_values)?,
-            "clamp" => self.eval_clamp(&input_values)?,
-            "max" | "min" => self.eval_minmax(&node.node_type, &input_values)?,
-            "power" => self.eval_power(&input_values)?,
-            "sqrt" => self.eval_sqrt(&input_values)?,
-            "ifgreater" => self.eval_ifgreater(&input_values)?,
-            "convert" => self.eval_convert(&input_values)?,
-            "combine2" => self.eval_combine2(&input_values)?,
-            "combine3" => self.eval_combine3(&input_values)?,
-            "combine4" => self.eval_combine4(&input_values)?,
-            "constant" => self.eval_constant(&input_values)?,
-            "output" => {
-                if let Some(bsdf_input) = input_values.get("bsdf") {
-                    bsdf_input.clone()
-                } else if let Some(edf_input) = input_values.get("edf") {
-                    edf_input.clone()
-                } else if !node.nodename.is_empty() {
-                    // Connection via the `nodename` attribute rather than a
-                    // child `<input>`: pass through the referenced node.
-                    let connected_node = self
-                        .graph
-                        .nodes
-                        .iter()
-                        .find(|n| n.name == node.nodename)
-                        .ok_or_else(|| CodegenError::InputNotFound(node.nodename.clone()))?;
-                    self.evaluate_node(connected_node)?
-                } else {
-                    OutputValue::String("output".to_string())
-                }
-            }
-            _ => return Err(CodegenError::UnsupportedNode(node.node_type.clone())),
-        };
+        let input_values = self.collect_input_values(node, node_def)?;
+        let result = self.dispatch_node(node, &input_values)?;
 
         self.node_values.insert(node.name.clone(), result.clone());
         self.visited.insert(node.name.clone(), VisitState::Visited);
         Ok(result)
     }
 
-    fn eval_math(
-        &self,
-        op: &str,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let in1 = inputs
-            .get("in1")
-            .or_else(|| inputs.get("in"))
-            .ok_or(CodegenError::InputNotFound("in1".into()))?;
-        let in2 = inputs
-            .get("in2")
-            .ok_or(CodegenError::InputNotFound("in2".into()))?;
-
-        match (in1, in2) {
-            (OutputValue::Float(a), OutputValue::Float(b)) => {
-                let result = match op {
-                    "multiply" => a * b,
-                    "add" => a + b,
-                    "divide" => a / b,
-                    "subtract" => a - b,
-                    _ => return Err(CodegenError::UnsupportedNode(op.into())),
-                };
-                Ok(OutputValue::Float(result))
-            }
-            (OutputValue::Color3(a), OutputValue::Color3(b)) => {
-                let result = match op {
-                    "multiply" => [a[0] * b[0], a[1] * b[1], a[2] * b[2]],
-                    "add" => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
-                    "divide" => [a[0] / b[0], a[1] / b[1], a[2] / b[2]],
-                    "subtract" => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
-                    _ => return Err(CodegenError::UnsupportedNode(op.into())),
-                };
-                Ok(OutputValue::Color3(result))
-            }
-            (OutputValue::Vector3(a), OutputValue::Vector3(b)) => {
-                let result = match op {
-                    "multiply" => [a[0] * b[0], a[1] * b[1], a[2] * b[2]],
-                    "add" => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
-                    "divide" => [a[0] / b[0], a[1] / b[1], a[2] / b[2]],
-                    "subtract" => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
-                    _ => return Err(CodegenError::UnsupportedNode(op.into())),
-                };
-                Ok(OutputValue::Vector3(result))
-            }
-            _ => Err(CodegenError::TypeConversion(
-                "mismatched types for math op".into(),
-            )),
+    /// Reject re-entrant visits (cycles) and serve memoized results.
+    fn check_visit_state(&self, node: &Node) -> Result<(), CodegenError> {
+        match self.visited.get(&node.name) {
+            Some(VisitState::Visiting) => Err(CodegenError::CyclicDependency),
+            Some(VisitState::Visited) => self
+                .node_values
+                .get(&node.name)
+                .cloned()
+                .map(|_| ())
+                .ok_or_else(|| CodegenError::InputNotFound(node.name.clone())),
+            None => Ok(()),
         }
     }
 
-    fn eval_invert(
-        &self,
+    /// Resolve every declared input: connected node, literal value, or the
+    /// node definition default.
+    fn collect_input_values(
+        &mut self,
+        node: &Node,
+        node_def: &NodeDef,
+    ) -> Result<HashMap<String, OutputValue>, CodegenError> {
+        let mut input_values = HashMap::new();
+        for input in &node.inputs {
+            let value = if !input.nodename.is_empty() {
+                self.evaluate_connected(&input.nodename)?
+            } else if !input.value.is_empty() {
+                parse_constant(&input.value, &input.input_type)?
+            } else if let Some(def) = node_def.inputs.iter().find(|d| d.name == input.name) {
+                parse_constant(&def.value, &def.input_type)?
+            } else {
+                return Err(CodegenError::InputNotFound(input.name.clone()));
+            };
+            input_values.insert(input.name.clone(), value);
+        }
+        Ok(input_values)
+    }
+
+    /// Evaluate a node referenced through a `nodename` attribute.
+    fn evaluate_connected(&mut self, nodename: &str) -> Result<OutputValue, CodegenError> {
+        let connected_node = self
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.name == nodename)
+            .ok_or_else(|| CodegenError::InputNotFound(nodename.to_string()))?;
+        self.evaluate_node(connected_node)
+    }
+
+    /// Route a fully-evaluated node to its handler by category.
+    fn dispatch_node(
+        &mut self,
+        node: &Node,
         inputs: &HashMap<String, OutputValue>,
     ) -> Result<OutputValue, CodegenError> {
-        let input = inputs
-            .get("in")
-            .ok_or(CodegenError::InputNotFound("in".into()))?;
-        match input {
-            OutputValue::Float(v) => Ok(OutputValue::Float(1.0 - v)),
-            OutputValue::Color3(v) => Ok(OutputValue::Color3([1.0 - v[0], 1.0 - v[1], 1.0 - v[2]])),
-            _ => Err(CodegenError::TypeConversion(
-                "invert expects float or color3".into(),
-            )),
+        let ty = node.node_type.as_str();
+        if is_arithmetic_node(ty) {
+            return eval_arithmetic(ty, inputs);
+        }
+        if is_data_node(ty) {
+            return eval_data(ty, inputs);
+        }
+        self.dispatch_shading(node, inputs)
+    }
+
+    /// Surface/BSDF/EDF/VDF nodes plus graph `output` pass-throughs.
+    fn dispatch_shading(
+        &mut self,
+        node: &Node,
+        inputs: &HashMap<String, OutputValue>,
+    ) -> Result<OutputValue, CodegenError> {
+        match node.node_type.as_str() {
+            "open_pbr_surface" => Ok(OutputValue::String("surface".to_string())),
+            "surface" => Ok(OutputValue::BSDF(node.name.clone())),
+            "oren_nayar_diffuse_bsdf" => Ok(OutputValue::BSDF("oren_nayar".to_string())),
+            "dielectric_bsdf" => Ok(OutputValue::BSDF("dielectric".to_string())),
+            "generalized_schlick_bsdf" => Ok(OutputValue::BSDF("schlick".to_string())),
+            "sheen_bsdf" => Ok(OutputValue::BSDF("sheen".to_string())),
+            "thin_film_bsdf" => Ok(OutputValue::BSDF("thin_film".to_string())),
+            "translucent_bsdf" => Ok(OutputValue::BSDF("translucent".to_string())),
+            "subsurface_bsdf" => Ok(OutputValue::BSDF("subsurface".to_string())),
+            "anisotropic_vdf" => Ok(OutputValue::VDF("anisotropic".to_string())),
+            "uniform_edf" => Ok(OutputValue::EDF("uniform".to_string())),
+            "generalized_schlick_edf" => Ok(OutputValue::EDF("schlick".to_string())),
+            "output" => self.eval_output_node(node, inputs),
+            _ => Err(CodegenError::UnsupportedNode(node.node_type.clone())),
         }
     }
 
-    fn eval_clamp(
-        &self,
+    /// `<output>` passes through its BSDF/EDF input or the node named by
+    /// the `nodename` attribute.
+    fn eval_output_node(
+        &mut self,
+        node: &Node,
         inputs: &HashMap<String, OutputValue>,
     ) -> Result<OutputValue, CodegenError> {
-        let input = inputs
-            .get("in")
-            .ok_or(CodegenError::InputNotFound("in".into()))?;
-        let low = inputs
-            .get("low")
-            .ok_or(CodegenError::InputNotFound("low".into()))?;
-        let high = inputs
-            .get("high")
-            .ok_or(CodegenError::InputNotFound("high".into()))?;
-
-        match (input, low, high) {
-            (OutputValue::Float(v), OutputValue::Float(l), OutputValue::Float(h)) => {
-                Ok(OutputValue::Float(v.clamp(*l, *h)))
-            }
-            (OutputValue::Color3(v), OutputValue::Float(l), OutputValue::Float(h)) => {
-                Ok(OutputValue::Color3([
-                    v[0].clamp(*l, *h),
-                    v[1].clamp(*l, *h),
-                    v[2].clamp(*l, *h),
-                ]))
-            }
-            _ => Err(CodegenError::TypeConversion("clamp type mismatch".into())),
+        if let Some(bsdf_input) = inputs.get("bsdf") {
+            return Ok(bsdf_input.clone());
         }
-    }
-
-    fn eval_minmax(
-        &self,
-        op: &str,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let in1 = inputs
-            .get("in1")
-            .ok_or(CodegenError::InputNotFound("in1".into()))?;
-        let in2 = inputs
-            .get("in2")
-            .ok_or(CodegenError::InputNotFound("in2".into()))?;
-
-        match (in1, in2) {
-            (OutputValue::Float(a), OutputValue::Float(b)) => {
-                let result = if op == "max" { a.max(*b) } else { a.min(*b) };
-                Ok(OutputValue::Float(result))
-            }
-            (OutputValue::Color3(a), OutputValue::Color3(b)) => {
-                let result = if op == "max" {
-                    [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])]
-                } else {
-                    [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])]
-                };
-                Ok(OutputValue::Color3(result))
-            }
-            _ => Err(CodegenError::TypeConversion("minmax type mismatch".into())),
+        if let Some(edf_input) = inputs.get("edf") {
+            return Ok(edf_input.clone());
         }
-    }
-
-    fn eval_power(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let input = inputs
-            .get("in")
-            .ok_or(CodegenError::InputNotFound("in".into()))?;
-        let exp = inputs
-            .get("exponent")
-            .ok_or(CodegenError::InputNotFound("exponent".into()))?;
-
-        match (input, exp) {
-            (OutputValue::Float(b), OutputValue::Float(e)) => Ok(OutputValue::Float(b.powf(*e))),
-            _ => Err(CodegenError::TypeConversion("power expects float".into())),
+        if !node.nodename.is_empty() {
+            return self.evaluate_connected(&node.nodename);
         }
+        Ok(OutputValue::String("output".to_string()))
     }
+}
 
-    fn eval_sqrt(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let input = inputs
-            .get("in")
-            .ok_or(CodegenError::InputNotFound("in".into()))?;
-        match input {
-            OutputValue::Float(v) => Ok(OutputValue::Float(v.sqrt())),
-            _ => Err(CodegenError::TypeConversion("sqrt expects float".into())),
+fn is_arithmetic_node(ty: &str) -> bool {
+    matches!(
+        ty,
+        "multiply"
+            | "add"
+            | "divide"
+            | "subtract"
+            | "invert"
+            | "clamp"
+            | "min"
+            | "max"
+            | "power"
+            | "sqrt"
+            | "ifgreater"
+    )
+}
+
+fn is_data_node(ty: &str) -> bool {
+    matches!(
+        ty,
+        "mix"
+            | "layer"
+            | "open_pbr_anisotropy"
+            | "convert"
+            | "combine2"
+            | "combine3"
+            | "combine4"
+            | "constant"
+    )
+}
+
+/// Arithmetic nodes with float/color3/vector3 element-wise semantics.
+fn eval_arithmetic(
+    ty: &str,
+    inputs: &HashMap<String, OutputValue>,
+) -> Result<OutputValue, CodegenError> {
+    match ty {
+        "multiply" | "add" | "divide" | "subtract" => eval_math(ty, inputs),
+        "invert" => eval_invert(inputs),
+        "clamp" => eval_clamp(inputs),
+        "min" | "max" => eval_minmax(ty, inputs),
+        "power" => eval_power(inputs),
+        "sqrt" => eval_sqrt(inputs),
+        "ifgreater" => eval_ifgreater(inputs),
+        _ => Err(CodegenError::UnsupportedNode(ty.to_string())),
+    }
+}
+
+/// Data-shaping nodes: conversion, combining, mixing, constants.
+fn eval_data(ty: &str, inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    match ty {
+        "convert" => eval_convert(inputs),
+        "combine2" => eval_combine2(inputs),
+        "combine3" => eval_combine3(inputs),
+        "combine4" => eval_combine4(inputs),
+        "constant" => eval_constant(inputs),
+        "mix" | "layer" => eval_mix(inputs),
+        "open_pbr_anisotropy" => eval_anisotropy(inputs),
+        _ => Err(CodegenError::UnsupportedNode(ty.to_string())),
+    }
+}
+
+fn eval_math(op: &str, inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let in1 = inputs
+        .get("in1")
+        .or_else(|| inputs.get("in"))
+        .ok_or(CodegenError::InputNotFound("in1".into()))?;
+    let in2 = inputs
+        .get("in2")
+        .ok_or(CodegenError::InputNotFound("in2".into()))?;
+
+    match (in1, in2) {
+        (OutputValue::Float(a), OutputValue::Float(b)) => {
+            let result = match op {
+                "multiply" => a * b,
+                "add" => a + b,
+                "divide" => a / b,
+                "subtract" => a - b,
+                _ => return Err(CodegenError::UnsupportedNode(op.into())),
+            };
+            Ok(OutputValue::Float(result))
         }
-    }
-
-    fn eval_ifgreater(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let v1 = inputs
-            .get("value1")
-            .ok_or(CodegenError::InputNotFound("value1".into()))?;
-        let v2 = inputs
-            .get("value2")
-            .ok_or(CodegenError::InputNotFound("value2".into()))?;
-        let in1 = inputs
-            .get("in1")
-            .ok_or(CodegenError::InputNotFound("in1".into()))?;
-        let in2 = inputs
-            .get("in2")
-            .ok_or(CodegenError::InputNotFound("in2".into()))?;
-
-        match (v1, v2) {
-            (OutputValue::Float(a), OutputValue::Float(b)) => {
-                if a > b {
-                    Ok(in1.clone())
-                } else {
-                    Ok(in2.clone())
-                }
-            }
-            _ => Err(CodegenError::TypeConversion(
-                "ifgreater expects float".into(),
-            )),
+        (OutputValue::Color3(a), OutputValue::Color3(b)) => {
+            let result = match op {
+                "multiply" => [a[0] * b[0], a[1] * b[1], a[2] * b[2]],
+                "add" => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+                "divide" => [a[0] / b[0], a[1] / b[1], a[2] / b[2]],
+                "subtract" => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+                _ => return Err(CodegenError::UnsupportedNode(op.into())),
+            };
+            Ok(OutputValue::Color3(result))
         }
-    }
-
-    fn eval_convert(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let input = inputs
-            .get("in")
-            .ok_or(CodegenError::InputNotFound("in".into()))?;
-        Ok(input.clone())
-    }
-
-    fn eval_combine2(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let in1 = inputs
-            .get("in1")
-            .ok_or(CodegenError::InputNotFound("in1".into()))?;
-        let in2 = inputs
-            .get("in2")
-            .ok_or(CodegenError::InputNotFound("in2".into()))?;
-        match (in1, in2) {
-            (OutputValue::Float(a), OutputValue::Float(b)) => Ok(OutputValue::Vector2([*a, *b])),
-            _ => Err(CodegenError::TypeConversion(
-                "combine2 expects float".into(),
-            )),
+        (OutputValue::Vector3(a), OutputValue::Vector3(b)) => {
+            let result = match op {
+                "multiply" => [a[0] * b[0], a[1] * b[1], a[2] * b[2]],
+                "add" => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+                "divide" => [a[0] / b[0], a[1] / b[1], a[2] / b[2]],
+                "subtract" => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+                _ => return Err(CodegenError::UnsupportedNode(op.into())),
+            };
+            Ok(OutputValue::Vector3(result))
         }
+        _ => Err(CodegenError::TypeConversion(
+            "mismatched types for math op".into(),
+        )),
     }
+}
 
-    fn eval_combine3(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let in1 = inputs
-            .get("in1")
-            .ok_or(CodegenError::InputNotFound("in1".into()))?;
-        let in2 = inputs
-            .get("in2")
-            .ok_or(CodegenError::InputNotFound("in2".into()))?;
-        let in3 = inputs
-            .get("in3")
-            .ok_or(CodegenError::InputNotFound("in3".into()))?;
-        match (in1, in2, in3) {
-            (OutputValue::Float(a), OutputValue::Float(b), OutputValue::Float(c)) => {
-                Ok(OutputValue::Vector3([*a, *b, *c]))
-            }
-            _ => Err(CodegenError::TypeConversion(
-                "combine3 expects float".into(),
-            )),
+fn eval_invert(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let input = inputs
+        .get("in")
+        .ok_or(CodegenError::InputNotFound("in".into()))?;
+    match input {
+        OutputValue::Float(v) => Ok(OutputValue::Float(1.0 - v)),
+        OutputValue::Color3(v) => Ok(OutputValue::Color3([1.0 - v[0], 1.0 - v[1], 1.0 - v[2]])),
+        _ => Err(CodegenError::TypeConversion(
+            "invert expects float or color3".into(),
+        )),
+    }
+}
+
+fn eval_clamp(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let input = inputs
+        .get("in")
+        .ok_or(CodegenError::InputNotFound("in".into()))?;
+    let low = inputs
+        .get("low")
+        .ok_or(CodegenError::InputNotFound("low".into()))?;
+    let high = inputs
+        .get("high")
+        .ok_or(CodegenError::InputNotFound("high".into()))?;
+
+    match (input, low, high) {
+        (OutputValue::Float(v), OutputValue::Float(l), OutputValue::Float(h)) => {
+            Ok(OutputValue::Float(v.clamp(*l, *h)))
         }
-    }
-
-    fn eval_combine4(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let in1 = inputs
-            .get("in1")
-            .ok_or(CodegenError::InputNotFound("in1".into()))?;
-        let in2 = inputs
-            .get("in2")
-            .ok_or(CodegenError::InputNotFound("in2".into()))?;
-        let in3 = inputs
-            .get("in3")
-            .ok_or(CodegenError::InputNotFound("in3".into()))?;
-        let in4 = inputs
-            .get("in4")
-            .ok_or(CodegenError::InputNotFound("in4".into()))?;
-        match (in1, in2, in3, in4) {
-            (
-                OutputValue::Float(a),
-                OutputValue::Float(b),
-                OutputValue::Float(c),
-                OutputValue::Float(d),
-            ) => Ok(OutputValue::Vector4([*a, *b, *c, *d])),
-            _ => Err(CodegenError::TypeConversion(
-                "combine4 expects float".into(),
-            )),
+        (OutputValue::Color3(v), OutputValue::Float(l), OutputValue::Float(h)) => {
+            Ok(OutputValue::Color3([
+                v[0].clamp(*l, *h),
+                v[1].clamp(*l, *h),
+                v[2].clamp(*l, *h),
+            ]))
         }
+        _ => Err(CodegenError::TypeConversion("clamp type mismatch".into())),
     }
+}
 
-    fn eval_constant(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        if let Some(v) = inputs.get("value") {
-            return Ok(v.clone());
+fn eval_minmax(
+    op: &str,
+    inputs: &HashMap<String, OutputValue>,
+) -> Result<OutputValue, CodegenError> {
+    let in1 = inputs
+        .get("in1")
+        .ok_or(CodegenError::InputNotFound("in1".into()))?;
+    let in2 = inputs
+        .get("in2")
+        .ok_or(CodegenError::InputNotFound("in2".into()))?;
+
+    match (in1, in2) {
+        (OutputValue::Float(a), OutputValue::Float(b)) => {
+            let result = if op == "max" { a.max(*b) } else { a.min(*b) };
+            Ok(OutputValue::Float(result))
         }
-        if let Some(v) = inputs.get("in") {
-            return Ok(v.clone());
+        (OutputValue::Color3(a), OutputValue::Color3(b)) => {
+            let result = if op == "max" {
+                [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])]
+            } else {
+                [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])]
+            };
+            Ok(OutputValue::Color3(result))
         }
-        Err(CodegenError::InputNotFound("constant value".into()))
+        _ => Err(CodegenError::TypeConversion("minmax type mismatch".into())),
     }
+}
 
-    fn eval_oren_nayar(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("oren_nayar".to_string()))
+fn eval_power(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let input = inputs
+        .get("in")
+        .ok_or(CodegenError::InputNotFound("in".into()))?;
+    let exp = inputs
+        .get("exponent")
+        .ok_or(CodegenError::InputNotFound("exponent".into()))?;
+
+    match (input, exp) {
+        (OutputValue::Float(b), OutputValue::Float(e)) => Ok(OutputValue::Float(b.powf(*e))),
+        _ => Err(CodegenError::TypeConversion("power expects float".into())),
     }
+}
 
-    fn eval_dielectric_bsdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("dielectric".to_string()))
+fn eval_sqrt(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let input = inputs
+        .get("in")
+        .ok_or(CodegenError::InputNotFound("in".into()))?;
+    match input {
+        OutputValue::Float(v) => Ok(OutputValue::Float(v.sqrt())),
+        _ => Err(CodegenError::TypeConversion("sqrt expects float".into())),
     }
+}
 
-    fn eval_schlick_bsdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("schlick".to_string()))
-    }
+fn eval_ifgreater(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let v1 = inputs
+        .get("value1")
+        .ok_or(CodegenError::InputNotFound("value1".into()))?;
+    let v2 = inputs
+        .get("value2")
+        .ok_or(CodegenError::InputNotFound("value2".into()))?;
+    let in1 = inputs
+        .get("in1")
+        .ok_or(CodegenError::InputNotFound("in1".into()))?;
+    let in2 = inputs
+        .get("in2")
+        .ok_or(CodegenError::InputNotFound("in2".into()))?;
 
-    fn eval_sheen_bsdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("sheen".to_string()))
-    }
-
-    fn eval_thin_film_bsdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("thin_film".to_string()))
-    }
-
-    fn eval_translucent_bsdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("translucent".to_string()))
-    }
-
-    fn eval_subsurface_bsdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::BSDF("subsurface".to_string()))
-    }
-
-    fn eval_anisotropic_vdf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::VDF("anisotropic".to_string()))
-    }
-
-    fn eval_uniform_edf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::EDF("uniform".to_string()))
-    }
-
-    fn eval_schlick_edf(
-        &self,
-        _inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        Ok(OutputValue::EDF("schlick".to_string()))
-    }
-
-    fn eval_anisotropy(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        let roughness = self.get_float(inputs, "roughness")?;
-        let anisotropy = self.get_float(inputs, "anisotropy")?;
-        Ok(OutputValue::Vector2([roughness, anisotropy]))
-    }
-
-    fn eval_mix(&self, inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
-        let fg = inputs
-            .get("fg")
-            .ok_or(CodegenError::InputNotFound("fg".into()))?;
-        let bg = inputs
-            .get("bg")
-            .ok_or(CodegenError::InputNotFound("bg".into()))?;
-        let mix = self.get_float(inputs, "mix")?;
-
-        match (fg, bg) {
-            (OutputValue::Float(f), OutputValue::Float(b)) => {
-                Ok(OutputValue::Float(b * (1.0 - mix) + f * mix))
+    match (v1, v2) {
+        (OutputValue::Float(a), OutputValue::Float(b)) => {
+            if a > b {
+                Ok(in1.clone())
+            } else {
+                Ok(in2.clone())
             }
-            (OutputValue::Color3(f), OutputValue::Color3(b)) => Ok(OutputValue::Color3([
-                b[0] * (1.0 - mix) + f[0] * mix,
-                b[1] * (1.0 - mix) + f[1] * mix,
-                b[2] * (1.0 - mix) + f[2] * mix,
-            ])),
-            _ => Err(CodegenError::TypeConversion("mix type mismatch".into())),
         }
+        _ => Err(CodegenError::TypeConversion(
+            "ifgreater expects float".into(),
+        )),
     }
+}
 
-    fn eval_layer(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-    ) -> Result<OutputValue, CodegenError> {
-        self.eval_mix(inputs)
+fn eval_convert(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let input = inputs
+        .get("in")
+        .ok_or(CodegenError::InputNotFound("in".into()))?;
+    Ok(input.clone())
+}
+
+fn eval_combine2(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let in1 = inputs
+        .get("in1")
+        .ok_or(CodegenError::InputNotFound("in1".into()))?;
+    let in2 = inputs
+        .get("in2")
+        .ok_or(CodegenError::InputNotFound("in2".into()))?;
+    match (in1, in2) {
+        (OutputValue::Float(a), OutputValue::Float(b)) => Ok(OutputValue::Vector2([*a, *b])),
+        _ => Err(CodegenError::TypeConversion(
+            "combine2 expects float".into(),
+        )),
     }
+}
 
-    fn get_float(
-        &self,
-        inputs: &HashMap<String, OutputValue>,
-        name: &str,
-    ) -> Result<f32, CodegenError> {
-        inputs
-            .get(name)
-            .and_then(|v| match v {
-                OutputValue::Float(f) => Some(*f),
-                _ => None,
-            })
-            .ok_or_else(|| CodegenError::InputNotFound(name.into()))
-    }
-
-    fn parse_constant(&self, value: &str, ty: &str) -> Result<OutputValue, CodegenError> {
-        match ty {
-            "float" => {
-                let v: f32 = value
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("float: {}", value)))?;
-                Ok(OutputValue::Float(v))
-            }
-            "color3" => {
-                let parts: Vec<&str> = value.split(',').collect();
-                if parts.len() != 3 {
-                    return Err(CodegenError::TypeConversion(format!("color3: {}", value)));
-                }
-                let r = parts[0]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color3 r: {}", value)))?;
-                let g = parts[1]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color3 g: {}", value)))?;
-                let b = parts[2]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color3 b: {}", value)))?;
-                Ok(OutputValue::Color3([r, g, b]))
-            }
-            "color4" => {
-                let parts: Vec<&str> = value.split(',').collect();
-                if parts.len() != 4 {
-                    return Err(CodegenError::TypeConversion(format!("color4: {}", value)));
-                }
-                let r = parts[0]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color4 r: {}", value)))?;
-                let g = parts[1]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color4 g: {}", value)))?;
-                let b = parts[2]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color4 b: {}", value)))?;
-                let a = parts[3]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("color4 a: {}", value)))?;
-                Ok(OutputValue::Color4([r, g, b, a]))
-            }
-            "vector2" => {
-                let parts: Vec<&str> = value.split(',').collect();
-                if parts.len() != 2 {
-                    return Err(CodegenError::TypeConversion(format!("vector2: {}", value)));
-                }
-                let x = parts[0]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector2 x: {}", value)))?;
-                let y = parts[1]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector2 y: {}", value)))?;
-                Ok(OutputValue::Vector2([x, y]))
-            }
-            "vector3" => {
-                let parts: Vec<&str> = value.split(',').collect();
-                if parts.len() != 3 {
-                    return Err(CodegenError::TypeConversion(format!("vector3: {}", value)));
-                }
-                let x = parts[0]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector3 x: {}", value)))?;
-                let y = parts[1]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector3 y: {}", value)))?;
-                let z = parts[2]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector3 z: {}", value)))?;
-                Ok(OutputValue::Vector3([x, y, z]))
-            }
-            "vector4" => {
-                let parts: Vec<&str> = value.split(',').collect();
-                if parts.len() != 4 {
-                    return Err(CodegenError::TypeConversion(format!("vector4: {}", value)));
-                }
-                let x = parts[0]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector4 x: {}", value)))?;
-                let y = parts[1]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector4 y: {}", value)))?;
-                let z = parts[2]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector4 z: {}", value)))?;
-                let w = parts[3]
-                    .trim()
-                    .parse()
-                    .map_err(|_| CodegenError::TypeConversion(format!("vector4 w: {}", value)))?;
-                Ok(OutputValue::Vector4([x, y, z, w]))
-            }
-            "boolean" => {
-                let v = value.trim().to_lowercase();
-                let b = match v.as_str() {
-                    "true" | "1" | "yes" => true,
-                    "false" | "0" | "no" => false,
-                    _ => return Err(CodegenError::TypeConversion(format!("boolean: {}", value))),
-                };
-                Ok(OutputValue::Boolean(b))
-            }
-            "string" => Ok(OutputValue::String(value.to_string())),
-            _ => Err(CodegenError::TypeConversion(format!(
-                "unsupported type: {}",
-                ty
-            ))),
+fn eval_combine3(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let in1 = inputs
+        .get("in1")
+        .ok_or(CodegenError::InputNotFound("in1".into()))?;
+    let in2 = inputs
+        .get("in2")
+        .ok_or(CodegenError::InputNotFound("in2".into()))?;
+    let in3 = inputs
+        .get("in3")
+        .ok_or(CodegenError::InputNotFound("in3".into()))?;
+    match (in1, in2, in3) {
+        (OutputValue::Float(a), OutputValue::Float(b), OutputValue::Float(c)) => {
+            Ok(OutputValue::Vector3([*a, *b, *c]))
         }
+        _ => Err(CodegenError::TypeConversion(
+            "combine3 expects float".into(),
+        )),
     }
+}
+
+fn eval_combine4(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let in1 = inputs
+        .get("in1")
+        .ok_or(CodegenError::InputNotFound("in1".into()))?;
+    let in2 = inputs
+        .get("in2")
+        .ok_or(CodegenError::InputNotFound("in2".into()))?;
+    let in3 = inputs
+        .get("in3")
+        .ok_or(CodegenError::InputNotFound("in3".into()))?;
+    let in4 = inputs
+        .get("in4")
+        .ok_or(CodegenError::InputNotFound("in4".into()))?;
+    match (in1, in2, in3, in4) {
+        (
+            OutputValue::Float(a),
+            OutputValue::Float(b),
+            OutputValue::Float(c),
+            OutputValue::Float(d),
+        ) => Ok(OutputValue::Vector4([*a, *b, *c, *d])),
+        _ => Err(CodegenError::TypeConversion(
+            "combine4 expects float".into(),
+        )),
+    }
+}
+
+fn eval_constant(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    if let Some(v) = inputs.get("value") {
+        return Ok(v.clone());
+    }
+    if let Some(v) = inputs.get("in") {
+        return Ok(v.clone());
+    }
+    Err(CodegenError::InputNotFound("constant value".into()))
+}
+
+fn eval_anisotropy(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let roughness = get_float(inputs, "roughness")?;
+    let anisotropy = get_float(inputs, "anisotropy")?;
+    Ok(OutputValue::Vector2([roughness, anisotropy]))
+}
+
+fn eval_mix(inputs: &HashMap<String, OutputValue>) -> Result<OutputValue, CodegenError> {
+    let fg = inputs
+        .get("fg")
+        .ok_or(CodegenError::InputNotFound("fg".into()))?;
+    let bg = inputs
+        .get("bg")
+        .ok_or(CodegenError::InputNotFound("bg".into()))?;
+    let mix = get_float(inputs, "mix")?;
+
+    match (fg, bg) {
+        (OutputValue::Float(f), OutputValue::Float(b)) => {
+            Ok(OutputValue::Float(b * (1.0 - mix) + f * mix))
+        }
+        (OutputValue::Color3(f), OutputValue::Color3(b)) => Ok(OutputValue::Color3([
+            b[0] * (1.0 - mix) + f[0] * mix,
+            b[1] * (1.0 - mix) + f[1] * mix,
+            b[2] * (1.0 - mix) + f[2] * mix,
+        ])),
+        _ => Err(CodegenError::TypeConversion("mix type mismatch".into())),
+    }
+}
+
+fn get_float(inputs: &HashMap<String, OutputValue>, name: &str) -> Result<f32, CodegenError> {
+    inputs
+        .get(name)
+        .and_then(|v| match v {
+            OutputValue::Float(f) => Some(*f),
+            _ => None,
+        })
+        .ok_or_else(|| CodegenError::InputNotFound(name.into()))
+}
+
+fn parse_constant(value: &str, ty: &str) -> Result<OutputValue, CodegenError> {
+    match ty {
+        "float" => parse_float_constant(value),
+        "color3" => parse_color_constant(value, 3),
+        "color4" => parse_color_constant(value, 4),
+        "vector2" => parse_vector_constant(value, 2),
+        "vector3" => parse_vector_constant(value, 3),
+        "vector4" => parse_vector_constant(value, 4),
+        "boolean" => parse_boolean_constant(value),
+        "string" => Ok(OutputValue::String(value.to_string())),
+        _ => Err(CodegenError::TypeConversion(format!(
+            "unsupported type: {}",
+            ty
+        ))),
+    }
+}
+
+fn parse_float_constant(value: &str) -> Result<OutputValue, CodegenError> {
+    let v: f32 = value
+        .trim()
+        .parse()
+        .map_err(|_| CodegenError::TypeConversion(format!("float: {}", value)))?;
+    Ok(OutputValue::Float(v))
+}
+
+/// Parse `n` comma-separated floats labeled `r/g/b[/a]`.
+fn parse_color_constant(value: &str, n: usize) -> Result<OutputValue, CodegenError> {
+    let labels: &[&str] = if n == 3 {
+        &["r", "g", "b"]
+    } else {
+        &["r", "g", "b", "a"]
+    };
+    let c = parse_components(value, n, if n == 3 { "color3" } else { "color4" }, labels)?;
+    let mut v = [0.0_f32; 4];
+    v[..n].copy_from_slice(&c);
+    if n == 3 {
+        Ok(OutputValue::Color3([v[0], v[1], v[2]]))
+    } else {
+        Ok(OutputValue::Color4([v[0], v[1], v[2], v[3]]))
+    }
+}
+
+/// Parse `n` comma-separated floats labeled `x/y/z[/w]`.
+fn parse_vector_constant(value: &str, n: usize) -> Result<OutputValue, CodegenError> {
+    let (ty, labels): (&str, &[&str]) = match n {
+        2 => ("vector2", &["x", "y"]),
+        3 => ("vector3", &["x", "y", "z"]),
+        _ => ("vector4", &["x", "y", "z", "w"]),
+    };
+    let c = parse_components(value, n, ty, labels)?;
+    let mut v = [0.0_f32; 4];
+    v[..n].copy_from_slice(&c);
+    match n {
+        2 => Ok(OutputValue::Vector2([v[0], v[1]])),
+        3 => Ok(OutputValue::Vector3([v[0], v[1], v[2]])),
+        _ => Ok(OutputValue::Vector4([v[0], v[1], v[2], v[3]])),
+    }
+}
+
+fn parse_boolean_constant(value: &str) -> Result<OutputValue, CodegenError> {
+    let b = match value.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" => true,
+        "false" | "0" | "no" => false,
+        _ => return Err(CodegenError::TypeConversion(format!("boolean: {}", value))),
+    };
+    Ok(OutputValue::Boolean(b))
+}
+
+/// Split `value` into exactly `n` floats; component errors are reported as
+/// `"<ty> <label>: <raw value>"` to match the original per-component messages.
+fn parse_components(
+    value: &str,
+    n: usize,
+    ty: &str,
+    labels: &[&str],
+) -> Result<Vec<f32>, CodegenError> {
+    let parts: Vec<&str> = value.split(',').collect();
+    if parts.len() != n {
+        return Err(CodegenError::TypeConversion(format!("{}: {}", ty, value)));
+    }
+    parts
+        .iter()
+        .zip(labels)
+        .map(|(part, label)| parse_component(part, &format!("{} {}", ty, label), value))
+        .collect()
+}
+
+fn parse_component(part: &str, what: &str, raw: &str) -> Result<f32, CodegenError> {
+    part.trim()
+        .parse()
+        .map_err(|_| CodegenError::TypeConversion(format!("{}: {}", what, raw)))
 }
 
 /// High-level function to convert MaterialX file to OpenPBRMaterial
@@ -1105,8 +1101,8 @@ mod tests {
         // attribute; "out" is not a material parameter name, so no material
         // parameters are extracted and the result is the default PBR material.
         let mat = result.unwrap();
-        assert_eq!(mat.base_params[2], 0.0);
-        assert_eq!(mat.specular_params[2], 1.5);
+        assert_eq!(mat.base.params[2], 0.0);
+        assert_eq!(mat.specular.params[2], 1.5);
     }
 
     #[test]
@@ -1321,9 +1317,8 @@ mod tests {
     /// OpenPBR parameter name, each fed by a constant. The builder is
     /// invoked for every group (base/specular/transmission/subsurface/fuzz/
     /// coat/thin_film/emission/geometry), so all extractor branches run.
-    /// `OpenPBRMaterial` has no public field accessors, so we assert the
-    /// result is Ok and non-default via Debug (coverage of the mapping is
-    /// the goal, not field-level inspection).
+    /// Coverage of the mapping is the goal, not field-level inspection, so
+    /// we assert each parameter group appears in the Debug dump.
     #[test]
     fn test_extract_all_openpbr_parameters() {
         let mtlx = format!(
@@ -1381,21 +1376,15 @@ mod tests {
         // are the flat arrays OpenPBRMaterial stores; we just check each
         // group is present in the debug dump.
         for group in [
-            "base_params",
-            "specular_params",
-            "transmission_params",
-            "transmission_color",
-            "transmission_scatter",
-            "subsurface_params",
-            "subsurface_color",
-            "fuzz_params",
-            "coat_params",
-            "coat_color",
-            "coat_ior",
-            "thin_film_params",
-            "emission_params",
-            "emission_color",
-            "geometry_params",
+            "BaseGroup",
+            "SpecularGroup",
+            "TransmissionGroup",
+            "SubsurfaceGroup",
+            "FuzzGroup",
+            "CoatGroup",
+            "ThinFilmGroup",
+            "EmissionGroup",
+            "GeometryGroup",
         ] {
             assert!(debug.contains(group), "missing group {group} in: {debug}");
         }
@@ -1602,12 +1591,12 @@ mod tests {
 
         let mat = materialx_to_openpbr(&mtlx).unwrap();
         // a - a*b per channel: (0.8, 0.4, 0.2) - (0.4, 0.2, 0.1)
-        assert_eq!(mat.base_color[0], 0.4f32);
-        assert_eq!(mat.base_color[1], 0.2f32);
-        assert_close(mat.base_color[2], 0.1);
+        assert_eq!(mat.base.color[0], 0.4f32);
+        assert_eq!(mat.base.color[1], 0.2f32);
+        assert_close(mat.base.color[2], 0.1);
         // invert(0.25)
-        assert_close(mat.base_params[0], 0.75);
+        assert_close(mat.base.params[0], 0.75);
         // clamp(1.5, 0, 1)
-        assert_close(mat.specular_params[1], 1.0);
+        assert_close(mat.specular.params[1], 1.0);
     }
 }
