@@ -195,6 +195,22 @@ impl<T> ComponentStore<T> {
         })
     }
 
+    /// Iterate over all live entities currently stored, without their
+    /// component values. Used by packed-component traversal (`Pack::
+    /// for_each_packed`) and any caller that needs the entity set of a lane.
+    pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.bitset.ones().filter_map(move |id| {
+            let dense_idx = self.sparse.get(id).copied()?;
+            let entity = self.entities[dense_idx];
+            // Re-check generation so a recycled id is not yielded.
+            if entity.generation() == self.entities[dense_idx].generation() {
+                Some(entity)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn chunked_iter_mut(&mut self) -> ChunkedIterMut<'_, T> {
         let n = self.data.len();
         let chunk_end = (n / 4) * 4;
