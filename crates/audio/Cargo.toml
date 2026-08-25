@@ -21,7 +21,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "AudioContext", "AudioContextState",
     "AudioBuffer", "AudioBufferSourceNode",
-    "GainNode", "PannerNode",
+    "GainNode", "PannerNode", "DistanceModelType", "AudioScheduledSourceNode",
     "AudioDestinationNode", "AudioNode", "AudioParam",
     "Window", "HtmlDocument",
     "console",

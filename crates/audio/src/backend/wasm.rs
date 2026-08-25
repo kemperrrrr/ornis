@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
-use web_sys::{AudioBufferSourceNode, AudioContext, GainNode, PannerNode};
+use web_sys::{
+    AudioBufferSourceNode, AudioContext, AudioScheduledSourceNode, GainNode, PannerNode,
+};
 
 use crate::source::{MixInput, SpatialParams};
 
@@ -83,9 +85,7 @@ impl AudioBackend {
             match self.context.create_panner() {
                 Ok(p) => {
                     if let Some(sp) = &input.spatial {
-                        let (x, z) = panner_position(sp);
-                        let _ = p.position_x().set_value(x);
-                        let _ = p.position_z().set_value(z);
+                        configure_panner(&p, sp);
                     }
                     Some(p)
                 }
@@ -132,7 +132,9 @@ impl AudioBackend {
     pub fn stop(&self, index: usize) {
         let active = self.active.borrow();
         if let Some((_, source, _, _)) = active.get(index) {
-            let _ = source.stop_with_when(0.0);
+            // Use the AudioScheduledSourceNode method — the
+            // AudioBufferSourceNode inherent one is deprecated in web-sys.
+            AudioScheduledSourceNode::stop_with_when(source, 0.0).ok();
         }
     }
 
@@ -146,7 +148,7 @@ impl AudioBackend {
     pub fn clear(&self) {
         let mut active = self.active.borrow_mut();
         for (_, source, _, _) in active.iter() {
-            let _ = source.stop_with_when(0.0);
+            AudioScheduledSourceNode::stop_with_when(source, 0.0).ok();
         }
         active.clear();
     }
@@ -159,17 +161,29 @@ impl Drop for AudioBackend {
     }
 }
 
-/// Map a `SpatialParams` to a Web Audio `PannerNode` world position.
+/// Map a `SpatialParams` to a Web Audio `PannerNode` configuration.
 ///
-/// `azimuth` is a true geometric angle in radians ([-π/2, π/2], 0 = ahead).
-/// The listener faces +z, so a source at `azimuth` with `distance` sits at
-/// `(distance·sin azimuth, -distance·cos azimuth)` — matching the native
-/// backend's equal-power pan.
-fn panner_position(sp: &SpatialParams) -> (f32, f32) {
-    (
-        sp.distance * sp.azimuth.sin(),
-        -sp.distance * sp.azimuth.cos(),
-    )
+/// `azimuth` is a true geometric angle in radians ([-π/2, π/2], 0 = ahead);
+/// the listener faces +z, so a source sits at
+/// `(d·sin az·cos el, d·sin el, -d·cos az·cos el)` — matching the native
+/// backend's geometry. Distance attenuation uses the LINEAR distance model
+/// with the same rolloff/reference values as native `distance_attenuation`,
+/// so browser and native builds hear the same falloff.
+fn configure_panner(p: &web_sys::PannerNode, sp: &SpatialParams) {
+    let cos_el = sp.elevation.cos();
+    let x = sp.distance * sp.azimuth.sin() * cos_el;
+    let y = sp.distance * sp.elevation.sin();
+    let z = -sp.distance * sp.azimuth.cos() * cos_el;
+    let _ = p.position_x().set_value(x);
+    let _ = p.position_y().set_value(y);
+    let _ = p.position_z().set_value(z);
+
+    // Linear model mirrors native distance_attenuation():
+    // gain = ref / (ref + rolloff * max(0, dist - ref)) is close to linear
+    // falloff from full gain at <= reference_distance.
+    let _ = p.set_distance_model(web_sys::DistanceModelType::Linear);
+    let _ = p.set_ref_distance(sp.reference_distance as f64);
+    let _ = p.set_rolloff_factor(sp.rolloff_factor as f64);
 }
 
 /// Register an `onended` callback that removes the finished source from the
@@ -185,6 +199,8 @@ fn attach_on_ended(
             active.borrow_mut().retain(|(sid, _, _, _)| *sid != stop_id);
         }
     }) as Box<dyn FnMut()>);
-    let _ = source.set_onended(Some(on_ended.as_ref().unchecked_ref()));
+    // set_onended is deprecated in web-sys; the modern path is
+    // add_event_listener_with_callback("ended", ...).
+    let _ = source.add_event_listener_with_callback("ended", on_ended.as_ref().unchecked_ref());
     on_ended.forget();
 }

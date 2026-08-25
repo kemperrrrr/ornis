@@ -157,13 +157,20 @@ fn run_audio_thread(
 
 fn pan_sample(sample: f32, azimuth: f32) -> (f32, f32) {
     // azimuth is a true geometric angle in radians, [-π/2, π/2], where
-    // -π/2 = hard left, 0 = center, +π/2 = hard right. Map to equal-power
-    // pan: phi = azimuth/2 + π/4, then (L, R) = (cos phi, sin phi) * sample.
-    // This keeps total energy constant across the pan (center is -3 dB per
-    // channel, which is correct for equal-power) and never inverts a channel.
-    let phi = azimuth / 2.0 + std::f32::consts::FRAC_PI_4;
-    let left = (phi.cos() * sample).clamp(-1.0, 1.0);
-    let right = (phi.sin() * sample).clamp(-1.0, 1.0);
+    // -π/2 = hard left, 0 = center, +π/2 = hard right.
+    //
+    // Equal-GAIN linear pan (deliberate product choice, see
+    // docs/quality/audio-panning-bug-2026-08-25.md): normalize
+    // t = az/(π/2) ∈ [-1, 1], then L = clamp(1 - t) * sample,
+    // R = clamp(1 + t) * sample. Center gives L = R = sample (0 dB, full
+    // loudness); hard left gives (sample, 0); no channel ever inverts.
+    // Tradeoff vs equal-power: the channel SUM dips slightly toward the
+    // center — accepted in exchange for an exact center level.
+    let t = (azimuth / std::f32::consts::FRAC_PI_2).clamp(-1.0, 1.0);
+    let l_gain = (1.0 - t).min(1.0).max(0.0);
+    let r_gain = (1.0 + t).min(1.0).max(0.0);
+    let left = (l_gain * sample).clamp(-1.0, 1.0);
+    let right = (r_gain * sample).clamp(-1.0, 1.0);
     (left, right)
 }
 
@@ -230,45 +237,48 @@ mod tests {
 
     #[test]
     fn pan_sample_centered() {
-        // azimuth 0 (ahead) -> equal-power: both channels = sample / sqrt(2).
-        let expected = 0.5f32 * std::f32::consts::FRAC_1_SQRT_2; // ~0.35355
+        // Equal-gain: center gives FULL gain on both channels (product choice).
         let (l, r) = pan_sample(0.5, 0.0);
-        assert!((l - expected).abs() < 1e-5, "left = {l}");
-        assert!((r - expected).abs() < 1e-5, "right = {r}");
-        // Centered: L == R.
-        assert!((l - r).abs() < 1e-5, "L != R: {l} vs {r}");
+        assert!((l - 0.5).abs() < 1e-6, "left = {l}");
+        assert!((r - 0.5).abs() < 1e-6, "right = {r}");
+        assert!((l - r).abs() < 1e-6, "L != R: {l} vs {r}");
     }
 
     #[test]
     fn pan_sample_full_left() {
         // azimuth -π/2 -> hard left (L = sample, R = 0).
         let (l, r) = pan_sample(0.5, -std::f32::consts::FRAC_PI_2);
-        assert!((l - 0.5).abs() < 1e-5, "left = {l}");
-        assert!(r.abs() < 1e-5, "right = {r}");
+        assert!((l - 0.5).abs() < 1e-6, "left = {l}");
+        assert!(r.abs() < 1e-6, "right = {r}");
     }
 
     #[test]
     fn pan_sample_full_right() {
         // azimuth +π/2 -> hard right (L = 0, R = sample).
         let (l, r) = pan_sample(0.5, std::f32::consts::FRAC_PI_2);
-        assert!(l.abs() < 1e-5, "left = {l}");
-        assert!((r - 0.5).abs() < 1e-5, "right = {r}");
+        assert!(l.abs() < 1e-6, "left = {l}");
+        assert!((r - 0.5).abs() < 1e-6, "right = {r}");
     }
 
     #[test]
-    fn pan_sample_never_inverts() {
-        // Across the full valid range, neither channel may go negative for a
-        // positive sample (the old formula inverted L at wide right angles).
+    fn pan_sample_never_inverts_and_monotonic() {
+        // Across the full range: no channel goes negative for a positive
+        // sample; L decreases and R increases monotonically with azimuth;
+        // max(L, R) == sample everywhere (at least one channel at full gain
+        // only at the extremes — otherwise both <= sample).
         let sample = 0.5f32;
+        let mut prev_l = f32::INFINITY;
+        let mut prev_r = f32::NEG_INFINITY;
         for i in 0..=20 {
             let az = -std::f32::consts::FRAC_PI_2
                 + (i as f32 / 20.0) * std::f32::consts::PI;
             let (l, r) = pan_sample(sample, az);
             assert!(l >= -1e-6, "L inverted at azimuth={az}: {l}");
             assert!(r >= -1e-6, "R inverted at azimuth={az}: {r}");
-            // Energy preserved: L^2 + R^2 == sample^2 (equal-power).
-            let energy = l * l + r * r;
-            assert!((energy - sample * sample).abs() < 1e-4, "energy {energy} at {az}");
+            assert!(l <= prev_l + 1e-6, "L not monotonic at {az}: {prev_l} -> {l}");
+            assert!(r >= prev_r - 1e-6, "R not monotonic at {az}: {prev_r} -> {r}");
+            prev_l = l;
+            prev_r = r;
         }
     }
 
