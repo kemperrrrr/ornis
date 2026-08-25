@@ -225,70 +225,8 @@ impl WideBatch {
             wb: Vec3x4::zero(),
         };
 
-        for (l, &(si, m, st)) in items.iter().enumerate() {
-            debug_assert_eq!(st.count, 1, "wide batch takes single-point manifolds only");
-            let (i, j) = (st.i, st.j);
-            let p = m.points[0].world_point;
-            let ra = p - bodies[i].position;
-            let rb = p - bodies[j].position;
-            let n = m.normal;
-
-            b.state_idx[l] = si;
-            b.idx_a[l] = i;
-            b.idx_b[l] = j;
-            b.n.set_lane(l, n);
-            b.ra.set_lane(l, ra);
-            b.rb.set_lane(l, rb);
-            b.t1.set_lane(l, st.t1);
-            b.t2.set_lane(l, st.t2);
-            b.target.set_lane(l, st.target[0]);
-            b.mu.set_lane(l, st.mu);
-            b.bias.set_lane(l, st.bias[0]);
-            b.acc.set_lane(l, st.acc[0]);
-
-            let (a, bb) = (&bodies[i], &bodies[j]);
-            b.inv_ma.set_lane(l, a.inv_mass);
-            b.inv_mb.set_lane(l, bb.inv_mass);
-            b.va.set_lane(l, a.velocity);
-            b.vb.set_lane(l, bb.velocity);
-            b.wa.set_lane(l, a.angular_velocity);
-            b.wb.set_lane(l, bb.angular_velocity);
-
-            // --- Precompute the constant factors ---
-            let ra_n = ra.cross(n);
-            let rb_n = rb.cross(n);
-            b.ra_n.set_lane(l, ra_n);
-            b.rb_n.set_lane(l, rb_n);
-
-            let wa = Self::world_inertia(a.orientation, a.inertia);
-            let wb = Self::world_inertia(bb.orientation, bb.inertia);
-            b.wa_mat[l] = wa;
-            b.wb_mat[l] = wb;
-
-            let total_inv = a.inv_mass + bb.inv_mass;
-            let k_n =
-                total_inv + ra_n.dot(Self::matvec(&wa, ra_n)) + rb_n.dot(Self::matvec(&wb, rb_n));
-            let ra_t1 = ra.cross(st.t1);
-            let rb_t1 = rb.cross(st.t1);
-            let ra_t2 = ra.cross(st.t2);
-            let rb_t2 = rb.cross(st.t2);
-            let k_t1 = total_inv
-                + ra_t1.dot(Self::matvec(&wa, ra_t1))
-                + rb_t1.dot(Self::matvec(&wb, rb_t1));
-            let k_t2 = total_inv
-                + ra_t2.dot(Self::matvec(&wa, ra_t2))
-                + rb_t2.dot(Self::matvec(&wb, rb_t2));
-            b.inv_k_n
-                .set_lane(l, if k_n >= 1e-10 { 1.0 / k_n } else { 0.0 });
-            b.inv_k_t1
-                .set_lane(l, if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 });
-            b.inv_k_t2
-                .set_lane(l, if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 });
-
-            b.apply_n_a.set_lane(l, n * a.inv_mass);
-            b.apply_n_b.set_lane(l, n * bb.inv_mass);
-            b.apply_w_a.set_lane(l, Self::matvec(&wa, ra_n));
-            b.apply_w_b.set_lane(l, Self::matvec(&wb, rb_n));
+        for (l, item) in items.iter().enumerate() {
+            b.fill_lane(l, *item, bodies);
         }
 
         // Mask inactive lanes to body 0 — a static with inv_mass 0, so all
@@ -299,6 +237,77 @@ impl WideBatch {
             b.idx_b[l] = 0;
         }
         b
+    }
+
+    /// Fill one lane from a single-point manifold (state index, manifold,
+    /// state) and its two bodies. All per-lane constant factors are
+    /// precomputed here so the hot iteration loop stays branch-light.
+    fn fill_lane(
+        &mut self,
+        l: usize,
+        (si, m, st): (usize, &Manifold, &ManifoldState),
+        bodies: &[RigidBody],
+    ) {
+        debug_assert_eq!(st.count, 1, "wide batch takes single-point manifolds only");
+        let (i, j) = (st.i, st.j);
+        let p = m.points[0].world_point;
+        let ra = p - bodies[i].position;
+        let rb = p - bodies[j].position;
+        let n = m.normal;
+
+        self.state_idx[l] = si;
+        self.idx_a[l] = i;
+        self.idx_b[l] = j;
+        self.n.set_lane(l, n);
+        self.ra.set_lane(l, ra);
+        self.rb.set_lane(l, rb);
+        self.t1.set_lane(l, st.t1);
+        self.t2.set_lane(l, st.t2);
+        self.target.set_lane(l, st.target[0]);
+        self.mu.set_lane(l, st.mu);
+        self.bias.set_lane(l, st.bias[0]);
+        self.acc.set_lane(l, st.acc[0]);
+
+        let (a, bb) = (&bodies[i], &bodies[j]);
+        self.inv_ma.set_lane(l, a.inv_mass);
+        self.inv_mb.set_lane(l, bb.inv_mass);
+        self.va.set_lane(l, a.velocity);
+        self.vb.set_lane(l, bb.velocity);
+        self.wa.set_lane(l, a.angular_velocity);
+        self.wb.set_lane(l, bb.angular_velocity);
+
+        // --- Precompute the constant factors ---
+        let ra_n = ra.cross(n);
+        let rb_n = rb.cross(n);
+        self.ra_n.set_lane(l, ra_n);
+        self.rb_n.set_lane(l, rb_n);
+
+        let wa = Self::world_inertia(a.orientation, a.inertia);
+        let wb = Self::world_inertia(bb.orientation, bb.inertia);
+        self.wa_mat[l] = wa;
+        self.wb_mat[l] = wb;
+
+        let total_inv = a.inv_mass + bb.inv_mass;
+        let k_n = total_inv + ra_n.dot(Self::matvec(&wa, ra_n)) + rb_n.dot(Self::matvec(&wb, rb_n));
+        let ra_t1 = ra.cross(st.t1);
+        let rb_t1 = rb.cross(st.t1);
+        let ra_t2 = ra.cross(st.t2);
+        let rb_t2 = rb.cross(st.t2);
+        let k_t1 =
+            total_inv + ra_t1.dot(Self::matvec(&wa, ra_t1)) + rb_t1.dot(Self::matvec(&wb, rb_t1));
+        let k_t2 =
+            total_inv + ra_t2.dot(Self::matvec(&wa, ra_t2)) + rb_t2.dot(Self::matvec(&wb, rb_t2));
+        self.inv_k_n
+            .set_lane(l, if k_n >= 1e-10 { 1.0 / k_n } else { 0.0 });
+        self.inv_k_t1
+            .set_lane(l, if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 });
+        self.inv_k_t2
+            .set_lane(l, if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 });
+
+        self.apply_n_a.set_lane(l, n * a.inv_mass);
+        self.apply_n_b.set_lane(l, n * bb.inv_mass);
+        self.apply_w_a.set_lane(l, Self::matvec(&wa, ra_n));
+        self.apply_w_b.set_lane(l, Self::matvec(&wb, rb_n));
     }
 
     /// Refresh velocities from the body array (called at the start of every
@@ -342,85 +351,93 @@ impl WideBatch {
     /// `solve_island_velocity`, lane by lane, with the precomputed factors.
     pub(crate) fn solve_iteration(&mut self) {
         for l in 0..self.count {
-            let n = self.n.lane(l);
-            let ra = self.ra.lane(l);
-            let rb = self.rb.lane(l);
-            let inv_ma = self.inv_ma.lane(l);
-            let inv_mb = self.inv_mb.lane(l);
             let max_friction = self.mu.lane(l) * self.acc.lane(l);
-
-            // ---- Normal direction ----
-            let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
-                - point_velocity(self.va.lane(l), self.wa.lane(l), ra);
-            let vn = rel.dot(n);
-            let lambda = (self.target.lane(l) - vn) * self.inv_k_n.lane(l);
-            let new_acc = (self.acc.lane(l) + lambda).max(0.0);
-            let delta = new_acc - self.acc.lane(l);
-            self.acc.set_lane(l, new_acc);
-            if delta.abs() > 1e-12 {
-                // apply_impulse: linear + angular, using the precomputed
-                // factors (n·inv_mass and I⁻¹_world·(ra×n)).
-                self.va
-                    .set_lane(l, self.va.lane(l) - self.apply_n_a.lane(l) * delta);
-                self.vb
-                    .set_lane(l, self.vb.lane(l) + self.apply_n_b.lane(l) * delta);
-                self.wa
-                    .set_lane(l, self.wa.lane(l) - self.apply_w_a.lane(l) * delta);
-                self.wb
-                    .set_lane(l, self.wb.lane(l) + self.apply_w_b.lane(l) * delta);
-            }
-
-            // ---- Friction (Coulomb) along the fixed tangent basis ----
-            // The relative velocity is re-measured AFTER the normal impulse,
-            // exactly like the scalar solver.
-            let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
-                - point_velocity(self.va.lane(l), self.wa.lane(l), ra);
-            let wa_mat = &self.wa_mat[l];
-            let wb_mat = &self.wb_mat[l];
-            let mut f_imp = Vec3::ZERO;
-
-            // Axis 1.
-            if self.inv_k_t1.lane(l) != 0.0 {
-                let t = self.t1.lane(l);
-                let vt = rel.dot(t);
-                let lambda_t = -vt * self.inv_k_t1.lane(l);
-                let new_t = self.acc_f1.lane(l) + lambda_t;
-                let other = self.acc_f2.lane(l);
-                let len = (new_t * new_t + other * other).sqrt();
-                let new_t = if len > max_friction && len > 1e-12 {
-                    new_t * (max_friction / len)
-                } else {
-                    new_t
-                };
-                f_imp += t * (new_t - self.acc_f1.lane(l));
-                self.acc_f1.set_lane(l, new_t);
-            }
-            // Axis 2.
-            if self.inv_k_t2.lane(l) != 0.0 {
-                let t = self.t2.lane(l);
-                let vt = rel.dot(t);
-                let lambda_t = -vt * self.inv_k_t2.lane(l);
-                let new_t = self.acc_f2.lane(l) + lambda_t;
-                let other = self.acc_f1.lane(l);
-                let len = (new_t * new_t + other * other).sqrt();
-                let new_t = if len > max_friction && len > 1e-12 {
-                    new_t * (max_friction / len)
-                } else {
-                    new_t
-                };
-                f_imp += t * (new_t - self.acc_f2.lane(l));
-                self.acc_f2.set_lane(l, new_t);
-            }
-
+            self.solve_lane_normal(l);
+            // Friction (Coulomb) along the fixed tangent basis. The relative
+            // velocity is re-measured AFTER the normal impulse, exactly like
+            // the scalar solver.
+            let f_imp = self.solve_lane_friction(l, max_friction);
             if f_imp.length_squared() > 1e-24 {
+                let inv_ma = self.inv_ma.lane(l);
+                let inv_mb = self.inv_mb.lane(l);
+                let ra = self.ra.lane(l);
+                let rb = self.rb.lane(l);
                 self.va.set_lane(l, self.va.lane(l) - f_imp * inv_ma);
                 self.vb.set_lane(l, self.vb.lane(l) + f_imp * inv_mb);
-                self.wa
-                    .set_lane(l, self.wa.lane(l) - Self::matvec(wa_mat, ra.cross(f_imp)));
-                self.wb
-                    .set_lane(l, self.wb.lane(l) + Self::matvec(wb_mat, rb.cross(f_imp)));
+                self.wa.set_lane(
+                    l,
+                    self.wa.lane(l) - Self::matvec(&self.wa_mat[l], ra.cross(f_imp)),
+                );
+                self.wb.set_lane(
+                    l,
+                    self.wb.lane(l) + Self::matvec(&self.wb_mat[l], rb.cross(f_imp)),
+                );
             }
         }
+    }
+
+    /// Normal-direction projected Gauss-Seidel update for one lane using the
+    /// precomputed effective-mass inverses and application factors.
+    fn solve_lane_normal(&mut self, l: usize) {
+        let n = self.n.lane(l);
+        let ra = self.ra.lane(l);
+        let rb = self.rb.lane(l);
+        let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
+            - point_velocity(self.va.lane(l), self.wa.lane(l), ra);
+        let vn = rel.dot(n);
+        let lambda = (self.target.lane(l) - vn) * self.inv_k_n.lane(l);
+        let new_acc = (self.acc.lane(l) + lambda).max(0.0);
+        let delta = new_acc - self.acc.lane(l);
+        self.acc.set_lane(l, new_acc);
+        if delta.abs() > 1e-12 {
+            // apply_impulse: linear + angular, using the precomputed
+            // factors (n·inv_mass and I⁻¹_world·(ra×n)).
+            self.va
+                .set_lane(l, self.va.lane(l) - self.apply_n_a.lane(l) * delta);
+            self.vb
+                .set_lane(l, self.vb.lane(l) + self.apply_n_b.lane(l) * delta);
+            self.wa
+                .set_lane(l, self.wa.lane(l) - self.apply_w_a.lane(l) * delta);
+            self.wb
+                .set_lane(l, self.wb.lane(l) + self.apply_w_b.lane(l) * delta);
+        }
+    }
+
+    /// Coulomb friction for one lane along both fixed tangents; returns the
+    /// total friction impulse to apply.
+    fn solve_lane_friction(&mut self, l: usize, max_friction: f32) -> Vec3 {
+        let rb = self.rb.lane(l);
+        let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
+            - point_velocity(self.va.lane(l), self.wa.lane(l), self.ra.lane(l));
+        let mut f_imp = Vec3::ZERO;
+
+        // Axis 1.
+        if self.inv_k_t1.lane(l) != 0.0 {
+            let t = self.t1.lane(l);
+            let vt = rel.dot(t);
+            let lambda_t = -vt * self.inv_k_t1.lane(l);
+            let new_t = clamp_friction_impulse_wide(
+                self.acc_f1.lane(l) + lambda_t,
+                self.acc_f2.lane(l),
+                max_friction,
+            );
+            f_imp += t * (new_t - self.acc_f1.lane(l));
+            self.acc_f1.set_lane(l, new_t);
+        }
+        // Axis 2.
+        if self.inv_k_t2.lane(l) != 0.0 {
+            let t = self.t2.lane(l);
+            let vt = rel.dot(t);
+            let lambda_t = -vt * self.inv_k_t2.lane(l);
+            let new_t = clamp_friction_impulse_wide(
+                self.acc_f2.lane(l) + lambda_t,
+                self.acc_f1.lane(l),
+                max_friction,
+            );
+            f_imp += t * (new_t - self.acc_f2.lane(l));
+            self.acc_f2.set_lane(l, new_t);
+        }
+        f_imp
     }
 
     /// One-shot restitution stage (mirrors the scalar post-iteration pass).
@@ -453,6 +470,17 @@ impl WideBatch {
                     .set_lane(l, self.wb.lane(l) + self.apply_w_b.lane(l) * lambda);
             }
         }
+    }
+}
+
+/// Coulomb cone projection for one wide-batch friction axis given the
+/// accumulated impulse on the perpendicular axis.
+fn clamp_friction_impulse_wide(new_t: f32, other: f32, max_friction: f32) -> f32 {
+    let len = (new_t * new_t + other * other).sqrt();
+    if len > max_friction && len > 1e-12 {
+        new_t * (max_friction / len)
+    } else {
+        new_t
     }
 }
 
@@ -652,89 +680,15 @@ mod tests {
         iterations: u32,
         _allow_restitution: bool,
     ) {
+        // Delegate to the PRODUCTION scalar single-point step so the parity
+        // test compares the wide path against the exact code it must match
+        // (single-point branch of the island velocity solver).
         for _ in 0..iterations {
             for st in states.iter_mut() {
-                let m = &manifolds[st.mi];
-                let (i, j) = (st.i, st.j);
-                let n = m.normal;
                 if st.count == 1 {
-                    let k = 0;
-                    let p = m.points[k].world_point;
-                    let ra = p - bodies[i].position;
-                    let rb = p - bodies[j].position;
-                    let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-                    let ra_d = ra.cross(n);
-                    let rb_d = rb.cross(n);
-                    let k_eff = total_inv
-                        + ra_d.dot(crate::engine::mul_inv_inertia(
-                            bodies[i].inertia,
-                            bodies[i].orientation,
-                            ra_d,
-                        ))
-                        + rb_d.dot(crate::engine::mul_inv_inertia(
-                            bodies[j].inertia,
-                            bodies[j].orientation,
-                            rb_d,
-                        ));
-                    if k_eff >= 1e-10 {
-                        let rel = crate::engine::point_velocity(&bodies[j], rb)
-                            - crate::engine::point_velocity(&bodies[i], ra);
-                        let vn = rel.dot(n);
-                        let lambda = (st.target[k] - vn) / k_eff;
-                        let new_acc = (st.acc[k] + lambda).max(0.0);
-                        let delta = new_acc - st.acc[k];
-                        st.acc[k] = new_acc;
-                        if delta.abs() > 1e-12 {
-                            crate::engine::apply_impulse(bodies, i, j, n * delta, ra, rb);
-                        }
-                    }
-                    let rel = crate::engine::point_velocity(&bodies[j], rb)
-                        - crate::engine::point_velocity(&bodies[i], ra);
-                    let max_friction = st.mu * st.acc[0];
-                    let mut f_imp = Vec3::ZERO;
-                    for axis in 0..2 {
-                        let t = if axis == 0 { st.t1 } else { st.t2 };
-                        let ra_t = ra.cross(t);
-                        let rb_t = rb.cross(t);
-                        let k_t = total_inv
-                            + ra_t.dot(crate::engine::mul_inv_inertia(
-                                bodies[i].inertia,
-                                bodies[i].orientation,
-                                ra_t,
-                            ))
-                            + rb_t.dot(crate::engine::mul_inv_inertia(
-                                bodies[j].inertia,
-                                bodies[j].orientation,
-                                rb_t,
-                            ));
-                        if k_t < 1e-10 {
-                            continue;
-                        }
-                        let vt = rel.dot(t);
-                        let lambda_t = -vt / k_t;
-                        let (cur, other) = if axis == 0 {
-                            (st.acc_friction[k], st.acc_friction2[k])
-                        } else {
-                            (st.acc_friction2[k], st.acc_friction[k])
-                        };
-                        let new_t = cur + lambda_t;
-                        let len = (new_t * new_t + other * other).sqrt();
-                        let new_t = if len > max_friction && len > 1e-12 {
-                            new_t * (max_friction / len)
-                        } else {
-                            new_t
-                        };
-                        if axis == 0 {
-                            f_imp += t * (new_t - st.acc_friction[k]);
-                            st.acc_friction[k] = new_t;
-                        } else {
-                            f_imp += t * (new_t - st.acc_friction2[k]);
-                            st.acc_friction2[k] = new_t;
-                        }
-                    }
-                    if f_imp.length_squared() > 1e-24 {
-                        crate::engine::apply_impulse(bodies, i, j, f_imp, ra, rb);
-                    }
+                    crate::engine::BuiltinPhysicsEngine::solve_scalar_velocity_step(
+                        bodies, manifolds, st,
+                    );
                 }
             }
         }

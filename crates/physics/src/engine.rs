@@ -12,6 +12,8 @@ use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;
 use crate::wide::{SolverStep, build_solver_steps};
 
+/// Physics engine trait: a single step of simulation, plus body/joint management
+/// and queries. Implementations may be CPU or GPU-based, single-threaded or multi-threaded.
 pub trait PhysicsEngine: Send + Sync {
     fn step(&mut self, dt: f32);
     fn add_body(&mut self, body: RigidBody) -> BodyHandle;
@@ -114,7 +116,10 @@ fn union_find(parent: &mut [usize], mut x: usize) -> usize {
 
 /// Apply the inverse world-space inertia tensor: I⁻¹_world = R · I⁻¹_body · Rᵀ.
 pub(crate) fn mul_inv_inertia(inertia: Vec3, orientation: glam::Quat, v: Vec3) -> Vec3 {
-    debug_assert!(vec3_finite(inertia), "inertia must be finite, got {inertia:?}");
+    debug_assert!(
+        vec3_finite(inertia),
+        "inertia must be finite, got {inertia:?}"
+    );
     debug_assert!(vec3_finite(v), "v must be finite, got {v:?}");
     debug_assert!(quat_finite(orientation), "orientation must be finite");
     let body = orientation.inverse() * v;
@@ -383,15 +388,6 @@ fn apply_positional_impulse(
     }
 }
 
-/// Exact LCP block solve of the normal direction for one manifold (G4).
-/// Generalizes the Box2D b2ContactSolver case tree to 3-4 points: enumerate
-/// active sets (largest first), solve the K system for the new accumulated
-/// impulses directly, and take the first set satisfying complementarity
-/// (acc' ≥ 0 on active, vn' ≥ target on inactive). Scalar per-point
-/// Gauss-Seidel oscillates between coupled points of one manifold (the
-/// rocking pump from G3); the block solve finds the exact active set in one
-/// shot. `target` (G6) is the per-point velocity floor: 0 for touching
-/// points, the speculative approach limit for separated ones.
 #[allow(clippy::too_many_arguments)]
 fn solve_normal_block(
     bodies: &mut [RigidBody],
@@ -421,108 +417,187 @@ fn solve_normal_block(
     for k in 0..count {
         vn[k] = (point_velocity(&bodies[j], rbs[k]) - point_velocity(&bodies[i], ras[k])).dot(n);
     }
+    let geom = BlockGeom { ras, rbs };
 
-    let total = 1usize << count;
+    let total = 1u32 << count;
     for pop in (1..=count).rev() {
         for mask in 1..total {
             if mask.count_ones() as usize != pop {
                 continue;
             }
-            let mut idx = [0usize; 4];
-            let mut ns = 0;
-            for k in 0..count {
-                if (mask >> k) & 1 == 1 {
-                    idx[ns] = k;
-                    ns += 1;
-                }
-            }
-            // Solve K_S · acc'_S = target_S − vn_S + K_{S,all} · acc (new
-            // accumulated impulses directly, so zeroing the inactive set is
-            // consistent). vn' = target on the active set.
-            let mut ks = [[0.0f32; 4]; 4];
-            let mut bs = [0.0f32; 4];
-            for a in 0..ns {
-                for b in 0..ns {
-                    ks[a][b] = k_mat[idx[a]][idx[b]];
-                }
-                let mut r = target[idx[a]] - vn[idx[a]];
-                debug_assert!(
-                    r.is_finite(),
-                    "solve_normal_block: r non-finite at a={a}, target={} vn={}",
-                    target[idx[a]],
-                    vn[idx[a]]
-                );
-                for m in 0..count {
-                    r += k_mat[idx[a]][m] * acc[m];
-                }
-                debug_assert!(
-                    r.is_finite(),
-                    "solve_normal_block: r non-finite after accum loop at a={a}"
-                );
-                bs[a] = r;
-                debug_assert!(
-                    bs[a].is_finite(),
-                    "solve_normal_block: non-finite bs[{a}]={}",
-                    bs[a]
-                );
-            }
-            let Some(ap) = solve_small(&ks, &bs, ns) else {
+            let set = active_set_indices(mask, count);
+            let Some(ap) = try_active_set(&k_mat, &vn, acc, target, count, &set) else {
                 continue;
             };
-            debug_assert!(
-                ap.iter().take(ns).all(|v| v.is_finite()),
-                "solve_normal_block: non-finite impulse solution"
-            );
-            if ap.iter().take(ns).any(|&v| v < -1e-6) {
-                continue;
-            }
-            // vn' on the inactive set must stay at or above its target.
-            let mut ok = true;
-            for t in 0..count {
-                if (mask >> t) & 1 == 1 {
-                    continue;
-                }
-                let mut v = vn[t];
-                for a in 0..ns {
-                    v += k_mat[t][idx[a]] * (ap[a] - acc[idx[a]]);
-                }
-                v -= k_mat[t][t] * acc[t]; // this point's impulse is removed
-                for m in 0..count {
-                    if (mask >> m) & 1 == 0 && m != t {
-                        v -= k_mat[t][m] * acc[m];
-                    }
-                }
-                if v < target[t] - 1e-5 {
-                    ok = false;
-                    break;
-                }
-            }
-            if !ok {
-                continue;
-            }
-            // Commit: apply the deltas and store the new accumulated impulses.
-            for a in 0..ns {
-                let k = idx[a];
-                let d = ap[a] - acc[k];
-                if d.abs() > 1e-12 {
-                    apply_impulse(bodies, i, j, n * d, ras[k], rbs[k]);
-                }
-                acc[k] = ap[a];
-            }
-            for t in 0..count {
-                if (mask >> t) & 1 == 0 && acc[t].abs() > 1e-12 {
-                    let d = -acc[t];
-                    apply_impulse(bodies, i, j, n * d, ras[t], rbs[t]);
-                    acc[t] = 0.0;
-                } else if (mask >> t) & 1 == 0 {
-                    acc[t] = 0.0;
-                }
-            }
+            commit_active_set(bodies, i, j, n, &geom, acc, &set, &ap);
             return;
         }
     }
     // No valid active set (numerically degenerate) — keep the warm-started
     // state; the next outer iteration will retry from updated velocities.
+}
+
+/// One candidate active set of the block-LCP enumeration: bitmask plus the
+/// unpacked point indices (`idx[..ns]`).
+struct ActiveSet {
+    mask: u32,
+    idx: [usize; 4],
+    ns: usize,
+    count: usize,
+}
+
+/// Contact-point lever arms of one manifold (body-relative anchors).
+struct BlockGeom {
+    ras: [Vec3; 4],
+    rbs: [Vec3; 4],
+}
+
+fn active_set_indices(mask: u32, count: usize) -> ActiveSet {
+    let mut idx = [0usize; 4];
+    // count is carried so helpers do not need it as a separate argument.
+    let mut ns = 0;
+    for k in 0..count {
+        if (mask >> k) & 1 == 1 {
+            idx[ns] = k;
+            ns += 1;
+        }
+    }
+    ActiveSet {
+        mask,
+        idx,
+        ns,
+        count,
+    }
+}
+
+/// Try one candidate active set: solve the reduced K system and verify
+/// complementarity (acc' >= 0 on the active set, vn' >= target elsewhere).
+/// Returns the new accumulated impulses on success.
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)] // mirrors the K-matrix block layout
+fn try_active_set(
+    k_mat: &[[f32; 4]; 4],
+    vn: &[f32; 4],
+    acc: &[f32; 4],
+    target: &[f32; 4],
+    count: usize,
+    set: &ActiveSet,
+) -> Option<[f32; 4]> {
+    let ActiveSet { idx, ns, .. } = *set;
+    let mut ks = [[0.0f32; 4]; 4];
+    let mut bs = [0.0f32; 4];
+    for a in 0..ns {
+        for b in 0..ns {
+            ks[a][b] = k_mat[idx[a]][idx[b]];
+        }
+        let mut r = target[idx[a]] - vn[idx[a]];
+        debug_assert!(
+            r.is_finite(),
+            "solve_normal_block: r non-finite at a={a}, target={} vn={}",
+            target[idx[a]],
+            vn[idx[a]]
+        );
+        for m in 0..count {
+            r += k_mat[idx[a]][m] * acc[m];
+        }
+        debug_assert!(
+            r.is_finite(),
+            "solve_normal_block: r non-finite after accum loop at a={a}"
+        );
+        bs[a] = r;
+        debug_assert!(
+            bs[a].is_finite(),
+            "solve_normal_block: non-finite bs[{a}]={}",
+            bs[a]
+        );
+    }
+    let ap = solve_small(&ks, &bs, ns)?;
+    debug_assert!(
+        ap.iter().take(ns).all(|v| v.is_finite()),
+        "solve_normal_block: non-finite impulse solution"
+    );
+    if ap.iter().take(ns).any(|&v| v < -1e-6) {
+        return None;
+    }
+    if !inactive_feasible(k_mat, vn, acc, target, count, set, &ap) {
+        return None;
+    }
+    Some(ap)
+}
+
+/// Check that removing the impulses of the inactive set keeps every inactive
+/// point's normal velocity at or above its target.
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)] // mirrors the K-matrix block layout
+fn inactive_feasible(
+    k_mat: &[[f32; 4]; 4],
+    vn: &[f32; 4],
+    acc: &[f32; 4],
+    target: &[f32; 4],
+    count: usize,
+    set: &ActiveSet,
+    ap: &[f32; 4],
+) -> bool {
+    let ActiveSet { mask, idx, ns, .. } = *set;
+    for t in 0..count {
+        if (mask >> t) & 1 == 1 {
+            continue;
+        }
+        let mut v = vn[t];
+        for a in 0..ns {
+            v += k_mat[t][idx[a]] * (ap[a] - acc[idx[a]]);
+        }
+        v -= k_mat[t][t] * acc[t]; // this point's impulse is removed
+        for m in 0..count {
+            if (mask >> m) & 1 == 0 && m != t {
+                v -= k_mat[t][m] * acc[m];
+            }
+        }
+        if v < target[t] - 1e-5 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Commit a solved active set: apply the impulse deltas, store the new
+/// accumulated impulses, and zero out the inactive set's impulses.
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)] // mirrors the K-matrix block layout
+fn commit_active_set(
+    bodies: &mut [RigidBody],
+    i: usize,
+    j: usize,
+    n: Vec3,
+    geom: &BlockGeom,
+    acc: &mut [f32; 4],
+    set: &ActiveSet,
+    ap: &[f32; 4],
+) {
+    let ActiveSet {
+        mask,
+        idx,
+        ns,
+        count,
+    } = *set;
+    let BlockGeom { ras, rbs } = geom;
+    for a in 0..ns {
+        let k = idx[a];
+        let d = ap[a] - acc[k];
+        if d.abs() > 1e-12 {
+            apply_impulse(bodies, i, j, n * d, ras[k], rbs[k]);
+        }
+        acc[k] = ap[a];
+    }
+    for t in 0..count {
+        if (mask >> t) & 1 == 0 && acc[t].abs() > 1e-12 {
+            let d = -acc[t];
+            apply_impulse(bodies, i, j, n * d, ras[t], rbs[t]);
+            acc[t] = 0.0;
+        } else if (mask >> t) & 1 == 0 {
+            acc[t] = 0.0;
+        }
+    }
 }
 
 fn compute_aabb(body: &RigidBody) -> AABB {
@@ -717,8 +792,6 @@ fn obb_corners(pos: Vec3, half: Vec3, rot: Quat) -> [Vec3; 8] {
     ]
 }
 
-/// Multi-point manifold for OBB-OBB: keeps up to 4 vertices that lie inside the
-/// opposing box's face (vertex-face contacts), falling back to a single point.
 #[allow(clippy::too_many_arguments)]
 fn box_manifold(
     pos_a: Vec3,
@@ -733,6 +806,7 @@ fn box_manifold(
 
     let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
     let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
+
     // Half-width of each box projected onto the contact normal.
     let hwn_a = half_a.x * aa[0].dot(n).abs()
         + half_a.y * aa[1].dot(n).abs()
@@ -753,62 +827,36 @@ fn box_manifold(
     // body starts rocking on a corner.
     let tangent_slack = 0.05;
 
+    // B's corners touching A's face (the face most anti-parallel to `n`),
+    // then A's corners touching B's face.
     let mut cand: Vec<(Vec3, f32)> = Vec::new();
-    // B's corners touching A's face (the face most anti-parallel to `n`).
-    for c in obb_corners(pos_b, half_b, rot_b) {
-        let local = rot_a.inverse() * (c - pos_a);
-        // Depth of the corner relative to A's surface along the normal.
-        let d = hwn_a - (c - pos_a).dot(n);
-        if d < -depth_tol {
-            continue;
-        }
-        // Tangential containment inside the face rectangle (with slack).
-        if local.x.abs() <= half_a.x + tangent_slack
-            && local.y.abs() <= half_a.y + tangent_slack
-            && local.z.abs() <= half_a.z + tangent_slack
-        {
-            cand.push((c, d));
-        }
-    }
-    // A's corners touching B's face.
-    for c in obb_corners(pos_a, half_a, rot_a) {
-        let local = rot_b.inverse() * (c - pos_b);
-        let d = hwn_b - (c - pos_b).dot(-n);
-        if d < -depth_tol {
-            continue;
-        }
-        if local.x.abs() <= half_b.x + tangent_slack
-            && local.y.abs() <= half_b.y + tangent_slack
-            && local.z.abs() <= half_b.z + tangent_slack
-        {
-            cand.push((c, d));
-        }
-    }
+    cand.extend(collect_face_corners(
+        &obb_corners(pos_b, half_b, rot_b),
+        &FaceProbe {
+            pos: pos_a,
+            half: half_a,
+            rot: rot_a,
+            hwn: hwn_a,
+            dir: n,
+            depth_tol,
+            slack: tangent_slack,
+        },
+    ));
+    cand.extend(collect_face_corners(
+        &obb_corners(pos_a, half_a, rot_a),
+        &FaceProbe {
+            pos: pos_b,
+            half: half_b,
+            rot: rot_b,
+            hwn: hwn_b,
+            dir: -n,
+            depth_tol,
+            slack: tangent_slack,
+        },
+    ));
 
-    // Deduplicate in the tangent plane: the same contact region appears once
-    // from each box's corners, offset along the normal by the penetration
-    // depth. Merge by tangential distance, keep the deeper representative —
-    // this yields a stable 4-point manifold instead of a flickering mix.
-    let mut uniq: Vec<(Vec3, f32)> = Vec::new();
-    for (p, d) in cand {
-        let mut merged = false;
-        for (q, qd) in uniq.iter_mut() {
-            let tangential = (p - *q) - n * (p - *q).dot(n);
-            // 5 cm: near-coincident points make the constraint system
-            // near-singular and PGS oscillates into runaway impulses.
-            if tangential.length() < 0.05 {
-                if d > *qd {
-                    *q = p;
-                    *qd = d;
-                }
-                merged = true;
-                break;
-            }
-        }
-        if !merged {
-            uniq.push((p, d));
-        }
-    }
+    // Deduplicate in the tangent plane, then keep the deepest four points.
+    let mut uniq = dedupe_contact_points(cand, n);
     uniq.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut points = [ManifoldPoint {
@@ -837,6 +885,69 @@ fn box_manifold(
         point_count: count,
         points,
     })
+}
+
+/// One opposing face of an OBB to test the other box's corners against.
+struct FaceProbe {
+    pos: Vec3,
+    half: Vec3,
+    rot: Quat,
+    /// Half-width of the probed face's box along the contact normal.
+    hwn: f32,
+    /// Direction pointing INTO the face along the contact normal.
+    dir: Vec3,
+    depth_tol: f32,
+    slack: f32,
+}
+
+/// Collect the corners of one box that touch the probed face of the other:
+/// depth along the normal within tolerance AND tangential containment inside
+/// the face rectangle (with slack).
+fn collect_face_corners(corners: &[Vec3; 8], probe: &FaceProbe) -> Vec<(Vec3, f32)> {
+    let mut out: Vec<(Vec3, f32)> = Vec::new();
+    for c in corners {
+        let local = probe.rot.inverse() * (*c - probe.pos);
+        // Depth of the corner relative to the surface along the normal.
+        let d = probe.hwn - (*c - probe.pos).dot(probe.dir);
+        if d < -probe.depth_tol {
+            continue;
+        }
+        if local.x.abs() <= probe.half.x + probe.slack
+            && local.y.abs() <= probe.half.y + probe.slack
+            && local.z.abs() <= probe.half.z + probe.slack
+        {
+            out.push((*c, d));
+        }
+    }
+    out
+}
+
+/// Merge near-coincident contact candidates in the tangent plane: the same
+/// contact region appears once from each box's corners, offset along the
+/// normal by the penetration depth. Keep the deeper representative — a stable
+/// 4-point manifold instead of a flickering mix.
+fn dedupe_contact_points(cand: Vec<(Vec3, f32)>, n: Vec3) -> Vec<(Vec3, f32)> {
+    let mut uniq: Vec<(Vec3, f32)> = Vec::new();
+    for (p, d) in cand {
+        let mut merged = false;
+        for (q, qd) in uniq.iter_mut() {
+            let tangential = (p - *q) - n * (p - *q).dot(n);
+            // 5 cm: near-coincident points make the constraint system
+            // near-singular and PGS oscillates into runaway impulses.
+            if tangential.length() < 0.05 {
+                if d > *qd {
+                    *q = p;
+                    *qd = d;
+                }
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            uniq.push((p, d));
+        }
+    }
+    uniq
 }
 
 /// Sphere vs an oriented capsule: closest point on the capsule's segment.
@@ -873,38 +984,36 @@ fn sphere_vs_capsule(
     })
 }
 
-/// Capsule-capsule: both segment axes are rotated by the body orientation.
-#[allow(clippy::too_many_arguments)]
-fn capsule_vs_capsule(
-    pos_a: Vec3,
-    radius_a: f32,
-    half_height_a: f32,
-    rot_a: Quat,
-    pos_b: Vec3,
-    radius_b: f32,
-    half_height_b: f32,
-    rot_b: Quat,
-    margin: f32,
-) -> Option<Contact> {
-    let ax = rot_a * Vec3::Y;
-    let bx = rot_b * Vec3::Y;
-    let bot_a = pos_a - ax * half_height_a;
-    let bot_b = pos_b - bx * half_height_b;
+/// Capsule collision parameters (keeps `capsule_vs_capsule` within the bca
+/// argument-count limit).
+struct CapsuleShape {
+    pos: Vec3,
+    radius: f32,
+    half_height: f32,
+    rot: Quat,
+}
 
-    let seg_a = ax * (2.0 * half_height_a);
-    let seg_b = bx * (2.0 * half_height_b);
+/// Capsule-capsule: both segment axes are rotated by the body orientation.
+fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option<Contact> {
+    let ax = a.rot * Vec3::Y;
+    let bx = b.rot * Vec3::Y;
+    let bot_a = a.pos - ax * a.half_height;
+    let bot_b = b.pos - bx * b.half_height;
+
+    let seg_a = ax * (2.0 * a.half_height);
+    let seg_b = bx * (2.0 * b.half_height);
     let diff = bot_b - bot_a;
-    let a = seg_a.dot(seg_a);
-    let b = seg_a.dot(seg_b);
+    let q = seg_a.dot(seg_a);
+    let r = seg_a.dot(seg_b);
     let c = seg_b.dot(seg_b);
     let d = seg_a.dot(diff);
     let e = seg_b.dot(diff);
-    let det = a * c - b * b;
+    let det = q * c - r * r;
 
     let (t_a, t_b) = if det.abs() < 1e-10 {
         (0.0, if c > 0.0 { e / c } else { 0.0 })
     } else {
-        ((b * e - c * d) / det, (a * e - b * d) / det)
+        ((r * e - c * d) / det, (q * e - r * d) / det)
     };
     let t_a = clamp01(t_a);
     let t_b = clamp01(t_b);
@@ -913,7 +1022,7 @@ fn capsule_vs_capsule(
     let closest_b = bot_b + seg_b * t_b;
     let diff2 = closest_b - closest_a;
     let dist_sq = diff2.length_squared();
-    let radius_sum = radius_a + radius_b + margin;
+    let radius_sum = a.radius + b.radius + margin;
     if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
         return None;
     }
@@ -998,14 +1107,18 @@ fn detect_collisions(
                     half_height: hb,
                 },
             ) => capsule_vs_capsule(
-                a.position,
-                ra,
-                ha,
-                a.orientation,
-                b.position,
-                rb,
-                hb,
-                b.orientation,
+                &CapsuleShape {
+                    pos: a.position,
+                    radius: ra,
+                    half_height: ha,
+                    rot: a.orientation,
+                },
+                &CapsuleShape {
+                    pos: b.position,
+                    radius: rb,
+                    half_height: hb,
+                    rot: b.orientation,
+                },
                 margin,
             )
             .map(|c| Manifold::single(i, j, c)),
@@ -1212,6 +1325,10 @@ struct ManifoldCtx<'a> {
     j: usize,
 }
 
+mod contacts;
+mod islands;
+mod joints;
+
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: SweepAndPrune,
@@ -1381,356 +1498,6 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    /// Rebuild the constraint-graph islands (union-find over dynamic bodies
-    /// connected by a contact manifold). Static bodies never join islands —
-    /// they anchor them, like in Jolt.
-    fn rebuild_islands(&mut self, manifolds: &[Manifold]) {
-        let n = self.bodies.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-
-        for m in manifolds {
-            let (a, b) = (m.body_a, m.body_b);
-            if self.bodies[a].body_type == BodyType::Dynamic
-                && self.bodies[b].body_type == BodyType::Dynamic
-            {
-                let (ra, rb) = (union_find(&mut parent, a), union_find(&mut parent, b));
-                if ra != rb {
-                    parent[rb] = ra;
-                }
-            }
-        }
-        // Joints are constraint-graph edges too (G5): jointed dynamic bodies
-        // belong to one island and sleep/wake together.
-        for joint in &self.joints {
-            let (a, b) = (joint.body_a, joint.body_b);
-            if self.bodies[a].body_type == BodyType::Dynamic
-                && self.bodies[b].body_type == BodyType::Dynamic
-            {
-                let (ra, rb) = (union_find(&mut parent, a), union_find(&mut parent, b));
-                if ra != rb {
-                    parent[rb] = ra;
-                }
-            }
-        }
-        // A fully sleeping island keeps its composition even if the contact
-        // detection blinks for a step: its members are not integrated, so
-        // their relative geometry cannot change — dissolving the island
-        // would let one member wake while its support stays asleep.
-        // (One representative per old island, not an O(n²) pair scan.)
-        let mut asleep_rep: HashMap<u32, usize> = HashMap::new();
-        for h in 0..n {
-            if !self.asleep.get(h).copied().unwrap_or(false) {
-                continue;
-            }
-            let old = self.island[h];
-            if old == u32::MAX {
-                continue;
-            }
-            match asleep_rep.entry(old) {
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(h);
-                }
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    let (ra, rb) = (union_find(&mut parent, *e.get()), union_find(&mut parent, h));
-                    if ra != rb {
-                        parent[rb] = ra;
-                    }
-                }
-            }
-        }
-        // Canonicalize island ids to the MINIMUM member index. The raw
-        // union-find root depends on manifold order, which varies step to
-        // step; a root that flips identity resets the island's sleep timer
-        // forever and the island never sleeps (measured on a 1025-body grid:
-        // half of the perfectly quiet scene stayed awake at ~200 ms/frame).
-        let mut canonical: HashMap<usize, usize> = HashMap::new();
-        for h in 0..n {
-            if self.bodies[h].body_type != BodyType::Dynamic {
-                continue;
-            }
-            let r = union_find(&mut parent, h);
-            canonical
-                .entry(r)
-                .and_modify(|m| *m = (*m).min(h))
-                .or_insert(h);
-        }
-        for h in 0..n {
-            self.island[h] = if self.bodies[h].body_type == BodyType::Dynamic {
-                canonical[&union_find(&mut parent, h)] as u32
-            } else {
-                u32::MAX
-            };
-        }
-        // Drop timers of roots that no longer exist.
-        let roots: std::collections::HashSet<u32> = self.island.iter().copied().collect();
-        self.island_timers.retain(|r, _| roots.contains(r));
-    }
-
-    /// Island-coherent sleep bookkeeping, run once per step (G4): an island
-    /// whose bodies ALL stay slow for SLEEP_TIME seconds is frozen as a
-    /// whole; islands are woken as a whole by contact with an awake body
-    /// (see resolve_manifolds).
-    fn update_sleep(&mut self, dt: f32) {
-        // Well below anything gameplay-visible, above the solver's settled
-        // jitter floor (~0.01-0.03).
-        const LIN_SLEEP: f32 = 0.15;
-        const ANG_SLEEP: f32 = 0.15;
-        const SLEEP_TIME: f32 = 0.5;
-        let n = self.bodies.len();
-        // An island is quiet only if every awake member is slow.
-        let mut quiet: HashMap<u32, bool> = HashMap::new();
-        for h in 0..n {
-            if self.island[h] == u32::MAX || self.asleep[h] {
-                continue;
-            }
-            let b = &self.bodies[h];
-            let slow = b.velocity.length() < LIN_SLEEP && b.angular_velocity.length() < ANG_SLEEP;
-            quiet
-                .entry(self.island[h])
-                .and_modify(|q| *q &= slow)
-                .or_insert(slow);
-        }
-        let mut to_sleep: Vec<u32> = Vec::new();
-        for (root, q) in quiet {
-            let timer = self.island_timers.entry(root).or_insert(0.0);
-            if q {
-                *timer += dt;
-                if *timer >= SLEEP_TIME {
-                    to_sleep.push(root);
-                }
-            } else {
-                *timer = 0.0;
-            }
-        }
-        for root in to_sleep {
-            for h in 0..n {
-                if self.island[h] == root {
-                    self.asleep[h] = true;
-                    let b = &mut self.bodies[h];
-                    b.velocity = Vec3::ZERO;
-                    b.angular_velocity = Vec3::ZERO;
-                    // A sleeping body is STATIC for the solver (Jolt
-                    // semantics): zero inverse mass/inertia makes every
-                    // impulse and effective-mass computation treat it as
-                    // immovable, so a resting contact with an awake body
-                    // can never accumulate invisible velocity in the
-                    // sleeper and detonate it on wake. Restored on wake.
-                    b.inv_mass = 0.0;
-                    b.inertia = Vec3::ZERO;
-                }
-            }
-        }
-    }
-
-    /// Wake the whole island containing body `h` (contact with an awake body
-    /// propagates motion through the island, so partial wake is incoherent).
-    fn wake_island(&mut self, h: usize) {
-        let root = self.island[h];
-        for h2 in 0..self.bodies.len() {
-            if self.island[h2] == root {
-                self.asleep[h2] = false;
-                // Undo the sleep-time staticification (see update_sleep).
-                let b = &mut self.bodies[h2];
-                if b.body_type == BodyType::Dynamic {
-                    b.inv_mass = 1.0 / b.mass;
-                    b.inertia = b.shape.inertia(b.mass);
-                }
-            }
-        }
-        self.island_timers.insert(root, 0.0);
-    }
-
-    /// Joint sub-solver (G5), run once per substep after the contact pass.
-    /// Ball joint: 3 linear equality constraints along the world axes at the
-    /// anchor points. Revolute: ball + 2 angular equality constraints along
-    /// the axes perpendicular to the hinge (the hinge rotation itself is
-    /// free). Both are warm-started from impulses accumulated last substep,
-    /// exactly like the contact cache. Joints and contacts alternate at
-    /// substep granularity (12 substeps ≈ 720 Hz), which converges well for
-    /// chains; true per-iteration interleaving is left for a later refactor.
-    /// Velocity stage of the joint solver: warm start from the accumulated
-    /// impulses, then velocity iterations. Runs before positions move.
-    fn solve_joints_velocity(&mut self) {
-        if self.joints.is_empty() {
-            return;
-        }
-        const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
-
-        let Self {
-            bodies,
-            joints,
-            asleep,
-            velocity_iterations,
-            ..
-        } = self;
-
-        for joint in joints.iter_mut() {
-            let (a, b) = (joint.body_a, joint.body_b);
-            // A fully sleeping jointed pair is frozen; island-coherent sleep
-            // guarantees both members share the sleep state.
-            if asleep[a] && asleep[b] {
-                continue;
-            }
-            let (la, lb) = joint.local_anchors();
-            let revolute_axes = match &joint.kind {
-                JointKind::Revolute {
-                    local_axis_a,
-                    local_axis_b,
-                    ..
-                } => Some((*local_axis_a, *local_axis_b)),
-                JointKind::Ball { .. } => None,
-            };
-
-            // --- Warm start: re-apply the accumulated impulses (G2b pattern).
-            let ra = bodies[a].orientation * la;
-            let rb = bodies[b].orientation * lb;
-            for (k, dir) in AXES.iter().enumerate() {
-                let l = joint.acc_lin[k];
-                if l.abs() > 1e-12 {
-                    apply_impulse(bodies, a, b, dir * l, ra, rb);
-                }
-            }
-            if let Some((axis_a, _)) = revolute_axes {
-                let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
-                let t1 = tangent_basis(wa);
-                let t2 = wa.cross(t1).normalize_or_zero();
-                for (k, t) in [t1, t2].iter().enumerate() {
-                    let l = joint.acc_ang[k];
-                    if l.abs() > 1e-12 {
-                        apply_angular_impulse(bodies, a, b, t * l);
-                    }
-                }
-            }
-
-            // --- Velocity iterations.
-            for _ in 0..*velocity_iterations {
-                for (k, dir) in AXES.iter().enumerate() {
-                    let k_eff = effective_mass(bodies, a, b, *dir, ra, rb);
-                    if k_eff < 1e-9 {
-                        continue;
-                    }
-                    let vrel =
-                        (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(*dir);
-                    // Equality constraint: no clamp, any sign of impulse.
-                    let dl = -vrel / k_eff;
-                    joint.acc_lin[k] += dl;
-                    apply_impulse(bodies, a, b, dir * dl, ra, rb);
-                }
-                if let Some((axis_a, _)) = revolute_axes {
-                    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
-                    let t1 = tangent_basis(wa);
-                    let t2 = wa.cross(t1).normalize_or_zero();
-                    for (k, t) in [t1, t2].iter().enumerate() {
-                        let (ba, bb) = (&bodies[a], &bodies[b]);
-                        let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *t).dot(*t)
-                            + mul_inv_inertia(bb.inertia, bb.orientation, *t).dot(*t);
-                        if k_eff < 1e-9 {
-                            continue;
-                        }
-                        let wrel = (bb.angular_velocity - ba.angular_velocity).dot(*t);
-                        let dl = -wrel / k_eff;
-                        joint.acc_ang[k] += dl;
-                        apply_angular_impulse(bodies, a, b, t * dl);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Position stage of the joint solver (split impulse: positions only).
-    /// Runs after `integrate_positions`, like Box3D's joint position pass.
-    fn solve_joints_position(&mut self) {
-        if self.joints.is_empty() {
-            return;
-        }
-        // Baumgarte-style, same β/cap policy as contacts.
-        const BETA: f32 = 0.2;
-        const MAX_LIN_CORRECTION: f32 = 0.25;
-        const MAX_ANG_CORRECTION: f32 = 0.5;
-        const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
-
-        let Self {
-            bodies,
-            joints,
-            asleep,
-            position_iterations,
-            ..
-        } = self;
-
-        for joint in joints.iter_mut() {
-            let (a, b) = (joint.body_a, joint.body_b);
-            if asleep[a] && asleep[b] {
-                continue;
-            }
-            let (la, lb) = joint.local_anchors();
-            let revolute_axes = match &joint.kind {
-                JointKind::Revolute {
-                    local_axis_a,
-                    local_axis_b,
-                    ..
-                } => Some((*local_axis_a, *local_axis_b)),
-                JointKind::Ball { .. } => None,
-            };
-
-            for _ in 0..*position_iterations {
-                let ra = bodies[a].orientation * la;
-                let rb = bodies[b].orientation * lb;
-                let c = (bodies[b].position + rb) - (bodies[a].position + ra);
-                for dir in AXES {
-                    let e = c.dot(dir).clamp(-MAX_LIN_CORRECTION, MAX_LIN_CORRECTION);
-                    if e.abs() < 1e-6 {
-                        continue;
-                    }
-                    let k_eff = effective_mass(bodies, a, b, dir, ra, rb);
-                    if k_eff < 1e-9 {
-                        continue;
-                    }
-                    let lambda = -BETA * e / k_eff;
-                    apply_positional_impulse(bodies, a, b, dir * lambda, ra, rb);
-                }
-                if let Some((axis_a, axis_b)) = revolute_axes {
-                    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
-                    let wb = (bodies[b].orientation * axis_b).normalize_or(Vec3::Z);
-                    // Small-angle misalignment. Rotation aligning wb with wa
-                    // is δ = −(wa × wb) (triple product: (wa×wb)×wb =
-                    // wb·cosθ − wa, i.e. +e would PUSH wb away — sign matters,
-                    // a flipped sign turns the correction into an exponential
-                    // pump). The error lives in the plane ⟂ wa.
-                    let e = wa.cross(wb);
-                    let t1 = tangent_basis(wa);
-                    let t2 = wa.cross(t1).normalize_or_zero();
-                    for t in [t1, t2] {
-                        let err = e.dot(t).clamp(-MAX_ANG_CORRECTION, MAX_ANG_CORRECTION);
-                        if err.abs() < 1e-6 {
-                            continue;
-                        }
-                        let (ba, bb) = (&bodies[a], &bodies[b]);
-                        let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, t).dot(t)
-                            + mul_inv_inertia(bb.inertia, bb.orientation, t).dot(t);
-                        if k_eff < 1e-9 {
-                            continue;
-                        }
-                        let lambda = -BETA * err / k_eff;
-                        // Inertia-weighted split: b rotates toward alignment,
-                        // a rotates against it (a static body has I⁻¹ = 0).
-                        let da = mul_inv_inertia(ba.inertia, ba.orientation, t * -lambda);
-                        let db = mul_inv_inertia(bb.inertia, bb.orientation, t * lambda);
-                        // Reborrow mutably after the shared reads above.
-                        let (lo, hi, swapped) = if a < b { (a, b, false) } else { (b, a, true) };
-                        let (head, tail) = bodies.split_at_mut(hi);
-                        let (ma, mb) = if swapped {
-                            (&mut tail[0], &mut head[lo])
-                        } else {
-                            (&mut head[lo], &mut tail[0])
-                        };
-                        apply_positional_rotation(ma, da);
-                        apply_positional_rotation(mb, db);
-                    }
-                }
-            }
-        }
-    }
-
     /// Time-of-impact pass (G6, b3SolveContinuous analog in its linear form):
     /// runs after the velocity solve, before positions move. A body whose
     /// predicted substep displacement exceeds half its smallest dimension is
@@ -1753,10 +1520,7 @@ impl BuiltinPhysicsEngine {
                 continue;
             }
             let disp = self.bodies[h].velocity * sub_dt;
-            debug_assert!(
-                vec3_finite(disp),
-                "velocity*sub_dt overflowed for body {h}"
-            );
+            debug_assert!(vec3_finite(disp), "velocity*sub_dt overflowed for body {h}");
             let min_dim = match &self.bodies[h].shape {
                 Shape::Sphere { radius } => *radius,
                 Shape::Box { half_extents } => half_extents.min_element(),
@@ -1804,1007 +1568,6 @@ impl BuiltinPhysicsEngine {
                     // restitution stage).
                     let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
                     b.velocity -= n * (bounce * vn);
-                }
-            }
-        }
-    }
-
-    /// Build one ManifoldState entry for a manifold at global body indices
-    /// `i`/`j`. This is the preamble extracted from `solve_island_velocity`;
-    /// today only the GPU single-point path calls it (the CPU island path
-    /// keeps its own inline copy in `solve_island_velocity`).
-    /// `key` is the sorted global body-pair for warm-cache lookup.
-    #[allow(clippy::needless_range_loop)]
-    #[allow(dead_code)]
-    fn build_manifold_state(
-        ctx: &mut ManifoldCtx,
-        m: &Manifold,
-        key: (usize, usize),
-    ) -> Option<ManifoldState> {
-        const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
-        const RESTITUTION_THRESHOLD: f32 = 1.0;
-        const RESTITUTION_MAX_PEN: f32 = 0.05;
-
-        let bodies = &mut *ctx.bodies;
-        let (i, j) = (ctx.i, ctx.j);
-        let sub_dt = ctx.sub_dt;
-        let allow_restitution = ctx.allow_restitution;
-        let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-        if total_inv < 1e-10 {
-            return None;
-        }
-        let n = m.normal;
-        let count = m.point_count;
-
-        let mut la = [Vec3::ZERO; 4];
-        let mut lb = [Vec3::ZERO; 4];
-        let mut pen0 = [0.0f32; 4];
-        for k in 0..count {
-            let p = m.points[k].world_point;
-            la[k] = bodies[i].orientation.inverse() * (p - bodies[i].position);
-            lb[k] = bodies[j].orientation.inverse() * (p - bodies[j].position);
-            pen0[k] = m.points[k].penetration;
-        }
-
-        // Warm-start matching (extracted to reduce bca cognitive)
-        let (warm, matched) =
-            Self::match_warm_points(&la, &lb, m, key, ctx.warm_in, MATCH_TOL_SQ, count);
-
-        // Restitution bias & speculative target
-        let e = bodies[i].restitution.min(bodies[j].restitution);
-        let mu = bodies[i].friction.max(bodies[j].friction);
-        let mut bias = [0.0f32; 4];
-        let mut target = [0.0f32; 4];
-        for k in 0..count {
-            if pen0[k] < 0.0 {
-                target[k] = pen0[k] / sub_dt;
-            }
-        }
-        if allow_restitution {
-            for k in 0..count {
-                if matched[k] || pen0[k] > RESTITUTION_MAX_PEN {
-                    continue;
-                }
-                let p = m.points[k].world_point;
-                let ra = p - bodies[i].position;
-                let rb = p - bodies[j].position;
-                let vn0 = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-                if vn0 >= -RESTITUTION_THRESHOLD {
-                    continue;
-                }
-                if pen0[k] < 0.0 && -pen0[k] > -vn0 * sub_dt {
-                    continue;
-                }
-                bias[k] = -e * vn0;
-            }
-        }
-
-        // Warm-start application (capped)
-        let mut warm_applied = warm;
-        for k in 0..count {
-            if warm[k] > 0.0 {
-                let p = m.points[k].world_point;
-                let ra = p - bodies[i].position;
-                let rb = p - bodies[j].position;
-                let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-                if k_eff < 1e-10 {
-                    warm_applied[k] = 0.0;
-                    continue;
-                }
-                let vn_pre =
-                    (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-                let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
-                warm_applied[k] = applied;
-                if applied > 0.0 {
-                    apply_impulse(bodies, i, j, n * applied, ra, rb);
-                }
-            }
-        }
-
-        Some(ManifoldState {
-            mi: ctx.mi,
-            i: ctx.i,
-            j: ctx.j,
-            count,
-            acc: warm_applied,
-            acc_friction: [0.0; 4],
-            acc_friction2: [0.0; 4],
-            bias,
-            target,
-            mu,
-            t1: tangent_basis(n),
-            t2: tangent_basis(n).cross(n),
-            la,
-            lb,
-            pen0,
-        })
-    }
-
-    /// Warm-start matching helper (extracted to reduce bca complexity).
-    #[allow(clippy::needless_range_loop)]
-    // Only called from `build_manifold_state` (the `gpu` feature path) today.
-    #[allow(dead_code)]
-    fn match_warm_points(
-        la: &[Vec3; 4],
-        lb: &[Vec3; 4],
-        m: &Manifold,
-        key: (usize, usize),
-        warm_in: &WarmCache,
-        match_tol_sq: f32,
-        count: usize,
-    ) -> ([f32; 4], [bool; 4]) {
-        let mut warm = [0.0f32; 4];
-        let mut matched = [false; 4];
-        if let Some((cached_points, cached_count)) = warm_in.get(&key) {
-            let mut used = [false; 4];
-            for k in 0..count {
-                let mut best: Option<(usize, f32)> = None;
-                for (c, cp) in cached_points.iter().enumerate().take(*cached_count) {
-                    if used[c] {
-                        continue;
-                    }
-                    if cp.normal.dot(m.normal) < 0.7 {
-                        continue;
-                    }
-                    let d2 = (cp.la - la[k]).length_squared() + (cp.lb - lb[k]).length_squared();
-                    if d2 < match_tol_sq && best.is_none_or(|(_, bd)| d2 < bd) {
-                        best = Some((c, d2));
-                    }
-                }
-                if let Some((c, _)) = best {
-                    used[c] = true;
-                    warm[k] = cached_points[c].impulse;
-                    matched[k] = true;
-                }
-            }
-        }
-        (warm, matched)
-    }
-
-    /// Partition `active` (manifold indices) into islands and build work
-    /// items. Extracted so both the CPU path and the GPU hybrid path reuse
-    /// the same island-building logic.
-    fn partition_into_islands(&self, active: &[usize], manifolds: &[Manifold]) -> Vec<IslandWork> {
-        let n = self.bodies.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        for &mi in active {
-            let m = &manifolds[mi];
-            let (a, b) = (m.body_a, m.body_b);
-            if self.bodies[a].body_type == BodyType::Dynamic
-                && self.bodies[b].body_type == BodyType::Dynamic
-            {
-                let (ra, rb) = (union_find(&mut parent, a), union_find(&mut parent, b));
-                if ra != rb {
-                    parent[rb] = ra;
-                }
-            }
-        }
-        let mut group_of: HashMap<usize, usize> = HashMap::new();
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for &mi in active {
-            let m = &manifolds[mi];
-            let d = if self.bodies[m.body_a].body_type == BodyType::Dynamic {
-                m.body_a
-            } else {
-                m.body_b
-            };
-            let root = union_find(&mut parent, d);
-            match group_of.entry(root) {
-                std::collections::hash_map::Entry::Occupied(e) => groups[*e.get()].push(mi),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(groups.len());
-                    groups.push(vec![mi]);
-                }
-            }
-        }
-
-        let mut islands: Vec<IslandWork> = Vec::with_capacity(groups.len());
-        for group in groups {
-            let mut body_idx: Vec<usize> = Vec::new();
-            for &mi in &group {
-                body_idx.push(manifolds[mi].body_a);
-                body_idx.push(manifolds[mi].body_b);
-            }
-            body_idx.sort_unstable();
-            body_idx.dedup();
-            let shard: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
-            let local = |g: usize| body_idx.binary_search(&g).expect("island body");
-            let island_manifolds: Vec<Manifold> = group
-                .iter()
-                .map(|&mi| {
-                    let mut mc = manifolds[mi].clone();
-                    mc.body_a = local(manifolds[mi].body_a);
-                    mc.body_b = local(manifolds[mi].body_b);
-                    mc
-                })
-                .collect();
-            let keys: Vec<(usize, usize)> = group
-                .iter()
-                .map(|&mi| {
-                    let m = &manifolds[mi];
-                    (m.body_a.min(m.body_b), m.body_a.max(m.body_b))
-                })
-                .collect();
-            islands.push(IslandWork {
-                body_idx,
-                bodies: shard,
-                manifolds: island_manifolds,
-                keys,
-                states: Vec::new(),
-                warm: HashMap::new(),
-            });
-        }
-        islands
-    }
-
-    /// Dispatch the island velocity solves (parallel via rayon when wide
-    /// enough), scatter bodies back, and merge warm caches.
-    fn dispatch_islands_velocity(
-        &mut self,
-        islands: &mut Vec<IslandWork>,
-        allow_restitution: bool,
-        sub_dt: f32,
-    ) {
-        const PAR_MIN_ISLANDS: usize = 2;
-        const PAR_MIN_MANIFOLDS: usize = 24;
-        if islands.is_empty() {
-            return;
-        }
-        let parallel = islands.len() >= PAR_MIN_ISLANDS
-            && islands.iter().map(|i| i.manifolds.len()).sum::<usize>() >= PAR_MIN_MANIFOLDS;
-        let warm_in = &self.warm_impulses;
-        let iters = self.velocity_iterations;
-        let wide_on = self.wide_solver;
-        let solve = |isl: &mut IslandWork| {
-            let (states, warm) = Self::solve_island_velocity(
-                &mut isl.bodies,
-                &isl.manifolds,
-                &isl.keys,
-                warm_in,
-                iters,
-                allow_restitution,
-                sub_dt,
-                wide_on,
-            );
-            isl.states = states;
-            isl.warm = warm;
-        };
-        if parallel {
-            islands.par_iter_mut().for_each(solve);
-        } else {
-            islands.iter_mut().for_each(solve);
-        }
-        let mut next: WarmCache = HashMap::new();
-        for isl in islands.iter() {
-            for (l, &g) in isl.body_idx.iter().enumerate() {
-                if self.bodies[g].body_type == BodyType::Dynamic {
-                    self.bodies[g] = isl.bodies[l].clone();
-                }
-            }
-            next.extend(isl.warm.iter().map(|(k, v)| (*k, *v)));
-        }
-        self.warm_impulses = next;
-    }
-
-    /// Contact velocity solve using the GPU for single-point manifolds
-    /// (G7, `gpu` feature). Multi-point manifolds are dispatched on CPU
-    /// islands. This is a Jacobi/GS hybrid (not bit-identical).
-    #[cfg(feature = "gpu")]
-    // Warm-point packing indexes parallel per-point arrays; a range loop is
-    // the clearest form here (same style as the scalar solver).
-    #[allow(clippy::needless_range_loop)]
-    fn solve_contacts_velocity_gpu(
-        &mut self,
-        active: Vec<usize>,
-        manifolds: &[Manifold],
-        allow_restitution: bool,
-        sub_dt: f32,
-    ) -> Vec<IslandWork> {
-        // Build global states for ALL active manifolds (shared preamble).
-        let mut global_states: Vec<ManifoldState> = Vec::with_capacity(active.len());
-        for &mi in &active {
-            let m = &manifolds[mi];
-            let (i, j) = (m.body_a, m.body_b);
-            let key = (i.min(j), i.max(j));
-            let mut ctx = ManifoldCtx {
-                bodies: &mut self.bodies,
-                warm_in: &self.warm_impulses,
-                allow_restitution,
-                sub_dt,
-                mi,
-                i,
-                j,
-            };
-            if let Some(st) = Self::build_manifold_state(&mut ctx, m, key) {
-                global_states.push(st);
-            }
-        }
-
-        // Split: single-point → GPU, multi-point → CPU islands.
-        let mut single_si: Vec<usize> = Vec::new();
-        let mut multi_mi: Vec<usize> = Vec::new();
-        for (si, st) in global_states.iter().enumerate() {
-            if st.count == 1 {
-                single_si.push(si);
-            } else {
-                multi_mi.push(st.mi);
-            }
-        }
-
-        // GPU solve single-point contacts.
-        let mut gpu_warm: WarmCache = HashMap::new();
-        if !single_si.is_empty() {
-            let gpu = self.gpu_solver.as_mut().unwrap();
-            let (batches, num_batches) =
-                pack_single_point_batches(&self.bodies, &global_states, manifolds, &single_si);
-            if num_batches > 0 {
-                gpu.upload_bodies(&self.bodies);
-                gpu.upload_batches(&batches);
-                gpu.solve(num_batches, self.velocity_iterations, allow_restitution);
-                gpu.download_bodies(&mut self.bodies);
-                let mut dl_batches = batches;
-                gpu.download_acc(&mut dl_batches);
-                write_back_acc(&mut global_states, &single_si, &dl_batches);
-                // Persist warm cache for single-point manifolds.
-                for &si in &single_si {
-                    let st = &global_states[si];
-                    let m = &manifolds[st.mi];
-                    let key = (m.body_a.min(m.body_b), m.body_a.max(m.body_b));
-                    let mut pts = [WarmPoint {
-                        la: Vec3::ZERO,
-                        lb: Vec3::ZERO,
-                        normal: Vec3::ZERO,
-                        impulse: 0.0,
-                    }; 4];
-                    for k in 0..st.count {
-                        pts[k] = WarmPoint {
-                            la: st.la[k],
-                            lb: st.lb[k],
-                            normal: m.normal,
-                            impulse: st.acc[k],
-                        };
-                    }
-                    gpu_warm.insert(key, (pts, st.count));
-                }
-            }
-        }
-
-        // CPU islands for multi-point manifolds. The island dispatch replaces
-        // `warm_impulses` with the multi-point cache, so the GPU entries are
-        // merged back in afterwards.
-        let islands = if multi_mi.is_empty() {
-            Vec::new()
-        } else {
-            let mut islands = self.partition_into_islands(&multi_mi, manifolds);
-            self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt);
-            islands
-        };
-        self.warm_impulses.extend(gpu_warm);
-        islands
-    }
-
-    /// Velocity stage of the contact solver (G6 stage order, G7 island
-    /// dispatch). Orchestrator: a sequential sleep/wake pre-pass (the only
-    /// part mutating island state), a union-find partition over the FRESH
-    /// manifolds, then each island solved independently by
-    /// `solve_island_velocity` — in parallel via rayon when the scene is wide
-    /// enough. Islands are disjoint over dynamic bodies by construction, so
-    /// concurrent solves are race-free and bit-identical for any thread
-    /// count (Strong Confluence). Returns the island work items; the position
-    /// stage reuses them (states + remapped manifolds) after integration.
-    fn solve_contacts_velocity(
-        &mut self,
-        manifolds: &[Manifold],
-        allow_restitution: bool,
-        sub_dt: f32,
-    ) -> Vec<IslandWork> {
-        // --- Sequential pre-pass: sleep/wake policy + active filtering ---
-        // Sleep: a contact needs work only if at least one side is an AWAKE
-        // DYNAMIC body. Static geometry never wakes anything (a body asleep
-        // on the floor must stay asleep).
-        const WAKE_IMPACT_SPEED: f32 = 0.5;
-        let mut active: Vec<usize> = Vec::with_capacity(manifolds.len());
-        for (mi, m) in manifolds.iter().enumerate() {
-            let (i, j) = (m.body_a, m.body_b);
-            let ai = self.asleep[i] || self.bodies[i].body_type != BodyType::Dynamic;
-            let aj = self.asleep[j] || self.bodies[j].body_type != BodyType::Dynamic;
-            if ai && aj {
-                continue;
-            }
-            // Wake hysteresis (G7): a sleeping island is woken only by a
-            // genuine IMPACT — approach speed above the threshold. A resting
-            // micro-jitter contact (vn ≈ 0) must NOT wake it: island
-            // composition can flicker at solver limit-cycle boundaries, and
-            // without hysteresis a singleton sliver sleeps, gets tickled
-            // awake by its quiet neighbour, and the pair churns
-            // sleep→wake→sleep forever, keeping half of a settled scene
-            // awake (measured on a 1025-body grid: ~50% never slept).
-            if (self.asleep[i] && !aj) || (self.asleep[j] && !ai) {
-                let (s, o) = if self.asleep[i] { (i, j) } else { (j, i) };
-                let p = m.points[0].world_point;
-                let rs = p - self.bodies[s].position;
-                let ro = p - self.bodies[o].position;
-                let approach = (point_velocity(&self.bodies[o], ro)
-                    - point_velocity(&self.bodies[s], rs))
-                .dot(m.normal)
-                    * if self.asleep[i] { -1.0 } else { 1.0 };
-                // m.normal points i → j; `approach` is the speed at which the
-                // awake partner closes in on the sleeper (sleep velocities
-                // are zeroed, so this is just the partner's normal speed).
-                if approach > WAKE_IMPACT_SPEED {
-                    self.wake_island(s);
-                }
-            }
-            // A still-sleeping body is static for the solver (its inv_mass is
-            // zeroed at sleep), so sleeper+static pairs carry no work.
-            if self.bodies[i].inv_mass + self.bodies[j].inv_mass < 1e-10 {
-                continue;
-            }
-            active.push(mi);
-        }
-        if active.is_empty() {
-            self.warm_impulses.clear();
-            return Vec::new();
-        }
-
-        // --- GPU single-point path (G7) ---
-        // When a GPU solver is attached, the whole velocity solve for
-        // single-point manifolds moves to the GPU (`solve_contacts_velocity_gpu`),
-        // and multi-point manifolds keep the CPU island path. The GPU and CPU
-        // passes are NOT interleaved per Gauss-Seidel iteration (they run
-        // sequentially per substep) — a Jacobi/GS hybrid that is physically
-        // correct but not bit-identical to the pure CPU path (see PLAN.md).
-        #[cfg(feature = "gpu")]
-        if self.gpu_solver.is_some() {
-            return self.solve_contacts_velocity_gpu(active, manifolds, allow_restitution, sub_dt);
-        }
-
-        // --- Partition into islands + dispatch (G7) ---
-        // Islands are disjoint over dynamic bodies by construction, so
-        // concurrent solves are race-free and bit-identical for any thread
-        // count (Strong Confluence).
-        let mut islands = self.partition_into_islands(&active, manifolds);
-        self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt);
-        islands
-    }
-
-    /// Position stage (G3 split impulse, G6 order, G7 island dispatch): runs
-    /// AFTER positions are integrated. Iterated NGS per island;
-    /// pseudo-motion only — real velocities are never touched. Each iteration
-    /// re-measures the LIVE separation at the stored body-frame anchors, so
-    /// corrections distribute evenly across the manifold set instead of
-    /// one-shot rigid pushes. β is kept low (0.2): stronger pseudo-correction
-    /// resonates with the velocity solve on rocking contacts.
-    fn solve_contacts_position(&mut self, islands: &mut [IslandWork]) {
-        const PAR_MIN_ISLANDS: usize = 2;
-        const PAR_MIN_MANIFOLDS: usize = 24;
-        if islands.is_empty() {
-            return;
-        }
-        // Re-gather: integration, TOI clamps and the joint velocity pass all
-        // moved the main array since the velocity stage ran.
-        for isl in islands.iter_mut() {
-            for (l, &g) in isl.body_idx.iter().enumerate() {
-                isl.bodies[l] = self.bodies[g].clone();
-            }
-        }
-        let iters = self.position_iterations;
-        let softness = self.contact_softness;
-        let total_manifolds: usize = islands.iter().map(|i| i.manifolds.len()).sum();
-        let solve = |isl: &mut IslandWork| {
-            Self::solve_island_position(
-                &mut isl.bodies,
-                &isl.manifolds,
-                &isl.states,
-                iters,
-                softness,
-            );
-        };
-        if islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS {
-            islands.par_iter_mut().for_each(solve);
-        } else {
-            islands.iter_mut().for_each(solve);
-        }
-        for isl in islands.iter() {
-            for (l, &g) in isl.body_idx.iter().enumerate() {
-                if self.bodies[g].body_type == BodyType::Dynamic {
-                    self.bodies[g] = isl.bodies[l].clone();
-                }
-            }
-        }
-    }
-
-    /// Per-island velocity solve: the G2b–G6 inner solver (warm start,
-    /// Gauss-Seidel with block-LCP normals and fixed-basis friction, one-shot
-    /// restitution, cache persist), operating on an island-local body shard.
-    /// All body indices in `manifolds` and the returned states are LOCAL;
-    /// `keys` maps each local manifold to its global body-pair warm-cache key.
-    /// When `use_wide` is true, single-point manifolds are solved in
-    /// SIMD-wide batches (G7); multi-point (block LCP) stays scalar.
-    // Solver loops index several parallel per-point arrays (manifold points,
-    // warm cache, accumulators); range loops are the clearest form here.
-    // The 8th parameter (`use_wide`, G7) tips this over clippy's default
-    // 7-argument limit; packing them into a struct would only add churn.
-    #[allow(clippy::needless_range_loop)]
-    #[allow(clippy::too_many_arguments)]
-    fn solve_island_velocity(
-        bodies: &mut [RigidBody],
-        manifolds: &[Manifold],
-        keys: &[(usize, usize)],
-        warm_in: &WarmCache,
-        velocity_iterations: u32,
-        allow_restitution: bool,
-        sub_dt: f32,
-        use_wide: bool,
-    ) -> (Vec<ManifoldState>, WarmCache) {
-        // G2b: warm-start cache matches points by proximity, not by index —
-        // manifold point order changes frame to frame (sorted by depth).
-        const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
-        // Below this approach speed restitution is skipped (avoids jitter).
-        const RESTITUTION_THRESHOLD: f32 = 1.0;
-        // Restitution fires only on genuine impacts = shallow penetration.
-        // A deep, spinning, penetrating contact is solver-recovery state
-        // (NGS is still extracting the body); restituting there converts the
-        // approach speed into a huge angular kick at the corner lever, and
-        // the spin presents as even faster approach next step — an energy
-        // pump. Deep contacts recover purely inelastically (dissipative).
-        const RESTITUTION_MAX_PEN: f32 = 0.05;
-
-        let mut states: Vec<ManifoldState> = Vec::with_capacity(manifolds.len());
-        for (mi, m) in manifolds.iter().enumerate() {
-            let (i, j) = (m.body_a, m.body_b);
-            let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-            if total_inv < 1e-10 {
-                continue;
-            }
-            let n = m.normal;
-            let key = keys[mi];
-            let count = m.point_count;
-
-            // --- Body-frame anchors first: matching and G3 both need them ---
-            let mut la = [Vec3::ZERO; 4];
-            let mut lb = [Vec3::ZERO; 4];
-            let mut pen0 = [0.0f32; 4];
-            for k in 0..count {
-                let p = m.points[k].world_point;
-                la[k] = bodies[i].orientation.inverse() * (p - bodies[i].position);
-                lb[k] = bodies[j].orientation.inverse() * (p - bodies[j].position);
-                pen0[k] = m.points[k].penetration;
-            }
-
-            // --- Match cached impulses by body-frame anchors (feature
-            // persistence, Jolt-style): stable while the same surface feature
-            // stays in contact, even when the bodies move fast in world space.
-            let mut warm = [0.0f32; 4];
-            let mut matched = [false; 4];
-            if let Some((cached_points, cached_count)) = warm_in.get(&key) {
-                let mut used = [false; 4];
-                for k in 0..count {
-                    let mut best: Option<(usize, f32)> = None;
-                    for (c, cp) in cached_points.iter().enumerate().take(*cached_count) {
-                        if used[c] {
-                            continue;
-                        }
-                        // Feature compatibility: same surface region AND a
-                        // compatible contact normal (rolling over an edge
-                        // changes the feature, dot < 0.7 => no match).
-                        if cp.normal.dot(n) < 0.7 {
-                            continue;
-                        }
-                        let d2 =
-                            (cp.la - la[k]).length_squared() + (cp.lb - lb[k]).length_squared();
-                        if d2 < MATCH_TOL_SQ && best.is_none_or(|(_, bd)| d2 < bd) {
-                            best = Some((c, d2));
-                        }
-                    }
-                    if let Some((c, _)) = best {
-                        used[c] = true;
-                        warm[k] = cached_points[c].impulse;
-                        matched[k] = true;
-                    }
-                }
-            }
-
-            // Restitution bias from the pre-solve approach velocity — only on
-            // the first substep of a step and only for NEW (unmatched) points:
-            // one bounce per impact event. A persistent contact must never
-            // re-restitute — the NGS position pass would feed it fresh
-            // approach velocity every step and the bounce becomes an energy
-            // pump (Box3D applies restitution as a one-shot, never cached).
-            let e = bodies[i].restitution.min(bodies[j].restitution);
-            let mu = bodies[i].friction.max(bodies[j].friction);
-            let mut bias = [0.0f32; 4];
-            let mut target = [0.0f32; 4];
-            for k in 0..count {
-                // Speculative (separated) point: may close the gap within this
-                // substep, but not more — Box2D's speculative distance baked
-                // into the velocity target.
-                if pen0[k] < 0.0 {
-                    target[k] = pen0[k] / sub_dt;
-                }
-            }
-            if allow_restitution {
-                for k in 0..count {
-                    if matched[k] || pen0[k] > RESTITUTION_MAX_PEN {
-                        continue;
-                    }
-                    let p = m.points[k].world_point;
-                    let ra = p - bodies[i].position;
-                    let rb = p - bodies[j].position;
-                    let vn0 =
-                        (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-                    if vn0 >= -RESTITUTION_THRESHOLD {
-                        continue;
-                    }
-                    // A speculative point restitutes only if the approach is
-                    // fast enough to actually land within this substep —
-                    // otherwise the bounce would fire in mid-air.
-                    if pen0[k] < 0.0 && -pen0[k] > -vn0 * sub_dt {
-                        continue;
-                    }
-                    bias[k] = -e * vn0;
-                }
-            }
-
-            // --- WarmStart stage: apply cached impulses once (Box2D pattern) ---
-            // Capped so the warm impulse can never push the pair APART faster
-            // than they currently approach: a stale cached impulse applied to
-            // a separating (or nearly static) contact is pure energy
-            // injection, repeated 240×/s (this was the high-spin pump).
-            let mut warm_applied = warm;
-            for k in 0..count {
-                if warm[k] > 0.0 {
-                    let p = m.points[k].world_point;
-                    let ra = p - bodies[i].position;
-                    let rb = p - bodies[j].position;
-                    let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-                    if k_eff < 1e-10 {
-                        warm_applied[k] = 0.0;
-                        continue;
-                    }
-                    let vn_pre =
-                        (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-                    // Cap against the speculative target too: a separated
-                    // point may keep approaching up to its gap limit.
-                    let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
-                    warm_applied[k] = applied;
-                    if applied > 0.0 {
-                        apply_impulse(bodies, i, j, n * applied, ra, rb);
-                    }
-                }
-            }
-
-            states.push(ManifoldState {
-                mi,
-                i,
-                j,
-                count,
-                acc: warm_applied,
-                acc_friction: [0.0; 4],
-                acc_friction2: [0.0; 4],
-                bias,
-                target,
-                mu,
-                t1: tangent_basis(n),
-                t2: tangent_basis(n).cross(n),
-                la,
-                lb,
-                pen0,
-            });
-        }
-
-        // --- Velocity solve: Gauss-Seidel iterations over ALL manifolds ---
-        // G7: single-point manifolds are packed into SIMD-wide batches
-        // (disjoint body sets, original GS order preserved — every contact
-        // stays in its place in the sequence); multi-point manifolds keep
-        // the scalar block-LCP path. Steps run in manifold order, so the
-        // computation is the same sequence either way.
-        let mut steps = if use_wide {
-            build_solver_steps(bodies, manifolds, &states)
-        } else {
-            Vec::new()
-        };
-        for _ in 0..velocity_iterations {
-            if use_wide {
-                for step in &mut steps {
-                    match step {
-                        SolverStep::Wide(b) => {
-                            b.gather(bodies);
-                            b.solve_iteration();
-                            b.scatter(bodies);
-                        }
-                        SolverStep::Scalar(si) => {
-                            Self::solve_scalar_velocity_step(bodies, manifolds, &mut states[*si]);
-                        }
-                    }
-                }
-            } else {
-                for st in states.iter_mut() {
-                    Self::solve_scalar_velocity_step(bodies, manifolds, st);
-                }
-            }
-        }
-        // Wide batches own the accumulated impulses of their lanes during
-        // the iterations; write them back so the cache persist below sees
-        // the final values.
-        if use_wide {
-            for step in &steps {
-                if let SolverStep::Wide(b) = step {
-                    b.write_back_acc(&mut states);
-                }
-            }
-        }
-
-        // --- Restitution stage (Box3D b3SolverStage_Restitution analog) ---
-        // One-shot per step: push the normal point velocity up to the stored
-        // bounce target. NOT accumulated, NOT warm-started — this is what
-        // keeps spinning bodies from pumping energy through the bounce.
-        if allow_restitution {
-            if use_wide {
-                for step in &mut steps {
-                    match step {
-                        SolverStep::Wide(b) => {
-                            b.gather(bodies);
-                            b.solve_restitution();
-                            b.scatter(bodies);
-                        }
-                        SolverStep::Scalar(si) => {
-                            Self::solve_scalar_restitution_step(bodies, manifolds, &states[*si]);
-                        }
-                    }
-                }
-            } else {
-                for st in &states {
-                    Self::solve_scalar_restitution_step(bodies, manifolds, st);
-                }
-            }
-        }
-
-        // --- Persist the cache for the next substep/step ---
-        // --- Persist this island's cache entries for the next substep ---
-        // (st.i/st.j are island-LOCAL indices; the cache is keyed globally.)
-        let mut next: WarmCache = HashMap::new();
-        for st in &states {
-            let m = &manifolds[st.mi];
-            let mut pts = [WarmPoint {
-                la: Vec3::ZERO,
-                lb: Vec3::ZERO,
-                normal: Vec3::ZERO,
-                impulse: 0.0,
-            }; 4];
-            for k in 0..st.count {
-                pts[k] = WarmPoint {
-                    la: st.la[k],
-                    lb: st.lb[k],
-                    normal: m.normal,
-                    impulse: st.acc[k],
-                };
-            }
-            next.insert(keys[st.mi], (pts, st.count));
-        }
-        (states, next)
-    }
-
-    /// One scalar Gauss-Seidel velocity step for a single manifold: the
-    /// block-LCP normal solve (multi-point) or the projected scalar solve
-    /// (single-point), then Coulomb friction along the fixed tangent basis.
-    /// Extracted from the iteration loop so the G7 step sequence (wide
-    /// batches interleaved with scalar manifolds) reuses the exact same code.
-    // Solver loops index several parallel per-point arrays; range loops are
-    // the clearest form here.
-    #[allow(clippy::needless_range_loop)]
-    fn solve_scalar_velocity_step(
-        bodies: &mut [RigidBody],
-        manifolds: &[Manifold],
-        st: &mut ManifoldState,
-    ) {
-        let m = &manifolds[st.mi];
-        let (i, j) = (st.i, st.j);
-        let n = m.normal;
-        let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-
-        // ---- Normal direction ----
-        // G4: multi-point manifolds are solved as an exact LCP block
-        // (scalar per-point GS oscillates between coupled points of one
-        // manifold — the rocking pump); single points keep the scalar
-        // projected update.
-        if st.count >= 2 {
-            let mut pts = [Vec3::ZERO; 4];
-            for k in 0..st.count {
-                pts[k] = m.points[k].world_point;
-            }
-            solve_normal_block(bodies, i, j, n, &pts, &mut st.acc, &st.target, st.count);
-        } else {
-            let k = 0;
-            let p = m.points[k].world_point;
-            let ra = p - bodies[i].position;
-            let rb = p - bodies[j].position;
-            let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-            if k_eff >= 1e-10 {
-                let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
-                let vn = rel.dot(n);
-                // Inelastic contact: restitution is a separate one-shot stage
-                // (below), never accumulated. G6: the target is the
-                // speculative approach limit (0 when touching), not
-                // necessarily a full stop.
-                let lambda = (st.target[k] - vn) / k_eff;
-                let new_acc = (st.acc[k] + lambda).max(0.0);
-                let delta = new_acc - st.acc[k];
-                st.acc[k] = new_acc;
-                if delta.abs() > 1e-12 {
-                    apply_impulse(bodies, i, j, n * delta, ra, rb);
-                }
-            }
-        }
-
-        // Friction (Coulomb) along the FIXED tangent basis (extracted helper).
-        Self::solve_scalar_friction(bodies, i, j, st, m, total_inv);
-    }
-
-    /// One-shot restitution step for a single manifold (the scalar half of
-    /// the post-iteration stage; the wide half lives in `WideBatch`).
-    #[allow(clippy::needless_range_loop)]
-    fn solve_scalar_restitution_step(
-        bodies: &mut [RigidBody],
-        manifolds: &[Manifold],
-        st: &ManifoldState,
-    ) {
-        let m = &manifolds[st.mi];
-        let (i, j) = (st.i, st.j);
-        let n = m.normal;
-        let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-        for k in 0..st.count {
-            if st.bias[k] <= 0.0 {
-                continue;
-            }
-            let p = m.points[k].world_point;
-            let ra = p - bodies[i].position;
-            let rb = p - bodies[j].position;
-            let ra_n = ra.cross(n);
-            let rb_n = rb.cross(n);
-            let k_eff = total_inv
-                + ra_n.dot(mul_inv_inertia(
-                    bodies[i].inertia,
-                    bodies[i].orientation,
-                    ra_n,
-                ))
-                + rb_n.dot(mul_inv_inertia(
-                    bodies[j].inertia,
-                    bodies[j].orientation,
-                    rb_n,
-                ));
-            if k_eff < 1e-10 {
-                continue;
-            }
-            let vn = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
-            let lambda = (st.bias[k] - vn) / k_eff;
-            if lambda > 0.0 {
-                apply_impulse(bodies, i, j, n * lambda, ra, rb);
-            }
-        }
-    }
-
-    /// Friction step for a single manifold (extracted to reduce bca
-    /// cognitive complexity of solve_scalar_velocity_step).
-    #[allow(clippy::needless_range_loop)]
-    fn solve_scalar_friction(
-        bodies: &mut [RigidBody],
-        i: usize,
-        j: usize,
-        st: &mut ManifoldState,
-        m: &Manifold,
-        total_inv: f32,
-    ) {
-        for k in 0..st.count {
-            debug_assert!(st.acc[k].is_finite(), "acc must be finite");
-            debug_assert!(
-                st.mu.is_finite() && st.mu >= 0.0,
-                "mu must be non-negative, got {}",
-                st.mu
-            );
-            let p = m.points[k].world_point;
-            let ra = p - bodies[i].position;
-            let rb = p - bodies[j].position;
-            let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
-            let max_friction = st.mu * st.acc[k];
-            let mut f_imp = Vec3::ZERO;
-            for axis in 0..2 {
-                let t = if axis == 0 { st.t1 } else { st.t2 };
-                let ra_t = ra.cross(t);
-                let rb_t = rb.cross(t);
-                let k_t = total_inv
-                    + ra_t.dot(mul_inv_inertia(
-                        bodies[i].inertia,
-                        bodies[i].orientation,
-                        ra_t,
-                    ))
-                    + rb_t.dot(mul_inv_inertia(
-                        bodies[j].inertia,
-                        bodies[j].orientation,
-                        rb_t,
-                    ));
-                if k_t < 1e-10 {
-                    continue;
-                }
-                let vt = rel.dot(t);
-                let lambda_t = -vt / k_t;
-                let (cur, other) = if axis == 0 {
-                    (st.acc_friction[k], st.acc_friction2[k])
-                } else {
-                    (st.acc_friction2[k], st.acc_friction[k])
-                };
-                let new_t = cur + lambda_t;
-                let len = (new_t * new_t + other * other).sqrt();
-                let new_t = if len > max_friction && len > 1e-12 {
-                    new_t * (max_friction / len)
-                } else {
-                    new_t
-                };
-                debug_assert!(new_t.is_finite(), "friction impulse overflowed");
-                if axis == 0 {
-                    f_imp += t * (new_t - st.acc_friction[k]);
-                    st.acc_friction[k] = new_t;
-                } else {
-                    f_imp += t * (new_t - st.acc_friction2[k]);
-                    st.acc_friction2[k] = new_t;
-                }
-            }
-            if f_imp.length_squared() > 1e-24 {
-                apply_impulse(bodies, i, j, f_imp, ra, rb);
-            }
-        }
-    }
-
-    /// Per-island NGS position solve on the local shard (stage doc lives on
-    /// `solve_contacts_position`). Pseudo-motion only: real velocities and
-    /// the warm cache are never touched here.
-    // Live anchors are re-measured per iteration; range loops over the
-    // per-point arrays are the clearest form here.
-    #[allow(clippy::needless_range_loop)]
-    fn solve_island_position(
-        bodies: &mut [RigidBody],
-        manifolds: &[Manifold],
-        states: &[ManifoldState],
-        position_iterations: u32,
-        contact_softness: f32,
-    ) {
-        const SLOP: f32 = 0.02;
-        const MAX_CORRECTION: f32 = 0.25;
-        const BETA_POS: f32 = 0.2;
-        for _ in 0..position_iterations {
-            for st in states {
-                let m = &manifolds[st.mi];
-                let (i, j) = (st.i, st.j);
-                let n = m.normal;
-                let inv_mass_a = bodies[i].inv_mass;
-                let inv_mass_b = bodies[j].inv_mass;
-                let total_inv = inv_mass_a + inv_mass_b;
-                let cfm = contact_softness * total_inv;
-                for k in 0..st.count {
-                    let (pos_a, rot_a) = (bodies[i].position, bodies[i].orientation);
-                    let (pos_b, rot_b) = (bodies[j].position, bodies[j].orientation);
-                    // Live world anchors; at detection they coincided, so the
-                    // separation along n started at -pen0.
-                    let wa = pos_a + rot_a * st.la[k];
-                    let wb = pos_b + rot_b * st.lb[k];
-                    let separation = (wb - wa).dot(n) - st.pen0[k];
-                    let c = (-separation - SLOP).clamp(0.0, MAX_CORRECTION);
-                    if c <= 0.0 {
-                        continue;
-                    }
-                    let ra = wa - pos_a;
-                    let rb = wb - pos_b;
-                    let ra_n = ra.cross(n);
-                    let rb_n = rb.cross(n);
-                    let k_pos = total_inv
-                        + ra_n.dot(mul_inv_inertia(bodies[i].inertia, rot_a, ra_n))
-                        + rb_n.dot(mul_inv_inertia(bodies[j].inertia, rot_b, rb_n));
-                    let k_soft = make_soft(k_pos, cfm);
-                    if k_soft < 1e-10 {
-                        continue;
-                    }
-                    let lam = BETA_POS * c / k_soft;
-                    apply_positional_impulse(bodies, i, j, n * lam, ra, rb);
                 }
             }
         }
@@ -3226,7 +1989,10 @@ mod tests {
             (half_y - 2f32.sqrt()).abs() < 1e-3,
             "OBB->AABB y-extent, got {half_y}"
         );
-        assert!((half_z - 1.0).abs() < 1e-3, "OBB->AABB z-extent, got {half_z}");
+        assert!(
+            (half_z - 1.0).abs() < 1e-3,
+            "OBB->AABB z-extent, got {half_z}"
+        );
     }
 
     #[test]
@@ -3859,20 +2625,24 @@ mod tests {
         }
         let ra_d = ra.cross(dir);
         let rb_d = rb.cross(dir);
-        let iw_i = rot_inertia(bodies[0].orientation, Vec3::new(
-            inv_inertia_axis(bodies[0].inertia.x),
-            inv_inertia_axis(bodies[0].inertia.y),
-            inv_inertia_axis(bodies[0].inertia.z),
-        ));
-        let iw_j = rot_inertia(bodies[1].orientation, Vec3::new(
-            inv_inertia_axis(bodies[1].inertia.x),
-            inv_inertia_axis(bodies[1].inertia.y),
-            inv_inertia_axis(bodies[1].inertia.z),
-        ));
-        let oracle = bodies[0].inv_mass
-            + bodies[1].inv_mass
-            + ra_d.dot(iw_i * ra_d)
-            + rb_d.dot(iw_j * rb_d);
+        let iw_i = rot_inertia(
+            bodies[0].orientation,
+            Vec3::new(
+                inv_inertia_axis(bodies[0].inertia.x),
+                inv_inertia_axis(bodies[0].inertia.y),
+                inv_inertia_axis(bodies[0].inertia.z),
+            ),
+        );
+        let iw_j = rot_inertia(
+            bodies[1].orientation,
+            Vec3::new(
+                inv_inertia_axis(bodies[1].inertia.x),
+                inv_inertia_axis(bodies[1].inertia.y),
+                inv_inertia_axis(bodies[1].inertia.z),
+            ),
+        );
+        let oracle =
+            bodies[0].inv_mass + bodies[1].inv_mass + ra_d.dot(iw_i * ra_d) + rb_d.dot(iw_j * rb_d);
 
         assert!(
             (em - oracle).abs() < 1e-5,
@@ -3899,10 +2669,8 @@ mod tests {
 
         // Reconstruct A·x via glam and confirm we recover b.
         let am = Mat4::from_cols_array(&[
-            a[0][0], a[1][0], a[2][0], a[3][0],
-            a[0][1], a[1][1], a[2][1], a[3][1],
-            a[0][2], a[1][2], a[2][2], a[3][2],
-            a[0][3], a[1][3], a[2][3], a[3][3],
+            a[0][0], a[1][0], a[2][0], a[3][0], a[0][1], a[1][1], a[2][1], a[3][1], a[0][2],
+            a[1][2], a[2][2], a[3][2], a[0][3], a[1][3], a[2][3], a[3][3],
         ]);
         let xv = glam::vec4(x[0], x[1], x[2], x[3]);
         let ax = am * xv;
@@ -4059,7 +2827,12 @@ mod tests {
 
         // Active-set impulses must be non-negative.
         for k in 0..count {
-            assert!(acc[k] >= -1e-6, "accumulated impulse {} negative: {}", k, acc[k]);
+            assert!(
+                acc[k] >= -1e-6,
+                "accumulated impulse {} negative: {}",
+                k,
+                acc[k]
+            );
         }
         // Each point's post-solve normal velocity must be at/above target (0),
         // i.e. separation or resting contact, not interpenetration growth.

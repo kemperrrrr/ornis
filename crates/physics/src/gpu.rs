@@ -187,30 +187,48 @@ pub(crate) struct GpuBatch {
     _pad2: u32,
 }
 
+/// One lane's worth of CPU-side contact data for `GpuBatch::fill_lane`
+/// (mirrors the WGSL batch layout: one scalar per field).
+struct LaneInput<'a> {
+    lane: usize,
+    n: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+    target: f32,
+    mu: f32,
+    bias: f32,
+    acc_in: f32,
+    a: &'a RigidBody,
+    ba_idx: u32,
+    b: &'a RigidBody,
+    bb_idx: u32,
+}
+
 impl GpuBatch {
     fn zero() -> Self {
         Self::zeroed()
     }
 
     /// Fill one lane from CPU-side contact data.
-    // The signature deliberately mirrors the WGSL batch layout: one scalar
-    // per field. Same rationale as `crates/render/src/shaders/math.rs`.
-    #[allow(clippy::too_many_arguments)]
-    fn fill_lane(
-        &mut self,
-        lane: usize,
-        n: Vec3,
-        ra: Vec3,
-        rb: Vec3,
-        target: f32,
-        mu: f32,
-        bias: f32,
-        acc_in: f32,
-        a: &RigidBody,
-        ba_idx: u32,
-        b: &RigidBody,
-        bb_idx: u32,
-    ) {
+    /// The per-lane scalars are packed into `LaneInput` (which mirrors the
+    /// WGSL batch layout: one scalar per field) to stay within the bca
+    /// argument-count limit.
+    fn fill_lane(&mut self, input: LaneInput<'_>) {
+        let LaneInput {
+            lane,
+            n,
+            ra,
+            rb,
+            target,
+            mu,
+            bias,
+            acc_in,
+            a,
+            ba_idx,
+            b,
+            bb_idx,
+        } = input;
+        let lane = lane as usize;
         let l3 = |x: &mut [f32; 4], y: &mut [f32; 4], z: &mut [f32; 4], v: Vec3| {
             x[lane] = v.x;
             y[lane] = v.y;
@@ -398,6 +416,12 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
 /// `lid` are the built-in workgroup parameters. All per-lane writes to
 /// `batch_buf` accumulators go through the full buffer path so that they
 /// persist across dispatches (the `let b = ...` copy is read-only).
+//
+// bca: suppress(abc) — kernel-DSL body: every statement is translated
+// verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
+// ONLY this function's body into `fn main`. Extracting helpers would emit
+// calls to functions that do not exist in the shader; splitting requires a
+// macro-level helper-inclusion feature, not a local edit.
 #[gpu_pipeline(
     workgroup_size = 4,
     storage(body_buf: [GpuBodyState; 64], read_write),
@@ -406,6 +430,11 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
     builtin(gid: workgroup_id, lid: local_invocation_id),
 )]
 fn contact_solver() {
+    // bca: suppress(abc) — kernel-DSL body: every statement is translated
+    // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
+    // ONLY this function's body into `fn main`. Extracting helpers would emit
+    // calls to functions that do not exist in the shader; splitting requires a
+    // macro-level helper-inclusion feature, not a local edit.
     let b = batch_buf[gid.x];
     let l = lid.x;
     if l >= b.count {
@@ -875,20 +904,20 @@ pub fn pack_single_point_batches(
         let p = m.points[0].world_point;
         let ra = p - bodies[i].position;
         let rb = p - bodies[j].position;
-        cur.fill_lane(
-            cur_len,
-            m.normal,
+        cur.fill_lane(LaneInput {
+            lane: cur_len,
+            n: m.normal,
             ra,
             rb,
-            st.target[0],
-            st.mu,
-            st.bias[0],
-            st.acc[0],
-            &bodies[i],
-            i as u32,
-            &bodies[j],
-            j as u32,
-        );
+            target: st.target[0],
+            mu: st.mu,
+            bias: st.bias[0],
+            acc_in: st.acc[0],
+            a: &bodies[i],
+            ba_idx: i as u32,
+            b: &bodies[j],
+            bb_idx: j as u32,
+        });
         cur_bodies[cur_n] = i;
         cur_bodies[cur_n + 1] = j;
         cur_n += 2;
@@ -1092,20 +1121,20 @@ mod tests {
         b.velocity = Vec3::new(0.0, -1.0, 0.0);
 
         let mut batch = GpuBatch::zero();
-        batch.fill_lane(
-            0,
-            Vec3::Y,                   // normal
-            Vec3::new(0.0, 0.5, 0.0),  // ra = contact − center a
-            Vec3::new(0.0, -0.5, 0.0), // rb = contact − center b
-            0.0,                       // target (non-speculative rest)
-            0.0,                       // mu (no friction)
-            0.0,                       // bias (no restitution)
-            0.0,                       // acc_in
-            &a,
-            0,
-            &b,
-            1,
-        );
+        batch.fill_lane(LaneInput {
+            lane: 0,
+            n: Vec3::Y,                    // normal
+            ra: Vec3::new(0.0, 0.5, 0.0),  // ra = contact − center a
+            rb: Vec3::new(0.0, -0.5, 0.0), // rb = contact − center b
+            target: 0.0,                   // target (non-speculative rest)
+            mu: 0.0,                       // mu (no friction)
+            bias: 0.0,                     // bias (no restitution)
+            acc_in: 0.0,                   // acc_in
+            a: &a,
+            ba_idx: 0,
+            b: &b,
+            bb_idx: 1,
+        });
         batch.count = 1;
 
         solver.upload_bodies(&[a.clone(), b.clone()]);

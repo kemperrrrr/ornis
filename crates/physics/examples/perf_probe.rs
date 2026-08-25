@@ -62,10 +62,9 @@ fn time_steps(label: &str, physics: &mut BuiltinPhysicsEngine, settle: u32, meas
     );
 }
 
-fn main() {
-    let mut grid = setup_islands_grid(16);
-    time_steps("islands_grid_16x16 (1025 bodies)", &mut grid, 60, 60);
-    // Sleep diagnostics: how much of the scene actually went to sleep?
+/// Sleep diagnostics for the grid: how much of the scene went to sleep and
+/// how fast the awake bodies are moving.
+fn log_grid_sleep_summary(grid: &BuiltinPhysicsEngine) {
     let mut asleep = 0usize;
     let mut max_v = 0.0f32;
     let mut max_w = 0.0f32;
@@ -79,7 +78,10 @@ fn main() {
         }
     }
     println!("grid after settle: {asleep}/1025 asleep, max |v|={max_v:.4}, max |w|={max_w:.4}");
-    // Watch the awake set for 30 more frames: does it oscillate?
+}
+
+/// Watch the awake set for 30 more frames: does it oscillate?
+fn log_awake_oscillation(grid: &mut BuiltinPhysicsEngine) {
     for f in 0..30 {
         grid.step(1.0 / 60.0);
         let mut awake = 0usize;
@@ -96,7 +98,10 @@ fn main() {
             println!("  f+{f}: awake={awake} max_awake_v={mv:.4}");
         }
     }
-    // Who stays awake? Print the positions/velocities of a few stubborn bodies.
+}
+
+/// Who stays awake? Print the positions/velocities of a few stubborn bodies.
+fn log_stubborn_bodies(grid: &mut BuiltinPhysicsEngine) {
     let mut stubborn = Vec::new();
     for h in 0..1025 {
         if !grid.is_asleep(h) && stubborn.len() < 6 {
@@ -113,7 +118,10 @@ fn main() {
             stubborn.push(h);
         }
     }
-    // Track island id + timer + contact count of one stubborn stack for 40 frames.
+}
+
+/// Track island id + timer + contact count of one stubborn stack for 40 frames.
+fn log_island_tracking(grid: &mut BuiltinPhysicsEngine) {
     for f in 0..40 {
         grid.step(1.0 / 60.0);
         println!(
@@ -126,8 +134,10 @@ fn main() {
             if grid.is_asleep(30) { "ZZ" } else { "  " },
         );
     }
-    let mut stack = setup_big_stack(32);
-    time_steps("big_stack_32 (33 bodies)", &mut stack, 60, 300);
+}
+
+/// Sleep summary plus per-frame manifold diagnostics for the big stack.
+fn log_stack_diagnostics(stack: &mut BuiltinPhysicsEngine) {
     let mut stack_asleep = 0;
     for h in 0..33 {
         if stack.is_asleep(h) {
@@ -135,6 +145,7 @@ fn main() {
         }
     }
     println!("stack after settle: {stack_asleep}/33 asleep");
+
     // Which pair of the big stack lacks a manifold, per frame?
     for f in 0..12 {
         stack.step(1.0 / 60.0);
@@ -153,4 +164,18 @@ fn main() {
         }
         println!("{line}");
     }
+}
+
+fn main() {
+    let mut grid = setup_islands_grid(16);
+    time_steps("islands_grid_16x16 (1025 bodies)", &mut grid, 60, 60);
+
+    log_grid_sleep_summary(&grid);
+    log_awake_oscillation(&mut grid);
+    log_stubborn_bodies(&mut grid);
+    log_island_tracking(&mut grid);
+
+    let mut stack = setup_big_stack(32);
+    time_steps("big_stack_32 (33 bodies)", &mut stack, 60, 300);
+    log_stack_diagnostics(&mut stack);
 }
