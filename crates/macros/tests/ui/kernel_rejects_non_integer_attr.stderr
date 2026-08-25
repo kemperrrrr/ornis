@@ -1,0 +1,8 @@
+error[E0433]: cannot find module or crate `wgpu` in this scope
+ --> tests/ui/kernel_rejects_non_integer_attr.rs:5:1
+  |
+5 | #[kernel("not_an_int")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `wgpu`
+  |
+  = help: if you wanted to use a crate named `wgpu`, use `cargo add wgpu` to add it to your `Cargo.toml`
+  = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)

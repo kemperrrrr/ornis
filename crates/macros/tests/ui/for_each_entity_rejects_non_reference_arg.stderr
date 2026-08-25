@@ -1,0 +1,5 @@
+error: expected &T or &mut T
+ --> tests/ui/for_each_entity_rejects_non_reference_arg.rs:7:35
+  |
+7 |     for_each_entity!(store, |pos: Position| {
+  |                                   ^^^^^^^^

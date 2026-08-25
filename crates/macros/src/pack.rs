@@ -143,6 +143,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         where_clause,
         &pack_mut_name,
     );
+    let for_each_packed = generate_for_each_packed(
+        struct_name,
+        &ty_generics,
+        where_clause,
+        &pack_mut_name,
+        &info.lanes,
+    );
 
     let expanded = quote! {
         #wrapper_defs
@@ -172,6 +179,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #pack_get_mut
             }
         }
+
+        #for_each_packed
     };
 
     expanded.into()
@@ -260,6 +269,43 @@ fn generate_pack_get_mut(
             #(#guard_fields_init)*
             _entity: entity,
         })
+    }
+}
+
+fn generate_for_each_packed(
+    struct_name: &Ident,
+    ty_generics: &syn::TypeGenerics,
+    where_clause: Option<&WhereClause>,
+    pack_mut_name: &Ident,
+    lanes: &[LaneInfo],
+) -> TokenStream2 {
+    // Iterate over entities present in the first generated lane; for each,
+    // acquire a `PackMut` and hand it to the caller. This is the packed
+    // analogue of `for_each_entity!` — it traverses a `Pack`-derived struct
+    // field-by-field (SoA) without materializing the whole struct.
+    let first_wrapper = &lanes[0].wrapper_ty;
+    quote! {
+        impl #ty_generics #struct_name #ty_generics #where_clause {
+            /// Iterate every entity that owns this packed component, giving
+            /// the closure `&mut PackMut` (field accessors per lane).
+            pub fn for_each_packed<F>(store: &mut ornis_core::SmartStore, mut f: F)
+            where
+                F: FnMut(&mut #pack_mut_name #ty_generics),
+            {
+                // Collect the entity set first (releasing the read guard),
+                // then acquire `PackMut` per entity — a live read-lane guard
+                // would otherwise conflict with `pack_get_mut`'s &mut store.
+                let entities: Vec<ornis_core::Entity> = match store.read_lane::<#first_wrapper>() {
+                    Some(__lane) => __lane.iter_entities().collect(),
+                    None => return,
+                };
+                for __entity in entities {
+                    if let Some(mut __pm) = Self::pack_get_mut(store, __entity) {
+                        f(&mut __pm);
+                    }
+                }
+            }
+        }
     }
 }
 
