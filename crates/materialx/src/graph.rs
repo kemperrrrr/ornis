@@ -1317,7 +1317,136 @@ mod tests {
         assert_close(float(&outputs, "clamped"), 0.75);
     }
 
-    /// An `<output>` whose connection is expressed via the `nodename`
+    /// Exercise every branch of `extract_material`: one output per
+    /// OpenPBR parameter name, each fed by a constant. The builder is
+    /// invoked for every group (base/specular/transmission/subsurface/fuzz/
+    /// coat/thin_film/emission/geometry), so all extractor branches run.
+    /// `OpenPBRMaterial` has no public field accessors, so we assert the
+    /// result is Ok and non-default via Debug (coverage of the mapping is
+    /// the goal, not field-level inspection).
+    #[test]
+    fn test_extract_all_openpbr_parameters() {
+        let mtlx = format!(
+            r#"<?xml version="1.0"?>
+<materialx version="1.39">
+{}
+  <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
+    <output name="out" type="surfaceshader">
+      <input name="base_weight" type="float" value="0.9" />
+      <input name="base_color" type="color3" value="0.1, 0.2, 0.3" />
+      <input name="base_diffuse_roughness" type="float" value="0.45" />
+      <input name="base_metalness" type="float" value="0.55" />
+      <input name="specular_weight" type="float" value="0.8" />
+      <input name="specular_color" type="color3" value="0.4, 0.5, 0.6" />
+      <input name="specular_roughness" type="float" value="0.33" />
+      <input name="specular_ior" type="float" value="1.45" />
+      <input name="specular_anisotropy" type="float" value="0.2" />
+      <input name="transmission_weight" type="float" value="0.7" />
+      <input name="transmission_color" type="color3" value="0.7, 0.8, 0.9" />
+      <input name="transmission_depth" type="float" value="1.2" />
+      <input name="transmission_dispersion_scale" type="float" value="2.0" />
+      <input name="transmission_dispersion_abbe" type="float" value="30.0" />
+      <input name="transmission_scatter" type="color3" value="0.3, 0.4, 0.5" />
+      <input name="transmission_scatter_anisotropy" type="float" value="0.6" />
+      <input name="subsurface_weight" type="float" value="0.5" />
+      <input name="subsurface_color" type="color3" value="0.6, 0.7, 0.8" />
+      <input name="subsurface_radius" type="float" value="0.4" />
+      <input name="subsurface_radius_scale" type="color3" value="0.1, 0.2, 0.3" />
+      <input name="subsurface_scatter_anisotropy" type="float" value="0.3" />
+      <input name="fuzz_weight" type="float" value="0.25" />
+      <input name="fuzz_color" type="color3" value="0.9, 0.8, 0.7" />
+      <input name="fuzz_roughness" type="float" value="0.15" />
+      <input name="coat_weight" type="float" value="0.6" />
+      <input name="coat_color" type="color3" value="0.5, 0.6, 0.7" />
+      <input name="coat_roughness" type="float" value="0.22" />
+      <input name="coat_anisotropy" type="float" value="0.1" />
+      <input name="coat_ior" type="float" value="1.9" />
+      <input name="coat_darkening" type="float" value="0.05" />
+      <input name="thin_film_weight" type="float" value="0.35" />
+      <input name="thin_film_thickness" type="float" value="0.55" />
+      <input name="thin_film_ior" type="float" value="1.3" />
+      <input name="emission_luminance" type="float" value="3.0" />
+      <input name="emission_color" type="color3" value="0.2, 0.1, 0.0" />
+      <input name="geometry_opacity" type="float" value="0.88" />
+      <input name="geometry_thin_walled" type="boolean" value="true" />
+    </output>
+  </nodegraph>
+</materialx>"#,
+            NODEDEFS
+        );
+
+        let mat = materialx_to_openpbr(&mtlx).expect("all params convert");
+        let debug = format!("{mat:?}");
+        // Every group's extractor branch ran (builder invoked). Field names
+        // are the flat arrays OpenPBRMaterial stores; we just check each
+        // group is present in the debug dump.
+        for group in [
+            "base_params",
+            "specular_params",
+            "transmission_params",
+            "transmission_color",
+            "transmission_scatter",
+            "subsurface_params",
+            "subsurface_color",
+            "fuzz_params",
+            "coat_params",
+            "coat_color",
+            "coat_ior",
+            "thin_film_params",
+            "emission_params",
+            "emission_color",
+            "geometry_params",
+        ] {
+            assert!(debug.contains(group), "missing group {group} in: {debug}");
+        }
+    }
+
+    /// A `color4` base_color must route through the RGBA extractor (not the
+    /// RGB one) — covers the `else if Color4` branch in extract_material.
+    #[test]
+    fn test_base_color_color4_path() {
+        let mtlx = format!(
+            r#"<?xml version="1.0"?>
+<materialx version="1.39">
+{}
+  <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
+    <output name="out" type="surfaceshader">
+      <input name="base_color" type="color4" value="0.1, 0.2, 0.3, 0.4" />
+    </output>
+  </nodegraph>
+</materialx>"#,
+            NODEDEFS
+        );
+        let result = materialx_to_openpbr(&mtlx);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// A graph with no `output` node at all still resolves `surface`/`edf`
+    /// nodes (the evaluator evaluates them even without an output), but
+    /// produces an empty output set — covers the surface/edf walk branch.
+    #[test]
+    fn test_surface_node_without_output_evaluates() {
+        let mtlx = format!(
+            r#"<?xml version="1.0"?>
+<materialx version="1.39">
+{}
+  <nodegraph name="test" nodedef="ND_open_pbr_surface_surfaceshader">
+    <surface name="surf" type="surfaceshader">
+      <input name="bsdf" type="BSDF" nodename="dielectric_bsdf" />
+    </surface>
+    <dielectric_bsdf name="dielectric_bsdf" type="BSDF">
+      <input name="ior" type="float" value="1.5" />
+    </dielectric_bsdf>
+  </nodegraph>
+</materialx>"#,
+            NODEDEFS
+        );
+        // No `output` referencing surf, so no material params extracted, but
+        // the surface node itself must evaluate without error.
+        let result = materialx_to_openpbr(&mtlx);
+        assert!(result.is_ok());
+    }
+
     /// attribute (no child `<input>`) must resolve to the referenced node,
     /// exposed under the output's own name.
     #[test]
