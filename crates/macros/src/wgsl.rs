@@ -1,4 +1,4 @@
-use syn::{FnArg, ItemFn, Pat, Stmt};
+use syn::{FnArg, ItemFn};
 
 #[allow(dead_code)]
 struct WgslGen;
@@ -36,31 +36,58 @@ impl WgslGen {
     }
 
     fn lit(l: &syn::ExprLit) -> String {
+        wgsl_values::lit(l)
+    }
+
+    fn path(p: &syn::ExprPath) -> String {
+        wgsl_values::path(p)
+    }
+
+    fn assign(a: &syn::ExprAssign) -> String {
+        format!("{} = {}", Self::expr(&a.left), Self::expr(&a.right))
+    }
+
+    fn ret(r: &syn::ExprReturn) -> String {
+        match &r.expr {
+            Some(expr) => format!("return {}", Self::expr(expr)),
+            None => "return".to_string(),
+        }
+    }
+
+    fn binary(b: &syn::ExprBinary) -> String {
+        wgsl_values::binary(b)
+    }
+
+    fn unary(u: &syn::ExprUnary) -> String {
+        use syn::UnOp::*;
+        let op = match &u.op {
+            Neg(_) => "-",
+            Not(_) => "!",
+            Deref(_) => "*",
+            _ => "*",
+        };
+        format!("{}{}", op, Self::expr(&u.expr))
+    }
+
+    fn call(c: &syn::ExprCall) -> String {
+        wgsl_calls::call(c)
+    }
+
+    fn method_call(m: &syn::ExprMethodCall) -> String {
+        wgsl_calls::method_call(m)
+    }
+}
+
+/// Value-level WGSL translation: literals, paths and binary/assign operators.
+///
+/// Kept out of the `WgslGen` impl so its weighted-method-count stays bounded;
+/// these are pure functions over `syn` nodes.
+mod wgsl_values {
+    pub(super) fn lit(l: &syn::ExprLit) -> String {
         use syn::Lit::*;
         match &l.lit {
-            Int(i) => {
-                // Hex/octal/binary literals: pass through unchanged.
-                let repr = i.to_string();
-                if repr.starts_with("0x") || repr.starts_with("0o") || repr.starts_with("0b") {
-                    return repr;
-                }
-                // Rust integer suffixes are not valid WGSL; map the common
-                // ones to the WGSL `u`/`i` suffixes and drop the rest.
-                let digits = i.base10_digits();
-                match i.suffix() {
-                    "u32" | "u64" | "usize" | "u16" | "u8" => format!("{digits}u"),
-                    "i32" | "i64" | "isize" | "i16" | "i8" => format!("{digits}i"),
-                    _ => digits.to_string(),
-                }
-            }
-            Float(f) => {
-                let base = f.base10_digits();
-                if base.contains('.') || base.contains('e') || base.contains('E') {
-                    base.to_string()
-                } else {
-                    format!("{}.0", base)
-                }
-            }
+            Int(i) => int_lit(i),
+            Float(f) => float_lit(f),
             Bool(b) => {
                 if b.value {
                     "true".into()
@@ -74,7 +101,32 @@ impl WgslGen {
         }
     }
 
-    fn path(p: &syn::ExprPath) -> String {
+    fn int_lit(i: &syn::LitInt) -> String {
+        // Hex/octal/binary literals: pass through unchanged.
+        let repr = i.to_string();
+        if repr.starts_with("0x") || repr.starts_with("0o") || repr.starts_with("0b") {
+            return repr;
+        }
+        // Rust integer suffixes are not valid WGSL; map the common
+        // ones to the WGSL `u`/`i` suffixes and drop the rest.
+        let digits = i.base10_digits();
+        match i.suffix() {
+            "u32" | "u64" | "usize" | "u16" | "u8" => format!("{digits}u"),
+            "i32" | "i64" | "isize" | "i16" | "i8" => format!("{digits}i"),
+            _ => digits.to_string(),
+        }
+    }
+
+    fn float_lit(f: &syn::LitFloat) -> String {
+        let base = f.base10_digits();
+        if base.contains('.') || base.contains('e') || base.contains('E') {
+            base.to_string()
+        } else {
+            format!("{}.0", base)
+        }
+    }
+
+    pub(super) fn path(p: &syn::ExprPath) -> String {
         let segs: Vec<_> = p
             .path
             .segments
@@ -82,47 +134,48 @@ impl WgslGen {
             .map(|s| s.ident.to_string())
             .collect();
         let last = segs.last().map(|s| s.as_str());
-
         // Map glam type constants to WGSL constructors
         let parent_type = segs
             .len()
             .checked_sub(2)
             .and_then(|i| segs.get(i))
             .map(|s| s.as_str());
-        match (parent_type, last) {
-            (Some("Vec2"), Some("ZERO")) => return "vec2<f32>(0.0)".into(),
-            (Some("Vec2"), Some("ONE")) => return "vec2<f32>(1.0)".into(),
-            (Some("Vec3"), Some("ZERO")) => return "vec3<f32>(0.0)".into(),
-            (Some("Vec3"), Some("ONE")) => return "vec3<f32>(1.0)".into(),
-            (Some("Vec4"), Some("ZERO")) => return "vec4<f32>(0.0)".into(),
-            (Some("Vec4"), Some("ONE")) => return "vec4<f32>(1.0)".into(),
-            _ => {}
-        }
 
-        match last {
-            Some("Vec2") | Some("vec2") => return "vec2<f32>".into(),
-            Some("Vec3") | Some("vec3") => return "vec3<f32>".into(),
-            Some("Vec4") | Some("vec4") => return "vec4<f32>".into(),
-            Some("Mat4") | Some("mat4") => return "mat4x4<f32>".into(),
-            Some("PI") => return "PI".into(),
-            _ => {}
-        }
-        segs.join("::")
+        vec_constant(parent_type, last)
+            .or_else(|| type_alias(last))
+            .unwrap_or_else(|| segs.join("::"))
     }
 
-    fn path_ident(p: &syn::ExprPath) -> Option<String> {
-        let ident = p.path.get_ident().map(|i| i.to_string());
-        if ident.is_some() {
-            return ident;
-        }
-        p.path.segments.last().map(|s| s.ident.to_string())
+    /// `Vec3::ZERO` → `vec3<f32>(0.0)` (same for ONE / Vec2 / Vec4).
+    fn vec_constant(parent: Option<&str>, last: Option<&str>) -> Option<String> {
+        let dim = match parent? {
+            "Vec2" => 2,
+            "Vec3" => 3,
+            "Vec4" => 4,
+            _ => return None,
+        };
+        let value = match last? {
+            "ZERO" => "0.0",
+            "ONE" => "1.0",
+            _ => return None,
+        };
+        Some(format!("vec{dim}<f32>({value})"))
     }
 
-    fn assign(a: &syn::ExprAssign) -> String {
-        format!("{} = {}", Self::expr(&a.left), Self::expr(&a.right))
+    /// Bare glam type names and constants map to their WGSL spellings.
+    fn type_alias(last: Option<&str>) -> Option<String> {
+        let alias = match last? {
+            "Vec2" | "vec2" => "vec2<f32>",
+            "Vec3" | "vec3" => "vec3<f32>",
+            "Vec4" | "vec4" => "vec4<f32>",
+            "Mat4" | "mat4" => "mat4x4<f32>",
+            "PI" => "PI",
+            _ => return None,
+        };
+        Some(alias.to_string())
     }
 
-    fn assign_op(b: &syn::ExprBinary) -> String {
+    pub(super) fn assign_op(b: &syn::ExprBinary) -> String {
         use syn::BinOp::*;
         let op = match &b.op {
             AddAssign(_) => "+=",
@@ -141,17 +194,10 @@ impl WgslGen {
                     .to_string();
             }
         };
-        format!("{} {} {}", Self::expr(&b.left), op, Self::expr(&b.right))
+        format!("{} {} {}", crate::wgsl::WgslGen::expr(&b.left), op, crate::wgsl::WgslGen::expr(&b.right))
     }
 
-    fn ret(r: &syn::ExprReturn) -> String {
-        match &r.expr {
-            Some(expr) => format!("return {}", Self::expr(expr)),
-            None => "return".to_string(),
-        }
-    }
-
-    fn binary(b: &syn::ExprBinary) -> String {
+    pub(super) fn binary(b: &syn::ExprBinary) -> String {
         use syn::BinOp::*;
         let op = match &b.op {
             Add(_) => "+",
@@ -163,7 +209,7 @@ impl WgslGen {
             // expressions with an assign-op `BinOp`.
             AddAssign(_) | SubAssign(_) | MulAssign(_) | DivAssign(_) | RemAssign(_)
             | ShlAssign(_) | ShrAssign(_) | BitAndAssign(_) | BitOrAssign(_) | BitXorAssign(_) => {
-                return Self::assign_op(b);
+                return assign_op(b);
             }
             // Rust `&&`/`||` are WGSL `&&`/`||` (short-circuit, not bitwise).
             And(_) => "&&",
@@ -185,21 +231,14 @@ impl WgslGen {
                     .to_string();
             }
         };
-        format!("{} {} {}", Self::expr(&b.left), op, Self::expr(&b.right))
+        format!("{} {} {}", crate::wgsl::WgslGen::expr(&b.left), op, crate::wgsl::WgslGen::expr(&b.right))
     }
+}
 
-    fn unary(u: &syn::ExprUnary) -> String {
-        use syn::UnOp::*;
-        let op = match &u.op {
-            Neg(_) => "-",
-            Not(_) => "!",
-            Deref(_) => "*",
-            _ => "*",
-        };
-        format!("{}{}", op, Self::expr(&u.expr))
-    }
-
-    fn map_fn(fn_name: &str, args: &[String]) -> Option<String> {
+/// Call/method-call WGSL translation (constructors, built-in mappings,
+/// swizzles, `powi` expansion).
+mod wgsl_calls {
+    pub(super) fn map_fn(fn_name: &str, args: &[String]) -> Option<String> {
         match fn_name {
             "new" => Some(args.join(", ")),
             "dot" => Some(format!("dot({})", args.join(", "))),
@@ -221,51 +260,59 @@ impl WgslGen {
         }
     }
 
-    fn call(c: &syn::ExprCall) -> String {
-        let args: Vec<String> = c.args.iter().map(Self::expr).collect();
+    pub(super) fn call(c: &syn::ExprCall) -> String {
+        let args: Vec<String> = c.args.iter().map(crate::wgsl::WgslGen::expr).collect();
 
-        if let syn::Expr::Path(p) = c.func.as_ref() {
-            let ident = Self::path_ident(p);
-            let ident_str = ident.as_deref().unwrap_or("");
-            // Handle constructors: glam::Vec3::new(a,b,c) -> vec3<f32>(a,b,c)
-            if ident_str == "new" {
-                let segs: Vec<_> = p.path.segments.iter().collect();
-                if let Some(type_seg) = segs.iter().rev().nth(1) {
-                    let type_name = type_seg.ident.to_string();
-                    if let Some(wgsl_ty) = Self::wgsl_type(&type_name) {
-                        return format!("{}({})", wgsl_ty, args.join(", "));
-                    }
-                }
-            }
-            // splat: glam::Vec3::splat(1.0) -> vec3<f32>(1.0)
-            if ident_str == "splat" {
-                let segs: Vec<_> = p.path.segments.iter().collect();
-                if let Some(type_seg) = segs.iter().rev().nth(1) {
-                    let type_name = type_seg.ident.to_string();
-                    if let Some(wgsl_ty) = Self::wgsl_type(&type_name) {
-                        return format!("{}({})", wgsl_ty, args.join(", "));
-                    }
-                }
-            }
-            if let Some(ident) = ident {
-                if let Some(mapped) = Self::map_fn(&ident, &args) {
-                    return mapped;
-                }
-                // Known WGSL built-ins that Rust spells differently
-                match ident.as_str() {
-                    "signum" => return format!("sign({})", args.join(", ")),
-                    "stepf" => return format!("step({})", args.join(", ")),
-                    "lerp" => return format!("mix({})", args.join(", ")),
-                    _ => {}
-                }
-            }
+        if let syn::Expr::Path(p) = c.func.as_ref()
+            && let Some(mapped) =
+                path_constructor(p, &args).or_else(|| named_builtin(&args, p))
+        {
+            return mapped;
         }
 
-        let callee = Self::expr(&c.func);
+        let callee = crate::wgsl::WgslGen::expr(&c.func);
         format!("{}({})", callee, args.join(", "))
     }
 
-    fn wgsl_type(ty: &str) -> Option<String> {
+    fn path_ident_str(p: &syn::ExprPath) -> String {
+        p.path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Constructors: glam::Vec3::new(a,b,c) / Vec3::splat(1.0) → vec3<f32>(…).
+    fn path_constructor(p: &syn::ExprPath, args: &[String]) -> Option<String> {
+        let ident = path_ident_str(p);
+        if ident != "new" && ident != "splat" {
+            return None;
+        }
+        let segs: Vec<_> = p.path.segments.iter().collect();
+        let type_seg = segs.iter().rev().nth(1)?;
+        let type_name = type_seg.ident.to_string();
+        let wgsl_ty = wgsl_type(&type_name)?;
+        Some(format!("{}({})", wgsl_ty, args.join(", ")))
+    }
+
+    fn named_builtin(args: &[String], p: &syn::ExprPath) -> Option<String> {
+        let ident = path_ident_str(p);
+        if ident.is_empty() {
+            return None;
+        }
+        if let Some(mapped) = map_fn(&ident, args) {
+            return Some(mapped);
+        }
+        // Known WGSL built-ins that Rust spells differently
+        match ident.as_str() {
+            "signum" => Some(format!("sign({})", args.join(", "))),
+            "stepf" => Some(format!("step({})", args.join(", "))),
+            "lerp" => Some(format!("mix({})", args.join(", "))),
+            _ => None,
+        }
+    }
+
+    pub(super) fn wgsl_type(ty: &str) -> Option<String> {
         match ty {
             "Vec2" | "vec2" => Some("vec2<f32>".into()),
             "Vec3" | "vec3" => Some("vec3<f32>".into()),
@@ -284,80 +331,113 @@ impl WgslGen {
         }
     }
 
-    fn method_call(m: &syn::ExprMethodCall) -> String {
-        let receiver = Self::expr(&m.receiver);
+    pub(super) fn method_call(m: &syn::ExprMethodCall) -> String {
+        let receiver = crate::wgsl::WgslGen::expr(&m.receiver);
         let method = m.method.to_string();
         let args: Vec<String> = std::iter::once(receiver.clone())
-            .chain(m.args.iter().map(Self::expr))
+            .chain(m.args.iter().map(crate::wgsl::WgslGen::expr))
             .collect();
 
-        // Handle powi specially
         if method == "powi" {
-            if let Some(arg) = m.args.first()
-                && let syn::Expr::Lit(lit) = arg
-                && let syn::Lit::Int(int_lit) = &lit.lit
-            {
-                let p = int_lit.base10_parse::<i32>().unwrap_or(0);
-                if p == 2 {
-                    return format!("{} * {}", receiver, receiver);
-                } else if p == 3 {
-                    return format!("{} * {} * {}", receiver, receiver, receiver);
-                } else if p == 4 {
-                    return format!("{} * {} * {} * {}", receiver, receiver, receiver, receiver);
-                } else if p > 0 {
-                    // Generate repeated multiplication for small positive ints
-                    let parts: Vec<String> =
-                        std::iter::repeat_n(receiver.clone(), p as usize).collect();
-                    return parts.join(" * ");
-                }
-            }
-            return format!("pow({}, {})", receiver, args[1..].join(", "));
+            return powi(m, &receiver, &args);
         }
 
-        if let Some(mapped) = Self::map_fn(&method, &args) {
+        if let Some(mapped) = map_fn(&method, &args) {
             return mapped;
         }
-
-        // Map Rust methods to WGSL functions
-        match method.as_str() {
-            // Swizzle methods - convert to field access in WGSL
-            "x" | "y" | "z" | "w" | "r" | "g" | "b" | "a" | "xy" | "xz" | "xw" | "yx" | "yz"
-            | "yw" | "zx" | "zy" | "zw" | "wx" | "wy" | "wz" | "xyz" | "xyw" | "xzy" | "xzw"
-            | "yxz" | "yxw" | "yzx" | "yzw" | "zxy" | "zxw" | "zyx" | "zyw" | "wxy" | "wxz"
-            | "wyz" | "wzx" | "wzy" | "xyzw" | "xywz" | "xzyw" | "xzwy" | "xwyz" | "xwzy"
-            | "yxzw" | "yxwz" | "yzxw" | "yzwx" | "ywxz" | "ywzx" | "zxyw" | "zxwy" | "zyxw"
-            | "zywx" | "zwxy" | "zwyx" | "wxyz" | "wxzy" | "wyxz" | "wyzx" | "wzxy" | "wzyx" => {
-                return format!("{}.{}", receiver, method);
-            }
-            "signum" => return format!("sign({})", args[0]),
-            "abs" | "sqrt" | "sin" | "cos" | "tan" | "floor" | "ceil" | "round" | "fract"
-            | "exp" | "log" | "normalize" | "length" | "saturate" | "asin" | "acos" | "atan" => {
-                return format!("{}({})", method, args[0]);
-            }
-            "dot" | "cross" | "pow" | "max" | "min" | "step" | "smoothstep" | "reflect"
-            | "refract" | "atan2" => {
-                return format!("{}({})", method, args.join(", "));
-            }
-            "clamp" => {
-                return format!("clamp({})", args.join(", "));
-            }
-            "lerp" => {
-                return format!("mix({})", args.join(", "));
-            }
-            "ln" => {
-                return format!("log({})", args.join(", "));
-            }
-            "powf" => {
-                return format!("pow({})", args.join(", "));
-            }
-            _ => {}
+        if let Some(mapped) = builtin_method(&method, &args, &receiver) {
+            return mapped;
         }
 
         format!("{}.{}({})", args[0], method, args[1..].join(", "))
     }
 
-    fn block_expr(b: &syn::ExprBlock) -> String {
-        wgsl_flow::block_expr(b)
+    /// Expand `x.powi(n)` for small positive integer literals into repeated
+    /// multiplication; everything else falls back to WGSL `pow(...)`.
+    fn powi(m: &syn::ExprMethodCall, receiver: &str, args: &[String]) -> String {
+        if let Some(exponent) = powi_exponent(m) {
+            let parts: Vec<String> =
+                std::iter::repeat_n(receiver.to_string(), exponent as usize).collect();
+            return parts.join(" * ");
+        }
+        format!("pow({}, {})", receiver, args[1..].join(", "))
+    }
+
+    /// The literal exponent of a `powi` call, if it is a small positive int.
+    fn powi_exponent(m: &syn::ExprMethodCall) -> Option<u32> {
+        let arg = m.args.first()?;
+        let syn::Expr::Lit(lit) = arg else {
+            return None;
+        };
+        let syn::Lit::Int(int_lit) = &lit.lit else {
+            return None;
+        };
+        let p = int_lit.base10_parse::<i32>().unwrap_or(0);
+        u32::try_from(p).ok()
+    }
+
+    /// True for swizzle methods (`v.xyz()` etc.), which become field access.
+    fn is_swizzle(method: &str) -> bool {
+        matches!(
+            method,
+            "x" | "y" | "z" | "w" | "r" | "g" | "b" | "a" | "xy" | "xz" | "xw" | "yx" | "yz"
+                | "yw" | "zx" | "zy" | "zw" | "wx" | "wy" | "wz" | "xyz" | "xyw" | "xzy" | "xzw"
+                | "yxz" | "yxw" | "yzx" | "yzw" | "zxy" | "zxw" | "zyx" | "zyw" | "wxy" | "wxz"
+                | "wyz" | "wzx" | "wzy" | "xyzw" | "xywz" | "xzyw" | "xzwy" | "xwyz" | "xwzy"
+                | "yxzw" | "yxwz" | "yzxw" | "yzwx" | "ywxz" | "ywzx" | "zxyw" | "zxwy" | "zyxw"
+                | "zywx" | "zwxy" | "zwyx" | "wxyz" | "wxzy" | "wyxz" | "wyzx" | "wzxy" | "wzyx"
+        )
+    }
+
+    /// Map Rust methods to WGSL functions (swizzles, renamed built-ins,
+    /// unary/multi-argument math functions).
+    fn builtin_method(method: &str, args: &[String], receiver: &str) -> Option<String> {
+        if is_swizzle(method) {
+            // Swizzle methods - convert to field access in WGSL
+            return Some(format!("{receiver}.{method}"));
+        }
+        renamed_unary(method, args)
+            .or_else(|| passthrough_math(method, args))
+            .or_else(|| renamed_multi(method, args))
+    }
+
+    /// Built-ins whose Rust name differs and take a single argument.
+    fn renamed_unary(method: &str, args: &[String]) -> Option<String> {
+        match method {
+            "signum" => Some(format!("sign({})", args[0])),
+            _ => None,
+        }
+    }
+
+    /// Math built-ins that keep their name (single- and multi-argument).
+    fn passthrough_math(method: &str, args: &[String]) -> Option<String> {
+        const UNARY: &[&str] = &[
+            "abs", "sqrt", "sin", "cos", "tan", "floor", "ceil", "round", "fract", "exp", "log",
+            "normalize", "length", "saturate", "asin", "acos", "atan",
+        ];
+        const MULTI: &[&str] = &[
+            "dot", "cross", "pow", "max", "min", "step", "smoothstep", "reflect", "refract",
+            "atan2",
+        ];
+        if UNARY.contains(&method) {
+            return Some(format!("{method}({})", args[0]));
+        }
+        if MULTI.contains(&method) {
+            return Some(format!("{method}({})", args.join(", ")));
+        }
+        None
+    }
+
+    /// Built-ins with argument-count or naming differences.
+    fn renamed_multi(method: &str, args: &[String]) -> Option<String> {
+        match method {
+            "clamp" => Some(format!("clamp({})", args.join(", "))),
+            // lerp maps to mix
+            "lerp" => Some(format!("mix({})", args.join(", "))),
+            "ln" => Some(format!("log({})", args.join(", "))),
+            "powf" => Some(format!("pow({})", args.join(", "))),
+            _ => None,
+        }
     }
 }
 
@@ -532,9 +612,9 @@ pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
     }
 }
 
-fn param_name(pat: &Pat) -> String {
+fn param_name(pat: &syn::Pat) -> String {
     match pat {
-        Pat::Ident(i) => i.ident.to_string(),
+        syn::Pat::Ident(i) => i.ident.to_string(),
         _ => "arg".to_string(),
     }
 }

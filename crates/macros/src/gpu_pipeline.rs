@@ -142,43 +142,7 @@ fn parse_binding_group(kind: &str, ts: TokenStream2, binding_index: usize) -> sy
         ));
     }
     let (wgsl_ty, elem) = parse_binding_type(&toks[2])?;
-
-    // Optional `, access` tail (storage only).
-    let mut access = String::new();
-    if toks.len() > 3 {
-        if !is_punct(&toks[3], ',') {
-            return Err(syn::Error::new(
-                toks[3].span(),
-                "expected `,` before the access mode",
-            ));
-        }
-        if let Some(acc_tt) = toks.get(4) {
-            let acc = match acc_tt {
-                TokenTree::Ident(i) => i.to_string(),
-                other => {
-                    return Err(syn::Error::new(
-                        other.span(),
-                        "expected access mode: `read` or `read_write`",
-                    ));
-                }
-            };
-            if kind == "uniform" {
-                return Err(syn::Error::new(
-                    acc_tt.span(),
-                    "uniform buffers do not take an access mode",
-                ));
-            }
-            if acc != "read" && acc != "read_write" {
-                return Err(syn::Error::new(
-                    acc_tt.span(),
-                    "expected access mode: `read` or `read_write`",
-                ));
-            }
-            if acc == "read_write" {
-                access = ", read_write".to_string();
-            }
-        }
-    }
+    let access = parse_access_mode(kind, &toks)?;
 
     let decl = match kind {
         "storage" => format!(
@@ -188,6 +152,48 @@ fn parse_binding_group(kind: &str, ts: TokenStream2, binding_index: usize) -> sy
         _ => unreachable!("only storage/uniform are valid binding kinds"),
     };
     Ok(decl)
+}
+
+/// Parse the optional `, read` / `, read_write` tail (storage only).
+fn parse_access_mode(kind: &str, toks: &[TokenTree]) -> syn::Result<String> {
+    if toks.len() <= 3 {
+        return Ok(String::new());
+    }
+    if !is_punct(&toks[3], ',') {
+        return Err(syn::Error::new(
+            toks[3].span(),
+            "expected `,` before the access mode",
+        ));
+    }
+    let Some(acc_tt) = toks.get(4) else {
+        return Ok(String::new());
+    };
+    let acc = match acc_tt {
+        TokenTree::Ident(i) => i.to_string(),
+        other => {
+            return Err(syn::Error::new(
+                other.span(),
+                "expected access mode: `read` or `read_write`",
+            ));
+        }
+    };
+    if kind == "uniform" {
+        return Err(syn::Error::new(
+            acc_tt.span(),
+            "uniform buffers do not take an access mode",
+        ));
+    }
+    if acc != "read" && acc != "read_write" {
+        return Err(syn::Error::new(
+            acc_tt.span(),
+            "expected access mode: `read` or `read_write`",
+        ));
+    }
+    if acc == "read_write" {
+        Ok(", read_write".to_string())
+    } else {
+        Ok(String::new())
+    }
 }
 
 /// Parse one `name: semantic` pair into a `main` parameter declaration.
@@ -243,8 +249,18 @@ fn parse_config(args: TokenStream2) -> syn::Result<Option<ShaderConfig>> {
         bindings: Vec::new(),
         builtins: Vec::new(),
     };
+    let mut binding_index = 0usize;
+    for item in split_top_level(args) {
+        if item.is_empty() {
+            continue; // trailing comma
+        }
+        apply_option(&item, &mut config, &mut binding_index)?;
+    }
+    Ok(Some(config))
+}
 
-    // Split the top level on commas, respecting nested groups.
+/// Split the top level on commas, respecting nested groups.
+fn split_top_level(args: TokenStream2) -> Vec<Vec<TokenTree>> {
     let mut items: Vec<Vec<TokenTree>> = Vec::new();
     let mut cur: Vec<TokenTree> = Vec::new();
     for tt in args {
@@ -257,67 +273,83 @@ fn parse_config(args: TokenStream2) -> syn::Result<Option<ShaderConfig>> {
     if !cur.is_empty() {
         items.push(cur);
     }
+    items
+}
 
-    let mut binding_index = 0usize;
-    for item in items {
-        if item.is_empty() {
-            continue; // trailing comma
+/// Apply one `key(...)` / `key = value` option to the shader config.
+fn apply_option(
+    item: &[TokenTree],
+    config: &mut ShaderConfig,
+    binding_index: &mut usize,
+) -> syn::Result<()> {
+    let first = item[0].clone();
+    let TokenTree::Ident(kw) = &first else {
+        return Err(syn::Error::new(
+            first.span(),
+            "expected an option: `workgroup_size`, `storage`, `uniform` or `builtin`",
+        ));
+    };
+    match kw.to_string().as_str() {
+        "workgroup_size" => parse_workgroup_size(item, config),
+        "storage" | "uniform" => {
+            let decl = parse_binding_option(kw.to_string(), item, *binding_index)?;
+            *binding_index += 1;
+            config.bindings.push(decl);
+            Ok(())
         }
-        let first = item[0].clone();
-        let TokenTree::Ident(kw) = &first else {
-            return Err(syn::Error::new(
-                first.span(),
-                "expected an option: `workgroup_size`, `storage`, `uniform` or `builtin`",
-            ));
-        };
-        match kw.to_string().as_str() {
-            "workgroup_size" => {
-                if item.len() < 3 || !is_punct(&item[1], '=') {
-                    return Err(syn::Error::new(
-                        first.span(),
-                        "expected `workgroup_size = <integer>`",
-                    ));
-                }
-                config.workgroup_size = parse_u32(&item[2])?;
-            }
-            "storage" | "uniform" => {
-                let group_tt = item.get(1).ok_or_else(|| {
-                    syn::Error::new(first.span(), format!("expected `{kw}(name: Type, ...)`"))
-                })?;
-                let TokenTree::Group(group) = group_tt else {
-                    return Err(syn::Error::new(
-                        group_tt.span(),
-                        format!("expected `{kw}(name: Type, ...)`"),
-                    ));
-                };
-                let decl = parse_binding_group(&kw.to_string(), group.stream(), binding_index)?;
-                binding_index += 1;
-                config.bindings.push(decl);
-            }
-            "builtin" => {
-                let group_tt = item.get(1).ok_or_else(|| {
-                    syn::Error::new(first.span(), "expected `builtin(name: semantic, ...)`")
-                })?;
-                let TokenTree::Group(group) = group_tt else {
-                    return Err(syn::Error::new(
-                        group_tt.span(),
-                        "expected `builtin(name: semantic, ...)`",
-                    ));
-                };
-                config.builtins.extend(parse_builtin_group(group.stream())?);
-            }
-            other => {
-                return Err(syn::Error::new(
-                    first.span(),
-                    format!(
-                        "unknown gpu_pipeline option `{other}`; expected `workgroup_size`, `storage`, `uniform` or `builtin`"
-                    ),
-                ));
-            }
+        "builtin" => {
+            let params = builtin_params(item)?;
+            config.builtins.extend(params);
+            Ok(())
         }
+        other => Err(syn::Error::new(
+            first.span(),
+            format!(
+                "unknown gpu_pipeline option `{other}`; expected `workgroup_size`, `storage`, `uniform` or `builtin`"
+            ),
+        )),
     }
+}
 
-    Ok(Some(config))
+/// `workgroup_size = <integer>`
+fn parse_workgroup_size(item: &[TokenTree], config: &mut ShaderConfig) -> syn::Result<()> {
+    if item.len() < 3 || !is_punct(&item[1], '=') {
+        return Err(syn::Error::new(
+            item[0].span(),
+            "expected `workgroup_size = <integer>`",
+        ));
+    }
+    config.workgroup_size = parse_u32(&item[2])?;
+    Ok(())
+}
+
+/// The parenthesized group of a `storage(..)` / `uniform(..)` /
+/// `builtin(..)` option.
+fn option_group(usage: &str, item: &[TokenTree]) -> syn::Result<TokenStream2> {
+    let group_tt = item
+        .get(1)
+        .ok_or_else(|| syn::Error::new(item[0].span(), format!("expected `{usage}`")))?;
+    let TokenTree::Group(group) = group_tt else {
+        return Err(syn::Error::new(group_tt.span(), format!("expected `{usage}`")));
+    };
+    Ok(group.stream())
+}
+
+/// `storage(name: Type[, access])` / `uniform(name: Type)`
+fn parse_binding_option(
+    kw: String,
+    item: &[TokenTree],
+    binding_index: usize,
+) -> syn::Result<String> {
+    let usage = format!("{}(name: Type, ...)", kw);
+    let group = option_group(&usage, item)?;
+    parse_binding_group(&kw, group, binding_index)
+}
+
+/// `builtin(name: semantic, ...)`
+fn builtin_params(item: &[TokenTree]) -> syn::Result<Vec<String>> {
+    let group = option_group("builtin(name: semantic, ...)", item)?;
+    parse_builtin_group(group)
 }
 
 pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {

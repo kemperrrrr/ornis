@@ -208,35 +208,15 @@ impl TypeAnalyzer {
     }
 
     fn estimate_type_size(&self, path: &syn::Path) -> usize {
-        if let Some(seg) = path.segments.last() {
-            let name = seg.ident.to_string();
-            match name.as_str() {
-                "f32" | "i32" | "u32" => 4,
-                "f64" | "i64" | "u64" => 8,
-                "i16" | "u16" => 2,
-                "i8" | "u8" | "bool" => 1,
-                "usize" | "isize" => 8,
-                "Vec2" | "Vec2A" => 8,
-                "Vec3" | "Vec3A" => 12,
-                "Vec4" => 16,
-                "Mat4" => 64,
-                "Quat" => 16,
-                "String" => 24,
-                "Vec" => 24,
-                "Box" => 8,
-                "Rc" | "Arc" => 8,
-                "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" => 48,
-                "VecDeque" | "LinkedList" => 48,
-                "Option" => 8,
-                "Result" => 16,
-                _ => {
-                    if self.is_gpu_type(path) {
-                        16
-                    } else {
-                        64
-                    }
-                }
-            }
+        let Some(seg) = path.segments.last() else {
+            return 64;
+        };
+        let name = seg.ident.to_string();
+        if let Some(size) = fixed_type_size(&name) {
+            return size;
+        }
+        if self.is_gpu_type(path) {
+            16
         } else {
             64
         }
@@ -399,6 +379,39 @@ impl<'ast> Visit<'ast> for TypeAnalyzer {
     }
 }
 
+/// Fixed byte-size estimate for known named types (scalars and std/glam
+/// composites); `None` when the type has no known size.
+fn fixed_type_size(name: &str) -> Option<usize> {
+    scalar_type_size(name).or_else(|| composite_type_size(name))
+}
+
+/// Byte sizes of fixed-width scalars.
+fn scalar_type_size(name: &str) -> Option<usize> {
+    Some(match name {
+        "f32" | "i32" | "u32" => 4,
+        "f64" | "i64" | "u64" | "usize" | "isize" => 8,
+        "i16" | "u16" => 2,
+        "i8" | "u8" | "bool" => 1,
+        _ => return None,
+    })
+}
+
+/// Byte sizes of composite handle / container types.
+fn composite_type_size(name: &str) -> Option<usize> {
+    Some(match name {
+        "Vec2" | "Vec2A" => 8,
+        "Vec3" | "Vec3A" => 12,
+        "Vec4" | "Quat" => 16,
+        "Mat4" => 64,
+        "String" | "Vec" => 24,
+        "Box" | "Rc" | "Arc" => 8,
+        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "LinkedList" => 48,
+        "Option" => 8,
+        "Result" => 16,
+        _ => return None,
+    })
+}
+
 fn trait_is_name(bound: &TypeParamBound, name: &str) -> bool {
     matches!(bound, TypeParamBound::Trait(tb) if tb.path.is_ident(name))
 }
@@ -533,31 +546,56 @@ fn compute_threshold(profile: &ProfileResult) -> usize {
 }
 
 fn compute_lane_target(profile: &ProfileResult) -> TokenStream2 {
-    let type_profile = &profile.type_profile;
-    let method_profiles = &profile.method_profiles;
     let threshold = compute_threshold(profile);
+
+    // An explicit `#[gpu]` / `#[cpu]` / `#[hybrid]` / `#[auto]` attribute
+    // overrides automatic classification.
+    if let Some(explicit) = explicit_lane_target(profile, threshold) {
+        return explicit;
+    }
+
     let (has_send, has_sync) = check_send_sync_bounds(&profile.generics, &profile.type_name);
+    classify_lane_target(
+        &profile.type_profile,
+        &profile.method_profiles,
+        has_send,
+        has_sync,
+        threshold,
+    )
+}
 
-    let has_gpu_attr = profile.attrs.iter().any(|a| a.path().is_ident("gpu"));
-    let has_cpu_attr = profile.attrs.iter().any(|a| a.path().is_ident("cpu"));
-    let has_hybrid_attr = profile.attrs.iter().any(|a| a.path().is_ident("hybrid"));
-    let has_auto_attr = profile.attrs.iter().any(|a| a.path().is_ident("auto"));
+/// The lane target requested by an explicit placement attribute, if any.
+fn explicit_lane_target(profile: &ProfileResult, threshold: usize) -> Option<TokenStream2> {
+    if profile.attrs.iter().any(|a| a.path().is_ident("gpu")) {
+        return Some(quote! { ornis_core::TargetDiscriminant::Gpu });
+    }
+    if profile.attrs.iter().any(|a| a.path().is_ident("cpu")) {
+        return Some(quote! { ornis_core::TargetDiscriminant::Cpu });
+    }
+    if profile
+        .attrs
+        .iter()
+        .any(|a| a.path().is_ident("hybrid") || a.path().is_ident("auto"))
+    {
+        return Some(auto_target(threshold));
+    }
+    None
+}
 
-    if has_gpu_attr {
-        return quote! { ornis_core::TargetDiscriminant::Gpu };
-    }
-    if has_cpu_attr {
-        return quote! { ornis_core::TargetDiscriminant::Cpu };
-    }
-    if has_hybrid_attr {
-        let threshold_lit = Literal::usize_unsuffixed(threshold);
-        return quote! { ornis_core::TargetDiscriminant::Auto(#threshold_lit) };
-    }
-    if has_auto_attr {
-        let threshold_lit = Literal::usize_unsuffixed(threshold);
-        return quote! { ornis_core::TargetDiscriminant::Auto(#threshold_lit) };
-    }
+/// `TargetDiscriminant::Auto(<threshold>)` tokens.
+fn auto_target(threshold: usize) -> TokenStream2 {
+    let threshold_lit = Literal::usize_unsuffixed(threshold);
+    quote! { ornis_core::TargetDiscriminant::Auto(#threshold_lit) }
+}
 
+/// Automatic GPU/CPU/Auto classification from the type and method profiles.
+fn classify_lane_target(
+    type_profile: &TypeProfile,
+    method_profiles: &[MethodProfile],
+    has_send: bool,
+    has_sync: bool,
+    threshold: usize,
+) -> TokenStream2 {
     let total_branches: usize = method_profiles.iter().map(|m| m.branch_count).sum();
     let total_loops: usize = method_profiles.iter().map(|m| m.loop_count).sum();
     let total_recursive: usize = method_profiles.iter().map(|m| m.recursive_call_count).sum();
@@ -592,8 +630,7 @@ fn compute_lane_target(profile: &ProfileResult) -> TokenStream2 {
     } else if is_gpu_friendly {
         quote! { ornis_core::TargetDiscriminant::Gpu }
     } else {
-        let threshold_lit = Literal::usize_unsuffixed(threshold);
-        quote! { ornis_core::TargetDiscriminant::Auto(#threshold_lit) }
+        auto_target(threshold)
     }
 }
 

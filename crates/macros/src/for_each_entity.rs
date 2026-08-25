@@ -6,6 +6,7 @@ use syn::{
     parse_macro_input,
 };
 
+
 struct ForEachInput {
     store: Ident,
     closure_args: Vec<ClosureArg>,
@@ -22,39 +23,7 @@ impl Parse for ForEachInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let store: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
-
-        let mut closure_args = Vec::new();
-        if input.peek(Token![|]) {
-            input.parse::<Token![|]>()?;
-            while !input.peek(Token![|]) {
-                let arg: FnArg = input.parse()?;
-                match arg {
-                    FnArg::Typed(PatType { pat, ty, .. }) => {
-                        let name = match &*pat {
-                            Pat::Ident(pi) => pi.ident.clone(),
-                            _ => return Err(syn::Error::new_spanned(pat, "expected identifier")),
-                        };
-                        let (mutable, inner_ty) = match &*ty {
-                            Type::Reference(TypeReference {
-                                elem, mutability, ..
-                            }) => (mutability.is_some(), *elem.clone()),
-                            _ => return Err(syn::Error::new_spanned(ty, "expected &T or &mut T")),
-                        };
-                        closure_args.push(ClosureArg {
-                            name,
-                            mutable,
-                            ty: inner_ty,
-                        });
-                    }
-                    _ => return Err(syn::Error::new_spanned(arg, "expected typed argument")),
-                }
-                if input.peek(Token![,]) {
-                    input.parse::<Token![,]>()?;
-                }
-            }
-            input.parse::<Token![|]>()?;
-        }
-
+        let closure_args = parse_closure_args(input)?;
         let body: proc_macro2::TokenStream = input.parse()?;
         Ok(ForEachInput {
             store,
@@ -62,6 +31,46 @@ impl Parse for ForEachInput {
             body,
         })
     }
+}
+
+/// Parse the optional `|a: &T, mut b: &mut U|` lane-closure arguments.
+fn parse_closure_args(input: ParseStream) -> syn::Result<Vec<ClosureArg>> {
+    let mut closure_args = Vec::new();
+    if !input.peek(Token![|]) {
+        return Ok(closure_args);
+    }
+    input.parse::<Token![|]>()?;
+    while !input.peek(Token![|]) {
+        let arg: FnArg = input.parse()?;
+        closure_args.push(closure_arg(&arg)?);
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+    }
+    input.parse::<Token![|]>()?;
+    Ok(closure_args)
+}
+
+/// One typed closure argument: `name: &T` (read) or `name: &mut T` (write).
+fn closure_arg(arg: &FnArg) -> syn::Result<ClosureArg> {
+    let FnArg::Typed(PatType { pat, ty, .. }) = arg else {
+        return Err(syn::Error::new_spanned(arg, "expected typed argument"));
+    };
+    let name = match &**pat {
+        Pat::Ident(pi) => pi.ident.clone(),
+        _ => return Err(syn::Error::new_spanned(pat, "expected identifier")),
+    };
+    let (mutable, inner_ty) = match &**ty {
+        Type::Reference(TypeReference {
+            elem, mutability, ..
+        }) => (mutability.is_some(), *elem.clone()),
+        _ => return Err(syn::Error::new_spanned(ty, "expected &T or &mut T")),
+    };
+    Ok(ClosureArg {
+        name,
+        mutable,
+        ty: inner_ty,
+    })
 }
 
 pub fn for_each_entity(input: TokenStream) -> TokenStream {
