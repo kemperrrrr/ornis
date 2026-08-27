@@ -1,8 +1,9 @@
 # PLAN — план реализации Ornis
 
 Рабочий документ, синхронизированный с кодом (не переписан из старых
-планов). Дополняет [`README.md`](README.md) (текущее состояние по
-компонентам) и [`IDEAS.md`](IDEAS.md) (архитектурные идеи).
+планов). Датированные блоки сохраняют хронологию; текущие статусы берутся
+из позднейших пометок и сверенного [`README.md`](README.md). Документ
+дополняет [`IDEAS.md`](IDEAS.md) (архитектурные идеи).
 
 Легенда: ✅ сделано и верифицировано · 🟡 частично · ❌ не начато ·
 ❄️ заморожено/удалено
@@ -38,7 +39,7 @@
   раздача фронтенда); `cargo xtask editor` (`6585c5b`, 26.07).
 - **Удаление нативного UI** (`29e3547`, 01.08): `crates/ui*`,
   `src/bin_blitz.rs`, форки `forks/` (blitz, boa_engine, icu_normalizer).
-  IPC-типы `UiCommand`/`GameEvent` сохранены в `src/ipc.rs`.
+  IPC-типы `UiCommand`/`GameEvent` сохранены в `crates/editor-backend/src/ipc.rs`.
 
 ### Качество (август 2026)
 
@@ -59,51 +60,57 @@
 - **CI** `.github/workflows/quality.yml`: quality / wasm-check /
   supply-chain (`cfa482d`).
 - Консолидация документации: README + PLAN + IDEAS, архив удалён
-  (этот коммит). Покрытие строк: 45.77% (базовая точка).
+  (этот коммит). Покрытие строк: 45.77% — историческая базовая точка;
+  актуальное значение — 83.32% (см. `docs/quality/coverage-2026-08-25.md`).
 
 ## 🟡 Частично — что достроить
 
-- **Remote Editor**: REST есть; WebSocket — нет; в режиме `editor-only`
-  обработчик команд не читает канал (`_cmd_rx` в `src/main.rs`) —
-  команды из `POST /api/command` теряются; `editor.js` не подключён
-  к REST (иерархия/инспектор статичны).
+- **Логический `World` (foundation)**: `ornis_core::World` объединяет
+  `Resources` и авторитетный `SmartStore`, предоставляет setup-доступ и
+  запуск `Schedule`; интеграция physics/render/editor в единый runtime пока
+  не завершена.
+- **Remote Editor**: REST, обработчик команд в `editor-only`, `GET /api/scene`,
+  подключение `editor.js` к `/api/scene`/`/api/status`, generic
+  `set_component`, а также save/load сцены — ✅. Рендер получает живые
+  snapshot'ы через polling; WebSocket, request ID/ACK и sequence numbers
+  пока не реализованы. Editor-only `EditorWorld` всё ещё отдельный от
+  `ornis_core::World` — это следующий интеграционный шаг.
 - **Command-Based Sync**: CPU-очередь + residency tracker и базовое
   GPU-исполнение (compute dispatch + flush, есть тест) — есть;
   автоматической data residency «копировать только при необходимости»
   (SmartBuffer) — нет.
-- **Линтер параллелизуемости**: `compile_warning!` от `#[smart_pipeline]`
-  есть; IDE-интеграции и расширяемого набора правил нет.
-- **WASM**: сцена статичная (однократная загрузка `scene.ron`); нет
-  связи с живым ECS и ввода (камера, гизмо).
-- **Component Packing**: `#[derive(Pack)]` генерирует wrapper-типы,
-  но не интегрирован автоматически в `for_each_entity`/`smart_pipeline`.
-- **GPU-физика (G7, остатки после починки сборки 2026-08-18)**:
-  GPU-решённые single-point контакты не проходят NGS позиционную
-  коррекцию — `solve_contacts_velocity_gpu` (`crates/physics/src/engine.rs`)
-  возвращает острова только для multi-point манифолдов, позиционная
-  стадия single-point пропускает (замерено ~14 мм лишнего проникновения
-  против CPU-пути). Толеранс теста `gpu_solver_tracks_cpu_engine` (0.05)
-  подтверждён на обоих адаптерах: локально на Metal и в CI на lavapipe
-  (прогон 32118113925 — оба device-теста реально выполнились, ~1 с,
-  не skip). GPU-путь осознанно не бит-идентичен CPU
-  (Jacobi/GS hybrid, Strong Confluence держит только CPU); если понадобится
-  детерминизм на GPU — варианты: fixed-point или CPU-only для
-  реиграемых сцен.
+- **Линтер параллелизуемости**: `#[smart_pipeline]` выдаёт предупреждения
+  через deprecated-note трюк; IDE-интеграции и расширяемого набора правил нет.
+- **WASM**: viewport получает актуальные scene snapshot'ы из `/api/scene`
+  через polling (~1/с), имеет fallback на `scene.ron` и orbit-камеру;
+  ввода из браузера обратно в движок и WebSocket-синхронизации пока нет.
+- **Component Packing**: `#[derive(Pack)]` генерирует wrapper-ленты и
+  `Pack::for_each_packed`; wrapper-ленты совместимы с `for_each_entity!`,
+  интеграция покрыта `crates/core/tests/pack_integration.rs` — ✅.
+- **GPU-физика (G7)**: single-point контакты решаются через GPU velocity
+  path, после чего проходят общий CPU NGS position solve; тест
+  `gpu_solver_tracks_cpu_engine` подтверждает согласованное состояние с
+  CPU-путём в заданном допуске на Metal и lavapipe. GPU-путь — Jacobi/GS
+  hybrid и осознанно не bit-identical CPU-пути; для реиграемых сцен нужен
+  CPU-only или отдельный fixed-point путь. Остатки G7: angular sweep в CCD,
+  per-iteration interleaving joints/contacts и полная масштабируемость
+  broadphase.
 
 ## Дорожная карта (по приоритетам)
 
 ### a. Протокол движок ↔ редактор
 
-Обработчик `cmd_rx` в `editor-only` режиме (команды из
-`POST /api/command` исполняются, а не теряются) → `GET /api/scene`
-(сериализация иерархии/компонентов из живого ECS) → подключение
-`editor.js` к REST (иерархия, инспектор, редактирование через
-`/api/command`) → WebSocket вместо polling `/api/events`.
+✅ Реализованы обработчик команд в `editor-only`, `GET /api/scene`,
+подключение `editor.js` к REST, generic `set_component`, а также
+сохранение/загрузка сцены. Остаются WebSocket вместо polling, request
+ID/ACK, sequence numbers и защита от устаревших snapshot'ов.
 
 ### b. Живой ECS в браузере
 
-WASM-canvas рендерит актуальное состояние ECS (двусторонняя
-синхронизация сцены), ввод из браузера в движок, орбитальная камера.
+✅ WASM-canvas рендерит актуальные snapshot'ы editor-only ECS через
+`/api/scene`, имеет fallback на `scene.ron` и orbit-камеру. Остаются
+ввод из браузера в движок, WebSocket/live events и подключение этой
+сцены к общему `ornis_core::World` вместо отдельного `EditorWorld`.
 
 ### c. Фаза 6 — Скриптинг (пересмотрена 2026-08-22, решение D1 аудита)
 
@@ -119,8 +126,8 @@ WASM-canvas рендерит актуальное состояние ECS (дву
    (`ComponentRegistry`/`ComponentMeta`; thunk'и мономорфизирует
    generic-регистрация — процедурный макрос не понадобился,
    derive-сахар опционально позже); юнит-тесты + doc-пример.
-   Ожидает прогона `cargo xtask quality` — в окружении разработки
-   не было toolchain'а (сборка/тесты не запускались).
+   Верифицировано последующим CI quality-прогоном; generic-регистрация
+   остаётся tooling-путём, горячие циклы не затрагивает.
 2. **`ScriptEngine`-трейт** — третий плагинный трейт рядом с
    `PhysicsEngine` и `RenderBackend`: ядро знает только трейт
    (load/call/batch/hot reload), языки — адаптеры.
@@ -141,22 +148,21 @@ Build-time генерация бинарных слепков для Sparse Sets
 
 ### e. Качество (продолжение)
 
-Покрытие ядра до 60%+ (сейчас **83.32%** по workspace, см.
-`docs/quality/coverage-2026-08-25.md`; базовая точка 45.77% от 2026-08-01
-устарела); первый полный
-mutants-прогон на ornis-core с фиксацией mutation score; ночные
-fuzz-прогоны (corpus растить, краши → регрессионные тесты);
-criterion-baseline как точка отсчёта производительности;
-flamegraph/dhat — на perf-спринт.
+Покрытие workspace уже **83.32%** (см.
+`docs/quality/coverage-2026-08-25.md`; 45.77% от 2026-08-01 — историческая
+базовая точка). Полный прогон mutants для `ornis-core` завершён с
+98.8% mutation score среди тестируемых мутантов; для physics зафиксирован
+первый большой прогон и отдельные T8–T14 ограничения. Остаются ночные
+fuzz-прогоны (растить corpus, краши → регрессионные тесты),
+criterion/performance-профилирование и flamegraph/dhat на perf-спринте.
 
 ### f. Дальше по старому плану
 
-Deferred/Forward hybrid рендер (G-buffer, lighting pass) —
-  конкретизирован в **B1-R7** (render graph, черновик для ревью,
-  [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md)) →
-NUMA-aware allocation → кроссплатформенные прогоны (Linux/Windows
-CI, miri) → адаптеры Rapier/Jolt за `PhysicsEngine` → документация
-API (rustdoc) и релизная упаковка.
+Deferred/Forward hybrid рендер и B1-R7 уже реализованы; подробности и
+пиксельные проверки записаны в [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md).
+Остаются NUMA-aware allocation → кроссплатформенные прогоны
+(Linux/Windows CI, miri) → адаптеры Rapier/Jolt за `PhysicsEngine` →
+документация API и релизная упаковка.
 
 ### g. Unified Scheduler (IDEAS §28, долгосрочно)
 
@@ -190,9 +196,10 @@ API (rustdoc) и релизная упаковка.
   proptest + mutants + fuzz.
 
 ---
-## Приложение B — Рендерер и физика: план работ (черновик для ревью)
+## Приложение B — Рендерер и физика: план работ
 
-> 🔎 Черновик по двум движкам. Номера пунктов — для ваших корректировок.
+> Архивный план, сверенный с реализованными фазами B1-R7 и G1-G7;
+> незавершённые пункты явно отмечены ниже.
 
 ### B1. Рендерер (`crates/render`) — план
 
@@ -201,7 +208,7 @@ API (rustdoc) и релизная упаковка.
   Deferred/Forward hybrid как ❌. Либо довести gbuffer-путь до активного
   (G-buffer → lighting pass → composite), либо удалить как спекулятивный
   каркас. Быстрый шаг: поставить README-статус точно по коду.
-  - **→ Решено (2026-08-10, черновик для ревью):** доводить gbuffer-путь
+  - **→ Решено (2026-08-10, design note):** доводить gbuffer-путь
     до активного гибрида, не удалять. Способ — render graph (см. R7).
     README-статус «Deferred/Forward hybrid» актуализировать по коду
     (гибрид уже работает императивно).
@@ -218,7 +225,7 @@ API (rustdoc) и релизная упаковка.
 - **R6.** Связать рендер с ECS-сценой в браузере: WASM-canvas рендерит
   актуальное состояние, ввод/камера из браузера (перекликается с
   «b. Живой ECS в браузере»).
-- **R7.** Render Graph — слой оркестрации пассов (черновик для ревью,
+- **R7.** Render Graph — слой оркестрации пассов (design/implementation note,
   2026-08-10). Гибрид forward/deferred уже работает императивно в
   `renderer.rs` (gbuffer 5 MRT → lighting → forward → composite); render
   graph делает выбор техники конфигурацией графа. Оговорка wgpu: барьеры
@@ -262,8 +269,10 @@ API (rustdoc) и релизная упаковка.
 > стадии WarmStart→Solve→IntegratePositions→Relax→Restitution, warm starting,
 > split impulse (velocity/position раздельно), constraint graph → острова + sleeping,
 > speculative CCD, мягкие констрейнты.
-> Наш текущий солвер — одиночный проход sequential impulse, по 1 контакту на пару,
-> без ориентации; это стартовый стиль. Ниже — поэтапный апгрейд, каждый этап с гейтом тестов.
+> В текущем коде G1-G7 уже реализованы: orientation, manifolds, split impulse,
+> islands/sleeping, joints, linear CCD/shapecast, CPU/SIMD/GPU paths. Следующий
+> практический риск — масштабирование broadphase и оставшиеся ограничения G7;
+> исторические описания стартового состояния ниже сохранены как хронология.
 
 | Этап | Что делаем | Основание (реальный код) | Статус |
 |---|---|---|---|
@@ -303,24 +312,35 @@ API (rustdoc) и релизная упаковка.
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 
+> **Актуальная оговорка (2026-08-27):** S0–S6 описывают завершённую
+> инфраструктурную ветку scheduler/render-plan. Добавленный
+> `ornis_core::World` — только первый фундамент интеграции; единый
+> runtime-кадр native/WASM с physics и render пока не подключён.
+
 > План по [`IDEAS.md`](IDEAS.md) §28 («третий путь» между Frostbite
 > FrameGraph и Bevy 0.19: один scheduler + автоматический lifetime/aliasing +
 > типизированные ресурсы в сигнатурах). Режим «в долгую»: каждый этап —
 > самостоятельный выигрыш, откатываемый и не зависящий от следующего (§28,
-> «эволюционный путь»). Горизонты — оценки, не обязательства. Все статусы —
-> на дату 2026-08-18. Приоритеты a–d (редактор, живой ECS, скриптинг,
-> ассеты) остаются выше; S0–S1 дёшевы и могут идти параллельно с «a».
+> «эволюционный путь»). Горизонты — оценки, не обязательства. Хронологическая
+> таблица ниже отражает срез 2026-08-18; актуальная оговорка 2026-08-27
+> находится перед C0. Приоритеты a–d (редактор, живой ECS, скриптинг, ассеты)
+> остаются выше; S0–S1 дёшевы и могут идти параллельно с «a».
 
-### C0. Отправная точка (верифицировано по коду)
+### C0. Отправная точка (снимок 2026-08-18)
+
+> Это исторический срез до выполнения S1–S6. Актуальные статусы и
+> оставшиеся пробелы указаны в таблице этапов и в блоке интеграции
+> `World` ниже; старые имена файлов в этом срезе сохранены только
+> для объяснения хронологии.
 
 Из §28 уже частично есть (работает, протестировано):
 
 | Компонент §28 | Что есть в коде | Где |
 |---|---|---|
-| Lifetime-окна ресурсов | `first_use..last_use` по enabled-пассам | `render_graph.rs:316` (`compute_layout`) |
+| Lifetime-окна ресурсов | `first_use..last_use` по enabled-пассам | `frame_plan.rs` (`FramePlan::compute_layout`) |
 | Пул/aliasing непересекающихся ресурсов | greedy first-fit interval partitioning по слотам с равным `TextureSpec` | там же |
-| Culling пассов | `set_pass_enabled`: disabled-пасс выпадает из layout, ресурсы не получают слотов | `render_graph.rs:293` |
-| Метрика памяти | `GraphExecutor::texture_budget()` — сумма байтов пула | `graph_frame.rs:75` |
+| Culling пассов | `set_pass_enabled`: disabled-пасс выпадает из layout, ресурсы не получают слотов | `frame_plan.rs` |
+| Метрика памяти | `FrameExecutor::texture_budget()` — сумма байтов пула | `frame_exec.rs` |
 | Пиксельная верификация | `render_probe` (legacy vs graph по техникам) | `crates/render/examples/render_probe.rs` |
 
 Пробелы, которые закрывает план:
@@ -344,7 +364,7 @@ API (rustdoc) и релизная упаковка.
 
 | Этап | Горизонт (по §28) | Суть | Статус |
 |---|---|---|---|
-| **S0** | недели | Базлайн-метрики: стоимость `build()` на кадр, память пула по техникам | 🟡 бенч написан и компилируется (CI); числа — после первого `cargo bench` |
+| **S0** | недели | Базлайн-метрики: стоимость `build()` на кадр, память пула по техникам | 🟡 benchmark-числа записаны в `perf-baseline-2026-08-27.md`; полная матрица texture budget/probe ещё не архивирована |
 | **S1** | недели | Кеш `GraphLayout` с инвалидацией по сигнатуре | ✅ верифицировано CI (PR #4: fmt/clippy/bca/test/doc/wasm зелёные, 2026-08-19) |
 | **S2** | месяцы | Пасс = типизированная система (`Reads`/`Writes` в типах), роспуск `match` по именам | ✅ S2a+S2b верифицировано CI (2026-08-19, прогон 32270386050) |
 | **S3** | месяцы | Layout из типов; `PassBuilder` → deprecated-шим; конфликт писателей — ошибка | ✅ верифицировано CI (2026-08-19, прогон 32284997326); конфликт писателей снят (порядок = регистрация) |
@@ -395,14 +415,14 @@ API (rustdoc) и релизная упаковка.
 Откат: `layout()` деградирует в пересчёт каждый вызов — эквивалент
 сегодняшнего поведения.
 
-**Статус (2026-08-18, код написан, компиляция при ближайшем
-`cargo xtask quality` — среда без toolchain, прецедент G7):**
+**Статус (сверка 2026-08-27; код и основной quality-гейт проверены CI):**
 
 - **S0**: бенч `crates/render/benches/layout_bench.rs` — группы
   `layout/compute/*` (Forward 7 / Deferred 8 / Hybrid 9 пассов, блум,
   1920×1080) и `layout/cache_hit/*`; числа — в
-  [`docs/rendering/unified-scheduler.md`](docs/rendering/unified-scheduler.md)
-  (заполнить с первым прогоном `cargo bench -p ornis-render`).
+  [`docs/rendering/unified-scheduler.md`](docs/rendering/unified-scheduler.md);
+  значения сняты в baseline `docs/quality/perf-baseline-2026-08-27.md`;
+  полная матрица texture budget/probe остаётся отдельным ручным прогоном.
 - **S1 (реализовано)**: `RenderGraph.cached: Option<GraphLayout>` +
   dirty-флаг на всех мутаторах (`set_surface_size`,
   `create/import/external`-ресурс, `add_pass`, `set_pass_enabled`,
@@ -414,13 +434,15 @@ API (rustdoc) и релизная упаковка.
   добавлены `RenderGraph3D::{graph, graph_mut}` для бенчей/проб.
   От сигнатурного хеша из §28 осознанно отказались в пользу честного
   dirty-флага: мутаций графа в steady state нет, хеш дороже и сложнее в
-  поддержке. Тесты (5 новых): `layout_is_cached_until_mutation`,
+  поддержке. Benchmark-числа S0/S1 зафиксированы в
+  `docs/quality/perf-baseline-2026-08-27.md`; ручной GPU probe остаётся
+  дополнительной верификацией. Тесты (5 новых): `layout_is_cached_until_mutation`,
   `every_mutation_invalidates_cache`, `build_snapshot_matches_cached_layout`
   (render_graph), `layout_cache_reused_across_frames` (graph_frame,
   уровень RenderGraph3D). `layout_dump` теперь `&mut self` (единственные
   внешние вызовы — `render_graph_probe`, биндинги уже `mut`). Остаток:
-  первый прогон bench + probe + полный гейт, заполнить числа в
-  unified-scheduler.md.
+  полная матрица texture budget и ручные probe-диффы на GPU; основной
+  benchmark и CI-гейт уже записаны.
 
 ### S2 — пасс как типизированная система (§28.1)
 

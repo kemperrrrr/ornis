@@ -6,10 +6,11 @@ SoA-хранилища (Sparse Sets) и направляют вычислени�
 GPU (wgpu compute). Редактор — браузерный: сцена рендерится в `<canvas>`
 через WASM + WebGPU, UI — обычное веб-приложение.
 
-> Документация проекта — три файла: этот README (что есть сейчас,
-> статусы верифицированы по коду), [`PLAN.md`](PLAN.md) (план
-> реализации, синхронизированный с кодом) и [`IDEAS.md`](IDEAS.md)
-> (архитектурные идеи). Плюс аудит-снимки в [`docs/quality/`](docs/quality/).
+> Основные документы проекта — этот README (что есть сейчас, статусы
+> верифицированы по коду), [`PLAN.md`](PLAN.md) (план реализации,
+> синхронизированный с кодом) и [`IDEAS.md`](IDEAS.md) (архитектурные
+> идеи). Дополнительные implementation notes находятся в
+> [`docs/quality/`](docs/quality/) и [`docs/rendering/`](docs/rendering/).
 > Прежние документы (`STRATEGY_PIVOT.md`, `implementation_plan.md` и др.)
 > удалены из дерева — история сохранена в git.
 
@@ -126,12 +127,13 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Фича | Статус | Комментарий |
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
+| Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; фундамент есть, но physics/render/editor и основной frame loop ещё не подключены |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
 | ZST-диспетчеризация (`GpuLane`/`CpuLane`/`HybridLane`, `LaneTarget`) | ✅ | `crates/core/src/pipeline.rs` |
 | Макросы (`smart_pipeline`, `for_each_entity`, `kernel`, `gpu_pipeline`, `WgslStruct`, `Pack`, `PipelineConfig`, `AutoPipeline`) | ✅ | `crates/macros/src/` |
-| Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | ✅ | `crates/core/src/dispatcher.rs` |
+| Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | 🟡 | `crates/core/src/dispatcher.rs`; выбор по порогу работает, но `GpuExecutor` в core пока CPU-fallback/stub |
 | Command-Based Sync: CPU-side очередь команд + residency tracker | ✅ | `crates/core/src/command_sync.rs` |
 | Command-Based Sync: реальное GPU-исполнение (compute dispatch + flush) | ✅ | `crates/wgpu_backend/src/command_sync.rs`, есть тест `gpu_dispatch_records_and_flushes` |
 | Линтер: compile-time предупреждения при непараллелизуемых паттернах | 🟡 | `#[smart_pipeline]` помечает такие циклы через deprecated-note трюк (видно в IDE и терминале; `crates/macros/src/smart_pipeline.rs`), но нет расширяемого набора правил |
@@ -147,7 +149,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
 | Frame Plan (бывш. Render Graph; модули `frame_plan.rs`/`frame_exec.rs`, rename от 2026-08-23): `RenderFrame3D` + `Technique` (forward/deferred/hybrid как конфигурация плана) + блум-каскад | ✅ |
-| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | ✅ | `crates/render/src/frame_plan.rs`, `frame_exec.rs`; детали: `docs/rendering/render-graph.md` |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | 🟡 | инфраструктура планирования реализована, но единый runtime-кадр native/WASM ещё не wired; `crates/render/src/frame_plan.rs`, `frame_exec.rs`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 
@@ -156,7 +158,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Desktop: winit + wgpu (Vulkan/Metal/DX12) | ✅ | `src/main.rs`, нативный режим |
 | WASM + WebGPU в браузере | ✅ | `crates/wasm`; рендер `editor/scene.ron` проверен headless-скриншотами (5 сфер, pixel-identical нативному эталону) |
 | Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит живую сцену из `/api/scene` (polling ~1/с) с fallback на `scene.ron`, есть orbit-камера |
-| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. Сохранение и загрузка сцены — команды `save_scene`/`load_scene` (см. следующую строку) |
+| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит отдельный editor-only ECS-мир (`src/editor_world.rs`), пока не общий `ornis_core::World`: при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. Сохранение и загрузка сцены — команды `save_scene`/`load_scene` (см. следующую строку) |
 | Сохранение/загрузка сцены (save/load) | ✅ | `save_scene`/`load_scene` через `POST /api/command` (опциональный `{"path": …}`, по умолчанию `editor/scene.ron`): мир сериализуется в RON и пишется атомарно (sibling `*.tmp` + rename), загрузка заменяет мир из файла; результаты — события `scene_saved {path, version}` / `scene_loaded {path, version, entity_count}` / `error` в `GET /api/events`. В UI — меню File → Save/Reload, результат в футере. WASM-canvas рендерит живую сцену: polling `/api/scene` (~1/с), при недоступности сервера — fallback на `scene.ron` |
 | Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. WebSocket нет. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
 | `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
@@ -173,8 +175,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 
 ### Не начато
 
-- **Скриптинг (фаза 6)**: реестр компонентов (F0), `ScriptEngine`-трейт,
-  Rhai-адаптер, Batch API, hot reload — ❌ (рамка 2026-08-22: плагинный
+- **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅; `ScriptEngine`-трейт,
+  Rhai-адаптер, Batch API и hot reload — ❌ (рамка 2026-08-22: плагинный
   шов + адаптеры вместо лесенки языков — см. PLAN.md и
   [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов, hot reload — ❌
@@ -184,13 +186,21 @@ cargo xtask bca --report      # html to target/bca/index.html
 
 ## Roadmap
 
+### Следующий интеграционный этап
+
+`ornis_core::World` уже даёт общий логический контейнер `Resources` с
+`SmartStore` и `Schedule`. Следующий шаг — подключить к нему time/input,
+physics и render как доменные системы, а затем перевести native и WASM
+frame loops на единый контракт. Это не означает немедленно удалять
+`FramePlan`: он остаётся переходным render/backend-планом.
+
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).
 
 ### Ближайшее: оживить браузерный редактор
 
 1. ~~**Обработчик команд engine ↔ editor**~~ — ✅ сделано: в режиме
    `editor-only` поток `editor-world` (`src/editor_world.rs`) читает `cmd_rx`
-   и исполняет команды из `POST /api/command` на живом ECS-мирe.
+   и исполняет команды из `POST /api/command` на живом editor-only ECS-мире.
 2. ~~**`GET /api/scene`**~~ — ✅ сделано: сцена сериализуется в JSON
    (version/сущности с transform/mesh/material/lights/camera/ambient),
    снапшот кешируется сервером; при старте мир загружает `editor/scene.ron`.
@@ -228,21 +238,23 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 
 ## Ключевые архитектурные идеи
 
-Полная версия — в [`IDEAS.md`](IDEAS.md) (26 идей). Суть:
+Полная версия — в [`IDEAS.md`](IDEAS.md) (28 пронумерованных разделов идей). Суть:
 
 1. **Невидимый ECS.** Пользователь пишет `entity.position += entity.velocity`,
    макросы превращают AoS-код в SoA-хранилища (Sparse Sets: плотный `data` +
    страничный sparse-индексатор + bitset). Мутации O(1), без Archetype Move.
-2. **Компилятор как оптимизатор.** ZST-маркеры (`GpuLane`/`CpuLane`) выбирают
-   исполнителя на этапе компиляции — в рантайме нет ни одного `if` для выбора
-   CPU/GPU. Статический профайлер анализирует AST (размер типа, ветвления,
-   access pattern) и генерирует пороги.
+2. **Компилятор как оптимизатор.** ZST-маркеры (`GpuLane`/`CpuLane`) задают
+   статический типовой маршрут там, где он уже известен; runtime
+   `SmartDispatcher` пока выбирает по порогу, а `ornis-core::GpuExecutor`
+   остаётся CPU-fallback/stub. Статический профайлер анализирует AST (размер
+   типа, ветвления, access pattern) и генерирует пороги.
 3. **Инструкции вместо данных.** CPU шлёт GPU не массивы float'ов, а команды
    («примени гравитацию к Position»); данные живут там, где созданы
    (Command-Based Sync + Data Residency).
-4. **Детерминизм (Strong Confluence).** Параллельные системы обязаны давать
-   побитово одинаковый результат при любом числе потоков (тесты с
-   `RAYON_NUM_THREADS=1` и `=32`).
+4. **Детерминизм (Strong Confluence).** CPU-пути с честными декларациями и
+   коммутативными аккумуляторами должны давать побитово одинаковый результат
+   при любом числе потоков (тесты с `RAYON_NUM_THREADS=1` и `=32`); GPU-путь
+   сознательно не обещает bit-identical результат.
 5. **Открытые стандарты.** OpenPBR как модель затенения, MaterialX как формат
    материалов — совместимость с VFX/AAA-пайплайнами, без изобретения своего PBR.
 6. **Плагинные трейты.** `PhysicsEngine` (своя лёгкая физика + Rapier/Jolt/PhysX)
@@ -254,12 +266,13 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 
 ## Документация
 
-Структура документации — три файла плюс аудит-снимки:
+Основные документы и implementation notes:
 
 - [`README.md`](README.md) — текущее состояние, верифицированное по коду (этот файл)
 - [`PLAN.md`](PLAN.md) — план реализации: сделано / частично / дорожная карта
-- [`IDEAS.md`](IDEAS.md) — 26 архитектурных идей (перенесён без изменений)
-- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline и report от 2026-08-01, [audit от 2026-08-22](docs/quality/audit-2026-08-22.md) (статический аудит ядра/планировщика + план унификации планировщика в `crates/schedule`)
+- [`IDEAS.md`](IDEAS.md) — 28 пронумерованных архитектурных разделов (включая исторический §5)
+- [`docs/quality/`](docs/quality/) — аудит-снимки качества: baseline/report, coverage, performance и audit;
+- [`docs/rendering/`](docs/rendering/) — implementation notes по FramePlan и Unified Scheduler.
 
 Прежние документы (`STRATEGY_PIVOT.md`, `implementation_plan.md`, `SUMMARY.md`,
 `ANALYSIS_DOCS_VS_CODE.md`, `GOSUB_INTEGRATION.md`) удалены из дерева при
@@ -293,17 +306,20 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 
 #### Что есть в коде
 - **Трейт `PhysicsEngine`** (Send+Sync): `step`, `add_body`/`remove_body`/`get_body(_mut)`, `raycast`, `shapecast` — точка подключения внешних движков (Rapier/Jolt за тем же трейтом).
-- **`BuiltinPhysicsEngine`** (`mod.rs`):
-  - **Sweep-and-Prune** широкофазный: сортировка AABB-ов по сменяющейся оси (x→y→z), active-пары.
-  - **Узкая фаза**: контакты сфера/сфера, сфера/бокс, бокс/бокс (минимальная ось SAT), капсула/капсула.
-  - **Разрешение**: позиционная коррекция по проникновению + импульс (реституция) + **трение Кулона**.
-  - **Substeps** = 4: внутри `step` цикл `integrate → broadphase → detect → resolve`.
-  - **Raycast** — t-slab по AABB, возвращает ближайшее. **`shapecast`** — честная реализация (G6): conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
-  - `BodyType` dynamic/static, `RigidBody` (position, velocity, inv_mass, restitution, friction), `Shape` (sphere/box/capsule).
-- Тесты в `mod.rs`: падение сферы, статика не падает, сфера-сфера, box-box, raycast на сферу.
+- **`BuiltinPhysicsEngine`** (`engine.rs`):
+  - **Sweep-and-Prune** широкофазный: swept AABB для движущихся тел, сортировка по сменяющейся оси (x→y→z), active-пары.
+  - **Узкая фаза**: sphere/sphere, sphere/box, box/box, sphere/capsule и
+    capsule/capsule; OBB SAT и контактные манифолды до 4 точек. Пара
+    box/capsule в дискретном contact path пока не реализована, хотя
+    `distance.rs` поддерживает её для shapecast.
+  - **Солвер**: warm-start, friction/restitution, split velocity/position stages, block solver, constraint islands, coherent sleeping/wake и ball/revolute joints; для single-point контактов доступны SIMD-wide и opt-in GPU пути.
+  - **`step`** по умолчанию делится на 12 подшагов; в каждом подшаге идут интеграция скоростей → broadphase/narrowphase → velocity solve → linear CCD → интеграция позиций → NGS position solve.
+  - **Raycast** — t-slab против ориентированного shape AABB с приближённой нормалью. **`shapecast`** — conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
+  - `BodyType` dynamic/static/kinematic, `RigidBody` с ориентацией, угловой скоростью и диагональным body-space inertia.
+- Тесты находятся в `engine.rs`, `engine/contacts.rs`, `engine/islands.rs`, `engine/joints.rs` и `gpu.rs`; physics пока не синхронизирована автоматически с ECS `World`.
 
 ### A3. Открытые вопросы для ревью
 1. ~~Рендер: активен ли G-buffer/lighting-путь или только forward?~~ **Закрыто в Фазе 4** — render graph c `Technique` (forward/deferred/hybrid), гибрид == legacy пиксель-в-пиксель.
-2. Физика: какие связки (joints) нужны в первую очередь (revolute/ball), нужен ли CCD для быстрых тел.
+2. ~~Физика: какие связки (joints) нужны в первую очередь и нужен ли CCD для быстрых тел?~~ Закрыто G5/G6: ball/revolute joints и linear CCD реализованы; дальше нужны joint limits/motors и angular CCD.
 3. ~~`shapecast` — пустая заглушка~~ **Закрыто (G6)** — честный shapecast через conservative advancement (`distance.rs`), покрыт тестами.
 4. ~~Движок рендера не связан с ECS-сценой в браузере~~ **Частично закрыто** — WASM-viewport рендерит живую сцену из `/api/scene`; физика со сценой браузера по-прежнему не связана (см. План B в PLAN.md).

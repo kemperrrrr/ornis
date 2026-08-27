@@ -1,22 +1,34 @@
 # Ornis: текущие ограничения и план развития
 
+> **Актуальный срез: 2026-08-27.** Этот документ объединяет
+> аудит и план работ. Формулировки в разделах с датами —
+> исторические снимки; текущие статусы сверены ниже с кодом и
+> последующими коммитами.
+
 ## Главные ограничения сейчас
 
 - GPU-диспетчеризация в `core` пока фактически является заглушкой: `Dispatcher` умеет выбрать GPU, но `GpuExecutor::execute` не выполняет GPU-операцию.
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
-- Scheduler вынесен в отдельный crate и хорошо протестирован, но еще не стал единым runtime-планировщиком всего движка.
+- В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
+  авторитетным `SmartStore` и запуском `Schedule`), но он ещё не
+  подключён к единому runtime-циклу physics/render/editor.
+- Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
+  не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
 - Проект одновременно развивает ECS, GPU compute, WASM editor, MaterialX, audio, physics и собственные макросы. Такой широкий scope увеличивает стоимость сопровождения и риск распыления усилий.
 - Native-приложение пока скорее showcase/runtime shell, чем полноценная игровая платформа.
 
 ## План дальнейшей работы
 
-1. ~~**Закончить вертикальный сценарий редактора**~~ — ✅ закрыт (2026-08-26)
+1. ~~**Закончить вертикальный сценарий редактора**~~ — ✅ закрыт (2026-08-26);
+   следующий этап — интеграция этого сценария с `ornis_core::World`.
 
    Создание entity → изменение Transform/Material → обновление WASM-сцены →
    сохранение и загрузка сцены (`save_scene`/`load_scene` через
    `POST /api/command`, атомарная запись `editor/scene.ron`, меню File →
    Save/Reload в UI, события `scene_saved`/`scene_loaded` в `/api/events`).
+   Это завершает editor-only vertical slice; он пока использует отдельный
+   `EditorWorld` и polling, а не общий runtime `World`.
 
 2. **Довести physics API**
 
@@ -42,7 +54,7 @@
    > render (layout + запись пассов), MaterialX. Добавлены бенчи:
    > `physics_bodies` (1k/10k), `deep_stack_128`, `materialx parse_bench`.
    > ⚠️ Находка: на 100k тел `step` сверхлинеен (единый пол-AABB вырождает
-   > Sweep-and-Prune в O(n²), ~48 с/шаг; с тайловым полом — 80–110 с/шаг,
+   > Sweep-and-Prune в O(n²), ~45–56 с/шаг; с тайловым полом — 80–110 с/шаг,
    > квадратичная составляющая остаётся) — 100k в criterion не помещается,
    > числа сняты зондом `crates/physics/examples/probe_100k.rs`. Это вход
    > для п.2/п.3.
@@ -68,7 +80,8 @@
 
    Уточнить заявления про «единый scheduler», CPU/GPU dispatch и invisible ECS, чтобы README отражал именно текущую реализацию.
 
-   > ✅ 2026-08-27: README сверен с кодом. Исправлено: `src/` без Vello;
+   > ✅ 2026-08-27: README и связанные текущие статусы сверены с кодом.
+   > Исправлено: `src/` без Vello;
    > IPC-типы — в `crates/editor-backend/src/ipc.rs` (не `src/ipc.rs`);
    > линтер `#[smart_pipeline]` — deprecated-note трюк вместо `compile_warning!`;
    > `Pack` → ✅ (`for_each_packed` + совместимость лент с `for_each_entity!`);
@@ -79,13 +92,13 @@
 
 8. **Единый источник шейдеров: перевести render на Rust→WGSL (путь 2)**
 
-   Сейчас проект непоследователен: физика генерирует шейдеры из Rust
-   (`#[gpu_pipeline]` + `#[derive(WgslStruct)]`, рукописного WGSL нет —
-   идея №4 «CPU↔GPU из одного Rust-кода»), а render содержит рукописные
-   WGSL-литералы прямо в .rs: `shader.rs` (~108 строк WGSL),
-   `shaders/mod.rs` (~116), `composite.rs` (8). Это уже привело к
-   двойной ручной правке при изменении `coat_darkening` (копии в shader.rs
-   и shaders/mod.rs пришлось менять синхронно).
+   После удаления мёртвого `shader.rs` канонический источник render-шейдеров
+   — builder'ы в `crates/render/src/shaders/`. Физика уже генерирует шейдеры
+   из Rust (`#[gpu_pipeline]` + `#[derive(WgslStruct)]`, идея №4
+   «CPU↔GPU из одного Rust-кода»), но render всё ещё содержит рукописные
+   WGSL-литералы в `shaders/mod.rs` и `composite.rs`. Поэтому задача ниже
+   остаётся актуальной: постепенно перевести render-пассы на общий
+   Rust→WGSL путь, не возвращая второй источник истины.
 
    Выбранный путь — **вариант 2: постепенный перевод рендерных пассов на
    `#[gpu_pipeline]` / `WgslStruct`**, чтобы весь WGSL выводился из одного
@@ -109,60 +122,35 @@
    naga-валидацией в тестах, чтобы строки шейдеров хотя бы не жили внутри
    Rust-кода.
 
-   > Находка аудита 2026-08-26: `shader.rs` — мёртвый дубль, как раньше
-   > `materialx/src/codegen.rs`. Его WGSL-константы (`PBR_VERTEX`,
-   > `PBR_FRAGMENT`, `GBUFFER_*`, `LIGHTING_*`, `COMPOSITE_*`, ~1343
-   > строки) потребляются только re-export'ом в `lib.rs`; реальный рендер
-   > строит все пайплайны из `shaders::*()` builder'ов (`renderer.rs`
-   > использует исключительно `shaders::pbr_fragment()` и т.п.). Внутри
-   > `shader.rs` к тому же 27 kernel-функций, инлайн-дублирующих
-   > `shaders/math.rs` (включая две копии `coat_base_darkening`). Ни один
-   > тест не сравнивает копии — рассинхрон уже возможен незаметно.
-   > Действие: удалить `shader.rs` (или сделать его тонким re-export над
-   > builder'ами), прежде чем начинать миграцию по пути 2.
-   >
-   > ✅ **Выполнено 2026-08-26**: `shader.rs` удалён (−1343 строки),
-   > re-export вычищен из `lib.rs`; workspace собирается, тесты зелёные.
-   > Канонический источник шейдеров теперь один: `shaders/` builder'ы.
+   > Историческая находка аудита 2026-08-26: `shader.rs` был мёртвым
+   > дублем и содержал около 1343 строк лишнего WGSL/kernel-кода.
+   > ✅ **Выполнено 2026-08-26**: файл удалён, re-export вычищен из `lib.rs`,
+   > канонический источник шейдеров закреплён за `shaders/` builder'ами.
+   > Оставшаяся часть задачи — перевести сами render-пассы на Rust→WGSL.
 
 9. **Документация Rust-кода: массовые пропуски, но мало лжи**
 
    Аудит 2026-08-26 (два параллельных прохода, все крейты):
 
-   - **Покрытие docs плохое и неровное** — публичных элементов без `///`:
-     core 169/267 (~63%), render ~60 (весь публичный фасад `Renderer3D`:
-     `new`, `resize`, `set_camera`, `render_gbuffer/lighting/...`),
-     materialx 20 (весь converter API), macros 42/45 (**все 8 экспортных
-     proc-macro точек входа**), physics 35/53, audio 34. Итого ~726+
-     недокументированных публичных элементов; lint `missing_docs` нигде
-     не включён.
-   - **Модульные `//!` хедеры отсутствуют у 28 файлов**, включая `lib.rs`
-     всех трёх ключевых крейтов (core, physics — 5 файлов, macros — 8,
-     audio — все 7, render — 10).
-   - **Расхождение доков с кодом почти НЕ подтверждено** — это хорошая
-     новость после раунда рефакторинга: найдена ровно одна битая ссылка
-     (`physics/src/engine/islands.rs:38` → несуществующий
-     `resolve_manifolds`, пережиток сплита engine.rs) и 2 неразрешимые
-     rustdoc-ссылки в `core/src/pipeline.rs:104,107`. Существующие доки —
-     глубокие, с обоснованием, и корректно пережили дробление функций.
-   - **План**: (а) немедленно — починить 1 битую ссылку, задокументировать
-     каноничность шейдер-источников (см. находку выше); (б) включить
-     `#![warn(missing_docs)]` в lib.rs крейтов и закрыть предупреждения
-     волной, начиная с публичного фасада (`Renderer3D`, `SmartStore`,
-     `ComponentStore`, `Entity`, proc-macro entry points, `AudioEngine`);
-     (в) правило для будущего: новый публичный API — только с `///`.
-   >
-   > Прогресс 2026-08-26:
-   > ✅ (а) битые ссылки исправлены: `islands.rs:38` → `wake_on_impact`
-   > (`engine/contacts.rs`), `pipeline.rs` — атрибут в backticks;
-   > rustdoc --workspace теперь **0 warnings**.
-   > 🔄 (б) в работе: `#![warn(missing_docs)]` включается по крейтам,
-   > волна документирования публичного фасада идёт параллельно.
-   > ⬜ (в) правило — зафиксировать в AGENTS.md/CONTRIBUTING после (б).
+   - **Покрытие docs было плохим и неровным** — аудит 2026-08-26 насчитал
+     ~726+ публичных элементов без `///` (это исторический baseline, а не
+     текущая цифра).
+   - **Модульные `//!` хедеры также были неполными** — в baseline отсутствовали
+     хедеры у 28 файлов; новые файлы теперь должны начинаться с `//!` по
+     правилу `AGENTS.md`.
+   - **Расхождение доков с кодом почти НЕ подтверждено** — после раунда
+     рефакторинга были найдены одна битая ссылка и две неразрешимые
+     rustdoc-ссылки; все они исправлены, rustdoc CI даёт **0 warnings**.
+   - **Текущий статус (2026-08-27):** `#![warn(missing_docs)]` включён во
+     всех workspace-крейтах и бинаре; основная волна публичной документации
+     уже прошла. Остаток — доведение отдельных `//!` хедеров и поддержание
+     правила для нового API. Каноничность render-шэйдеров зафиксирована:
+     мёртвый `shader.rs` удалён, но полный Rust→WGSL перевод render ещё не
+     выполнен.
 
 ## Ближайший приоритет
 
-Самая полезная следующая задача — полноценная live-сцена редактора. Она свяжет ECS, physics, render, WASM и HTTP backend в один проверяемый продуктовый сценарий.
+Editor-only vertical slice уже работает. Следующий приоритет — подключить его к добавленному логическому `ornis_core::World` и общему frame contract, не создавая вторую authoritative-модель состояния; затем заняться масштабированием broadphase physics и надёжностью editor-протокола.
 
 
 ---
@@ -703,7 +691,7 @@ fn run(&self, resources: &Resources)
 
 А `SmartStore` содержит ECS-компоненты.
 
-Это хорошая основа для мира, но **структуры `World`, объединяющей ECS, Physics, Renderer, GPU context, resources и schedules, сейчас нет**.
+Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, time/input и frame lifecycle, пока не собран.
 
 #### Что реально существует
 
@@ -779,7 +767,7 @@ struct GameContext {
 - не содержит `SmartStore`;
 - не содержит Physics;
 - не содержит `Schedule`;
-- не содержит общего ECS world;
+- не использует `ornis_core::World`;
 - хранит `materials` и `instance_data` отдельно;
 - рисует фиксированную showcase-сцену из пяти сфер.
 
@@ -1159,25 +1147,15 @@ resize
 - **EditorWorld есть**, но он не является общим World;
 - **Native loop есть**, но это showcase loop;
 - **WASM loop есть**, но это browser render loop;
-- **единого authoritative world нет**;
+- **единый runtime authoritative world ещё не wired**: core `World` существует, но editor/native/physics/render используют отдельные контейнеры;
 - **единого CPU/GPU data lifecycle нет**;
 - **physics/render/ECS не проходят через один frame schedule**.
 
 ### Что нужно сделать, чтобы появилась настоящая единая архитектура
 
-Нужен верхнеуровневый runtime, например:
-
-```rust
-pub struct World {
-    pub ecs: SmartStore,
-    pub resources: Resources,
-    pub physics: PhysicsEngineResource,
-    pub renderer: RendererResource,
-    pub gpu: GpuResources,
-}
-```
-
-И единый frame runner:
+`ornis_core::World` уже существует как логический контейнер
+`Resources` + `SmartStore`. Нужен верхнеуровневый runtime, который
+зарегистрирует в нём доменные ресурсы и будет владеть единым frame runner:
 
 ```rust
 pub struct Engine {
@@ -1192,9 +1170,9 @@ pub struct Engine {
 
 ```rust
 fn frame(&mut self, dt: Duration) {
-    self.world.resources.insert(Time::new(dt));
+    self.world.resources_mut().insert(Time::new(dt));
 
-    self.schedule.run(&self.world.resources);
+    self.world.run(&self.schedule);
 
     self.physics_step();
     self.extract_render_data();
@@ -1705,14 +1683,11 @@ Engine World
 
 Целевая структура может выглядеть так:
 
-```rust
-pub struct World {
-    pub ecs: SmartStore,
-    pub resources: Resources,
-    pub assets: AssetServer,
-    pub time: Time,
-}
+`ornis_core::World` уже предоставляет логический контейнер ресурсов и
+`SmartStore`. Runtime-обвязка должна добавлять специализированные ресурсы,
+не дублируя ECS-состояние:
 
+```rust
 pub struct Engine {
     pub world: World,
     pub schedule: Schedule,
@@ -1770,11 +1745,11 @@ FramePlan
 
 #### World
 
-Создать единый logical `World`, но не превращать его в огромный god-object. Внутри могут быть специализированные ресурсы, однако все они должны быть доступны единому планировщику через общий контракт.
+`ornis_core::World` уже создан как логический контейнер `Resources` с авторитетным `SmartStore`; не превращать его в огромный god-object. Специализированные physics/render/assets ресурсы должны быть доступны единому планировщику через общий контракт.
 
 ### Эволюционный план
 
-1. создать `EngineWorld`/`World`;
+1. ✅ создать фундамент `ornis_core::World` (`crates/core/src/world.rs`);
 2. зарегистрировать `Time`, `SmartStore`, `PhysicsRuntime`, asset resources;
 3. добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut`;
 4. добавить `RenderExtract`;
