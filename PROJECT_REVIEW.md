@@ -57,6 +57,15 @@
 
    Уточнить заявления про «единый scheduler», CPU/GPU dispatch и invisible ECS, чтобы README отражал именно текущую реализацию.
 
+   > ✅ 2026-08-27: README сверен с кодом. Исправлено: `src/` без Vello;
+   > IPC-типы — в `crates/editor-backend/src/ipc.rs` (не `src/ipc.rs`);
+   > линтер `#[smart_pipeline]` — deprecated-note трюк вместо `compile_warning!`;
+   > `Pack` → ✅ (`for_each_packed` + совместимость лент с `for_each_entity!`);
+   > WASM-viewport рендерит живую сцену из `/api/scene` (fallback на `scene.ron`,
+   > orbit-камера) — статусы редактора и roadmap п.4 обновлены; Приложение A
+   > подтверждено кодом (убран удалённый `shader.rs`, `shapecast` реализован —
+   > G6, A3.3/A3.4 закрыты). Заодно обновлён комментарий в шапке `editor/editor.js`.
+
 8. **Единый источник шейдеров: перевести render на Rust→WGSL (путь 2)**
 
    Сейчас проект непоследователен: физика генерирует шейдеры из Rust

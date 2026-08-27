@@ -2,8 +2,9 @@
 // Polls GET /api/scene + GET /api/status and renders the live ECS state
 // into the Hierarchy panel, the Inspector and the footer. Commands
 // (create/rename/destroy entity, set transform/material) go through
-// POST /api/command. The WASM viewport (viewport.js) is separate
-// and renders its own static scene.ron.
+// POST /api/command. The WASM viewport (viewport.js) polls the same
+// /api/scene (~1/s) and renders the live ECS scene, falling back to
+// scene.ron when the server is unavailable.
 
 // ES module: top-level scope is private to this file; loaded as
 // <script type="module"> from index.html.

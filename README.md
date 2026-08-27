@@ -96,7 +96,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 
 | Путь | Назначение | Статус |
 |---|---|---|
-| `src/` | Бинарь `ornis`: нативный режим (winit + wgpu + Vello) и `editor-only` (HTTP-сервер) | Активен |
+| `src/` | Бинарь `ornis`: нативный режим (winit + wgpu) и `editor-only` (HTTP-сервер) | Активен |
 | `editor/` | Фронтенд редактора: `index.html`, `css/`, `js/`, `icons/`, `scene.ron` | Активен |
 | `xtask/` | Команды `cargo xtask`: `editor`, `quality`, `fuzz`, `mutants` | Активен |
 | `crates/core` | Sparse Sets, Entity (генерационные индексы), диспетчер, Command Sync | Активен |
@@ -115,7 +115,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 > `forks/` (blitz, boa_engine, icu_normalizer). Решение: писать собственный
 > отрисовщик фронтенда нецелесообразно — редактор живёт в браузере (`editor/`),
 > сцена рендерится через WASM/WebGPU. IPC-типы `UiCommand`/`GameEvent`
-> переехали в `src/ipc.rs`. Планы и контекст — в git-истории.
+> переехали в `crates/editor-backend/src/ipc.rs`. Планы и контекст — в git-истории.
 
 ## Текущее состояние (верифицировано по коду)
 
@@ -134,8 +134,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | ✅ | `crates/core/src/dispatcher.rs` |
 | Command-Based Sync: CPU-side очередь команд + residency tracker | ✅ | `crates/core/src/command_sync.rs` |
 | Command-Based Sync: реальное GPU-исполнение (compute dispatch + flush) | ✅ | `crates/wgpu_backend/src/command_sync.rs`, есть тест `gpu_dispatch_records_and_flushes` |
-| Линтер: `compile_warning!` при непараллелизуемых паттернах | 🟡 | `#[smart_pipeline]` генерирует `compile_warning!` (`crates/macros/src/smart_pipeline.rs`), но нет интеграции с IDE и расширяемого набора правил |
-| Component Packing (`#[derive(Pack)]`) | 🟡 | wrapper-типы генерируются, но не интегрированы автоматически в `for_each_entity`/`smart_pipeline` |
+| Линтер: compile-time предупреждения при непараллелизуемых паттернах | 🟡 | `#[smart_pipeline]` помечает такие циклы через deprecated-note трюк (видно в IDE и терминале; `crates/macros/src/smart_pipeline.rs`), но нет расширяемого набора правил |
+| Component Packing (`#[derive(Pack)]`) | ✅ | генерируются wrapper-ленты и `Pack::for_each_packed` (packed-аналог `for_each_entity!`); wrapper-ленты — обычные компоненты и напрямую совместимы с `for_each_entity!` (`crates/core/tests/pack_integration.rs`) |
 | SmartBuffer (автоматическая data residency CPU↔GPU) | 🟡 | dirty-флаги есть; автоматического копирования «только при необходимости» нет |
 
 ### Рендер и материалы
@@ -155,9 +155,9 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Desktop: winit + wgpu (Vulkan/Metal/DX12) | ✅ | `src/main.rs`, нативный режим |
 | WASM + WebGPU в браузере | ✅ | `crates/wasm`; рендер `editor/scene.ron` проверен headless-скриншотами (5 сфер, pixel-identical нативному эталону) |
-| Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит статичную сцену из `scene.ron` |
-| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. Сохранение и загрузка сцены — команды `save_scene`/`load_scene` (см. следующую строку). WASM-canvas по-прежнему рендерит статичный `scene.ron`; live-синхронизация рендера — впереди |
-| Сохранение/загрузка сцены (save/load) | ✅ | `save_scene`/`load_scene` через `POST /api/command` (опциональный `{"path": …}`, по умолчанию `editor/scene.ron`): мир сериализуется в RON и пишется атомарно (sibling `*.tmp` + rename), загрузка заменяет мир из файла; результаты — события `scene_saved {path, version}` / `scene_loaded {path, version, entity_count}` / `error` в `GET /api/events`. В UI — меню File → Save/Reload, результат в футере |
+| Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит живую сцену из `/api/scene` (polling ~1/с) с fallback на `scene.ron`, есть orbit-камера |
+| Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит живой ECS-мир (`src/editor_world.rs`): при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. Сохранение и загрузка сцены — команды `save_scene`/`load_scene` (см. следующую строку) |
+| Сохранение/загрузка сцены (save/load) | ✅ | `save_scene`/`load_scene` через `POST /api/command` (опциональный `{"path": …}`, по умолчанию `editor/scene.ron`): мир сериализуется в RON и пишется атомарно (sibling `*.tmp` + rename), загрузка заменяет мир из файла; результаты — события `scene_saved {path, version}` / `scene_loaded {path, version, entity_count}` / `error` в `GET /api/events`. В UI — меню File → Save/Reload, результат в футере. WASM-canvas рендерит живую сцену: polling `/api/scene` (~1/с), при недоступности сервера — fallback на `scene.ron` |
 | Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. WebSocket нет. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
 | `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
 | Нативный UI-крейт | 🗑️ | удалён (август 2026): `crates/ui*`, форки, vello/boa-стек; нативный режим рендерит 3D-сцену без UI-overlay |
@@ -205,8 +205,9 @@ cargo xtask bca --report      # html to target/bca/index.html
    ~~Сохранение/загрузка сцены~~ — ✅ сделано: меню File → Save/Reload шлёт
    `save_scene`/`load_scene` (атомарная запись `editor/scene.ron`, события
    `scene_saved`/`scene_loaded`/`error`, результат показан в футере).
-4. **WASM-canvas ↔ живой ECS** — рендер не статичного `scene.ron`,
-   а актуального состояния; ввод (мышь/клавиатура) из браузера в движок.
+4. **WASM-canvas ↔ живой ECS** — 🟡 частично: viewport рендерит актуальное
+   состояние из `/api/scene` (polling ~1/с, fallback на `scene.ron`), есть
+   orbit-камера; впереди — ввод (мышь/клавиатура) из браузера в движок.
 5. Дальше: WebSocket-канал для событий и live-синхронизации вместо polling'а
    `/api/events`.
 
@@ -266,10 +267,9 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 любых старых источников с кодом верить коду.
 
 ---
-## Приложение A — Движок рендеринга и физический движок (черновик для ревью)
+## Приложение A — Движок рендеринга и физический движок
 
-> 🔎 Черновик, написан по коду (`crates/render`, `crates/physics`).
-> Нужен ваш ревью: там, где формулировки неточны, — поправьте.
+> Сверено с кодом (`crates/render`, `crates/physics`) 2026-08-27.
 
 ### A1. Движок рендеринга (`crates/render`)
 
@@ -287,7 +287,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
   - Бюджеты: `max_objects=256`, `max_materials=64`.
 - **Материалы**: `OpenPBRMaterial` (20 vec4-параметра, все BSDF) из `ornis_core`, константа `OPENPBR_MATERIAL_SIZE`.
 - **`RenderBackend`** (`render_backend.rs`) — трейт + фабрика `create_render_backend` (плагинная точка смены бэкенда).
-- **`scene.rs`** — загрузка сцены, **`mesh.rs`** (`Mesh`/`Vertex`), **`shader.rs`**/`shaders/` (WGSL, `math.rs` — math-хелперы шейдеров), **`transform.rs`**, **`composite.rs`**.
+- **`scene.rs`** — загрузка сцены, **`mesh.rs`** (`Mesh`/`Vertex`), **`shaders/`** (WGSL, `math.rs` — math-хелперы шейдеров), **`transform.rs`**, **`composite.rs`**.
 
 ### A2. Физический движок (`crates/physics`)
 
@@ -298,12 +298,12 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
   - **Узкая фаза**: контакты сфера/сфера, сфера/бокс, бокс/бокс (минимальная ось SAT), капсула/капсула.
   - **Разрешение**: позиционная коррекция по проникновению + импульс (реституция) + **трение Кулона**.
   - **Substeps** = 4: внутри `step` цикл `integrate → broadphase → detect → resolve`.
-  - **Raycast** — t-slab по AABB, возвращает ближайшее. **`shapecast` — заглушка (`None`)**.
+  - **Raycast** — t-slab по AABB, возвращает ближайшее. **`shapecast`** — честная реализация (G6): conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
   - `BodyType` dynamic/static, `RigidBody` (position, velocity, inv_mass, restitution, friction), `Shape` (sphere/box/capsule).
 - Тесты в `mod.rs`: падение сферы, статика не падает, сфера-сфера, box-box, raycast на сферу.
 
 ### A3. Открытые вопросы для ревью
 1. ~~Рендер: активен ли G-buffer/lighting-путь или только forward?~~ **Закрыто в Фазе 4** — render graph c `Technique` (forward/deferred/hybrid), гибрид == legacy пиксель-в-пиксель.
 2. Физика: какие связки (joints) нужны в первую очередь (revolute/ball), нужен ли CCD для быстрых тел.
-3. `shapecast` — пустая заглушка; планируется ли честная реализация или достаточно raycast+sphere-cast.
-4. Движок рендера и физики не связаны с ECS-сценой в браузере (см. План B в PLAN.md).
+3. ~~`shapecast` — пустая заглушка~~ **Закрыто (G6)** — честный shapecast через conservative advancement (`distance.rs`), покрыт тестами.
+4. ~~Движок рендера не связан с ECS-сценой в браузере~~ **Частично закрыто** — WASM-viewport рендерит живую сцену из `/api/scene`; физика со сценой браузера по-прежнему не связана (см. План B в PLAN.md).
