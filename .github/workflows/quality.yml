@@ -106,7 +106,16 @@ jobs:
         # default cannot be relied on — `shell: bash` on Linux maps to
         # `bash --noprofile --norc -eo pipefail {0}`.
         shell: bash
-        run: cargo xtask quality --ci 2>&1 | tee target/quality.log
+        run: |
+          # tee opens the log BEFORE cargo starts, so `target/` must
+          # already exist: on a rust-cache miss (fresh Cargo.lock key,
+          # new branch) the directory is absent, tee fails instantly,
+          # pipefail turns the gate red, and every post-failure step
+          # then crashes on the missing file instead of reporting the
+          # real error (observed: FileNotFoundError in the chunked
+          # comment step on a cache-miss PR run).
+          mkdir -p target
+          cargo xtask quality --ci 2>&1 | tee target/quality.log
 
       # Artifact: full log, kept 7 days. Visible in the Actions UI
       # (not the agent's reach, but useful for humans debugging the
@@ -139,17 +148,26 @@ jobs:
             echo '### 📊 QUALITY SUMMARY'
             echo
             echo '```text'
-            if grep -q 'QUALITY SUMMARY' target/quality.log; then
-              awk '/QUALITY SUMMARY/,/^╚/' target/quality.log
+            if [ -f target/quality.log ]; then
+              if grep -q 'QUALITY SUMMARY' target/quality.log; then
+                awk '/QUALITY SUMMARY/,/^╚/' target/quality.log
+              else
+                echo '(no summary block found in log — xtask may have crashed before printing it)'
+              fi
             else
-              echo '(no summary block found in log — xtask may have crashed before printing it)'
+              echo '(target/quality.log missing — gate failed before tee could write it;'
+              echo ' see the raw "Quality gate" step output in the Actions log)'
             fi
             echo '```'
             echo
             echo '### 📜 Tail of log (200 lines)'
             echo
             echo '```text'
-            tail -n 200 target/quality.log
+            if [ -f target/quality.log ]; then
+              tail -n 200 target/quality.log
+            else
+              echo '(no log file — see above)'
+            fi
             echo '```'
             echo
             echo 'Полные логи — в артефакте `quality-log` этого run.'
@@ -193,7 +211,16 @@ jobs:
                   txt = r.read()
               return json.loads(txt) if txt else None
 
-          log = open('target/quality.log', encoding='utf-8', errors='replace').read()
+          log_path = 'target/quality.log'
+          if os.path.exists(log_path):
+              log = open(log_path, encoding='utf-8', errors='replace').read()
+          else:
+              # Gate failed before tee could write the log (e.g. missing
+              # target/ on a cold rust-cache). Still post a marker comment
+              # so the agent sees SOMETHING instead of a crashed step.
+              log = ('(target/quality.log was not created — the gate step failed\n'
+                     'before tee wrote anything. Read the raw "Quality gate" step\n'
+                     'output in the Actions run referenced by the digest comment.)\n')
           log = re.sub(r'\x1b\[[0-9;]*m', '', log)  # ANSI-коды xtask
           chunks, buf = [], ''
           for line in log.splitlines(keepends=True):
