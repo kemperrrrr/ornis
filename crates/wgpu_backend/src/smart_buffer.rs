@@ -2,13 +2,24 @@ use bitflags::bitflags;
 use wgpu::util::DeviceExt;
 
 bitflags! {
+    /// Tracks which side of a [`SmartBuffer`] holds the newer copy of the
+    /// data, so sync operations transfer bytes only when needed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ResidencyFlags: u8 {
+        /// The CPU copy was mutated; the GPU buffer is stale.
         const DIRTY_CPU = 0b01;
+        /// The GPU copy was mutated by a dispatch; the CPU slice is stale.
         const DIRTY_GPU = 0b10;
     }
 }
 
+/// A buffer resident on both CPU and GPU with dirty-flag synchronization.
+///
+/// Mutating through [`cpu_data_mut`](Self::cpu_data_mut) or a GPU dispatch
+/// (flagged via [`mark_gpu_dirty`](Self::mark_gpu_dirty)) marks the opposite
+/// side stale; [`sync_to_gpu`](Self::sync_to_gpu) and
+/// [`sync_to_cpu_blocking`](Self::sync_to_cpu_blocking) then move the bytes
+/// on demand instead of eagerly.
 pub struct SmartBuffer<T: bytemuck::Pod> {
     cpu_data: Vec<T>,
     gpu_buffer: Option<wgpu::Buffer>,
@@ -18,6 +29,8 @@ pub struct SmartBuffer<T: bytemuck::Pod> {
 }
 
 impl<T: bytemuck::Pod> SmartBuffer<T> {
+    /// Creates a buffer with `cpu_data` as the initial contents, uploaded to
+    /// a fresh GPU buffer with the given usage flags. Both sides start clean.
     pub fn new(
         cpu_data: Vec<T>,
         device: &wgpu::Device,
@@ -41,23 +54,31 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
         }
     }
 
+    /// The GPU-side buffer, or `None` if it was dropped and not yet
+    /// recreated via [`ensure_gpu_buffer`](Self::ensure_gpu_buffer).
     pub fn gpu_buffer(&self) -> Option<&wgpu::Buffer> {
         self.gpu_buffer.as_ref()
     }
 
+    /// Read-only view of the CPU copy. Does not raise any dirty flag.
     pub fn cpu_data(&self) -> &[T] {
         &self.cpu_data
     }
 
+    /// Mutable view of the CPU copy; marks the GPU side stale
+    /// ([`ResidencyFlags::DIRTY_CPU`]).
     pub fn cpu_data_mut(&mut self) -> &mut [T] {
         self.flags.insert(ResidencyFlags::DIRTY_CPU);
         &mut self.cpu_data
     }
 
+    /// Records that a GPU dispatch mutated the buffer, marking the CPU side
+    /// stale ([`ResidencyFlags::DIRTY_GPU`]).
     pub fn mark_gpu_dirty(&mut self) {
         self.flags.insert(ResidencyFlags::DIRTY_GPU);
     }
 
+    /// Current dirty flags for both residency sides.
     pub fn flags(&self) -> ResidencyFlags {
         self.flags
     }

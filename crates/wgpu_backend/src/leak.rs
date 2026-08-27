@@ -68,13 +68,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>,
     )
 }
 
+/// A ready-to-record LEAK-style compute dispatch: pipeline, bind group, and
+/// grid size precomputed for a fixed element count.
 pub struct LeakDispatch {
+    /// Compiled compute pipeline for the generated LEAK shader.
     pub pipeline: wgpu::ComputePipeline,
+    /// Bind group wiring the input, output, and dirty-flag buffers.
     pub bind_group: wgpu::BindGroup,
+    /// Dispatch grid: `x` covers `element_count / block_size`, rounded up.
     pub workgroup_count: (u32, u32, u32),
 }
 
 impl LeakDispatch {
+    /// Generates the shader for `elem_type` + `body_expr`, compiles the
+    /// pipeline, and binds `input_buffer`/`output_buffer`/`dirty_buffer` to
+    /// slots 0/1/2. The grid is sized so every element of `element_count`
+    /// is covered by a `block_size`-wide workgroup.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &wgpu::Device,
@@ -131,6 +140,7 @@ impl LeakDispatch {
         }
     }
 
+    /// Encodes the dispatch into a fresh command buffer, ready to submit.
     pub fn record(&self, device: &wgpu::Device) -> wgpu::CommandBuffer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("leak_encoder"),

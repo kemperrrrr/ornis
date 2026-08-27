@@ -1,15 +1,30 @@
+/// Fully initialized `wgpu` handles for a high-performance adapter.
+///
+/// Construction picks the best available backend and requests a device with
+/// downlevel-compatible limits, so the same context works on native and web
+/// targets.
 pub struct WgpuContext {
+    /// Entry point owning the underlying graphics backend connections.
     pub instance: wgpu::Instance,
+    /// Handle to the selected physical GPU.
     pub adapter: wgpu::Adapter,
+    /// Logical device used to create all GPU resources.
     pub device: wgpu::Device,
+    /// Submission queue paired with [`device`](Self::device).
     pub queue: wgpu::Queue,
 }
 
 impl WgpuContext {
+    /// Blocking wrapper around [`new`](Self::new) for synchronous call sites.
+    ///
+    /// Panics if no compatible GPU adapter is found.
     pub fn new_blocking() -> Self {
         pollster::block_on(Self::new())
     }
 
+    /// Requests a high-performance adapter and a device with downlevel limits.
+    ///
+    /// Panics if no compatible GPU adapter is found or device creation fails.
     pub async fn new() -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),

@@ -16,6 +16,7 @@ pub struct CommandSync {
 }
 
 impl CommandSync {
+    /// Creates an empty recorder bound to the given device and queue.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let device = std::sync::Arc::new(device);
         let queue = std::sync::Arc::new(queue);
@@ -100,10 +101,12 @@ impl CommandSync {
         }
     }
 
+    /// Number of commands recorded since the last [`flush`](Self::flush).
     pub fn len(&self) -> usize {
         self.commands.len()
     }
 
+    /// Returns `true` when no commands are waiting to be flushed.
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
+/// Measured GPU/CPU crossover configuration, persisted as JSON between runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfilerConfig {
     /// Element count threshold above which GPU is preferred.
@@ -28,9 +29,14 @@ impl Default for ProfilerConfig {
 
 const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000];
 
+/// Measures CPU and GPU dispatch costs on the local hardware and derives the
+/// element-count threshold where the GPU starts to win.
 pub struct AutoProfiler;
 
 impl AutoProfiler {
+    /// Path of the persisted calibration file
+    /// (`$CONFIG_DIR/ornis/profiler_config.json`), creating the parent
+    /// directory if needed.
     pub fn config_path() -> PathBuf {
         let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         p.push("ornis");
@@ -39,6 +45,8 @@ impl AutoProfiler {
         p
     }
 
+    /// Returns the persisted config when present and valid; otherwise runs
+    /// [`calibrate`](Self::calibrate) and writes the result to disk.
     pub fn load_or_calibrate(device: &wgpu::Device, queue: &wgpu::Queue) -> ProfilerConfig {
         let path = Self::config_path();
         if path.exists()
@@ -55,6 +63,9 @@ impl AutoProfiler {
         cfg
     }
 
+    /// Benchmarks GPU and CPU execution across a fixed set of workload sizes
+    /// and returns a config whose threshold is the first size where the GPU
+    /// round-trip beats the CPU.
     pub fn calibrate(device: &wgpu::Device, queue: &wgpu::Queue) -> ProfilerConfig {
         let mut gpu_times: Vec<(usize, f64)> = Vec::new();
         let mut cpu_times: Vec<(usize, f64)> = Vec::new();

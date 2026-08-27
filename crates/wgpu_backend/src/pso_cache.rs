@@ -8,6 +8,9 @@ struct CachedPipeline {
     label: String,
 }
 
+/// Memoizes compiled compute pipelines keyed by (kernel, component) type
+/// pair, and mirrors the WGSL sources to a cache directory so later runs can
+/// be inspected or warmed up.
 pub struct PsoCache {
     device: wgpu::Device,
     pipelines: HashMap<(TypeId, TypeId), CachedPipeline>,
@@ -15,6 +18,8 @@ pub struct PsoCache {
 }
 
 impl PsoCache {
+    /// Creates an empty cache rooted at `$CACHE_DIR/ornis/pso_cache`,
+    /// creating the directory if needed.
     pub fn new(device: wgpu::Device) -> Self {
         let mut path = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
         path.push("ornis");
@@ -86,6 +91,7 @@ impl PsoCache {
         self.pipelines.len()
     }
 
+    /// Returns `true` when no pipelines have been compiled yet.
     pub fn is_empty(&self) -> bool {
         self.pipelines.is_empty()
     }

@@ -10,6 +10,10 @@ pub struct GpuExecutor;
 
 /// Trait with zero-cost dispatch via ZSTs.
 pub trait ExecuteLane {
+    /// Records the workload into `sync` on this executor's lane.
+    ///
+    /// The GPU lane submits `pipeline`/`bind_group` as a compute dispatch
+    /// sized from `element_count`; the CPU lane runs `cpu_work` instead.
     fn execute(
         &self,
         sync: &mut CommandSync,
