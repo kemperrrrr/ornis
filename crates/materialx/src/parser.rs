@@ -49,6 +49,8 @@ fn is_node_element(name: &[u8]) -> bool {
     )
 }
 
+/// Streaming quick-xml parser producing a [`crate::nodes::MaterialXDocument`]
+/// from `.mtlx` text. Stateless: create with [`MaterialXParser::new`] and reuse freely.
 pub struct MaterialXParser;
 
 impl Default for MaterialXParser {
@@ -128,10 +130,19 @@ impl ParseState {
 }
 
 impl MaterialXParser {
+    /// Create a stateless parser instance.
     pub fn new() -> Self {
         Self
     }
 
+    /// Parse `.mtlx` XML into a structured document of nodedefs and nodegraphs.
+    ///
+    /// Self-closing tags are expanded so `<input .../>` children are never
+    /// dropped. Unknown elements are ignored rather than rejected.
+    ///
+    /// # Errors
+    /// [`crate::MaterialXError::Xml`]/[`crate::MaterialXError::Attr`]/
+    /// [`crate::MaterialXError::Utf8`] from the underlying reader.
     pub fn parse(&self, content: &str) -> Result<MaterialXDocument, MaterialXError> {
         let mut reader = Reader::from_str(content);
         reader.config_mut().trim_text(true);

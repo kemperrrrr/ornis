@@ -8,80 +8,120 @@ use std::collections::HashMap;
 use std::str::Utf8Error;
 use thiserror::Error;
 
+/// Failures of graph evaluation and OpenPBR extraction.
 #[derive(Error, Debug)]
 pub enum CodegenError {
+    /// No nodegraph implementing `open_pbr_surface` exists in the document.
     #[error("Node graph not found: {0}")]
     GraphNotFound(String),
+    /// A node's type has no matching nodedef in the document.
     #[error("Node definition not found: {0}")]
     NodeDefNotFound(String),
+    /// An input with no connection, literal value or nodedef default.
     #[error("Required input not found: {0}")]
     InputNotFound(String),
+    /// A literal value could not be parsed into the declared type.
     #[error("Type conversion error: {0}")]
     TypeConversion(String),
+    /// The evaluator has no handler for this node type.
     #[error("Unsupported node type: {0}")]
     UnsupportedNode(String),
+    /// The nodegraph contains a dependency cycle.
     #[error("Cyclic dependency detected")]
     CyclicDependency,
     #[error("IO error: {0}")]
+    /// Filesystem error raised while loading a document.
     Io(#[from] std::io::Error),
+    /// Wraps a parse-stage failure raised while converting.
     #[error("MaterialX error: {0}")]
     MaterialX(#[from] Box<MaterialXError>),
 }
 
+/// Unified failure type for the whole parse→convert pipeline.
 #[derive(Error, Debug)]
 pub enum MaterialXError {
+    /// quick_xml failed on the document.
     #[error("XML parse error: {0}")]
     Xml(#[from] XmlError),
+    /// Filesystem access failed while reading the document.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// An XML attribute was malformed.
     #[error("XML attribute error: {0}")]
     Attr(#[from] AttrError),
     #[error("UTF-8 conversion error: {0}")]
+    /// Non-UTF-8 text inside the XML document.
     Utf8(#[from] Utf8Error),
+    /// A referenced node does not exist in the graph.
     #[error("Node not found: {0}")]
     NodeNotFound(String),
     #[error("Invalid parameter: {0}")]
+    /// A parameter value is malformed or out of contract.
     InvalidParameter(String),
     #[error("Unsupported node type: {0}")]
+    /// The parser/evaluator has no support for this node type.
     UnsupportedNode(String),
     #[error("Missing required input: {0}")]
+    /// A node references an input that is nowhere defined.
     MissingInput(String),
+    /// Graph evaluation / material extraction failed after a successful parse.
     #[error("Codegen error: {0}")]
     Codegen(Box<CodegenError>),
 }
 
+/// Adapter so MaterialX failures can flow through IO-typed call sites.
 impl From<MaterialXError> for std::io::Error {
     fn from(e: MaterialXError) -> Self {
         std::io::Error::other(e.to_string())
     }
 }
 
+/// Result of evaluating one nodegraph: named output values keyed by the
+/// `<output>` element name (e.g. `"base_color"`).
 #[derive(Debug, Clone)]
 pub struct EvaluatedGraph {
+    /// Fully evaluated outputs of the graph.
     pub outputs: HashMap<String, OutputValue>,
 }
 
+/// Dynamically typed value produced by an evaluated MaterialX node.
 #[derive(Debug, Clone)]
 pub enum OutputValue {
+    /// Scalar (`float`).
     Float(f32),
+    /// Linear RGB color.
     Color3([f32; 3]),
+    /// RGBA color.
     Color4([f32; 4]),
+    /// 2-component vector.
     Vector2([f32; 2]),
+    /// 3-component vector.
     Vector3([f32; 3]),
+    /// 4-component vector.
     Vector4([f32; 4]),
+    /// Truth value.
     Boolean(bool),
+    /// Free-form string (also used for `open_pbr_surface` markers).
     String(String),
+    /// Reference to a bidirectional scattering distribution.
     BSDF(String),
+    /// Reference to an emission distribution.
     EDF(String),
+    /// Reference to a volume distribution.
     VDF(String),
 }
 
+/// Evaluates a parsed [`MaterialXDocument`] and extracts an
+/// [`OpenPBRMaterial`] from its `open_pbr_surface` graph.
 pub struct MaterialXConverter {
     document: MaterialXDocument,
     node_defs: HashMap<String, NodeDef>,
 }
 
 impl MaterialXConverter {
+    /// Index all nodedefs of `document` for lookup. Definitions are indexed
+    /// both by their `ND_*` name and their `node` attribute (the evaluator
+    /// looks them up by node *type*); later document order wins conflicts.
     pub fn new(document: MaterialXDocument) -> Self {
         let mut node_defs = HashMap::new();
         for def in &document.nodedefs {
@@ -106,6 +146,13 @@ impl MaterialXConverter {
         }
     }
 
+    /// Evaluate the first nodegraph whose `nodedef` references
+    /// `open_pbr_surface` and map its named outputs onto an
+    /// [`OpenPBRMaterial`], starting from the default material.
+    ///
+    /// # Errors
+    /// [`CodegenError::GraphNotFound`] without such a graph; evaluation
+    /// failures otherwise propagate as-is.
     pub fn to_openpbr(&self) -> Result<OpenPBRMaterial, CodegenError> {
         let graph = self.find_openpbr_graph()?;
         let mut evaluator = GraphEvaluator::new(self, graph);
@@ -944,7 +991,9 @@ fn parse_component(part: &str, what: &str, raw: &str) -> Result<f32, CodegenErro
         .map_err(|_| CodegenError::TypeConversion(format!("{}: {}", what, raw)))
 }
 
-/// High-level function to convert MaterialX file to OpenPBRMaterial
+/// One-shot conversion of MaterialX XML text to an [`OpenPBRMaterial`]:
+/// parse → evaluate → extract. Evaluation failures surface wrapped in
+/// [`MaterialXError::Codegen`].
 pub fn materialx_to_openpbr(mtlx_content: &str) -> Result<OpenPBRMaterial, MaterialXError> {
     let document = crate::parser::MaterialXParser::new().parse(mtlx_content)?;
     let converter = MaterialXConverter::new(document);
@@ -953,7 +1002,10 @@ pub fn materialx_to_openpbr(mtlx_content: &str) -> Result<OpenPBRMaterial, Mater
         .map_err(|e| MaterialXError::Codegen(Box::new(e)))
 }
 
-/// Load MaterialX from file and convert to OpenPBRMaterial
+/// File-based variant of [`materialx_to_openpbr`].
+///
+/// # Errors
+/// IO errors from reading `path` plus everything [`materialx_to_openpbr`] can raise.
 pub fn load_materialx_file<P: AsRef<std::path::Path>>(
     path: P,
 ) -> Result<OpenPBRMaterial, MaterialXError> {
@@ -961,6 +1013,11 @@ pub fn load_materialx_file<P: AsRef<std::path::Path>>(
     materialx_to_openpbr(&content)
 }
 
+/// Alias of [`materialx_to_openpbr`] kept for API stability; identical
+/// parse→evaluate→extract pipeline.
+///
+/// # Errors
+/// Same contract as [`materialx_to_openpbr`].
 pub fn parse_materialx(content: &str) -> Result<OpenPBRMaterial, MaterialXError> {
     let parser = crate::parser::MaterialXParser::new();
     let document = parser.parse(content)?;
@@ -970,6 +1027,8 @@ pub fn parse_materialx(content: &str) -> Result<OpenPBRMaterial, MaterialXError>
         .map_err(|e| MaterialXError::Codegen(Box::new(e)))
 }
 
+/// Marker namespace for OpenPBR graph helpers (kept for API compatibility;
+/// currently carries no behavior).
 pub struct OpenPBRGraph;
 
 #[cfg(test)]

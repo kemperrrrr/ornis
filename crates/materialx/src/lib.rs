@@ -1,7 +1,11 @@
+#![warn(missing_docs)]
 //! MaterialX parser and OpenPBR material converter for Ornis Engine
 
+/// Graph evaluation and conversion of parsed documents to [`OpenPBRMaterial`].
 pub mod graph;
+/// serde-friendly AST mirroring the MaterialX XML structure.
 pub mod nodes;
+/// Streaming XML reader turning `.mtlx` text into [`crate::nodes::MaterialXDocument`]s.
 pub mod parser;
 
 pub use graph::{
@@ -13,7 +17,10 @@ pub use parser::MaterialXParser;
 
 use ornis_render::OpenPBRMaterial;
 
-/// Load MaterialX from file and convert to OpenPBRMaterial
+/// Crate-root convenience wrapper around [`graph::load_materialx_file`].
+///
+/// # Errors
+/// Same contract as [`graph::load_materialx_file`].
 pub fn load_materialx<P: AsRef<std::path::Path>>(
     path: P,
 ) -> Result<OpenPBRMaterial, MaterialXError> {
