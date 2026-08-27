@@ -582,15 +582,20 @@ impl<'a> FrameState<'a> {
         let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
         let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
-        self.renderer
-            .set_camera(&self.queue, &view_proj.to_cols_array_2d(), cam_pos.to_array());
+        self.renderer.set_camera(
+            &self.queue,
+            &view_proj.to_cols_array_2d(),
+            cam_pos.to_array(),
+        );
     }
 
     /// Draw one frame into the given swap-chain view.
     fn draw(&mut self, target_view: &wgpu::TextureView) {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render_encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
         self.renderer.render_scene(
             RenderContext {
                 device: &self.device,

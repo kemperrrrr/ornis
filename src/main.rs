@@ -238,7 +238,7 @@ impl GameApp {
                 mat.coat.weight(1.0);
                 mat.coat.roughness(0.1);
                 mat
-            }
+            },
         ];
 
         let spacing = 2.8;
