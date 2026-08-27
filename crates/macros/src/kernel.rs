@@ -170,7 +170,15 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     let body = &func.block;
 
     let expanded = quote! {
+        // The user-facing `#[kernel] fn` carries the docs; the generated
+        // helper module (eval/wgsl_source/...) is intentionally bare and
+        // hidden from rustdoc.
+        #[doc(hidden)]
         pub mod #fn_name {
+            // The user-facing `#[kernel] fn` carries the docs; the generated
+            // helper surface (eval/wgsl_source/...) is intentionally bare and
+            // hidden from rustdoc.
+            #[allow(missing_docs)]
             #[allow(non_snake_case)]
             pub fn eval ( #inputs ) #output {
                 use super::*;

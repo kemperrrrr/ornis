@@ -1,6 +1,16 @@
+//! Storage for infrequently accessed ("cold") components.
+//!
+//! Wraps [`ComponentStore`] for component types that are rarely read or
+//! written (save data, editor-only metadata, ...). Keeping them in a
+//! separate store keeps hot archetype/smart stores dense and cache
+//! friendly while still offering full CRUD access.
+
 use crate::component_store::ComponentStore;
 use crate::entity::Entity;
 
+/// A [`ComponentStore`] dedicated to cold (rarely touched) components of
+/// type `T`. API mirrors [`ComponentStore`] exactly; the split exists
+/// purely to keep hot data paths compact.
 pub struct ColdComponentStore<T> {
     inner: ComponentStore<T>,
 }
@@ -14,42 +24,52 @@ impl<T> Default for ColdComponentStore<T> {
 }
 
 impl<T> ColdComponentStore<T> {
+    /// Creates an empty store.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Inserts or replaces the component for `entity`.
     pub fn insert(&mut self, entity: Entity, component: T) {
         self.inner.insert(entity, component);
     }
 
+    /// Removes and returns the component for `entity`, if present.
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
         self.inner.remove(entity)
     }
 
+    /// Returns a shared reference to the component, if present.
     pub fn get(&self, entity: Entity) -> Option<&T> {
         self.inner.get(entity)
     }
 
+    /// Returns an exclusive reference to the component, if present.
     pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
         self.inner.get_mut(entity)
     }
 
+    /// Returns `true` if `entity` has a component in this store.
     pub fn contains(&self, entity: Entity) -> bool {
         self.inner.contains(entity)
     }
 
+    /// Iterates over all stored components in unspecified order.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.inner.iter()
     }
 
+    /// Mutably iterates over all stored components in unspecified order.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.inner.iter_mut()
     }
 
+    /// Returns the number of stored components.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// Returns `true` if no components are stored.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }

@@ -10,10 +10,14 @@ use symphonia::core::probe::Hint;
 
 use crate::source::AudioClip;
 
+/// Failure modes of [`decode_file`] / [`decode_bytes`].
 #[derive(Debug)]
 pub enum DecodeError {
+    /// The file could not be opened or read.
     Io(std::io::Error),
+    /// Symphonia rejected the container/metadata (e.g. not audio at all).
     Format(&'static str),
+    /// No decodable track, or no Symphonia decoder registered for the codec.
     Unsupported,
 }
 
@@ -35,6 +39,16 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Decode any Symphonia-supported audio file into an interleaved f32 clip.
+///
+/// The path's extension feeds the format probe's hint. Samples come out
+/// interleaved and normalized to [-1, 1]; unknown sample rate/channel count
+/// falls back to 44100 Hz / stereo. Undecodable packets are skipped rather
+/// than failing the whole decode.
+///
+/// # Errors
+/// [`DecodeError::Io`] when the path can't be read, [`DecodeError::Format`]
+/// when probing fails, [`DecodeError::Unsupported`] without a usable track.
 pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<AudioClip, DecodeError> {
     let file = std::fs::File::open(path.as_ref())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -106,6 +120,10 @@ pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<AudioClip, DecodeError> {
     })
 }
 
+/// In-memory counterpart of [`decode_file`] for embedded/fetched audio.
+///
+/// `extension` (e.g. `"wav"`) drives the format hint; same error contract
+/// and sample normalization as [`decode_file`].
 pub fn decode_bytes(data: &[u8], extension: &str) -> Result<AudioClip, DecodeError> {
     let owned = data.to_vec();
     let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(owned)), Default::default());

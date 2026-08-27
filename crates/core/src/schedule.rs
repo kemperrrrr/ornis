@@ -99,6 +99,7 @@ pub struct Resources {
 }
 
 impl Resources {
+    /// Creates an empty resource map.
     pub fn new() -> Self {
         Self::default()
     }
@@ -167,7 +168,9 @@ impl Resources {
 /// `Read`/`Write` графа).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemAccess {
+    /// Resource types the system reads (`&R`).
     pub reads: Vec<TypeId>,
+    /// Resource types the system writes (`&mut R`).
     pub writes: Vec<TypeId>,
     /// Ленты компонентов, читаемые системой (`TypeId` компонента).
     pub reads_lanes: Vec<TypeId>,
@@ -176,6 +179,7 @@ pub struct SystemAccess {
 }
 
 impl SystemAccess {
+    /// Creates an empty access set.
     pub fn new() -> Self {
         Self::default()
     }
@@ -260,8 +264,11 @@ impl SystemAccess {
 
 /// Система единого шедулера: доступы — данные, исполнение — над миром.
 pub trait System: Send + Sync {
+    /// Unique system name for diagnostics and ordering.
     fn name(&self) -> &'static str;
+    /// Declares the resources and lanes this system touches.
     fn access(&self) -> SystemAccess;
+    /// Runs the system against the shared resources.
     fn run(&self, resources: &Resources);
 }
 
@@ -454,6 +461,7 @@ impl Default for Schedule {
 }
 
 impl Schedule {
+    /// Creates an empty schedule with parallel execution enabled.
     pub fn new() -> Self {
         Self {
             systems: Vec::new(),

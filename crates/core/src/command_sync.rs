@@ -12,9 +12,14 @@ use std::collections::HashMap;
 /// Data residency state for a lane
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DataResidency {
+    /// Latest authoritative copy lives only on the CPU; a CPU-to-GPU
+    /// upload is pending.
     #[default]
     CpuOnly,
+    /// Latest authoritative copy lives only on the GPU; a GPU readback is
+    /// pending before CPU code may consume the data.
     GpuOnly,
+    /// Both copies are up to date; no transfer required.
     Both,
 }
 
@@ -25,27 +30,35 @@ pub struct ResidencyTracker {
 }
 
 impl ResidencyTracker {
+    /// Creates an empty tracker; every untracked type is implicitly
+    /// `CpuOnly`.
     pub fn new() -> Self {
         Self {
             residency: HashMap::new(),
         }
     }
 
+    /// Records that the CPU copy of `T` is the fresh one.
     pub fn mark_cpu<T: 'static + Send + Sync>(&mut self) {
         self.residency
             .insert(TypeId::of::<T>(), DataResidency::CpuOnly);
     }
 
+    /// Records that the GPU copy of `T` is the fresh one.
     pub fn mark_gpu<T: 'static + Send + Sync>(&mut self) {
         self.residency
             .insert(TypeId::of::<T>(), DataResidency::GpuOnly);
     }
 
+    /// Records that both copies of `T` are in sync (after a completed
+    /// transfer).
     pub fn mark_both<T: 'static + Send + Sync>(&mut self) {
         self.residency
             .insert(TypeId::of::<T>(), DataResidency::Both);
     }
 
+    /// Current residency of `T`; defaults to [`DataResidency::CpuOnly`]
+    /// for types never marked.
     pub fn get<T: 'static + Send + Sync>(&self) -> DataResidency {
         self.residency
             .get(&TypeId::of::<T>())
@@ -53,18 +66,22 @@ impl ResidencyTracker {
             .unwrap_or(DataResidency::CpuOnly)
     }
 
+    /// Number of tracked component types.
     pub fn len(&self) -> usize {
         self.residency.len()
     }
 
+    /// Returns `true` if no type has been tracked yet.
     pub fn is_empty(&self) -> bool {
         self.residency.is_empty()
     }
 
+    /// `true` when the GPU copy is stale and an upload of `T` is due.
     pub fn needs_cpu_to_gpu<T: 'static + Send + Sync>(&self) -> bool {
         matches!(self.get::<T>(), DataResidency::CpuOnly)
     }
 
+    /// `true` when the CPU copy is stale and a readback of `T` is due.
     pub fn needs_gpu_to_cpu<T: 'static + Send + Sync>(&self) -> bool {
         matches!(self.get::<T>(), DataResidency::GpuOnly)
     }
@@ -86,11 +103,14 @@ pub enum CommandType {
 /// A GPU command to be executed on the GPU
 #[derive(Debug)]
 pub struct GpuCommand {
+    /// What kind of transfer/dispatch to perform.
     pub command_type: CommandType,
+    /// Which component lane the command applies to.
     pub component_type: TypeId,
 }
 
 impl GpuCommand {
+    /// Creates a command targeting the lane of component type `T`.
     pub fn new<T: 'static + Send + Sync>(command_type: CommandType) -> Self {
         Self {
             command_type,
@@ -107,6 +127,7 @@ pub struct CommandQueue {
 }
 
 impl CommandQueue {
+    /// Creates an empty queue with no dirty lanes.
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
@@ -114,14 +135,17 @@ impl CommandQueue {
         }
     }
 
+    /// Appends `command` (typed by `T` purely for call-site clarity).
     pub fn enqueue<T: 'static + Send + Sync>(&mut self, command: GpuCommand) {
         self.commands.push(command);
     }
 
+    /// Flags the lane of `T` as having unsynced CPU-side changes.
     pub fn mark_dirty<T: 'static + Send + Sync>(&mut self) {
         self.dirty_lanes.insert(TypeId::of::<T>(), true);
     }
 
+    /// `true` if the lane of `T` has changes not yet flushed to the GPU.
     pub fn is_dirty<T: 'static + Send + Sync>(&self) -> bool {
         self.dirty_lanes
             .get(&TypeId::of::<T>())
@@ -129,18 +153,23 @@ impl CommandQueue {
             .unwrap_or(false)
     }
 
+    /// Clears the dirty flag for `T` (call after a successful upload).
     pub fn clear_dirty<T: 'static + Send + Sync>(&mut self) {
         self.dirty_lanes.insert(TypeId::of::<T>(), false);
     }
 
+    /// Number of queued commands.
     pub fn len(&self) -> usize {
         self.commands.len()
     }
 
+    /// Returns `true` if no commands are pending.
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
 
+    /// Takes all queued commands, leaving the queue empty; the render
+    /// thread executes them and reports residency back.
     pub fn drain(&mut self) -> Vec<GpuCommand> {
         std::mem::take(&mut self.commands)
     }
@@ -162,10 +191,14 @@ impl Default for CommandSync {
 }
 
 impl CommandSync {
+    /// Creates an empty sync state with no commands or tracked lanes.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Flags the lane of POD component `T` as dirty on the CPU side:
+    /// marks it in the queue and records `CpuOnly` residency so the next
+    /// flush issues an upload.
     pub fn mark_dirty<T: 'static + Send + Sync + bytemuck::Pod + bytemuck::Zeroable>(
         &mut self,
         _store: &SmartStore,
@@ -174,16 +207,20 @@ impl CommandSync {
         self.residency.mark_cpu::<T>();
     }
 
+    /// Pending GPU commands accumulated since the last drain.
     pub fn queue(&self) -> &CommandQueue {
         &self.queue
     }
 
+    /// Residency state per component type.
     pub fn residency(&self) -> &ResidencyTracker {
         &self.residency
     }
 }
 
 /// Trait for components that can be synced via commands
+/// Marker for component types eligible for command-based GPU sync:
+/// plain-old-data so they can be copied into GPU buffers verbatim.
 pub trait CommandSyncable: 'static + Send + Sync + bytemuck::Pod + bytemuck::Zeroable {}
 
 impl<T: 'static + Send + Sync + bytemuck::Pod + bytemuck::Zeroable> CommandSyncable for T {}

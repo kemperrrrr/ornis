@@ -9,108 +9,153 @@
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Base (diffuse) parameters — GPU slot 0.
 pub struct BaseGroup {
+    /// Scalar params: `[weight, diffuse_roughness, metalness, reserved]`.
     pub params: [f32; 4],
+    /// Linear base color (RGBA).
     pub color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Specular reflection parameters — GPU slot 1.
 pub struct SpecularGroup {
+    /// Scalar params: `[weight, roughness, ior, anisotropy]`.
     pub params: [f32; 4],
+    /// Metallic edge tint (RGB; alpha unused).
     pub color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Transmission (refraction) parameters — GPU slot 2.
 pub struct TransmissionGroup {
+    /// Scalar params: `[weight, depth, dispersion_scale, dispersion_abbe]`.
     pub params: [f32; 4],
+    /// Transmitted tint color (RGB) with `anisotropy` in alpha.
     pub color: [f32; 4],
+    /// Volume scattering color (RGB) with `anisotropy` in alpha.
     pub scatter: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Subsurface scattering parameters — GPU slot 3.
 pub struct SubsurfaceGroup {
+    /// Scalar params: `[weight, radius, radius_scale_r, scatter_anisotropy]`.
     pub params: [f32; 4],
+    /// Subsurface scattering color (RGBA).
     pub color: [f32; 4],
+    /// Per-channel radius scales `[g, b, _, _]`; red scale lives in `params[2]`.
     pub radius_scale_gb: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Fuzz (sheen) parameters — GPU slot 4.
 pub struct FuzzGroup {
+    /// Scalar params: `[weight, roughness, reserved]`.
     pub params: [f32; 4],
+    /// Fuzz tint color (RGB; alpha unused).
     pub color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Clearcoat parameters — GPU slot 5.
 pub struct CoatGroup {
+    /// Scalar params: `[weight, roughness, anisotropy, darkening]`.
     pub params: [f32; 4],
+    /// Coat tint color (RGB; alpha unused).
     pub color: [f32; 4],
+    /// Coat index of refraction in `x` (rest unused).
     pub ior: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Thin-film interference parameters — GPU slot 6.
 pub struct ThinFilmGroup {
+    /// Scalar params: `[weight, thickness_um, ior, reserved]`.
     pub params: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Emission parameters — GPU slot 7.
 pub struct EmissionGroup {
+    /// Emission luminance in nits at `x` (rest reserved).
     pub params: [f32; 4],
+    /// Emission color (RGBA).
     pub color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Geometry (opacity/thin-walled) parameters — GPU slot 8.
 pub struct GeometryGroup {
+    /// First param vec4: `[opacity, thin_walled_flag, reserved]`.
     pub params: [f32; 4],
+    /// Second reserved param vec4 kept for 16-byte alignment.
     pub params2: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Full OpenPBR material as a flat `#[repr(C)]` blob of 20 `vec4` slots (320 bytes),
+/// matching the WGSL uniform layout expected by the renderer.
 pub struct OpenPBRMaterial {
+    /// Diffuse base parameters.
     pub base: BaseGroup,
+    /// Specular reflection parameters.
     pub specular: SpecularGroup,
 
+    /// Refraction/transmission parameters.
     pub transmission: TransmissionGroup,
 
+    /// Subsurface scattering parameters.
     pub subsurface: SubsurfaceGroup,
 
+    /// Fuzz (sheen) parameters.
     pub fuzz: FuzzGroup,
 
+    /// Clearcoat parameters.
     pub coat: CoatGroup,
 
+    /// Thin-film parameters.
     pub thin_film: ThinFilmGroup,
 
+    /// Emission parameters.
     pub emission: EmissionGroup,
 
+    /// Geometry (opacity) parameters.
     pub geometry: GeometryGroup,
 }
 
 impl BaseGroup {
+    /// Sets diffuse weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets diffuse roughness (clamped to \[0, 1\]).
     pub fn diffuse_roughness(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets metalness (clamped to \[0, 1\]).
     pub fn metalness(&mut self, v: f32) -> &mut Self {
         self.params[2] = v.clamp(0.0, 1.0);
         self
     }
 
+    /// Sets base color from explicit RGBA components.
     pub fn color(&mut self, r: f32, g: f32, b: f32, a: f32) -> &mut Self {
         self.color = [r, g, b, a];
         self
     }
+    /// Sets base color from an RGB array (alpha unchanged).
     pub fn color_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -120,27 +165,33 @@ impl BaseGroup {
 }
 
 impl SpecularGroup {
+    /// Sets specular weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets specular roughness (clamped to \[0, 1\]).
     pub fn roughness(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets index of refraction (at least 1.0).
     pub fn ior(&mut self, v: f32) -> &mut Self {
         self.params[2] = v.max(1.0);
         self
     }
+    /// Sets specular anisotropy (clamped to \[0, 1\]).
     pub fn anisotropy(&mut self, v: f32) -> &mut Self {
         self.params[3] = v.clamp(0.0, 1.0);
         self
     }
 
+    /// Sets metallic edge tint from explicit RGB components.
     pub fn edge_tint(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.color = [r, g, b, 0.0];
         self
     }
+    /// Sets metallic edge tint from an RGB array.
     pub fn edge_tint_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -150,27 +201,33 @@ impl SpecularGroup {
 }
 
 impl TransmissionGroup {
+    /// Sets transmission weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets absorption depth (non-negative).
     pub fn depth(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.max(0.0);
         self
     }
+    /// Sets chromatic dispersion strength (non-negative).
     pub fn dispersion_scale(&mut self, v: f32) -> &mut Self {
         self.params[2] = v.max(0.0);
         self
     }
+    /// Sets Abbe number controlling dispersion spread (non-negative).
     pub fn dispersion_abbe(&mut self, v: f32) -> &mut Self {
         self.params[3] = v.max(0.0);
         self
     }
 
+    /// Sets transmission tint from explicit RGB components.
     pub fn color(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.color = [r, g, b, 0.0];
         self
     }
+    /// Sets transmission tint from an RGB array.
     pub fn color_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -178,10 +235,12 @@ impl TransmissionGroup {
         self
     }
 
+    /// Sets volume scattering color from explicit RGB components.
     pub fn scatter_color(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.scatter = [r, g, b, 0.0];
         self
     }
+    /// Sets volume scattering anisotropy (clamped to \[-1, 1\]).
     pub fn scatter_anisotropy(&mut self, v: f32) -> &mut Self {
         self.scatter[3] = v.clamp(-1.0, 1.0);
         self
@@ -189,27 +248,33 @@ impl TransmissionGroup {
 }
 
 impl SubsurfaceGroup {
+    /// Sets subsurface weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets mean free path radius (non-negative).
     pub fn radius(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.max(0.0);
         self
     }
+    /// Sets red-channel radius scale (non-negative).
     pub fn radius_scale_r(&mut self, v: f32) -> &mut Self {
         self.params[2] = v.max(0.0);
         self
     }
+    /// Sets scattering anisotropy (clamped to \[-1, 1\]).
     pub fn scatter_anisotropy(&mut self, v: f32) -> &mut Self {
         self.params[3] = v.clamp(-1.0, 1.0);
         self
     }
 
+    /// Sets subsurface color from explicit RGB components.
     pub fn color(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.color = [r, g, b, 1.0];
         self
     }
+    /// Sets subsurface color from an RGB array.
     pub fn color_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -217,10 +282,12 @@ impl SubsurfaceGroup {
         self
     }
 
+    /// Sets green-channel radius scale (non-negative).
     pub fn radius_scale_g(&mut self, v: f32) -> &mut Self {
         self.radius_scale_gb[0] = v.max(0.0);
         self
     }
+    /// Sets blue-channel radius scale (non-negative).
     pub fn radius_scale_b(&mut self, v: f32) -> &mut Self {
         self.radius_scale_gb[1] = v.max(0.0);
         self
@@ -228,19 +295,23 @@ impl SubsurfaceGroup {
 }
 
 impl FuzzGroup {
+    /// Sets fuzz weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets fuzz roughness (clamped to \[0, 1\]).
     pub fn roughness(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.clamp(0.0, 1.0);
         self
     }
 
+    /// Sets fuzz tint from explicit RGB components.
     pub fn color(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.color = [r, g, b, 0.0];
         self
     }
+    /// Sets fuzz tint from an RGB array.
     pub fn color_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -250,27 +321,33 @@ impl FuzzGroup {
 }
 
 impl CoatGroup {
+    /// Sets coat weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets coat roughness (clamped to \[0, 1\]).
     pub fn roughness(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets coat anisotropy (clamped to \[0, 1\]).
     pub fn anisotropy(&mut self, v: f32) -> &mut Self {
         self.params[2] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets coat darkening (clamped to \[0, 1\]).
     pub fn darkening(&mut self, v: f32) -> &mut Self {
         self.params[3] = v.clamp(0.0, 1.0);
         self
     }
 
+    /// Sets coat tint from explicit RGB components.
     pub fn color(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.color = [r, g, b, 0.0];
         self
     }
+    /// Sets coat tint from an RGB array.
     pub fn color_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -278,6 +355,7 @@ impl CoatGroup {
         self
     }
 
+    /// Sets coat index of refraction (at least 1.0).
     pub fn ior(&mut self, v: f32) -> &mut Self {
         self.ior[0] = v.max(1.0);
         self
@@ -285,14 +363,17 @@ impl CoatGroup {
 }
 
 impl ThinFilmGroup {
+    /// Sets thin-film weight (clamped to \[0, 1\]).
     pub fn weight(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Sets film thickness in micrometers (non-negative).
     pub fn thickness_um(&mut self, v: f32) -> &mut Self {
         self.params[1] = v.max(0.0);
         self
     }
+    /// Sets film index of refraction (at least 1.0).
     pub fn ior(&mut self, v: f32) -> &mut Self {
         self.params[2] = v.max(1.0);
         self
@@ -300,14 +381,17 @@ impl ThinFilmGroup {
 }
 
 impl EmissionGroup {
+    /// Sets emitted luminance in nits (non-negative).
     pub fn luminance(&mut self, nits: f32) -> &mut Self {
         self.params[0] = nits.max(0.0);
         self
     }
+    /// Sets emission color from explicit RGB components.
     pub fn color(&mut self, r: f32, g: f32, b: f32) -> &mut Self {
         self.color = [r, g, b, 1.0];
         self
     }
+    /// Sets emission color from an RGB array.
     pub fn color_rgb(&mut self, rgb: [f32; 3]) -> &mut Self {
         self.color[0] = rgb[0];
         self.color[1] = rgb[1];
@@ -317,10 +401,12 @@ impl EmissionGroup {
 }
 
 impl GeometryGroup {
+    /// Sets surface opacity (clamped to \[0, 1\]).
     pub fn opacity(&mut self, v: f32) -> &mut Self {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
+    /// Toggles thin-walled geometry mode.
     pub fn thin_walled(&mut self, v: bool) -> &mut Self {
         self.params[1] = if v { 1.0 } else { 0.0 };
         self
@@ -328,9 +414,12 @@ impl GeometryGroup {
 }
 
 impl OpenPBRMaterial {
+    /// Number of `vec4` slots the flat material occupies on the GPU.
     pub const VEC4_COUNT: usize = 20;
+    /// Size of the flat material blob in bytes.
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
+    /// Default physically-plausible PBR material (gray dielectric).
     pub fn pbr() -> Self {
         Self {
             base: BaseGroup {
@@ -374,6 +463,7 @@ impl OpenPBRMaterial {
         }
     }
 
+    /// Polished gray metal preset.
     pub fn metal() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(1.0);
@@ -383,6 +473,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Rough dielectric preset.
     pub fn dielectric() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -393,6 +484,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Transparent glass preset with full transmission and thin walls.
     pub fn glass() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -407,6 +499,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Reddish subsurface scattering preset.
     pub fn subsurface() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -420,6 +513,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Dielectric with a glossy clearcoat layer.
     pub fn coat() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -433,6 +527,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Fabric-like preset with a fuzz (sheen) layer.
     pub fn fuzz() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -446,6 +541,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Iridescent soap-bubble preset driven by thin-film interference.
     pub fn thin_film() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -459,6 +555,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Warm emissive light-source preset (1000 nits).
     pub fn emission() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -469,6 +566,7 @@ impl OpenPBRMaterial {
         m
     }
 
+    /// Thick refractive transmissive medium preset.
     pub fn transmission() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
@@ -489,7 +587,9 @@ impl Default for OpenPBRMaterial {
     }
 }
 
+/// Flat-slot count of [`OpenPBRMaterial`] (20 `vec4`s).
 pub const OPENPBR_MATERIAL_VEC4_COUNT: usize = 20;
+/// Byte size of [`OpenPBRMaterial`] (320 bytes).
 pub const OPENPBR_MATERIAL_SIZE: usize = std::mem::size_of::<OpenPBRMaterial>();
 
 #[cfg(test)]

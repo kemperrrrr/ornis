@@ -330,7 +330,10 @@ fn option_group(usage: &str, item: &[TokenTree]) -> syn::Result<TokenStream2> {
         .get(1)
         .ok_or_else(|| syn::Error::new(item[0].span(), format!("expected `{usage}`")))?;
     let TokenTree::Group(group) = group_tt else {
-        return Err(syn::Error::new(group_tt.span(), format!("expected `{usage}`")));
+        return Err(syn::Error::new(
+            group_tt.span(),
+            format!("expected `{usage}`"),
+        ));
     };
     Ok(group.stream())
 }

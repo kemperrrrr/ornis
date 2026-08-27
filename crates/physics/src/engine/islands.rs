@@ -35,7 +35,7 @@ impl BuiltinPhysicsEngine {
     /// Island-coherent sleep bookkeeping, run once per step (G4): an island
     /// whose bodies ALL stay slow for SLEEP_TIME seconds is frozen as a
     /// whole; islands are woken as a whole by contact with an awake body
-    /// (see resolve_manifolds).
+    /// (see `wake_on_impact` in `engine/contacts.rs`).
     pub(super) fn update_sleep(&mut self, dt: f32) {
         // Well below anything gameplay-visible, above the solver's settled
         // jitter floor (~0.01-0.03).

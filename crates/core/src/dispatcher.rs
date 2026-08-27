@@ -1,3 +1,9 @@
+//! CPU/GPU dispatch decisions for smart-store workloads.
+//!
+//! [`Dispatcher`] (and the higher-level [`SmartDispatcher`]) compare an
+//! operation's element count against a configurable threshold and route it
+//! to CPU or GPU executors, falling back to CPU whenever no GPU executor is
+//! wired up or the `gpu` feature is off.
 use crate::component_store::ComponentStore;
 use crate::pipeline::PipelineConfig;
 use crate::smart_store::SmartStore;
@@ -5,7 +11,9 @@ use crate::smart_store::SmartStore;
 /// Result of runtime dispatch decision
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionTarget {
+    /// Run on CPU threads.
     Cpu,
+    /// Run on the GPU.
     Gpu,
 }
 
@@ -192,7 +200,9 @@ impl SmartDispatcher {
 }
 
 /// Trait for types that can be dispatched to CPU or GPU
+/// Types whose workload size can be measured for dispatch decisions.
 pub trait Dispatchable: 'static + Send + Sync {
+    /// Returns how many elements of this type are currently live in `store`.
     fn element_count(&self, store: &SmartStore) -> usize;
 }
 

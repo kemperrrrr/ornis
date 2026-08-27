@@ -194,7 +194,12 @@ mod wgsl_values {
                     .to_string();
             }
         };
-        format!("{} {} {}", crate::wgsl::WgslGen::expr(&b.left), op, crate::wgsl::WgslGen::expr(&b.right))
+        format!(
+            "{} {} {}",
+            crate::wgsl::WgslGen::expr(&b.left),
+            op,
+            crate::wgsl::WgslGen::expr(&b.right)
+        )
     }
 
     pub(super) fn binary(b: &syn::ExprBinary) -> String {
@@ -231,7 +236,12 @@ mod wgsl_values {
                     .to_string();
             }
         };
-        format!("{} {} {}", crate::wgsl::WgslGen::expr(&b.left), op, crate::wgsl::WgslGen::expr(&b.right))
+        format!(
+            "{} {} {}",
+            crate::wgsl::WgslGen::expr(&b.left),
+            op,
+            crate::wgsl::WgslGen::expr(&b.right)
+        )
     }
 }
 
@@ -264,8 +274,7 @@ mod wgsl_calls {
         let args: Vec<String> = c.args.iter().map(crate::wgsl::WgslGen::expr).collect();
 
         if let syn::Expr::Path(p) = c.func.as_ref()
-            && let Some(mapped) =
-                path_constructor(p, &args).or_else(|| named_builtin(&args, p))
+            && let Some(mapped) = path_constructor(p, &args).or_else(|| named_builtin(&args, p))
         {
             return mapped;
         }
@@ -380,12 +389,66 @@ mod wgsl_calls {
     fn is_swizzle(method: &str) -> bool {
         matches!(
             method,
-            "x" | "y" | "z" | "w" | "r" | "g" | "b" | "a" | "xy" | "xz" | "xw" | "yx" | "yz"
-                | "yw" | "zx" | "zy" | "zw" | "wx" | "wy" | "wz" | "xyz" | "xyw" | "xzy" | "xzw"
-                | "yxz" | "yxw" | "yzx" | "yzw" | "zxy" | "zxw" | "zyx" | "zyw" | "wxy" | "wxz"
-                | "wyz" | "wzx" | "wzy" | "xyzw" | "xywz" | "xzyw" | "xzwy" | "xwyz" | "xwzy"
-                | "yxzw" | "yxwz" | "yzxw" | "yzwx" | "ywxz" | "ywzx" | "zxyw" | "zxwy" | "zyxw"
-                | "zywx" | "zwxy" | "zwyx" | "wxyz" | "wxzy" | "wyxz" | "wyzx" | "wzxy" | "wzyx"
+            "x" | "y"
+                | "z"
+                | "w"
+                | "r"
+                | "g"
+                | "b"
+                | "a"
+                | "xy"
+                | "xz"
+                | "xw"
+                | "yx"
+                | "yz"
+                | "yw"
+                | "zx"
+                | "zy"
+                | "zw"
+                | "wx"
+                | "wy"
+                | "wz"
+                | "xyz"
+                | "xyw"
+                | "xzy"
+                | "xzw"
+                | "yxz"
+                | "yxw"
+                | "yzx"
+                | "yzw"
+                | "zxy"
+                | "zxw"
+                | "zyx"
+                | "zyw"
+                | "wxy"
+                | "wxz"
+                | "wyz"
+                | "wzx"
+                | "wzy"
+                | "xyzw"
+                | "xywz"
+                | "xzyw"
+                | "xzwy"
+                | "xwyz"
+                | "xwzy"
+                | "yxzw"
+                | "yxwz"
+                | "yzxw"
+                | "yzwx"
+                | "ywxz"
+                | "ywzx"
+                | "zxyw"
+                | "zxwy"
+                | "zyxw"
+                | "zywx"
+                | "zwxy"
+                | "zwyx"
+                | "wxyz"
+                | "wxzy"
+                | "wyxz"
+                | "wyzx"
+                | "wzxy"
+                | "wzyx"
         )
     }
 
@@ -412,11 +475,34 @@ mod wgsl_calls {
     /// Math built-ins that keep their name (single- and multi-argument).
     fn passthrough_math(method: &str, args: &[String]) -> Option<String> {
         const UNARY: &[&str] = &[
-            "abs", "sqrt", "sin", "cos", "tan", "floor", "ceil", "round", "fract", "exp", "log",
-            "normalize", "length", "saturate", "asin", "acos", "atan",
+            "abs",
+            "sqrt",
+            "sin",
+            "cos",
+            "tan",
+            "floor",
+            "ceil",
+            "round",
+            "fract",
+            "exp",
+            "log",
+            "normalize",
+            "length",
+            "saturate",
+            "asin",
+            "acos",
+            "atan",
         ];
         const MULTI: &[&str] = &[
-            "dot", "cross", "pow", "max", "min", "step", "smoothstep", "reflect", "refract",
+            "dot",
+            "cross",
+            "pow",
+            "max",
+            "min",
+            "step",
+            "smoothstep",
+            "reflect",
+            "refract",
             "atan2",
         ];
         if UNARY.contains(&method) {
@@ -447,7 +533,7 @@ mod wgsl_calls {
 /// stays bounded — these helpers are pure functions over `syn` nodes that
 /// call back into `WgslGen` for base expression translation.
 mod wgsl_flow {
-    use syn::{ExprBlock, ExprIf, Block, Stmt, Pat};
+    use syn::{Block, ExprBlock, ExprIf, Pat, Stmt};
 
     pub(super) fn if_expr(i: &ExprIf) -> String {
         let cond = crate::wgsl::WgslGen::expr(&i.cond);
@@ -516,10 +602,16 @@ mod wgsl_flow {
                 .unwrap_or_default();
             // Convert: let x = if c { a } else { b };
             // To WGSL: var x = b; if (c) { x = a; }
-            return format!("var {} = {}; if ({}) {{ {} = {}; }} ", p, else_val, cond, p, then_val);
+            return format!(
+                "var {} = {}; if ({}) {{ {} = {}; }} ",
+                p, else_val, cond, p, then_val
+            );
         }
         let p = pat(&local.pat);
-        let init = local.init.as_ref().map(|init| crate::wgsl::WgslGen::expr(&init.expr));
+        let init = local
+            .init
+            .as_ref()
+            .map(|init| crate::wgsl::WgslGen::expr(&init.expr));
         // Rust `let mut` becomes WGSL `var` — the only WGSL binding kind that
         // can be reassigned.
         let kw = if let syn::Pat::Ident(pi) = &local.pat

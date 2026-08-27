@@ -15,10 +15,19 @@ use crate::wide::{SolverStep, build_solver_steps};
 /// Physics engine trait: a single step of simulation, plus body/joint management
 /// and queries. Implementations may be CPU or GPU-based, single-threaded or multi-threaded.
 pub trait PhysicsEngine: Send + Sync {
+    /// Advance the simulation by `dt` seconds: broadphase → narrowphase →
+    /// island partitioning → substepped velocity/position solving (contacts,
+    /// friction, joints) → integration. `dt` must be > 0 and finite.
     fn step(&mut self, dt: f32);
+    /// Register a body and return its stable handle.
     fn add_body(&mut self, body: RigidBody) -> BodyHandle;
+    /// Remove a body; handles of later bodies shift down, so cached handles
+    /// may become stale. Joints touching the removed body are destroyed too.
     fn remove_body(&mut self, handle: BodyHandle);
+    /// Read-only access to a body, or `None` for an invalid handle.
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody>;
+    /// Mutable access to a body, or `None` for an invalid handle. Direct
+    /// pose edits take effect at the next [`PhysicsEngine::step`].
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody>;
     /// Create a joint between two existing, distinct bodies (G5).
     /// Returns None on invalid handles or a self-joint.
@@ -28,8 +37,13 @@ pub trait PhysicsEngine: Send + Sync {
         body_b: BodyHandle,
         kind: JointKind,
     ) -> Option<JointHandle>;
+    /// Destroy a joint by handle; no-op for an invalid handle.
     fn remove_joint(&mut self, handle: JointHandle);
+    /// Closest hit of `ray` against dynamic-world bodies within `max_dist`
+    /// (in units of the ray direction's length), or `None` if nothing is hit.
     fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit>;
+    /// Sweep `shape` along the segment `from → to` and report the first body
+    /// hit (hit distance measured along the sweep direction), or `None`.
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit>;
 }
 
@@ -1329,6 +1343,15 @@ mod contacts;
 mod islands;
 mod joints;
 
+/// The CPU reference physics engine: sequential-impulse solver with sweep-and-
+/// prune broadphase, manifold generation, island-coherent sleeping, warm-started
+/// contacts and joints, and optional SIMD-wide / GPU contact solving.
+///
+/// Step pipeline per [`PhysicsEngine::step`]: rebuild AABBs and broadphase
+/// pairs → narrowphase manifolds → union-find islands (contacts + joints) →
+/// `substeps` × (warm start, velocity iterations with friction/restitution,
+/// positional Baumgarte pass) → integration. Bodies outside active islands
+/// sleep as a whole island and wake together.
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: SweepAndPrune,
@@ -1371,6 +1394,10 @@ pub struct BuiltinPhysicsEngine {
 }
 
 impl BuiltinPhysicsEngine {
+    /// Empty engine with the default tuning: 12 substeps, 8 velocity
+    /// iterations, 4 position iterations, rigid contacts, SIMD-wide solver
+    /// on, no gravity until set here. `gravity` is a constant world-space
+    /// acceleration (m/s²) applied to dynamic bodies each step.
     pub fn new(gravity: Vec3) -> Self {
         Self {
             bodies: Vec::new(),
@@ -1409,18 +1436,25 @@ impl BuiltinPhysicsEngine {
         self.gpu_solver = Some(solver);
     }
 
+    /// Number of sub-iterations the solver splits each `step(dt)` into
+    /// (default 12). More substeps = more stable stacks, linearly more cost.
     pub fn set_substeps(&mut self, n: u32) {
         self.substeps = n;
     }
 
+    /// Sequential-impulse velocity iterations per substep (default 8).
     pub fn set_velocity_iterations(&mut self, n: u32) {
         self.velocity_iterations = n;
     }
 
+    /// Baumgarte positional-correction iterations per substep (default 4).
     pub fn set_position_iterations(&mut self, n: u32) {
         self.position_iterations = n;
     }
 
+    /// CFM softness scale for the positional pass: 0 (default) = rigid,
+    /// larger values spread corrections over more iterations for smoother
+    /// but softer penetration recovery.
     pub fn set_contact_softness(&mut self, softness: f32) {
         self.contact_softness = softness;
     }
@@ -2826,12 +2860,12 @@ mod tests {
             .collect();
 
         // Active-set impulses must be non-negative.
-        for k in 0..count {
+        for (k, impulse) in acc.iter().enumerate().take(count) {
             assert!(
-                acc[k] >= -1e-6,
+                *impulse >= -1e-6,
                 "accumulated impulse {} negative: {}",
                 k,
-                acc[k]
+                impulse
             );
         }
         // Each point's post-solve normal velocity must be at/above target (0),

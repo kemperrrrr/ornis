@@ -1,3 +1,12 @@
+//! The smart store: type-erased component lanes plus entity lifecycle.
+//!
+//! [`SmartStore`] is the engine's central component database. Each
+//! component type lives in its own lane - an `RwLock`-guarded
+//! [`ComponentStore`] by default, or an epoch-reclaimed lock-free clone-on-
+//! write store for the experimental `lock-free` feature. Cold (rarely
+//! accessed) lanes are kept in a separate map so hot data stays compact.
+//! The [`Pack`] trait extends the store with multi-component packed
+//! access used by GPU upload paths.
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{RwLock, atomic::Ordering};
@@ -8,6 +17,7 @@ use crate::cold_store::ColdComponentStore;
 use crate::component_store::ComponentStore;
 use crate::entity::{Entity, EntityAllocator};
 
+/// Internal per-lane interface: erase storage details behind `SmartStore`.
 trait Lane: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn remove_entity(&self, entity: Entity);
@@ -75,7 +85,9 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
     }
 }
 
-// reserved: read-guard for lock-free lanes (experimental "lock-free" feature)
+// Reserved: RAII read guard for lock-free lanes (experimental
+// "lock-free" feature). Holds an epoch guard alive while exposing the
+// snapshot of the store captured at read time.
 #[allow(dead_code)]
 pub struct LockFreeReadGuard<'g, T> {
     store: &'g ComponentStore<T>,
@@ -95,6 +107,15 @@ impl<'g, T> std::ops::Deref for LockFreeReadGuard<'g, T> {
     }
 }
 
+/// Central ECS storage: one lane per component type plus entity
+/// allocation.
+///
+/// Hot lanes hold frequently touched components behind per-type `RwLock`s
+/// (readers of different lanes run fully in parallel; rayon systems can
+/// share `&SmartStore`). Lock-free lanes trade write cost (full snapshot
+/// + swap) for wait-free reads via crossbeam epochs.
+///
+/// Cold lanes isolate rarely used components from the hot working set.
 pub struct SmartStore {
     lanes: HashMap<TypeId, Box<dyn Lane>>,
     cold_lanes: HashMap<TypeId, Box<dyn Lane>>,
@@ -112,10 +133,14 @@ impl Default for SmartStore {
 }
 
 impl SmartStore {
+    /// Creates an empty store with no lanes and a fresh entity allocator.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Eagerly creates the hot lane for component type `T` (no-op if it
+    /// already exists). Registration up front avoids surprise allocations
+    /// inside systems.
     pub fn register<T: 'static + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
@@ -123,6 +148,9 @@ impl SmartStore {
             .or_insert_with(|| Box::new(RwLock::new(ComponentStore::<T>::new())));
     }
 
+    /// Registers `T` as a lock-free (clone-on-write, epoch-reclaimed)
+    /// hot lane instead of the default `RwLock` lane. Requires `T: Clone`
+    /// because every write publishes a fresh snapshot.
     pub fn register_lock_free<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
@@ -148,6 +176,7 @@ impl SmartStore {
             .or_insert_with(|| Box::new(LockFreeLaneInner::<T>::new()));
     }
 
+    /// Eagerly creates the cold lane for `T`. No-op if already present.
     pub fn register_cold<T: 'static + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.cold_lanes
@@ -162,6 +191,8 @@ impl SmartStore {
             .or_insert_with(|| Box::new(RwLock::new(ColdComponentStore::<T>::new())));
     }
 
+    /// Inserts a cold component for `entity`, creating the cold lane on
+    /// first use.
     pub fn insert_cold<T: 'static + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_cold_lane::<T>();
         let tid = TypeId::of::<T>();
@@ -174,6 +205,8 @@ impl SmartStore {
         }
     }
 
+    /// Shared read guard over the cold lane of `T`; `None` if the lane
+    /// was never registered/populated.
     pub fn read_cold_lane<T: 'static + Send + Sync>(
         &self,
     ) -> Option<std::sync::RwLockReadGuard<'_, ColdComponentStore<T>>> {
@@ -188,6 +221,8 @@ impl SmartStore {
         )
     }
 
+    /// Exclusive write guard over the cold lane of `T`; `None` if the
+    /// lane was never registered/populated.
     pub fn write_cold_lane<T: 'static + Send + Sync>(
         &self,
     ) -> Option<std::sync::RwLockWriteGuard<'_, ColdComponentStore<T>>> {
@@ -202,10 +237,15 @@ impl SmartStore {
         )
     }
 
+    /// Allocates a new live entity handle (recycling freed ids with a
+    /// bumped generation).
     pub fn create_entity(&self) -> Entity {
         self.allocator.write().unwrap().allocate()
     }
 
+    /// Destroys `entity`: removes its components from every hot and cold
+    /// lane (including lock-free ones), then returns the id to the
+    /// allocator for reuse.
     pub fn destroy_entity(&self, entity: Entity) {
         for lane in self.lanes.values() {
             lane.remove_entity(entity);
@@ -216,10 +256,15 @@ impl SmartStore {
         self.allocator.write().unwrap().deallocate(entity);
     }
 
+    /// Returns `true` if the handle matches the allocator's current
+    /// generation - i.e. the entity was created and not yet destroyed.
     pub fn is_alive(&self, entity: Entity) -> bool {
         self.allocator.read().unwrap().is_alive(entity)
     }
 
+    /// Inserts or replaces the hot component `T` for `entity`, creating
+    /// the lane on first use. Dispatches to the RwLock or lock-free
+    /// implementation depending on how `T` was registered.
     pub fn insert<T: 'static + Clone + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_lane::<T>();
         let tid = TypeId::of::<T>();
@@ -231,12 +276,12 @@ impl SmartStore {
         }
     }
 
-    /// Читает горячую ленту компонента `T`.
+    /// Reads the hot lane of component `T` as a shared guard.
     ///
     /// # Panics
-    /// При включённом schedule-принуждении — если лента не декларирована
-    /// ([`SystemAccess::reads_lane`](crate::SystemAccess) /
-    /// `writes_lane`; аудит §3.6).
+    /// When schedule enforcement is enabled: if this lane was not declared
+    /// as read ([`SystemAccess::reads_lane`](crate::SystemAccess)) or
+    /// written (`writes_lane`) by the running system.
     pub fn read_lane<T: 'static + Send + Sync>(
         &self,
     ) -> Option<std::sync::RwLockReadGuard<'_, ComponentStore<T>>> {
@@ -252,12 +297,13 @@ impl SmartStore {
         )
     }
 
-    /// Пишет в горячую ленту компонента `T`.
+    /// Writes to the hot lane of component `T` behind an exclusive guard.
     ///
     /// # Panics
-    /// При включённом schedule-принуждении — если лента не декларирована
-    /// строго на запись ([`SystemAccess::writes_lane`](crate::SystemAccess);
-    /// `reads_lane` записи не покрывает).
+    /// When schedule enforcement is enabled: if this lane was not declared
+    /// strictly for writing
+    /// ([`SystemAccess::writes_lane`](crate::SystemAccess)); a read-only
+    /// declaration does not cover writes.
     pub fn write_lane<T: 'static + Send + Sync>(
         &self,
     ) -> Option<std::sync::RwLockWriteGuard<'_, ComponentStore<T>>> {
@@ -273,6 +319,10 @@ impl SmartStore {
         )
     }
 
+    /// Runs `f` against an epoch-pinned snapshot of the lock-free lane of
+    /// `T`. Readers never block writers (and vice versa); the snapshot is
+    /// consistent for the duration of the call. Returns `None` if `T` has
+    /// no lock-free lane.
     pub fn with_lock_free_lane<T: 'static + Clone + Send + Sync, R>(
         &self,
         f: impl FnOnce(&ComponentStore<T>) -> R,
@@ -285,6 +335,10 @@ impl SmartStore {
         Some(f(store_ref))
     }
 
+    /// Applies a mutation to the lock-free lane of `T`: clones the current
+    /// snapshot, runs the mutator on the clone, then atomically publishes
+    /// it. Old snapshots are reclaimed by the epoch garbage collector once
+    /// readers drain. No-op if `T` has no lock-free lane.
     pub fn write_lock_free_lane<T: 'static + Clone + Send + Sync>(
         &self,
         f: impl FnOnce(&mut ComponentStore<T>),
@@ -297,14 +351,35 @@ impl SmartStore {
     }
 }
 
+/// A bundle of components stored contiguously ("packed") for GPU upload
+/// and bulk traversal.
+///
+/// Implementations are usually generated by
+/// [`#[derive(Pack)]`](ornis_macros::derive_pack) over a plain struct; the
+/// derive registers one lane per field and implements gather/scatter of
+/// whole bundles per entity. This is the Rust-side half of the engine's
+/// Component Packing scheme (see PLAN.md): systems mutate packed bundles,
+/// which are then uploaded as a single buffer rather than field by field.
 pub trait Pack: Clone + Send + Sync + 'static {
+    /// Mutable handle produced by [`Pack::pack_get_mut`]; writes go back
+    /// into the store when dropped or flushed.
     type PackMut<'a>
     where
         Self: 'a;
 
+    /// Creates/registers all lanes this bundle requires on `store`.
     fn pack_register(store: &mut SmartStore);
+
+    /// Gathers the bundle from existing lanes for `entity` and inserts it
+    /// into its own packed lane.
     fn pack_insert(&self, store: &mut SmartStore, entity: Entity);
+
+    /// Reconstructs the bundle for `entity`, or `None` if it lacks any of
+    /// the components.
     fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self>;
+
+    /// Returns a mutable view of the bundle for `entity` allowing in-place
+    /// edits of the underlying component data.
     fn pack_get_mut<'a>(store: &'a mut SmartStore, entity: Entity) -> Option<Self::PackMut<'a>>;
 }
 

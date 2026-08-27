@@ -2,30 +2,61 @@ use glam::{Quat, Vec3};
 
 use crate::shape::Shape;
 
+/// Stable index of a body inside its owning [`BuiltinPhysicsEngine`](crate::engine::BuiltinPhysicsEngine).
+///
+/// Handles stay valid until the body is explicitly removed; removal shifts
+/// subsequent handles because this is a plain vector index, so callers should
+/// not cache handles across removals.
 pub type BodyHandle = usize;
 
+/// How a body participates in simulation.
+///
+/// Determines which solver terms apply: static bodies have zero inverse mass
+/// and never integrate, kinematic bodies integrate velocity but push dynamic
+/// bodies with infinite effective mass, dynamic bodies respond to contacts
+/// and gravity in full.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BodyType {
+    /// Never moves (level geometry); treated as having infinite mass.
     Static,
+    /// Fully simulated under forces, gravity, contacts and joints.
     Dynamic,
+    /// Moved by setting [`RigidBody::velocity`] directly; collides with and
+    /// pushes dynamic bodies but is unaffected by them.
     Kinematic,
 }
 
+/// A single rigid body: pose, motion state, material properties and shape.
+///
+/// Mass properties are derived from [`Shape::inertia`] at construction; when
+/// mutating `mass` directly, keep `inv_mass` consistent (`1/mass` for
+/// dynamics, `0` for statics) — the solver reads only the inverse quantities.
 #[derive(Debug, Clone)]
 pub struct RigidBody {
+    /// World-space position of the body's center of mass.
     pub position: Vec3,
     /// Rotation of the body, stored as a unit quaternion.
     pub orientation: Quat,
+    /// Linear velocity of the center of mass (m/s).
     pub velocity: Vec3,
+    /// Angular velocity in world space (rad/s), about the center of mass.
     pub angular_velocity: Vec3,
+    /// Total mass (kg). Zero mass means static/infinite-mass behavior.
     pub mass: f32,
+    /// Cached `1 / mass` (0 for statics) — what the solver actually uses.
     pub inv_mass: f32,
     /// Diagonal (body-frame) inertia tensor.
     pub inertia: Vec3,
+    /// Accumulated external torque (N·m), consumed and cleared each step.
     pub torque: Vec3,
+    /// Coefficient of restitution in `[0, 1]`: how much normal velocity
+    /// survives a bounce (0 = dead stop, 1 = perfectly elastic).
     pub restitution: f32,
+    /// Coulomb friction coefficient ≥ 0 used by the contact solver.
     pub friction: f32,
+    /// Collision primitive; also drives the derived inertia tensor.
     pub shape: Shape,
+    /// Simulation role; derived from mass at construction, settable after.
     pub body_type: BodyType,
 }
 
@@ -53,14 +84,20 @@ impl RigidBody {
         }
     }
 
+    /// Sphere body with default material (restitution 0.5, friction 0.3).
+    /// Mass > 0 yields a dynamic body; mass 0 a static one.
     pub fn new_sphere(position: Vec3, radius: f32, mass: f32) -> Self {
         Self::build(position, mass, 0.5, 0.3, Shape::Sphere { radius })
     }
 
+    /// Axis-aligned box body (half-extents per axis), restitution 0.3,
+    /// friction 0.5.
     pub fn new_box(position: Vec3, half_extents: Vec3, mass: f32) -> Self {
         Self::build(position, mass, 0.3, 0.5, Shape::Box { half_extents })
     }
 
+    /// Capsule body aligned to the local +Y axis (`half_height` is the
+    /// cylinder half-length excluding the caps), restitution/friction 0.4.
     pub fn new_capsule(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
@@ -74,15 +111,18 @@ impl RigidBody {
         )
     }
 
+    /// Builder-style variant of [`RigidBody::set_orientation`].
     pub fn with_orientation(mut self, orientation: Quat) -> Self {
         self.orientation = orientation;
         self
     }
 
+    /// Overwrite the rotation; must remain a unit quaternion.
     pub fn set_orientation(&mut self, orientation: Quat) {
         self.orientation = orientation;
     }
 
+    /// Directly set the world-space angular velocity (rad/s).
     pub fn set_angular_velocity(&mut self, w: Vec3) {
         self.angular_velocity = w;
     }

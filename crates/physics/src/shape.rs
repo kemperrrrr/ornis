@@ -2,11 +2,31 @@ use glam::{Quat, Vec3};
 
 use crate::math::AABB;
 
+/// Convex collision primitives supported by the builtin engine.
+///
+/// All shapes are centered on the body origin; a box and a capsule are
+/// symmetric about the body's local +Y axis. Every variant must provide an
+/// AABB projection (broadphase) and a diagonal inertia tensor (solver).
 #[derive(Debug, Clone)]
 pub enum Shape {
-    Sphere { radius: f32 },
-    Box { half_extents: Vec3 },
-    Capsule { radius: f32, half_height: f32 },
+    /// Uniform ball: rotation-invariant, isotropic inertia.
+    Sphere {
+        /// Distance from center to surface.
+        radius: f32,
+    },
+    /// Oriented box (OBB) with half-extents along each local axis.
+    Box {
+        /// Half-size of the box along its local X/Y/Z axes.
+        half_extents: Vec3,
+    },
+    /// Cylinder of `2 * half_height` along local +Y with hemispherical caps
+    /// of `radius`; used for characters and rounded bars.
+    Capsule {
+        /// Radius of the cylinder and the spherical caps.
+        radius: f32,
+        /// Half-length of the cylindrical segment, excluding the caps.
+        half_height: f32,
+    },
 }
 
 impl Shape {

@@ -6,6 +6,14 @@ use ornis_core::{Entity, SmartStore};
 use crate::backend::{AudioBackend, AudioBackendTrait};
 use crate::source::{AudioClip, AudioSource, AudioState, MixInput, SpatialParams};
 
+/// Bridges the ECS world and the audio backend.
+///
+/// Each [`step`](AudioEngine::step) scans every entity carrying an
+/// [`AudioSource`]: entities newly marked [`AudioState::Playing`] get their
+/// mix input (with spatial parameters derived relative to the listener)
+/// submitted to the backend once, then tracked as active; paused/stopped or
+/// despawned entities are untracked. Clip storage is owned here and
+/// referenced by registration index.
 pub struct AudioEngine {
     backend: Box<dyn AudioBackendTrait>,
     clips: Vec<AudioClip>,
@@ -15,6 +23,10 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    /// Create an engine on the platform's real audio output.
+    ///
+    /// # Errors
+    /// Propagates backend construction failure (no mixer thread).
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             backend: Box::new(AudioBackend::new()?),
@@ -36,6 +48,8 @@ impl AudioEngine {
         }
     }
 
+    /// Store a clip and return its stable registration id for
+    /// [`AudioSource::clip_id`]. Ids are never reused.
     pub fn register_clip(&mut self, clip: AudioClip) -> usize {
         let id = self.clips.len();
         self.clips.push(clip);
@@ -50,10 +64,15 @@ impl AudioEngine {
         self._listener_gain = gain.max(0.0);
     }
 
+    /// Access the underlying backend (typically downcast via
+    /// [`AudioBackendTrait::as_any`] in tests).
     pub fn backend(&self) -> &dyn AudioBackendTrait {
         &*self.backend
     }
 
+    /// One frame of orchestration: submit newly-playing sources, drop
+    /// stopped/paused/despawned ones. Cheap no-op when no [`AudioSource`]
+    /// lane exists in `store`.
     pub fn step(&mut self, store: &SmartStore) {
         self.update_sources(store);
     }
@@ -125,7 +144,7 @@ impl AudioEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::SpatialParams;
+    
 
     /// Records every `play` call so the engine's orchestration can be
     /// asserted without a real audio device.

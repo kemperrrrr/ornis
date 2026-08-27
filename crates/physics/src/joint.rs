@@ -8,6 +8,10 @@ use glam::Vec3;
 
 use crate::body::BodyHandle;
 
+/// Stable index of a joint inside its owning engine.
+///
+/// Like [`BodyHandle`](crate::body::BodyHandle) this is a vector index:
+/// removal shifts subsequent handles.
 pub type JointHandle = usize;
 
 /// What the user supplies when creating a joint. Local anchors/axes are
@@ -18,18 +22,23 @@ pub enum JointKind {
     /// Ball-and-socket (spherical): anchor points coincide.
     /// 3 linear equality constraints along the world axes.
     Ball {
+        /// Anchor point in body A's local frame.
         local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame.
         local_anchor_b: Vec3,
     },
     /// Revolute (hinge): ball joint + the hinge axes stay parallel,
     /// leaving exactly one rotational degree of freedom around the axis.
     /// 3 linear + 2 angular equality constraints.
     Revolute {
+        /// Anchor point in body A's local frame (hinge center).
         local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (hinge center).
         local_anchor_b: Vec3,
         /// Hinge axis in each body's local frame. The axes must coincide in
         /// world space when the joint is assembled (normalized on creation).
         local_axis_a: Vec3,
+        /// Hinge axis in body B's local frame; see `local_axis_a`.
         local_axis_b: Vec3,
     },
 }

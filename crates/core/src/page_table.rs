@@ -1,5 +1,24 @@
+//! Sparse paged storage backing the smart store's virtual slots.
+//!
+//! A [`PageTable`] maps dense indices to values in fixed-size pages that
+//! are allocated lazily on first write. This keeps memory proportional to
+//! actual occupancy while preserving O(1) indexed access — the classic
+//! sparse-set/page-table trade-off used by packed component lanes.
+/// Number of slots per page. Chosen to match a typical 4 KiB arena so a
+/// fully populated page of small components stays cache and allocator
+/// friendly.
 pub const PAGE_SIZE: usize = 4096;
 
+/// Sparse, lazily paged vector indexed by dense `usize` slots.
+///
+/// Pages of `PAGE_SIZE` slots are allocated only when a slot inside them
+/// is first written via [`set`](PageTable::set); reads of untouched
+/// regions return `None` without allocating. This gives O(1) access with
+/// memory proportional to occupancy - used as backing storage for packed
+/// component lanes in [`SmartStore`](crate::SmartStore).
+///
+/// `T: Clone + Default` is required: untouched slots conceptually hold
+/// `T::default()` and pages are materialized by filling with defaults.
 pub struct PageTable<T> {
     pages: Vec<Option<Box<[T; PAGE_SIZE]>>>,
 }
@@ -29,6 +48,7 @@ impl<T: Clone + Default> Clone for PageTable<T> {
 }
 
 impl<T: Clone + Default> PageTable<T> {
+    /// Creates an empty table with no pages allocated.
     pub fn new() -> Self {
         Self::default()
     }
@@ -46,16 +66,23 @@ impl<T: Clone + Default> PageTable<T> {
         self.pages.get(page_id)?.as_ref().map(|b| &**b)
     }
 
+    /// Returns a reference to the slot at `index`, or `None` if the
+    /// containing page was never allocated.
     pub fn get(&self, index: usize) -> Option<&T> {
         let offset = index % PAGE_SIZE;
         self.page(index).map(|p| &p[offset])
     }
 
+    /// Returns an exclusive reference to the slot at `index`. Unlike
+    /// [`set`](PageTable::set), this does NOT allocate a missing page:
+    /// returning `None` preserves the "untouched" semantics of sparse slots.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
         let offset = index % PAGE_SIZE;
         self.page_mut(index).as_mut().map(|p| &mut p[offset])
     }
 
+    /// Writes `value` into the slot at `index`, allocating its page
+    /// (filled with `T::default()`) if this is the first touch.
     pub fn set(&mut self, index: usize, value: T) {
         let page = self.page_mut(index);
         let offset = index % PAGE_SIZE;

@@ -18,6 +18,11 @@ enum AudioCommand {
     Shutdown,
 }
 
+/// Native (cpal) output backend.
+///
+/// Spawns a dedicated `ornis-audio` thread owning the cpal device stream;
+/// commands are exchanged via a crossbeam channel so `play`/`stop` are safe
+/// from any thread. Dropping the backend signals shutdown and joins the thread.
 pub struct AudioBackend {
     command_tx: Sender<AudioCommand>,
     handle: Option<thread::JoinHandle<()>>,
@@ -25,6 +30,11 @@ pub struct AudioBackend {
 }
 
 impl AudioBackend {
+    /// Spawn the mixer thread.
+    ///
+    /// # Errors
+    /// Returns an error when the OS thread cannot be spawned. Device problems
+    /// surface asynchronously as stderr messages from the mixer thread.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let running = Arc::new(AtomicBool::new(true));
@@ -45,18 +55,22 @@ impl AudioBackend {
         })
     }
 
+    /// Queue a sound for mixing; never blocks on the audio thread.
     pub fn play(&self, input: MixInput) {
         let _ = self.command_tx.send(AudioCommand::Play(input));
     }
 
+    /// Remove the queued sound at `index` (index into the mixer's active list).
     pub fn stop(&self, index: usize) {
         let _ = self.command_tx.send(AudioCommand::Stop(index));
     }
 
+    /// Change the volume of the queued sound at `index`; clamped to [0, 1] at mix time.
     pub fn set_volume(&self, index: usize, volume: f32) {
         let _ = self.command_tx.send(AudioCommand::SetVolume(index, volume));
     }
 
+    /// Drop every queued sound immediately.
     pub fn clear(&self) {
         let _ = self.command_tx.send(AudioCommand::Clear);
     }
@@ -167,8 +181,8 @@ fn pan_sample(sample: f32, azimuth: f32) -> (f32, f32) {
     // Tradeoff vs equal-power: the channel SUM dips slightly toward the
     // center — accepted in exchange for an exact center level.
     let t = (azimuth / std::f32::consts::FRAC_PI_2).clamp(-1.0, 1.0);
-    let l_gain = (1.0 - t).min(1.0).max(0.0);
-    let r_gain = (1.0 + t).min(1.0).max(0.0);
+    let l_gain = (1.0 - t).clamp(0.0, 1.0);
+    let r_gain = (1.0 + t).clamp(0.0, 1.0);
     let left = (l_gain * sample).clamp(-1.0, 1.0);
     let right = (r_gain * sample).clamp(-1.0, 1.0);
     (left, right)
@@ -303,7 +317,7 @@ mod tests {
         assert!(far > 0.0 && far < 1.0, "far = {far}");
         // Clamped to [0, 1].
         let clamped = distance_attenuation(1e9, 1.0, 1.0);
-        assert!(clamped >= 0.0 && clamped <= 1.0);
+        assert!((0.0..=1.0).contains(&clamped));
     }
 
     #[test]
@@ -314,7 +328,7 @@ mod tests {
             samples: std::sync::Arc::new(vec![0.5f32; 4]),
         };
         let src = AudioSource::new();
-        let mut input = MixInput::new(&clip, &src, None);
+        let input = MixInput::new(&clip, &src, None);
 
         let mut out = vec![0.0f32; 4]; // 2 frames x 2 channels
         mix(&mut vec![input], &mut out, 2);
@@ -335,7 +349,7 @@ mod tests {
         };
         let mut src = AudioSource::new();
         src.volume = 0.5;
-        let mut input = MixInput::new(&clip, &src, None);
+        let input = MixInput::new(&clip, &src, None);
 
         let mut out = vec![0.0f32; 2];
         mix(&mut vec![input], &mut out, 1);
@@ -351,7 +365,7 @@ mod tests {
         };
         let mut src = AudioSource::new();
         src.looping = true;
-        let mut input = MixInput::new(&clip, &src, None);
+        let input = MixInput::new(&clip, &src, None);
 
         // Output longer than the clip: looping must wrap the cursor and
         // keep producing samples instead of dropping the sound.
@@ -371,7 +385,7 @@ mod tests {
             samples: std::sync::Arc::new(vec![0.25f32; 2]),
         };
         let src = AudioSource::new(); // looping = false
-        let mut input = MixInput::new(&clip, &src, None);
+        let input = MixInput::new(&clip, &src, None);
 
         // Output longer than clip: sound should be removed after 2 frames.
         let mut out = vec![0.0f32; 4];

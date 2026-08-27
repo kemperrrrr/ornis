@@ -1,3 +1,13 @@
+//! Ornis core ECS: entities, component storage, scheduling, and the
+//! CPU/GPU dispatch layer.
+//!
+//! The crate provides the data backbone of the engine: [`Entity`] handles
+//! with generational reuse, dense ([`ComponentStore`]) and packed
+//! ([`SmartStore`]) component storage, a dependency-driven [`Schedule`],
+//! and a [`Dispatcher`] that routes work between CPU lanes and GPU compute.
+//! The [`material`] module holds the GPU-ready OpenPBR material layout.
+#![warn(missing_docs)]
+
 mod cold_store;
 mod command_sync;
 mod component_store;
@@ -7,6 +17,7 @@ mod entity;
 mod lock_free_store;
 pub mod material;
 mod page_table;
+/// Compile-time CPU/GPU routing for the smart pipeline.
 pub mod pipeline;
 mod prefetch;
 mod registry;

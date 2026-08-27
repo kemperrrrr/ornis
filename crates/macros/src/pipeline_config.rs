@@ -215,11 +215,7 @@ impl TypeAnalyzer {
         if let Some(size) = fixed_type_size(&name) {
             return size;
         }
-        if self.is_gpu_type(path) {
-            16
-        } else {
-            64
-        }
+        if self.is_gpu_type(path) { 16 } else { 64 }
     }
 
     fn analyze_type(&mut self, ty: &Type) {
@@ -441,7 +437,11 @@ fn where_clause_send_sync(wc: &WhereClause, type_name: &Ident) -> (bool, bool) {
     for predicate in &wc.predicates {
         if let WherePredicate::Type(wt) = predicate
             && let Type::Path(tp) = &wt.bounded_ty
-            && tp.path.segments.first().is_some_and(|s| s.ident == *type_name)
+            && tp
+                .path
+                .segments
+                .first()
+                .is_some_and(|s| s.ident == *type_name)
         {
             for bound in &wt.bounds {
                 if trait_is_name(bound, "Send") {

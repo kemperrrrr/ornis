@@ -269,6 +269,7 @@ pub struct ComponentRegistry {
 }
 
 impl ComponentRegistry {
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
     }

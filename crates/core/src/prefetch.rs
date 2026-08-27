@@ -10,21 +10,31 @@
 
 #[cfg(target_arch = "x86_64")]
 #[mutants::skip]
+/// Hints the CPU to prefetch one cache line at `ptr` before use.
+///
+/// `LOCALITY` mirrors `_mm_prefetch`'s compile-time hint (3 = keep in all
+/// cache levels). Pure performance hint with no observable semantics.
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
     unsafe { std::arch::x86_64::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }
 
 #[cfg(target_arch = "x86")]
 #[mutants::skip]
+/// 32-bit x86 variant of the prefetch hint; see the x86_64 version.
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
     unsafe { std::arch::x86::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+/// Portable no-op fallback for architectures without an x86 prefetch
+/// instruction; keeps call sites branch-free across targets.
 pub fn prefetch_read<T, const LOCALITY: i32>(_ptr: *const T) {}
 
 pub(crate) const PREFETCH_STRIDE: usize = 8;
 
+/// Wraps an iterator so that every `$stride`-th item triggers a software
+/// prefetch of its memory, hiding latency on dense linear scans (used by
+/// `ComponentStore::iter`/`iter_mut`).
 #[macro_export]
 macro_rules! prefetch_iter {
     ($iter:expr, $stride:expr) => {{

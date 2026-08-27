@@ -5,9 +5,30 @@ use crate::entity::Entity;
 use crate::page_table::PageTable;
 use crate::prefetch::{PREFETCH_STRIDE, prefetch_iter};
 
+/// Dense single-type component storage (sparse-set style).
+///
+/// Classic three-structure sparse set: a [`PageTable`] maps an entity id to
+/// its index in the dense `data` array, and a [`FixedBitSet`] records which
+/// ids are live. Components of all live entities sit contiguously in
+/// `data`, giving cache-linear iteration — the core read path for systems.
+///
+/// Invariants kept by every operation:
+/// * `data[i]` belongs to `entities[i]`, and
+///   `sparse.get(entities[i].id()) == i` for every live slot;
+/// * lookups verify the entity's generation, so a handle to a destroyed
+///   (and possibly recycled) entity can never observe or delete another
+///   entity's component.
+///
+/// The 64-byte alignment keeps the hot header on its own cache line when
+/// stores are embedded in larger lane objects. Removal is O(1) via
+/// swap-with-last (dense order is not stable across removals; call
+/// [`defrag`](ComponentStore::defrag) to restore id order).
 #[repr(align(64))]
 pub struct ComponentStore<T> {
+    /// Dense component values, one per live entity, in insertion order
+    /// (modulo swap-on-remove). Iterate this slice for cache-friendly reads.
     pub data: Vec<T>,
+    /// Entity owning the component at the same index in [`Self::data`].
     pub entities: Vec<Entity>,
     sparse: PageTable<usize>,
     bitset: FixedBitSet,
@@ -36,10 +57,16 @@ impl<T: Clone> Clone for ComponentStore<T> {
 }
 
 impl<T> ComponentStore<T> {
+    /// Creates an empty store with no allocations beyond the defaults.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Inserts or replaces the component for `entity`.
+    ///
+    /// Re-insertion overwrites the existing value in place and refreshes
+    /// the stored handle (a newer generation must be able to read its own
+    /// write). A first insertion appends to the dense arrays.
     pub fn insert(&mut self, entity: Entity, component: T) {
         let id = entity.id() as usize;
         if self.bitset.contains(id)
@@ -60,6 +87,11 @@ impl<T> ComponentStore<T> {
         self.bitset.set(id, true);
     }
 
+    /// Removes the component for `entity`, returning it.
+    ///
+    /// Uses swap-with-last, so relative order of the remaining components
+    /// changes (the moved component's sparse mapping is updated). Returns
+    /// `None` if the entity has no component here or the handle is stale.
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
         let id = entity.id() as usize;
         if !self.bitset.contains(id) {
@@ -86,6 +118,8 @@ impl<T> ComponentStore<T> {
         component
     }
 
+    /// Returns the component for `entity`, or `None` if absent or the
+    /// handle refers to a destroyed generation.
     pub fn get(&self, entity: Entity) -> Option<&T> {
         let id = entity.id() as usize;
         if !self.bitset.contains(id) {
@@ -98,6 +132,8 @@ impl<T> ComponentStore<T> {
         Some(&self.data[dense_idx])
     }
 
+    /// Mutable variant of [`get`](ComponentStore::get) with the same
+    /// generation-checked semantics.
     pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
         let id = entity.id() as usize;
         if !self.bitset.contains(id) {
@@ -110,6 +146,8 @@ impl<T> ComponentStore<T> {
         Some(&mut self.data[dense_idx])
     }
 
+    /// Returns `true` if `entity` currently owns a component here (with
+    /// a matching generation).
     pub fn contains(&self, entity: Entity) -> bool {
         let id = entity.id() as usize;
         if !self.bitset.contains(id) {
@@ -121,14 +159,17 @@ impl<T> ComponentStore<T> {
         dense_idx < self.data.len() && entity.generation() == self.entities[dense_idx].generation()
     }
 
+    /// Iterates components in dense order with software prefetch hints.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         prefetch_iter!(self.data.iter(), PREFETCH_STRIDE)
     }
 
+    /// Mutably iterates components in dense order with prefetch hints.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         prefetch_iter!(self.data.iter_mut(), PREFETCH_STRIDE)
     }
 
+    /// Parallel read-only iteration over the dense slice (rayon-backed).
     pub fn par_iter(&self) -> rayon::slice::Iter<'_, T>
     where
         T: Sync,
@@ -136,6 +177,7 @@ impl<T> ComponentStore<T> {
         self.data[..].par_iter()
     }
 
+    /// Parallel mutable iteration over the dense slice (rayon-backed).
     pub fn par_iter_mut(&mut self) -> rayon::slice::IterMut<'_, T>
     where
         T: Send,
@@ -143,18 +185,26 @@ impl<T> ComponentStore<T> {
         self.data[..].par_iter_mut()
     }
 
+    /// Number of live components (length of the dense array).
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Returns `true` if no components are stored.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
+    /// Read-only view of the liveness bitset (one bit per entity id).
+    /// Used for set algebra between lanes (see
+    /// [`iter_without`](ComponentStore::iter_without)).
     pub fn bitset(&self) -> &FixedBitSet {
         &self.bitset
     }
 
+    /// Maps an entity handle to its index in the dense array, verifying
+    /// both presence and generation. Exposed for callers that need to pair
+    /// this store with packed GPU-side layouts by index.
     pub fn dense_index(&self, entity: Entity) -> Option<usize> {
         let id = entity.id() as usize;
         if !self.bitset.contains(id) {
@@ -167,6 +217,8 @@ impl<T> ComponentStore<T> {
         Some(dense_idx)
     }
 
+    /// Iterates `(entity, &A, &B)` pairs for every entity present in both
+    /// stores, skipping entities whose generations disagree between them.
     pub fn iter_zip<'a, 'b, U>(&'a self, other: &'b ComponentStore<U>) -> ZipIter<'a, 'b, T, U> {
         let entity_ids: Vec<u32> = self
             .bitset
@@ -181,6 +233,9 @@ impl<T> ComponentStore<T> {
         }
     }
 
+    /// Iterates `(entity, component)` pairs for entities NOT marked in
+    /// `exclude` — the "join with absence" pattern used by systems that
+    /// require one component but forbid another.
     pub fn iter_without<'a>(
         &'a self,
         exclude: &'a FixedBitSet,
@@ -211,6 +266,9 @@ impl<T> ComponentStore<T> {
         })
     }
 
+    /// Mutably iterates the dense array in chunks of exactly 4 elements
+    /// (SIMD-friendly width); any remainder is reachable via
+    /// [`ChunkedIterMut::into_tail`].
     pub fn chunked_iter_mut(&mut self) -> ChunkedIterMut<'_, T> {
         let n = self.data.len();
         let chunk_end = (n / 4) * 4;
@@ -221,6 +279,8 @@ impl<T> ComponentStore<T> {
         }
     }
 
+    /// Parallel mutable iteration in chunks of 4 elements, flattened back
+    /// into individual items.
     pub fn chunked_par_iter_mut(&mut self) -> impl ParallelIterator<Item = &mut T>
     where
         T: Send,
@@ -228,6 +288,9 @@ impl<T> ComponentStore<T> {
         self.data.par_chunks_exact_mut(4).flatten()
     }
 
+    /// Reorders the dense array by ascending entity id, restoring a
+    /// canonical layout after swap-on-remove churn. O(n log n) and
+    /// allocation-heavy — call at explicit maintenance points, not per frame.
     pub fn defrag(&mut self)
     where
         T: Clone,
@@ -253,6 +316,8 @@ impl<T> ComponentStore<T> {
     }
 }
 
+/// Iterator produced by [`ComponentStore::iter_zip`]: yields the shared
+/// entities of two stores together with references to both components.
 pub struct ZipIter<'a, 'b, A, B> {
     entity_ids: Vec<u32>,
     cursor: usize,
@@ -308,6 +373,9 @@ impl<'a, 'b, A, B> Iterator for ZipIter<'a, 'b, A, B> {
     }
 }
 
+/// Chunk-of-4 mutable iterator from
+/// [`ComponentStore::chunked_iter_mut`]; the leftover `< 4` elements are
+/// available through [`into_tail`](Self::into_tail).
 pub struct ChunkedIterMut<'a, T> {
     chunks: std::slice::ChunksExactMut<'a, T>,
     tail: Option<&'a mut [T]>,
@@ -326,6 +394,8 @@ impl<'a, T> Iterator for ChunkedIterMut<'a, T> {
 }
 
 impl<'a, T> ChunkedIterMut<'a, T> {
+    /// Consumes the iterator, returning the trailing remainder shorter
+    /// than one full 4-element chunk (if any).
     pub fn into_tail(self) -> Option<&'a mut [T]> {
         self.tail
     }

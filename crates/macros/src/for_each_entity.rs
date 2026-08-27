@@ -6,7 +6,6 @@ use syn::{
     parse_macro_input,
 };
 
-
 struct ForEachInput {
     store: Ident,
     closure_args: Vec<ClosureArg>,
