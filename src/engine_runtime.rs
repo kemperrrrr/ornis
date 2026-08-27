@@ -40,11 +40,6 @@ impl PhysicsRuntime {
         }
     }
 
-    /// Number of physics bodies currently bound to ECS entities.
-    pub fn body_count(&self) -> usize {
-        self.bindings.len()
-    }
-
     fn sync_in(
         &mut self,
         bodies: &ComponentStore<RigidBody>,
@@ -413,7 +408,7 @@ mod tests {
             .expect("physics resource")
             .lock()
             .expect("physics runtime lock");
-        assert_eq!(runtime.body_count(), 0);
+        assert_eq!(runtime.bindings.len(), 0);
     }
 
     #[test]
