@@ -187,9 +187,9 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
 впервые в продакшн-цикле, extract-фазы нет by construction.
 
 > **Прогресс 2026-08-27:** `ornis_core::Engine` с `Time` уже исполняет
-> native showcase frame и backend-neutral `RenderExtract`; editor-only
-> `EditorWorld` исполняет physics sync/step/sync-out. Остаются общий
-> `FramePlan`-render pipeline, input, WASM-side frame contract и единый
+> native showcase frame; backend-neutral `RenderExtract` и `FramePlan`
+> подключены к native path, а editor-only `EditorWorld` исполняет physics
+> sync/step/sync-out. Остаются input, WASM-side frame contract и единый
 > runtime без отдельных domain-контейнеров.
 
 ## ❌ Не делать / отложено (решения владельца)

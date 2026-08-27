@@ -81,7 +81,7 @@ mod native {
     pub use ornis_core::Engine;
     pub use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
     pub use ornis_render::{
-        Mesh, RenderBackend, RenderBackendConfig, create_render_backend, create_sphere,
+        Mesh, RenderFrame3D, RenderContext, Renderer3D, Technique, create_sphere,
     };
 }
 
@@ -101,7 +101,8 @@ struct GameContext {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
-    renderer3d: Box<dyn RenderBackend>,
+    renderer3d: Renderer3D,
+    frame_plan: RenderFrame3D,
     sphere_mesh: Mesh,
     engine: Engine,
     remote_cmd_rx: Receiver<UiCommand>,
@@ -202,13 +203,13 @@ impl GameApp {
         };
         surface.configure(&device, &surface_config);
 
-        let backend_config = RenderBackendConfig {
-            surface_config: surface_config.clone(),
-            sample_count: 1,
-            max_objects: 256,
-            max_materials: 64,
-        };
-        let renderer3d: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
+        let renderer3d = Renderer3D::new(&device, &surface_config, 1);
+        let frame_plan = RenderFrame3D::new_with(
+            surface_format,
+            (surface_config.width, surface_config.height),
+            Technique::Hybrid,
+            false,
+        );
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let (engine, entity_count) = Self::showcase_engine();
@@ -220,6 +221,7 @@ impl GameApp {
             surface,
             surface_config,
             renderer3d,
+            frame_plan,
             sphere_mesh,
             engine,
             remote_cmd_rx,
@@ -380,15 +382,19 @@ impl GameApp {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let context = ornis_render::RenderContext {
+        let context = RenderContext {
             device: &ctx.device,
             queue: &ctx.queue,
             encoder: &mut encoder,
             target: &frame_view,
         };
 
-        ctx.renderer3d
-            .render_scene(context, &ctx.sphere_mesh, extracted.instances.len() as u32);
+        ctx.frame_plan.render(
+            context,
+            &ctx.renderer3d,
+            &ctx.sphere_mesh,
+            extracted.instances.len() as u32,
+        );
 
         ctx.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -449,6 +455,8 @@ impl ApplicationHandler for GameApp {
                 ctx.surface.configure(&ctx.device, &ctx.surface_config);
                 ctx.renderer3d
                     .resize(&ctx.device, size.width.max(1), size.height.max(1));
+                ctx.frame_plan
+                    .set_surface_size(size.width.max(1), size.height.max(1));
                 ctx.window.request_redraw();
             }
             _ => {}

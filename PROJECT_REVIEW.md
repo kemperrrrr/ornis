@@ -751,7 +751,8 @@ struct GameContext {
     device,
     queue,
     surface,
-    renderer3d,
+    renderer3d: Renderer3D,
+    frame_plan: RenderFrame3D,
     sphere_mesh,
     engine: ornis_core::Engine,
     remote_cmd_rx,
@@ -765,11 +766,13 @@ struct GameContext {
 - содержит `ornis_core::Engine` с ECS-компонентами сцены;
 - запускает `RenderExtract` через `Engine::run_frame`;
 - хранит wgpu surface/renderer/mesh отдельно как backend-ресурсы;
+- использует `RenderFrame3D`/`FramePlan` для native frame recording;
 - рисует фиксированную showcase-сцену из пяти ECS-сущностей;
-- пока не содержит physics systems и `FramePlan`.
+- пока не содержит physics systems.
 
-Native rendering уже получает материалы и instances через ECS extraction,
-но полный engine frame contract ещё не подключён.
+Native rendering уже получает материалы и instances через ECS extraction и
+проходит через render plan, но полный engine frame contract с physics/input
+ещё не подключён.
 
 ##### WASM GpuScene
 
@@ -847,13 +850,14 @@ Scene
 
 #### FramePlan rendering
 
-`RenderFrame3D` получает render-specific pass data и GPU resources. Он пока
-не получает напрямую `SmartStore` и не извлекает автоматически ECS-компоненты:
-`RenderExtracted` формируется отдельным backend-neutral system перед native
-upload, а WASM строит свою GPU-копию из `/api/scene`.
+`RenderFrame3D` получает render-specific pass data и GPU resources. Native
+runtime теперь вызывает его через `Engine::run_frame` после `RenderExtract`:
+ECS-компоненты превращаются в `RenderExtracted`, затем загружаются в
+`Renderer3D` и записываются через `FramePlan`.
 
-То есть общий extraction-контракт уже появился, но ещё не подключён к
-`RenderFrame3D` и WASM frame schedule как единый runtime pipeline.
+WASM пока строит свою GPU-копию из `/api/scene` и вызывает legacy
+`RenderBackend::render_scene`; подключение WASM к общему frame contract
+остаётся следующим шагом.
 
 ### 4. Откуда сейчас берёт данные физика?
 
@@ -977,20 +981,20 @@ RedrawRequested
 → set camera
 → set lights
 → upload extracted materials/instances
-→ render_scene
+→ FramePlan / RenderFrame3D
 → submit
 → present
 ```
 
-В этом цикле уже есть ECS systems execution и render extraction, но пока
-отсутствуют отдельные стадии:
+В этом цикле уже есть ECS systems execution, render extraction и native
+FramePlan, но пока отсутствуют отдельные стадии:
 
 ```text
 pre_update
 input
 fixed_update / physics
 post_update
-FramePlan render schedule
+WASM FramePlan / common render schedule
 cleanup
 ```
 
@@ -1103,8 +1107,7 @@ resize
 - **Scheduler есть**, но не является главным scheduler'ом движка;
 - **Render FramePlan есть**, но это отдельный render scheduler;
 - **Physics подключена как systems в editor-only runtime**;
-- **RenderExtract подключён к native frame loop**, но `FramePlan` ещё не стал
-  частью общего runtime;
+- **RenderExtract и native `FramePlan` подключены к native frame loop**;
 - **EditorWorld использует core `World`, но остаётся editor-only facade**;
 - **Native loop всё ещё showcase loop**, несмотря на ECS-backed extraction;
 - **WASM loop есть**, но это browser render loop;
@@ -1715,7 +1718,7 @@ FramePlan
 3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only runtime; общий native/WASM pipeline ещё впереди;
 4. ✅ добавить backend-neutral `RenderExtract`;
 5. ✅ перевести native showcase loop на `Engine::run_frame` для ECS-backed extraction;
-6. подключить `RenderFrame3D`/`FramePlan` как внутренность `RenderSystem`;
+6. ✅ подключить `RenderFrame3D`/`FramePlan` к native render path; WASM ещё впереди;
 7. перевести WASM loop на тот же frame contract;
 8. добавить `AssetServer` и handles;
 9. только после этого развивать WebSocket, scripting и сложный hot reload.
