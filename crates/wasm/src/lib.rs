@@ -586,7 +586,7 @@ fn accept_live_scene_version(
     candidate_version: u64,
 ) -> bool {
     candidate_version > applied_version
-        && pending_version.map_or(true, |pending| candidate_version > pending)
+        && pending_version.is_none_or(|pending| candidate_version > pending)
 }
 
 /// Kick off a `/api/scene` poll unless one is already in flight. Deposits a
