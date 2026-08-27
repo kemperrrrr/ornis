@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(extracted.instances.len(), 1);
         assert_eq!(extracted.instances[0].material_index, 0);
         assert_eq!(
-            extracted.instances[0].model_matrix.w_axis().truncate(),
+            extracted.instances[0].model_matrix.w_axis.truncate(),
             Vec3::new(1.0, 2.0, 3.0)
         );
     }
