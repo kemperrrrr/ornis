@@ -24,7 +24,9 @@ fn free_port() -> u16 {
 fn http_get(port: u16, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
         .expect("write");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))

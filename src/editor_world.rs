@@ -41,14 +41,22 @@
 //! * `destroy_entity` — `{"id": u32, "generation": u32}`;
 //! * `set_component` — `{"id": u32, "generation"?: u32, "component": "Transform", "value": {…}}`;
 //!   generic upsert through the registry, full replace of the component;
-//! * `list_entities` — no payload.
+//! * `list_entities` — no payload;
+//! * `save_scene` — `{"path"?: string}`; serializes the world to RON and
+//!   writes it **atomically** (sibling `*.tmp` file + rename) to `path`
+//!   (default `editor/scene.ron`, the file the WASM viewport renders),
+//!   emitting `scene_saved {path, version}`. The world is not mutated;
+//! * `load_scene` — `{"path"?: string}`; replaces the world with the scene
+//!   read back from `path`, emitting `scene_loaded {path, version,
+//!   entity_count}` plus fresh `status`/`scene` snapshots. A missing or
+//!   malformed file emits `error` and leaves the world untouched.
 //!
 //! `version` is incremented on every mutation so clients can cheaply detect
 //! changes. Invalid commands never panic: they produce an `error` event and
 //! leave the world (and its version) untouched.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::thread::{self, JoinHandle};
 
@@ -57,7 +65,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ornis_core::{ComponentMeta, ComponentRegistry, Entity, SmartStore};
-use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+use ornis_render::scene::{
+    CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
+};
 
 use editor_backend::ipc::{GameEvent, UiCommand};
 
@@ -82,8 +92,11 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
 /// World resource: lighting, camera and ambient light of the scene.
 #[derive(Debug, Clone)]
 pub struct SceneEnvironment {
+    /// All scene lights (currently directional only).
     pub lights: Vec<LightDesc>,
+    /// The single viewing camera.
     pub camera: CameraDesc,
+    /// Ambient light RGB multiplier.
     pub ambient: [f32; 3],
 }
 
@@ -105,20 +118,37 @@ impl Default for SceneEnvironment {
 }
 
 /// Live renderable scene: alive entities plus Name/Transform/Mesh/Material
-/// components, the environment resource and a mutation version counter.
-#[derive(Default)]
+/// components, the environment resource, the scene label and a mutation
+/// version counter.
 pub struct EditorWorld {
     store: SmartStore,
     alive: Vec<Entity>,
     environment: SceneEnvironment,
+    /// Scene label round-tripped through `Scene::name` on save/load.
+    scene_name: String,
     version: u64,
 }
 
+impl Default for EditorWorld {
+    fn default() -> Self {
+        Self {
+            store: SmartStore::default(),
+            alive: Vec::new(),
+            environment: SceneEnvironment::default(),
+            scene_name: "scene".into(),
+            version: 0,
+        }
+    }
+}
+
 impl EditorWorld {
+    /// An empty world with the default environment (default camera,
+    /// no lights).
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Number of currently alive entities.
     pub fn entity_count(&self) -> usize {
         self.alive.len()
     }
@@ -133,6 +163,8 @@ impl EditorWorld {
         )
     }
 
+    /// Spawn an entity with explicit components and an optional name
+    /// (defaults to "Entity <id>"); bumps the version counter.
     pub fn spawn_with(
         &mut self,
         name: Option<String>,
@@ -163,236 +195,369 @@ impl EditorWorld {
         Some(entity)
     }
 
+    /// Display name of `entity`, if alive and named.
     pub fn name_of(&self, entity: Entity) -> Option<String> {
         self.store
             .read_lane::<Name>()
             .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
     }
 
-    /// Load a RON scene into the world: each `EntityDesc` becomes an entity,
-    /// lights/camera/ambient replace the environment resource.
+    /// Snapshot the world as a [`Scene`]: every alive entity becomes an
+    /// [`EntityDesc`] (missing components fall back to the spawn defaults),
+    /// lights/camera/ambient come from the environment resource.
+    pub fn to_scene(&self) -> Scene {
+        to_scene(self)
+    }
+
+    /// Replace the world with `scene`: each `EntityDesc` becomes an entity,
+    /// lights/camera/ambient replace the environment resource. The version
+    /// stays monotonic (`max(loaded entity count, old version + 1)`) so
+    /// clients polling `version` always observe the replacement.
     /// Returns the number of entities loaded.
-    pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, String> {
-        let scene = Scene::from_ron(ron_str).map_err(|e| format!("invalid scene RON: {e}"))?;
+    pub fn load_scene(&mut self, scene: Scene) -> usize {
         let count = scene.entities.len();
+        let mut fresh = EditorWorld::new();
         for e in scene.entities {
-            self.spawn_with(Some(e.name), e.transform, e.mesh, e.material);
+            fresh.spawn_with(Some(e.name), e.transform, e.mesh, e.material);
         }
-        self.environment = SceneEnvironment {
+        fresh.environment = SceneEnvironment {
             lights: scene.lights,
             camera: scene.camera,
             ambient: scene.ambient,
         };
-        Ok(count)
+        fresh.scene_name = scene.name;
+        fresh.version = fresh.version.max(self.version + 1);
+        *self = fresh;
+        count
+    }
+
+    /// Parse a RON scene and load it (replacing the world, see
+    /// [`EditorWorld::load_scene`]). An invalid RON string leaves the world
+    /// untouched.
+    pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, String> {
+        let scene = Scene::from_ron(ron_str).map_err(|e| format!("invalid scene RON: {e}"))?;
+        Ok(self.load_scene(scene))
+    }
+
+    /// Serialize the world to RON and write it to `path` **atomically**
+    /// (sibling `*.tmp` file + rename): a crash or I/O error mid-write can
+    /// never leave a truncated scene file behind. The world is not mutated.
+    pub fn save_scene_file(&self, path: &Path) -> Result<(), String> {
+        let ron = self
+            .to_scene()
+            .to_ron()
+            .map_err(|e| format!("scene RON serialization: {e}"))?;
+        atomic_write(path, &ron)
+    }
+
+    /// Read `path` and replace the world with its scene. Any error (missing
+    /// file, invalid RON) leaves the world untouched.
+    pub fn load_scene_file(&mut self, path: &Path) -> Result<usize, String> {
+        let ron =
+            fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        self.load_scene_ron(&ron)
     }
 
     /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
     pub fn scene_json(&self) -> String {
-        let entities: Vec<Value> = self
-            .alive
-            .iter()
-            .map(|&e| entity_json(&self.store, e))
-            .collect();
-        let lights = serde_json::to_value(&self.environment.lights).expect("LightDesc serializes");
-        let camera = serde_json::to_value(&self.environment.camera).expect("CameraDesc serializes");
-        serde_json::json!({
-            "version": self.version,
-            "entity_count": self.entity_count(),
-            "entities": entities,
-            "lights": lights,
-            "camera": camera,
-            "ambient": self.environment.ambient,
-        })
-        .to_string()
+        scene_json(self)
     }
 
     /// JSON payload for `GET /api/status` (cached by the HTTP server).
     pub fn status_json(&self) -> String {
-        serde_json::json!({
-            "entity_count": self.entity_count(),
-            "name": "Ornis Engine",
-            "version": self.version,
-        })
-        .to_string()
+        status_json(self)
     }
 
-    /// Publish `status` + `scene` snapshots so the HTTP server's caches
-    /// (`GET /api/status`, `GET /api/scene`) reflect the current world.
-    fn publish_state(&self, ev_tx: &Sender<GameEvent>) {
-        self.emit(ev_tx, "status", self.status_json());
-        self.emit(ev_tx, "scene", self.scene_json());
-    }
-
-    fn emit(&self, ev_tx: &Sender<GameEvent>, cmd_type: &str, payload: String) {
-        ev_tx
-            .send(GameEvent::CustomEvent {
-                cmd_type: cmd_type.into(),
-                json_data: payload,
-            })
-            .ok();
-    }
-
-    /// Invalid commands become `error` events instead of panics.
-    fn emit_error(&self, ev_tx: &Sender<GameEvent>, command: &str, message: &str) {
-        self.emit(
-            ev_tx,
-            "error",
-            serde_json::json!({"command": command, "message": message}).to_string(),
-        );
-    }
-
-    /// Execute one command, emitting the corresponding events.
+    /// Execute one command from the HTTP server, emitting the corresponding
+    /// events (`entity_created`/`entity_destroyed`/`entity_list`,
+    /// `ComponentUpdated`, `status`/`scene` snapshots or `error`). Invalid
+    /// commands never mutate the world — they produce an `error` event.
     pub fn handle_command(&mut self, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
-        match cmd {
-            UiCommand::CreateEntity => {
-                self.spawn(None);
-                self.publish_state(ev_tx);
-            }
-            UiCommand::DestroyEntity { entity_id } => {
-                // The typed variant carries no generation; match any alive
-                // entity with this id.
-                if let Ok(entity) = resolve_alive(&self.alive, *entity_id, None) {
-                    self.despawn(entity.id(), entity.generation());
-                    self.publish_state(ev_tx);
-                }
-            }
-            UiCommand::Custom {
-                cmd_type,
-                json_data,
-            } => self.handle_custom(cmd_type, json_data, ev_tx),
-            UiCommand::SetComponent {
-                entity_id,
-                generation,
-                type_name,
-                json_data,
-            } => self.handle_set_component(*entity_id, *generation, type_name, json_data, ev_tx),
-        }
+        handle_command(self, cmd, ev_tx);
     }
+}
 
-    /// Typed `SetComponent` (remote maps the `set_component` POST here):
-    /// generic upsert through the component registry. Success emits the
-    /// typed `ComponentUpdated` event and publishes fresh snapshots; any
-    /// error (unknown entity/component, malformed JSON) is an `error`
-    /// event with the world left untouched.
-    fn handle_set_component(
-        &mut self,
-        entity_id: u32,
-        generation: Option<u32>,
-        type_name: &str,
-        json_data: &str,
-        ev_tx: &Sender<GameEvent>,
-    ) {
-        match self.set_component(entity_id, generation, type_name, json_data) {
-            Ok(value) => {
-                ev_tx
-                    .send(GameEvent::ComponentUpdated {
-                        entity_id,
-                        type_name: type_name.into(),
-                        json_data: value.to_string(),
-                    })
-                    .ok();
-                self.publish_state(ev_tx);
-            }
-            Err(e) => self.emit_error(ev_tx, "set_component", &e),
-        }
+// ═══════════════════════════════════════════════════════════════════════════
+// Snapshots and command handling — free functions over [`EditorWorld`]
+// ═══════════════════════════════════════════════════════════════════════════
+// The bulk of the snapshot/command logic lives here, not in
+// `impl EditorWorld`, to keep the type under the bca number-of-methods
+// gate; the public methods above are thin delegates.
+
+/// Snapshot `world` as a [`Scene`]: every alive entity becomes an
+/// [`EntityDesc`] (missing components fall back to the spawn defaults),
+/// lights/camera/ambient come from the environment resource.
+fn to_scene(world: &EditorWorld) -> Scene {
+    let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
+    Scene {
+        name: world.scene_name.clone(),
+        entities,
+        lights: world.environment.lights.clone(),
+        camera: world.environment.camera.clone(),
+        ambient: world.environment.ambient,
     }
+}
 
-    /// Validate and apply the upsert; returns the applied payload.
-    fn set_component(
-        &mut self,
-        entity_id: u32,
-        generation: Option<u32>,
-        type_name: &str,
-        json_data: &str,
-    ) -> Result<Value, String> {
-        let entity = resolve_alive(&self.alive, entity_id, generation)?;
-        let meta = REGISTRY
-            .by_name(type_name)
-            .ok_or_else(|| format!("unknown component '{type_name}'"))?;
-        let value: Value =
-            serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
-        meta.set_json(&mut self.store, entity, &value)
-            .map_err(|e| e.to_string())?;
-        self.version += 1;
-        Ok(value)
+/// One alive entity as an [`EntityDesc`] for [`to_scene`].
+fn entity_desc(world: &EditorWorld, entity: Entity) -> EntityDesc {
+    EntityDesc {
+        name: world
+            .name_of(entity)
+            .unwrap_or_else(|| format!("Entity {}", entity.id())),
+        transform: read_component(&world.store, entity).unwrap_or_else(default_transform),
+        mesh: read_component(&world.store, entity).unwrap_or_else(default_mesh),
+        material: read_component(&world.store, entity).unwrap_or_else(default_material),
     }
+}
 
-    fn handle_custom(&mut self, cmd_type: &str, json_data: &str, ev_tx: &Sender<GameEvent>) {
-        let data = match parse_data(json_data) {
-            Ok(data) => data,
-            Err(e) => {
-                self.emit_error(ev_tx, cmd_type, &e);
-                return;
-            }
-        };
-        match cmd_type {
-            "create_entity" => match self.cmd_create_entity(&data) {
-                Ok(payload) => {
-                    self.emit(ev_tx, "entity_created", payload);
-                    self.publish_state(ev_tx);
-                }
-                Err(e) => self.emit_error(ev_tx, cmd_type, &e),
-            },
-            "destroy_entity" => match self.cmd_destroy_entity(&data) {
-                Ok(payload) => {
-                    self.emit(ev_tx, "entity_destroyed", payload);
-                    self.publish_state(ev_tx);
-                }
-                Err(e) => self.emit_error(ev_tx, cmd_type, &e),
-            },
-            "list_entities" => {
-                let payload = list_entities_json(self);
-                self.emit(ev_tx, "entity_list", payload);
-            }
-            other => self.emit_error(ev_tx, other, "unknown command"),
-        }
-    }
+/// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
+fn scene_json(world: &EditorWorld) -> String {
+    let entities: Vec<Value> = world
+        .alive
+        .iter()
+        .map(|&e| entity_json(&world.store, e))
+        .collect();
+    let lights = serde_json::to_value(&world.environment.lights).expect("LightDesc serializes");
+    let camera = serde_json::to_value(&world.environment.camera).expect("CameraDesc serializes");
+    serde_json::json!({
+        "version": world.version,
+        "entity_count": world.entity_count(),
+        "entities": entities,
+        "lights": lights,
+        "camera": camera,
+        "ambient": world.environment.ambient,
+    })
+    .to_string()
+}
 
-    fn cmd_create_entity(&mut self, data: &Value) -> Result<String, String> {
-        let name = opt_string(data, "name")?;
-        // Optional component overrides by registry name. Everything is
-        // parsed BEFORE the spawn so a bad payload leaves the world (and
-        // its version) untouched.
-        let overrides = match data.get("components") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Object(map)) => parse_overrides(map)?,
-            Some(_) => return Err("'components': expected an object".into()),
-        };
-        let entity = self.spawn(name);
-        for (meta, boxed) in overrides {
-            // Parsed from the same meta — the box type always matches.
-            meta.insert_any(&mut self.store, entity, boxed);
-        }
-        Ok(serde_json::json!({
-            "id": entity.id(),
-            "generation": entity.generation(),
-            "name": self.name_of(entity),
+/// JSON payload for `GET /api/status` (cached by the HTTP server).
+fn status_json(world: &EditorWorld) -> String {
+    serde_json::json!({
+        "entity_count": world.entity_count(),
+        "name": "Ornis Engine",
+        "version": world.version,
+    })
+    .to_string()
+}
+
+/// Publish `status` + `scene` snapshots so the HTTP server's caches
+/// (`GET /api/status`, `GET /api/scene`) reflect the current world.
+fn publish_state(world: &EditorWorld, ev_tx: &Sender<GameEvent>) {
+    emit(ev_tx, "status", world.status_json());
+    emit(ev_tx, "scene", world.scene_json());
+}
+
+fn emit(ev_tx: &Sender<GameEvent>, cmd_type: &str, payload: String) {
+    ev_tx
+        .send(GameEvent::CustomEvent {
+            cmd_type: cmd_type.into(),
+            json_data: payload,
         })
-        .to_string())
-    }
+        .ok();
+}
 
-    fn cmd_destroy_entity(&mut self, data: &Value) -> Result<String, String> {
-        let entity = self.resolve_entity(data)?;
-        self.despawn(entity.id(), entity.generation());
-        Ok(serde_json::json!({"id": entity.id(), "generation": entity.generation()}).to_string())
-    }
+/// Invalid commands become `error` events instead of panics.
+fn emit_error(ev_tx: &Sender<GameEvent>, command: &str, message: &str) {
+    emit(
+        ev_tx,
+        "error",
+        serde_json::json!({"command": command, "message": message}).to_string(),
+    );
+}
 
-    /// Validate `id` + `generation` against the store's allocator.
-    fn resolve_entity(&self, data: &Value) -> Result<Entity, String> {
-        let id = data
-            .get("id")
-            .and_then(Value::as_u64)
-            .ok_or("missing or invalid 'id'")? as u32;
-        let generation = data
-            .get("generation")
-            .and_then(Value::as_u64)
-            .ok_or("missing or invalid 'generation'")? as u32;
-        let entity = Entity::new_with_gen(id, generation);
-        if !self.store.is_alive(entity) {
-            return Err(format!("entity {id}:{generation} not found"));
+/// Execute one command from the HTTP server, emitting the corresponding
+/// events (`entity_created`/`entity_destroyed`/`entity_list`,
+/// `ComponentUpdated`, `status`/`scene` snapshots or `error`). Invalid
+/// commands never mutate the world — they produce an `error` event.
+fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
+    match cmd {
+        UiCommand::CreateEntity => {
+            world.spawn(None);
+            publish_state(world, ev_tx);
         }
-        Ok(entity)
+        UiCommand::DestroyEntity { entity_id } => {
+            // The typed variant carries no generation; match any alive
+            // entity with this id.
+            if let Ok(entity) = resolve_alive(&world.alive, *entity_id, None) {
+                world.despawn(entity.id(), entity.generation());
+                publish_state(world, ev_tx);
+            }
+        }
+        UiCommand::Custom {
+            cmd_type,
+            json_data,
+        } => handle_custom(world, cmd_type, json_data, ev_tx),
+        UiCommand::SetComponent {
+            entity_id,
+            generation,
+            type_name,
+            json_data,
+        } => handle_set_component(world, *entity_id, *generation, type_name, json_data, ev_tx),
     }
+}
+
+/// Typed `SetComponent` (remote maps the `set_component` POST here):
+/// generic upsert through the component registry. Success emits the
+/// typed `ComponentUpdated` event and publishes fresh snapshots; any
+/// error (unknown entity/component, malformed JSON) is an `error`
+/// event with the world left untouched.
+fn handle_set_component(
+    world: &mut EditorWorld,
+    entity_id: u32,
+    generation: Option<u32>,
+    type_name: &str,
+    json_data: &str,
+    ev_tx: &Sender<GameEvent>,
+) {
+    match set_component(world, entity_id, generation, type_name, json_data) {
+        Ok(value) => {
+            ev_tx
+                .send(GameEvent::ComponentUpdated {
+                    entity_id,
+                    type_name: type_name.into(),
+                    json_data: value.to_string(),
+                })
+                .ok();
+            publish_state(world, ev_tx);
+        }
+        Err(e) => emit_error(ev_tx, "set_component", &e),
+    }
+}
+
+/// Validate and apply the upsert; returns the applied payload.
+fn set_component(
+    world: &mut EditorWorld,
+    entity_id: u32,
+    generation: Option<u32>,
+    type_name: &str,
+    json_data: &str,
+) -> Result<Value, String> {
+    let entity = resolve_alive(&world.alive, entity_id, generation)?;
+    let meta = REGISTRY
+        .by_name(type_name)
+        .ok_or_else(|| format!("unknown component '{type_name}'"))?;
+    let value: Value =
+        serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
+    meta.set_json(&mut world.store, entity, &value)
+        .map_err(|e| e.to_string())?;
+    world.version += 1;
+    Ok(value)
+}
+
+fn handle_custom(
+    world: &mut EditorWorld,
+    cmd_type: &str,
+    json_data: &str,
+    ev_tx: &Sender<GameEvent>,
+) {
+    let data = match parse_data(json_data) {
+        Ok(data) => data,
+        Err(e) => {
+            emit_error(ev_tx, cmd_type, &e);
+            return;
+        }
+    };
+    match cmd_type {
+        "create_entity" => match cmd_create_entity(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "entity_created", payload);
+                publish_state(world, ev_tx);
+            }
+            Err(e) => emit_error(ev_tx, cmd_type, &e),
+        },
+        "destroy_entity" => match cmd_destroy_entity(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "entity_destroyed", payload);
+                publish_state(world, ev_tx);
+            }
+            Err(e) => emit_error(ev_tx, cmd_type, &e),
+        },
+        "list_entities" => {
+            let payload = list_entities_json(world);
+            emit(ev_tx, "entity_list", payload);
+        }
+        "save_scene" => {
+            let path = command_path(&data);
+            match world.save_scene_file(&path) {
+                Ok(()) => emit(
+                    ev_tx,
+                    "scene_saved",
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "version": world.version,
+                    })
+                    .to_string(),
+                ),
+                Err(e) => emit_error(ev_tx, cmd_type, &e),
+            }
+        }
+        "load_scene" => {
+            let path = command_path(&data);
+            match world.load_scene_file(&path) {
+                Ok(count) => {
+                    emit(
+                        ev_tx,
+                        "scene_loaded",
+                        serde_json::json!({
+                            "path": path.display().to_string(),
+                            "version": world.version,
+                            "entity_count": count,
+                        })
+                        .to_string(),
+                    );
+                    publish_state(world, ev_tx);
+                }
+                Err(e) => emit_error(ev_tx, cmd_type, &e),
+            }
+        }
+        other => emit_error(ev_tx, other, "unknown command"),
+    }
+}
+
+fn cmd_create_entity(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+    let name = opt_string(data, "name")?;
+    // Optional component overrides by registry name. Everything is
+    // parsed BEFORE the spawn so a bad payload leaves the world (and
+    // its version) untouched.
+    let overrides = match data.get("components") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Object(map)) => parse_overrides(map)?,
+        Some(_) => return Err("'components': expected an object".into()),
+    };
+    let entity = world.spawn(name);
+    for (meta, boxed) in overrides {
+        // Parsed from the same meta — the box type always matches.
+        meta.insert_any(&mut world.store, entity, boxed);
+    }
+    Ok(serde_json::json!({
+        "id": entity.id(),
+        "generation": entity.generation(),
+        "name": world.name_of(entity),
+    })
+    .to_string())
+}
+
+fn cmd_destroy_entity(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+    let entity = resolve_entity(world, data)?;
+    world.despawn(entity.id(), entity.generation());
+    Ok(serde_json::json!({"id": entity.id(), "generation": entity.generation()}).to_string())
+}
+
+/// Validate `id` + `generation` against the store's allocator.
+fn resolve_entity(world: &EditorWorld, data: &Value) -> Result<Entity, String> {
+    let id = data
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or("missing or invalid 'id'")? as u32;
+    let generation = data
+        .get("generation")
+        .and_then(Value::as_u64)
+        .ok_or("missing or invalid 'generation'")? as u32;
+    let entity = Entity::new_with_gen(id, generation);
+    if !world.store.is_alive(entity) {
+        return Err(format!("entity {id}:{generation} not found"));
+    }
+    Ok(entity)
 }
 
 /// One entity entry: `id`/`generation` plus a map
@@ -411,6 +576,13 @@ fn entity_json(store: &SmartStore, entity: Entity) -> Value {
         "generation": entity.generation(),
         "components": components,
     })
+}
+
+/// Read a typed component of `entity` from the store.
+fn read_component<T: 'static + Clone + Send + Sync>(store: &SmartStore, entity: Entity) -> Option<T> {
+    store
+        .read_lane::<T>()
+        .and_then(|lane| lane.get(entity).cloned())
 }
 
 /// Typed commands resolve an entity by id among the alive ones;
@@ -466,6 +638,16 @@ fn default_material() -> MaterialDesc {
     }
 }
 
+/// Scene path override from a `save_scene`/`load_scene` payload
+/// (`{"path": "…"}`); defaults to [`scene_file_path`]. A non-string `path`
+/// is ignored (falls back to the default) like any other soft payload flaw.
+fn command_path(data: &Value) -> PathBuf {
+    data.get("path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(scene_file_path)
+}
+
 /// Parse the command payload; an empty body means `{}`.
 fn parse_data(json_data: &str) -> Result<Value, String> {
     if json_data.trim().is_empty() {
@@ -510,6 +692,24 @@ fn parse_overrides(map: &serde_json::Map<String, Value>) -> Result<ParsedOverrid
 // Startup
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Default scene file for the `save_scene`/`load_scene` commands:
+/// `editor/scene.ron` — the scene the WASM viewport renders at startup
+/// (CARGO_MANIFEST_DIR for the `ornis` binary points at the workspace root).
+fn scene_file_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron")
+}
+
+/// Write `contents` to `path` atomically: a sibling `<name>.tmp` file is
+/// written first and renamed over the target, so a failed write leaves the
+/// previous scene file intact (or no file at all).
+fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
+}
+
 /// Startup scene RON: `editor/scene.ron` (what the WASM viewport renders
 /// statically), falling back to `assets/scene.ron`.
 fn startup_scene_ron() -> Option<String> {
@@ -537,7 +737,7 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
             }
             // Publish the initial state so the HTTP caches are live
             // before the first command arrives.
-            world.publish_state(&ev_tx);
+            publish_state(&world, &ev_tx);
             while let Ok(cmd) = cmd_rx.recv() {
                 world.handle_command(&cmd, &ev_tx);
             }
@@ -1093,5 +1293,168 @@ mod tests {
 
         drop(cmd_tx);
         handle.join().expect("editor-world thread must finish");
+    }
+
+    // ── save/load scene ────────────────────────────────────────────────────
+
+    /// Snapshot JSON with `version` stripped: two worlds compare by content.
+    fn scene_value(world: &EditorWorld) -> Value {
+        let mut v: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        v.as_object_mut().unwrap().remove("version");
+        v
+    }
+
+    /// Fresh temp dir per test (removed first, so no stale state).
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn to_scene_round_trip_through_ron_preserves_world() {
+        let ron =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
+                .expect("editor/scene.ron readable");
+        let mut world = EditorWorld::new();
+        world.load_scene_ron(&ron).expect("scene loads");
+        // A runtime-created entity must round-trip too.
+        world.spawn_with(
+            Some("Extra".into()),
+            TransformDesc {
+                translation: [9.0, 1.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [2.0, 2.0, 2.0],
+            },
+            MeshDesc::Sphere {
+                radius: 0.5,
+                segments: 8,
+                rings: 4,
+            },
+            MaterialDesc::Metal {
+                base_color: [1.0, 0.0, 0.0],
+                roughness: 0.3,
+            },
+        );
+
+        let serialized = world.to_scene().to_ron().expect("serialize");
+        let reparsed = Scene::from_ron(&serialized).expect("re-parse");
+
+        let mut restored = EditorWorld::new();
+        let loaded = restored.load_scene(reparsed);
+        assert_eq!(loaded, 6);
+        assert_eq!(scene_value(&restored), scene_value(&world));
+        // Version: max(loaded entity count, old version + 1) — here the
+        // 6 spawns dominate over the fresh world's `0 + 1`.
+        assert_eq!(restored.version, world.version);
+    }
+
+    #[test]
+    fn save_and_load_file_round_trip() {
+        let dir = temp_dir("ornis_editor_world_save_load");
+        let path = dir.join("scene.ron");
+
+        let mut world = EditorWorld::new();
+        world.spawn(Some("Hero".into()));
+        world.save_scene_file(&path).expect("save");
+
+        // The file on disk is a valid scene with the world's content.
+        let on_disk = Scene::from_ron(&fs::read_to_string(&path).unwrap()).expect("valid RON");
+        assert_eq!(on_disk.entities.len(), 1);
+        assert_eq!(on_disk.entities[0].name, "Hero");
+
+        let mut restored = EditorWorld::new();
+        let loaded = restored.load_scene_file(&path).expect("load");
+        assert_eq!(loaded, 1);
+        assert_eq!(scene_value(&restored), scene_value(&world));
+        // The temp file was renamed away — no litter.
+        assert!(!dir.join("scene.ron.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_failure_never_leaves_partial_files() {
+        // The target directory does not exist: the write must fail cleanly.
+        let dir = std::env::temp_dir().join("ornis_editor_world_save_fail");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("scene.ron");
+
+        let world = EditorWorld::new();
+        assert!(world.save_scene_file(&path).is_err());
+        assert!(!path.exists(), "no partial scene file");
+        assert!(!dir.join("scene.ron.tmp").exists(), "no temp file left");
+    }
+
+    #[test]
+    fn load_broken_or_missing_file_keeps_world() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        world.handle_command(&custom("create_entity", r#"{"name":"Keep"}"#), &ev_tx);
+        while ev_rx.try_recv().is_ok() {}
+        let before = scene_value(&world);
+        let version = world.version;
+
+        let dir = temp_dir("ornis_editor_world_load_broken");
+        let broken = dir.join("broken.ron");
+        fs::write(&broken, "Scene(name: 42)").unwrap();
+
+        let load = |path: &Path| custom("load_scene", &format!(r#"{{"path":"{}"}}"#, path.display()));
+        world.handle_command(&load(&broken), &ev_tx);
+        world.handle_command(&load(&dir.join("nope.ron")), &ev_tx);
+
+        let events = drain_all(&ev_rx);
+        assert_eq!(custom_events(&events, "error").len(), 2);
+        assert_eq!(custom_events(&events, "scene_loaded").len(), 0);
+        assert_eq!(scene_value(&world), before, "world untouched");
+        assert_eq!(world.version, version, "version untouched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_load_commands_emit_events_and_restore_state() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let dir = temp_dir("ornis_editor_world_cmds");
+        let path = dir.join("scene.ron");
+        let arg = format!(r#"{{"path":"{}"}}"#, path.display());
+
+        world.handle_command(&custom("create_entity", r#"{"name":"Hero"}"#), &ev_tx);
+        world.handle_command(&custom("save_scene", &arg), &ev_tx);
+
+        let events = drain_all(&ev_rx);
+        let saved = custom_events(&events, "scene_saved");
+        assert_eq!(saved.len(), 1);
+        let saved: Value = serde_json::from_str(&saved[0]).unwrap();
+        assert!(saved["path"].as_str().unwrap().ends_with("scene.ron"));
+        assert_eq!(saved["version"], 1);
+        assert!(path.exists());
+
+        // Mutate: create + destroy; then load brings the saved state back.
+        world.handle_command(&custom("create_entity", r#"{"name":"Temp"}"#), &ev_tx);
+        let hero = world.alive[0];
+        world.handle_command(
+            &custom(
+                "destroy_entity",
+                &format!(r#"{{"id":{},"generation":{}}}"#, hero.id(), hero.generation()),
+            ),
+            &ev_tx,
+        );
+        assert_eq!(world.entity_count(), 1);
+        assert_eq!(world.name_of(world.alive[0]).as_deref(), Some("Temp"));
+        while ev_rx.try_recv().is_ok() {}
+
+        world.handle_command(&custom("load_scene", &arg), &ev_tx);
+        assert_eq!(world.entity_count(), 1);
+
+        let events = drain_all(&ev_rx);
+        let loaded = custom_events(&events, "scene_loaded");
+        assert_eq!(loaded.len(), 1);
+        let loaded: Value = serde_json::from_str(&loaded[0]).unwrap();
+        assert_eq!(loaded["entity_count"], 1);
+        // Fresh snapshots were published after the load.
+        let scenes = custom_events(&events, "scene");
+        assert_eq!(scenes.len(), 1);
+        let scene: Value = serde_json::from_str(&scenes[0]).unwrap();
+        assert_eq!(scene["entities"][0]["components"]["Name"], "Hero");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

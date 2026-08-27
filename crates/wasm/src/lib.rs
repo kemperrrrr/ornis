@@ -1,3 +1,15 @@
+//! Ornis WASM — WebGPU entry point for the browser editor.
+
+#![warn(missing_docs)]
+//!
+//! Renders the live scene from `/api/scene` (polled ~1/s) when the remote
+//! server provides it; otherwise falls back to `assets/scene.ron` through
+//! the shared [`Renderer3D`](ornis_render::Renderer3D) behind
+//! [`RenderBackend`](ornis_render::RenderBackend). The orbit camera is
+//! client-side only.
+//!
+//! Build: `wasm-pack build crates/wasm --target web`.
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -15,13 +27,9 @@ mod scene_api;
 
 use scene_api::LiveScene;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Ornis WASM — WebGPU entry point for browser editor
-// Renders the live scene from /api/scene (polled ~1/s) when the remote
-// server provides it; otherwise falls back to assets/scene.ron through the
-// shared Renderer3D (RenderBackend). Orbit camera is client-side only.
-// Build: wasm-pack build crates/wasm --target web
-// ═══════════════════════════════════════════════════════════════════════════
+/// Shared handle to the requestAnimationFrame closure (self-rescheduling
+/// render loop needs to reference itself).
+type FrameCallback = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 /// Compiled-in fallback for the scene when fetch('scene.ron') is unavailable
 /// (e.g. opened without the ornis remote server).
@@ -31,6 +39,7 @@ const FALLBACK_SCENE_RON: &str = include_str!("../../../assets/scene.ron");
 const LIVE_POLL_INTERVAL_FRAMES: u64 = 60;
 
 #[wasm_bindgen(start)]
+/// wasm-bindgen entry point: installs the panic hook and logs module load.
 pub fn start() {
     console_error_panic_hook::set_once();
     console::log_1(&"[ornis-wasm] module loaded".into());
@@ -654,6 +663,14 @@ struct LoopHandles {
     live_mode: bool,
 }
 
+/// Browser entry point: initializes WebGPU on the canvas with `canvas_id`,
+/// loads the initial scene (`/api/scene` or the compiled-in fallback), and
+/// spawns the render loop with orbit controls and live scene polling.
+///
+/// # Errors
+///
+/// Returns a `JsValue` error if the canvas is missing, WebGPU initialization
+/// or scene loading fails, or no `window` object is available.
 #[wasm_bindgen]
 pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     console::log_1(&format!("[ornis-wasm] init canvas={}", canvas_id).into());
@@ -743,7 +760,7 @@ fn spawn_render_loop(
         live_mode,
     } = handles;
 
-    let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let f: FrameCallback = Rc::new(RefCell::new(None));
     let f_clone = f.clone();
 
     let window_for_loop = window.clone();

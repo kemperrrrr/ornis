@@ -19,7 +19,13 @@
     <div class="app">
         <div class="panel header">
             <img src="./Owl_bored.svg" class="logo" alt="Ornis Logo" />
-            <span>File</span>
+            <div class="menu" id="file-menu">
+                <span>File</span>
+                <div class="menu-dropdown">
+                    <button type="button" id="file-save">Save</button>
+                    <button type="button" id="file-reload">Reload</button>
+                </div>
+            </div>
             <span>Edit</span>
             <span>View</span>
             <span>Window</span>
@@ -376,7 +382,7 @@
         </div>
     </div>
     <div class="footer">
-        <div class="left"><span>Bevy Editor v0.1.0 Alpha (a9df95c)</span><span>Rust v1.74.1 (a28077b28)</span><span id="status-entities">Entities: –</span>
+        <div class="left"><span>Bevy Editor v0.1.0 Alpha (a9df95c)</span><span>Rust v1.74.1 (a28077b28)</span><span id="status-entities">Entities: –</span><span id="status-file"></span>
         </div>
         <div class="center-container"><span>my_game v0.1.0 (7e7e14d)</span></div>
         <div class="right">

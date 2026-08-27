@@ -18,22 +18,31 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // protocol surface for editor↔engine (roadmap)
 pub enum UiCommand {
+    /// Spawn a new entity with default components.
     CreateEntity,
+    /// Despawn the entity with this id (any generation).
     DestroyEntity {
+        /// Entity id to despawn.
         entity_id: u32,
     },
     /// Generic component upsert by registry name: `json_data` is the
     /// serde-canonical JSON of the whole component (full replace).
     /// `generation: None` matches any alive entity with this id.
     SetComponent {
+        /// Id of the entity to edit.
         entity_id: u32,
+        /// `None` matches any alive generation.
         generation: Option<u32>,
+        /// Registry name of the component ("Transform", "Mesh", ...).
         type_name: String,
+        /// serde-canonical JSON of the whole component (full replace).
         json_data: String,
     },
     /// Generic command with a type tag and JSON payload.
     Custom {
+        /// Command tag, e.g. "create_entity"/"destroy_entity"/"list_entities".
         cmd_type: String,
+        /// JSON object payload for the command.
         json_data: String,
     },
 }
@@ -45,19 +54,28 @@ pub enum GameEvent {
     /// Emitted after a successful `SetComponent`: `json_data` echoes the
     /// applied payload (serde-canonical component JSON).
     ComponentUpdated {
+        /// Id of the edited entity.
         entity_id: u32,
+        /// Registry name of the component.
         type_name: String,
+        /// Applied component JSON.
         json_data: String,
     },
+    /// A new entity was spawned.
     EntityCreated {
+        /// Id of the created entity.
         entity_id: u32,
     },
+    /// An entity was destroyed.
     EntityDestroyed {
+        /// Id of the destroyed entity.
         entity_id: u32,
     },
     /// Generic event for remote editor / extensibility.
     CustomEvent {
+        /// Event tag mirroring the originating command type.
         cmd_type: String,
+        /// JSON payload of the event.
         json_data: String,
     },
 }
@@ -77,6 +95,7 @@ pub struct IpcChannel {
 #[allow(dead_code)] // reserved: see comment on the struct
 impl IpcChannel {
     /// Create a new IPC pair. Returns the UI handle and the game connection.
+    #[allow(missing_docs)] // reserved struct, see comment above
     pub fn pair() -> (Self, GameConnection) {
         let (ui_tx, game_rx) = unbounded();
         let (game_tx, ui_rx) = unbounded();

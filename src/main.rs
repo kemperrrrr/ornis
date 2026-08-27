@@ -1,5 +1,13 @@
+//! Бинарь `ornis`: нативный режим (winit + wgpu) и `editor-only`
+//! (HTTP-сервер редактора на порту 3420 без нативного окна).
+
+#![warn(missing_docs)]
+
 use crossbeam_channel::unbounded;
-use editor_backend::{GameEvent, RemoteEditor, UiCommand};
+use editor_backend::RemoteEditor;
+// Only the native-mode loop types the channels explicitly.
+#[cfg(not(feature = "editor-only"))]
+use editor_backend::{GameEvent, UiCommand};
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // in native mode nothing calls it yet (the native loop is a counter stub).

@@ -526,15 +526,82 @@ function initCreateEntity() {
     });
 }
 
+// ── File menu (save/reload scene) ─────────────────────────────────
+
+// File-op results arrive as CustomEvents on /api/events
+// (scene_saved/scene_loaded/error); the latest one is shown in the footer.
+function showFileStatus(text) {
+    var node = document.getElementById('status-file');
+    if (node) node.textContent = text;
+}
+
+function initFileMenu() {
+    var menu = document.getElementById('file-menu');
+    if (!menu) return;
+    // Hover opens the dropdown via CSS; click toggles it too (touch).
+    menu.querySelector('span').addEventListener('click', function() {
+        menu.classList.toggle('open');
+    });
+    document.addEventListener('click', function(e) {
+        if (!menu.contains(e.target)) menu.classList.remove('open');
+    });
+
+    var save = document.getElementById('file-save');
+    var reload = document.getElementById('file-reload');
+    if (save) save.addEventListener('click', function() {
+        menu.classList.remove('open');
+        showFileStatus('Saving…');
+        sendCommand('save_scene', {})
+            .then(refreshEvents)
+            .catch(function() { showFileStatus('Save failed: engine offline'); });
+    });
+    if (reload) reload.addEventListener('click', function() {
+        menu.classList.remove('open');
+        showFileStatus('Reloading…');
+        sendCommand('load_scene', {})
+            .then(refreshEvents)
+            .then(refreshScene)
+            .then(refreshStatus)
+            .catch(function() { showFileStatus('Reload failed: engine offline'); });
+    });
+}
+
+// Poll /api/events and surface scene save/load results in the footer.
+// The endpoint drains its buffer per request — this is its only consumer.
+function refreshEvents() {
+    return fetchJson('/api/events')
+        .then(function(events) {
+            events.forEach(function(ev) {
+                var custom = ev && ev.CustomEvent;
+                if (!custom) return;
+                var data = {};
+                try { data = JSON.parse(custom.json_data); } catch (e) { return; }
+                if (custom.cmd_type === 'scene_saved') {
+                    showFileStatus('Saved ' + (data.path || 'scene') + ' (v' + data.version + ')');
+                } else if (custom.cmd_type === 'scene_loaded') {
+                    showFileStatus('Loaded ' + (data.path || 'scene') + ' — ' +
+                        data.entity_count + ' entities (v' + data.version + ')');
+                    refreshScene();
+                    refreshStatus();
+                } else if (custom.cmd_type === 'error') {
+                    showFileStatus('Error (' + data.command + '): ' + data.message);
+                }
+            });
+        })
+        .catch(function() { /* engine offline — keep last state */ });
+}
+
 // ── Init ────────────────────────────────────────────────────────────
 
 function init() {
     initCreateEntity();
     initHierarchyKeys();
+    initFileMenu();
     refreshScene();
     refreshStatus();
     setInterval(refreshScene, POLL_MS);
     setInterval(refreshStatus, POLL_MS);
+    setInterval(refreshEvents, POLL_MS);
 }
 
 if (document.readyState === 'loading') {
@@ -546,6 +613,7 @@ if (document.readyState === 'loading') {
 window.OrnisEditor = {
     refreshScene: refreshScene,
     refreshStatus: refreshStatus,
+    refreshEvents: refreshEvents,
     sendCommand: sendCommand,
     selectEntity: selectEntity
 };

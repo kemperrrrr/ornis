@@ -13,8 +13,8 @@ use crate::ipc::{GameEvent, UiCommand};
 /// Editor frontend root. Resolution order:
 ///   1. `--editor-dir <path>` CLI argument
 ///   2. `ORNIS_EDITOR_DIR` environment variable
-///   3. `<workspace>/editor` (CARGO_MANIFEST_DIR for the `ornis` binary
-///      points at the workspace root)
+///   3. `<workspace>/editor` (this crate lives at `crates/editor-backend`,
+///      so CARGO_MANIFEST_DIR is two levels below the workspace root)
 fn assets_root() -> PathBuf {
     let mut args = std::env::args().skip_while(|a| a != "--editor-dir");
     if args.next().is_some()
@@ -27,15 +27,19 @@ fn assets_root() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor")
 }
 
+/// The HTTP remote editor server: serves the static editor assets and the
+/// `/api/*` endpoints from a background thread; `stop` shuts it down and joins.
 pub struct RemoteEditor {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl RemoteEditor {
+    /// Bind `127.0.0.1:{port}` and start serving. On bind failure prints an
+    /// error and returns an inert handle instead of panicking.
     pub fn start(port: u16, game_tx: Sender<UiCommand>, game_rx: Receiver<GameEvent>) -> Self {
         let addr = format!("127.0.0.1:{port}");
         let server = match Server::http(&addr) {
@@ -63,6 +67,7 @@ impl RemoteEditor {
         }
     }
 
+    /// Signal shutdown and join the server thread.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -382,7 +387,11 @@ mod tests {
         });
         let cmd = parse_set_component(Some(&data)).expect("valid");
         match cmd {
-            UiCommand::SetComponent { entity_id, generation, .. } => {
+            UiCommand::SetComponent {
+                entity_id,
+                generation,
+                ..
+            } => {
                 assert_eq!(entity_id, 7);
                 assert_eq!(generation, None);
             }
@@ -436,7 +445,10 @@ mod tests {
     fn build_command_custom_no_data() {
         let cmd = build_command("ping", None).expect("custom");
         match cmd {
-            UiCommand::Custom { cmd_type, json_data } => {
+            UiCommand::Custom {
+                cmd_type,
+                json_data,
+            } => {
                 assert_eq!(cmd_type, "ping");
                 assert_eq!(json_data, "");
             }
@@ -449,7 +461,10 @@ mod tests {
     #[test]
     fn post_command_valid_forwards_to_game() {
         let (tx, rx) = unbounded::<UiCommand>();
-        post_command(r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#, &tx);
+        post_command(
+            r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#,
+            &tx,
+        );
         let cmd = rx.try_recv().expect("command forwarded");
         assert!(matches!(cmd, UiCommand::SetComponent { entity_id: 5, .. }));
     }
@@ -536,8 +551,7 @@ mod tests {
             json_data: "SCN".into(),
         })
         .unwrap();
-        tx.send(GameEvent::EntityCreated { entity_id: 11 })
-            .unwrap();
+        tx.send(GameEvent::EntityCreated { entity_id: 11 }).unwrap();
 
         let mut buffer = Vec::new();
         let mut snaps = Snapshots::default();
@@ -546,7 +560,10 @@ mod tests {
         assert_eq!(snaps.status, "STAT");
         assert_eq!(snaps.scene, "SCN");
         assert_eq!(buffer.len(), 1);
-        assert!(matches!(buffer[0], GameEvent::EntityCreated { entity_id: 11 }));
+        assert!(matches!(
+            buffer[0],
+            GameEvent::EntityCreated { entity_id: 11 }
+        ));
     }
 
     // ── assets_root ────────────────────────────────────────────────────────
