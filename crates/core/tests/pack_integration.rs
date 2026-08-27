@@ -6,7 +6,7 @@
 //! and its lanes are directly usable by `for_each_entity!` through the
 //! generated wrapper lane types.
 
-use ornis_core::{Entity, Pack, SmartStore};
+use ornis_core::{Pack, SmartStore};
 use ornis_macros::{Pack, for_each_entity};
 
 #[derive(Clone, Pack)]
