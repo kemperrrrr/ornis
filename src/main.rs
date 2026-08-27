@@ -211,6 +211,24 @@ impl GameApp {
         let renderer3d: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
+        let (engine, entity_count) = Self::showcase_engine();
+
+        Ok(GameContext {
+            window,
+            device,
+            queue,
+            surface,
+            surface_config,
+            renderer3d,
+            sphere_mesh,
+            engine,
+            remote_cmd_rx,
+            remote_ev_tx,
+            entity_count,
+        })
+    }
+
+    fn showcase_engine() -> (Engine, u32) {
         let materials = vec![
             MaterialDesc::Dielectric {
                 base_color: [0.8, 0.2, 0.2],
@@ -261,20 +279,7 @@ impl GameApp {
             }
         }
         install_render_extract(&mut engine);
-
-        Ok(GameContext {
-            window,
-            device,
-            queue,
-            surface,
-            surface_config,
-            renderer3d,
-            sphere_mesh,
-            engine,
-            remote_cmd_rx,
-            remote_ev_tx,
-            entity_count,
-        })
+        (engine, entity_count)
     }
 
     fn process_remote_commands(ctx: &mut GameContext) {

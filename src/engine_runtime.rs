@@ -18,8 +18,8 @@ use ornis_core::{
     Time,
 };
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
-use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_render::InstanceData;
+use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///

@@ -857,37 +857,28 @@ upload, а WASM строит свою GPU-копию из `/api/scene`.
 
 ### 4. Откуда сейчас берёт данные физика?
 
-Физика живёт полностью отдельно.
+Физика всё ещё владеет оптимизированным внутренним представлением
+`BuiltinPhysicsEngine`, но editor-only runtime уже подключает его как
+доменный ресурс `PhysicsRuntime`.
 
-`BuiltinPhysicsEngine` владеет своими:
-
-- rigid bodies;
-- shapes;
-- handles;
-- velocities;
-- contacts;
-- joints;
-- islands.
-
-Она не читает автоматически:
-
-```rust
-SmartStore<Transform>
-SmartStore<RigidBody>
-SmartStore<Collider>
-```
-
-и не записывает автоматически результаты обратно в ECS.
-
-В текущем коде нет интеграции вида:
+В editor-only путь выглядит так:
 
 ```text
-ECS Transform + Collider
-→ Physics step
-→ ECS Transform update
+ECS RigidBody + TransformDesc
+→ PhysicsSyncIn
+→ BuiltinPhysicsEngine::step
+→ PhysicsSyncOut
+→ ECS RigidBody + TransformDesc
 ```
 
-Есть physics API и собственный physics state, но нет physics system, зарегистрированной в общем мире.
+Синхронизация и системы находятся в `src/engine_runtime.rs`. `RigidBody`
+остаётся внутренним physics-компонентом editor facade и не входит в текущий
+serde scene snapshot. Native runtime пока подключает только RenderExtract,
+а WASM physics не запускает.
+
+То есть первый ECS ↔ physics шов уже есть, но полноценный physics pipeline
+для всех runtime-платформ и единый Collider/Transform data lifecycle ещё
+не реализованы.
 
 ### 5. Есть ли общие CPU/GPU данные?
 
@@ -929,18 +920,9 @@ FrameExecutor
 
 В `ornis-physics` есть отдельный GPU solver.
 
-Но сейчас нет единого объекта вроде:
-
-```rust
-struct World {
-    ecs: SmartStore,
-    physics: PhysicsWorld,
-    renderer: Renderer,
-    resources: Resources,
-    schedule: Schedule,
-    gpu: GpuContext,
-}
-```
+Core `World` и backend-neutral `Engine` уже существуют, но пока не
+содержат одновременно domain resources physics/render/GPU и не являются
+владельцами полного production frame lifecycle.
 
 И нет единой автоматической схемы:
 
