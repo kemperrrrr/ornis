@@ -10,8 +10,9 @@
 - GPU-диспетчеризация в `core` пока фактически является заглушкой: `Dispatcher` умеет выбрать GPU, но `GpuExecutor::execute` не выполняет GPU-операцию.
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
-  авторитетным `SmartStore` и запуском `Schedule`), но он ещё не
-  подключён к единому runtime-циклу physics/render/editor.
+  авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
+  `Engine` с ресурсом `Time`, но они ещё не подключены к единому
+  runtime-циклу physics/render/editor.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -691,7 +692,7 @@ fn run(&self, resources: &Resources)
 
 А `SmartStore` содержит ECS-компоненты.
 
-Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, time/input и frame lifecycle, пока не собран.
+Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Дополнительно `ornis_core::Engine` публикует `Time` и запускает один frame schedule. Но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, input и полным frame lifecycle, пока не собран.
 
 #### Что реально существует
 
@@ -701,9 +702,8 @@ fn run(&self, resources: &Resources)
 
 ```rust
 pub struct EditorWorld {
-    store: SmartStore,
+    world: World,
     alive: Vec<Entity>,
-    environment: SceneEnvironment,
     scene_name: String,
     version: u64,
 }
@@ -713,12 +713,9 @@ pub struct EditorWorld {
 
 Он содержит:
 
-- `SmartStore`;
+- `ornis_core::World` с `SmartStore` и `SceneEnvironment`-ресурсом;
 - список живых entities;
-- Transform/Mesh/Material/Name;
-- camera;
-- lights;
-- ambient;
+- Transform/Mesh/Material/Name в ECS-лентах;
 - scene version;
 - команды редактора.
 
@@ -736,8 +733,7 @@ pub struct EditorWorld {
 
 - в нём нет `BuiltinPhysicsEngine`;
 - в нём нет `Renderer3D`;
-- в нём нет `Schedule`;
-- он не запускает игровой frame loop;
+- он не регистрирует системы в `Schedule` и не запускает игровой frame loop;
 - WASM получает от него JSON snapshot через HTTP.
 
 То есть `EditorWorld` — это **мир редактора**, а не общий engine world.
@@ -1154,15 +1150,17 @@ resize
 ### Что нужно сделать, чтобы появилась настоящая единая архитектура
 
 `ornis_core::World` уже существует как логический контейнер
-`Resources` + `SmartStore`. Нужен верхнеуровневый runtime, который
-зарегистрирует в нём доменные ресурсы и будет владеть единым frame runner:
+`Resources` + `SmartStore`, а `ornis_core::Engine` — как минимальный
+backend-neutral frame host с `Time` и `Schedule`. Нужен следующий слой,
+который зарегистрирует в World доменные ресурсы и подключит physics/render
+к этому frame runner:
 
 ```rust
-pub struct Engine {
-    world: World,
-    schedule: Schedule,
+pub struct GameRuntime {
+    frame_host: ornis_core::Engine,
+    physics: PhysicsRuntime,
+    renderer: RendererRuntime,
     render_frame: RenderFrame3D,
-    time: Time,
 }
 ```
 
@@ -1170,10 +1168,7 @@ pub struct Engine {
 
 ```rust
 fn frame(&mut self, dt: Duration) {
-    self.world.resources_mut().insert(Time::new(dt));
-
-    self.world.run(&self.schedule);
-
+    self.frame_host.run_frame(dt.as_secs_f32()); // publishes Time + runs scheduled systems
     self.physics_step();
     self.extract_render_data();
     self.render_frame();
@@ -1688,9 +1683,8 @@ Engine World
 не дублируя ECS-состояние:
 
 ```rust
-pub struct Engine {
-    pub world: World,
-    pub schedule: Schedule,
+pub struct GameRuntime {
+    pub frame_host: ornis_core::Engine,
     pub physics: PhysicsRuntime,
     pub renderer: RendererRuntime,
     pub render_frame: RenderFrame3D,
@@ -1749,8 +1743,8 @@ FramePlan
 
 ### Эволюционный план
 
-1. ✅ создать фундамент `ornis_core::World` (`crates/core/src/world.rs`);
-2. зарегистрировать `Time`, `SmartStore`, `PhysicsRuntime`, asset resources;
+1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time` (`crates/core/src/{world.rs,engine.rs}`);
+2. зарегистрировать в World `PhysicsRuntime`, input и asset resources (Time и SmartStore предоставляет core foundation);
 3. добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut`;
 4. добавить `RenderExtract`;
 5. перевести native loop на `Engine::run_frame`;

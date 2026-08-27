@@ -65,10 +65,10 @@
 
 ## 🟡 Частично — что достроить
 
-- **Логический `World` (foundation)**: `ornis_core::World` объединяет
-  `Resources` и авторитетный `SmartStore`, предоставляет setup-доступ и
-  запуск `Schedule`; интеграция physics/render/editor в единый runtime пока
-  не завершена.
+- **Логический `World` + frame host (foundation)**: `ornis_core::World`
+  объединяет `Resources` и авторитетный `SmartStore`, а `ornis_core::Engine`
+  добавляет `Time` и `run_frame` поверх `Schedule`; интеграция
+  physics/render/editor в единый runtime пока не завершена.
 - **Remote Editor**: REST, обработчик команд в `editor-only`, `GET /api/scene`,
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые

@@ -5,13 +5,16 @@
 //! with generational reuse, dense ([`ComponentStore`]) and packed
 //! ([`SmartStore`]) component storage, a dependency-driven [`Schedule`],
 //! and a [`Dispatcher`] that routes work between CPU lanes and GPU compute.
-//! The [`material`] module holds the GPU-ready OpenPBR material layout.
+//! [`Engine`] adds a backend-neutral frame boundary with a [`Time`] resource
+//! over the logical [`World`]. The [`material`] module holds the GPU-ready
+//! OpenPBR material layout.
 #![warn(missing_docs)]
 
 mod cold_store;
 mod command_sync;
 mod component_store;
 mod dispatcher;
+mod engine;
 mod entity;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
@@ -31,6 +34,7 @@ pub use command_sync::{
 };
 pub use component_store::{ChunkedIterMut, ComponentStore, ZipIter};
 pub use dispatcher::{CpuExecutor, Dispatchable, Dispatcher, ExecutionTarget, SmartDispatcher};
+pub use engine::{Engine, Time};
 pub use entity::{Entity, EntityAllocator};
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use page_table::{PAGE_SIZE, PageTable};

@@ -128,6 +128,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
 | Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; фундамент есть, но physics/render/editor и основной frame loop ещё не подключены |
+| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, domain runtimes пока не wired |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
@@ -189,9 +190,10 @@ cargo xtask bca --report      # html to target/bca/index.html
 ### Следующий интеграционный этап
 
 `ornis_core::World` уже даёт общий логический контейнер `Resources` с
-`SmartStore` и `Schedule`. Следующий шаг — подключить к нему time/input,
-physics и render как доменные системы, а затем перевести native и WASM
-frame loops на единый контракт. Это не означает немедленно удалять
+`SmartStore` и `Schedule`, а `ornis_core::Engine` — минимальную границу
+кадра с ресурсом `Time`. Следующий шаг — подключить к этому host'у
+input, physics и render как доменные системы, а затем перевести native и
+WASM frame loops на единый контракт. Это не означает немедленно удалять
 `FramePlan`: он остаётся переходным render/backend-планом.
 
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).

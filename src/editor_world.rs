@@ -2,14 +2,15 @@
 //!
 //! In `editor-only` there is no native winit loop to consume `UiCommand`s,
 //! so [`run`] spawns an `editor-world` thread that owns an [`EditorWorld`]
-//! (ornis-core `SmartStore` + the component registry), executes commands
-//! from `POST /api/command` and publishes `GameEvent`s back to the HTTP
+//! (ornis-core `World` with its `SmartStore` + the component registry), executes
+//! commands from `POST /api/command` and publishes `GameEvent`s back to the HTTP
 //! server (`status`/`scene` snapshots are cached by `remote.rs` for
 //! `GET /api/status` and `GET /api/scene`; the rest reach `GET /api/events`).
 //!
 //! At startup the world loads `editor/scene.ron` (via
-//! `ornis_render::scene::Scene::from_ron`), so the live world matches what
-//! the WASM viewport renders statically. Component payloads reuse the
+//! `ornis_render::scene::Scene::from_ron`), so the initial live world matches
+//! the scene used by the WASM viewport; subsequent changes arrive through
+//! live snapshots. Component payloads reuse the
 //! `ornis_render::scene` description types — **serde-canonical** JSON
 //! (externally-tagged enums), served generically through the component
 //! registry (F0, audit §10 D2). The JSON contract of
@@ -64,7 +65,7 @@ use crossbeam_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ornis_core::{ComponentMeta, ComponentRegistry, Entity, SmartStore};
+use ornis_core::{ComponentMeta, ComponentRegistry, Entity, SmartStore, World};
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
@@ -121,9 +122,8 @@ impl Default for SceneEnvironment {
 /// components, the environment resource, the scene label and a mutation
 /// version counter.
 pub struct EditorWorld {
-    store: SmartStore,
+    world: World,
     alive: Vec<Entity>,
-    environment: SceneEnvironment,
     /// Scene label round-tripped through `Scene::name` on save/load.
     scene_name: String,
     version: u64,
@@ -131,10 +131,11 @@ pub struct EditorWorld {
 
 impl Default for EditorWorld {
     fn default() -> Self {
+        let mut world = World::new();
+        let _ = world.insert(SceneEnvironment::default());
         Self {
-            store: SmartStore::default(),
+            world,
             alive: Vec::new(),
-            environment: SceneEnvironment::default(),
             scene_name: "scene".into(),
             version: 0,
         }
@@ -146,6 +147,44 @@ impl EditorWorld {
     /// no lights).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the shared logical world backing the editor facade.
+    ///
+    /// The editor keeps protocol metadata (`alive`, scene name and version)
+    /// beside the world, but ECS components and singleton domain resources
+    /// live in this single `ornis_core::World`.
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// Returns the shared logical world for setup and command processing.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
+    fn store(&self) -> &SmartStore {
+        self.world.store().expect("EditorWorld always registers SmartStore")
+    }
+
+    fn store_mut(&mut self) -> &mut SmartStore {
+        self.world
+            .store_mut()
+            .expect("EditorWorld always registers SmartStore")
+    }
+
+    fn environment(&self) -> &SceneEnvironment {
+        self.world
+            .resources()
+            .get::<SceneEnvironment>()
+            .expect("EditorWorld always registers SceneEnvironment")
+    }
+
+    fn environment_mut(&mut self) -> &mut SceneEnvironment {
+        self.world
+            .resources_mut()
+            .get_mut::<SceneEnvironment>()
+            .expect("EditorWorld always registers SceneEnvironment")
     }
 
     /// Number of currently alive entities.
@@ -172,13 +211,13 @@ impl EditorWorld {
         mesh: MeshDesc,
         material: MaterialDesc,
     ) -> Entity {
-        let entity = self.store.create_entity();
+        let entity = self.store().create_entity();
         self.alive.push(entity);
         let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
-        self.store.insert(entity, Name(name));
-        self.store.insert(entity, transform);
-        self.store.insert(entity, mesh);
-        self.store.insert(entity, material);
+        self.store_mut().insert(entity, Name(name));
+        self.store_mut().insert(entity, transform);
+        self.store_mut().insert(entity, mesh);
+        self.store_mut().insert(entity, material);
         self.version += 1;
         entity
     }
@@ -186,18 +225,18 @@ impl EditorWorld {
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
-        if !self.store.is_alive(entity) {
+        if !self.store().is_alive(entity) {
             return None;
         }
         self.alive.retain(|e| *e != entity);
-        self.store.destroy_entity(entity);
+        self.store().destroy_entity(entity);
         self.version += 1;
         Some(entity)
     }
 
     /// Display name of `entity`, if alive and named.
     pub fn name_of(&self, entity: Entity) -> Option<String> {
-        self.store
+        self.store()
             .read_lane::<Name>()
             .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
     }
@@ -220,7 +259,7 @@ impl EditorWorld {
         for e in scene.entities {
             fresh.spawn_with(Some(e.name), e.transform, e.mesh, e.material);
         }
-        fresh.environment = SceneEnvironment {
+        *fresh.environment_mut() = SceneEnvironment {
             lights: scene.lights,
             camera: scene.camera,
             ambient: scene.ambient,
@@ -291,9 +330,9 @@ fn to_scene(world: &EditorWorld) -> Scene {
     Scene {
         name: world.scene_name.clone(),
         entities,
-        lights: world.environment.lights.clone(),
-        camera: world.environment.camera.clone(),
-        ambient: world.environment.ambient,
+        lights: world.environment().lights.clone(),
+        camera: world.environment().camera.clone(),
+        ambient: world.environment().ambient,
     }
 }
 
@@ -303,9 +342,9 @@ fn entity_desc(world: &EditorWorld, entity: Entity) -> EntityDesc {
         name: world
             .name_of(entity)
             .unwrap_or_else(|| format!("Entity {}", entity.id())),
-        transform: read_component(&world.store, entity).unwrap_or_else(default_transform),
-        mesh: read_component(&world.store, entity).unwrap_or_else(default_mesh),
-        material: read_component(&world.store, entity).unwrap_or_else(default_material),
+        transform: read_component(world.store(), entity).unwrap_or_else(default_transform),
+        mesh: read_component(world.store(), entity).unwrap_or_else(default_mesh),
+        material: read_component(world.store(), entity).unwrap_or_else(default_material),
     }
 }
 
@@ -314,17 +353,17 @@ fn scene_json(world: &EditorWorld) -> String {
     let entities: Vec<Value> = world
         .alive
         .iter()
-        .map(|&e| entity_json(&world.store, e))
+        .map(|&e| entity_json(world.store(), e))
         .collect();
-    let lights = serde_json::to_value(&world.environment.lights).expect("LightDesc serializes");
-    let camera = serde_json::to_value(&world.environment.camera).expect("CameraDesc serializes");
+    let lights = serde_json::to_value(&world.environment().lights).expect("LightDesc serializes");
+    let camera = serde_json::to_value(&world.environment().camera).expect("CameraDesc serializes");
     serde_json::json!({
         "version": world.version,
         "entity_count": world.entity_count(),
         "entities": entities,
         "lights": lights,
         "camera": camera,
-        "ambient": world.environment.ambient,
+        "ambient": world.environment().ambient,
     })
     .to_string()
 }
@@ -436,7 +475,7 @@ fn set_component(
         .by_name(type_name)
         .ok_or_else(|| format!("unknown component '{type_name}'"))?;
     let value: Value = serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
-    meta.set_json(&mut world.store, entity, &value)
+    meta.set_json(world.store_mut(), entity, &value)
         .map_err(|e| e.to_string())?;
     world.version += 1;
     Ok(value)
@@ -525,7 +564,7 @@ fn cmd_create_entity(world: &mut EditorWorld, data: &Value) -> Result<String, St
     let entity = world.spawn(name);
     for (meta, boxed) in overrides {
         // Parsed from the same meta — the box type always matches.
-        meta.insert_any(&mut world.store, entity, boxed);
+        meta.insert_any(world.store_mut(), entity, boxed);
     }
     Ok(serde_json::json!({
         "id": entity.id(),
@@ -552,7 +591,7 @@ fn resolve_entity(world: &EditorWorld, data: &Value) -> Result<Entity, String> {
         .and_then(Value::as_u64)
         .ok_or("missing or invalid 'generation'")? as u32;
     let entity = Entity::new_with_gen(id, generation);
-    if !world.store.is_alive(entity) {
+    if !world.store().is_alive(entity) {
         return Err(format!("entity {id}:{generation} not found"));
     }
     Ok(entity)
@@ -828,6 +867,23 @@ mod tests {
     }
 
     const FULL_TRANSFORM: &str = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
+
+    #[test]
+    fn editor_world_uses_core_world_for_components_and_environment() {
+        let mut world = EditorWorld::new();
+        let entity = world.spawn(Some("Hero".into()));
+
+        assert!(world.world().store().is_some());
+        assert!(world.world().resources().get::<SceneEnvironment>().is_some());
+        assert!(world
+            .world()
+            .store()
+            .expect("core World store")
+            .read_lane::<TransformDesc>()
+            .expect("Transform lane")
+            .get(entity)
+            .is_some());
+    }
 
     #[test]
     fn spawn_assigns_names_and_counts() {
