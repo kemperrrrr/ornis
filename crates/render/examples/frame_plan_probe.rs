@@ -314,7 +314,7 @@ impl<'a> Probe<'a> {
     /// Legacy (non-graph) render of the whole scene into `target`.
     fn render_legacy(&self, target: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
         self.renderer.render_scene(
-            &self.device,
+            self.device,
             self.queue,
             encoder,
             target,

@@ -1,13 +1,26 @@
+//! Backend-neutral rendering interface.
+//!
+//! [`RenderBackend`] abstracts the deferred renderer behind a small trait so
+//! callers (and tests) can drive a full frame — camera, lights, uploads, one
+//! draw — without touching [`crate::renderer::Renderer3D`] directly. The
+//! factory [`create_render_backend`] returns the production implementation.
 use crate::mesh::Mesh;
 use crate::renderer::InstanceData;
 use ornis_core::material::OpenPBRMaterial;
+
 use wgpu;
 
+/// Sizing and capacity knobs for backend construction.
 #[derive(Debug, Clone)]
 pub struct RenderBackendConfig {
+    /// Surface format/size/present parameters; must be compatible with the
+    /// target surface (or an offscreen texture in tests).
     pub surface_config: wgpu::SurfaceConfiguration,
+    /// MSAA sample count for the gbuffer and lighting passes.
     pub sample_count: u32,
+    /// Upper bound on instances per frame (sized into GPU buffers).
     pub max_objects: u32,
+    /// Upper bound on materials per frame.
     pub max_materials: u32,
 }
 
@@ -31,18 +44,30 @@ impl Default for RenderBackendConfig {
     }
 }
 
+/// Per-frame resources a [`RenderBackend::render_scene`] call needs.
+#[derive(Debug)]
 pub struct RenderContext<'a> {
+    /// Logical device owning the pipeline/buffers.
     pub device: &'a wgpu::Device,
+    /// Upload queue for uniform data.
     pub queue: &'a wgpu::Queue,
+    /// Encoder the render pass is recorded onto.
     pub encoder: &'a mut wgpu::CommandEncoder,
+    /// View of the frame's final output target.
     pub target: &'a wgpu::TextureView,
 }
 
+/// Backend-neutral interface over one deferred renderer instance.
 pub trait RenderBackend {
+    /// Reallocate size-dependent targets after the output extent changed.
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32);
 
+    /// Upload view-projection matrix (column-major `[[f32;4];4]`) and world-space
+    /// eye position used by lighting.
     fn set_camera(&mut self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]);
 
+    /// Upload ambient RGB and directional lights as
+    /// `(direction, intensity, color)` triples.
     fn set_lights(
         &mut self,
         queue: &wgpu::Queue,
@@ -50,14 +75,19 @@ pub trait RenderBackend {
         lights: &[([f32; 3], f32, [f32; 3])],
     );
 
+    /// Replace the material table; instance data references entries by index.
     fn upload_materials(&mut self, queue: &wgpu::Queue, materials: &[OpenPBRMaterial]);
 
+    /// Replace per-object instance transforms + material indices for the next draw.
     fn upload_instances(&mut self, queue: &wgpu::Queue, instances: &[InstanceData]);
 
+    /// Record the full deferred frame (gbuffer -> lighting -> composite) into
+    /// `context`, drawing the first `instance_count` uploaded instances with `mesh`.
     fn render_scene(&self, context: RenderContext<'_>, mesh: &Mesh, instance_count: u32);
 }
 
-/// Factory function to create a render backend implementation
+/// Build the production [`RenderBackend`] (the deferred [`crate::renderer::Renderer3D`])
+/// from `config`.
 pub fn create_render_backend(
     device: &wgpu::Device,
     config: &RenderBackendConfig,
@@ -69,6 +99,8 @@ pub fn create_render_backend(
     ))
 }
 
+/// Adapter implementing [`RenderBackend`] by delegating to the concrete
+/// [`crate::renderer::Renderer3D`]; this is what [`create_render_backend`] hands out.
 pub mod renderer3d_backend {
     use super::*;
     use crate::renderer::Renderer3D;

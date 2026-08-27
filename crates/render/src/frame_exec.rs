@@ -46,6 +46,7 @@ pub struct FrameExecutor {
 }
 
 impl FrameExecutor {
+    /// Create an executor with an empty texture pool.
     pub fn new() -> Self {
         Self::default()
     }
@@ -373,20 +374,31 @@ impl Technique {
 /// Resource handles of the [`RenderFrame3D`] plan.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameIds {
+    /// Albedo/base-color gbuffer target.
     pub albedo: ResourceId,
+    /// World-space normal target.
     pub normal: ResourceId,
+    /// Material id target.
     pub material_id: ResourceId,
+    /// World-space position target.
     pub world_position: ResourceId,
+    /// Material parameter target.
     pub material_params: ResourceId,
+    /// Depth buffer (gbuffer-owned or forward-owned per technique).
     pub depth: ResourceId,
+    /// Deferred HDR color layer.
     pub hdr: ResourceId,
+    /// Forward HDR color layer.
     pub hdr_fwd: ResourceId,
+    /// External output (swapchain view).
     pub target: ResourceId,
     /// Bloom chain levels: 1/2, 1/4, 1/8 of the surface. Always declared so
     /// every plan shares one `FrameIds` shape; they only consume pool slots
     /// when the bloom passes exist (`new_with_bloom`).
     pub bloom0: ResourceId,
+    /// Second bloom mip level (1/4 surface).
     pub bloom1: ResourceId,
+    /// Third bloom mip level (1/8 surface).
     pub bloom2: ResourceId,
 }
 

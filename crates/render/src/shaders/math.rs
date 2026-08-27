@@ -1,3 +1,8 @@
+//! Rust reference implementations of the WGSL/PBR BRDF math (OpenPBR spec).
+//!
+//! Every public function here is also compiled to WGSL by the `#[kernel]`
+//! macro pipeline and spliced into the engine's shaders via `wgsl_source()`,
+//! keeping GPU shading and CPU-side verification on one source of truth.
 // These functions mirror the WGSL/PBR shader signatures (OpenPBR spec), so
 // some of them take more than 7 arguments — a deliberate match.
 #![allow(clippy::too_many_arguments)]
@@ -5,15 +10,20 @@
 use glam::Vec3Swizzles;
 use ornis_macros::kernel;
 
+/// Pi, re-exported into WGSL kernels by name.
 pub const PI: f32 = std::f32::consts::PI;
+/// `1/PI`, used to normalize cosine-weighted BRDF integrals.
 pub const INV_PI: f32 = 1.0 / PI;
+/// Small epsilon guarding divisions and sqrt arguments in the kernels.
 pub const EPS: f32 = 1e-6;
 
+/// Rec.709 relative luminance of a linear RGB color.
 #[kernel]
 fn luminance(c: glam::Vec3) -> f32 {
     c.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722))
 }
 
+/// ACES filmic tone-mapping curve (Narkowicz approximation), HDR -> LDR.
 #[kernel]
 fn aces_tonemap(color: glam::Vec3) -> glam::Vec3 {
     let a = 2.51;
@@ -24,22 +34,28 @@ fn aces_tonemap(color: glam::Vec3) -> glam::Vec3 {
     color * (a * color + b) / (color * (c * color + d) + e)
 }
 
+/// Normal-incidence Fresnel reflectance F0 from an index of refraction.
 #[kernel]
 fn fresnel0_from_ior(ior: f32) -> f32 {
     let f = (ior - 1.0) / (ior + 1.0);
     f * f
 }
 
+/// Scalar Schlick approximation of the Fresnel term (`cos_theta` = NoV or NoL).
 #[kernel]
 fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
     f0 + (1.0 - f0) * (1.0 - cos_theta).powf(5.0)
 }
 
+/// RGB Schlick Fresnel with spectral F0 (metals).
 #[kernel]
 fn fresnel_schlick_vec(cos_theta: f32, f0: glam::Vec3) -> glam::Vec3 {
     f0 + (glam::Vec3::splat(1.0) - f0) * (1.0 - cos_theta).powf(5.0)
 }
 
+/// Holzschuch--Pacanowsky "F82 tint" Fresnel: Schlick plus a correction
+/// term that pins reflectance to `f82_tint` at 82 degrees, matching measured
+/// metal data better than plain Schlick.
 #[kernel]
 fn fresnel_f82_tint(cos_theta: f32, f0: glam::Vec3, f82_tint: glam::Vec3) -> glam::Vec3 {
     let mu_bar = 1.0 / 7.0;
@@ -53,6 +69,7 @@ fn fresnel_f82_tint(cos_theta: f32, f0: glam::Vec3, f82_tint: glam::Vec3) -> gla
     f82_correction.max(glam::Vec3::splat(0.0))
 }
 
+/// GGX/Trowbridge-Reitz normal distribution for isotropic roughness.
 #[kernel]
 fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
@@ -60,6 +77,7 @@ fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
     a2 / (PI * denom * denom)
 }
 
+/// Anisotropic GGX normal distribution (Anisotropic Gloss, OpenPBR spec).
 #[kernel]
 fn ggx_ndf_aniso(
     _NoH: f32,
@@ -77,6 +95,8 @@ fn ggx_ndf_aniso(
     1.0 / (PI * a2u * a2v * denom * denom)
 }
 
+/// Map (roughness, anisotropy) to the alpha_u/alpha_v pair used by the
+/// anisotropic NDF and visibility terms.
 #[kernel]
 fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> glam::Vec2 {
     let r2 = roughness * roughness;
@@ -90,6 +110,8 @@ fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> glam::Vec2 {
     glam::Vec2::new(alpha_u, alpha_v)
 }
 
+/// Smith height-correlated GGX visibility term (isotropic), the
+/// `G / (4 NoV NoL)` factor already folded in.
 #[kernel]
 fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
@@ -98,6 +120,7 @@ fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
     0.5 / (ggxv + ggxl).max(EPS)
 }
 
+/// Height-correlated Smith GGX visibility for anisotropic distributions.
 #[kernel]
 fn smith_ggx_aniso(
     NoV: f32,
@@ -120,6 +143,7 @@ fn smith_ggx_aniso(
     0.5 / (ggxv + ggxl).max(EPS)
 }
 
+/// Oren--Nayar diffuse BRDF (`alpha` = roughness sigma), normalized by 1/PI.
 #[kernel]
 fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     let sigma = alpha.max(EPS);
@@ -134,6 +158,7 @@ fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     (A + B * cos_phi * alpha_max.sin() * tan_beta) * INV_PI
 }
 
+/// Fabric sheen lobe (Charlie-style D with approximate visibility).
 #[kernel]
 fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
     let alpha = roughness * roughness;
@@ -143,6 +168,8 @@ fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
     D * G * F / (4.0 * NoV * NoL).max(EPS)
 }
 
+/// Convert transmission tint + thickness into a Beer--Lambert extinction
+/// coefficient `sigma_t = -ln(c) / depth` per channel.
 #[kernel]
 fn transmission_color_to_extinction(
     transmission_color: glam::Vec3,
@@ -155,6 +182,8 @@ fn transmission_color_to_extinction(
     -c.ln() / transmission_depth
 }
 
+/// Single-lobe subsurface approximation: exponential profile scaled by a
+/// cosine phase term encoding anisotropy.
 #[kernel]
 fn subsurface_brdf(
     _NoV: f32,
@@ -169,6 +198,7 @@ fn subsurface_brdf(
     profile * phase * INV_PI
 }
 
+/// Decode sRGB-encoded RGB to linear light (piecewise IEC 61966-2-1 OETF inverse).
 #[kernel]
 fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
     let cutoff = 0.04045;
@@ -214,9 +244,8 @@ fn coat_base_darkening(
     let Ebase_Kcoat = Ebase * Kcoat;
     let one_minus_Kcoat = 1.0 - Kcoat;
     let one_minus_Ebase_Kcoat = glam::Vec3::splat(1.0) - Ebase_Kcoat;
-    let base_darkening =
-        glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6));
-    base_darkening
+    
+    glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6))
 }
 
 /// Coat darkening, part 2: blend between clean and darkened albedo by the
@@ -226,6 +255,8 @@ fn coat_blend_darkened(base_darkening: glam::Vec3, mix_factor: f32) -> glam::Vec
     glam::Vec3::splat(1.0).lerp(base_darkening, mix_factor)
 }
 
+/// Thin-film interference modulation over white: phase per RGB wavelength
+/// from film IOR/thickness (nanometers), Airy-like reflectance boost.
 #[kernel]
 fn thin_film_modulation(
     cos_theta: f32,
@@ -244,6 +275,7 @@ fn thin_film_modulation(
             / glam::Vec3::splat(1.0 - r0 * r0)
 }
 
+/// Octahedral mapping of a unit vector to [0,1]^2 — compact normal storage.
 #[kernel]
 fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
     let p = n.xy() / (n.x.abs() + n.y.abs() + n.z.abs());
@@ -339,7 +371,7 @@ mod tests {
     fn octahedral_encode_roundtrip() {
         let n = glam::Vec3::new(0.577, 0.577, 0.577).normalize();
         let enc = octahedral_encode::eval(n);
-        let dec = crate::shader::octahedral_decode_rust(enc);
+        let dec = crate::shaders::octahedral_decode_rust(enc);
         for i in 0..3 {
             assert!(
                 (n[i] - dec[i]).abs() < 0.01,

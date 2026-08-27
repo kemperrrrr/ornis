@@ -1,75 +1,122 @@
+//! Declarative scene descriptions (de)serialized as RON.
+//!
+//! The `*Desc` types are the serde-canonical contract shared by the demo
+//! asset (`assets/scene.ron`), the editor protocol and the WASM viewport:
+//! component payloads travel over the wire in exactly this shape.
+
 use serde::{Deserialize, Serialize};
 
-/// Scene description in RON format.
-/// Example: `assets/scene.ron`
+/// Full scene description in RON format (see `assets/scene.ron`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
+    /// Human-readable scene label.
     pub name: String,
+    /// Renderable entities.
     pub entities: Vec<EntityDesc>,
+    /// Scene lights.
     pub lights: Vec<LightDesc>,
+    /// The single viewing camera.
     pub camera: CameraDesc,
+    /// Ambient light RGB multiplier.
     pub ambient: [f32; 3],
 }
 
+/// One renderable object: identity plus its three components.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityDesc {
+    /// Display name; the editor uses it as the default `Name` component.
     pub name: String,
+    /// Placement in world space.
     pub transform: TransformDesc,
+    /// Geometry.
     pub mesh: MeshDesc,
+    /// OpenPBR surface description.
     pub material: MaterialDesc,
 }
 
+/// Placement of an entity in world space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformDesc {
+    /// Translation in world units.
     pub translation: [f32; 3],
-    pub rotation: [f32; 4], // quaternion xyzw
+    /// Orientation as a quaternion in `(x, y, z, w)` order.
+    pub rotation: [f32; 4],
+    /// Non-uniform scale per axis.
     pub scale: [f32; 3],
 }
 
+/// Geometry description (procedurally generated at load time).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MeshDesc {
+    /// UV sphere centered at the transform origin.
     Sphere {
+        /// Radius in world units.
         radius: f32,
+        /// Longitude divisions (minimum 3 at generation time).
         segments: u32,
+        /// Latitude divisions (minimum 2 at generation time).
         rings: u32,
     },
     // Future: Box, Plane, Cylinder, Custom { path: String }
 }
 
+/// Material preset mapped onto the engine's OpenPBR surface model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MaterialDesc {
+    /// Non-metal with specular reflection.
     Dielectric {
+        /// Albedo color in linear space.
         base_color: [f32; 3],
+        /// Microfacet roughness in [0, 1].
         roughness: f32,
     },
+    /// Conductor with tinted specular reflection.
     Metal {
+        /// Reflectance color in linear space.
         base_color: [f32; 3],
+        /// Microfacet roughness in [0, 1].
         roughness: f32,
     },
+    /// Base layer with a clearcoat on top.
     Coat {
+        /// Albedo color of the base layer.
         base_color: [f32; 3],
+        /// Clearcoat strength in [0, 1].
         coat_weight: f32,
+        /// Clearcoat roughness in [0, 1].
         coat_roughness: f32,
     },
 }
 
+/// Light source description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LightDesc {
+    /// Infinitely distant light shining along a fixed direction.
     Directional {
+        /// Direction the light travels (from light toward the scene).
         direction: [f32; 3],
+        /// Radiometric strength multiplier.
         intensity: f32,
+        /// Emission color in linear space.
         color: [f32; 3],
     },
     // Future: Point, Spot
 }
 
+/// Viewing camera described look-at style.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraDesc {
+    /// Eye position in world units.
     pub position: [f32; 3],
+    /// Point the camera looks at.
     pub target: [f32; 3],
+    /// Up vector (should not be parallel to the view direction).
     pub up: [f32; 3],
-    pub fov: f32, // degrees
+    /// Vertical field of view in degrees.
+    pub fov: f32,
+    /// Near clip distance in world units.
     pub near: f32,
+    /// Far clip distance in world units.
     pub far: f32,
 }
 

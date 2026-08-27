@@ -91,7 +91,12 @@ pub enum SizePolicy {
     /// bloom at 1/2, 1/4, 1/8). The result is floored and clamped to 1.
     Fraction(u32),
     /// Fixed size.
-    Fixed { width: u32, height: u32 },
+    Fixed {
+        /// Absolute width in texels.
+        width: u32,
+        /// Absolute height in texels.
+        height: u32,
+    },
 }
 
 impl SizePolicy {
@@ -111,8 +116,11 @@ impl SizePolicy {
 /// Texture specification — the pool reuse key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureSpec {
+    /// Texture format; resources of different formats never share slots.
     pub format: wgpu::TextureFormat,
+    /// MSAA sample count.
     pub samples: u32,
+    /// Size policy (resolved against the surface at allocation time).
     pub size: SizePolicy,
 }
 
@@ -127,8 +135,11 @@ pub struct PassId(pub u32);
 /// Per-resource information in a layout.
 #[derive(Debug, Clone)]
 pub struct ResourceLayout {
+    /// Unique resource identifier.
     pub id: ResourceId,
+    /// Human-readable name for debugging and plan dumps.
     pub name: String,
+    /// Texture format/size/usage specification.
     pub spec: TextureSpec,
     /// Index of the first pass that uses the resource; `usize::MAX` if unused.
     pub first_use: usize,
@@ -153,18 +164,24 @@ impl ResourceLayout {
 /// lifetime windows do not overlap.
 #[derive(Debug, Clone)]
 pub struct PoolSlot {
+    /// Slot index used by the executor to key its texture pool.
     pub index: usize,
+    /// Shared spec — the pool reuse key.
     pub spec: TextureSpec,
     /// Resources sharing the slot (non-overlapping windows).
     pub resources: Vec<ResourceId>,
+    /// Index of the first pass using the slot.
     pub first_pass: usize,
+    /// Index of the last pass using the slot.
     pub last_pass: usize,
 }
 
 /// A pass in the executable layout.
 #[derive(Debug, Clone)]
 pub struct PassLayout {
+    /// Identifier of the pass.
     pub id: PassId,
+    /// Human-readable pass name for debugging and plan dumps.
     pub name: String,
     /// Resources read by the pass.
     pub reads: Vec<ResourceId>,
@@ -610,7 +627,6 @@ fn validate_no_slot_aliasing(pass_alive: &[Vec<ResourceId>], resources: &[Resour
 ///
 /// # Panics
 /// Panics if the layout has not been computed yet (call `build()` first).
-
 impl FramePlan {
     /// Creates an empty plan; `surface_size` feeds `SizePolicy::MatchSurface`.
     pub fn new(surface_size: (u32, u32)) -> Self {
@@ -854,6 +870,7 @@ impl FramePlan {
         }
     }
 
+    /// Walk the layout's passes in order, invoking `run` with each pass's context.
     pub fn execute(&self, layout: &FrameLayout, mut run: impl FnMut(PassContext<'_>)) {
         for index in 0..layout.passes.len() {
             run(PassContext { layout, index });

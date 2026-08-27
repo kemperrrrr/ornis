@@ -1,22 +1,35 @@
+//! GPU mesh representation and procedural primitive generation.
+
 use wgpu::util::DeviceExt;
 
+/// Vertex + index buffers uploaded to the device, ready to draw.
 pub struct Mesh {
+    /// Interleaved [`Vertex`] data.
     pub vertex_buffer: wgpu::Buffer,
+    /// Triangle index list (`u32`).
     pub index_buffer: wgpu::Buffer,
+    /// Number of indices to draw.
     pub num_indices: u32,
+    /// Number of vertices in `vertex_buffer`.
     pub vertex_count: u32,
 }
 
+/// GPU vertex layout shared by every mesh (must match the WGSL inputs).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
+    /// Object-space position.
     pub position: [f32; 3],
+    /// Shading normal (unit length for generated primitives).
     pub normal: [f32; 3],
+    /// Texture coordinates in [0, 1].
     pub uv: [f32; 2],
+    /// Surface tangent for normal mapping / anisotropy.
     pub tangent: [f32; 3],
 }
 
 impl Vertex {
+    /// wgpu vertex buffer layout matching this struct's memory layout.
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
@@ -48,6 +61,9 @@ impl Vertex {
     }
 }
 
+/// Generate a UV sphere with positions, normals, UVs and tangents, uploading
+/// it to `device`. `sectors`/`stacks` are clamped to at least 3/2 so degenerate
+/// arguments still produce valid geometry.
 pub fn create_sphere(device: &wgpu::Device, radius: f32, sectors: u32, stacks: u32) -> Mesh {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();

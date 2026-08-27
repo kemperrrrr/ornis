@@ -51,9 +51,11 @@ pub trait FrameResource: 'static {
 
 /// A clear value attached to a [`WriteClear`] access.
 pub trait ClearValue {
+    /// The color written when the attached target is cleared.
     const COLOR: wgpu::Color;
 }
 
+/// Clear to opaque black (HDR layers, bloom chain).
 /// Clear to opaque black (HDR layers, bloom chain).
 pub struct ClearBlack;
 impl ClearValue for ClearBlack {
@@ -61,11 +63,13 @@ impl ClearValue for ClearBlack {
 }
 
 /// Clear to opaque white (depth when the pass owns it).
+/// Clear to opaque white (depth when the pass owns it).
 pub struct ClearWhite;
 impl ClearValue for ClearWhite {
     const COLOR: wgpu::Color = wgpu::Color::WHITE;
 }
 
+/// Clear to fully transparent (forward HDR layer).
 /// Clear to fully transparent (forward HDR layer).
 pub struct ClearTransparent;
 impl ClearValue for ClearTransparent {
@@ -74,18 +78,23 @@ impl ClearValue for ClearTransparent {
 
 /// One declared access: which resource, read or write, optional clear.
 pub trait Access {
+    /// The resource being accessed.
     type Resource: FrameResource;
+    /// `true` for write accesses.
     const IS_WRITE: bool;
+    /// Clear value applied on first write, if any.
     fn clear() -> Option<wgpu::Color>;
 }
 
-/// Read access marker (ZST).
+/// Read access marker (ZST): the pass only samples the resource's contents.
 pub struct Read<R>(PhantomData<fn() -> R>);
 
-/// Write access marker, no clear (ZST).
+/// Write access marker without an explicit clear (ZST); the pass fully
+/// overwrites or continues the previous content.
 pub struct Write<R>(PhantomData<fn() -> R>);
 
-/// Write access marker with a clear value (ZST).
+/// Write access marker carrying the clear value `C` (ZST), e.g. depth
+/// owned by the gbuffer pass (`WriteClear<Hdr, ClearBlack>`).
 pub struct WriteClear<R, C: ClearValue>(PhantomData<fn() -> (R, C)>);
 
 impl<R: FrameResource> Access for Read<R> {
@@ -115,9 +124,13 @@ impl<R: FrameResource, C: ClearValue> Access for WriteClear<R, C> {
 /// Runtime projection of one access (used to wire the pass into the plan).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AccessDesc {
+    /// Type identity of [`FrameResource`].
     pub resource: TypeId,
+    /// Debug name from [`FrameResource::NAME`].
     pub name: &'static str,
+    /// Write vs read access.
     pub write: bool,
+    /// Clear color carried by a `WriteClear` access.
     pub clear: Option<wgpu::Color>,
 }
 
@@ -126,6 +139,7 @@ pub struct AccessDesc {
 /// Arity is supported up to 6 (one `impl_access_tuple!` line below adds
 /// more if a pass ever needs it).
 pub trait AccessSet {
+    /// Push this set's accesses onto `out`, in declaration order.
     fn collect_accesses(out: &mut Vec<AccessDesc>);
 }
 
@@ -136,6 +150,7 @@ impl AccessSet for () {
 /// Every access resolves to a texture view of the same lifetime; the helper
 /// trait exists so tuple `Views` types can be built per-element in a macro.
 pub trait AccessView<'a> {
+    /// Resolved view type for one access (always `&'a wgpu::TextureView`).
     type View;
 }
 
@@ -147,6 +162,7 @@ impl<'a, A: Access> AccessView<'a> for A {
 pub trait ViewsFor<'a>: AccessSet {
     /// A tuple of `&wgpu::TextureView` matching the access set's arity.
     type Views;
+    /// Fetches the views from the frame resolver.
     fn fetch(resolver: &Resolver<'a>) -> Self::Views;
 }
 
@@ -212,13 +228,19 @@ impl<'a> Resolver<'a> {
 }
 
 /// Per-frame execution context handed to every system: the render context
-/// parts (`device`/`queue`/`encoder`) plus the frame's draw inputs.
+/// parts plus the frame's draw inputs.
 pub struct Frame<'a> {
+    /// Logical device owning pipeline/buffers.
     pub device: &'a wgpu::Device,
+    /// Upload queue for uniform data.
     pub queue: &'a wgpu::Queue,
+    /// Encoder to record passes onto.
     pub encoder: &'a mut wgpu::CommandEncoder,
+    /// The renderer providing pipelines and buffers.
     pub renderer: &'a Renderer3D,
+    /// Mesh drawn this frame.
     pub mesh: &'a Mesh,
+    /// Number of uploaded instances to draw.
     pub instance_count: u32,
 }
 
@@ -228,7 +250,9 @@ pub struct Frame<'a> {
 /// `Send` (S5b): the erased runner may execute on rayon threads when the
 /// plan records passes in parallel.
 pub trait FramePass: Send + 'static {
+    /// Type-level tuple of read accesses, e.g. `(Read<GBufferAlbedo>,)`.
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
+    /// Type-level tuple of write accesses.
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
     /// Pass name in the layout (insertion order defines execution order).
     fn name(&self) -> &'static str;
@@ -243,8 +267,12 @@ pub trait FramePass: Send + 'static {
 
 /// The typed views for one pass execution: one `&TextureView` per declared
 /// access, in declaration order, plus the resolver for type-based fetch.
+/// The typed views for one pass execution: one `&TextureView` per declared
+/// access, in declaration order, plus the resolver for type-based fetch.
 pub struct SystemViews<'a, P: FramePass> {
+    /// Resolved views of [`FramePass::Reads`] in declaration order.
     pub reads: <<P as FramePass>::Reads as ViewsFor<'a>>::Views,
+    /// Resolved views of [`FramePass::Writes`] in declaration order.
     pub writes: <<P as FramePass>::Writes as ViewsFor<'a>>::Views,
     resolver: Resolver<'a>,
 }
@@ -309,6 +337,7 @@ struct SystemEntry {
 }
 
 impl SystemSet {
+    /// Create an empty set.
     pub fn new() -> Self {
         Self::default()
     }

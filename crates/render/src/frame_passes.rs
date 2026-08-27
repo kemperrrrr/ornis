@@ -288,8 +288,11 @@ const BLOOM_BRIGHT_THRESHOLD: f32 = 0.7;
 /// Depth ownership of the forward pass: forward-only clears the depth
 /// itself; hybrid reads the one the gbuffer pass filled.
 pub trait ForwardMode: Sized + 'static {
+    /// Accesses of the mode's forward pass.
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
+    /// Writes of the mode's forward pass.
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
+    /// `true` when this technique clears the depth buffer itself.
     const OWNS_DEPTH: bool;
 }
 
@@ -348,7 +351,9 @@ impl<M: ForwardMode> FramePass for Forward<M> {
 
 /// Which HDR layer feeds the bright pass (the one this technique made).
 pub trait BrightInput: Sized + 'static {
+    /// The layer read by the bright pass in this mode.
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
+    /// Borrows the HDR view this technique's bright pass reads.
     fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> &'a wgpu::TextureView;
 }
 
@@ -406,8 +411,11 @@ impl<I: BrightInput> FramePass for BloomBright<I> {
 
 /// Which HDR layers exist and whether the bloom chain feeds the mix.
 pub trait CompositeMode: Sized + 'static {
+    /// This mode's live layers (dead ones bind a zeroed view instead).
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
+    /// Value of the shader's layer-mix selector (`CompositeInputs::mode`).
     const SHADER_MODE: u32;
+    /// Whether the bloom chain contributes to the mix.
     const BLOOM: bool;
     /// Binds the shader inputs from this mode's declared views. Dead
     /// layers (the ones this technique does not produce) are bound to a

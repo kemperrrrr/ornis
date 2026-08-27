@@ -1,13 +1,20 @@
+//! Local-to-world placement component shared by all rendered entities.
+
 use glam::{Mat4, Quat, Vec3};
 
+/// Entity placement: translation, orientation and scale, composed T * R * S.
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
+    /// World-space position.
     pub position: Vec3,
+    /// Orientation quaternion (unit length expected).
     pub rotation: Quat,
+    /// Per-axis scale factors.
     pub scale: Vec3,
 }
 
 impl Transform {
+    /// Full constructor with explicit components.
     pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
         Self {
             position,
@@ -16,6 +23,7 @@ impl Transform {
         }
     }
 
+    /// Translation only: identity rotation, unit scale.
     pub fn from_position(position: Vec3) -> Self {
         Self {
             position,
@@ -24,12 +32,14 @@ impl Transform {
         }
     }
 
+    /// Local-to-world matrix: scale applied first, then rotation, then translation.
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
 }
 
 impl Default for Transform {
+    /// Identity transform: origin, identity rotation, unit scale.
     fn default() -> Self {
         Self {
             position: Vec3::ZERO,

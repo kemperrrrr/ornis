@@ -1,3 +1,9 @@
+//! The deferred `Renderer3D`: imperative hybrid pipeline of
+//! gbuffer (5 MRT) -> lighting -> forward -> composite passes, plus the bloom
+//! chain. This is the production implementation behind
+//! [`crate::render_backend::RenderBackend`]; see also [`crate::frame_exec`]
+//! for the render-graph-driven equivalent.
+
 use crate::mesh::{Mesh, Vertex};
 use crate::shaders;
 use glam::Mat4;
@@ -5,20 +11,29 @@ use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
+/// Frame-global camera uniform (binding shared by every pass).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
+    /// View-projection matrix.
     pub view_proj: [[f32; 4]; 4],
+    /// Its inverse: reconstructs world position from depth in the lighting pass.
     pub inv_view_proj: [[f32; 4]; 4],
+    /// World-space eye position (`w` = 1) for specular falloff.
     pub camera_pos: [f32; 4],
 }
 
+/// GPU per-instance record mirroring CPU [`InstanceData`] with padding to 16 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerObjectGpu {
+    /// Local-to-world matrix.
     pub model: [[f32; 4]; 4],
+    /// Inverse-transpose model matrix (normal transform).
     pub normal_matrix: [[f32; 4]; 4],
+    /// Index into the material buffer uploaded by `upload_materials`.
     pub material_index: u32,
+    /// Aligns the record to 16-byte stride.
     _padding: [u32; 3],
 }
 
@@ -38,54 +53,94 @@ struct LightingUniform {
     _pad: [u32; 3],
 }
 
+/// CPU-side description of one drawn instance.
+#[derive(Debug, Clone, Copy)]
 pub struct InstanceData {
+    /// Local-to-world matrix.
     pub model_matrix: Mat4,
+    /// Normal matrix (inverse transpose of the linear part).
     pub normal_matrix: Mat4,
+    /// Index into the material table.
     pub material_index: u32,
 }
 
 /// G-buffer texture views, fed either from persistent textures (legacy
 /// path) or from render-plan pool slots (plan path).
 pub struct GbufferTargets<'a> {
+    /// Base albedo (sRGB) view.
     pub albedo: &'a wgpu::TextureView,
+    /// View-space/world normals view.
     pub normal: &'a wgpu::TextureView,
+    /// Material identifier view.
     pub material_id: &'a wgpu::TextureView,
+    /// World-space positions view.
     pub world_position: &'a wgpu::TextureView,
+    /// Material parameter table view.
     pub material_params: &'a wgpu::TextureView,
+    /// Depth buffer view.
     pub depth: &'a wgpu::TextureView,
 }
 
+/// Persistent g-buffer textures of the legacy path (plan path draws into
+/// pooled slots instead) plus their views.
 pub struct GBufferTextures {
+    /// Albedo/base color target (Rgba8Unorm).
     pub albedo: wgpu::Texture,
+    /// View of [`GBufferTextures::albedo`].
     pub albedo_view: wgpu::TextureView,
+    /// World-space normal target (Rg16Float).
     pub normal: wgpu::Texture,
+    /// View of [`GBufferTextures::normal`].
     pub normal_view: wgpu::TextureView,
+    /// Material id target (R32Uint).
     pub material_id: wgpu::Texture,
+    /// View of [`GBufferTextures::material_id`].
     pub material_id_view: wgpu::TextureView,
+    /// World-space position target (Rg16Float xy + z from depth).
     pub world_position: wgpu::Texture,
+    /// View of [`GBufferTextures::world_position`].
     pub world_position_view: wgpu::TextureView,
+    /// Material parameter target (Rgba16Float).
     pub material_params: wgpu::Texture,
+    /// View of [`GBufferTextures::material_params`].
     pub material_params_view: wgpu::TextureView,
+    /// Depth buffer (Depth32Float), reused by the forward pass.
     pub depth: wgpu::Texture,
+    /// View of [`GBufferTextures::depth`].
     pub depth_view: wgpu::TextureView,
 }
 
+/// Full-screen deferred lighting pass: reads the five g-buffer targets +
+/// depth, evaluates the PBR BRDF, writes the HDR color image.
 pub struct LightingPass {
+    /// Full-screen triangle-strip pipeline writing Rgba16Float HDR.
     pipeline: wgpu::RenderPipeline,
+    /// Bindings: camera/lighting/material buffers, 5 gbuffer views, depth, sampler.
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Linear sampler for gbuffer fetches (MSAA resolve handled upstream).
     sampler: wgpu::Sampler,
 }
 
+/// Forward pass for transparency-friendly objects: draws geometry with full
+/// lighting into an HDR layer, testing against the gbuffer's depth.
 pub struct ForwardPass {
+    /// Lit-forward pipeline (same shading as the lighting pass).
     pipeline: wgpu::RenderPipeline,
+    /// Kept alive for the bind group.
     _bind_group_layout: wgpu::BindGroupLayout,
+    /// Buffers bound once at construction.
     bind_group: wgpu::BindGroup,
+    /// Owned HDR color attachment.
     _color_texture: wgpu::Texture,
+    /// View of `_color_texture`.
     color_view: wgpu::TextureView,
 }
 
+/// Final blend pass mixing deferred HDR, forward HDR and bloom into the output.
 pub struct CompositePass {
+    /// Full-screen triangle-strip pipeline targeting the surface format.
     pipeline: wgpu::RenderPipeline,
+    /// Bindings: two HDR layers, sampler, bloom view, params buffer.
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -94,11 +149,17 @@ pub struct CompositePass {
 /// stays small as the mix gains terms. `mode` selects the blend in the
 /// shader: 0 = deferred-only, 1 = forward-only, 2 = hybrid.
 pub struct CompositeInputs<'a> {
+    /// Output view written by the pass (usually the surface).
     pub target: &'a wgpu::TextureView,
+    /// Deferred-lit HDR layer.
     pub hdr: &'a wgpu::TextureView,
+    /// Forward-lit HDR layer.
     pub hdr_fwd: &'a wgpu::TextureView,
+    /// Bloom contribution texture (may be black when culled).
     pub bloom: &'a wgpu::TextureView,
+    /// Multiplier on the bloom contribution (0 disables it).
     pub bloom_intensity: f32,
+    /// Layer mix selector in the shader: 0 = deferred-only, 1 = forward-only, 2 = hybrid.
     pub mode: u32,
 }
 
@@ -136,7 +197,9 @@ pub struct BloomPass {
     params_buffer: wgpu::Buffer,
 }
 
+/// Shared resources for composite/bloom sampling.
 pub struct CompositeResources {
+    /// Linear-filtering, clamp-to-edge sampler used by all full-screen passes.
     pub sampler: wgpu::Sampler,
 }
 
@@ -148,6 +211,9 @@ struct CoreBuffers {
     lighting: wgpu::Buffer,
 }
 
+/// The deferred 3D renderer: owns GPU buffers, pipelines and persistent
+/// targets; drives the hybrid deferred+forward+bloom frame via its
+/// `render_*` methods or the all-in-one [`Renderer3D::render_scene`].
 pub struct Renderer3D {
     camera_buffer: wgpu::Buffer,
     per_object_buffer: wgpu::Buffer,
@@ -171,11 +237,17 @@ pub struct Renderer3D {
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     composite_pass: CompositePass,
+    /// Linear sampler shared by composite/bloom full-screen passes.
     composite_sampler: wgpu::Sampler,
+    /// Bloom chain pipelines and params buffer.
     bloom_pass: BloomPass,
 }
 
 impl Renderer3D {
+    /// Build every pipeline/target for `surface_config`'s format and extent.
+    ///
+    /// Capacity is fixed at 256 instances / 64 materials; zero-sized extents
+    /// are clamped to 1 pixel.
     pub fn new(
         device: &wgpu::Device,
         surface_config: &wgpu::SurfaceConfiguration,
@@ -1352,6 +1424,8 @@ impl Renderer3D {
         })
     }
 
+    /// Reallocate all size-dependent textures and re-record dependent
+    /// pipelines after the output extent changed. Extents are clamped to >= 1.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -1407,6 +1481,7 @@ impl Renderer3D {
         self.composite_pass = Self::create_composite_pass(device, self.format);
     }
 
+    /// View of the final lit HDR image produced by the legacy-path lighting pass.
     pub fn pbr_view(&self) -> &wgpu::TextureView {
         &self.pbr_texture_view
     }
@@ -1432,6 +1507,8 @@ impl Renderer3D {
         gbuffer + pbr + forward
     }
 
+    /// Upload the camera uniform: view-projection, its inverse (computed here)
+    /// and eye position. Call once per frame before rendering.
     pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]) {
         let inv_view_proj = glam::Mat4::from_cols_array_2d(view_proj)
             .inverse()
@@ -1444,6 +1521,9 @@ impl Renderer3D {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    /// Upload ambient RGB plus up to four directional lights given as
+    /// `(direction, intensity, color)`; directions are normalized here and
+    /// excess lights beyond four are dropped (shader-side limit).
     pub fn set_lights(
         &self,
         queue: &wgpu::Queue,
@@ -1477,6 +1557,8 @@ impl Renderer3D {
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&lighting));
     }
 
+    /// Replace the GPU material table (truncated to the 64-entry capacity);
+    /// instances reference entries by index.
     pub fn upload_materials(&self, queue: &wgpu::Queue, materials: &[OpenPBRMaterial]) {
         let count = materials.len().min(self.max_materials as usize);
         queue.write_buffer(
@@ -1486,6 +1568,8 @@ impl Renderer3D {
         );
     }
 
+    /// Convert and upload up to 256 instances (excess dropped) into the
+    /// per-object buffer used by both gbuffer and forward passes.
     pub fn upload_instances(&self, queue: &wgpu::Queue, instances: &[InstanceData]) {
         let count = instances.len().min(self.max_objects as usize);
         let mut gpu_objects: Vec<PerObjectGpu> = Vec::with_capacity(count);
@@ -1506,6 +1590,8 @@ impl Renderer3D {
         );
     }
 
+    /// Record the gbuffer pass: fills the five MRT targets + depth for
+    /// `instance_count` uploaded instances of `mesh`.
     pub fn render_gbuffer(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1607,6 +1693,8 @@ impl Renderer3D {
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
     }
 
+    /// Record the deferred lighting pass: reconstructs surface data from the
+    /// g-buffer in `g`, evaluates the OpenPBR BRDF and writes HDR color into `output`.
     pub fn render_lighting(
         &self,
         device: &wgpu::Device,
@@ -1690,6 +1778,10 @@ impl Renderer3D {
         rpass.draw(0..4, 0..1);
     }
 
+    /// Record the forward pass: draws lit geometry into the HDR `output`
+    /// layer, depth-testing against (and optionally clearing) `depth`.
+    /// `clear_depth = true` when the forward pass runs standalone; `false`
+    /// when it follows the gbuffer pass and must share its depth.
     pub fn render_forward(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1740,6 +1832,9 @@ impl Renderer3D {
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
     }
 
+    /// Record the final blend into `inputs.target`: mixes deferred + forward
+    /// HDR layers per `inputs.mode` and adds bloom scaled by
+    /// `inputs.bloom_intensity` (0 keeps the legacy path pixel-identical).
     pub fn render_composite(
         &self,
         device: &wgpu::Device,
@@ -1816,6 +1911,10 @@ impl Renderer3D {
         rpass.draw(0..4, 0..1);
     }
 
+    /// All-in-one legacy frame on the renderer's persistent targets:
+    /// gbuffer -> lighting -> forward -> composite straight into `target`.
+    /// The render-graph path (`frame_exec`) supersedes this for plan-driven
+    /// execution, but it remains the reference hybrid pipeline.
     pub fn render_scene(
         &self,
         device: &wgpu::Device,

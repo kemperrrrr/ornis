@@ -1,3 +1,10 @@
+//! Final full-screen pass: blends the lit PBR image with the 2D UI texture.
+//!
+//! Draws one triangle-strip quad over the output target and mixes
+//! `ui.rgb` into `pbr.rgb` weighted by `ui.a`, decoding the sRGB-encoded
+//! UI bytes to linear light first (see the WGSL comment) so the hardware's
+//! single OETF re-encode lands on the correct value.
+
 const COMPOSITE_SHADER: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -54,13 +61,18 @@ fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Final full-screen pass blending the lit PBR image with the 2D UI layer.
 pub struct CompositePass {
+    /// Full-screen triangle-strip pipeline targeting the surface format.
     pipeline: wgpu::RenderPipeline,
+    /// Layout binding pbr/ui textures + shared sampler (bindings 0..3).
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Linear-filtering, clamp-to-edge sampler used by both textures.
     sampler: wgpu::Sampler,
 }
 
 impl CompositePass {
+    /// Build the pipeline against `surface_format` (the final output format).
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite shader"),
@@ -167,6 +179,10 @@ impl CompositePass {
         }
     }
 
+    /// Record the blend pass: `target = mix(pbr, srgb_to_linear(ui), ui.a)`.
+    ///
+    /// `pbr_texture` must be an `*_Srgb` view (sampler returns linear);
+    /// `ui_texture` is plain `Rgba8Unorm` holding sRGB-encoded bytes.
     pub fn compose(
         &self,
         device: &wgpu::Device,

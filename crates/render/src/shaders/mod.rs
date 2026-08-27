@@ -1,3 +1,10 @@
+//! Shader source assembly.
+//!
+//! Each public function here assembles a complete WGSL module by splicing
+//! math-kernel snippets (generated from Rust via `wgsl_source()`, see
+//! [`math`]) into a fixed entry-point skeleton, so CPU tests exercise the
+//! exact BRDF code the GPU runs.
+
 pub mod math;
 
 /// ── COMPOSITE_VERTEX ────────────────────────────────────────────────
@@ -27,6 +34,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> CompositeVertexOutput {
 }
 "#;
 
+/// Assemble the full-screen composite vertex shader (triangle-strip quad).
 pub fn composite_vertex() -> String {
     COMPOSITE_VERTEX_BOILERPLATE.to_string()
 }
@@ -100,6 +108,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Assemble the composite fragment shader: HDR mix + bloom, splicing the ACES tonemap and luminance kernels via `wgsl_source()`.
 pub fn composite_fragment() -> String {
     format!(
         "{}\n{}\n{}",
@@ -165,6 +174,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Assemble the bloom fragment shader (bright-pass/blend), splicing the luminance kernel.
 pub fn bloom_fragment() -> String {
     format!(
         "{}\n{}",
@@ -230,6 +240,7 @@ fn vs_main(
 }
 "#;
 
+/// Assemble the gbuffer vertex shader (instance transforms + world position).
 pub fn gbuffer_vertex() -> String {
     GBUFFER_VERTEX_BOILERPLATE.to_string()
 }
@@ -316,6 +327,7 @@ fn fs_main(input: FragmentInput) -> GBufferOutput {
 }
 "#;
 
+/// Assemble the 5-MRT gbuffer fragment shader, splicing the octahedral normal-encoding kernel.
 pub fn gbuffer_fragment() -> String {
     format!(
         "{}\n{}",
@@ -351,6 +363,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> LightingVertexOutput {
 }
 "#;
 
+/// Assemble the full-screen lighting vertex shader.
 pub fn lighting_vertex() -> String {
     LIGHTING_VERTEX_BOILERPLATE.to_string()
 }
@@ -701,6 +714,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Assemble the deferred lighting fragment shader: reconstructs surface data and evaluates OpenPBR by splicing all BRDF math kernels via `wgsl_source()`.
 pub fn lighting_fragment() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
@@ -787,6 +801,7 @@ fn vs_main(
 }
 "#;
 
+/// Assemble the forward PBR vertex shader.
 pub fn pbr_vertex() -> String {
     PBR_VERTEX_BOILERPLATE.to_string()
 }
@@ -1108,6 +1123,7 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Assemble the forward PBR fragment shader: full OpenPBR evaluation, splicing all BRDF math kernels via `wgsl_source()`.
 pub fn pbr_fragment() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
@@ -1136,4 +1152,19 @@ pub fn pbr_fragment() -> String {
         src.push_str(k);
     }
     src
+}
+
+/// Rust mirror of the WGSL `octahedral_decode` used in the fragment shaders;
+/// kept next to [`math::octahedral_encode`] so CPU tests can round-trip it.
+pub fn octahedral_decode_rust(p: glam::Vec2) -> glam::Vec3 {
+    let mut n = glam::Vec3::new(p.x, p.y, 1.0 - p.x.abs() - p.y.abs());
+    let t = (-n.z).max(0.0);
+    let offset = if n.x >= 0.0 {
+        glam::Vec2::new(n.y, n.x)
+    } else {
+        -glam::Vec2::new(n.y, n.x)
+    } * t;
+    n.x += offset.x;
+    n.y += offset.y;
+    n.normalize()
 }
