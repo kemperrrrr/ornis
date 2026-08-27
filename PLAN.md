@@ -74,8 +74,9 @@
 - **Remote Editor**: REST, обработчик команд в `editor-only`, `GET /api/scene`,
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые
-  snapshot'ы через polling; WebSocket, request ID/ACK и sequence numbers
-  пока не реализованы. Editor-only `EditorWorld` использует `ornis_core::World`,
+  snapshot'ы через polling; WASM отбрасывает устаревшие версии до применения,
+  но WebSocket, request ID/ACK и серверные sequence numbers пока не реализованы.
+  Editor-only `EditorWorld` использует `ornis_core::World`,
   а браузер восстанавливает snapshot в отдельном `RenderWorld` после
   serialization boundary — общей памяти между ними нет.
 - **Command-Based Sync**: CPU-очередь + residency tracker и базовое
@@ -108,8 +109,9 @@
 
 ✅ Реализованы обработчик команд в `editor-only`, `GET /api/scene`,
 подключение `editor.js` к REST, generic `set_component`, а также
-сохранение/загрузка сцены. Остаются WebSocket вместо polling, request
-ID/ACK, sequence numbers и защита от устаревших snapshot'ов.
+сохранение/загрузка сцены. WASM уже защищает применение от устаревших
+versioned snapshots; остаются WebSocket вместо polling, request ID/ACK и
+серверные sequence numbers.
 
 ### b. Живой ECS в браузере
 

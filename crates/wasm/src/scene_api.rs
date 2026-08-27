@@ -96,25 +96,26 @@ pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
 }
 
 #[cfg(test)]
+/// The full contract payload, in the canonical generic form.
+pub(crate) const FULL_CONTRACT: &str = r#"{
+    "version": 5, "entity_count": 2,
+    "entities": [{
+        "id": 0, "generation": 0,
+        "components": {
+            "Name": "Red Sphere",
+            "Transform": {"translation":[-5.6,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+            "Mesh": {"Sphere": {"radius":1.0,"segments":32,"rings":24}},
+            "Material": {"Dielectric": {"base_color":[0.8,0.2,0.2],"roughness":0.5}}
+        }
+    }],
+    "lights": [{"Directional": {"direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}}],
+    "camera": {"position":[0,2.5,9],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0},
+    "ambient": [0.10,0.10,0.15]
+}"#;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The full contract payload, in the canonical generic form.
-    const FULL_CONTRACT: &str = r#"{
-        "version": 5, "entity_count": 2,
-        "entities": [{
-            "id": 0, "generation": 0,
-            "components": {
-                "Name": "Red Sphere",
-                "Transform": {"translation":[-5.6,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-                "Mesh": {"Sphere": {"radius":1.0,"segments":32,"rings":24}},
-                "Material": {"Dielectric": {"base_color":[0.8,0.2,0.2],"roughness":0.5}}
-            }
-        }],
-        "lights": [{"Directional": {"direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}}],
-        "camera": {"position":[0,2.5,9],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0},
-        "ambient": [0.10,0.10,0.15]
-    }"#;
 
     #[test]
     fn parses_full_contract() {

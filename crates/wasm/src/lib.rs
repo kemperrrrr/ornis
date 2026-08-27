@@ -577,8 +577,20 @@ fn log_frame_milestone(frame_count: u64, config: &wgpu::SurfaceConfiguration, in
     }
 }
 
+/// Whether a candidate snapshot is newer than both the applied and queued
+/// versions. The server's version is monotonic; rejecting older responses
+/// prevents an out-of-order fetch from rolling the viewport back.
+fn accept_live_scene_version(
+    applied_version: u64,
+    pending_version: Option<u64>,
+    candidate_version: u64,
+) -> bool {
+    candidate_version > applied_version
+        && pending_version.map_or(true, |pending| candidate_version > pending)
+}
+
 /// Kick off a `/api/scene` poll unless one is already in flight. Deposits a
-/// changed parsed scene into `pending_scene`; cleared on completion.
+/// newer parsed scene into `pending_scene`; cleared on completion.
 fn poll_live_scene(
     pending_scene: &Rc<RefCell<Option<LiveScene>>>,
     fetch_in_flight: &Rc<Cell<bool>>,
@@ -589,18 +601,19 @@ fn poll_live_scene(
     let fetch_in_flight = fetch_in_flight.clone();
     let applied_version = applied_version.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(live) = fetch_live_scene().await
-            && live.version != applied_version.get()
-        {
-            console::log_1(
-                &format!(
-                    "[ornis-wasm] /api/scene changed: v{} -> v{}",
-                    applied_version.get(),
-                    live.version
-                )
-                .into(),
-            );
-            *pending_scene.borrow_mut() = Some(live);
+        if let Some(live) = fetch_live_scene().await {
+            let applied = applied_version.get();
+            let pending = pending_scene.borrow().as_ref().map(|scene| scene.version);
+            if accept_live_scene_version(applied, pending, live.version) {
+                console::log_1(
+                    &format!(
+                        "[ornis-wasm] /api/scene changed: v{} -> v{}",
+                        applied, live.version
+                    )
+                    .into(),
+                );
+                *pending_scene.borrow_mut() = Some(live);
+            }
         }
         fetch_in_flight.set(false);
     });
@@ -796,4 +809,40 @@ async fn fetch_api_text(url: &str) -> Option<String> {
         .await
         .ok()?;
     text.as_string()
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn live_snapshot_crosses_serialization_boundary_into_shared_render_world() {
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        let mut render_world = RenderWorld::from_scene(&live.scene);
+
+        assert_eq!(render_world.entity_count(), live.scene.entities.len());
+        assert_eq!(render_world.engine().schedule().len(), 1);
+
+        render_world.run_frame(0.0);
+        let extracted = render_world.extracted();
+
+        assert_eq!(extracted.mesh_params, (32, 24));
+        assert_eq!(extracted.materials.len(), live.scene.entities.len());
+        assert_eq!(extracted.instances.len(), live.scene.entities.len());
+        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(
+            extracted.instances[0].model_matrix.w_axis.truncate(),
+            Vec3::new(-5.6, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn stale_live_snapshot_versions_are_rejected() {
+        assert!(!accept_live_scene_version(5, None, 4));
+        assert!(!accept_live_scene_version(5, Some(7), 6));
+        assert!(!accept_live_scene_version(5, Some(7), 7));
+        assert!(accept_live_scene_version(5, Some(7), 8));
+        assert!(accept_live_scene_version(0, None, 1));
+    }
 }

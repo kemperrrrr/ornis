@@ -229,7 +229,8 @@ Editor-only vertical slice уже работает. Следующий прио�
 - fire-and-forget команды;
 - `POST /api/command` возвращает `{}` даже для некорректной команды;
 - нет нормального request ID / acknowledgement;
-- нет sequence numbers для snapshot'ов;
+- нет серверных sequence numbers для snapshot'ов (WASM применяет только
+  более новые `version` и не откатывает уже queued snapshot);
 - ошибка команды приходит отдельно через event;
 - редактор и движок не используют единый надёжный live-протокол;
 - native runtime по-прежнему выглядит скорее showcase shell, чем полноценный runtime.
@@ -338,8 +339,9 @@ cargo: command not found
 Однако для такого проекта важно добавить ещё:
 
 - end-to-end тест editor command → ECS mutation → scene snapshot;
-- end-to-end тест snapshot → WASM scene;
-- тест stale snapshot / sequence number;
+- браузерный визуальный end-to-end тест snapshot → WASM scene;
+- серверный sequence number / ACK и cross-request stale snapshot test (client-side
+  monotonic version guard уже покрыта unit-тестом);
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
 - regression test на JSON escaping событий;
@@ -478,7 +480,8 @@ create entity
 - sequence number у snapshots;
 - version у scene state;
 - typed event serialization через Serde;
-- защита от stale updates;
+- серверные sequence numbers и explicit stale-update policy (WASM уже
+  имеет базовую monotonic-version guard);
 - WebSocket после стабилизации REST-контракта.
 
 ### Приоритет 3 — physics scaling
