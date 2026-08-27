@@ -81,7 +81,7 @@ mod native {
     pub use ornis_core::Engine;
     pub use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
     pub use ornis_render::{
-        Mesh, RenderFrame3D, RenderContext, Renderer3D, Technique, create_sphere,
+        Mesh, RenderContext, RenderFrame3D, Renderer3D, Technique, create_sphere,
     };
 }
 
