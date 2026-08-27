@@ -1,22 +1,25 @@
-//! Domain systems that connect the core frame host to builtin physics.
+//! Domain systems that connect the core frame host to builtin physics and
+//! backend-neutral render extraction.
 //!
 //! The runtime keeps `BuiltinPhysicsEngine` as a domain representation while
 //! `TransformDesc` and `RigidBody` remain ECS components in the logical
-//! [`ornis_core::World`]. Three systems make the boundary explicit:
-//! sync ECS state into physics, advance the solver, and write the resulting
-//! pose back to ECS. The module deliberately does not depend on rendering or
-//! editor protocol details.
+//! [`ornis_core::World`]. Physics systems make the sync-in/step/sync-out
+//! boundary explicit; render extraction turns the same ECS lanes into a
+//! backend-neutral snapshot. GPU resource ownership and editor protocol
+//! details remain outside this module.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use ornis_core::{
-    ComponentStore, Engine, Entity, Resources, SmartStore, System, SystemAccess, Time,
+    ComponentStore, Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess,
+    Time,
 };
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
-use ornis_render::scene::TransformDesc;
+use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_render::InstanceData;
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///
@@ -76,12 +79,18 @@ impl PhysicsRuntime {
         stale.sort_unstable_by_key(|&(_, handle)| Reverse(handle));
 
         for (entity, handle) in stale {
+            let last = self.bindings.len().saturating_sub(1);
+            let moved = if handle < last {
+                self.bindings
+                    .iter()
+                    .find_map(|(&candidate, &bound)| (bound == last).then_some(candidate))
+            } else {
+                None
+            };
             self.solver.remove_body(handle);
             self.bindings.remove(&entity);
-            for bound in self.bindings.values_mut() {
-                if *bound > handle {
-                    *bound -= 1;
-                }
+            if let Some(moved) = moved {
+                self.bindings.insert(moved, handle);
             }
             self.changed = true;
         }
@@ -281,21 +290,157 @@ impl System for PhysicsSyncOut {
     }
 }
 
-/// Applies an ECS transform to a physics body's pose.
-pub(crate) fn apply_transform_to_body(body: &mut RigidBody, transform: &TransformDesc) {
-    body.position = Vec3::from_array(transform.translation);
-    let orientation = Quat::from_xyzw(
-        transform.rotation[0],
-        transform.rotation[1],
-        transform.rotation[2],
-        transform.rotation[3],
-    );
+/// CPU-side render data extracted from ECS for a frame.
+#[derive(Clone, Debug)]
+pub struct RenderExtracted {
+    /// Maximum sphere tessellation required by the extracted entities.
+    pub mesh_params: (u32, u32),
+    /// GPU-ready materials in the same order as [`Self::instances`].
+    pub materials: Vec<OpenPBRMaterial>,
+    /// Per-entity model/normal matrices and material indices.
+    pub instances: Vec<InstanceData>,
+}
+
+impl Default for RenderExtracted {
+    fn default() -> Self {
+        Self {
+            mesh_params: (32, 24),
+            materials: Vec::new(),
+            instances: Vec::new(),
+        }
+    }
+}
+
+/// Installs the render extraction resource and system in `engine`.
+///
+/// This stage is backend-neutral: it only converts ECS scene components into
+/// CPU-side `InstanceData` and OpenPBR tables. A native or WASM renderer can
+/// upload the extracted snapshot to its own GPU resources afterwards.
+pub fn install_render_extract(engine: &mut Engine) {
+    let _ = engine
+        .world_mut()
+        .insert(Mutex::new(RenderExtracted::default()));
+    engine.schedule_mut().add_system(RenderExtract);
+}
+
+/// ECS → backend-neutral render extraction system.
+struct RenderExtract;
+
+impl System for RenderExtract {
+    fn name(&self) -> &'static str {
+        "render_extract"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .reads::<SmartStore>()
+            .reads_lane::<TransformDesc>()
+            .reads_lane::<MeshDesc>()
+            .reads_lane::<MaterialDesc>()
+            .writes::<Mutex<RenderExtracted>>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let Some(store) = resources.get::<SmartStore>() else {
+            return;
+        };
+        let Some(output) = resources.get::<Mutex<RenderExtracted>>() else {
+            return;
+        };
+        let extracted = extract_render_data(store);
+        *output.lock().expect("render extraction lock") = extracted;
+    }
+}
+
+fn extract_render_data(store: &SmartStore) -> RenderExtracted {
+    let mut extracted = RenderExtracted::default();
+    let Some(transforms) = store.read_lane::<TransformDesc>() else {
+        return extracted;
+    };
+    let Some(meshes) = store.read_lane::<MeshDesc>() else {
+        return extracted;
+    };
+    let Some(materials) = store.read_lane::<MaterialDesc>() else {
+        return extracted;
+    };
+
+    for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
+        let Some(mesh) = meshes.get(entity) else {
+            continue;
+        };
+        let Some(material) = materials.get(entity) else {
+            continue;
+        };
+        let MeshDesc::Sphere {
+            radius,
+            segments,
+            rings,
+        } = mesh;
+        extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
+        extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
+        let model = Mat4::from_scale_rotation_translation(
+            Vec3::from_array(transform.scale) * *radius,
+            normalized_rotation(transform.rotation),
+            Vec3::from_array(transform.translation),
+        );
+        extracted.materials.push(material_to_gpu(material));
+        extracted.instances.push(InstanceData {
+            model_matrix: model,
+            normal_matrix: model.inverse().transpose(),
+            material_index: extracted.materials.len() as u32 - 1,
+        });
+    }
+    extracted
+}
+
+fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
+    match material {
+        MaterialDesc::Dielectric {
+            base_color,
+            roughness,
+        } => {
+            let mut output = OpenPBRMaterial::dielectric();
+            output.base.color_rgb(*base_color);
+            output.specular.roughness(*roughness);
+            output
+        }
+        MaterialDesc::Metal {
+            base_color,
+            roughness,
+        } => {
+            let mut output = OpenPBRMaterial::metal();
+            output.base.color_rgb(*base_color);
+            output.specular.roughness(*roughness);
+            output
+        }
+        MaterialDesc::Coat {
+            base_color,
+            coat_weight,
+            coat_roughness,
+        } => {
+            let mut output = OpenPBRMaterial::coat();
+            output.base.color_rgb(*base_color);
+            output.coat.weight(*coat_weight);
+            output.coat.roughness(*coat_roughness);
+            output
+        }
+    }
+}
+
+fn normalized_rotation(rotation: [f32; 4]) -> Quat {
+    let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
     let length_squared = orientation.length_squared();
-    body.orientation = if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > 1e-12 {
         orientation.normalize()
     } else {
         Quat::IDENTITY
-    };
+    }
+}
+
+/// Applies an ECS transform to a physics body's pose.
+pub(crate) fn apply_transform_to_body(body: &mut RigidBody, transform: &TransformDesc) {
+    body.position = Vec3::from_array(transform.translation);
+    body.orientation = normalized_rotation(transform.rotation);
 }
 
 #[cfg(test)]
@@ -412,6 +557,131 @@ mod tests {
     }
 
     #[test]
+    fn removing_middle_body_preserves_swap_remove_bindings() {
+        let mut engine = Engine::new();
+        let mut entities = Vec::new();
+        for i in 0..4 {
+            let entity = engine
+                .world_mut()
+                .store_mut()
+                .expect("world store")
+                .create_entity();
+            engine
+                .world_mut()
+                .store_mut()
+                .expect("world store")
+                .insert(entity, dynamic_body(Vec3::new(i as f32, 0.0, 0.0)));
+            engine
+                .world_mut()
+                .store_mut()
+                .expect("world store")
+                .insert(entity, transform(Vec3::new(i as f32, 0.0, 0.0)));
+            entities.push(entity);
+        }
+        install_physics(&mut engine, Vec3::ZERO);
+        engine.run_frame(0.0);
+
+        let removed = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .write_lane::<RigidBody>()
+            .expect("rigid-body lane")
+            .remove(entities[1]);
+        assert!(removed.is_some());
+        engine.run_frame(0.0);
+
+        let runtime = engine
+            .world()
+            .resources()
+            .get::<Mutex<PhysicsRuntime>>()
+            .expect("physics resource")
+            .lock()
+            .expect("physics runtime lock");
+        assert_eq!(runtime.bindings.get(&entities[0]), Some(&0));
+        assert_eq!(runtime.bindings.get(&entities[2]), Some(&2));
+        assert_eq!(runtime.bindings.get(&entities[3]), Some(&1));
+    }
+
+    #[test]
+    fn render_extract_collects_complete_ecs_entities() {
+        let mut engine = Engine::new();
+        let entity = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, transform(Vec3::new(1.0, 2.0, 3.0)));
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MeshDesc::Sphere {
+                radius: 2.0,
+                segments: 48,
+                rings: 32,
+            },
+        );
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MaterialDesc::Metal {
+                base_color: [0.9, 0.8, 0.2],
+                roughness: 0.2,
+            },
+        );
+        install_render_extract(&mut engine);
+
+        engine.run_frame(0.0);
+
+        let extracted = engine
+            .world()
+            .resources()
+            .get::<Mutex<RenderExtracted>>()
+            .expect("render extraction resource")
+            .lock()
+            .expect("render extraction lock")
+            .clone();
+        assert_eq!(extracted.mesh_params, (48, 32));
+        assert_eq!(extracted.materials.len(), 1);
+        assert_eq!(extracted.instances.len(), 1);
+        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(
+            extracted.instances[0].model_matrix.w_axis().truncate(),
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn render_extract_skips_entities_without_complete_render_components() {
+        let mut engine = Engine::new();
+        let entity = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, transform(Vec3::ZERO));
+        install_render_extract(&mut engine);
+
+        engine.run_frame(0.0);
+
+        let extracted = engine
+            .world()
+            .resources()
+            .get::<Mutex<RenderExtracted>>()
+            .expect("render extraction resource")
+            .lock()
+            .expect("render extraction lock");
+        assert!(extracted.instances.is_empty());
+        assert!(extracted.materials.is_empty());
+    }
+
+    #[test]
     fn physics_accesses_are_declared_for_schedule_enforcement() {
         assert!(
             PhysicsSyncIn
@@ -424,6 +694,12 @@ mod tests {
                 .access()
                 .writes_lanes
                 .contains(&std::any::TypeId::of::<TransformDesc>())
+        );
+        assert!(
+            RenderExtract
+                .access()
+                .reads_lanes
+                .contains(&std::any::TypeId::of::<MaterialDesc>())
         );
     }
 }

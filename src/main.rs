@@ -8,6 +8,8 @@ use editor_backend::RemoteEditor;
 // Only the native-mode loop types the channels explicitly.
 #[cfg(not(feature = "editor-only"))]
 use editor_backend::{GameEvent, UiCommand};
+#[cfg(not(feature = "editor-only"))]
+use engine_runtime::{RenderExtracted, install_render_extract};
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // in native mode nothing calls it yet (the native loop is a counter stub).
@@ -76,9 +78,10 @@ mod native {
     pub use winit::event_loop::{ActiveEventLoop, EventLoop};
     pub use winit::window::WindowAttributes;
 
+    pub use ornis_core::Engine;
+    pub use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
     pub use ornis_render::{
-        InstanceData, Mesh, OpenPBRMaterial, RenderBackend, RenderBackendConfig,
-        create_render_backend, create_sphere,
+        Mesh, RenderBackend, RenderBackendConfig, create_render_backend, create_sphere,
     };
 }
 
@@ -100,8 +103,7 @@ struct GameContext {
     surface_config: wgpu::SurfaceConfiguration,
     renderer3d: Box<dyn RenderBackend>,
     sphere_mesh: Mesh,
-    materials: Vec<OpenPBRMaterial>,
-    instance_data: Vec<InstanceData>,
+    engine: Engine,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
@@ -210,54 +212,55 @@ impl GameApp {
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let materials = vec![
-            {
-                let mut mat = OpenPBRMaterial::dielectric();
-                mat.base.color_rgb([0.8, 0.2, 0.2]);
-                mat
+            MaterialDesc::Dielectric {
+                base_color: [0.8, 0.2, 0.2],
+                roughness: 0.5,
             },
-            {
-                let mut mat = OpenPBRMaterial::dielectric();
-                mat.base.color_rgb([0.2, 0.8, 0.2]);
-                mat.specular.roughness(0.7);
-                mat
+            MaterialDesc::Dielectric {
+                base_color: [0.2, 0.8, 0.2],
+                roughness: 0.7,
             },
-            {
-                let mut mat = OpenPBRMaterial::dielectric();
-                mat.base.color_rgb([0.2, 0.2, 0.8]);
-                mat.specular.roughness(0.1);
-                mat
+            MaterialDesc::Dielectric {
+                base_color: [0.2, 0.2, 0.8],
+                roughness: 0.1,
             },
-            {
-                let mut mat = OpenPBRMaterial::metal();
-                mat.base.color_rgb([0.9, 0.7, 0.1]);
-                mat.specular.roughness(0.2);
-                mat
+            MaterialDesc::Metal {
+                base_color: [0.9, 0.7, 0.1],
+                roughness: 0.2,
             },
-            {
-                let mut mat = OpenPBRMaterial::coat();
-                mat.base.color_rgb([0.9, 0.9, 0.9]);
-                mat.coat.weight(1.0);
-                mat.coat.roughness(0.1);
-                mat
+            MaterialDesc::Coat {
+                base_color: [0.9, 0.9, 0.9],
+                coat_weight: 1.0,
+                coat_roughness: 0.1,
             },
         ];
-
-        let spacing = 2.8;
-        let instance_data: Vec<InstanceData> = materials
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let x = (i as f32 - 2.0) * spacing;
-                let pos = Vec3::new(x, 0.0, 0.0);
-                let model = Mat4::from_translation(pos);
-                let normal_matrix = Mat4::IDENTITY;
-                InstanceData {
-                    model_matrix: model,
-                    normal_matrix,
-                    material_index: i as u32,
-                }
-            })
-            .collect();
+        let entity_count = materials.len() as u32;
+        let mut engine = Engine::new();
+        {
+            let store = engine.world_mut().store_mut().expect("world store");
+            for (i, material) in materials.into_iter().enumerate() {
+                let entity = store.create_entity();
+                let x = (i as f32 - 2.0) * 2.8;
+                store.insert(
+                    entity,
+                    TransformDesc {
+                        translation: [x, 0.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                );
+                store.insert(
+                    entity,
+                    MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 32,
+                        rings: 24,
+                    },
+                );
+                store.insert(entity, material);
+            }
+        }
+        install_render_extract(&mut engine);
 
         Ok(GameContext {
             window,
@@ -267,11 +270,10 @@ impl GameApp {
             surface_config,
             renderer3d,
             sphere_mesh,
-            materials,
-            instance_data,
+            engine,
             remote_cmd_rx,
             remote_ev_tx,
-            entity_count: 0,
+            entity_count,
         })
     }
 
@@ -308,6 +310,25 @@ impl GameApp {
     }
 
     fn render_frame(ctx: &mut GameContext) {
+        ctx.engine.run_frame(1.0 / 60.0);
+        let extracted = ctx
+            .engine
+            .world()
+            .resources()
+            .get::<std::sync::Mutex<RenderExtracted>>()
+            .expect("render extraction resource")
+            .lock()
+            .expect("render extraction lock")
+            .clone();
+        if extracted.mesh_params != (32, 24) {
+            ctx.sphere_mesh = create_sphere(
+                &ctx.device,
+                1.0,
+                extracted.mesh_params.0,
+                extracted.mesh_params.1,
+            );
+        }
+
         let w = ctx.surface_config.width as f64;
         let h = ctx.surface_config.height as f64;
         let aspect = w as f32 / h as f32;
@@ -326,9 +347,10 @@ impl GameApp {
                 ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
             ],
         );
-        ctx.renderer3d.upload_materials(&ctx.queue, &ctx.materials);
         ctx.renderer3d
-            .upload_instances(&ctx.queue, &ctx.instance_data);
+            .upload_materials(&ctx.queue, &extracted.materials);
+        ctx.renderer3d
+            .upload_instances(&ctx.queue, &extracted.instances);
 
         let mut encoder = ctx
             .device
@@ -361,7 +383,7 @@ impl GameApp {
         };
 
         ctx.renderer3d
-            .render_scene(context, &ctx.sphere_mesh, ctx.instance_data.len() as u32);
+            .render_scene(context, &ctx.sphere_mesh, extracted.instances.len() as u32);
 
         ctx.queue.submit(Some(encoder.finish()));
         frame.present();
