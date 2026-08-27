@@ -164,7 +164,9 @@ impl EditorWorld {
     }
 
     fn store(&self) -> &SmartStore {
-        self.world.store().expect("EditorWorld always registers SmartStore")
+        self.world
+            .store()
+            .expect("EditorWorld always registers SmartStore")
     }
 
     fn store_mut(&mut self) -> &mut SmartStore {
@@ -874,15 +876,23 @@ mod tests {
         let entity = world.spawn(Some("Hero".into()));
 
         assert!(world.world().store().is_some());
-        assert!(world.world().resources().get::<SceneEnvironment>().is_some());
-        assert!(world
-            .world()
-            .store()
-            .expect("core World store")
-            .read_lane::<TransformDesc>()
-            .expect("Transform lane")
-            .get(entity)
-            .is_some());
+        assert!(
+            world
+                .world()
+                .resources()
+                .get::<SceneEnvironment>()
+                .is_some()
+        );
+        assert!(
+            world
+                .world()
+                .store()
+                .expect("core World store")
+                .read_lane::<TransformDesc>()
+                .expect("Transform lane")
+                .get(entity)
+                .is_some()
+        );
     }
 
     #[test]
