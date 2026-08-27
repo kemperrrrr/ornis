@@ -253,8 +253,7 @@ impl EditorWorld {
     /// Read `path` and replace the world with its scene. Any error (missing
     /// file, invalid RON) leaves the world untouched.
     pub fn load_scene_file(&mut self, path: &Path) -> Result<usize, String> {
-        let ron =
-            fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let ron = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         self.load_scene_ron(&ron)
     }
 
@@ -436,8 +435,7 @@ fn set_component(
     let meta = REGISTRY
         .by_name(type_name)
         .ok_or_else(|| format!("unknown component '{type_name}'"))?;
-    let value: Value =
-        serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
+    let value: Value = serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
     meta.set_json(&mut world.store, entity, &value)
         .map_err(|e| e.to_string())?;
     world.version += 1;
@@ -579,7 +577,10 @@ fn entity_json(store: &SmartStore, entity: Entity) -> Value {
 }
 
 /// Read a typed component of `entity` from the store.
-fn read_component<T: 'static + Clone + Send + Sync>(store: &SmartStore, entity: Entity) -> Option<T> {
+fn read_component<T: 'static + Clone + Send + Sync>(
+    store: &SmartStore,
+    entity: Entity,
+) -> Option<T> {
     store
         .read_lane::<T>()
         .and_then(|lane| lane.get(entity).cloned())
@@ -1398,7 +1399,8 @@ mod tests {
         let broken = dir.join("broken.ron");
         fs::write(&broken, "Scene(name: 42)").unwrap();
 
-        let load = |path: &Path| custom("load_scene", &format!(r#"{{"path":"{}"}}"#, path.display()));
+        let load =
+            |path: &Path| custom("load_scene", &format!(r#"{{"path":"{}"}}"#, path.display()));
         world.handle_command(&load(&broken), &ev_tx);
         world.handle_command(&load(&dir.join("nope.ron")), &ev_tx);
 
@@ -1434,7 +1436,11 @@ mod tests {
         world.handle_command(
             &custom(
                 "destroy_entity",
-                &format!(r#"{{"id":{},"generation":{}}}"#, hero.id(), hero.generation()),
+                &format!(
+                    r#"{{"id":{},"generation":{}}}"#,
+                    hero.id(),
+                    hero.generation()
+                ),
             ),
             &ev_tx,
         );

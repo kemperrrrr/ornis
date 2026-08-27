@@ -244,7 +244,7 @@ fn coat_base_darkening(
     let Ebase_Kcoat = Ebase * Kcoat;
     let one_minus_Kcoat = 1.0 - Kcoat;
     let one_minus_Ebase_Kcoat = glam::Vec3::splat(1.0) - Ebase_Kcoat;
-    
+
     glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6))
 }
 

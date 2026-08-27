@@ -23,6 +23,7 @@ mod prefetch;
 mod registry;
 pub mod schedule;
 mod smart_store;
+mod world;
 
 pub use cold_store::ColdComponentStore;
 pub use command_sync::{
@@ -44,3 +45,4 @@ pub use rayon;
 pub use registry::{ComponentMeta, ComponentRegistry, LaneId, RegistryError};
 pub use schedule::{OrderError, Resources, Schedule, System, SystemAccess, compute_levels};
 pub use smart_store::{Pack, SmartStore};
+pub use world::World;

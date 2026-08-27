@@ -144,7 +144,6 @@ impl AudioEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     /// Records every `play` call so the engine's orchestration can be
     /// asserted without a real audio device.

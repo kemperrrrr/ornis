@@ -228,7 +228,6 @@ impl GpuBatch {
             b,
             bb_idx,
         } = input;
-        let lane = lane as usize;
         let l3 = |x: &mut [f32; 4], y: &mut [f32; 4], z: &mut [f32; 4], v: Vec3| {
             x[lane] = v.x;
             y[lane] = v.y;

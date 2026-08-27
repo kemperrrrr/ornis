@@ -163,3 +163,1644 @@
 ## Ближайший приоритет
 
 Самая полезная следующая задача — полноценная live-сцена редактора. Она свяжет ECS, physics, render, WASM и HTTP backend в один проверяемый продуктовый сценарий.
+
+
+---
+
+## Дополнение по результатам ревью
+
+
+## Основные проблемы
+
+### 1. Критическая проблема производительности физики
+
+Это самая серьёзная техническая находка.
+
+Согласно [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md):
+
+- 10 000 тел — около **767 ms за шаг** в одном из сценариев;
+- 100 000 тел — примерно **45–110 секунд за шаг**;
+- Sweep-and-Prune вырождается в квадратичную работу;
+- гигантский AABB пола приводит к огромному active set;
+- даже tiled floor не устраняет сверхлинейный рост.
+
+Следовательно, физический движок сейчас **не масштабируется до заявленного ECS/engine workload**. Причина не только в конкретной сортировке, но и в общей модели broad phase.
+
+Приоритетные направления:
+
+1. spatial hash / uniform grid / dynamic AABB tree;
+2. разбиение мира на регионы;
+3. фильтрация collision layers;
+4. отдельный pipeline для sleeping bodies;
+5. ограничение island expansion;
+6. profiling narrow phase и contact generation;
+7. отдельный benchmark для worst-case broad phase.
+
+До решения этой проблемы я бы не позиционировал движок как пригодный для больших сцен.
+
+### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
+
+В [`crates/core/src/dispatcher.rs`](crates/core/src/dispatcher.rs):
+
+- `Dispatcher` действительно выбирает `Cpu` или `Gpu`;
+- `GpuExecutor` существует при feature `gpu`;
+- однако `GpuExecutor::execute` возвращает `None`;
+- GPU-операция там не выполняется.
+
+При этом в `ornis-wgpu-backend` есть отдельный рабочий механизм compute dispatch через `CommandSync`.
+
+То есть нужно чётко разделять:
+
+- **работающий GPU backend / command dispatch**;
+- **не завершённую автоматическую GPU-диспетчеризацию ECS-операций из core**.
+
+Сейчас API легко создаёт впечатление, что `SmartDispatcher` уже способен автоматически исполнять generic ECS workload на GPU. На самом деле это пока fallback на CPU.
+
+Это не обязательно плохое архитектурное решение, но документация и API должны явно маркировать эту границу.
+
+### 3. Редактор ещё не является полностью live-системой
+
+Положительные части есть:
+
+- HTTP server;
+- REST endpoints;
+- command channel;
+- scene snapshots;
+- создание entity;
+- изменение компонентов;
+- save/load;
+- WASM viewport;
+- polling.
+
+Но остаются ограничения:
+
+- polling вместо WebSocket;
+- fire-and-forget команды;
+- `POST /api/command` возвращает `{}` даже для некорректной команды;
+- нет нормального request ID / acknowledgement;
+- нет sequence numbers для snapshot'ов;
+- ошибка команды приходит отдельно через event;
+- редактор и движок не используют единый надёжный live-протокол;
+- native runtime по-прежнему выглядит скорее showcase shell, чем полноценный runtime.
+
+Особенно неприятный момент — ручная сериализация событий в `format_events` в [`crates/editor-backend/src/remote.rs`](crates/editor-backend/src/remote.rs). Поля вроде `cmd_type` и `type_name` вставляются в JSON через `format!`, без JSON escaping. Если туда попадёт кавычка, обратный слеш или управляющий символ, endpoint может вернуть невалидный JSON.
+
+Лучше сериализовать структуры через `serde_json`, а не собирать JSON вручную.
+
+### 4. Проект слишком широк для текущего размера
+
+Одновременно развиваются:
+
+- ECS;
+- GPU compute;
+- custom procedural macros;
+- render graph;
+- unified scheduler;
+- physics;
+- audio;
+- MaterialX;
+- WASM;
+- editor;
+- scripting roadmap;
+- asset pipeline;
+- lock-free storage.
+
+Каждая подсистема сама по себе достаточно большая. Риск в том, что движок станет коллекцией интересных технологий без одного законченного пользовательского сценария.
+
+Наиболее разумный фокус сейчас:
+
+> **живой редактор → ECS → render → physics → save/load**
+
+Пока этот vertical slice не станет устойчивым, scripting, новые языки, asset pipeline и дальнейшее усложнение scheduler лучше держать на втором плане.
+
+### 5. Слишком крупные модули
+
+По размеру особенно выделяются:
+
+- `crates/physics/src/engine.rs` — около 2900 строк;
+- `crates/render/src/renderer.rs` — около 2000 строк;
+- `crates/materialx/src/graph.rs` — около 1600 строк;
+- `crates/render/src/frame_plan.rs`;
+- `crates/render/src/frame_exec.rs`;
+- `crates/core/src/schedule.rs`.
+
+Часть уже была разделена, но остаточная сложность всё ещё высокая. В частности:
+
+- physics стоит дальше делить на broad phase, narrow phase, contacts, solver, integration, queries;
+- renderer — на resource setup, upload, pass recording, frame lifecycle;
+- MaterialX graph — на parse, graph validation, evaluation, extraction.
+
+Это не блокирует разработку прямо сейчас, но повышает стоимость дальнейших изменений и ревью.
+
+### 6. Документация местами опережает реальную интеграцию
+
+Документация в целом подробная и полезная, но часть формулировок звучит более завершённо, чем соответствующий код.
+
+Например:
+
+- «invisible ECS» пока в значительной степени реализуется через macro/API слой, а не как полностью прозрачная трансформация произвольного объектного кода;
+- unified scheduler реализован как инфраструктура, но ещё не стал runtime-планировщиком полного кадра;
+- GPU dispatch в core не завершён;
+- редактор live-связан с ECS только через промежуточные REST snapshots и commands.
+
+Я бы рекомендовал для каждой крупной возможности разделять статусы:
+
+- `implemented`;
+- `tested in isolation`;
+- `integrated in runtime`;
+- `used by editor`;
+- `production-ready`.
+
+Сейчас эти уровни иногда смешиваются.
+
+## Тестирование
+
+Я попытался запустить:
+
+```bash
+cargo test --workspace
+```
+
+Но в окружении отсутствует `cargo`:
+
+```text
+cargo: command not found
+```
+
+Поэтому в рамках этого ревью я не могу подтвердить текущий compile/test status фактическим запуском. Статический осмотр показывает хорошую тестовую базу, но итоговая оценка должна учитывать, что именно в этой сессии workspace не был собран.
+
+При этом в репозитории уже есть [`quality.yml`](.github/workflows/quality.yml), который запускает `cargo xtask quality --ci` в GitHub Actions. В случае падения workflow сохраняет лог и публикует сводку и части полного лога в комментариях к pull request. Права на изменение GitHub-среды и самого workflow в рамках этого ревью не требовались и не использовались.
+
+Есть тесты для:
+
+- ECS и generation semantics;
+- macros;
+- scheduler;
+- editor backend;
+- scene serialization;
+- physics;
+- render planning;
+- GPU pipeline;
+- property tests;
+- integration tests.
+
+Однако для такого проекта важно добавить ещё:
+
+- end-to-end тест editor command → ECS mutation → scene snapshot;
+- end-to-end тест snapshot → WASM scene;
+- тест stale snapshot / sequence number;
+- fuzzing HTTP command payloads;
+- benchmark worst-case broad phase;
+- regression test на JSON escaping событий;
+- compile test для всех публичных macro entry points.
+
+## Что в проекте хорошо
+
+### 1. Хорошая модульная декомпозиция
+
+Workspace разделён на логичные крейты:
+
+- `ornis-core` — ECS, sparse sets, entity lifecycle, dispatcher;
+- `ornis-physics` — физика и collision detection;
+- `ornis-render` — wgpu-рендерер и PBR;
+- `ornis-schedule` — планирование систем;
+- `ornis-wgpu-backend` — GPU compute и command sync;
+- `ornis-materialx` — импорт MaterialX;
+- `ornis-audio` — аудио;
+- `ornis-wasm` — браузерный рендер;
+- `editor-backend` — HTTP/IPC слой;
+- `xtask` — единая инфраструктура качества.
+
+Это значительно лучше, чем монолитный экспериментальный движок, где ECS, физика и рендер смешаны в одном crate.
+
+### 2. Сильная реализация ECS-ядра
+
+В `crates/core` есть:
+
+- sparse-set storage;
+- dense-массивы и paginated sparse index;
+- bitset-пересечения;
+- generation-aware entities;
+- recycling entity IDs;
+- hot/cold и lock-free storage;
+- CPU/Rayon execution lanes;
+- component registry;
+- property-тесты и тесты детерминизма.
+
+Особенно хорошо, что property-тесты уже находили реальные ошибки в семантике generations. Это признак полезной тестовой инфраструктуры, а не просто большого числа smoke-тестов.
+
+### 3. Неплохая тестовая и quality-инфраструктура
+
+Есть:
+
+- `cargo xtask quality`;
+- `cargo clippy --all-targets -- -D warnings`;
+- `cargo deny`;
+- `cargo audit`;
+- `cargo outdated`;
+- fuzzing для RON и MaterialX;
+- mutation testing через `cargo-mutants`;
+- baseline complexity;
+- benchmarks;
+- CI workflow;
+- GPU-тесты на software adapter.
+
+Это сильная сторона проекта. В большинстве подобных ранних движков есть только `cargo test`, а здесь уже сформирована инженерная оболочка вокруг разработки.
+
+### 4. Рендерер выглядит содержательно, а не декларативно
+
+В `ornis-render` есть:
+
+- forward/deferred/hybrid frame plan;
+- G-buffer;
+- lighting/composite passes;
+- PBR-функции;
+- OpenPBR material;
+- WGSL shader builders;
+- material upload;
+- render backend abstraction;
+- тесты планировщика;
+- benchmark записи команд.
+
+Удаление мёртвого дубликата `shader.rs` было правильным решением: наличие двух независимых источников WGSL было серьёзным риском рассинхронизации.
+
+### 5. Физика уже больше, чем заглушка
+
+В `ornis-physics` реализованы:
+
+- Sweep-and-Prune broad phase;
+- sphere/box/capsule контакты;
+- SAT для box-box;
+- импульсный solver;
+- restitution и friction;
+- islands;
+- joints;
+- raycast;
+- shapecast через conservative advancement;
+- CPU и GPU-путь.
+
+Для экспериментального движка это достаточно широкий и полезный набор.
+
+## Что в проекте хорошо в целом
+
+Проект выглядит как **сильный технический R&D-прототип с хорошей культурой разработки**, а не как игрушечный engine scaffold. Особенно хорошо сделаны:
+
+- workspace architecture;
+- ECS storage;
+- quality tooling;
+- scheduler foundation;
+- PBR/rendering foundation;
+- breadth of tests.
+
+Но до production ещё далеко из-за трёх блокеров:
+
+1. **физика плохо масштабируется**;
+2. **GPU dispatch в core не завершён**;
+3. **editor/ECS protocol ещё не является надёжной live-интеграцией**.
+
+Если сфокусироваться на одном вертикальном сценарии и временно заморозить расширение scope, из проекта может получиться интересный специализированный Rust engine. В текущем виде это качественный, но слишком широкий исследовательский прототип.
+
+## Что я бы сделал следующим
+
+### Приоритет 1 — закрыть надёжный vertical slice
+
+Сделать один сценарий полностью проверяемым:
+
+```text
+create entity
+→ set Transform
+→ set Material
+→ render updated scene
+→ save
+→ reload
+→ verify identical scene
+```
+
+Причём не только UI-тестом, а отдельным интеграционным тестом backend/world protocol.
+
+### Приоритет 2 — исправить editor protocol
+
+Минимальный набор:
+
+- request ID;
+- explicit ACK/error response;
+- sequence number у snapshots;
+- version у scene state;
+- typed event serialization через Serde;
+- защита от stale updates;
+- WebSocket после стабилизации REST-контракта.
+
+### Приоритет 3 — physics scaling
+
+Не добавлять новые сложные формы, пока не будет понятен профиль broad phase на:
+
+- 1k;
+- 10k;
+- 100k тел;
+- много маленьких islands;
+- один большой контактный кластер;
+- большой static environment.
+
+### Приоритет 4 — явно пометить experimental API
+
+Экспериментальные или незавершённые поверхности API нужно **не прятать, а явно помечать** в документации, rustdoc и по возможности в именах/модулях. В первую очередь это касается:
+
+- core GPU executor stub;
+- незавершённого automatic SmartBuffer residency;
+- experimental scheduler integration;
+- speculative scripting interfaces.
+
+Для таких API стоит использовать явные маркеры вроде `Experimental`, `Unstable`, `not production-ready`, feature flags и отдельные разделы документации. При этом API должны оставаться видимыми разработчику: задача не скрыть технический долг, а не допустить ошибочного восприятия экспериментального контракта как стабильного.
+
+### Приоритет 5 — documentation lint
+
+В репозитории уже зафиксировано большое количество недокументированного public API. Стоит:
+
+1. включить `#![warn(missing_docs)]` в библиотеках;
+2. начать с public facade:
+   - `Renderer3D`;
+   - `SmartStore`;
+   - `ComponentStore`;
+   - `Entity`;
+   - macro entry points;
+   - `AudioEngine`;
+3. затем включить `-D warnings` для rustdoc в CI.
+
+## Итоговая оценка
+
+| Область | Оценка |
+|---|---:|
+| Архитектура | **8/10** |
+| Инженерная культура | **8/10** |
+| Тестовая база | **7/10** |
+| Готовность к production | **4/10** |
+| Фокус продукта | **5/10** |
+| Потенциал | **8/10** |
+
+**Ornis — амбициозный экспериментальный игровой движок на Rust, а не готовый production engine.** Архитектурно проект уже достаточно серьёзный: около 10 крейтов, ECS, физика, wgpu-рендер, MaterialX, WASM/WebGPU-редактор, планировщики и quality tooling.
+
+Главная проблема проекта — не отсутствие интересных технологий, а **широкий scope и незавершённая интеграция между подсистемами**.
+
+---
+
+## Дополнение: фактическая интеграция Scheduler, World и игрового цикла
+
+### Краткий ответ
+
+Сейчас у Ornis **нет единого runtime-мирового цикла, который связывает Scheduler, ECS, Physics, Render и CPU/GPU**. Есть отдельные хорошо проработанные механизмы и несколько параллельных «скелетов» интеграции, но они пока не собраны в одну работающую систему.
+
+### 1. Используется ли Scheduler?
+
+#### `ornis-core::Schedule`
+
+Структура существует:
+
+```rust
+ornis_core::Schedule
+ornis_core::Resources
+ornis_core::System
+ornis_core::SystemAccess
+```
+
+Она умеет:
+
+- регистрировать системы;
+- анализировать `reads`/`writes`;
+- строить уровни параллельного выполнения;
+- соблюдать `order_before`;
+- запускать системы последовательно или через Rayon;
+- проверять объявленные доступы;
+- работать с access-декларациями для `SmartStore`-лент.
+
+Реализация находится в:
+
+```text
+crates/core/src/schedule.rs
+crates/schedule/src/lib.rs
+```
+
+Но **в основном runtime этот Scheduler сейчас не вызывается**.
+
+По фактическому использованию:
+
+- в `crates/core` он преимущественно тестируется;
+- в `crates/render/tests/scheduler_parity.rs` проверяется соответствие render-планировщика;
+- в `crates/render/src/frame_exec.rs` используется общий `ornis_schedule::run_levels`;
+- физика его не использует;
+- native game loop его не использует;
+- WASM render loop его не использует;
+- editor world его не использует.
+
+То есть `ornis-core::Schedule` сейчас — это **готовая инфраструктура и API**, но не главный исполнитель кадра движка.
+
+#### Render Scheduler / FramePlan
+
+У рендера есть отдельный механизм:
+
+```text
+FramePlan
+FrameLayout
+RenderFrame3D
+FrameExecutor
+```
+
+Он используется в:
+
+- `crates/render/src/frame_plan.rs`;
+- `crates/render/src/frame_exec.rs`;
+- render-тестах;
+- render benchmarks;
+- render examples.
+
+Он умеет:
+
+- строить порядок render passes;
+- вычислять lifetime ресурсов;
+- делать aliasing текстур;
+- строить уровни параллельной записи команд;
+- исполнять pass'ы через `FrameExecutor`;
+- использовать общий `ornis_schedule::run_levels`.
+
+Но это **не общий игровой Scheduler**. Это scheduler именно для render frame.
+
+Более того, существующие native и WASM entry points сейчас используют в основном старый прямой путь:
+
+```rust
+renderer.render_scene(...)
+```
+
+Native:
+
+```text
+src/main.rs
+GameApp::about_to_wait
+GameApp::window_event
+render_frame
+Renderer3D::render_scene
+```
+
+WASM:
+
+```text
+crates/wasm/src/lib.rs
+requestAnimationFrame
+FrameState::draw
+Renderer3D / RenderBackend
+```
+
+`RenderFrame3D` полноценно используется в тестах, benchmark'ах и examples, но **не является пока центральным render pipeline основного native/WASM runtime**.
+
+#### Physics Scheduler
+
+Physics Scheduler не использует.
+
+Физика вызывается напрямую:
+
+```rust
+physics.step(delta_time)
+```
+
+В `ornis-physics` есть собственный внутренний pipeline:
+
+```text
+integration
+→ broad phase
+→ narrow phase
+→ islands
+→ velocity solving
+→ positional solving
+```
+
+Это внутренняя последовательность физического движка, а не `ornis_core::Schedule`.
+
+Правильная формулировка сейчас такая:
+
+> Physics имеет собственный внутренний solver pipeline, но не является системой, зарегистрированной в общем engine Scheduler.
+
+### 2. Существует ли единый мир?
+
+#### Формально — частично
+
+В `ornis-core` есть:
+
+```text
+Resources
+SmartStore
+Schedule
+```
+
+`Resources` — это type-erased singleton container:
+
+```rust
+HashMap<TypeId, Box<dyn Any + Send + Sync>>
+```
+
+Системы получают:
+
+```rust
+fn run(&self, resources: &Resources)
+```
+
+А `SmartStore` содержит ECS-компоненты.
+
+Это хорошая основа для мира, но **структуры `World`, объединяющей ECS, Physics, Renderer, GPU context, resources и schedules, сейчас нет**.
+
+#### Что реально существует
+
+##### Editor World
+
+В `src/editor_world.rs` есть:
+
+```rust
+pub struct EditorWorld {
+    store: SmartStore,
+    alive: Vec<Entity>,
+    environment: SceneEnvironment,
+    scene_name: String,
+    version: u64,
+}
+```
+
+Это настоящий мир, но только для editor-only режима.
+
+Он содержит:
+
+- `SmartStore`;
+- список живых entities;
+- Transform/Mesh/Material/Name;
+- camera;
+- lights;
+- ambient;
+- scene version;
+- команды редактора.
+
+Он умеет:
+
+- создать entity;
+- удалить entity;
+- изменить компонент;
+- сериализовать сцену;
+- загружать сцену;
+- сохранять сцену;
+- публиковать snapshots.
+
+Но:
+
+- в нём нет `BuiltinPhysicsEngine`;
+- в нём нет `Renderer3D`;
+- в нём нет `Schedule`;
+- он не запускает игровой frame loop;
+- WASM получает от него JSON snapshot через HTTP.
+
+То есть `EditorWorld` — это **мир редактора**, а не общий engine world.
+
+##### Native GameContext
+
+В `src/main.rs` native режим использует:
+
+```rust
+struct GameContext {
+    window,
+    device,
+    queue,
+    surface,
+    renderer3d,
+    sphere_mesh,
+    materials,
+    instance_data,
+    remote_cmd_rx,
+    remote_ev_tx,
+    entity_count,
+}
+```
+
+Это уже больше похоже на runtime context, но он:
+
+- не содержит `SmartStore`;
+- не содержит Physics;
+- не содержит `Schedule`;
+- не содержит общего ECS world;
+- хранит `materials` и `instance_data` отдельно;
+- рисует фиксированную showcase-сцену из пяти сфер.
+
+Native rendering сейчас не берёт данные из ECS.
+
+##### WASM GpuScene
+
+В WASM создаётся отдельная структура:
+
+```rust
+struct GpuScene {
+    mesh,
+    mesh_params,
+    materials,
+    instances,
+    lights,
+}
+```
+
+Она строится из `Scene` / `LiveScene`, полученной через JSON.
+
+Это уже связь:
+
+```text
+EditorWorld
+→ /api/scene
+→ WASM
+→ GpuScene
+→ Renderer3D
+```
+
+Но это не общий in-process world. Это:
+
+```text
+server-side world
+→ serialized snapshot
+→ browser-side copy
+```
+
+Между ними нет общей памяти и нет общей ECS-ссылки.
+
+### 3. Откуда сейчас берёт данные рендеринг?
+
+Есть три разных источника.
+
+#### Native runtime
+
+В `src/main.rs` данные создаются вручную:
+
+```rust
+materials = vec![...]
+instance_data = ...
+sphere_mesh = create_sphere(...)
+```
+
+Рендеринг получает данные из `GameContext`.
+
+Это демонстрационная сцена, не ECS.
+
+#### Editor/WASM runtime
+
+Источник такой:
+
+```text
+editor/scene.ron
+или
+/api/scene
+```
+
+Дальше:
+
+```text
+Scene
+→ build_gpu_scene
+→ materials
+→ instances
+→ lights
+→ Renderer3D
+```
+
+Это работает как scene serialization pipeline.
+
+#### FramePlan rendering
+
+`RenderFrame3D` получает render-specific pass data и GPU resources. Он не получает напрямую `SmartStore` и не извлекает автоматически ECS-компоненты.
+
+То есть рендер пока не делает:
+
+```text
+world.query::<Transform, Mesh, Material>()
+→ render instances
+```
+
+Такого общего extraction слоя нет.
+
+### 4. Откуда сейчас берёт данные физика?
+
+Физика живёт полностью отдельно.
+
+`BuiltinPhysicsEngine` владеет своими:
+
+- rigid bodies;
+- shapes;
+- handles;
+- velocities;
+- contacts;
+- joints;
+- islands.
+
+Она не читает автоматически:
+
+```rust
+SmartStore<Transform>
+SmartStore<RigidBody>
+SmartStore<Collider>
+```
+
+и не записывает автоматически результаты обратно в ECS.
+
+В текущем коде нет интеграции вида:
+
+```text
+ECS Transform + Collider
+→ Physics step
+→ ECS Transform update
+```
+
+Есть physics API и собственный physics state, но нет physics system, зарегистрированной в общем мире.
+
+### 5. Есть ли общие CPU/GPU данные?
+
+Пока нет единой data model.
+
+Существуют отдельные механизмы.
+
+#### CPU ECS storage
+
+```text
+ComponentStore
+SmartStore
+ColdComponentStore
+Lock-free store
+```
+
+#### GPU command/data path
+
+```text
+CommandQueue
+CommandSync
+DataResidency
+ResidencyTracker
+SmartBuffer
+GpuCommand
+```
+
+#### Render GPU resources
+
+```text
+wgpu::Buffer
+wgpu::Texture
+wgpu::TextureView
+Renderer3D
+FrameExecutor
+```
+
+#### Physics GPU path
+
+В `ornis-physics` есть отдельный GPU solver.
+
+Но сейчас нет единого объекта вроде:
+
+```rust
+struct World {
+    ecs: SmartStore,
+    physics: PhysicsWorld,
+    renderer: Renderer,
+    resources: Resources,
+    schedule: Schedule,
+    gpu: GpuContext,
+}
+```
+
+И нет единой автоматической схемы:
+
+```text
+ECS component changed
+→ residency tracker notices it
+→ CPU/GPU synchronization
+→ physics or render consumes same authoritative data
+```
+
+`SmartBuffer` и residency infrastructure существуют, но автоматическая полноценная синхронизация пока не завершена.
+
+### 6. Существует ли игровой цикл?
+
+#### Native mode — да, но минимальный и не engine-level
+
+В `src/main.rs` есть winit lifecycle:
+
+```text
+main()
+→ EventLoop::new()
+→ run_app()
+→ GameApp::resumed()
+→ GameApp::about_to_wait()
+→ GameApp::window_event()
+```
+
+Инициализация:
+
+```text
+GameApp::resumed
+→ create window
+→ create wgpu instance
+→ request adapter
+→ create device/queue
+→ create surface
+→ create Renderer3D
+→ create mesh/materials/instances
+```
+
+Каждый кадр:
+
+```text
+about_to_wait
+→ process_remote_commands
+→ request_redraw
+
+RedrawRequested
+→ render_frame
+→ acquire surface texture
+→ set camera
+→ set lights
+→ upload materials
+→ upload instances
+→ render_scene
+→ submit
+→ present
+```
+
+Но в этом цикле отсутствуют отдельные стадии:
+
+```text
+pre_update
+input
+fixed_update
+physics
+post_update
+extract
+render
+cleanup
+```
+
+Фактически есть:
+
+```text
+process remote commands
+→ render
+```
+
+Также нет:
+
+- фиксированного physics timestep;
+- accumulator;
+- `delta_time` для gameplay;
+- ECS systems execution;
+- physics step в игровом цикле;
+- render extraction;
+- post-frame systems;
+- frame statistics;
+- deterministic update stage.
+
+#### Editor-only mode
+
+В `editor-only`:
+
+```text
+main
+→ создать command/event channels
+→ запустить EditorWorld thread
+→ запустить HTTP server
+→ park main thread
+```
+
+Внутри editor thread:
+
+```text
+load editor/scene.ron
+→ ждать UiCommand
+→ выполнить команду
+→ отправить GameEvent/snapshot
+```
+
+Это **command-processing loop**, но не игровой цикл.
+
+Там нет render tick и physics tick.
+
+#### WASM mode
+
+В WASM игровой/рендерный цикл существует в виде:
+
+```text
+start_renderer
+→ init WebGPU
+→ load scene
+→ create GpuScene
+→ create Renderer
+→ spawn_render_loop
+→ requestAnimationFrame
+```
+
+Каждый кадр выполняется примерно:
+
+```text
+resize
+→ иногда poll /api/scene
+→ применить live scene
+→ update camera
+→ acquire surface texture
+→ draw
+→ present
+→ requestAnimationFrame
+```
+
+Это настоящий render loop, но он:
+
+- не вызывает общий Scheduler;
+- не запускает Physics;
+- не запускает ECS systems;
+- получает состояние snapshot'ами;
+- содержит только client-side camera update и rendering.
+
+### Итоговая схема текущего состояния
+
+Сейчас архитектура выглядит так:
+
+```text
+                    ┌────────────────────┐
+                    │ Ornis-core Schedule│
+                    │  готов, но не wired │
+                    └────────────────────┘
+
+┌────────────────┐       REST/JSON       ┌────────────────┐
+│  EditorWorld   │ ────────────────────> │  WASM GpuScene │
+│ SmartStore     │                        │  Renderer3D    │
+│ scene state    │                        │ requestFrame   │
+└────────────────┘                        └────────────────┘
+
+
+┌────────────────┐
+│ Native GameApp │
+│ GameContext    │
+│ direct render  │
+│ fixed showcase │
+└────────────────┘
+
+
+┌─────────────────────────┐
+│ BuiltinPhysicsEngine    │
+│ own bodies/shapes/state  │
+│ direct physics.step()   │
+└─────────────────────────┘
+
+
+┌─────────────────────────┐
+│ RenderFrame3D/FramePlan │
+│ render-only scheduler   │
+│ tests/examples/benches  │
+└─────────────────────────┘
+```
+
+То есть:
+
+- **Scheduler есть**, но не является главным scheduler'ом движка;
+- **Render FramePlan есть**, но это отдельный render scheduler;
+- **Physics есть**, но он не подключён как system;
+- **EditorWorld есть**, но он не является общим World;
+- **Native loop есть**, но это showcase loop;
+- **WASM loop есть**, но это browser render loop;
+- **единого authoritative world нет**;
+- **единого CPU/GPU data lifecycle нет**;
+- **physics/render/ECS не проходят через один frame schedule**.
+
+### Что нужно сделать, чтобы появилась настоящая единая архитектура
+
+Нужен верхнеуровневый runtime, например:
+
+```rust
+pub struct World {
+    pub ecs: SmartStore,
+    pub resources: Resources,
+    pub physics: PhysicsEngineResource,
+    pub renderer: RendererResource,
+    pub gpu: GpuResources,
+}
+```
+
+И единый frame runner:
+
+```rust
+pub struct Engine {
+    world: World,
+    schedule: Schedule,
+    render_frame: RenderFrame3D,
+    time: Time,
+}
+```
+
+Цикл:
+
+```rust
+fn frame(&mut self, dt: Duration) {
+    self.world.resources.insert(Time::new(dt));
+
+    self.schedule.run(&self.world.resources);
+
+    self.physics_step();
+    self.extract_render_data();
+    self.render_frame();
+}
+```
+
+Более правильный вариант с фазами:
+
+```text
+PreUpdate
+→ Input
+→ Gameplay systems
+→ FixedUpdate / Physics
+→ Transform propagation
+→ Render extraction
+→ Render schedule
+→ Present
+→ PostFrame
+```
+
+При этом Physics и Render должны быть **потребителями данных из World**, а не независимыми владельцами параллельных копий состояния.
+
+Именно это — следующий большой архитектурный шаг проекта. Сейчас все необходимые строительные блоки уже существуют, но **их интеграция в единый runtime ещё не выполнена**.
+
+---
+
+## Дополнение: единый Scheduler, единый World и единый execution model
+
+### Уточнение целевой архитектуры
+
+В контексте задумки Ornis более логичной целью является не набор независимых планировщиков для разных доменов, а:
+
+> **один Scheduler + единый World + общая модель типизированных доступов, где render passes, physics и обычные системы являются одной категорией вычислений.**
+
+Предыдущая формулировка о `FramePlan` как о постоянном отдельном render sub-planner была слишком консервативной. В `IDEAS.md`, особенно в секции 28, заложена более сильная идея: Scheduler должен решать общую задачу для всех вычислений движка:
+
+- видеть зависимости по данным;
+- распределять порядок выполнения;
+- определять параллельные участки;
+- выбирать CPU или GPU;
+- управлять residency;
+- вычислять lifetime ресурсов;
+- переиспользовать память;
+- строить команды;
+- не заставлять программиста вручную разделять ECS, системы и render passes.
+
+Render, Physics и Gameplay — это разные алгоритмы, работающие поверх **одной execution/data model**.
+
+### Единый Scheduler, но не один гигантский алгоритм
+
+Целевая архитектура должна выглядеть не так:
+
+```text
+Engine Scheduler
+├── Physics
+├── RenderFramePlan
+└── AssetManager
+```
+
+а так:
+
+```text
+Engine Scheduler
+├── Gameplay systems
+├── Physics systems
+├── Audio systems
+├── Asset systems
+├── Render extraction systems
+└── Render pass systems
+```
+
+Все системы:
+
+- объявляют доступы к данным;
+- становятся узлами одного DAG;
+- могут выполняться на CPU или GPU;
+- используют один World;
+- участвуют в одном плане зависимостей.
+
+Domain-specific код при этом содержит только алгоритм:
+
+```text
+physics algorithm
+render algorithm
+audio algorithm
+material algorithm
+```
+
+Общие механизмы движка предоставляют:
+
+```text
+storage
+query
+dependency analysis
+CPU/GPU routing
+residency
+parallel execution
+resource lifetime
+buffer/texture allocation
+command recording
+```
+
+Это соответствует идее «обычный Rust-код → умный конвейер», а не классическому ECS, где разработчик вручную раскладывает всё по системам.
+
+### Render pass как обычная система
+
+Целевая форма может выглядеть примерно так:
+
+```rust
+#[smart_pipeline]
+fn gbuffer(
+    entities: Query<(&Transform, &MeshHandle, &MaterialHandle)>,
+    camera: Res<Camera>,
+    target: Write<GBuffer>,
+) {
+    // Rust-код алгоритма рендера.
+}
+```
+
+Или более низкоуровнево:
+
+```rust
+#[smart_pipeline]
+fn lighting(
+    gbuffer: Read<GBuffer>,
+    lights: Read<Lights>,
+    output: Write<HdrTarget>,
+) {
+    // Общий Rust DSL, который может попасть на CPU или GPU.
+}
+```
+
+Тогда `gbuffer` — не особый объект `FramePlan::add_pass(...)`, а обычный узел Scheduler с типизированными доступами.
+
+Scheduler видит:
+
+```text
+gbuffer:
+  reads  Transform, MeshHandle, MaterialHandle, Camera
+  writes GBuffer
+
+lighting:
+  reads  GBuffer, Lights
+  writes HdrTarget
+```
+
+И строит:
+
+```text
+gbuffer → lighting
+```
+
+Если две системы используют независимые ресурсы, они могут выполняться параллельно. Если доступы конфликтуют, Scheduler строит зависимость.
+
+### Render resource lifetime как часть общего Scheduler
+
+Render resource lifetime не является аргументом в пользу отдельного архитектурного Scheduler. Это аргумент в пользу того, чтобы общий Scheduler стал достаточно мощным и понимал ресурсы первого класса.
+
+Он должен уметь не только:
+
+```text
+system A before system B
+```
+
+но и:
+
+```text
+resource GBuffer:
+  created by GBufferPass
+  alive through LightingPass
+  dead after CompositePass
+```
+
+Тогда текущие возможности `FramePlan`:
+
+- lifetime windows;
+- transient textures;
+- aliasing;
+- texture pool;
+- memory budget;
+- pass culling;
+- render ordering;
+
+становятся не отдельной системой, а частью общего планировщика.
+
+`FramePlan` в переходной архитектуре может оставаться:
+
+```text
+scheduler backend / compiled execution plan
+```
+
+А в долгосрочной архитектуре его API должен постепенно исчезнуть или стать внутренним implementation detail. Это совпадает с `IDEAS.md §28.1`: pass становится системой с типизированной сигнатурой, а не отдельным imperative builder.
+
+### Physics на том же механизме
+
+Физика не должна навсегда оставаться непрозрачным вызовом:
+
+```rust
+physics.step(dt)
+```
+
+Внешний physics pipeline должен стать набором систем:
+
+```text
+PhysicsSyncIn
+PhysicsBroadPhase
+PhysicsNarrowPhase
+PhysicsIslandBuild
+PhysicsVelocitySolve
+PhysicsPositionSolve
+PhysicsSyncOut
+```
+
+Их внутренние алгоритмы остаются domain-specific, но планирование, доступы и CPU/GPU routing становятся общими.
+
+Например:
+
+```text
+PhysicsSyncIn:
+  reads  Transform, Collider, RigidBody
+  writes PhysicsBodies
+
+BroadPhase:
+  reads  PhysicsBodies
+  writes BroadPhasePairs
+
+NarrowPhase:
+  reads  BroadPhasePairs, Shapes
+  writes ContactManifolds
+
+Solver:
+  reads  ContactManifolds, RigidBodies
+  writes RigidBodies
+
+PhysicsSyncOut:
+  reads  RigidBodies
+  writes Transform
+```
+
+Scheduler получает возможность видеть зависимости не как одну непрозрачную функцию `physics.step`, а как реальный pipeline.
+
+Отдельный physics solver может внутри использовать SIMD или GPU-алгоритм, но снаружи подключается через общую модель систем и ресурсов.
+
+### Взаимодействие областей
+
+Единая data/scheduling модель особенно важна для взаимодействия подсистем.
+
+Например, отладка коллайдеров может быть обычным междоменным pipeline:
+
+```text
+Physics systems
+  writes: ColliderDebugGeometry
+
+DebugDraw system
+  reads: ColliderDebugGeometry
+  writes: DebugRenderBuffer
+
+Render system
+  reads: DebugRenderBuffer
+  writes: RenderTarget
+```
+
+Scheduler автоматически строит:
+
+```text
+Physics
+→ ColliderDebugGeometry
+→ DebugDraw
+→ Render
+```
+
+То же самое можно делать для:
+
+- collision contacts;
+- navmesh visualization;
+- audio emitters;
+- particle systems;
+- GPU profiler overlays;
+- shadow debug;
+- skeletal bones;
+- editor gizmos;
+- physics islands;
+- GPU residency diagnostics.
+
+Без общей data/scheduling модели каждая такая связь превращается в отдельный integration layer и увеличивает сложность проекта.
+
+### «Невидимый ECS» — не классический ECS API
+
+Цель Ornis не в том, чтобы пользователь вручную писал классический ECS-код:
+
+```rust
+for (entity, transform, velocity) in query.iter_mut() {
+    // manual ECS-oriented code
+}
+```
+
+Цель — позволить писать привычный объектный или предметный код:
+
+```rust
+for entity in entities {
+    entity.position += entity.velocity;
+}
+```
+
+А pipeline сам:
+
+1. определяет используемые поля;
+2. раскладывает данные по sparse sets;
+3. выводит lane-доступы;
+4. выбирает CPU/Rayon или GPU/WGSL;
+5. строит зависимости;
+6. планирует residency;
+7. группирует работу;
+8. исполняет вычисление.
+
+Поэтому правильный вопрос — не «как подключить Physics и Render к ECS?», а:
+
+> «Как сделать так, чтобы Physics и Render были алгоритмами, которые используют тот же скрытый data/execution pipeline, что и обычный пользовательский код?»
+
+Это существенно более сильная постановка, чем классический явный ECS API.
+
+### Единый World должен быть логическим
+
+«Единый World» не означает, что данные всегда находятся только в одном физическом буфере памяти. Один логический компонент может иметь несколько представлений:
+
+```text
+logical component
+├── CPU dense storage
+├── GPU storage buffer
+├── render representation
+└── physics representation
+```
+
+Но это должны быть представления одной логической сущности, которыми управляет общий residency/ownership механизм.
+
+Например:
+
+```text
+Position
+→ authoritative logical component
+→ CPU lane, если нужен gameplay
+→ GPU lane, если выполняется particle/update kernel
+→ render read, когда строится кадр
+```
+
+Scheduler и residency tracker должны понимать:
+
+- кто последним писал данные;
+- где находится актуальная версия;
+- нужна ли синхронизация;
+- можно ли передать команду вместо копирования;
+- когда необходимо materialize CPU/GPU view.
+
+Это соответствует идеям Ornis о Data Residency, Instructions Instead of Data, ZST CPU/GPU routing и Command-Based Sync.
+
+### Единый Asset Pipeline
+
+Asset pipeline также должен быть частью той же модели, а не отдельным изолированным менеджером.
+
+Целевая схема:
+
+```text
+AssetServer
+→ AssetRegistry
+→ typed handles
+→ CPU/GPU residency
+→ loader/importer systems
+→ asset events
+→ render/physics consumers
+```
+
+В ECS хранятся handles:
+
+```rust
+MeshHandle
+MaterialHandle
+ColliderHandle
+AudioClipHandle
+```
+
+а не копии самих больших ассетов.
+
+Общий Scheduler может запускать:
+
+```text
+AssetScan
+→ ParseMaterialX
+→ BuildOpenPBR
+→ UploadMaterialGPU
+→ CookPhysicsShape
+→ MarkAssetReady
+```
+
+Типизированные загрузчики остаются специализированными:
+
+```text
+.ron       → SceneLoader
+.mtlx      → MaterialXLoader
+.gltf      → MeshLoader
+.png/.jpg  → TextureLoader
+.wav/.ogg  → AudioLoader
+```
+
+Единый asset lifecycle должен обеспечивать:
+
+- единые `AssetId` и handles;
+- async loading;
+- dependency tracking;
+- cache;
+- hot reload;
+- load/error events;
+- CPU/GPU residency;
+- versioning;
+- safe lifetime management;
+- одинаковое поведение native и WASM.
+
+Один asset может иметь несколько runtime-представлений:
+
+```text
+MeshAsset
+├── CPU mesh
+├── GPU mesh
+└── Physics collision mesh
+```
+
+Или:
+
+```text
+MaterialX document
+├── OpenPBR material for renderer
+├── GPU material buffer
+└── editor inspection data
+```
+
+### EditorWorld в единой архитектуре
+
+`EditorWorld` должен эволюционировать в frontend над тем же `World`:
+
+```text
+Editor command
+→ EngineCommand
+→ World mutation
+→ Schedule / command application
+→ events
+→ render extraction
+```
+
+Целевая модель не такая:
+
+```text
+EditorWorld
+→ JSON
+→ отдельный WASM state
+```
+
+а такая:
+
+```text
+Engine World
+├── ECS state
+├── Physics state
+├── Asset state
+├── Render extraction state
+└── Editor protocol
+```
+
+Для браузера всё равно останется serialization boundary, если WASM и сервер живут в разных контекстах. Но authoritative state должен быть один — на стороне engine world, а браузер должен получать versioned snapshots/events.
+
+### Целевая архитектура
+
+```text
+                         ┌─────────────────────┐
+                         │   Engine Scheduler  │
+                         │  unified dependency │
+                         │   + CPU/GPU router  │
+                         └──────────┬──────────┘
+                                    │
+                         ┌──────────▼──────────┐
+                         │        World        │
+                         │                     │
+                         │ SmartStore          │
+                         │ Resources           │
+                         │ Assets              │
+                         │ Time/Input          │
+                         │ Residency           │
+                         └──────┬───────┬──────┘
+                                │       │
+                 ┌──────────────▼─┐   ┌─▼──────────────┐
+                 │ Physics systems │   │ Render systems │
+                 │                 │   │               │
+                 │ broad phase     │   │ extract       │
+                 │ contacts        │   │ gbuffer       │
+                 │ solver           │   │ lighting      │
+                 │ sync in/out      │   │ bloom         │
+                 └──────────────┬──┘   └──────┬────────┘
+                                │             │
+                                └──────┬──────┘
+                                       │
+                              ┌────────▼────────┐
+                              │ Common execution │
+                              │ CPU / Rayon      │
+                              │ GPU / WGSL       │
+                              │ buffers / pools  │
+                              │ command sync     │
+                              └──────────────────┘
+```
+
+Целевая структура может выглядеть так:
+
+```rust
+pub struct World {
+    pub ecs: SmartStore,
+    pub resources: Resources,
+    pub assets: AssetServer,
+    pub time: Time,
+}
+
+pub struct Engine {
+    pub world: World,
+    pub schedule: Schedule,
+    pub physics: PhysicsRuntime,
+    pub renderer: RendererRuntime,
+    pub render_frame: RenderFrame3D,
+    pub gpu: GpuContext,
+}
+```
+
+### Что делать с текущими структурами
+
+#### `ornis_core::Schedule`
+
+Развивать в сторону настоящего общего Scheduler:
+
+- typed resource access;
+- component/lane access;
+- CPU/GPU execution target;
+- resource lifetime;
+- transient resource declarations;
+- command recording;
+- residency dependencies;
+- stage/phase support;
+- unified diagnostics.
+
+#### `FramePlan`
+
+Не выбрасывать сразу. Использовать как промежуточную реализацию:
+
+```text
+FramePlan
+→ адаптировать под общий Scheduler
+→ сделать pass системой
+→ перенести resource lifetime в общую модель
+→ оставить FrameExecutor backend-specific
+```
+
+Текущий `FramePlan` — не неправильное решение, а **первый специализированный прототип будущего unified scheduler**.
+
+#### Physics
+
+Разделить физический `step` на системы, сохранив внутренние оптимизированные kernels там, где это выгодно.
+
+#### `SmartStore`
+
+Сделать его не просто storage-компонентов, а основой для прозрачного доступа:
+
+- queries;
+- lanes;
+- generated access metadata;
+- CPU/GPU route;
+- packed iteration;
+- residency-aware views.
+
+#### World
+
+Создать единый logical `World`, но не превращать его в огромный god-object. Внутри могут быть специализированные ресурсы, однако все они должны быть доступны единому планировщику через общий контракт.
+
+### Эволюционный план
+
+1. создать `EngineWorld`/`World`;
+2. зарегистрировать `Time`, `SmartStore`, `PhysicsRuntime`, asset resources;
+3. добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut`;
+4. добавить `RenderExtract`;
+5. перевести native loop на `Engine::run_frame`;
+6. подключить `RenderFrame3D` как внутренность `RenderSystem`;
+7. перевести WASM loop на тот же frame contract;
+8. добавить `AssetServer` и handles;
+9. только после этого развивать WebSocket, scripting и сложный hot reload.
+
+### Итог
+
+Более логичная цель для Ornis:
+
+> **один Scheduler, один логический World, один Asset Pipeline и единый CPU/GPU execution model.**
+
+При этом:
+
+- Physics, Render, Audio и Gameplay реализуют свои алгоритмы;
+- общий движок отвечает за хранение, зависимости, параллелизм, выбор CPU/GPU и синхронизацию;
+- render lifetime/aliasing не исчезают, а становятся частью общего resource planner;
+- ECS не должен быть классическим явным ECS API;
+- sparse sets и macro-based hidden ECS должны скрывать от пользователя механическую часть распределения данных и систем;
+- взаимодействия между доменами должны выражаться обычными общими компонентами и ресурсами.
+
+Итоговая формула:
+
+> **Доменная специализация должна существовать на уровне алгоритмов и backend execution, но не на уровне разрозненных моделей World, Scheduler и data flow.**
+
+Это одна из самых сильных и отличительных идей Ornis. Текущая кодовая база находится на переходной стадии: `Schedule`, `FramePlan`, `SmartStore`, `CommandSync` и registry уже являются строительными блоками, но unified runtime ещё предстоит собрать.
