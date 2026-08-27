@@ -14,9 +14,7 @@
 use std::sync::Mutex;
 
 use glam::{Mat4, Quat, Vec3};
-use ornis_core::{
-    Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess,
-};
+use ornis_core::{Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess};
 
 use crate::renderer::InstanceData;
 use crate::scene::{MaterialDesc, MeshDesc, Scene, TransformDesc};
@@ -223,7 +221,10 @@ impl System for RenderExtract {
     }
 }
 
-fn insert_scene_entities(engine: &mut Engine, entities: &[crate::scene::EntityDesc]) -> Vec<Entity> {
+fn insert_scene_entities(
+    engine: &mut Engine,
+    entities: &[crate::scene::EntityDesc],
+) -> Vec<Entity> {
     let store = engine.world_mut().store_mut().expect("render world store");
     let mut handles = Vec::with_capacity(entities.len());
     for entity in entities {
@@ -351,18 +352,25 @@ mod tests {
     #[test]
     fn incomplete_entities_are_skipped() {
         let mut engine = Engine::new();
-        let entity = engine.world_mut().store_mut().expect("store").create_entity();
-        engine
+        let entity = engine
             .world_mut()
             .store_mut()
             .expect("store")
-            .insert(entity, TransformDesc {
+            .create_entity();
+        engine.world_mut().store_mut().expect("store").insert(
+            entity,
+            TransformDesc {
                 translation: Vec3::ZERO.to_array(),
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: Vec3::ONE.to_array(),
-            });
+            },
+        );
         install_render_extract(&mut engine);
         engine.run_frame(0.0);
-        assert!(extract_render_data(engine.world().store().expect("store")).instances.is_empty());
+        assert!(
+            extract_render_data(engine.world().store().expect("store"))
+                .instances
+                .is_empty()
+        );
     }
 }

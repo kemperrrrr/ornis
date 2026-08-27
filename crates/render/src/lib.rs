@@ -4,6 +4,8 @@
 #![warn(missing_docs)]
 /// Final PBR/UI blend pass (legacy path).
 pub mod composite;
+/// Shared ECS-to-render extraction and logical render-world frame host.
+pub mod extraction;
 /// wgpu executor mapping plan slots to textures and running passes.
 pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
@@ -20,17 +22,13 @@ pub mod renderer;
 pub mod scene;
 /// WGSL shader assembly and Rust-side BRDF math kernels.
 pub mod shaders;
-/// Shared ECS-to-render extraction and logical render-world frame host.
-pub mod extraction;
 /// Typed plan systems: resources, access sets and pass traits.
 pub mod system;
 /// Local-to-world transform component.
 pub mod transform;
 
 pub use composite::CompositePass as LegacyCompositePass;
-pub use extraction::{
-    RenderExtracted, RenderWorld, extract_render_data, install_render_extract,
-};
+pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use frame_plan::{
     Budget, BudgetExceeded, FrameLayout, FramePlan, PassContext, PassId, PassLayout, PoolSlot,

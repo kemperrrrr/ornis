@@ -172,13 +172,10 @@ struct GpuScene {
     mesh_params: (u32, u32),
     extracted: RenderExtracted,
     lights: Vec<([f32; 3], f32, [f32; 3])>,
+    ambient: [f32; 3],
 }
 
-fn build_gpu_scene(
-    device: &wgpu::Device,
-    render_world: &RenderWorld,
-    scene: &Scene,
-) -> GpuScene {
+fn build_gpu_scene(device: &wgpu::Device, render_world: &RenderWorld, scene: &Scene) -> GpuScene {
     let extracted = render_world.extracted();
     // RenderFrame3D draws one shared mesh instanced. Each sphere's radius is
     // already folded into its extracted model scale, so the maximum
@@ -202,6 +199,7 @@ fn build_gpu_scene(
         mesh_params,
         extracted,
         lights,
+        ambient: scene.ambient,
     }
 }
 
@@ -677,7 +675,6 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         gpu_scene,
         orbit,
         initial_version,
-        scene.ambient,
     )?;
     Ok(())
 }
@@ -688,17 +685,16 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
 fn spawn_render_loop(
     handles: LoopHandles,
     ctx: GpuContext,
-    mut renderer: Renderer3D,
+    renderer: Renderer3D,
     frame_plan: RenderFrame3D,
     render_world: RenderWorld,
     gpu_scene: GpuScene,
     orbit: Rc<RefCell<OrbitCamera>>,
     initial_version: u64,
-    ambient: [f32; 3],
 ) -> Result<(), JsValue> {
     renderer.upload_materials(&ctx.queue, &gpu_scene.extracted.materials);
     renderer.upload_instances(&ctx.queue, &gpu_scene.extracted.instances);
-    renderer.set_lights(&ctx.queue, ambient, &gpu_scene.lights);
+    renderer.set_lights(&ctx.queue, gpu_scene.ambient, &gpu_scene.lights);
 
     let applied_version = Rc::new(Cell::new(initial_version));
 

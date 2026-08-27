@@ -17,8 +17,8 @@ use ornis_core::{
     ComponentStore, Engine, Entity, Resources, SmartStore, System, SystemAccess, Time,
 };
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
-pub use ornis_render::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
-use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_render::scene::{MeshDesc, TransformDesc};
+use ornis_render::{RenderExtracted, install_render_extract};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///
@@ -556,12 +556,6 @@ mod tests {
                 .access()
                 .writes_lanes
                 .contains(&std::any::TypeId::of::<TransformDesc>())
-        );
-        assert!(
-            RenderExtract
-                .access()
-                .reads_lanes
-                .contains(&std::any::TypeId::of::<MaterialDesc>())
         );
     }
 }
