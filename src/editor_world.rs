@@ -182,7 +182,12 @@ impl EditorWorld {
             .world_mut()
             .resources_mut()
             .get_mut::<Mutex<PhysicsRuntime>>()
-            .map(|runtime| runtime.get_mut().expect("physics runtime lock").take_changed())
+            .map(|runtime| {
+                runtime
+                    .get_mut()
+                    .expect("physics runtime lock")
+                    .take_changed()
+            })
             .unwrap_or(false);
         if changed {
             self.version += 1;
@@ -694,11 +699,7 @@ fn physics_body_for(transform: &TransformDesc, mesh: &MeshDesc) -> RigidBody {
     let radius = match mesh {
         MeshDesc::Sphere { radius, .. } => *radius,
     };
-    let mut body = RigidBody::new_sphere(
-        Vec3::from_array(transform.translation),
-        radius,
-        0.0,
-    );
+    let mut body = RigidBody::new_sphere(Vec3::from_array(transform.translation), radius, 0.0);
     apply_transform_to_body(&mut body, transform);
     body
 }

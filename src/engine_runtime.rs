@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
-use ornis_core::{ComponentStore, Engine, Entity, Resources, SmartStore, System, SystemAccess, Time};
+use ornis_core::{
+    ComponentStore, Engine, Entity, Resources, SmartStore, System, SystemAccess, Time,
+};
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
 use ornis_render::scene::TransformDesc;
 
@@ -287,13 +289,18 @@ impl System for PhysicsSyncOut {
 /// Applies an ECS transform to a physics body's pose.
 pub(crate) fn apply_transform_to_body(body: &mut RigidBody, transform: &TransformDesc) {
     body.position = Vec3::from_array(transform.translation);
-    body.orientation = Quat::from_xyzw(
+    let orientation = Quat::from_xyzw(
         transform.rotation[0],
         transform.rotation[1],
         transform.rotation[2],
         transform.rotation[3],
-    )
-    .normalize_or_identity();
+    );
+    let length_squared = orientation.length_squared();
+    body.orientation = if length_squared.is_finite() && length_squared > 1e-12 {
+        orientation.normalize()
+    } else {
+        Quat::IDENTITY
+    };
 }
 
 #[cfg(test)]
@@ -335,9 +342,7 @@ mod tests {
         engine.run_frame(1.0 / 60.0);
 
         let store = engine.world().store().expect("world store");
-        let lane = store
-            .read_lane::<TransformDesc>()
-            .expect("transform lane");
+        let lane = store.read_lane::<TransformDesc>().expect("transform lane");
         assert!(lane.get(entity).expect("entity transform").translation[1] < 0.0);
     }
 
@@ -349,11 +354,10 @@ mod tests {
             .store_mut()
             .expect("world store")
             .create_entity();
-        engine
-            .world_mut()
-            .store_mut()
-            .expect("world store")
-            .insert(entity, RigidBody::new_sphere(Vec3::new(2.0, 3.0, 4.0), 0.5, 0.0));
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            RigidBody::new_sphere(Vec3::new(2.0, 3.0, 4.0), 0.5, 0.0),
+        );
         engine
             .world_mut()
             .store_mut()
@@ -364,10 +368,11 @@ mod tests {
         engine.run_frame(1.0 / 60.0);
 
         let store = engine.world().store().expect("world store");
-        let lane = store
-            .read_lane::<TransformDesc>()
-            .expect("transform lane");
-        assert_eq!(lane.get(entity).expect("entity transform").translation, [2.0, 3.0, 4.0]);
+        let lane = store.read_lane::<TransformDesc>().expect("transform lane");
+        assert_eq!(
+            lane.get(entity).expect("entity transform").translation,
+            [2.0, 3.0, 4.0]
+        );
     }
 
     #[test]
@@ -391,11 +396,14 @@ mod tests {
         install_physics(&mut engine, Vec3::ZERO);
         engine.run_frame(1.0 / 60.0);
 
-        engine
+        let removed = engine
             .world_mut()
             .store_mut()
             .expect("world store")
-            .remove::<RigidBody>(entity);
+            .write_lane::<RigidBody>()
+            .expect("rigid-body lane")
+            .remove(entity);
+        assert!(removed.is_some());
         engine.run_frame(1.0 / 60.0);
 
         let runtime = engine
@@ -410,10 +418,17 @@ mod tests {
 
     #[test]
     fn physics_accesses_are_declared_for_schedule_enforcement() {
-        assert!(PhysicsSyncIn.access().reads_lanes.contains(&std::any::TypeId::of::<RigidBody>()));
-        assert!(PhysicsSyncOut
-            .access()
-            .writes_lanes
-            .contains(&std::any::TypeId::of::<TransformDesc>()));
+        assert!(
+            PhysicsSyncIn
+                .access()
+                .reads_lanes
+                .contains(&std::any::TypeId::of::<RigidBody>())
+        );
+        assert!(
+            PhysicsSyncOut
+                .access()
+                .writes_lanes
+                .contains(&std::any::TypeId::of::<TransformDesc>())
+        );
     }
 }
