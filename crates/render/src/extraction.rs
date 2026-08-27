@@ -3,8 +3,8 @@
 //! A [`RenderWorld`] is a small render-domain view over the logical
 //! [`ornis_core::Engine`]. Scene descriptions are deserialized at the
 //! serialization boundary and inserted as `TransformDesc`, `MeshDesc` and
-//! `MaterialDesc` component lanes. The scheduled [`RenderExtract`] system
-//! then produces one backend-neutral [`RenderExtracted`] snapshot.
+//! `MaterialDesc` component lanes. The scheduled [`install_render_extract`]
+//! system then produces one backend-neutral [`RenderExtracted`] snapshot.
 //!
 //! GPU resources, cameras and lights remain owned by the platform renderer;
 //! this module deliberately stops at CPU-side instance/material data. That

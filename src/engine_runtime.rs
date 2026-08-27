@@ -17,7 +17,10 @@ use ornis_core::{
     ComponentStore, Engine, Entity, Resources, SmartStore, System, SystemAccess, Time,
 };
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
-use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_render::scene::TransformDesc;
+#[cfg(test)]
+use ornis_render::scene::{MaterialDesc, MeshDesc};
+#[cfg(test)]
 use ornis_render::{RenderExtracted, install_render_extract};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.

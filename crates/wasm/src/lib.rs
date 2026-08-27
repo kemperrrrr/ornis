@@ -4,9 +4,8 @@
 //!
 //! Renders the live scene from `/api/scene` (polled ~1/s) when the remote
 //! server provides it; otherwise falls back to `assets/scene.ron` through
-//! the shared ECS [`RenderWorld`](ornis_render::RenderWorld),
-//! [`RenderExtracted`](ornis_render::RenderExtracted), and
-//! [`RenderFrame3D`](ornis_render::RenderFrame3D) frame contract. The orbit
+//! the shared ECS [`RenderWorld`], [`RenderExtracted`], and
+//! [`RenderFrame3D`] frame contract. The orbit
 //! camera is client-side only.
 //!
 //! Build: `wasm-pack build crates/wasm --target web`.
