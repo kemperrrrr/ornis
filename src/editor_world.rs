@@ -2,9 +2,10 @@
 //!
 //! In `editor-only` there is no native winit loop to consume `UiCommand`s,
 //! so [`run`] spawns an `editor-world` thread that owns an [`EditorWorld`]
-//! (ornis-core `World` with its `SmartStore` + the component registry), executes
-//! commands from `POST /api/command` and publishes `GameEvent`s back to the HTTP
-//! server (`status`/`scene` snapshots are cached by `remote.rs` for
+//! (an `ornis-core::Engine` with its `World`, `SmartStore`, physics systems
+//! and component registry), executes commands from `POST /api/command` and
+//! publishes `GameEvent`s back to the HTTP server (`status`/`scene`
+//! snapshots are cached by `remote.rs` for
 //! `GET /api/status` and `GET /api/scene`; the rest reach `GET /api/events`).
 //!
 //! At startup the world loads `editor/scene.ron` (via
@@ -58,14 +59,19 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ornis_core::{ComponentMeta, ComponentRegistry, Entity, SmartStore, World};
+use ornis_core::{ComponentMeta, ComponentRegistry, Engine, Entity, SmartStore, World};
+use ornis_physics::RigidBody;
+
+use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
@@ -118,11 +124,11 @@ impl Default for SceneEnvironment {
     }
 }
 
-/// Live renderable scene: alive entities plus Name/Transform/Mesh/Material
-/// components, the environment resource, the scene label and a mutation
-/// version counter.
+/// Live renderable scene: an `ornis_core::Engine` with ECS components,
+/// environment resource, builtin physics bindings, the scene label and a
+/// mutation version counter.
 pub struct EditorWorld {
-    world: World,
+    engine: Engine,
     alive: Vec<Entity>,
     /// Scene label round-tripped through `Scene::name` on save/load.
     scene_name: String,
@@ -131,10 +137,11 @@ pub struct EditorWorld {
 
 impl Default for EditorWorld {
     fn default() -> Self {
-        let mut world = World::new();
-        let _ = world.insert(SceneEnvironment::default());
+        let mut engine = Engine::new();
+        let _ = engine.world_mut().insert(SceneEnvironment::default());
+        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
         Self {
-            world,
+            engine,
             alive: Vec::new(),
             scene_name: "scene".into(),
             version: 0,
@@ -155,35 +162,59 @@ impl EditorWorld {
     /// beside the world, but ECS components and singleton domain resources
     /// live in this single `ornis_core::World`.
     pub fn world(&self) -> &World {
-        &self.world
+        self.engine.world()
     }
 
     /// Returns the shared logical world for setup and command processing.
     pub fn world_mut(&mut self) -> &mut World {
-        &mut self.world
+        self.engine.world_mut()
+    }
+
+    /// Advances the editor's domain schedule by one frame.
+    ///
+    /// Physics is intentionally opt-in per component: only entities with a
+    /// `RigidBody` lane entry participate. Returns `true` when physics changed
+    /// an ECS pose and the caller should publish a fresh scene snapshot.
+    pub fn tick(&mut self, delta_seconds: f32) -> bool {
+        self.engine.run_frame(delta_seconds);
+        let changed = self
+            .engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<Mutex<PhysicsRuntime>>()
+            .map(|runtime| runtime.get_mut().expect("physics runtime lock").take_changed())
+            .unwrap_or(false);
+        if changed {
+            self.version += 1;
+        }
+        changed
     }
 
     fn store(&self) -> &SmartStore {
-        self.world
+        self.engine
+            .world()
             .store()
             .expect("EditorWorld always registers SmartStore")
     }
 
     fn store_mut(&mut self) -> &mut SmartStore {
-        self.world
+        self.engine
+            .world_mut()
             .store_mut()
             .expect("EditorWorld always registers SmartStore")
     }
 
     fn environment(&self) -> &SceneEnvironment {
-        self.world
+        self.engine
+            .world()
             .resources()
             .get::<SceneEnvironment>()
             .expect("EditorWorld always registers SceneEnvironment")
     }
 
     fn environment_mut(&mut self) -> &mut SceneEnvironment {
-        self.world
+        self.engine
+            .world_mut()
             .resources_mut()
             .get_mut::<SceneEnvironment>()
             .expect("EditorWorld always registers SceneEnvironment")
@@ -213,6 +244,7 @@ impl EditorWorld {
         mesh: MeshDesc,
         material: MaterialDesc,
     ) -> Entity {
+        let physics_body = physics_body_for(&transform, &mesh);
         let entity = self.store().create_entity();
         self.alive.push(entity);
         let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
@@ -220,6 +252,7 @@ impl EditorWorld {
         self.store_mut().insert(entity, transform);
         self.store_mut().insert(entity, mesh);
         self.store_mut().insert(entity, material);
+        self.store_mut().insert(entity, physics_body);
         self.version += 1;
         entity
     }
@@ -657,6 +690,19 @@ fn list_entities_json(world: &EditorWorld) -> String {
 // Component defaults / JSON (de)serialization helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+fn physics_body_for(transform: &TransformDesc, mesh: &MeshDesc) -> RigidBody {
+    let radius = match mesh {
+        MeshDesc::Sphere { radius, .. } => *radius,
+    };
+    let mut body = RigidBody::new_sphere(
+        Vec3::from_array(transform.translation),
+        radius,
+        0.0,
+    );
+    apply_transform_to_body(&mut body, transform);
+    body
+}
+
 fn default_transform() -> TransformDesc {
     TransformDesc {
         translation: [0.0, 0.0, 0.0],
@@ -752,8 +798,8 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
 }
 
-/// Startup scene RON: `editor/scene.ron` (what the WASM viewport renders
-/// statically), falling back to `assets/scene.ron`.
+/// Startup scene RON: `editor/scene.ron` (the initial scene for the live
+/// editor/WASM snapshot), falling back to `assets/scene.ron`.
 fn startup_scene_ron() -> Option<String> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     ["editor/scene.ron", "assets/scene.ron"]
@@ -762,8 +808,8 @@ fn startup_scene_ron() -> Option<String> {
 }
 
 /// Spawn the `editor-world` thread: owns the world, loads the startup scene,
-/// blocks on `cmd_rx`, executes commands until the HTTP server side drops
-/// its sender.
+/// executes commands from `cmd_rx`, and advances the fixed-rate domain frame
+/// host between commands until the HTTP server side drops its sender.
 pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("editor-world".into())
@@ -780,8 +826,16 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
             // Publish the initial state so the HTTP caches are live
             // before the first command arrives.
             publish_state(&world, &ev_tx);
-            while let Ok(cmd) = cmd_rx.recv() {
-                world.handle_command(&cmd, &ev_tx);
+            loop {
+                match cmd_rx.recv_timeout(Duration::from_millis(16)) {
+                    Ok(cmd) => world.handle_command(&cmd, &ev_tx),
+                    Err(RecvTimeoutError::Timeout) => {
+                        if world.tick(1.0 / 60.0) {
+                            publish_state(&world, &ev_tx);
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
             }
         })
         .expect("spawn editor-world thread")
@@ -893,6 +947,21 @@ mod tests {
                 .get(entity)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn editor_tick_synchronizes_dynamic_physics_pose() {
+        let mut world = EditorWorld::new();
+        let entity = world.spawn(None);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        assert!(world.tick(1.0 / 60.0));
+
+        assert!(world.to_scene().entities[0].transform.translation[1] < 0.0);
     }
 
     #[test]

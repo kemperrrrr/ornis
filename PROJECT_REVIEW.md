@@ -11,8 +11,8 @@
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
-  `Engine` с ресурсом `Time`, но они ещё не подключены к единому
-  runtime-циклу physics/render/editor.
+  `Engine` с ресурсом `Time`; editor-only runtime уже подключил к нему
+  builtin physics, но единый native/WASM runtime с render ещё не собран.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -702,18 +702,18 @@ fn run(&self, resources: &Resources)
 
 ```rust
 pub struct EditorWorld {
-    world: World,
+    engine: ornis_core::Engine,
     alive: Vec<Entity>,
     scene_name: String,
     version: u64,
 }
 ```
 
-Это настоящий мир, но только для editor-only режима.
+Это editor-only facade над общим core runtime host'ом.
 
 Он содержит:
 
-- `ornis_core::World` с `SmartStore` и `SceneEnvironment`-ресурсом;
+- `ornis_core::Engine` с `World`, `SmartStore` и `SceneEnvironment`-ресурсом;
 - список живых entities;
 - Transform/Mesh/Material/Name в ECS-лентах;
 - scene version;
@@ -731,12 +731,14 @@ pub struct EditorWorld {
 
 Но:
 
-- в нём нет `BuiltinPhysicsEngine`;
-- в нём нет `Renderer3D`;
-- он не регистрирует системы в `Schedule` и не запускает игровой frame loop;
+- содержит `BuiltinPhysicsEngine` через ресурс `PhysicsRuntime` и три
+  physics systems (`sync_in`/`step`/`sync_out`);
+- не содержит `Renderer3D` и не является полным native/WASM frame loop;
+- запускает physics frame через `Engine::run_frame` при timeout между командами;
 - WASM получает от него JSON snapshot через HTTP.
 
-То есть `EditorWorld` — это **мир редактора**, а не общий engine world.
+То есть `EditorWorld` уже использует **общий core World**, но остаётся
+editor-only facade, а не полным engine runtime.
 
 ##### Native GameContext
 
@@ -1139,13 +1141,15 @@ resize
 
 - **Scheduler есть**, но не является главным scheduler'ом движка;
 - **Render FramePlan есть**, но это отдельный render scheduler;
-- **Physics есть**, но он не подключён как system;
-- **EditorWorld есть**, но он не является общим World;
+- **Physics подключена как systems только в editor-only runtime**;
+- **EditorWorld использует core `World`, но остаётся editor-only facade**;
 - **Native loop есть**, но это showcase loop;
 - **WASM loop есть**, но это browser render loop;
-- **единый runtime authoritative world ещё не wired**: core `World` существует, но editor/native/physics/render используют отдельные контейнеры;
+- **единый runtime authoritative world ещё не wired для всех доменов**:
+  core `World` используется editor-only, native/physics/render всё ещё имеют
+  отдельные runtime-контейнеры;
 - **единого CPU/GPU data lifecycle нет**;
-- **physics/render/ECS не проходят через один frame schedule**.
+- **native/WASM physics/render/ECS не проходят через один frame schedule**.
 
 ### Что нужно сделать, чтобы появилась настоящая единая архитектура
 
@@ -1744,8 +1748,8 @@ FramePlan
 ### Эволюционный план
 
 1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time` (`crates/core/src/{world.rs,engine.rs}`);
-2. зарегистрировать в World `PhysicsRuntime`, input и asset resources (Time и SmartStore предоставляет core foundation);
-3. добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut`;
+2. ✅ зарегистрировать в editor-only World `PhysicsRuntime` (Time и SmartStore предоставляет core foundation); input и asset resources ещё впереди;
+3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only runtime; общий native/WASM pipeline ещё впереди;
 4. добавить `RenderExtract`;
 5. перевести native loop на `Engine::run_frame`;
 6. подключить `RenderFrame3D` как внутренность `RenderSystem`;

@@ -13,6 +13,7 @@ use editor_backend::{GameEvent, UiCommand};
 // in native mode nothing calls it yet (the native loop is a counter stub).
 #[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
 mod editor_world;
+mod engine_runtime;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // "BROWSER-ONLY EDITOR" MODE (editor-only)

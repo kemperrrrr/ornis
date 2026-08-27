@@ -127,8 +127,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Фича | Статус | Комментарий |
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
-| Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; фундамент есть, но physics/render/editor и основной frame loop ещё не подключены |
-| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, domain runtimes пока не wired |
+| Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; foundation используется editor-only facade, но основной native/WASM frame loop и render ещё не подключены |
+| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, physics подключена только в editor-only runtime, render/input ещё не wired |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |

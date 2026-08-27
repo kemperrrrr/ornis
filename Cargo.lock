@@ -1784,6 +1784,7 @@ dependencies = [
  "editor-backend",
  "glam 0.30.10",
  "ornis-core",
+ "ornis-physics",
  "ornis-render",
  "pollster 0.3.0",
  "serde",
