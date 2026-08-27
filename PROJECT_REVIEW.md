@@ -11,9 +11,10 @@
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
-  `Engine` с ресурсом `Time`; editor-only physics и native/WASM render
-  extraction + `FramePlan` уже подключены. Полный cross-domain runtime с
-  input и physics во всех режимах ещё не собран.
+  `Engine` с ресурсами `Time`/`InputState`; editor-only physics и native/WASM
+  render extraction + `FramePlan` уже подключены. Native input events теперь
+  попадают в ресурс, но полный cross-domain runtime с browser consumers и
+  physics во всех режимах ещё не собран.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -700,7 +701,7 @@ fn run(&self, resources: &Resources)
 
 А `SmartStore` содержит ECS-компоненты.
 
-Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Дополнительно `ornis_core::Engine` публикует `Time` и запускает один frame schedule. Но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, input и полным frame lifecycle, пока не собран.
+Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Дополнительно `ornis_core::Engine` публикует `Time` и `InputState` и запускает один frame schedule; после schedule transient input deltas очищаются. Native winit adapter заполняет ресурс, но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, browser input consumers и полным frame lifecycle, пока не собран.
 
 #### Что реально существует
 
@@ -1734,14 +1735,14 @@ FramePlan
 
 ### Эволюционный план
 
-1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time` (`crates/core/src/{world.rs,engine.rs}`);
+1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time`/`InputState` (`crates/core/src/{world.rs,engine.rs,input.rs}`);
 2. ✅ зарегистрировать в editor-only World `PhysicsRuntime` (Time и SmartStore предоставляет core foundation); input и asset resources ещё впереди;
 3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only runtime; общий native/WASM physics pipeline ещё впереди;
 4. ✅ добавить backend-neutral `RenderExtract` и вынести его в `ornis-render::extraction`;
 5. ✅ перевести native showcase loop на общий `RenderWorld::run_frame` для ECS-backed extraction;
 6. ✅ подключить `RenderFrame3D`/`FramePlan` к native render path;
 7. ✅ перевести WASM loop на тот же `RenderWorld`/`Engine`/`RenderExtract`/`FramePlan` contract после serialization boundary;
-8. добавить input, native/WASM physics systems и полноценный cross-domain runtime;
+8. завершить browser/gameplay input consumers, добавить native/WASM physics systems и полноценный cross-domain runtime;
 9. добавить `AssetServer` и handles;
 10. только после этого развивать WebSocket, scripting и сложный hot reload.
 

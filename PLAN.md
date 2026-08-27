@@ -70,7 +70,9 @@
   добавляет `Time` и `run_frame` поверх `Schedule`. Editor-only facade уже
   использует этот host и physics sync/step/sync-out; native и WASM render
   используют общий library-level `RenderWorld`/`RenderExtract`/`FramePlan`
-  contract. Input, native physics и полный cross-domain runtime пока не завершены.
+  contract. Backend-neutral `InputState` уже публикуется Engine и native
+  winit adapter его заполняет; browser consumers, native physics и полный
+  cross-domain runtime пока не завершены.
 - **Remote Editor**: REST, обработчик команд в `editor-only`, `GET /api/scene`,
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые
@@ -203,9 +205,10 @@ cross-domain scheduler. Physics впервые в production editor-only цик�
 > native showcase и browser-side `RenderWorld` frames; общий
 > backend-neutral `RenderExtract` находится в `ornis-render`, а native и WASM
 > используют `RenderFrame3D`/`FramePlan`. Editor-only `EditorWorld` исполняет
-> physics sync/step/sync-out. Остаются input, native physics и единый
-> cross-domain runtime; serialization boundary между сервером и браузером
-> сохраняется намеренно.
+> physics sync/step/sync-out. `InputState` и native event adapter добавлены,
+> остаются browser/gameplay consumers, native physics и единый cross-domain
+> runtime; serialization boundary между сервером и браузером сохраняется
+> намеренно.
 
 ## ❌ Не делать / отложено (решения владельца)
 

@@ -5,7 +5,7 @@
 //! physics, rendering and gameplay domains a common frame boundary without
 //! coupling the core crate to any particular backend.
 
-use crate::{Schedule, World};
+use crate::{InputState, Schedule, World};
 
 /// Per-frame clock published in the [`World`] resource map.
 ///
@@ -74,11 +74,12 @@ impl Default for Engine {
 }
 
 impl Engine {
-    /// Creates an empty engine with a fresh [`World`] and a zeroed [`Time`]
-    /// resource.
+    /// Creates an empty engine with a fresh [`World`], zeroed [`Time`] and
+    /// empty [`InputState`] resources.
     pub fn new() -> Self {
         let mut world = World::new();
         let _ = world.insert(Time::new());
+        let _ = world.insert(InputState::new());
         Self {
             world,
             schedule: Schedule::new(),
@@ -111,8 +112,10 @@ impl Engine {
 
     /// Runs one frame with `delta_seconds` and publishes [`Time`] first.
     ///
-    /// The delta must be finite and non-negative. Systems observe the same
-    /// immutable time snapshot during this call; domain-specific mutable
+    /// Input events accumulated by a platform adapter are visible to systems
+    /// during the schedule. After all systems finish, transient pointer and
+    /// wheel deltas are cleared from [`InputState`]; held keys/buttons persist.
+    /// The delta must be finite and non-negative. Domain-specific mutable
     /// state continues to use the scheduler's declared resource/lane access
     /// contract.
     pub fn run_frame(&mut self, delta_seconds: f32) {
@@ -124,6 +127,9 @@ impl Engine {
             let _ = self.world.insert(time);
         }
         self.world.run(&self.schedule);
+        if let Some(input) = self.world.resources_mut().get_mut::<InputState>() {
+            input.clear_frame_transients();
+        }
     }
 }
 

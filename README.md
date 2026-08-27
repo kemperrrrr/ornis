@@ -128,7 +128,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
 | Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; native и WASM render-клиенты используют ECS-backed `RenderWorld`, editor-only facade использует тот же core World; серверный authoritative World и браузер по-прежнему разделены serialization boundary |
-| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only physics подключена; input, native physics и полный cross-domain runtime ещё впереди |
+| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only physics подключена; native physics и полный cross-domain runtime ещё впереди |
+| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit events уже записываются в ресурс, browser gameplay/input systems ещё впереди |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
@@ -193,7 +194,9 @@ cargo xtask bca --report      # html to target/bca/index.html
 `SmartStore` и `Schedule`, а `ornis_core::Engine` — минимальную границу
 кадра с ресурсом `Time`. Native и WASM render loops уже используют общий
 `RenderWorld`/`RenderExtract`/`FramePlan` контракт после serialization
-boundary. Следующий шаг — подключить input и physics как доменные системы,
+boundary. `InputState` теперь является backend-neutral resource и native
+winit adapter уже записывает keyboard, mouse and wheel events. Следующий
+шаг — добавить browser/gameplay consumers и physics как доменную систему,
 а затем собрать полноценный cross-domain runtime. Это не означает
 немедленно удалять `FramePlan`: он остаётся переходным render/backend-планом.
 

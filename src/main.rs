@@ -70,10 +70,12 @@ fn main() {
 mod native {
     pub use crossbeam_channel::{Receiver, Sender};
     pub use glam::{Mat4, Vec3};
+    pub use ornis_core::InputState;
     pub use winit::application::ApplicationHandler;
     pub use winit::dpi::PhysicalSize;
-    pub use winit::event::WindowEvent;
+    pub use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
     pub use winit::event_loop::{ActiveEventLoop, EventLoop};
+    pub use winit::keyboard::PhysicalKey;
     pub use winit::window::WindowAttributes;
 
     pub use ornis_render::scene::Scene;
@@ -234,6 +236,18 @@ impl GameApp {
         let mut render_world = RenderWorld::from_scene(&scene);
         render_world.run_frame(0.0);
         (render_world, entity_count)
+    }
+
+    fn update_input(ctx: &mut GameContext, update: impl FnOnce(&mut InputState)) {
+        if let Some(input) = ctx
+            .render_world
+            .engine_mut()
+            .world_mut()
+            .resources_mut()
+            .get_mut::<InputState>()
+        {
+            update(input);
+        }
     }
 
     fn process_remote_commands(ctx: &mut GameContext) {
@@ -402,6 +416,40 @@ impl ApplicationHandler for GameApp {
                 ctx.frame_plan
                     .set_surface_size(size.width.max(1), size.height.max(1));
                 ctx.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = matches!(event.state, ElementState::Pressed);
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    Self::update_input(ctx, |input| input.set_key(code as u32, pressed));
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let code = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Right => 1,
+                    MouseButton::Middle => 2,
+                    MouseButton::Back => 3,
+                    MouseButton::Forward => 4,
+                    MouseButton::Other(code) => code.min(u16::from(u8::MAX)) as u8,
+                };
+                Self::update_input(ctx, |input| {
+                    input.set_mouse_button(code, matches!(state, ElementState::Pressed));
+                });
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                Self::update_input(ctx, |input| {
+                    input.set_pointer_position([position.x as f32, position.y as f32]);
+                });
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 100.0,
+                };
+                Self::update_input(ctx, |input| input.add_wheel_delta(amount));
+            }
+            WindowEvent::Focused(false) => {
+                Self::update_input(ctx, InputState::clear_all);
             }
             _ => {}
         }
