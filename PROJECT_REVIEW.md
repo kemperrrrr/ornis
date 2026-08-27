@@ -36,6 +36,17 @@
    - ECS storage;
    - MaterialX parsing.
 
+   > ✅ 2026-08-27: baseline зафиксирован в
+   > [perf-baseline-2026-08-27.md](docs/quality/perf-baseline-2026-08-27.md)
+   > (Apple M1): ECS storage (1k–100k), physics step (islands/стеки/тела),
+   > render (layout + запись пассов), MaterialX. Добавлены бенчи:
+   > `physics_bodies` (1k/10k), `deep_stack_128`, `materialx parse_bench`.
+   > ⚠️ Находка: на 100k тел `step` сверхлинеен (единый пол-AABB вырождает
+   > Sweep-and-Prune в O(n²), ~48 с/шаг; с тайловым полом — 80–110 с/шаг,
+   > квадратичная составляющая остаётся) — 100k в criterion не помещается,
+   > числа сняты зондом `crates/physics/examples/probe_100k.rs`. Это вход
+   > для п.2/п.3.
+
 5. **Упростить крупные модули**
 
    Разделить `physics/src/engine.rs` и MaterialX evaluator по ответственности: broadphase, narrow phase, constraints, integration и queries.

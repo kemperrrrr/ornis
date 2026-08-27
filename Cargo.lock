@@ -1844,6 +1844,7 @@ name = "ornis-materialx"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "glam 0.30.10",
  "ornis-core",
  "ornis-render",
