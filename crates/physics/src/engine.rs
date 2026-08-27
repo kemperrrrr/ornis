@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance;
 #[cfg(feature = "gpu")]
-use crate::gpu::{WgpuContactSolver, pack_single_point_batches, write_back_acc};
+use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;

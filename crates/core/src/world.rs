@@ -190,7 +190,10 @@ mod tests {
 
     #[test]
     fn schedule_can_read_store_resource_directly() {
-        let world = World::new();
+        let mut world = World::new();
+        let entity = world.store_mut().expect("store").create_entity();
+        world.store_mut().expect("store").insert(entity, 7_u32);
+
         let mut schedule = Schedule::new();
         schedule.add_system(ReadStore);
         world.run(&schedule);

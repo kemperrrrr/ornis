@@ -145,7 +145,6 @@ impl AudioEngine {
 mod tests {
     use super::*;
 
-
     /// Records every `play` call so the engine's orchestration can be
     /// asserted without a real audio device.
     struct MockBackend {
