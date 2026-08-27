@@ -127,8 +127,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Фича | Статус | Комментарий |
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
-| Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; используется native RenderExtract/FramePlan и editor-only physics facade, но WASM и полный domain runtime ещё не подключены |
-| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native render и editor physics подключены, полный native/WASM domain runtime ещё впереди |
+| Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; native и WASM render-клиенты используют ECS-backed `RenderWorld`, editor-only facade использует тот же core World; серверный authoritative World и браузер по-прежнему разделены serialization boundary |
+| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only physics подключена; input, native physics и полный cross-domain runtime ещё впереди |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
@@ -150,14 +150,14 @@ cargo xtask bca --report      # html to target/bca/index.html
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
 | Frame Plan (бывш. Render Graph; модули `frame_plan.rs`/`frame_exec.rs`, rename от 2026-08-23): `RenderFrame3D` + `Technique` (forward/deferred/hybrid как конфигурация плана) + блум-каскад | ✅ |
-| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | 🟡 | инфраструктура планирования реализована, но единый runtime-кадр native/WASM ещё не wired; `crates/render/src/frame_plan.rs`, `frame_exec.rs`; детали: `docs/rendering/render-graph.md` |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | 🟡 | инфраструктура и render frame contract реализованы; native и WASM render loops проходят через `Engine`/`RenderWorld`/`RenderExtract`/`FramePlan`, но единый cross-domain runtime с input и physics ещё не собран; `crates/render/src/{extraction.rs,frame_plan.rs,frame_exec.rs}`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 
 | Фича | Статус | Комментарий |
 |---|---|---|
 | Desktop: winit + wgpu (Vulkan/Metal/DX12) | ✅ | `src/main.rs`, нативный режим |
-| WASM + WebGPU в браузере | ✅ | `crates/wasm`; рендер `editor/scene.ron` проверен headless-скриншотами (5 сфер, pixel-identical нативному эталону) |
+| WASM + WebGPU в браузере | ✅ | `crates/wasm`; `/api/scene` или `scene.ron` проходит через `RenderWorld`/`Engine`/`RenderExtract`, затем `RenderFrame3D`/`FramePlan`; orbit-камера остаётся client-side |
 | Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит живую сцену из `/api/scene` (polling ~1/с) с fallback на `scene.ron`, есть orbit-камера |
 | Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит отдельный editor-only ECS-мир (`src/editor_world.rs`), пока не общий `ornis_core::World`: при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. Сохранение и загрузка сцены — команды `save_scene`/`load_scene` (см. следующую строку) |
 | Сохранение/загрузка сцены (save/load) | ✅ | `save_scene`/`load_scene` через `POST /api/command` (опциональный `{"path": …}`, по умолчанию `editor/scene.ron`): мир сериализуется в RON и пишется атомарно (sibling `*.tmp` + rename), загрузка заменяет мир из файла; результаты — события `scene_saved {path, version}` / `scene_loaded {path, version, entity_count}` / `error` в `GET /api/events`. В UI — меню File → Save/Reload, результат в футере. WASM-canvas рендерит живую сцену: polling `/api/scene` (~1/с), при недоступности сервера — fallback на `scene.ron` |
@@ -191,10 +191,11 @@ cargo xtask bca --report      # html to target/bca/index.html
 
 `ornis_core::World` уже даёт общий логический контейнер `Resources` с
 `SmartStore` и `Schedule`, а `ornis_core::Engine` — минимальную границу
-кадра с ресурсом `Time`. Следующий шаг — подключить к этому host'у
-input, physics и render как доменные системы, а затем перевести native и
-WASM frame loops на единый контракт. Это не означает немедленно удалять
-`FramePlan`: он остаётся переходным render/backend-планом.
+кадра с ресурсом `Time`. Native и WASM render loops уже используют общий
+`RenderWorld`/`RenderExtract`/`FramePlan` контракт после serialization
+boundary. Следующий шаг — подключить input и physics как доменные системы,
+а затем собрать полноценный cross-domain runtime. Это не означает
+немедленно удалять `FramePlan`: он остаётся переходным render/backend-планом.
 
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).
 
@@ -217,9 +218,11 @@ WASM frame loops на единый контракт. Это не означае�
    ~~Сохранение/загрузка сцены~~ — ✅ сделано: меню File → Save/Reload шлёт
    `save_scene`/`load_scene` (атомарная запись `editor/scene.ron`, события
    `scene_saved`/`scene_loaded`/`error`, результат показан в футере).
-4. **WASM-canvas ↔ живой ECS** — 🟡 частично: viewport рендерит актуальное
-   состояние из `/api/scene` (polling ~1/с, fallback на `scene.ron`), есть
-   orbit-камера; впереди — ввод (мышь/клавиатура) из браузера в движок.
+4. **WASM-canvas ↔ живой ECS** — 🟡 частично: после serialization boundary
+   viewport восстанавливает snapshot в общем library-level `RenderWorld`,
+   запускает `Engine`/`RenderExtract` и рисует через `FramePlan`; источник —
+   `/api/scene` (polling ~1/с, fallback на `scene.ron`), есть orbit-камера.
+   Впереди — ввод (мышь/клавиатура) из браузера в движок и live events.
 5. Дальше: WebSocket-канал для событий и live-синхронизации вместо polling'а
    `/api/events`.
 

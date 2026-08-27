@@ -487,6 +487,15 @@ pub struct ComponentStore<T> {
 
 **Что меняется в Ornis**: текущая связка `RenderGraph3D` (отдельный контейнер поверх `RenderGraph` + `GraphExecutor`) и `RenderContext` (отдельный контейнер для `device`/`queue`/`encoder`) сворачивается в **ECS-системы, которые берут `Res<Device>`, `Res<SurfaceConfig>`, etc., и пишут в те же ленты, что и физика**. Никаких копирований. Граница между «CPU-стороной» и «GPU-стороной» остаётся только как соглашение о типах, не как физический разрыв.
 
+> **Переходный статус 2026-08-27:** native и WASM уже используют общий
+> library-level `RenderWorld`/`Engine`/`RenderExtract` data-flow и один
+> `RenderFrame3D`/`FramePlan` pass path. Серверный `EditorWorld` и браузерный
+> `RenderWorld` находятся в разных контекстах, поэтому versioned JSON
+> serialization boundary сохраняется намеренно; это не считается нарушением
+> идеи единого *логического* World. Полное слияние render/physics/input в
+> верхний scheduler и устранение отдельной extraction boundary остаются
+> долгосрочной целью этого раздела.
+
 ### 28.3 Memory budget как first-class цель оптимизации
 
 Сейчас и Frostbite, и Bevy оптимизируют по скорости выполнения. Никто не говорит: «у меня 64 МБ на GPU-текстуры — сделай лучший кадр в этом бюджете». А это **именно то, что нужно мобильным и tier-1 консолям** — и то, что позволяет алиасить более агрессивно.

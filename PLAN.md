@@ -68,14 +68,16 @@
 - **Логический `World` + frame host (foundation)**: `ornis_core::World`
   объединяет `Resources` и авторитетный `SmartStore`, а `ornis_core::Engine`
   добавляет `Time` и `run_frame` поверх `Schedule`. Editor-only facade уже
-  использует этот host и physics sync/step/sync-out; интеграция native/WASM
-  render/input и полный engine runtime пока не завершена.
+  использует этот host и physics sync/step/sync-out; native и WASM render
+  используют общий library-level `RenderWorld`/`RenderExtract`/`FramePlan`
+  contract. Input, native physics и полный cross-domain runtime пока не завершены.
 - **Remote Editor**: REST, обработчик команд в `editor-only`, `GET /api/scene`,
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые
   snapshot'ы через polling; WebSocket, request ID/ACK и sequence numbers
-  пока не реализованы. Editor-only `EditorWorld` всё ещё отдельный от
-  `ornis_core::World` — это следующий интеграционный шаг.
+  пока не реализованы. Editor-only `EditorWorld` использует `ornis_core::World`,
+  а браузер восстанавливает snapshot в отдельном `RenderWorld` после
+  serialization boundary — общей памяти между ними нет.
 - **Command-Based Sync**: CPU-очередь + residency tracker и базовое
   GPU-исполнение (compute dispatch + flush, есть тест) — есть;
   автоматической data residency «копировать только при необходимости»
@@ -83,8 +85,11 @@
 - **Линтер параллелизуемости**: `#[smart_pipeline]` выдаёт предупреждения
   через deprecated-note трюк; IDE-интеграции и расширяемого набора правил нет.
 - **WASM**: viewport получает актуальные scene snapshot'ы из `/api/scene`
-  через polling (~1/с), имеет fallback на `scene.ron` и orbit-камеру;
-  ввода из браузера обратно в движок и WebSocket-синхронизации пока нет.
+  через polling (~1/с), имеет fallback на `scene.ron` и orbit-камеру; каждый
+  snapshot восстанавливается в общий для native/WASM library-level
+  `RenderWorld`, проходит `Engine::run_frame`/`RenderExtract` и записывается
+  через `RenderFrame3D`/`FramePlan`. Ввода из браузера обратно в движок и
+  WebSocket-синхронизации пока нет.
 - **Component Packing**: `#[derive(Pack)]` генерирует wrapper-ленты и
   `Pack::for_each_packed`; wrapper-ленты совместимы с `for_each_entity!`,
   интеграция покрыта `crates/core/tests/pack_integration.rs` — ✅.
@@ -109,9 +114,12 @@ ID/ACK, sequence numbers и защита от устаревших snapshot'ов
 ### b. Живой ECS в браузере
 
 ✅ WASM-canvas рендерит актуальные snapshot'ы editor-only ECS через
-`/api/scene`, имеет fallback на `scene.ron` и orbit-камеру. Остаются
-ввод из браузера в движок, WebSocket/live events и подключение этой
-сцены к общему `ornis_core::World` вместо отдельного `EditorWorld`.
+`/api/scene`, имеет fallback на `scene.ron` и orbit-камеру. После границы
+serialization snapshot восстанавливается в `ornis_render::RenderWorld`,
+где `Engine` запускает общий `RenderExtract`, а `RenderFrame3D` исполняет
+`FramePlan`. Остаются ввод из браузера в движок, WebSocket/live events и
+полный cross-domain runtime; серверный `EditorWorld` и browser-side copy
+намеренно не делят память.
 
 ### c. Фаза 6 — Скриптинг (пересмотрена 2026-08-22, решение D1 аудита)
 
@@ -183,14 +191,19 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
 вместе с приоритетом «a»): кадр через верхний `Schedule` над
 `Resources`-миром (`Res<Device>`/`Res<Queue>`/время); физика и рендер —
 системы-домены (внутренние острова/уровни — внутренность); критерий:
-главный цикл (натив и wasm) исполняет кадр через `Schedule`, физика
-впервые в продакшн-цикле, extract-фазы нет by construction.
+главный цикл (натив и wasm) исполняет render-кадр через `Engine`, а
+render extraction остаётся явной переходной boundary-стадией до полного
+cross-domain scheduler. Physics впервые в production editor-only цикле;
+полный unified runtime без отдельной extract-фазы — будущая цель, не текущий
+статус.
 
-> **Прогресс 2026-08-27:** `ornis_core::Engine` с `Time` уже исполняет
-> native showcase frame; backend-neutral `RenderExtract` и `FramePlan`
-> подключены к native path, а editor-only `EditorWorld` исполняет physics
-> sync/step/sync-out. Остаются input, WASM-side frame contract и единый
-> runtime без отдельных domain-контейнеров.
+> **Прогресс 2026-08-27:** `ornis_core::Engine` с `Time` исполняет
+> native showcase и browser-side `RenderWorld` frames; общий
+> backend-neutral `RenderExtract` находится в `ornis-render`, а native и WASM
+> используют `RenderFrame3D`/`FramePlan`. Editor-only `EditorWorld` исполняет
+> physics sync/step/sync-out. Остаются input, native physics и единый
+> cross-domain runtime; serialization boundary между сервером и браузером
+> сохраняется намеренно.
 
 ## ❌ Не делать / отложено (решения владельца)
 
@@ -227,11 +240,14 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
   переключение материалов без rebind.
 - **R4.** Свет: сейчас только направленные (до 4, `GpuLight`) — добавить
   point/spot + shadow maps (когда понадобится).
-- **R5.** Единый путь нативных и WASM-бэкендов через `RenderBackend`
-  (недублирование wgpu-кода для браузера).
-- **R6.** Связать рендер с ECS-сценой в браузере: WASM-canvas рендерит
-  актуальное состояние, ввод/камера из браузера (перекликается с
-  «b. Живой ECS в браузере»).
+- **R5.** Довести backend abstraction до plan-capable API: native и WASM
+  уже используют один `Renderer3D` + `RenderFrame3D` путь, а
+  `RenderBackend::render_scene` сохраняется как compatibility/plugin API и
+  reference path без дублирования pass logic.
+- **R6.** Связать рендер с ECS-сценой в браузере: snapshot уже
+  восстанавливается в shared library-level `RenderWorld` и проходит
+  `Engine`/`RenderExtract`/`FramePlan`; остаются ввод/камера из браузера в
+  движок и live event transport (перекликается с «b. Живой ECS в браузере»).
 - **R7.** Render Graph — слой оркестрации пассов (design/implementation note,
   2026-08-10). Гибрид forward/deferred уже работает императивно в
   `renderer.rs` (gbuffer 5 MRT → lighting → forward → composite); render
@@ -320,9 +336,11 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 
 > **Актуальная оговорка (2026-08-27):** S0–S6 описывают завершённую
-> инфраструктурную ветку scheduler/render-plan. Добавленный
-> `ornis_core::World` — только первый фундамент интеграции; единый
-> runtime-кадр native/WASM с physics и render пока не подключён.
+> инфраструктурную ветку scheduler/render-plan. `ornis_core::World` и
+> `Engine` теперь являются frame host'ом для native и browser-side render
+> extraction; `RenderWorld`/`RenderExtract` вынесены в `ornis-render`, а
+> `RenderFrame3D`/`FramePlan` используются обоими render loops. Полный
+> cross-domain runtime с physics/input всё ещё не подключён.
 
 > План по [`IDEAS.md`](IDEAS.md) §28 («третий путь» между Frostbite
 > FrameGraph и Bevy 0.19: один scheduler + автоматический lifetime/aliasing +

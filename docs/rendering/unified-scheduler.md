@@ -514,12 +514,13 @@ scheduler'ом», соблюдает контракт:
 у рендера. Иерархия: верхний `Schedule` планирует домены, домен
 планирует своё нутро — вложенность, а не конкуренция.
 
-**Веха интеграции** (после S6, вместе с приоритетом «a»): кадр гоняется
-через верхний `Schedule` над `Resources`-миром (`Res<Device>`,
-`Res<Queue>`, время, ввод): физика и рендер — системы-домены, скрипты
-фазы 6 — data-фронтенд. Критерий приёмки: главный цикл (натив и wasm)
-исполняет кадр через `Schedule`; физика впервые живёт в продакшн-цикле;
-extract-фаза отсутствует by construction.
+**Веха интеграции** (срез 2026-08-27): native и WASM render loops уже
+проходят через верхний `Engine`/`Schedule` frame host, общий
+`ornis-render::RenderExtract` и `RenderFrame3D`/`FramePlan`. Physics systems
+живут в editor-only цикле; input и cross-domain physics/render ещё впереди.
+`RenderExtract` остаётся явной переходной serialization/ECS boundary —
+критерий «без отдельной extract-фазы» относится только к будущему полному
+unified scheduler, а не к текущему runtime.
 
 ## S6 — ратификация (✅ 2026-08-19): реестр + отладочная проекция
 

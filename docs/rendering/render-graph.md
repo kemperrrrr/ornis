@@ -7,6 +7,12 @@
 > Дата исходного дизайна: 2026-08-10.
 > Источник: исследование Hermes (дисциплина web-research), первоисточники в разделе «Источники».
 >
+> **Интеграция 2026-08-27:** native и WASM render loops используют
+> `ornis_render::RenderWorld`/`RenderExtracted` для ECS-backed extraction и
+> `RenderFrame3D`/`FramePlan` для записи кадра. `RenderBackend::render_scene`
+> остаётся compatibility/reference API; server↔browser serialization boundary
+> сохраняется.
+>
 > **Переименование 2026-08-23**: модули/типы — `render_graph.rs` → `frame_plan.rs`
 > (`RenderGraph` → `FramePlan`, `GraphLayout` → `FrameLayout`), `graph_frame.rs` →
 > `frame_exec.rs` (`GraphExecutor` → `FrameExecutor`, `RenderGraph3D` → `RenderFrame3D`),

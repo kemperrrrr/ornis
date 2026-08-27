@@ -4,23 +4,23 @@
 //!
 //! Renders the live scene from `/api/scene` (polled ~1/s) when the remote
 //! server provides it; otherwise falls back to `assets/scene.ron` through
-//! the shared [`Renderer3D`](ornis_render::Renderer3D) behind
-//! [`RenderBackend`](ornis_render::RenderBackend). The orbit camera is
-//! client-side only.
+//! the shared ECS [`RenderWorld`](ornis_render::RenderWorld),
+//! [`RenderExtracted`](ornis_render::RenderExtracted), and
+//! [`RenderFrame3D`](ornis_render::RenderFrame3D) frame contract. The orbit
+//! camera is client-side only.
 //!
 //! Build: `wasm-pack build crates/wasm --target web`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use ornis_core::OpenPBRMaterial;
-use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
+use ornis_render::scene::{CameraDesc, LightDesc, Scene};
 use ornis_render::{
-    InstanceData, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+    RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
 };
 
 mod scene_api;
@@ -161,92 +161,34 @@ impl OrbitCamera {
     }
 }
 
-/// GPU-side scene built from a parsed [`Scene`]: shared mesh, materials,
-/// per-entity instances and lights in the tuple form RenderBackend expects.
+/// GPU-side scene built from the ECS extraction snapshot. The scene
+/// description remains the serialization boundary; renderable components
+/// are inserted into [`RenderWorld`] and extracted by its scheduled
+/// `Engine` frame before this GPU adapter runs.
 struct GpuScene {
     mesh: ornis_render::Mesh,
     /// (segments, rings) of the shared unit sphere — recreate the mesh only
     /// when these change.
     mesh_params: (u32, u32),
-    materials: Vec<OpenPBRMaterial>,
-    instances: Vec<InstanceData>,
+    extracted: RenderExtracted,
     lights: Vec<([f32; 3], f32, [f32; 3])>,
 }
 
-fn build_gpu_scene(device: &wgpu::Device, scene: &Scene) -> GpuScene {
-    // Renderer3D::render_scene draws ONE mesh instanced, so all entities
-    // share a single unit sphere (radius 1) and each entity's radius is
-    // folded into its instance scale. A sphere of radius r is exactly the
-    // unit sphere scaled by r, so this is lossless and supports entities
-    // with different radii. Tessellation uses the max segments/rings.
-    let mut segments = 32u32;
-    let mut rings = 24u32;
-    for entity in &scene.entities {
-        let MeshDesc::Sphere {
-            segments: s,
-            rings: r,
-            ..
-        } = &entity.mesh;
-        segments = segments.max(*s);
-        rings = rings.max(*r);
-    }
-    let mesh = ornis_render::create_sphere(device, 1.0, segments, rings);
-
-    let mut materials = Vec::with_capacity(scene.entities.len());
-    let mut instances = Vec::with_capacity(scene.entities.len());
-    for (i, entity) in scene.entities.iter().enumerate() {
-        let material = match &entity.material {
-            MaterialDesc::Dielectric {
-                base_color,
-                roughness,
-            } => {
-                let mut mat = OpenPBRMaterial::dielectric();
-                mat.base.color_rgb(*base_color);
-                mat.specular.roughness(*roughness);
-                mat
-            }
-            MaterialDesc::Metal {
-                base_color,
-                roughness,
-            } => {
-                let mut mat = OpenPBRMaterial::metal();
-                mat.base.color_rgb(*base_color);
-                mat.specular.roughness(*roughness);
-                mat
-            }
-            MaterialDesc::Coat {
-                base_color,
-                coat_weight,
-                coat_roughness,
-            } => {
-                let mut mat = OpenPBRMaterial::coat();
-                mat.base.color_rgb(*base_color);
-                mat.coat.weight(*coat_weight);
-                mat.coat.roughness(*coat_roughness);
-                mat
-            }
-        };
-        materials.push(material);
-
-        let MeshDesc::Sphere { radius, .. } = &entity.mesh;
-        let t = &entity.transform;
-        let model = Mat4::from_scale_rotation_translation(
-            Vec3::from(t.scale) * *radius,
-            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]).normalize(),
-            Vec3::from(t.translation),
-        );
-        let normal_matrix = model.inverse().transpose();
-        instances.push(InstanceData {
-            model_matrix: model,
-            normal_matrix,
-            material_index: i as u32,
-        });
-    }
-
+fn build_gpu_scene(
+    device: &wgpu::Device,
+    render_world: &RenderWorld,
+    scene: &Scene,
+) -> GpuScene {
+    let extracted = render_world.extracted();
+    // RenderFrame3D draws one shared mesh instanced. Each sphere's radius is
+    // already folded into its extracted model scale, so the maximum
+    // tessellation is sufficient for every entity.
+    let mesh_params = extracted.mesh_params;
+    let mesh = ornis_render::create_sphere(device, 1.0, mesh_params.0, mesh_params.1);
     let lights = scene
         .lights
         .iter()
-        .map(|l| match l {
+        .map(|light| match light {
             LightDesc::Directional {
                 direction,
                 intensity,
@@ -257,9 +199,8 @@ fn build_gpu_scene(device: &wgpu::Device, scene: &Scene) -> GpuScene {
 
     GpuScene {
         mesh,
-        mesh_params: (segments, rings),
-        materials,
-        instances,
+        mesh_params,
+        extracted,
         lights,
     }
 }
@@ -510,7 +451,9 @@ struct FrameState<'a> {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    renderer: Box<dyn RenderBackend>,
+    renderer: Renderer3D,
+    frame_plan: RenderFrame3D,
+    render_world: RenderWorld,
     mesh: ornis_render::Mesh,
     mesh_params: (u32, u32),
     instance_count: u32,
@@ -537,28 +480,33 @@ impl<'a> FrameState<'a> {
             self.config.height = ph;
             self.surface.configure(&self.device, &self.config);
             self.renderer.resize(&self.device, pw, ph);
+            self.frame_plan.set_surface_size(pw, ph);
             console::log_1(&format!("[ornis-wasm] resized surface to {}x{}", pw, ph).into());
         }
     }
 
-    /// Rebuild materials/instances (and the shared mesh if tessellation
-    /// changed) for a freshly polled live scene and re-upload. No
-    /// device/surface recreation.
+    /// Rebuild the client ECS scene through the shared `Engine` schedule,
+    /// extract its components and re-upload the resulting GPU snapshot. No
+    /// device/surface recreation is needed for a live scene update.
     fn apply_live_scene(&mut self, live: &LiveScene, applied_version: &Cell<u64>) {
-        let gpu = build_gpu_scene(&self.device, &live.scene);
+        self.render_world.replace_scene(&live.scene);
+        self.render_world.run_frame(0.0);
+        let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
         if gpu.mesh_params != self.mesh_params {
             self.mesh = gpu.mesh;
             self.mesh_params = gpu.mesh_params;
         }
-        self.renderer.upload_materials(&self.queue, &gpu.materials);
-        self.renderer.upload_instances(&self.queue, &gpu.instances);
+        self.renderer
+            .upload_materials(&self.queue, &gpu.extracted.materials);
+        self.renderer
+            .upload_instances(&self.queue, &gpu.extracted.instances);
         self.renderer
             .set_lights(&self.queue, live.scene.ambient, &gpu.lights);
-        self.instance_count = gpu.instances.len() as u32;
+        self.instance_count = gpu.extracted.instances.len() as u32;
         applied_version.set(live.version);
         console::log_1(
             &format!(
-                "[ornis-wasm] live scene v{} applied ({} instances)",
+                "[ornis-wasm] live scene v{} applied through Engine/FramePlan ({} instances)",
                 live.version, self.instance_count
             )
             .into(),
@@ -589,20 +537,22 @@ impl<'a> FrameState<'a> {
         );
     }
 
-    /// Draw one frame into the given swap-chain view.
+    /// Draw one frame into the given swap-chain view through the shared
+    /// [`RenderFrame3D`] plan, not the legacy `render_scene` shortcut.
     fn draw(&mut self, target_view: &wgpu::TextureView) {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("render_encoder"),
             });
-        self.renderer.render_scene(
+        self.frame_plan.render(
             RenderContext {
                 device: &self.device,
                 queue: &self.queue,
                 encoder: &mut encoder,
                 target: target_view,
             },
+            &self.renderer,
             &self.mesh,
             self.instance_count,
         );
@@ -687,16 +637,19 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let ctx = init_webgpu(&instance, &canvas).await?;
 
     let (scene, initial_version, live_mode) = load_initial_scene().await?;
-    let gpu_scene = build_gpu_scene(&ctx.device, &scene);
+    // Keep the browser-side ECS explicitly separate from the server's
+    // authoritative world: the serialized scene crosses the boundary once,
+    // then the same Engine/RenderExtract contract as native is used locally.
+    let mut render_world = RenderWorld::from_scene(&scene);
+    render_world.run_frame(0.0);
+    let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
-    let renderer: Box<dyn RenderBackend> = create_render_backend(
-        &ctx.device,
-        &RenderBackendConfig {
-            surface_config: ctx.config.clone(),
-            sample_count: 1,
-            max_objects: 256,
-            max_materials: 64,
-        },
+    let renderer = Renderer3D::new(&ctx.device, &ctx.config, 1);
+    let frame_plan = RenderFrame3D::new_with(
+        ctx.config.format,
+        (ctx.config.width, ctx.config.height),
+        Technique::Hybrid,
+        false,
     );
 
     // Client-side orbit camera, initialized from the scene camera.
@@ -719,6 +672,8 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         handles,
         ctx,
         renderer,
+        frame_plan,
+        render_world,
         gpu_scene,
         orbit,
         initial_version,
@@ -733,14 +688,16 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
 fn spawn_render_loop(
     handles: LoopHandles,
     ctx: GpuContext,
-    mut renderer: Box<dyn RenderBackend>,
+    mut renderer: Renderer3D,
+    frame_plan: RenderFrame3D,
+    render_world: RenderWorld,
     gpu_scene: GpuScene,
     orbit: Rc<RefCell<OrbitCamera>>,
     initial_version: u64,
     ambient: [f32; 3],
 ) -> Result<(), JsValue> {
-    renderer.upload_materials(&ctx.queue, &gpu_scene.materials);
-    renderer.upload_instances(&ctx.queue, &gpu_scene.instances);
+    renderer.upload_materials(&ctx.queue, &gpu_scene.extracted.materials);
+    renderer.upload_instances(&ctx.queue, &gpu_scene.extracted.instances);
     renderer.set_lights(&ctx.queue, ambient, &gpu_scene.lights);
 
     let applied_version = Rc::new(Cell::new(initial_version));
@@ -751,9 +708,11 @@ fn spawn_render_loop(
         queue: ctx.queue,
         config: ctx.config,
         renderer,
+        frame_plan,
+        render_world,
         mesh: gpu_scene.mesh,
         mesh_params: gpu_scene.mesh_params,
-        instance_count: gpu_scene.instances.len() as u32,
+        instance_count: gpu_scene.extracted.instances.len() as u32,
         orbit,
     };
 

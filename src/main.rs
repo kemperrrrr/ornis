@@ -8,8 +8,6 @@ use editor_backend::RemoteEditor;
 // Only the native-mode loop types the channels explicitly.
 #[cfg(not(feature = "editor-only"))]
 use editor_backend::{GameEvent, UiCommand};
-#[cfg(not(feature = "editor-only"))]
-use engine_runtime::{RenderExtracted, install_render_extract};
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // in native mode nothing calls it yet (the native loop is a counter stub).
@@ -78,10 +76,9 @@ mod native {
     pub use winit::event_loop::{ActiveEventLoop, EventLoop};
     pub use winit::window::WindowAttributes;
 
-    pub use ornis_core::Engine;
-    pub use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
+    pub use ornis_render::scene::Scene;
     pub use ornis_render::{
-        Mesh, RenderContext, RenderFrame3D, Renderer3D, Technique, create_sphere,
+        Mesh, RenderContext, RenderFrame3D, RenderWorld, Renderer3D, Technique, create_sphere,
     };
 }
 
@@ -104,7 +101,7 @@ struct GameContext {
     renderer3d: Renderer3D,
     frame_plan: RenderFrame3D,
     sphere_mesh: Mesh,
-    engine: Engine,
+    render_world: RenderWorld,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
@@ -212,7 +209,7 @@ impl GameApp {
         );
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
-        let (engine, entity_count) = Self::showcase_engine();
+        let (render_world, entity_count) = Self::showcase_engine();
 
         Ok(GameContext {
             window,
@@ -223,65 +220,20 @@ impl GameApp {
             renderer3d,
             frame_plan,
             sphere_mesh,
-            engine,
+            render_world,
             remote_cmd_rx,
             remote_ev_tx,
             entity_count,
         })
     }
 
-    fn showcase_engine() -> (Engine, u32) {
-        let materials = vec![
-            MaterialDesc::Dielectric {
-                base_color: [0.8, 0.2, 0.2],
-                roughness: 0.5,
-            },
-            MaterialDesc::Dielectric {
-                base_color: [0.2, 0.8, 0.2],
-                roughness: 0.7,
-            },
-            MaterialDesc::Dielectric {
-                base_color: [0.2, 0.2, 0.8],
-                roughness: 0.1,
-            },
-            MaterialDesc::Metal {
-                base_color: [0.9, 0.7, 0.1],
-                roughness: 0.2,
-            },
-            MaterialDesc::Coat {
-                base_color: [0.9, 0.9, 0.9],
-                coat_weight: 1.0,
-                coat_roughness: 0.1,
-            },
-        ];
-        let entity_count = materials.len() as u32;
-        let mut engine = Engine::new();
-        {
-            let store = engine.world_mut().store_mut().expect("world store");
-            for (i, material) in materials.into_iter().enumerate() {
-                let entity = store.create_entity();
-                let x = (i as f32 - 2.0) * 2.8;
-                store.insert(
-                    entity,
-                    TransformDesc {
-                        translation: [x, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
-                );
-                store.insert(
-                    entity,
-                    MeshDesc::Sphere {
-                        radius: 1.0,
-                        segments: 32,
-                        rings: 24,
-                    },
-                );
-                store.insert(entity, material);
-            }
-        }
-        install_render_extract(&mut engine);
-        (engine, entity_count)
+    fn showcase_engine() -> (RenderWorld, u32) {
+        let scene = Scene::from_ron(include_str!("../assets/scene.ron"))
+            .expect("shipped showcase scene must parse");
+        let entity_count = scene.entities.len() as u32;
+        let mut render_world = RenderWorld::from_scene(&scene);
+        render_world.run_frame(0.0);
+        (render_world, entity_count)
     }
 
     fn process_remote_commands(ctx: &mut GameContext) {
@@ -317,16 +269,8 @@ impl GameApp {
     }
 
     fn render_frame(ctx: &mut GameContext) {
-        ctx.engine.run_frame(1.0 / 60.0);
-        let extracted = ctx
-            .engine
-            .world()
-            .resources()
-            .get::<std::sync::Mutex<RenderExtracted>>()
-            .expect("render extraction resource")
-            .lock()
-            .expect("render extraction lock")
-            .clone();
+        ctx.render_world.run_frame(1.0 / 60.0);
+        let extracted = ctx.render_world.extracted();
         if extracted.mesh_params != (32, 24) {
             ctx.sphere_mesh = create_sphere(
                 &ctx.device,

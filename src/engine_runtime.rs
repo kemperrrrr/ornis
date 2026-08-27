@@ -12,13 +12,12 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Quat, Vec3};
 use ornis_core::{
-    ComponentStore, Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess,
-    Time,
+    ComponentStore, Engine, Entity, Resources, SmartStore, System, SystemAccess, Time,
 };
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
-use ornis_render::InstanceData;
+pub use ornis_render::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
 use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
@@ -287,143 +286,6 @@ impl System for PhysicsSyncOut {
             .lock()
             .expect("physics runtime lock")
             .sync_out(&mut body_lane, &mut transform_lane);
-    }
-}
-
-/// CPU-side render data extracted from ECS for a frame.
-#[derive(Clone, Debug)]
-pub struct RenderExtracted {
-    /// Maximum sphere tessellation required by the extracted entities.
-    pub mesh_params: (u32, u32),
-    /// GPU-ready materials in the same order as [`Self::instances`].
-    pub materials: Vec<OpenPBRMaterial>,
-    /// Per-entity model/normal matrices and material indices.
-    pub instances: Vec<InstanceData>,
-}
-
-impl Default for RenderExtracted {
-    fn default() -> Self {
-        Self {
-            mesh_params: (32, 24),
-            materials: Vec::new(),
-            instances: Vec::new(),
-        }
-    }
-}
-
-/// Installs the render extraction resource and system in `engine`.
-///
-/// This stage is backend-neutral: it only converts ECS scene components into
-/// CPU-side `InstanceData` and OpenPBR tables. A native or WASM renderer can
-/// upload the extracted snapshot to its own GPU resources afterwards.
-pub fn install_render_extract(engine: &mut Engine) {
-    let _ = engine
-        .world_mut()
-        .insert(Mutex::new(RenderExtracted::default()));
-    engine.schedule_mut().add_system(RenderExtract);
-}
-
-/// ECS → backend-neutral render extraction system.
-struct RenderExtract;
-
-impl System for RenderExtract {
-    fn name(&self) -> &'static str {
-        "render_extract"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<SmartStore>()
-            .reads_lane::<TransformDesc>()
-            .reads_lane::<MeshDesc>()
-            .reads_lane::<MaterialDesc>()
-            .writes::<Mutex<RenderExtracted>>()
-    }
-
-    fn run(&self, resources: &Resources) {
-        let Some(store) = resources.get::<SmartStore>() else {
-            return;
-        };
-        let Some(output) = resources.get::<Mutex<RenderExtracted>>() else {
-            return;
-        };
-        let extracted = extract_render_data(store);
-        *output.lock().expect("render extraction lock") = extracted;
-    }
-}
-
-fn extract_render_data(store: &SmartStore) -> RenderExtracted {
-    let mut extracted = RenderExtracted::default();
-    let Some(transforms) = store.read_lane::<TransformDesc>() else {
-        return extracted;
-    };
-    let Some(meshes) = store.read_lane::<MeshDesc>() else {
-        return extracted;
-    };
-    let Some(materials) = store.read_lane::<MaterialDesc>() else {
-        return extracted;
-    };
-
-    for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
-        let Some(mesh) = meshes.get(entity) else {
-            continue;
-        };
-        let Some(material) = materials.get(entity) else {
-            continue;
-        };
-        let MeshDesc::Sphere {
-            radius,
-            segments,
-            rings,
-        } = mesh;
-        extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
-        extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
-        let model = Mat4::from_scale_rotation_translation(
-            Vec3::from_array(transform.scale) * *radius,
-            normalized_rotation(transform.rotation),
-            Vec3::from_array(transform.translation),
-        );
-        extracted.materials.push(material_to_gpu(material));
-        extracted.instances.push(InstanceData {
-            model_matrix: model,
-            normal_matrix: model.inverse().transpose(),
-            material_index: extracted.materials.len() as u32 - 1,
-        });
-    }
-    extracted
-}
-
-fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
-    match material {
-        MaterialDesc::Dielectric {
-            base_color,
-            roughness,
-        } => {
-            let mut output = OpenPBRMaterial::dielectric();
-            output.base.color_rgb(*base_color);
-            output.specular.roughness(*roughness);
-            output
-        }
-        MaterialDesc::Metal {
-            base_color,
-            roughness,
-        } => {
-            let mut output = OpenPBRMaterial::metal();
-            output.base.color_rgb(*base_color);
-            output.specular.roughness(*roughness);
-            output
-        }
-        MaterialDesc::Coat {
-            base_color,
-            coat_weight,
-            coat_roughness,
-        } => {
-            let mut output = OpenPBRMaterial::coat();
-            output.base.color_rgb(*base_color);
-            output.coat.weight(*coat_weight);
-            output.coat.roughness(*coat_roughness);
-            output
-        }
     }
 }
 

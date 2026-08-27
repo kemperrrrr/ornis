@@ -11,9 +11,9 @@
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
-  `Engine` с ресурсом `Time`; editor-only physics и native render extraction
-  уже подключены, но единый native/WASM runtime с полным render pipeline ещё
-  не собран.
+  `Engine` с ресурсом `Time`; editor-only physics и native/WASM render
+  extraction + `FramePlan` уже подключены. Полный cross-domain runtime с
+  input и physics во всех режимах ещё не собран.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -23,14 +23,15 @@
 ## План дальнейшей работы
 
 1. ~~**Закончить вертикальный сценарий редактора**~~ — ✅ закрыт (2026-08-26);
-   следующий этап — интеграция этого сценария с `ornis_core::World`.
+   следующий этап — довести cross-domain runtime поверх `ornis_core::World`.
 
    Создание entity → изменение Transform/Material → обновление WASM-сцены →
    сохранение и загрузка сцены (`save_scene`/`load_scene` через
    `POST /api/command`, атомарная запись `editor/scene.ron`, меню File →
    Save/Reload в UI, события `scene_saved`/`scene_loaded` в `/api/events`).
-   Это завершает editor-only vertical slice; он пока использует отдельный
-   `EditorWorld` и polling, а не общий runtime `World`.
+   Editor-only vertical slice использует `EditorWorld` на core World и
+   polling; браузер после serialization boundary восстанавливает snapshot
+   в отдельный `ornis_render::RenderWorld`.
 
 2. **Довести physics API**
 
@@ -573,15 +574,16 @@ crates/schedule/src/lib.rs
 
 По фактическому использованию:
 
-- в `crates/core` он преимущественно тестируется;
+- в `crates/core` он тестируется и исполняется через `Engine::run_frame`;
 - в `crates/render/tests/scheduler_parity.rs` проверяется соответствие render-планировщика;
-- в `crates/render/src/frame_exec.rs` используется общий `ornis_schedule::run_levels`;
-- физика его не использует;
-- native game loop его не использует;
-- WASM render loop его не использует;
-- editor world его не использует.
+- в `crates/render/src/frame_exec.rs` используется общий `ornis_schedule::run_levels` для render-пассов;
+- editor-only physics systems исполняются core `Schedule` через `EditorWorld::tick`;
+- native loop запускает `RenderWorld::run_frame`, а WASM loop — тот же library-level host;
+- полный scheduler всех доменов (input, physics, render и gameplay) ещё не собран.
 
-То есть `ornis-core::Schedule` сейчас — это **готовая инфраструктура и API**, но не главный исполнитель кадра движка.
+То есть `ornis-core::Schedule` уже является frame executor для подключённых
+runtime-доменов, но пока не единым главным планировщиком всего движка:
+`FramePlan` сохраняет специализированное управление render resources/pass'ами.
 
 #### Render Scheduler / FramePlan
 
@@ -611,22 +613,22 @@ FrameExecutor
 - исполнять pass'ы через `FrameExecutor`;
 - использовать общий `ornis_schedule::run_levels`.
 
-Но это **не общий игровой Scheduler**. Это scheduler именно для render frame.
+Но это **не общий игровой Scheduler**. Это scheduler именно для render frame
+и его transient GPU resources; он остаётся специализированным внутренним
+планом, пока верхний `Engine` orchestrates domain systems.
 
-Более того, существующие native и WASM entry points сейчас используют в основном старый прямой путь:
-
-```rust
-renderer.render_scene(...)
-```
+Текущие production render paths используют один и тот же concrete plan-capable
+pipeline:
 
 Native:
 
 ```text
 src/main.rs
-GameApp::about_to_wait
-GameApp::window_event
-render_frame
-Renderer3D::render_scene
+GameApp::render_frame
+RenderWorld::run_frame
+→ RenderExtract
+→ Renderer3D uploads
+→ RenderFrame3D::render / FramePlan
 ```
 
 WASM:
@@ -634,21 +636,23 @@ WASM:
 ```text
 crates/wasm/src/lib.rs
 requestAnimationFrame
-FrameState::draw
-Renderer3D / RenderBackend
+RenderWorld::run_frame
+→ RenderExtract
+→ Renderer3D uploads
+→ RenderFrame3D::render / FramePlan
 ```
 
-`RenderFrame3D` полноценно используется в тестах, benchmark'ах и examples, но **не является пока центральным render pipeline основного native/WASM runtime**.
+`RenderBackend::render_scene` остаётся compatibility/plugin и reference API;
+основные native/WASM loops больше не вызывают этот legacy shortcut и не
+дублируют pass recording logic.
 
 #### Physics Scheduler
 
-Physics Scheduler не использует.
-
-Физика вызывается напрямую:
-
-```rust
-physics.step(delta_time)
-```
+`ornis-physics` сохраняет собственный оптимизированный внутренний pipeline и
+вызывает `BuiltinPhysicsEngine::step(delta_time)` как одну доменную операцию.
+В editor-only режиме этот шаг обёрнут core systems
+`PhysicsSyncIn` → `PhysicsStep` → `PhysicsSyncOut` и исполняется через
+`Engine::run_frame`; native/WASM physics пока не подключены.
 
 В `ornis-physics` есть собственный внутренний pipeline:
 
@@ -754,7 +758,7 @@ struct GameContext {
     renderer3d: Renderer3D,
     frame_plan: RenderFrame3D,
     sphere_mesh,
-    engine: ornis_core::Engine,
+    render_world: ornis_render::RenderWorld,
     remote_cmd_rx,
     remote_ev_tx,
     entity_count,
@@ -763,8 +767,9 @@ struct GameContext {
 
 Это всё ещё минимальный showcase context, но теперь он:
 
-- содержит `ornis_core::Engine` с ECS-компонентами сцены;
-- запускает `RenderExtract` через `Engine::run_frame`;
+- содержит `ornis_render::RenderWorld` (внутри `ornis_core::Engine`) с
+  ECS-компонентами сцены;
+- запускает общий `RenderExtract` через `RenderWorld::run_frame`;
 - хранит wgpu surface/renderer/mesh отдельно как backend-ресурсы;
 - использует `RenderFrame3D`/`FramePlan` для native frame recording;
 - рисует фиксированную showcase-сцену из пяти ECS-сущностей;
@@ -774,41 +779,35 @@ Native rendering уже получает материалы и instances чер�
 проходит через render plan, но полный engine frame contract с physics/input
 ещё не подключён.
 
-##### WASM GpuScene
+##### WASM RenderWorld и GPU adapter
 
-В WASM создаётся отдельная структура:
-
-```rust
-struct GpuScene {
-    mesh,
-    mesh_params,
-    materials,
-    instances,
-    lights,
-}
-```
-
-Она строится из `Scene` / `LiveScene`, полученной через JSON.
-
-Это уже связь:
+В WASM серверный `Scene` / `LiveScene`, полученный через JSON, сначала
+проходит serialization boundary и восстанавливается в общий с native
+library-level `ornis_render::RenderWorld`:
 
 ```text
 EditorWorld
 → /api/scene
-→ WASM
-→ GpuScene
-→ Renderer3D
+→ RenderWorld (Engine + SmartStore + Schedule)
+→ RenderExtracted
+→ Renderer3D / RenderFrame3D
 ```
 
-Но это не общий in-process world. Это:
+Внутренний `GpuScene` WASM теперь содержит только mesh, extracted snapshot
+и light tuples — он не повторяет ECS-to-material/instance conversion.
+`RenderWorld::run_frame` запускает тот же `Engine`/`RenderExtract` контракт,
+а `RenderFrame3D` записывает тот же typed `FramePlan`, что и native.
+
+Это не общий in-process world между сервером и браузером:
 
 ```text
-server-side world
-→ serialized snapshot
-→ browser-side copy
+server-side authoritative world
+→ versioned serialized snapshot
+→ browser-side RenderWorld copy
 ```
 
-Между ними нет общей памяти и нет общей ECS-ссылки.
+Между ними нет общей памяти и общей ECS-ссылки; это намеренная
+serialization boundary из IDEAS §28.
 
 ### 3. Откуда сейчас берёт данные рендеринг?
 
@@ -838,26 +837,27 @@ editor/scene.ron
 Дальше:
 
 ```text
-Scene
-→ build_gpu_scene
-→ materials
-→ instances
-→ lights
+Scene / LiveScene
+→ RenderWorld::replace_scene
+→ Engine::run_frame
+→ RenderExtracted
+→ mesh/material/instance uploads
 → Renderer3D
 ```
 
-Это работает как scene serialization pipeline.
+Это сохраняет scene serialization boundary, но conversion logic живёт в
+`crates/render/src/extraction.rs`, а не в WASM adapter.
 
 #### FramePlan rendering
 
-`RenderFrame3D` получает render-specific pass data и GPU resources. Native
-runtime теперь вызывает его через `Engine::run_frame` после `RenderExtract`:
-ECS-компоненты превращаются в `RenderExtracted`, затем загружаются в
-`Renderer3D` и записываются через `FramePlan`.
+`RenderFrame3D` получает render-specific pass data и GPU resources. Native и
+WASM runtime вызывают его после `RenderWorld::run_frame`/`RenderExtract`:
+ECS-компоненты превращаются в общий `RenderExtracted`, затем загружаются в
+`Renderer3D` и записываются через один и тот же typed `FramePlan`.
 
-WASM пока строит свою GPU-копию из `/api/scene` и вызывает legacy
-`RenderBackend::render_scene`; подключение WASM к общему frame contract
-остаётся следующим шагом.
+`RenderBackend::render_scene` остаётся legacy compatibility path для
+плагинов, тестов и reference probes; production native/WASM loops его не
+вызывают.
 
 ### 4. Откуда сейчас берёт данные физика?
 
@@ -886,9 +886,12 @@ serde scene snapshot. Native runtime пока подключает только 
 
 ### 5. Есть ли общие CPU/GPU данные?
 
-Пока нет единой data model.
+Полной автоматической CPU/GPU data model пока нет, но общий логический
+render input уже существует: `RenderWorld`/`SmartStore` → `RenderExtracted` →
+platform-owned GPU buffers. Физика и GPU residency пока имеют отдельные
+physical representations.
 
-Существуют отдельные механизмы.
+Существуют следующие механизмы.
 
 #### CPU ECS storage
 
@@ -963,8 +966,9 @@ GameApp::resumed
 → request adapter
 → create device/queue
 → create surface
-→ create Renderer3D
-→ create mesh/materials/instances
+→ create Renderer3D + RenderFrame3D
+→ create RenderWorld from `assets/scene.ron`
+→ run initial RenderExtract
 ```
 
 Каждый кадр:
@@ -986,15 +990,14 @@ RedrawRequested
 → present
 ```
 
-В этом цикле уже есть ECS systems execution, render extraction и native
-FramePlan, но пока отсутствуют отдельные стадии:
+В этом цикле уже есть ECS systems execution, общий render extraction и
+native/WASM `FramePlan`, но пока отсутствуют отдельные стадии:
 
 ```text
 pre_update
 input
 fixed_update / physics
 post_update
-WASM FramePlan / common render schedule
 cleanup
 ```
 
@@ -1003,11 +1006,10 @@ cleanup
 - фиксированного physics timestep;
 - accumulator;
 - `delta_time` для gameplay;
-- physics step в native игровом цикле;
-- `FramePlan` в production native/WASM loop;
+- physics step в native и WASM render loops;
 - post-frame systems;
 - frame statistics;
-- deterministic update stage.
+- deterministic cross-domain update stage.
 
 #### Editor-only mode
 
@@ -1044,8 +1046,9 @@ load editor/scene.ron
 start_renderer
 → init WebGPU
 → load scene
-→ create GpuScene
-→ create Renderer
+→ create RenderWorld (Engine + SmartStore + Schedule)
+→ initial Engine::run_frame / RenderExtract
+→ create Renderer3D + RenderFrame3D
 → spawn_render_loop
 → requestAnimationFrame
 ```
@@ -1055,21 +1058,23 @@ start_renderer
 ```text
 resize
 → иногда poll /api/scene
-→ применить live scene
+→ RenderWorld::replace_scene
+→ Engine::run_frame / RenderExtract
+→ upload extracted data
 → update camera
 → acquire surface texture
-→ draw
+→ RenderFrame3D::render / FramePlan
 → present
 → requestAnimationFrame
 ```
 
-Это настоящий render loop, но он:
+Это настоящий render loop с ECS extraction и render plan, но он:
 
-- не вызывает общий Scheduler;
+- не является общим in-process world с сервером — состояние приходит
+  versioned snapshot'ами;
 - не запускает Physics;
-- не запускает ECS systems;
-- получает состояние snapshot'ами;
-- содержит только client-side camera update и rendering.
+- не содержит input/gameplay systems;
+- содержит только client-side camera update и rendering после boundary.
 
 ### Итоговая схема текущего состояния
 
@@ -1091,39 +1096,44 @@ resize
              │ REST/JSON                                 │ GPU upload
              ▼                                           ▼
 ┌────────────────────────┐                 ┌──────────────────────────┐
-│ WASM GpuScene           │                 │ Renderer3D / RenderBackend│
-│ snapshot client         │                 │ direct showcase path      │
-└────────────────────────┘                 └──────────────────────────┘
-
-┌─────────────────────────┐
-│ FramePlan / FrameExecutor│
-│ render-only scheduler    │
-│ tests/examples/benches  │
-└─────────────────────────┘
+│ WASM RenderWorld        │                 │ Native RenderWorld        │
+│ snapshot → Engine       │                 │ assets → Engine           │
+│ → RenderExtract         │                 │ → RenderExtract           │
+└────────────┬───────────┘                 └────────────┬─────────────┘
+             │                                          │
+             └──────────────┬───────────────────────────┘
+                            ▼
+                 ┌──────────────────────────┐
+                 │ Renderer3D + FramePlan    │
+                 │ shared typed pass path    │
+                 └──────────────────────────┘
 ```
 
 То есть:
 
-- **Scheduler есть**, но не является главным scheduler'ом движка;
-- **Render FramePlan есть**, но это отдельный render scheduler;
+- **Core `Engine`/`Schedule` уже исполняется** для подключённых render- и
+  editor-only physics-систем;
+- **Render `FramePlan` остаётся отдельным render scheduler** для lifetime,
+  aliasing и typed pass execution;
 - **Physics подключена как systems в editor-only runtime**;
-- **RenderExtract и native `FramePlan` подключены к native frame loop**;
-- **EditorWorld использует core `World`, но остаётся editor-only facade**;
+- **RenderExtract и `FramePlan` подключены к native и WASM render loops**;
+- **EditorWorld использует core `World`, но остаётся server-side facade**;
 - **Native loop всё ещё showcase loop**, несмотря на ECS-backed extraction;
-- **WASM loop есть**, но это browser render loop;
-- **единый runtime authoritative world ещё не wired для всех доменов**:
-  core `World` используется в native/editor-only частично, а WASM остаётся
-  snapshot-клиентом;
+- **WASM loop — browser-side snapshot client** с собственным `RenderWorld`;
+- **единый authoritative world между server и browser не требуется**:
+  serialization boundary сохраняется по IDEAS §28;
 - **единого CPU/GPU data lifecycle нет**;
-- **полный native/WASM physics/render/ECS кадр не проходит через один schedule**.
+- **полный native/WASM physics/render/ECS кадр не проходит через один
+  cross-domain schedule**.
 
 ### Что нужно сделать, чтобы появилась настоящая единая архитектура
 
 `ornis_core::World` уже существует как логический контейнер
 `Resources` + `SmartStore`, а `ornis_core::Engine` — как минимальный
 backend-neutral frame host с `Time` и `Schedule`. Editor-only physics и
-native `RenderExtract` уже используют этот host. Нужен следующий слой,
-который доведёт интеграцию до общего native/WASM physics/render pipeline:
+native/WASM render extraction уже используют этот host. Нужен следующий
+слой, который доведёт интеграцию до общего cross-domain physics/render/input
+pipeline; serialization boundary server↔browser при этом сохраняется:
 
 ```rust
 pub struct GameRuntime {
@@ -1591,21 +1601,29 @@ Editor command
 ```text
 EditorWorld
 → JSON
-→ отдельный WASM state
+→ отдельный ad-hoc GpuScene conversion
 ```
 
 а такая:
 
 ```text
-Engine World
+Engine World (server authoritative)
 ├── ECS state
 ├── Physics state
 ├── Asset state
 ├── Render extraction state
 └── Editor protocol
+              │ versioned serialization boundary
+              ▼
+Browser RenderWorld (Engine + SmartStore + RenderExtract)
+→ Renderer3D + FramePlan
 ```
 
-Для браузера всё равно останется serialization boundary, если WASM и сервер живут в разных контекстах. Но authoritative state должен быть один — на стороне engine world, а браузер должен получать versioned snapshots/events.
+Для браузера serialization boundary остаётся обязательной, если WASM и
+сервер живут в разных контекстах. Authoritative state находится на стороне
+server engine world; browser-side `RenderWorld` — typed snapshot replica, а
+не второй источник истины. Общими остаются contract и data-flow, но не
+память и не физический solver state.
 
 ### Целевая архитектура
 
@@ -1715,13 +1733,14 @@ FramePlan
 
 1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time` (`crates/core/src/{world.rs,engine.rs}`);
 2. ✅ зарегистрировать в editor-only World `PhysicsRuntime` (Time и SmartStore предоставляет core foundation); input и asset resources ещё впереди;
-3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only runtime; общий native/WASM pipeline ещё впереди;
-4. ✅ добавить backend-neutral `RenderExtract`;
-5. ✅ перевести native showcase loop на `Engine::run_frame` для ECS-backed extraction;
-6. ✅ подключить `RenderFrame3D`/`FramePlan` к native render path; WASM ещё впереди;
-7. перевести WASM loop на тот же frame contract;
-8. добавить `AssetServer` и handles;
-9. только после этого развивать WebSocket, scripting и сложный hot reload.
+3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only runtime; общий native/WASM physics pipeline ещё впереди;
+4. ✅ добавить backend-neutral `RenderExtract` и вынести его в `ornis-render::extraction`;
+5. ✅ перевести native showcase loop на общий `RenderWorld::run_frame` для ECS-backed extraction;
+6. ✅ подключить `RenderFrame3D`/`FramePlan` к native render path;
+7. ✅ перевести WASM loop на тот же `RenderWorld`/`Engine`/`RenderExtract`/`FramePlan` contract после serialization boundary;
+8. добавить input, native/WASM physics systems и полноценный cross-domain runtime;
+9. добавить `AssetServer` и handles;
+10. только после этого развивать WebSocket, scripting и сложный hot reload.
 
 ### Итог
 
