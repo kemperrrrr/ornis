@@ -174,8 +174,7 @@ impl FixedTime {
 
     fn begin_frame(&mut self, frame_delta: f32) -> u32 {
         debug_assert!(frame_delta.is_finite() && frame_delta >= 0.0);
-        let max_accumulator =
-            self.delta_seconds * (self.max_steps_per_frame as f32 + 1.0);
+        let max_accumulator = self.delta_seconds * (self.max_steps_per_frame as f32 + 1.0);
         let available_capacity = max_accumulator - self.accumulator_seconds;
         if frame_delta > available_capacity {
             self.dropped_seconds += f64::from(frame_delta - available_capacity);
@@ -197,8 +196,7 @@ impl FixedTime {
         }
         let steps = available_steps.min(self.max_steps_per_frame);
         let dropped_steps = available_steps.saturating_sub(steps);
-        self.dropped_seconds +=
-            f64::from(dropped_steps) * f64::from(self.delta_seconds);
+        self.dropped_seconds += f64::from(dropped_steps) * f64::from(self.delta_seconds);
         self.accumulator_seconds = remaining + steps as f32 * self.delta_seconds;
         self.steps_this_frame = steps;
         self.current_step = 0;
