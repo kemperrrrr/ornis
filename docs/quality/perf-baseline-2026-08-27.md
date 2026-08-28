@@ -14,11 +14,29 @@
 
 ## Воспроизведение
 
+### Локально
+
 ```bash
 cargo bench -p ornis-core        # ECS storage
 cargo bench -p ornis-physics     # physics step (solver_bench)
 cargo bench -p ornis-render      # frame-plan layout + запись пассов
 cargo bench -p ornis-materialx   # MaterialX parse/convert
+```
+
+### На GitHub Actions
+
+Отдельный performance workflow (`.github/workflows/performance.yml`):
+
+- запускается вручную через `workflow_dispatch`;
+- выполняет `cargo bench -p ornis-physics --bench solver_bench`;
+- сохраняет результаты Criterion в артефакты;
+- публикует краткую сводку в job summary;
+- не влияет на основной Quality gate.
+
+Для 100k тел зонд запускается отдельно:
+
+```bash
+cargo run -p ornis-physics --release --example probe_100k
 ```
 
 ## ECS storage (`crates/core`)

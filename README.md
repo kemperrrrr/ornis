@@ -89,6 +89,16 @@ cargo xtask bca --report      # html to target/bca/index.html
   xtask — единственный источник правды о составе гейта: локально и в CI
   выполняется одна и та же команда.
 
+- **Performance benchmarks** (`.github/workflows/performance.yml`) — отдельный
+  workflow для criterion-бенчмарков, не входящий в основной quality gate:
+  - запуск вручную через `workflow_dispatch` в Actions;
+  - `cargo bench -p ornis-physics --bench solver_bench` — сравнение
+    SweepAndPrune / UniformGrid на 1k и 10k телах;
+  - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
+  - workflow не влияет на основной quality gate;
+  - 100k body зонд запускается вручную: `cargo run -p ornis-physics --release --example probe_100k`;
+  - подробности: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
+
 Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md),
 [`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md)
 и [`docs/quality/bca.md`](docs/quality/bca.md).
