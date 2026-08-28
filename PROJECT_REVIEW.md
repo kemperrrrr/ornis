@@ -219,6 +219,29 @@ benchmark-матрицы 1k/10k/100k тел, большого единого п�
 sparse world, плотных islands и worst-case broadphase. Это выбор broadphase
 backend, а не новый верхний scheduler и не runtime-выбор без измерений.
 
+### Exploratory benchmark (2026-08-28)
+
+По логу отдельного performance workflow (Run ID, CPU/runner metadata и
+`rustc` version не были сохранены) получены следующие центральные оценки
+Criterion:
+
+| Сценарий | Sweep-and-Prune | UniformGrid | Вывод |
+|---|---:|---:|---|
+| 1k тел | 1.4029 µs | 1.4075 µs | практически паритет, около +0.3% для grid |
+| 10k тел | 1.1167 s | 288.58 ms | grid быстрее примерно в 3.87 раза, −74.2% |
+
+Это подтверждает UniformGrid как provisional candidate для текущего
+CPU tiled-floor workload, но не закрывает масштабирование: 288.58 ms на
+10k тел всё ещё значительно выше бюджета 16.7 ms, 100k не измерены, а
+10k-прогон использовал только 10 samples и содержал warning Criterion.
+`Gnuplot not found` не является ошибкой — использован Plotters backend.
+GPU physics в этом прогоне не участвовала: benchmark не включал
+`--features gpu` и не подключал `WgpuContactSolver`.
+
+Следующий измерительный шаг — получить candidate-pair/solver breakdown и
+повторить 100k probe для обоих CPU backend'ов. До этого Sweep-and-Prune
+остаётся default, UniformGrid — opt-in.
+
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
 В [`crates/core/src/dispatcher.rs`](crates/core/src/dispatcher.rs):

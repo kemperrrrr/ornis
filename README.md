@@ -97,7 +97,8 @@ cargo xtask bca --report      # html to target/bca/index.html
   - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
   - workflow не влияет на основной quality gate;
   - 100k body зонд запускается вручную: `cargo run -p ornis-physics --release --example probe_100k`;
-  - подробности: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
+  - exploratory результат 2026-08-28: на 1k тел методы равны в пределах шума, на 10k UniformGrid быстрее примерно в 3.87 раза (288.58 ms против 1.1167 s), но это не полный baseline — metadata runner отсутствует, 100k не измерены;
+  - подробности и ограничения сравнения: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
 
 Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md),
 [`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md)

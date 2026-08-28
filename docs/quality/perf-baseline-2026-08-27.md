@@ -75,6 +75,41 @@ cargo run -p ornis-physics --release --example probe_100k
 | physics_bodies/10000 (сетка на тайловом полу) | 767 ms | тела не успевают уснуть за 30 шагов — бодрствующий шаг |
 | physics_bodies/100000 | **не измерим criterion** — см. находку ниже |
 
+### Exploratory comparison: Sweep-and-Prune vs UniformGrid (2026-08-28)
+
+Ниже зафиксирован результат отдельного performance workflow по логу,
+предоставленному пользователем. Run ID, CPU/runner metadata и версия
+`rustc` в логе отсутствуют, поэтому это **exploratory comparison**, а не
+замена воспроизводимому Apple M1 baseline выше.
+
+Команда:
+
+```bash
+cargo bench -p ornis-physics --bench solver_bench -- --verbose
+```
+
+Центральная оценка Criterion (`time: [low estimate high]`):
+
+| Сценарий | Sweep-and-Prune | UniformGrid | Сравнение |
+|---|---:|---:|---|
+| `physics_bodies/1000` | 1.4029 µs | 1.4075 µs | разница около +0.3% для UniformGrid, в пределах шума |
+| `physics_bodies/10000` | 1.1167 s | 288.58 ms | UniformGrid примерно в 3.87 раза быстрее, −74.2% |
+
+На 1k тел измерения практически равны. На 10k тел UniformGrid
+подтверждает исходную гипотезу для tiled-floor workload, но абсолютное
+время остаётся около 289 ms и всё ещё далеко от бюджета real-time кадра
+16.7 ms. В 10k-прогоне было всего 10 samples, Criterion предупредил о
+длительном сборе, а Sweep-and-Prune получил один outlier; относительный
+вывод нужно повторить с большим числом samples.
+
+`Gnuplot not found` не влияет на измерения: Criterion использовал Plotters
+backend. Этот прогон не включал GPU physics — benchmark использовал обычный
+CPU path без `--features gpu` и без подключения `WgpuContactSolver`.
+
+**Промежуточное решение:** UniformGrid — сильный provisional candidate для
+текущей CPU-сцены, но Sweep-and-Prune остаётся default до профилирования
+candidate pairs/solver и отдельного прогона 100k на обоих backend'ах.
+
 ### Находка: сверхлинейный рост step на 100k тел
 
 Ручной зонд (`crates/physics/examples/probe_100k.rs`, `step` с попешаговым

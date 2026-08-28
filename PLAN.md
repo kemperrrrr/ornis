@@ -373,6 +373,19 @@ sparse/heterogeneous worlds. Production default откладывается до 
 1k/10k/100k тел, giant floor/tiled floor, sparse world, dense islands и
 worst-case broadphase.
 
+**Exploratory benchmark (2026-08-28):** в присланном Criterion-логе UniformGrid
+и Sweep-and-Prune практически равны на 1k тел (1.4075 vs 1.4029 µs), но на
+10k tiled-floor тел UniformGrid быстрее примерно в 3.87 раза (288.58 ms vs
+1.1167 s). Runner/CPU metadata и Run ID отсутствуют; 10k использовал 10
+samples и дал warning о длительном сборе, поэтому результат фиксируется как
+направляющий, не как полный baseline. GPU path в этом прогоне не участвовал.
+Абсолютные 288.58 ms всё ещё не соответствуют real-time бюджету 16.7 ms.
+
+**Следующий benchmark-срез:** измерить broadphase отдельно от solver,
+собрать candidate-pair counts и повторить 100k probe для обоих backend'ов.
+UniformGrid пока остаётся opt-in provisional candidate, а Sweep-and-Prune —
+default до этих измерений.
+
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 
