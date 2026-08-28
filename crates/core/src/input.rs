@@ -63,6 +63,14 @@ impl InputState {
         self.pointer_position = position;
     }
 
+    /// Sets the pointer position without generating movement delta.
+    ///
+    /// Pointer-down adapters should use this to establish a drag anchor so
+    /// the click location itself does not rotate a camera.
+    pub fn set_pointer_anchor(&mut self, position: [f32; 2]) {
+        self.pointer_position = position;
+    }
+
     /// Absolute pointer position from the latest platform event.
     pub fn pointer_position(&self) -> [f32; 2] {
         self.pointer_position
@@ -147,7 +155,7 @@ mod tests {
         let mut input = InputState::new();
         input.set_key(17, true);
         input.set_mouse_button(1, true);
-        input.set_pointer_position([10.0, 20.0]);
+        input.set_pointer_anchor([10.0, 20.0]);
         input.set_pointer_position([13.0, 18.0]);
         input.add_wheel_delta(2.5);
 

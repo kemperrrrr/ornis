@@ -153,7 +153,7 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
         Closure::new(move |e: web_sys::PointerEvent| {
             let mut input = input.borrow_mut();
             input.set_mouse_button(0, true);
-            input.set_pointer_position([e.client_x() as f32, e.client_y() as f32]);
+            input.set_pointer_anchor([e.client_x() as f32, e.client_y() as f32]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
         })

@@ -8,6 +8,8 @@ use editor_backend::RemoteEditor;
 // Only the native-mode loop types the channels explicitly.
 #[cfg(not(feature = "editor-only"))]
 use editor_backend::{GameEvent, UiCommand};
+#[cfg(not(feature = "editor-only"))]
+use engine_runtime::install_physics;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // in native mode nothing calls it yet (the native loop is a counter stub).
@@ -69,8 +71,9 @@ fn main() {
 #[cfg(not(feature = "editor-only"))]
 mod native {
     pub use crossbeam_channel::{Receiver, Sender};
-    pub use glam::Mat4;
+    pub use glam::{Mat4, Vec3};
     pub use ornis_core::InputState;
+    pub use ornis_physics::RigidBody;
     pub use winit::application::ApplicationHandler;
     pub use winit::dpi::PhysicalSize;
     pub use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -238,6 +241,41 @@ impl GameApp {
         let entity_count = scene.entities.len() as u32;
         let orbit = OrbitCamera::from_desc(&scene.camera);
         let mut render_world = RenderWorld::from_scene(&scene);
+        install_physics(render_world.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
+        {
+            let entities = render_world.entities().to_vec();
+            let store = render_world
+                .engine_mut()
+                .world_mut()
+                .store_mut()
+                .expect("render world store");
+            for (index, entity) in entities.into_iter().enumerate() {
+                let description = &scene.entities[index];
+                let radius = match &description.mesh {
+                    ornis_render::scene::MeshDesc::Sphere { radius, .. } => *radius,
+                };
+                let mass = if index == 0 { 1.0 } else { 0.0 };
+                store.insert(
+                    entity,
+                    RigidBody::new_sphere(
+                        Vec3::from_array(description.transform.translation),
+                        radius,
+                        mass,
+                    ),
+                );
+            }
+            // Hidden static floor: it has a physics component but no render
+            // components, so it does not enter RenderExtracted.
+            let floor = store.create_entity();
+            store.insert(
+                floor,
+                RigidBody::new_box(
+                    Vec3::new(0.0, -2.0, 0.0),
+                    Vec3::new(20.0, 1.0, 20.0),
+                    0.0,
+                ),
+            );
+        }
         render_world.run_frame(0.0);
         (render_world, entity_count, orbit)
     }
@@ -483,8 +521,12 @@ impl ApplicationHandler for GameApp {
                     MouseButton::Forward => 4,
                     MouseButton::Other(code) => code.min(u16::from(u8::MAX)) as u8,
                 };
+                let pressed = matches!(state, ElementState::Pressed);
                 Self::update_input(ctx, |input| {
-                    input.set_mouse_button(code, matches!(state, ElementState::Pressed));
+                    if pressed {
+                        input.clear_frame_transients();
+                    }
+                    input.set_mouse_button(code, pressed);
                 });
             }
             WindowEvent::CursorMoved { position, .. } => {

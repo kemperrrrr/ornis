@@ -128,8 +128,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
 | Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; native и WASM render-клиенты используют ECS-backed `RenderWorld`, editor-only facade использует тот же core World; серверный authoritative World и браузер по-прежнему разделены serialization boundary |
-| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only physics подключена; native physics и полный cross-domain runtime ещё впереди |
-| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit и WASM orbit adapters уже записывают input в ресурс, browser gameplay systems ещё впереди |
+| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only и native showcase physics подключены; browser physics и полный cross-domain runtime ещё впереди |
+| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit и WASM orbit adapters записывают input, общий `OrbitCamera` его потребляет; остальные browser gameplay systems ещё впереди |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
@@ -197,8 +197,10 @@ cargo xtask bca --report      # html to target/bca/index.html
 boundary. `InputState` теперь является backend-neutral resource; native
 winit и WASM orbit adapters записывают keyboard, mouse, pointer and wheel
 input, а browser render frame публикует его через `Engine`. Следующий шаг —
-добавить gameplay consumers и physics как доменную систему, а затем собрать
-полноценный cross-domain runtime. Это не означает
+добавить gameplay consumers и расширить fixed-timestep orchestration на
+остальные домены, а затем собрать полноценный cross-domain runtime. Native
+showcase physics уже подключена с bounded 60 Hz accumulator; server/browser
+physics остаётся отдельным вопросом из-за serialization boundary. Это не означает
 немедленно удалять `FramePlan`: он остаётся переходным render/backend-планом.
 
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).
@@ -326,7 +328,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
   - **`step`** по умолчанию делится на 12 подшагов; в каждом подшаге идут интеграция скоростей → broadphase/narrowphase → velocity solve → linear CCD → интеграция позиций → NGS position solve.
   - **Raycast** — t-slab против ориентированного shape AABB с приближённой нормалью. **`shapecast`** — conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
   - `BodyType` dynamic/static/kinematic, `RigidBody` с ориентацией, угловой скоростью и диагональным body-space inertia.
-- Тесты находятся в `engine.rs`, `engine/contacts.rs`, `engine/islands.rs`, `engine/joints.rs` и `gpu.rs`; physics пока не синхронизирована автоматически с ECS `World`.
+- Тесты находятся в `engine.rs`, `engine/contacts.rs`, `engine/islands.rs`, `engine/joints.rs` и `gpu.rs`; editor-only и native showcase используют ECS↔physics sync systems, browser-side physics намеренно не запускается поверх server snapshot.
 
 ### A3. Открытые вопросы для ревью
 1. ~~Рендер: активен ли G-buffer/lighting-путь или только forward?~~ **Закрыто в Фазе 4** — render graph c `Technique` (forward/deferred/hybrid), гибрид == legacy пиксель-в-пиксель.

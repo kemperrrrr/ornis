@@ -95,6 +95,15 @@ impl RenderWorld {
         self.entities.len()
     }
 
+    /// Returns the handles of entities populated from the current scene.
+    ///
+    /// The slice excludes auxiliary entities inserted through
+    /// [`Self::engine_mut`], which lets a platform attach hidden runtime
+    /// components such as physics bodies without changing the render count.
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
     /// Replaces the renderable ECS entities with `scene.entities`.
     ///
     /// Camera, lights and ambient values are intentionally not copied here:

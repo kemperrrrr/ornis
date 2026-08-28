@@ -28,10 +28,17 @@ use ornis_render::{RenderExtracted, install_render_extract};
 /// The builtin solver owns its optimized body array and the map keeps the
 /// association with generational ECS entities. ECS `RigidBody` components are
 /// synchronized at the system boundary rather than exposing physics' internal
-/// vector to other domains.
+/// vector to other domains. The system host accumulates render-frame time and
+/// advances the solver at a bounded fixed 60 Hz timestep.
+const PHYSICS_FIXED_DELTA: f32 = 1.0 / 60.0;
+const PHYSICS_MAX_STEPS_PER_FRAME: u32 = 8;
+const PHYSICS_MAX_ACCUMULATOR: f32 =
+    PHYSICS_FIXED_DELTA * (PHYSICS_MAX_STEPS_PER_FRAME as f32 + 1.0);
+
 pub struct PhysicsRuntime {
     solver: BuiltinPhysicsEngine,
     bindings: HashMap<Entity, BodyHandle>,
+    accumulator: f32,
     changed: bool,
 }
 
@@ -41,6 +48,7 @@ impl PhysicsRuntime {
         Self {
             solver: BuiltinPhysicsEngine::new(gravity),
             bindings: HashMap::new(),
+            accumulator: 0.0,
             changed: false,
         }
     }
@@ -135,8 +143,20 @@ impl PhysicsRuntime {
             })
             .collect();
 
-        if delta_seconds > 0.0 {
-            self.solver.step(delta_seconds);
+        self.accumulator = (self.accumulator + delta_seconds).min(PHYSICS_MAX_ACCUMULATOR);
+        let mut steps = 0;
+        while self.accumulator >= PHYSICS_FIXED_DELTA
+            && steps < PHYSICS_MAX_STEPS_PER_FRAME
+        {
+            self.solver.step(PHYSICS_FIXED_DELTA);
+            self.accumulator -= PHYSICS_FIXED_DELTA;
+            steps += 1;
+        }
+        // A long render hitch must not cause an unbounded catch-up spiral.
+        // Drop excess simulation time after the cap and keep only a fractional
+        // remainder for the next frame.
+        if steps == PHYSICS_MAX_STEPS_PER_FRAME && self.accumulator >= PHYSICS_FIXED_DELTA {
+            self.accumulator %= PHYSICS_FIXED_DELTA;
         }
 
         self.changed |= before.iter().any(|(entity, position, orientation)| {
@@ -184,16 +204,19 @@ impl PhysicsRuntime {
 /// The ECS must contain `RigidBody` and `TransformDesc` lanes for entities
 /// that should participate. The editor registers static rigid bodies for
 /// renderable scene entities; callers can insert dynamic bodies before the
-/// first frame or through their own domain command.
+/// first frame or through their own domain command. The three systems are
+/// prepended in reverse registration order so physics sync-out runs before
+/// any render extraction system already installed in the schedule. The physics
+/// step itself uses the bounded fixed-timestep accumulator above.
 pub fn install_physics(engine: &mut Engine, gravity: Vec3) {
     let _ = engine
         .world_mut()
         .insert(Mutex::new(PhysicsRuntime::new(gravity)));
     engine
         .schedule_mut()
-        .add_system(PhysicsSyncIn)
-        .add_system(PhysicsStep)
-        .add_system(PhysicsSyncOut);
+        .prepend_system(PhysicsSyncOut)
+        .prepend_system(PhysicsStep)
+        .prepend_system(PhysicsSyncIn);
 }
 
 /// ECS → physics synchronization system.
@@ -349,6 +372,51 @@ mod tests {
         let store = engine.world().store().expect("world store");
         let lane = store.read_lane::<TransformDesc>().expect("transform lane");
         assert!(lane.get(entity).expect("entity transform").translation[1] < 0.0);
+    }
+
+    #[test]
+    fn physics_accumulator_runs_fixed_steps_after_partial_frames() {
+        let mut engine = Engine::new();
+        let entity = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, dynamic_body(Vec3::ZERO));
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, transform(Vec3::ZERO));
+        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
+
+        engine.run_frame(PHYSICS_FIXED_DELTA * 0.51);
+        let halfway = engine
+            .world()
+            .store()
+            .expect("world store")
+            .read_lane::<TransformDesc>()
+            .expect("transform lane")
+            .get(entity)
+            .expect("entity transform")
+            .translation[1];
+        assert_eq!(halfway, 0.0);
+
+        engine.run_frame(PHYSICS_FIXED_DELTA * 0.51);
+        let after_step = engine
+            .world()
+            .store()
+            .expect("world store")
+            .read_lane::<TransformDesc>()
+            .expect("transform lane")
+            .get(entity)
+            .expect("entity transform")
+            .translation[1];
+        assert!(after_step < 0.0);
     }
 
     #[test]
@@ -515,6 +583,66 @@ mod tests {
         assert_eq!(
             extracted.instances[0].model_matrix.w_axis.truncate(),
             Vec3::new(1.0, 2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn physics_sync_out_precedes_render_extraction_in_shared_schedule() {
+        let mut engine = Engine::new();
+        let entity = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, dynamic_body(Vec3::ZERO));
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, transform(Vec3::ZERO));
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MeshDesc::Sphere {
+                radius: 0.5,
+                segments: 16,
+                rings: 8,
+            },
+        );
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MaterialDesc::Dielectric {
+                base_color: [0.5, 0.5, 0.5],
+                roughness: 0.5,
+            },
+        );
+        install_render_extract(&mut engine);
+        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
+
+        engine.run_frame(1.0 / 60.0);
+
+        let transform = engine
+            .world()
+            .store()
+            .expect("world store")
+            .read_lane::<TransformDesc>()
+            .expect("transform lane")
+            .get(entity)
+            .expect("entity transform");
+        assert!(transform.translation[1] < 0.0);
+        let extracted = engine
+            .world()
+            .resources()
+            .get::<Mutex<RenderExtracted>>()
+            .expect("render extraction resource")
+            .lock()
+            .expect("render extraction lock");
+        assert_eq!(
+            extracted.instances[0].model_matrix.w_axis.truncate().y,
+            transform.translation[1]
         );
     }
 
