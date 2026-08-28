@@ -4,11 +4,12 @@ use glam::{Quat, Vec3};
 use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::broadphase::{BroadPhase, BroadPhaseBackend, BroadPhaseKind};
 use crate::distance;
 #[cfg(feature = "gpu")]
 use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
-use crate::math::{AABB, Ray, RaycastHit};
+use crate::math::{Ray, RaycastHit};
 use crate::shape::Shape;
 use crate::trigger::{TriggerEvent, TriggerEventKind};
 use crate::wide::{SolverStep, build_solver_steps};
@@ -624,709 +625,6 @@ fn commit_active_set(
     }
 }
 
-fn compute_aabb(body: &RigidBody) -> AABB {
-    body.shape.aabb(body.position, body.orientation)
-}
-
-/// Detect actual (not speculative) overlaps for pairs containing a trigger.
-///
-/// Trigger geometry uses the exact distance oracle rather than the contact
-/// margin: a nearby but non-overlapping body must not emit `Entered`. The
-/// broadphase has already applied the mutual layer masks, so this pass only
-/// performs the shape-level check.
-fn detect_trigger_overlaps(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<(usize, usize)> {
-    let mut overlaps = Vec::new();
-    for &(i, j) in active {
-        let a = &bodies[i];
-        let b = &bodies[j];
-        if !(a.is_trigger || b.is_trigger) || !a.can_collide_with(b) {
-            continue;
-        }
-        let distance = distance::shape_distance(
-            distance::ShapeRef {
-                shape: &a.shape,
-                pos: a.position,
-                rot: a.orientation,
-            },
-            distance::ShapeRef {
-                shape: &b.shape,
-                pos: b.position,
-                rot: b.orientation,
-            },
-        );
-        if distance.dist <= 0.0 {
-            overlaps.push((i, j));
-        }
-    }
-    overlaps
-}
-
-/// Reconcile the current overlap set with the previous step and queue sorted
-/// enter/exit events. Sorting keeps event order independent of broadphase
-/// sweep-axis rotation and hash-set iteration order.
-fn update_trigger_events(
-    previous: &HashSet<(usize, usize)>,
-    current: Vec<(usize, usize)>,
-    events: &mut Vec<TriggerEvent>,
-) -> HashSet<(usize, usize)> {
-    let current_set: HashSet<(usize, usize)> = current.into_iter().collect();
-    let mut entered: Vec<_> = current_set.difference(previous).copied().collect();
-    let mut exited: Vec<_> = previous.difference(&current_set).copied().collect();
-    entered.sort_unstable();
-    exited.sort_unstable();
-    events.extend(entered.into_iter().map(|(body_a, body_b)| TriggerEvent {
-        body_a,
-        body_b,
-        kind: TriggerEventKind::Entered,
-    }));
-    events.extend(exited.into_iter().map(|(body_a, body_b)| TriggerEvent {
-        body_a,
-        body_b,
-        kind: TriggerEventKind::Exited,
-    }));
-    current_set
-}
-
-// ---- Narrow-phase: world-frame analytic contact tests (oriented shapes) ----
-
-/// Sphere-sphere. `margin` (G6 speculative): pairs separated by less than
-/// the margin still report a contact with NEGATIVE penetration (= the gap),
-/// so the solver can stop approach before any overlap exists.
-fn sphere_vs_sphere(
-    pos_a: Vec3,
-    radius_a: f32,
-    pos_b: Vec3,
-    radius_b: f32,
-    margin: f32,
-) -> Option<Contact> {
-    let diff = pos_b - pos_a;
-    let dist_sq = diff.length_squared();
-    let radius_sum = radius_a + radius_b + margin;
-    if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
-        return None;
-    }
-    let dist = dist_sq.sqrt();
-    let normal = diff / dist;
-    let penetration = radius_sum - dist - margin;
-    Some(Contact {
-        normal,
-        penetration,
-        contact_point: pos_a + normal * (radius_a - penetration * 0.5),
-    })
-}
-
-/// Sphere vs an oriented box (OBB), resolved in the box's local frame.
-/// `margin`: speculative contact distance (see sphere_vs_sphere).
-fn sphere_vs_obb(
-    sphere_pos: Vec3,
-    sphere_radius: f32,
-    box_pos: Vec3,
-    half_extents: Vec3,
-    box_rot: Quat,
-    margin: f32,
-) -> Option<Contact> {
-    let local = box_rot.inverse() * (sphere_pos - box_pos);
-    let clamped = local.clamp(-half_extents, half_extents);
-    let delta = clamped - local;
-    let dist_sq = delta.length_squared();
-    let reach = sphere_radius + margin;
-    if dist_sq > reach * reach || dist_sq < 1e-10 {
-        return None;
-    }
-    let dist = dist_sq.sqrt();
-    // Normal points from the box toward the sphere, in world space.
-    let normal = box_rot * (delta / dist);
-    let penetration = sphere_radius - dist;
-    // Contact point: where the sphere touches the box (midway on the normal).
-    let contact_point = (local + clamped) * 0.5;
-    Some(Contact {
-        normal,
-        penetration,
-        contact_point: box_pos + box_rot * contact_point,
-    })
-}
-
-/// Axis used for the OBB overlap test: returns `radius_a + radius_b - separation`.
-#[allow(clippy::too_many_arguments)]
-fn obb_overlap_on(
-    pos_a: Vec3,
-    half_a: Vec3,
-    rot_a: Quat,
-    pos_b: Vec3,
-    half_b: Vec3,
-    rot_b: Quat,
-    axis: Vec3,
-) -> f32 {
-    let aa = rot_a * Vec3::X;
-    let ab = rot_a * Vec3::Y;
-    let ac = rot_a * Vec3::Z;
-    let ba = rot_b * Vec3::X;
-    let bb = rot_b * Vec3::Y;
-    let bc = rot_b * Vec3::Z;
-    let ra = half_a.x * axis.dot(aa).abs()
-        + half_a.y * axis.dot(ab).abs()
-        + half_a.z * axis.dot(ac).abs();
-    let rb = half_b.x * axis.dot(ba).abs()
-        + half_b.y * axis.dot(bb).abs()
-        + half_b.z * axis.dot(bc).abs();
-    let center_dist = (pos_b - pos_a).dot(axis);
-    ra + rb - center_dist.abs()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn obb_sat(
-    pos_a: Vec3,
-    half_a: Vec3,
-    rot_a: Quat,
-    pos_b: Vec3,
-    half_b: Vec3,
-    rot_b: Quat,
-    margin: f32,
-) -> Option<(Vec3, f32)> {
-    // SAT: the 3 face normals of each box plus the cross products of their axes.
-    let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
-    let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
-
-    // Face normals first; an edge-edge axis may replace a face axis only if
-    // it beats it by a margin. Otherwise micro-tilts at face contacts make
-    // SAT pick noisy cross-product axes and the normal flickers.
-    const FACE_PREFERENCE: f32 = 1e-3;
-
-    let mut best_overlap = f32::MAX;
-    let mut best_axis = Vec3::X;
-
-    for u in aa.into_iter().chain(ba) {
-        let overlap = obb_overlap_on(pos_a, half_a, rot_a, pos_b, half_b, rot_b, u);
-        // Separated along any axis by more than the speculative margin -> no
-        // contact. Within the margin the pair still reports as touching
-        // (negative overlap = gap): the manifold never blinks off for a
-        // substep, and fast pairs get speculative constraints (G6).
-        if overlap <= -margin {
-            return None;
-        }
-        if overlap < best_overlap {
-            best_overlap = overlap;
-            best_axis = u;
-        }
-    }
-    for ai in &aa {
-        for bi in &ba {
-            let c = ai.cross(*bi);
-            // Near-parallel edge pairs give a numerically noisy axis; the
-            // face axes cover that case. A too-small threshold here lets
-            // float noise produce false "separated" verdicts on micro-tilts
-            // and the manifold blinks on/off — a warm-start energy pump.
-            if c.length() < 1e-3 {
-                continue;
-            }
-            let u = c.normalize();
-            let overlap = obb_overlap_on(pos_a, half_a, rot_a, pos_b, half_b, rot_b, u);
-            if overlap <= -margin {
-                return None;
-            }
-            if overlap < best_overlap - FACE_PREFERENCE {
-                best_overlap = overlap;
-                best_axis = u;
-            }
-        }
-    }
-
-    // Orient the normal so it points from A to B.
-    let normal = if best_axis.dot(pos_b - pos_a) < 0.0 {
-        -best_axis
-    } else {
-        best_axis
-    };
-    Some((normal, best_overlap))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn box_vs_box(
-    pos_a: Vec3,
-    half_a: Vec3,
-    rot_a: Quat,
-    pos_b: Vec3,
-    half_b: Vec3,
-    rot_b: Quat,
-    margin: f32,
-) -> Option<Contact> {
-    let (normal, penetration) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)?;
-    Some(Contact {
-        normal,
-        penetration,
-        contact_point: (pos_a + pos_b) * 0.5,
-    })
-}
-
-/// Eight world-space corners of an oriented box.
-fn obb_corners(pos: Vec3, half: Vec3, rot: Quat) -> [Vec3; 8] {
-    let x = rot * (Vec3::X * half.x);
-    let y = rot * (Vec3::Y * half.y);
-    let z = rot * (Vec3::Z * half.z);
-    [
-        pos + x + y + z,
-        pos + x + y - z,
-        pos + x - y + z,
-        pos + x - y - z,
-        pos - x + y + z,
-        pos - x + y - z,
-        pos - x - y + z,
-        pos - x - y - z,
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn box_manifold(
-    pos_a: Vec3,
-    half_a: Vec3,
-    rot_a: Quat,
-    pos_b: Vec3,
-    half_b: Vec3,
-    rot_b: Quat,
-    margin: f32,
-) -> Option<Manifold> {
-    let (n, _pen) = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)?;
-
-    let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
-    let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
-
-    // Half-width of each box projected onto the contact normal.
-    let hwn_a = half_a.x * aa[0].dot(n).abs()
-        + half_a.y * aa[1].dot(n).abs()
-        + half_a.z * aa[2].dot(n).abs();
-    let hwn_b = half_b.x * ba[0].dot(n).abs()
-        + half_b.y * ba[1].dot(n).abs()
-        + half_b.z * ba[2].dot(n).abs();
-
-    // Contact-region tolerance: a corner counts as touching the opposing face
-    // when it is within this distance along the (negated) contact normal.
-    // G6: this is the pair's speculative margin (base + approach speed · dt),
-    // so fast pairs generate constraints BEFORE any overlap exists; points
-    // then carry negative penetration (= the remaining gap).
-    let depth_tol = margin;
-    // Tangential slack beyond the face rectangle: corners slightly outside the
-    // face edge (micro-tilts at face contacts) must still generate points,
-    // otherwise the manifold collapses to the single-point fallback and the
-    // body starts rocking on a corner.
-    let tangent_slack = 0.05;
-
-    // B's corners touching A's face (the face most anti-parallel to `n`),
-    // then A's corners touching B's face.
-    let mut cand: Vec<(Vec3, f32)> = Vec::new();
-    cand.extend(collect_face_corners(
-        &obb_corners(pos_b, half_b, rot_b),
-        &FaceProbe {
-            pos: pos_a,
-            half: half_a,
-            rot: rot_a,
-            hwn: hwn_a,
-            dir: n,
-            depth_tol,
-            slack: tangent_slack,
-        },
-    ));
-    cand.extend(collect_face_corners(
-        &obb_corners(pos_a, half_a, rot_a),
-        &FaceProbe {
-            pos: pos_b,
-            half: half_b,
-            rot: rot_b,
-            hwn: hwn_b,
-            dir: -n,
-            depth_tol,
-            slack: tangent_slack,
-        },
-    ));
-
-    // Deduplicate in the tangent plane, then keep the deepest four points.
-    let mut uniq = dedupe_contact_points(cand, n);
-    uniq.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut points = [ManifoldPoint {
-        world_point: Vec3::ZERO,
-        penetration: 0.0,
-    }; 4];
-    let mut count = 0;
-    for (p, d) in uniq.into_iter().take(4) {
-        // Speculative points keep their NEGATIVE depth (= the gap); the
-        // velocity solver turns it into an approach-speed limit (G6).
-        points[count] = ManifoldPoint {
-            world_point: p,
-            penetration: d,
-        };
-        count += 1;
-    }
-
-    if count == 0 {
-        return box_vs_box(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)
-            .map(|c| Manifold::single(0, 0, c));
-    }
-    Some(Manifold {
-        body_a: 0,
-        body_b: 0,
-        normal: n,
-        point_count: count,
-        points,
-    })
-}
-
-/// One opposing face of an OBB to test the other box's corners against.
-struct FaceProbe {
-    pos: Vec3,
-    half: Vec3,
-    rot: Quat,
-    /// Half-width of the probed face's box along the contact normal.
-    hwn: f32,
-    /// Direction pointing INTO the face along the contact normal.
-    dir: Vec3,
-    depth_tol: f32,
-    slack: f32,
-}
-
-/// Collect the corners of one box that touch the probed face of the other:
-/// depth along the normal within tolerance AND tangential containment inside
-/// the face rectangle (with slack).
-fn collect_face_corners(corners: &[Vec3; 8], probe: &FaceProbe) -> Vec<(Vec3, f32)> {
-    let mut out: Vec<(Vec3, f32)> = Vec::new();
-    for c in corners {
-        let local = probe.rot.inverse() * (*c - probe.pos);
-        // Depth of the corner relative to the surface along the normal.
-        let d = probe.hwn - (*c - probe.pos).dot(probe.dir);
-        if d < -probe.depth_tol {
-            continue;
-        }
-        if local.x.abs() <= probe.half.x + probe.slack
-            && local.y.abs() <= probe.half.y + probe.slack
-            && local.z.abs() <= probe.half.z + probe.slack
-        {
-            out.push((*c, d));
-        }
-    }
-    out
-}
-
-/// Merge near-coincident contact candidates in the tangent plane: the same
-/// contact region appears once from each box's corners, offset along the
-/// normal by the penetration depth. Keep the deeper representative — a stable
-/// 4-point manifold instead of a flickering mix.
-fn dedupe_contact_points(cand: Vec<(Vec3, f32)>, n: Vec3) -> Vec<(Vec3, f32)> {
-    let mut uniq: Vec<(Vec3, f32)> = Vec::new();
-    for (p, d) in cand {
-        let mut merged = false;
-        for (q, qd) in uniq.iter_mut() {
-            let tangential = (p - *q) - n * (p - *q).dot(n);
-            // 5 cm: near-coincident points make the constraint system
-            // near-singular and PGS oscillates into runaway impulses.
-            if tangential.length() < 0.05 {
-                if d > *qd {
-                    *q = p;
-                    *qd = d;
-                }
-                merged = true;
-                break;
-            }
-        }
-        if !merged {
-            uniq.push((p, d));
-        }
-    }
-    uniq
-}
-
-/// Sphere vs an oriented capsule: closest point on the capsule's segment.
-#[allow(clippy::too_many_arguments)]
-fn sphere_vs_capsule(
-    sphere_pos: Vec3,
-    sphere_radius: f32,
-    cap_pos: Vec3,
-    cap_radius: f32,
-    cap_half_height: f32,
-    cap_rot: Quat,
-    margin: f32,
-) -> Option<Contact> {
-    let axis = cap_rot * Vec3::Y;
-    let bottom = cap_pos - axis * cap_half_height;
-    let seg = axis * (2.0 * cap_half_height);
-    let t = (sphere_pos - bottom).dot(seg) / seg.length_squared();
-    let t = t.clamp(0.0, 1.0);
-    let closest = bottom + seg * t;
-    let to_sphere = sphere_pos - closest;
-    let d = to_sphere.length();
-    let rr = cap_radius + sphere_radius + margin;
-    if d >= rr || d < 1e-10 {
-        return None;
-    }
-    // Normal points from the capsule toward the sphere.
-    let n = to_sphere / d;
-    let penetration = rr - d - margin;
-    let contact_point = closest + n * (cap_radius - penetration * 0.5);
-    Some(Contact {
-        normal: n,
-        penetration,
-        contact_point,
-    })
-}
-
-/// Capsule collision parameters (keeps `capsule_vs_capsule` within the bca
-/// argument-count limit).
-struct CapsuleShape {
-    pos: Vec3,
-    radius: f32,
-    half_height: f32,
-    rot: Quat,
-}
-
-/// Capsule-capsule: both segment axes are rotated by the body orientation.
-fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option<Contact> {
-    let ax = a.rot * Vec3::Y;
-    let bx = b.rot * Vec3::Y;
-    let bot_a = a.pos - ax * a.half_height;
-    let bot_b = b.pos - bx * b.half_height;
-
-    let seg_a = ax * (2.0 * a.half_height);
-    let seg_b = bx * (2.0 * b.half_height);
-    let diff = bot_b - bot_a;
-    let q = seg_a.dot(seg_a);
-    let r = seg_a.dot(seg_b);
-    let c = seg_b.dot(seg_b);
-    let d = seg_a.dot(diff);
-    let e = seg_b.dot(diff);
-    let det = q * c - r * r;
-
-    let (t_a, t_b) = if det.abs() < 1e-10 {
-        (0.0, if c > 0.0 { e / c } else { 0.0 })
-    } else {
-        ((r * e - c * d) / det, (q * e - r * d) / det)
-    };
-    let t_a = clamp01(t_a);
-    let t_b = clamp01(t_b);
-
-    let closest_a = bot_a + seg_a * t_a;
-    let closest_b = bot_b + seg_b * t_b;
-    let diff2 = closest_b - closest_a;
-    let dist_sq = diff2.length_squared();
-    let radius_sum = a.radius + b.radius + margin;
-    if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
-        return None;
-    }
-    let dist = dist_sq.sqrt();
-    let normal = diff2 / dist;
-    let penetration = radius_sum - dist - margin;
-    Some(Contact {
-        normal,
-        penetration,
-        contact_point: (closest_a + closest_b) * 0.5,
-    })
-}
-
-/// Narrow phase over the broadphase pair list. G6: every pair gets a
-/// speculative contact margin = base + approach speed · sub_dt, so contacts
-/// exist BEFORE overlap; the velocity solver then caps the approach speed
-/// to the remaining gap instead of letting the bodies interpenetrate.
-fn detect_collisions(
-    bodies: &[RigidBody],
-    active: &[(usize, usize)],
-    asleep: &[bool],
-    sub_dt: f32,
-) -> Vec<Manifold> {
-    /// Base speculative margin (m): also the AABB inflation used by the
-    /// broadphase, so pairs within it are guaranteed to reach narrow phase.
-    const SPEC_BASE: f32 = 0.05;
-    let mut manifolds = Vec::new();
-    for &(i, j) in active {
-        let a = &bodies[i];
-        let b = &bodies[j];
-        if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
-            continue;
-        }
-        if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
-            continue;
-        }
-        // G7: both-asleep pairs are frozen in place — their relative geometry
-        // cannot change, so re-running the narrow phase (SAT!) per substep is
-        // pure waste. On a settled scene this IS the frame cost. The island
-        // graph keeps them composed via the frozen-asleep union instead.
-        if asleep[i] && asleep[j] {
-            continue;
-        }
-        let rel_speed = (a.velocity - b.velocity).length();
-        let margin = SPEC_BASE + rel_speed * sub_dt;
-
-        let manifold = match (&a.shape, &b.shape) {
-            (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_sphere(a.position, ra, b.position, rb, margin)
-                    .map(|c| Manifold::single(i, j, c))
-            }
-            (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
-                sphere_vs_obb(a.position, ra, b.position, hb, b.orientation, margin)
-                    .map(|c| Manifold::single(i, j, c))
-            }
-            (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
-                sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(|c| {
-                    Manifold::single(
-                        i,
-                        j,
-                        Contact {
-                            normal: -c.normal,
-                            penetration: c.penetration,
-                            contact_point: c.contact_point,
-                        },
-                    )
-                })
-            }
-            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => box_manifold(
-                a.position,
-                ha,
-                a.orientation,
-                b.position,
-                hb,
-                b.orientation,
-                margin,
-            ),
-            (
-                &Shape::Capsule {
-                    radius: ra,
-                    half_height: ha,
-                },
-                &Shape::Capsule {
-                    radius: rb,
-                    half_height: hb,
-                },
-            ) => capsule_vs_capsule(
-                &CapsuleShape {
-                    pos: a.position,
-                    radius: ra,
-                    half_height: ha,
-                    rot: a.orientation,
-                },
-                &CapsuleShape {
-                    pos: b.position,
-                    radius: rb,
-                    half_height: hb,
-                    rot: b.orientation,
-                },
-                margin,
-            )
-            .map(|c| Manifold::single(i, j, c)),
-            (
-                &Shape::Sphere { radius: r },
-                &Shape::Capsule {
-                    radius: cr,
-                    half_height: hh,
-                },
-            ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
-                .map(|c| Manifold::single(i, j, c)),
-            (
-                &Shape::Capsule {
-                    radius: cr,
-                    half_height: hh,
-                },
-                &Shape::Sphere { radius: r },
-            ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(
-                |c| {
-                    Manifold::single(
-                        i,
-                        j,
-                        Contact {
-                            normal: -c.normal,
-                            penetration: c.penetration,
-                            contact_point: c.contact_point,
-                        },
-                    )
-                },
-            ),
-            _ => None,
-        };
-
-        if let Some(mut m) = manifold {
-            m.body_a = i;
-            m.body_b = j;
-            manifolds.push(m);
-        }
-    }
-    manifolds
-}
-
-struct SweepAndPrune {
-    aabbs: Vec<AABB>,
-    active: Vec<(usize, usize)>,
-    sort_axis: usize,
-}
-
-impl SweepAndPrune {
-    fn new() -> Self {
-        Self {
-            aabbs: Vec::new(),
-            active: Vec::new(),
-            sort_axis: 0,
-        }
-    }
-
-    /// Rebuild AABBs and the active pair list. G6: dynamic bodies get a
-    /// SWEPT AABB (extended by this substep's displacement) and everything
-    /// is inflated by half the base speculative margin — a fast pair must
-    /// reach the narrow phase before its shapes can interpenetrate.
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
-        const HALF_SPEC_MARGIN: f32 = 0.025; // SPEC_BASE / 2 in detect_collisions
-        self.aabbs = bodies
-            .iter()
-            .map(|b| {
-                let mut aabb = compute_aabb(b);
-                if b.body_type == BodyType::Dynamic {
-                    let d = b.velocity * sub_dt;
-                    aabb.expand(aabb.min + d);
-                    aabb.expand(aabb.max + d);
-                }
-                let m = Vec3::splat(HALF_SPEC_MARGIN);
-                aabb.expand(aabb.min - m);
-                aabb.expand(aabb.max + m);
-                aabb
-            })
-            .collect();
-        self.sort_axis = (self.sort_axis + 1) % 3;
-        self.active.clear();
-
-        let n = self.aabbs.len();
-        let mut starts: Vec<(f32, usize)> = self
-            .aabbs
-            .iter()
-            .enumerate()
-            .map(|(i, aabb)| match self.sort_axis {
-                0 => (aabb.min.x, i),
-                1 => (aabb.min.y, i),
-                _ => (aabb.min.z, i),
-            })
-            .collect();
-        starts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        for sweep_pos in 0..n {
-            let i = starts[sweep_pos].1;
-            let sweep_aabb = &self.aabbs[i];
-            let end = match self.sort_axis {
-                0 => sweep_aabb.max.x,
-                1 => sweep_aabb.max.y,
-                _ => sweep_aabb.max.z,
-            };
-            for &(_pos, j) in &starts[(sweep_pos + 1)..] {
-                let start_j = match self.sort_axis {
-                    0 => self.aabbs[j].min.x,
-                    1 => self.aabbs[j].min.y,
-                    _ => self.aabbs[j].min.z,
-                };
-                if start_j > end {
-                    break;
-                }
-                if i < j
-                    && bodies[i].can_collide_with(&bodies[j])
-                    && sweep_aabb.overlaps(&self.aabbs[j])
-                {
-                    self.active.push((i, j));
-                }
-            }
-        }
-    }
-}
-
 /// Cached contact point for warm starting (G2b): world-space point plus the
 /// accumulated normal impulse from the previous substep.
 #[derive(Clone, Copy, Debug)]
@@ -1418,9 +716,11 @@ mod contacts;
 mod islands;
 mod joints;
 
-/// The CPU reference physics engine: sequential-impulse solver with sweep-and-
-/// prune broadphase, manifold generation, island-coherent sleeping, warm-started
-/// contacts and joints, and optional SIMD-wide / GPU contact solving.
+/// The CPU reference physics engine: sequential-impulse solver with a
+/// selectable broadphase, manifold generation, island-coherent sleeping,
+/// warm-started contacts and joints, and optional SIMD-wide / GPU contact
+/// solving. Sweep-and-Prune is the default; UniformGrid is opt-in while its
+/// workload tradeoffs are benchmarked.
 ///
 /// Step pipeline per [`PhysicsEngine::step`]: rebuild AABBs and broadphase
 /// pairs → narrowphase manifolds → union-find islands (contacts + joints) →
@@ -1429,7 +729,7 @@ mod joints;
 /// sleep as a whole island and wake together.
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
-    broadphase: SweepAndPrune,
+    broadphase: BroadPhaseBackend,
     gravity: Vec3,
     substeps: u32,
     velocity_iterations: u32,
@@ -1480,7 +780,7 @@ impl BuiltinPhysicsEngine {
     pub fn new(gravity: Vec3) -> Self {
         Self {
             bodies: Vec::new(),
-            broadphase: SweepAndPrune::new(),
+            broadphase: BroadPhaseBackend::new(BroadPhaseKind::SweepAndPrune),
             gravity,
             substeps: 12,
             velocity_iterations: 8,
@@ -1499,6 +799,24 @@ impl BuiltinPhysicsEngine {
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
+    }
+
+    /// Select the broadphase candidate-pair backend.
+    ///
+    /// The default is [`BroadPhaseKind::SweepAndPrune`].
+    /// [`BroadPhaseKind::UniformGrid`] is an opt-in experimental backend
+    /// with a fixed default cell size; compare both through the physics
+    /// benchmarks before choosing a production default.
+    pub fn set_broadphase(&mut self, kind: BroadPhaseKind) {
+        if self.broadphase.kind() != kind {
+            self.broadphase = BroadPhaseBackend::new(kind);
+            self.warm_impulses.clear();
+        }
+    }
+
+    /// Returns the currently selected broadphase backend.
+    pub fn broadphase_kind(&self) -> BroadPhaseKind {
+        self.broadphase.kind()
     }
 
     /// Toggle the G7 SIMD-wide contact solver (default: enabled). Disabling
@@ -2184,11 +1502,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // Jointed pairs never collide: their parts legitimately sweep
             // through each other's space (a hinge pin passes through the arm).
             let manifolds = if self.joint_pairs.is_empty() {
-                detect_collisions(&self.bodies, &self.broadphase.active, &self.asleep, sub_dt)
+                detect_collisions(&self.bodies, self.broadphase.active(), &self.asleep, sub_dt)
             } else {
                 let pairs: Vec<(usize, usize)> = self
                     .broadphase
-                    .active
+                    .active()
                     .iter()
                     .copied()
                     .filter(|p| !self.joint_pairs.contains(p))
@@ -2219,7 +1537,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // describe the state visible after this whole physics step, not the
         // state from before the final substep's integration.
         self.broadphase.update(&self.bodies, 0.0);
-        let current_triggers = detect_trigger_overlaps(&self.bodies, &self.broadphase.active);
+        let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
         let previous_triggers = std::mem::take(&mut self.trigger_pairs);
         self.trigger_pairs = update_trigger_events(
             &previous_triggers,
@@ -2431,6 +1749,16 @@ mod tests {
         physics.step(1.0 / 60.0);
         let body = physics.get_body(ground).unwrap();
         assert_eq!(body.position.y, -1.0);
+    }
+
+    #[test]
+    fn broadphase_backend_can_be_selected_explicitly() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
+        physics.set_broadphase(BroadPhaseKind::UniformGrid);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
+        physics.set_broadphase(BroadPhaseKind::SweepAndPrune);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
     }
 
     #[test]

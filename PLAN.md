@@ -365,12 +365,13 @@ box/capsule с binary search первого sampled impact; fully analytic
 swept-volume TOI остаётся дальнейшим улучшением.
 
 **Broadphase decision boundary (2026-08-28):** текущий Sweep-and-Prune
-остаётся baseline/fallback. Первый кандидат для benchmark-прототипа —
-deterministic uniform grid/spatial hash со static/dynamic split и разбиением
-крупной static геометрии по регионам; layer/mask фильтруются до narrowphase.
-Dynamic AABB tree рассматривается вторым кандидатом для sparse/heterogeneous
-worlds. Production-выбор откладывается до матрицы 1k/10k/100k тел, giant
-floor/tiled floor, sparse world, dense islands и worst-case broadphase.
+остаётся default baseline/fallback. В коде появился opt-in
+`BroadPhaseKind::UniformGrid`: deterministic grid candidate pairs,
+static/dynamic cell decomposition, large-body escape path и layer/mask
+filtering до narrowphase. Dynamic AABB tree остаётся вторым кандидатом для
+sparse/heterogeneous worlds. Production default откладывается до матрицы
+1k/10k/100k тел, giant floor/tiled floor, sparse world, dense islands и
+worst-case broadphase.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

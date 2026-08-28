@@ -206,18 +206,18 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 
 ### Решение по следующему broadphase (срез 2026-08-28)
 
-Конкретный production backend пока не выбран. В качестве первого
-эксперимента рекомендуется deterministic **uniform grid/spatial hash** с
-разделением static и dynamic геометрии: крупные static AABB (например, пол)
-должны раскладываться по регионам/ячейкам, а collision layer/mask —
-отбрасывать пары до narrowphase. Текущий Sweep-and-Prune остаётся baseline и
-fallback для сравнения.
+Конкретный production default пока не выбран. В коде уже есть opt-in
+экспериментальный `BroadPhaseKind::UniformGrid` с deterministic candidate
+pairs, static/dynamic-friendly cell decomposition и large-body escape path;
+крупные static AABB (например, пол) не обязаны порождать одну пару со всеми
+телами через линейный axis sweep. `Sweep-and-Prune` остаётся default
+baseline/fallback для сравнения.
 
 **Dynamic AABB tree** остаётся вторым кандидатом для разреженных миров с
-сильно различающимися размерами тел. Выбор не фиксируется до benchmark-матрицы
-1k/10k/100k тел, большого единого пола, tiled floor, sparse world, плотных
-islands и worst-case broadphase. Это выбор broadphase backend, а не новый
-верхний scheduler и не runtime-выбор без измерений.
+сильно различающимися размерами тел. Выбор default не фиксируется до
+benchmark-матрицы 1k/10k/100k тел, большого единого пола, tiled floor,
+sparse world, плотных islands и worst-case broadphase. Это выбор broadphase
+backend, а не новый верхний scheduler и не runtime-выбор без измерений.
 
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 

@@ -322,7 +322,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 #### Что есть в коде
 - **Трейт `PhysicsEngine`** (Send+Sync): `step`, `add_body`/`remove_body`/`get_body(_mut)`, `raycast`, `shapecast` — точка подключения внешних движков (Rapier/Jolt за тем же трейтом).
 - **`BuiltinPhysicsEngine`** (`engine.rs`):
-  - **Sweep-and-Prune** широкофазный: swept AABB для движущихся тел, сортировка по сменяющейся оси (x→y→z), active-пары.
+  - **Broadphase**: `Sweep-and-Prune` остаётся default baseline с swept AABB и сортировкой по сменяющейся оси (x→y→z); opt-in `BroadPhaseKind::UniformGrid` строит deterministic cell candidate pairs и имеет large-body escape path.
   - **Узкая фаза**: sphere/sphere, sphere/box, box/box, sphere/capsule и
     capsule/capsule; OBB SAT и контактные манифолды до 4 точек. Пара
     box/capsule в дискретном contact path пока не реализована, хотя
@@ -338,4 +338,4 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 2. ~~Физика: какие связки (joints) нужны в первую очередь и нужен ли CCD для быстрых тел?~~ Закрыто G5/G6 и 2026-08-28: ball/revolute joints, linear CCD и bounded angular CCD реализованы; полностью аналитический swept-volume TOI остаётся дальнейшим улучшением. Далее нужны joint limits/motors.
 3. ~~`shapecast` — пустая заглушка~~ **Закрыто (G6)** — честный shapecast через conservative advancement (`distance.rs`), покрыт тестами.
 4. ~~Движок рендера не связан с ECS-сценой в браузере~~ **Частично закрыто** — WASM-viewport рендерит живую сцену из `/api/scene`; физика со сценой браузера по-прежнему не связана (см. План B в PLAN.md).
-5. **Broadphase scaling** — открытый performance-вопрос: Sweep-and-Prune остаётся baseline; первым кандидатом для deterministic benchmark-прототипа является uniform grid/spatial hash со static/dynamic split, dynamic AABB tree — второй кандидат для sparse/heterogeneous worlds. Production-выбор ещё не зафиксирован.
+5. **Broadphase scaling** — открытый performance-вопрос: Sweep-and-Prune остаётся default baseline/fallback, а deterministic `UniformGrid` уже доступен opt-in со static/dynamic cell decomposition и large-body escape path. Dynamic AABB tree остаётся вторым кандидатом для sparse/heterogeneous worlds; production default ещё не зафиксирован.

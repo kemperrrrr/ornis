@@ -3,7 +3,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use glam::Vec3;
 
-use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BroadPhaseKind, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
 
 /// A GxG grid of independent 4-box stacks on one big static floor: many
 /// disjoint islands — the best case for per-island parallel dispatch (G7).
@@ -125,14 +125,20 @@ fn bench_body_scaling(c: &mut Criterion) {
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(6));
-    for n in [1_000u32, 10_000] {
-        group.bench_function(BenchmarkId::from_parameter(n), |b| {
-            let mut physics = setup_body_grid(n);
-            for _ in 0..30 {
-                physics.step(1.0 / 60.0);
-            }
-            b.iter(|| black_box(&mut physics).step(black_box(1.0 / 60.0)));
-        });
+    for (backend_name, backend) in [
+        ("sweep_and_prune", BroadPhaseKind::SweepAndPrune),
+        ("uniform_grid", BroadPhaseKind::UniformGrid),
+    ] {
+        for n in [1_000u32, 10_000] {
+            group.bench_function(BenchmarkId::new(backend_name, n), |b| {
+                let mut physics = setup_body_grid(n);
+                physics.set_broadphase(backend);
+                for _ in 0..30 {
+                    physics.step(1.0 / 60.0);
+                }
+                b.iter(|| black_box(&mut physics).step(black_box(1.0 / 60.0)));
+            });
+        }
     }
     group.finish();
 }
