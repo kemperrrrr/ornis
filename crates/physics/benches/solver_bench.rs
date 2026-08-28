@@ -118,9 +118,11 @@ fn print_broadphase_stats(backend_name: &str, bodies: u32, physics: &BuiltinPhys
     let stats = physics.broadphase_stats();
     eprintln!(
         concat!(
-            "broadphase/{backend_name}/{bodies}: bodies={} cells={} large={} pair_tests={} ",
+            "broadphase/{}/{}: bodies={} cells={} large={} pair_tests={} ",
             "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}"
         ),
+        backend_name,
+        bodies,
         stats.body_count,
         stats.occupied_cells,
         stats.large_bodies,
