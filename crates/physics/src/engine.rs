@@ -1759,20 +1759,22 @@ fn ray_sphere_hit(
     Some((distance, (point - center).normalize_or(Vec3::X)))
 }
 
+/// Mutable interval and normal state for a local-space OBB ray query.
+struct RayObbState {
+    near: f32,
+    far: f32,
+    near_normal: Vec3,
+    far_normal: Vec3,
+}
+
 /// Update one slab of a local-space OBB ray intersection.
-// Keep the scalar slab state explicit: the helper is also the normal-tracking
-// boundary for entry/exit faces.
-#[allow(clippy::too_many_arguments)]
 fn ray_obb_slab(
     origin: f32,
     direction: f32,
     minimum: f32,
     maximum: f32,
     axis: Vec3,
-    near: &mut f32,
-    far: &mut f32,
-    near_normal: &mut Vec3,
-    far_normal: &mut Vec3,
+    state: &mut RayObbState,
 ) -> bool {
     if direction.abs() <= 1e-12 {
         return origin >= minimum && origin <= maximum;
@@ -1792,15 +1794,15 @@ fn ray_obb_slab(
             -axis,
         )
     };
-    if entry > *near {
-        *near = entry;
-        *near_normal = entry_normal;
+    if entry > state.near {
+        state.near = entry;
+        state.near_normal = entry_normal;
     }
-    if exit < *far {
-        *far = exit;
-        *far_normal = exit_normal;
+    if exit < state.far {
+        state.far = exit;
+        state.far_normal = exit_normal;
     }
-    *near <= *far
+    state.near <= state.far
 }
 
 /// Exact local-space ray/OBB intersection using a three-axis slab test.
@@ -1813,50 +1815,43 @@ fn ray_obb_hit(
     if direction.length_squared() <= 1e-12 {
         return None;
     }
-    let mut near = f32::NEG_INFINITY;
-    let mut far = max_dist;
-    let mut near_normal = Vec3::ZERO;
-    let mut far_normal = Vec3::ZERO;
+    let mut state = RayObbState {
+        near: f32::NEG_INFINITY,
+        far: max_dist,
+        near_normal: Vec3::ZERO,
+        far_normal: Vec3::ZERO,
+    };
     if !ray_obb_slab(
         origin.x,
         direction.x,
         -half_extents.x,
         half_extents.x,
         Vec3::X,
-        &mut near,
-        &mut far,
-        &mut near_normal,
-        &mut far_normal,
+        &mut state,
     ) || !ray_obb_slab(
         origin.y,
         direction.y,
         -half_extents.y,
         half_extents.y,
         Vec3::Y,
-        &mut near,
-        &mut far,
-        &mut near_normal,
-        &mut far_normal,
+        &mut state,
     ) || !ray_obb_slab(
         origin.z,
         direction.z,
         -half_extents.z,
         half_extents.z,
         Vec3::Z,
-        &mut near,
-        &mut far,
-        &mut near_normal,
-        &mut far_normal,
+        &mut state,
     ) {
         return None;
     }
-    if far < 0.0 || near > max_dist {
+    if state.far < 0.0 || state.near > max_dist {
         return None;
     }
-    if near >= 0.0 {
-        Some((near, near_normal))
+    if state.near >= 0.0 {
+        Some((state.near, state.near_normal))
     } else {
-        Some((far, far_normal))
+        Some((state.far, state.far_normal))
     }
 }
 
@@ -2367,16 +2362,14 @@ mod tests {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
         let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
         physics.add_body(
-            RigidBody::new_box(
-                Vec3::ZERO,
-                Vec3::new(1.0, 0.25, 0.25),
-                0.0,
-            )
-            .with_orientation(rotation),
+            RigidBody::new_box(Vec3::ZERO, Vec3::new(1.0, 0.25, 0.25), 0.0)
+                .with_orientation(rotation),
         );
 
         let ray = Ray::new(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
-        let hit = physics.raycast(ray, 10.0).expect("ray must hit the rotated box");
+        let hit = physics
+            .raycast(ray, 10.0)
+            .expect("ray must hit the rotated box");
         let expected_distance = 2.0 - 0.25 * std::f32::consts::SQRT_2;
         let expected_normal = rotation * Vec3::Y;
         assert!((hit.distance - expected_distance).abs() < 1e-4);
