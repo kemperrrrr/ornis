@@ -104,6 +104,14 @@ pub enum GameEvent {
         /// Human-readable failure reason, if `success` is false.
         error: Option<String>,
     },
+    /// Transport marker indicating that a bounded event history no longer
+    /// contains everything after the client's cursor.
+    EventGap {
+        /// Cursor supplied by the client before the gap was detected.
+        after: u64,
+        /// Earliest event sequence still retained by the server.
+        oldest: u64,
+    },
 }
 
 /// UI-side handle for two-way IPC with the game thread.

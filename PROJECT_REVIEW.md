@@ -78,9 +78,10 @@
 
 6. **Улучшить надежность редактора**
 
-   Базовые request id/ACK, transport sequence numbers, JSON escaping и stale
-   guards уже добавлены. Следующий уровень — связать completion events с
-   request id, добавить replay/cursors и затем заменить polling на WebSocket.
+   Базовые request id/ACK, correlated completion events, transport sequence
+   numbers, JSON escaping и stale guards уже добавлены. `/api/events` получил
+   bounded replay по cursor и `EventGap`; следующий уровень — заменить polling
+   на WebSocket.
 
 7. **Привести документацию к фактическому состоянию**
 
@@ -230,10 +231,11 @@ Editor-only vertical slice уже работает. Следующий прио�
 
 - polling вместо WebSocket;
 - команды получают queue-level `request_id`/`accepted` ACK и correlated
-  `CommandCompleted` event, но server-side replay/cursor ещё отсутствует;
+  `CommandCompleted` event;
 - snapshot endpoints получают transport `sequence`, а scene сохраняет
-  authoritative `version`; сервер не хранит историю и не предоставляет
-  cursor-based replay;
+  authoritative `version`;
+- `/api/events?after=<sequence>` даёт bounded replay и `EventGap`, если старые
+  записи уже вытеснены;
 - ошибка выполнения команды приходит через correlated completion event и
   legacy `error` event;
 - редактор и движок ещё не используют единый WebSocket live-протокол;
@@ -343,7 +345,7 @@ cargo: command not found
 Однако для такого проекта важно добавить ещё:
 
 - браузерный визуальный end-to-end тест snapshot → WASM scene;
-- server-side snapshot replay/cursor test;
+- WebSocket live-channel end-to-end test;
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
 - compile test для всех публичных macro entry points.
@@ -477,8 +479,8 @@ create entity
 Базовый REST-шов закрыт: есть client/server request id, explicit
 queue-level ACK/error response, correlated completion events, transport
 sequence snapshots, scene version, `serde_json` event serialization и stale
-guards в WASM/editor UI. Остаются server-side replay/cursors и WebSocket
-после стабилизации REST-контракта.
+guards в WASM/editor UI. `/api/events?after=<sequence>` даёт bounded replay и
+`EventGap`; остаётся WebSocket после стабилизации REST-контракта.
 
 ### Приоритет 3 — physics scaling
 

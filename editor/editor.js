@@ -19,6 +19,7 @@ var hasLiveScene = false;   // false until the first successful fetch
 var lastSceneSequence = 0;  // transport sequence; reject out-of-order replies
 var lastStatusSequence = 0;
 var nextRequestId = 1;      // client-generated id echoed by /api/command
+var eventCursor = 0;        // last /api/events sequence applied locally
 var pendingCommands = new Map(); // request_id -> command type until completion
 var selectedKey = null;     // "id:generation" of the selected entity
 var lastInspectorKey = '';  // fingerprint of the rendered inspector
@@ -595,12 +596,25 @@ function initFileMenu() {
     });
 }
 
-// Poll /api/events and surface scene save/load results in the footer.
-// The endpoint drains its buffer per request — this is its only consumer.
+// Poll /api/events after the last cursor and surface scene save/load results
+// in the footer. The server retains a bounded replay window.
 function refreshEvents() {
-    return fetchJson('/api/events')
+    return fetchJson('/api/events?after=' + eventCursor)
         .then(function(events) {
             events.forEach(function(ev) {
+                if (ev && typeof ev.sequence === 'number' && ev.sequence > eventCursor) {
+                    eventCursor = ev.sequence;
+                }
+                var gap = ev && ev.EventGap;
+                if (gap) {
+                    // The server evicted older events. Reconcile from the
+                    // authoritative snapshots, then continue at the oldest
+                    // retained sequence instead of replaying the gap forever.
+                    eventCursor = Math.max(0, (gap.oldest || 1) - 1);
+                    refreshScene();
+                    refreshStatus();
+                    return;
+                }
                 var completed = ev && ev.CommandCompleted;
                 if (completed) {
                     var pending = pendingCommands.get(completed.request_id);

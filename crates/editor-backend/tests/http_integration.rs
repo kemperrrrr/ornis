@@ -129,6 +129,37 @@ fn remote_editor_http_endpoints() {
     editor.stop();
 }
 
+
+#[test]
+fn remote_editor_replays_events_after_cursor() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    ev_tx
+        .send(GameEvent::CommandCompleted {
+            request_id: 7,
+            command: "create_entity".into(),
+            success: true,
+            error: None,
+        })
+        .expect("send event");
+    std::thread::sleep(Duration::from_millis(200));
+
+    let (status, body) = http_get(port, "/api/events?after=0");
+    assert_eq!(status, 200);
+    let events: serde_json::Value = serde_json::from_str(&body).expect("replay JSON");
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[0]["CommandCompleted"]["request_id"], 7);
+
+    let (status, body) = http_get(port, "/api/events?after=1");
+    assert_eq!(status, 200);
+    assert_eq!(body, "[]");
+    editor.stop();
+}
+
 #[test]
 fn remote_editor_bind_failure_is_safe() {
     // Starting two editors on the same port: the second must not panic,
