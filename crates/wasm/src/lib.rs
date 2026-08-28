@@ -205,10 +205,7 @@ fn build_gpu_scene(device: &wgpu::Device, render_world: &RenderWorld, scene: &Sc
 
 /// Attach orbit-camera pointer/wheel listeners to the canvas. The closures
 /// are leaked intentionally — they live as long as the page.
-fn attach_orbit_controls(
-    canvas: &web_sys::HtmlCanvasElement,
-    input: &Rc<RefCell<InputState>>,
-) {
+fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell<InputState>>) {
     let on_pointerdown: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
         let canvas = canvas.clone();
@@ -741,6 +738,15 @@ fn spawn_render_loop(
 
     let applied_version = Rc::new(Cell::new(initial_version));
 
+    let LoopHandles {
+        window,
+        canvas,
+        pending_scene,
+        fetch_in_flight,
+        live_mode,
+        input,
+    } = handles;
+
     let mut frame = FrameState {
         surface: ctx.surface,
         device: ctx.device,
@@ -755,15 +761,6 @@ fn spawn_render_loop(
         input,
         orbit,
     };
-
-    let LoopHandles {
-        window,
-        canvas,
-        pending_scene,
-        fetch_in_flight,
-        live_mode,
-        input,
-    } = handles;
 
     let f: FrameCallback = Rc::new(RefCell::new(None));
     let f_clone = f.clone();
