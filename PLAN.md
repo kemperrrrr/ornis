@@ -360,7 +360,9 @@ runtime без отдельной extract-фазы — будущая цель, 
 narrowphase и linear CCD не создают пары для несовместимых фильтров.
 Triggers имеют `Entered`/`Exited` events и не применяют solver/CCD impulses.
 Raycast теперь использует точные sphere/OBB/capsule intersections с
-корректными surface normals. Остаётся angular CCD.
+корректными surface normals. Angular CCD получил bounded sweep по углу для
+box/capsule с binary search первого sampled impact; fully analytic
+swept-volume TOI остаётся дальнейшим улучшением.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

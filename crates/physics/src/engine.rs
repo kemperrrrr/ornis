@@ -1613,15 +1613,13 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    /// Time-of-impact pass (G6, b3SolveContinuous analog in its linear form):
-    /// runs after the velocity solve, before positions move. A body whose
-    /// predicted substep displacement exceeds half its smallest dimension is
-    /// cast along that displacement (exact distances, rotation fixed) and
-    /// clamped to the first impact; the clamped body is flagged in `skip` so
-    /// `integrate_positions` leaves it where the cast put it. This is the
-    /// safety net under the speculative contacts for extreme speeds — a true
-    /// pass-through needs the displacement to exceed margin + thickness +
-    /// radii in one substep.
+    /// Time-of-impact pass (G6, b3SolveContinuous analog): runs after the
+    /// velocity solve, before positions move. Linear movers use conservative
+    /// advancement; rotating boxes/capsules use the bounded angular sweep
+    /// helper. The body is clamped to the first detected impact and flagged in
+    /// `skip` so `integrate_positions` does not move it a second time. The
+    /// angular path is deliberately a bounded approximation until an analytic
+    /// swept-volume solver is available.
     // The loop indexes bodies/asleep/skip in parallel; a range loop is the
     // clearest form here (same policy as the solver loops above).
     #[allow(clippy::needless_range_loop)]
@@ -1636,63 +1634,32 @@ impl BuiltinPhysicsEngine {
             }
             let disp = self.bodies[h].velocity * sub_dt;
             debug_assert!(vec3_finite(disp), "velocity*sub_dt overflowed for body {h}");
-            let min_dim = match &self.bodies[h].shape {
-                Shape::Sphere { radius } => *radius,
-                Shape::Box { half_extents } => half_extents.min_element(),
-                Shape::Capsule { radius, .. } => *radius,
-            };
-            if disp.length_squared() <= (0.5 * min_dim) * (0.5 * min_dim) {
+            let Some(hit) = find_continuous_hit(&self.bodies, h, disp, sub_dt) else {
                 continue;
-            }
-            let mover_layer = self.bodies[h].collision_layer;
-            let mover_mask = self.bodies[h].collision_mask;
-            let mover_is_trigger = self.bodies[h].is_trigger;
-            let mover = distance::ShapeRef {
-                shape: &self.bodies[h].shape,
-                pos: self.bodies[h].position,
-                rot: self.bodies[h].orientation,
             };
-            let targets = self
-                .bodies
-                .iter()
-                .enumerate()
-                .filter(move |&(o, b)| {
-                    o != h
-                        && !mover_is_trigger
-                        && !b.is_trigger
-                        && mover_mask & b.collision_layer != 0
-                        && b.collision_mask & mover_layer != 0
-                })
-                .map(|(o, b)| {
-                    (
-                        o,
-                        distance::ShapeRef {
-                            shape: &b.shape,
-                            pos: b.position,
-                            rot: b.orientation,
-                        },
-                    )
-                });
-            let hit = distance::cast_shape(mover, disp, targets);
-            if let Some(hit) = hit {
-                let n = hit.normal; // from the target toward the mover
-                let e = self.bodies[h]
-                    .restitution
-                    .min(self.bodies[hit.handle].restitution);
-                let b = &mut self.bodies[h];
-                // Back off a hair so the discrete narrow phase sees a clean
-                // touching contact next substep, not a zero-gap flicker.
-                // hit.t is an ABSOLUTE distance along the displacement.
-                b.position += disp.normalize() * hit.t + n * 1e-3;
-                skip[h] = true;
-                let vn = b.velocity.dot(n);
-                if vn < 0.0 {
-                    // Inelastic below the shared restitution threshold; a
-                    // genuine impact bounces (one-shot, like the discrete
-                    // restitution stage).
-                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
-                    b.velocity -= n * (bounce * vn);
-                }
+            let orientation = swept_orientation(&self.bodies[h], sub_dt, hit.fraction);
+            let e = self.bodies[h]
+                .restitution
+                .min(self.bodies[hit.handle].restitution);
+            let b = &mut self.bodies[h];
+            // Back off a hair so the discrete narrow phase sees a clean
+            // touching contact next substep, not a zero-gap flicker.
+            b.position += disp * hit.fraction + hit.normal * 1e-3;
+            b.orientation = orientation;
+            skip[h] = true;
+            if hit.angular {
+                // The angular path has stopped the body at the first sampled
+                // rotational impact. A later joint/contact pass may provide
+                // a more precise angular response.
+                b.angular_velocity = Vec3::ZERO;
+            }
+            let vn = b.velocity.dot(hit.normal);
+            if vn < 0.0 {
+                // Inelastic below the shared restitution threshold; a
+                // genuine impact bounces (one-shot, like the discrete
+                // restitution stage).
+                let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
+                b.velocity -= hit.normal * (bounce * vn);
             }
         }
     }
@@ -1725,6 +1692,239 @@ impl BuiltinPhysicsEngine {
             distance,
         })
     }
+}
+
+/// Candidate returned by the linear or angular continuous collision query.
+struct ContinuousHit {
+    fraction: f32,
+    normal: Vec3,
+    handle: usize,
+    angular: bool,
+}
+
+fn shape_min_dimension(shape: &Shape) -> f32 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        Shape::Box { half_extents } => half_extents.min_element(),
+        Shape::Capsule { radius, .. } => *radius,
+    }
+}
+
+fn shape_rotation_sensitive(shape: &Shape) -> bool {
+    !matches!(shape, Shape::Sphere { .. })
+}
+
+/// Orientation at a fraction of the current substep's angular motion.
+fn swept_orientation(body: &RigidBody, sub_dt: f32, fraction: f32) -> Quat {
+    (Quat::from_scaled_axis(body.angular_velocity * (sub_dt * fraction)) * body.orientation)
+        .normalize()
+}
+
+/// Exact shape distance at a pose on the combined linear/angular sweep.
+fn swept_distance(
+    body: &RigidBody,
+    target: distance::ShapeRef<'_>,
+    displacement: Vec3,
+    sub_dt: f32,
+    fraction: f32,
+) -> distance::Distance {
+    distance::shape_distance(
+        distance::ShapeRef {
+            shape: &body.shape,
+            pos: body.position + displacement * fraction,
+            rot: swept_orientation(body, sub_dt, fraction),
+        },
+        target,
+    )
+}
+
+/// Conservative overlap predicate for a swept pose. OBB pairs use SAT because
+/// the generic OBB distance oracle is unsigned while overlapping boxes need a
+/// signed contact decision; the other pairs use their analytic signed distance.
+fn swept_shape_overlaps(
+    body: &RigidBody,
+    target: distance::ShapeRef<'_>,
+    displacement: Vec3,
+    sub_dt: f32,
+    fraction: f32,
+) -> bool {
+    let position = body.position + displacement * fraction;
+    let orientation = swept_orientation(body, sub_dt, fraction);
+    match (&body.shape, target.shape) {
+        (Shape::Box { half_extents: half_a }, Shape::Box { half_extents: half_b }) => {
+            obb_sat(
+                position,
+                *half_a,
+                orientation,
+                target.pos,
+                *half_b,
+                target.rot,
+                1e-5,
+            )
+            .is_some()
+        }
+        _ => {
+            let distance = distance::shape_distance(
+                distance::ShapeRef {
+                    shape: &body.shape,
+                    pos: position,
+                    rot: orientation,
+                },
+                target,
+            );
+            distance.dist <= 1e-5
+        }
+    }
+}
+
+fn find_linear_continuous_hit(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+) -> Option<ContinuousHit> {
+    let body = &bodies[mover_index];
+    if body.is_trigger {
+        return None;
+    }
+    let length = displacement.length();
+    let min_dimension = shape_min_dimension(&body.shape);
+    if length <= 0.5 * min_dimension {
+        return None;
+    }
+    let mover_layer = body.collision_layer;
+    let mover_mask = body.collision_mask;
+    let mover = distance::ShapeRef {
+        shape: &body.shape,
+        pos: body.position,
+        rot: body.orientation,
+    };
+    let targets = bodies
+        .iter()
+        .enumerate()
+        .filter(move |&(handle, target)| {
+            handle != mover_index
+                && !target.is_trigger
+                && mover_mask & target.collision_layer != 0
+                && target.collision_mask & mover_layer != 0
+        })
+        .map(|(handle, target)| {
+            (
+                handle,
+                distance::ShapeRef {
+                    shape: &target.shape,
+                    pos: target.position,
+                    rot: target.orientation,
+                },
+            )
+        });
+    distance::cast_shape(mover, displacement, targets).map(|hit| ContinuousHit {
+        fraction: (hit.t / length).clamp(0.0, 1.0),
+        normal: hit.normal,
+        handle: hit.handle,
+        angular: false,
+    })
+}
+
+/// Sample the angular sweep at no more than five degrees per interval and
+/// binary-search the first overlap. This is conservative at the physics
+/// scale: a rotating long body cannot jump across a thin target between the
+/// bounded samples, while the final pose is still evaluated by exact shape
+/// distance/SAT rather than an AABB approximation.
+fn find_angular_continuous_hit(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+    sub_dt: f32,
+) -> Option<ContinuousHit> {
+    let body = &bodies[mover_index];
+    if body.is_trigger || !shape_rotation_sensitive(&body.shape) {
+        return None;
+    }
+    let angle = (body.angular_velocity * sub_dt).length();
+    if angle <= 1e-5 {
+        return None;
+    }
+    const MAX_ANGLE_STEP: f32 = 5.0f32.to_radians();
+    let samples = (angle / MAX_ANGLE_STEP).ceil().clamp(1.0, 128.0) as u32;
+    let mover_layer = body.collision_layer;
+    let mover_mask = body.collision_mask;
+    let mut best = None;
+
+    for (handle, target) in bodies.iter().enumerate() {
+        if handle == mover_index
+            || target.is_trigger
+            || mover_mask & target.collision_layer == 0
+            || target.collision_mask & mover_layer == 0
+        {
+            continue;
+        }
+        let target_ref = distance::ShapeRef {
+            shape: &target.shape,
+            pos: target.position,
+            rot: target.orientation,
+        };
+        if swept_shape_overlaps(body, target_ref, displacement, sub_dt, 0.0) {
+            continue;
+        }
+        let mut previous = 0.0;
+        for sample in 1..=samples {
+            let current = sample as f32 / samples as f32;
+            if !swept_shape_overlaps(body, target_ref, displacement, sub_dt, current) {
+                previous = current;
+                continue;
+            }
+            let mut low = previous;
+            let mut high = current;
+            for _ in 0..8 {
+                let middle = (low + high) * 0.5;
+                if swept_shape_overlaps(body, target_ref, displacement, sub_dt, middle) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            let distance = swept_distance(body, target_ref, displacement, sub_dt, high);
+            let position = body.position + displacement * high;
+            let fallback = (position - target.position).normalize_or(Vec3::Y);
+            let normal = (distance.point_a - distance.point_b).normalize_or(fallback);
+            let candidate = ContinuousHit {
+                fraction: high,
+                normal,
+                handle,
+                angular: true,
+            };
+            best = choose_continuous_hit(best, Some(candidate));
+            break;
+        }
+    }
+    best
+}
+
+fn choose_continuous_hit(
+    best: Option<ContinuousHit>,
+    candidate: Option<ContinuousHit>,
+) -> Option<ContinuousHit> {
+    match (best, candidate) {
+        (None, candidate) => candidate,
+        (best, None) => best,
+        (Some(best), Some(candidate)) => Some(if candidate.fraction < best.fraction {
+            candidate
+        } else {
+            best
+        }),
+    }
+}
+
+/// Find the earliest linear or angular time of impact for one dynamic body.
+fn find_continuous_hit(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+    sub_dt: f32,
+) -> Option<ContinuousHit> {
+    let linear = find_linear_continuous_hit(bodies, mover_index, displacement);
+    let angular = find_angular_continuous_hit(bodies, mover_index, displacement, sub_dt);
+    choose_continuous_hit(linear, angular)
 }
 
 /// Ray/sphere intersection in the shape's local frame. The returned normal is
@@ -2635,6 +2835,57 @@ mod tests {
         assert!(
             (y - 0.15).abs() < 0.05,
             "bullet did not settle on the floor: y={y}"
+        );
+    }
+
+    #[test]
+    fn angular_sweep_finds_rotating_box_impact() {
+        let dt = 1.0 / 60.0;
+        let mut mover = RigidBody::new_box(Vec3::ZERO, Vec3::new(1.5, 0.1, 0.1), 1.0);
+        mover.angular_velocity = Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+        let target = RigidBody::new_box(
+            Vec3::new(0.0, 1.1, 0.0),
+            Vec3::new(0.2, 0.05, 0.2),
+            0.0,
+        );
+        let bodies = [mover, target];
+
+        let hit = find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt)
+            .expect("angular sweep must find the rotating box impact");
+        assert_eq!(hit.handle, 1);
+        assert!(hit.angular);
+        assert!(hit.fraction > 0.0 && hit.fraction < 1.0);
+    }
+
+    #[test]
+    fn angular_continuous_motion_stops_at_first_impact() {
+        let dt = 1.0 / 60.0;
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.set_substeps(1);
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 1.1, 0.0),
+            Vec3::new(0.2, 0.05, 0.2),
+            0.0,
+        ));
+        let mover = physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(1.5, 0.1, 0.1),
+            1.0,
+        ));
+        physics.get_body_mut(mover).unwrap().angular_velocity =
+            Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+
+        physics.step(dt);
+
+        let body = physics.get_body(mover).expect("mover remains alive");
+        assert!(
+            body.angular_velocity.length() < 1e-5,
+            "angular CCD must stop the rotating body"
+        );
+        assert_ne!(
+            body.orientation,
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            "rotating body must not jump through the target"
         );
     }
 

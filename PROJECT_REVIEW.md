@@ -41,8 +41,9 @@
    Collision layers/masks уже добавлены в `RigidBody` и применяются
    симметрично в broadphase, narrowphase и linear CCD. Triggers генерируют
    deterministic enter/exit events без solver impulses, а raycast использует
-   точные sphere/OBB/capsule intersection'ы и surface normals. Осталась
-   CCD-ротация.
+   точные sphere/OBB/capsule intersection'ы и surface normals. Angular CCD
+   теперь имеет bounded sweep для вращающихся box/capsule; fully analytic
+   swept-volume TOI остаётся отдельным улучшением.
 
 3. **Укрепить GPU-путь**
 
