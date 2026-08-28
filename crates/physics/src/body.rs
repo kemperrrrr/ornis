@@ -67,6 +67,9 @@ pub struct RigidBody {
     /// body's layer. The default is all layers, preserving pre-filter
     /// behavior.
     pub collision_mask: u32,
+    /// When true, the body reports overlap transitions but never applies
+    /// contact or CCD impulses. Triggers still obey collision filters.
+    pub is_trigger: bool,
     /// Simulation role; derived from mass at construction, settable after.
     pub body_type: BodyType,
 }
@@ -89,6 +92,7 @@ impl RigidBody {
             shape,
             collision_layer: 1,
             collision_mask: u32::MAX,
+            is_trigger: false,
             body_type: if mass > 0.0 {
                 BodyType::Dynamic
             } else {
@@ -144,6 +148,20 @@ impl RigidBody {
     pub fn can_collide_with(&self, other: &Self) -> bool {
         self.collision_mask & other.collision_layer != 0
             && other.collision_mask & self.collision_layer != 0
+    }
+
+    /// Builder-style trigger configuration.
+    ///
+    /// A trigger remains in broadphase overlap queries, but its contacts are
+    /// reported as [`crate::TriggerEvent`] values instead of being solved.
+    pub fn with_trigger(mut self, is_trigger: bool) -> Self {
+        self.set_trigger(is_trigger);
+        self
+    }
+
+    /// Enables or disables overlap-event behavior in place.
+    pub fn set_trigger(&mut self, is_trigger: bool) {
+        self.is_trigger = is_trigger;
     }
 
     /// Builder-style variant of [`RigidBody::set_orientation`].
@@ -232,6 +250,14 @@ mod tests {
         body.set_collision_filter(0b1000, 0b0100);
         assert_eq!(body.collision_layer, 0b1000);
         assert_eq!(body.collision_mask, 0b0100);
+    }
+
+    #[test]
+    fn trigger_builder_and_setter_update_sensor_state() {
+        let mut body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0).with_trigger(true);
+        assert!(body.is_trigger);
+        body.set_trigger(false);
+        assert!(!body.is_trigger);
     }
 
     /// `set_angular_velocity` is a straight setter with the same zombie

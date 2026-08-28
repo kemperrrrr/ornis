@@ -121,6 +121,7 @@ impl PhysicsRuntime {
         if body.body_type != source.body_type
             || body.collision_layer != source.collision_layer
             || body.collision_mask != source.collision_mask
+            || body.is_trigger != source.is_trigger
         {
             *body = source.clone();
             if let Some(transform) = transform {

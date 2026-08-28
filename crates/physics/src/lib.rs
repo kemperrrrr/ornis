@@ -25,6 +25,8 @@ pub mod joint;
 pub mod math;
 /// Collision shapes with AABB projection and inertia tensors.
 pub mod shape;
+/// Trigger overlap event types emitted by the builtin physics engine.
+pub mod trigger;
 pub(crate) mod wide;
 
 pub use body::{BodyHandle, BodyType, RigidBody};
@@ -32,3 +34,4 @@ pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
 pub use joint::{JointHandle, JointKind};
 pub use math::{AABB, Ray, RaycastHit};
 pub use shape::Shape;
+pub use trigger::{TriggerEvent, TriggerEventKind};

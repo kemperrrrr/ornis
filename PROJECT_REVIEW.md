@@ -39,7 +39,8 @@
 2. **Довести physics API** — 🟡
 
    Collision layers/masks уже добавлены в `RigidBody` и применяются
-   симметрично в broadphase, narrowphase и linear CCD. Остались триггеры,
+   симметрично в broadphase, narrowphase и linear CCD. Triggers теперь
+   генерируют deterministic enter/exit events без solver impulses. Остались
    CCD-ротация и более точный `raycast` для OBB и capsule.
 
 3. **Укрепить GPU-путь**

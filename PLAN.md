@@ -358,7 +358,8 @@ runtime без отдельной extract-фазы — будущая цель, 
 **Physics API follow-up (2026-08-28):** `RigidBody` теперь имеет
 взаимную фильтрацию `collision_layer`/`collision_mask`; broadphase,
 narrowphase и linear CCD не создают пары для несовместимых фильтров.
-Остаются triggers, angular CCD и более точный raycast для OBB/capsule.
+Triggers имеют `Entered`/`Exited` events и не применяют solver/CCD impulses.
+Остаются angular CCD и более точный raycast для OBB/capsule.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

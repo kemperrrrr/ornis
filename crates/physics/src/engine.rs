@@ -10,6 +10,7 @@ use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{AABB, Ray, RaycastHit};
 use crate::shape::Shape;
+use crate::trigger::{TriggerEvent, TriggerEventKind};
 use crate::wide::{SolverStep, build_solver_steps};
 
 /// Physics engine trait: a single step of simulation, plus body/joint management
@@ -45,6 +46,14 @@ pub trait PhysicsEngine: Send + Sync {
     /// Sweep `shape` along the segment `from → to` and report the first body
     /// hit (hit distance measured along the sweep direction), or `None`.
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit>;
+    /// Drain trigger enter/exit transitions produced by completed steps.
+    ///
+    /// Engines without trigger support may keep the default empty result;
+    /// the builtin engine reports canonical body-handle pairs in deterministic
+    /// order.
+    fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
+        Vec::new()
+    }
 }
 
 struct Contact {
@@ -618,6 +627,68 @@ fn compute_aabb(body: &RigidBody) -> AABB {
     body.shape.aabb(body.position, body.orientation)
 }
 
+/// Detect actual (not speculative) overlaps for pairs containing a trigger.
+///
+/// Trigger geometry uses the exact distance oracle rather than the contact
+/// margin: a nearby but non-overlapping body must not emit `Entered`. The
+/// broadphase has already applied the mutual layer masks, so this pass only
+/// performs the shape-level check.
+fn detect_trigger_overlaps(
+    bodies: &[RigidBody],
+    active: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    let mut overlaps = Vec::new();
+    for &(i, j) in active {
+        let a = &bodies[i];
+        let b = &bodies[j];
+        if !(a.is_trigger || b.is_trigger) || !a.can_collide_with(b) {
+            continue;
+        }
+        let distance = distance::shape_distance(
+            distance::ShapeRef {
+                shape: &a.shape,
+                pos: a.position,
+                rot: a.orientation,
+            },
+            distance::ShapeRef {
+                shape: &b.shape,
+                pos: b.position,
+                rot: b.orientation,
+            },
+        );
+        if distance.dist <= 0.0 {
+            overlaps.push((i, j));
+        }
+    }
+    overlaps
+}
+
+/// Reconcile the current overlap set with the previous step and queue sorted
+/// enter/exit events. Sorting keeps event order independent of broadphase
+/// sweep-axis rotation and hash-set iteration order.
+fn update_trigger_events(
+    previous: &HashSet<(usize, usize)>,
+    current: Vec<(usize, usize)>,
+    events: &mut Vec<TriggerEvent>,
+) -> HashSet<(usize, usize)> {
+    let current_set: HashSet<(usize, usize)> = current.into_iter().collect();
+    let mut entered: Vec<_> = current_set.difference(previous).copied().collect();
+    let mut exited: Vec<_> = previous.difference(&current_set).copied().collect();
+    entered.sort_unstable();
+    exited.sort_unstable();
+    events.extend(entered.into_iter().map(|(body_a, body_b)| TriggerEvent {
+        body_a,
+        body_b,
+        kind: TriggerEventKind::Entered,
+    }));
+    events.extend(exited.into_iter().map(|(body_a, body_b)| TriggerEvent {
+        body_a,
+        body_b,
+        kind: TriggerEventKind::Exited,
+    }));
+    current_set
+}
+
 // ---- Narrow-phase: world-frame analytic contact tests (oriented shapes) ----
 
 /// Sphere-sphere. `margin` (G6 speculative): pairs separated by less than
@@ -1067,7 +1138,7 @@ fn detect_collisions(
     for &(i, j) in active {
         let a = &bodies[i];
         let b = &bodies[j];
-        if !a.can_collide_with(b) {
+        if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
             continue;
         }
         if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
@@ -1389,6 +1460,10 @@ pub struct BuiltinPhysicsEngine {
     joint_pairs: HashSet<(usize, usize)>,
     /// Diagnostics: (body_a, body_b) of the last substep's manifolds.
     debug_pairs: Vec<(usize, usize)>,
+    /// Trigger pairs overlapping on the previous completed step.
+    trigger_pairs: HashSet<(usize, usize)>,
+    /// Enter/exit transitions waiting for the caller to drain.
+    trigger_events: Vec<TriggerEvent>,
     /// G7: enable SIMD-wide contact solver for single-point manifolds.
     /// Default true. Set to false for bit-exact scalar reproduction.
     wide_solver: bool,
@@ -1420,6 +1495,8 @@ impl BuiltinPhysicsEngine {
             joints: Vec::new(),
             joint_pairs: HashSet::new(),
             debug_pairs: Vec::new(),
+            trigger_pairs: HashSet::new(),
+            trigger_events: Vec::new(),
             wide_solver: true,
             #[cfg(feature = "gpu")]
             gpu_solver: None,
@@ -1571,6 +1648,7 @@ impl BuiltinPhysicsEngine {
             }
             let mover_layer = self.bodies[h].collision_layer;
             let mover_mask = self.bodies[h].collision_mask;
+            let mover_is_trigger = self.bodies[h].is_trigger;
             let mover = distance::ShapeRef {
                 shape: &self.bodies[h].shape,
                 pos: self.bodies[h].position,
@@ -1582,6 +1660,8 @@ impl BuiltinPhysicsEngine {
                 .enumerate()
                 .filter(move |&(o, b)| {
                     o != h
+                        && !mover_is_trigger
+                        && !b.is_trigger
                         && mover_mask & b.collision_layer != 0
                         && b.collision_mask & mover_layer != 0
                 })
@@ -1657,15 +1737,17 @@ impl BuiltinPhysicsEngine {
 
 impl PhysicsEngine for BuiltinPhysicsEngine {
     fn step(&mut self, dt: f32) {
-        // G7: a fully sleeping world cannot change — skip the whole substep
-        // loop (broadphase re-sort included) instead of paying ~10 ms/frame
-        // to rediscover that nothing moves.
-        if self
+        // G7: a fully sleeping world with no trigger state cannot change —
+        // skip the whole substep loop (broadphase re-sort included) instead
+        // of paying to rediscover that nothing moves. Trigger-only worlds
+        // still run the overlap reconciliation pass below.
+        let has_awake_dynamic = self
             .bodies
             .iter()
             .enumerate()
-            .all(|(h, b)| b.body_type != BodyType::Dynamic || self.asleep[h])
-        {
+            .any(|(h, b)| b.body_type == BodyType::Dynamic && !self.asleep[h]);
+        let has_trigger = self.bodies.iter().any(|body| body.is_trigger);
+        if !has_awake_dynamic && !has_trigger && self.trigger_pairs.is_empty() {
             return;
         }
         let sub_dt = dt / self.substeps as f32;
@@ -1710,6 +1792,19 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             .extend(last_manifolds.iter().map(|m| (m.body_a, m.body_b)));
         self.rebuild_islands(&last_manifolds);
         self.update_sleep(dt);
+
+        // Rebuild the broadphase at the completed poses so trigger events
+        // describe the state visible after this whole physics step, not the
+        // state from before the final substep's integration.
+        self.broadphase.update(&self.bodies, 0.0);
+        let current_triggers =
+            detect_trigger_overlaps(&self.bodies, &self.broadphase.active);
+        let previous_triggers = std::mem::take(&mut self.trigger_pairs);
+        self.trigger_pairs = update_trigger_events(
+            &previous_triggers,
+            current_triggers,
+            &mut self.trigger_events,
+        );
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
@@ -1728,6 +1823,27 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
     fn remove_body(&mut self, handle: BodyHandle) {
         if handle < self.bodies.len() {
             let last = self.bodies.len() - 1;
+            let previous_triggers = std::mem::take(&mut self.trigger_pairs);
+            let mut removed_triggers = Vec::new();
+            let mut remapped_triggers = HashSet::new();
+            for (body_a, body_b) in previous_triggers {
+                if body_a == handle || body_b == handle {
+                    removed_triggers.push((body_a, body_b));
+                    continue;
+                }
+                let map = |body: usize| if body == last { handle } else { body };
+                let a = map(body_a);
+                let b = map(body_b);
+                remapped_triggers.insert((a.min(b), a.max(b)));
+            }
+            removed_triggers.sort_unstable();
+            self.trigger_events
+                .extend(removed_triggers.into_iter().map(|(body_a, body_b)| TriggerEvent {
+                    body_a,
+                    body_b,
+                    kind: TriggerEventKind::Exited,
+                }));
+            self.trigger_pairs = remapped_triggers;
             self.bodies.swap_remove(handle);
             self.island.swap_remove(handle);
             self.asleep.swap_remove(handle);
@@ -1862,6 +1978,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             distance: h.t,
         })
     }
+
+    fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
+        std::mem::take(&mut self.trigger_events)
+    }
 }
 
 #[cfg(test)]
@@ -1963,6 +2083,67 @@ mod tests {
             physics.get_body(bullet).unwrap().position.y < -0.1,
             "filtered bullet should pass through the floor"
         );
+    }
+
+    #[test]
+    fn trigger_emits_enter_and_exit_without_solving_contact() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let trigger = physics.add_body(
+            RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0).with_trigger(true),
+        );
+        let mover = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.8, 0.0), 0.5, 1.0));
+
+        physics.step(1.0 / 60.0);
+        assert_eq!(
+            physics.drain_trigger_events(),
+            vec![TriggerEvent {
+                body_a: trigger.min(mover),
+                body_b: trigger.max(mover),
+                kind: TriggerEventKind::Entered,
+            }]
+        );
+        assert_eq!(physics.debug_contact_count(mover), 0);
+        assert_eq!(physics.get_body(mover).unwrap().position, Vec3::new(0.0, 0.8, 0.0));
+
+        physics.step(1.0 / 60.0);
+        assert!(physics.drain_trigger_events().is_empty());
+
+        physics.get_body_mut(mover).unwrap().position = Vec3::new(0.0, 3.0, 0.0);
+        physics.step(1.0 / 60.0);
+        assert_eq!(
+            physics.drain_trigger_events(),
+            vec![TriggerEvent {
+                body_a: trigger.min(mover),
+                body_b: trigger.max(mover),
+                kind: TriggerEventKind::Exited,
+            }]
+        );
+    }
+
+    #[test]
+    fn removing_trigger_body_queues_exit_and_clears_pair_state() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let trigger = physics.add_body(
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0).with_trigger(true),
+        );
+        let first = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
+        let second = physics.add_body(RigidBody::new_sphere(Vec3::new(5.0, 0.0, 0.0), 0.5, 1.0));
+        physics.step(1.0 / 60.0);
+        assert_eq!(physics.drain_trigger_events().len(), 1);
+
+        physics.remove_body(trigger);
+        assert_eq!(
+            physics.drain_trigger_events(),
+            vec![TriggerEvent {
+                body_a: trigger,
+                body_b: first,
+                kind: TriggerEventKind::Exited,
+            }]
+        );
+        physics.get_body_mut(second - 1).unwrap().position = Vec3::ZERO;
+        physics.step(1.0 / 60.0);
+        let events = physics.drain_trigger_events();
+        assert!(events.is_empty());
     }
 
     #[test]
