@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -226,7 +226,7 @@ fn header_value(request: &Request, name: &str) -> Option<String> {
         .headers()
         .iter()
         .find(|header| header.field.equiv(name))
-        .map(|header| header.value.clone())
+        .map(|header| header.value.to_string())
 }
 
 fn is_websocket_request(request: &Request) -> bool {
@@ -283,16 +283,14 @@ fn write_websocket_text(stream: &mut impl Write, payload: &str) -> io::Result<()
     let length = bytes.len();
     let mut frame = Vec::with_capacity(length + 10);
     frame.push(0x81); // FIN + text opcode
-    match length {
-        0..=125 => frame.push(length as u8),
-        126..=u16::MAX as usize => {
-            frame.push(126);
-            frame.extend_from_slice(&(length as u16).to_be_bytes());
-        }
-        _ => {
-            frame.push(127);
-            frame.extend_from_slice(&(length as u64).to_be_bytes());
-        }
+    if length <= 125 {
+        frame.push(length as u8);
+    } else if length <= u16::MAX as usize {
+        frame.push(126);
+        frame.extend_from_slice(&(length as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(length as u64).to_be_bytes());
     }
     frame.extend_from_slice(bytes);
     stream.write_all(&frame)?;
@@ -497,7 +495,7 @@ fn command_request_id(body: &str, next_request_id: &mut u64) -> u64 {
 fn route_request(
     root: &Path,
     request: &mut Request,
-    buffer: &EventLog,
+    buffer: &Arc<Mutex<EventLog>>,
     snapshots: &Snapshots,
     game_tx: &Sender<UiCommand>,
     next_request_id: &mut u64,
@@ -512,7 +510,11 @@ fn route_request(
         ("GET", "/api/scene") => json_response(&snapshots.scene),
         ("GET", "/api/events") => {
             let cursor = event_cursor(&url);
-            let body = format_event_records(&buffer.after(cursor));
+            let records = buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .after(cursor);
+            let body = format_event_records(&records);
             json_response(&body)
         }
         ("POST", "/api/command") => {
