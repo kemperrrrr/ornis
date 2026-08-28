@@ -44,7 +44,9 @@ jobs:
       # Run criterion benchmarks for physics solver (SweepAndPrune / UniformGrid comparison)
       - name: Run solver benchmarks
         id: bench
+        shell: bash
         run: |
+          set -o pipefail
           mkdir -p target
           cargo bench -p ornis-physics --bench solver_bench -- --verbose 2>&1 | tee target/bench.log
 
