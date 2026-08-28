@@ -117,8 +117,10 @@ fn bench_step(c: &mut Criterion) {
 fn print_broadphase_stats(backend_name: &str, bodies: u32, physics: &BuiltinPhysicsEngine) {
     let stats = physics.broadphase_stats();
     eprintln!(
-        "broadphase/{backend_name}/{bodies}: bodies={} cells={} large={} pair_tests={} "
-        "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}",
+        concat!(
+            "broadphase/{backend_name}/{bodies}: bodies={} cells={} large={} pair_tests={} ",
+            "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}"
+        ),
         stats.body_count,
         stats.occupied_cells,
         stats.large_bodies,
