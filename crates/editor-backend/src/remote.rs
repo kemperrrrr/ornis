@@ -221,7 +221,7 @@ fn serve(
     }
 }
 
-fn header_value(request: &Request, name: &str) -> Option<String> {
+fn header_value(request: &Request, name: &'static str) -> Option<String> {
     request
         .headers()
         .iter()
