@@ -239,9 +239,12 @@ CPU tiled-floor workload, но не закрывает масштабирова�
 GPU physics в этом прогоне не участвовала: benchmark не включал
 `--features gpu` и не подключал `WgpuContactSolver`.
 
-Следующий измерительный шаг — получить candidate-pair/solver breakdown и
-повторить 100k probe для обоих CPU backend'ов. До этого Sweep-and-Prune
-остаётся default, UniformGrid — opt-in.
+Benchmark теперь печатает `BroadPhaseStats`: body count, raw pair tests,
+layer/mask rejections, static-static skips, AABB rejections, unique
+candidate pairs, occupied grid cells и large-body count. Это закрывает
+первый candidate-pair breakdown; отдельный timing broadphase против solver
+и повторный 100k probe для обоих CPU backend'ов ещё впереди. До этих
+измерений Sweep-and-Prune остаётся default, UniformGrid — opt-in.
 
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 

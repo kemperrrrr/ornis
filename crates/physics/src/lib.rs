@@ -8,6 +8,7 @@
 //! - [`body`] — rigid bodies and their handles/mass model.
 //! - [`shape`] — convex primitives with AABB projection and inertia tensors.
 //! - [`math`] — geometric queries used by broadphase and raycasts.
+//! - `broadphase` — candidate-pair backends and benchmark diagnostics.
 //! - [`joint`] — persistent equality constraints (ball/revolute).
 //! - [`engine`] — the step pipeline: broadphase → narrowphase → island
 //!   partitioning → substepped velocity/position solving, with optional
@@ -32,7 +33,7 @@ pub mod trigger;
 pub(crate) mod wide;
 
 pub use body::{BodyHandle, BodyType, RigidBody};
-pub use broadphase::BroadPhaseKind;
+pub use broadphase::{BroadPhaseKind, BroadPhaseStats};
 pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
 pub use joint::{JointHandle, JointKind};
 pub use math::{AABB, Ray, RaycastHit};

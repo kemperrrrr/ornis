@@ -16,6 +16,30 @@ const HALF_SPEC_MARGIN: f32 = 0.025;
 const DEFAULT_GRID_CELL_SIZE: f32 = 2.0;
 const DEFAULT_MAX_CELLS_PER_BODY: usize = 4096;
 
+/// Summary of the last broadphase update.
+///
+/// The counters describe candidate generation before narrowphase/solver work;
+/// they are intended for benchmark diagnostics rather than gameplay logic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BroadPhaseStats {
+    /// Number of bodies included in the update.
+    pub body_count: usize,
+    /// Number of raw pair checks before filtering and AABB rejection.
+    pub pair_tests: usize,
+    /// Pair checks rejected by mutual collision layers/masks.
+    pub filter_rejections: usize,
+    /// Raw pair checks skipped because both bodies are ordinary static bodies.
+    pub static_static_skips: usize,
+    /// Pair checks whose swept AABBs do not overlap.
+    pub aabb_rejections: usize,
+    /// Unique candidate pairs emitted for narrowphase processing.
+    pub candidate_pairs: usize,
+    /// Number of occupied cells for the grid backend.
+    pub occupied_cells: usize,
+    /// Number of bodies routed through the grid's large-body escape path.
+    pub large_bodies: usize,
+}
+
 /// Available candidate-pair backends for [`crate::BuiltinPhysicsEngine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadPhaseKind {
@@ -32,6 +56,8 @@ pub(crate) trait BroadPhase {
     fn update(&mut self, bodies: &[RigidBody], sub_dt: f32);
     /// Candidate body pairs, canonicalized as `(lower_handle, higher_handle)`.
     fn active(&self) -> &[(usize, usize)];
+    /// Diagnostics for the latest update.
+    fn stats(&self) -> BroadPhaseStats;
 }
 
 /// Runtime-selected broadphase backend.
@@ -74,6 +100,13 @@ impl BroadPhase for BroadPhaseBackend {
             Self::UniformGrid(backend) => backend.active(),
         }
     }
+
+    fn stats(&self) -> BroadPhaseStats {
+        match self {
+            Self::SweepAndPrune(backend) => backend.stats(),
+            Self::UniformGrid(backend) => backend.stats(),
+        }
+    }
 }
 
 fn swept_aabbs(bodies: &[RigidBody], sub_dt: f32) -> Vec<AABB> {
@@ -94,22 +127,50 @@ fn swept_aabbs(bodies: &[RigidBody], sub_dt: f32) -> Vec<AABB> {
         .collect()
 }
 
+fn candidate_allowed(
+    bodies: &[RigidBody],
+    aabbs: &[AABB],
+    stats: &mut BroadPhaseStats,
+    first: usize,
+    second: usize,
+) -> bool {
+    if !bodies[first].can_collide_with(&bodies[second]) {
+        stats.filter_rejections += 1;
+        return false;
+    }
+    if bodies[first].body_type == BodyType::Static
+        && bodies[second].body_type == BodyType::Static
+        && !bodies[first].is_trigger
+        && !bodies[second].is_trigger
+    {
+        stats.static_static_skips += 1;
+        return false;
+    }
+    if !aabbs[first].overlaps(&aabbs[second]) {
+        stats.aabb_rejections += 1;
+        return false;
+    }
+    true
+}
+
 fn add_pair(
     pairs: &mut HashSet<(usize, usize)>,
     bodies: &[RigidBody],
     aabbs: &[AABB],
+    stats: &mut BroadPhaseStats,
     first: usize,
     second: usize,
 ) {
     if first == second {
         return;
     }
+    stats.pair_tests += 1;
     let (a, b) = if first < second {
         (first, second)
     } else {
         (second, first)
     };
-    if bodies[a].can_collide_with(&bodies[b]) && aabbs[a].overlaps(&aabbs[b]) {
+    if candidate_allowed(bodies, aabbs, stats, a, b) {
         pairs.insert((a, b));
     }
 }
@@ -119,6 +180,7 @@ pub(crate) struct SweepAndPrune {
     aabbs: Vec<AABB>,
     active: Vec<(usize, usize)>,
     sort_axis: usize,
+    stats: BroadPhaseStats,
 }
 
 impl SweepAndPrune {
@@ -127,6 +189,7 @@ impl SweepAndPrune {
             aabbs: Vec::new(),
             active: Vec::new(),
             sort_axis: 0,
+            stats: BroadPhaseStats::default(),
         }
     }
 }
@@ -137,6 +200,10 @@ impl BroadPhase for SweepAndPrune {
         self.sort_axis = (self.sort_axis + 1) % 3;
         self.active.clear();
 
+        self.stats = BroadPhaseStats {
+            body_count: bodies.len(),
+            ..BroadPhaseStats::default()
+        };
         let n = self.aabbs.len();
         let mut starts: Vec<(f32, usize)> = self
             .aabbs
@@ -167,11 +234,17 @@ impl BroadPhase for SweepAndPrune {
                 if start > end {
                     break;
                 }
-                if first < second
-                    && bodies[first].can_collide_with(&bodies[second])
-                    && sweep_aabb.overlaps(&self.aabbs[second])
-                {
-                    self.active.push((first, second));
+                if first < second {
+                    self.stats.pair_tests += 1;
+                    if candidate_allowed(
+                        bodies,
+                        &self.aabbs,
+                        &mut self.stats,
+                        first,
+                        second,
+                    ) {
+                        self.active.push((first, second));
+                    }
                 }
             }
         }
@@ -179,6 +252,12 @@ impl BroadPhase for SweepAndPrune {
 
     fn active(&self) -> &[(usize, usize)] {
         &self.active
+    }
+
+    fn stats(&self) -> BroadPhaseStats {
+        let mut stats = self.stats;
+        stats.candidate_pairs = self.active.len();
+        stats
     }
 }
 
@@ -209,6 +288,7 @@ pub(crate) struct UniformGrid {
     large: Vec<usize>,
     cell_size: f32,
     max_cells_per_body: usize,
+    stats: BroadPhaseStats,
 }
 
 impl UniformGrid {
@@ -220,6 +300,7 @@ impl UniformGrid {
             large: Vec::new(),
             cell_size: DEFAULT_GRID_CELL_SIZE,
             max_cells_per_body: DEFAULT_MAX_CELLS_PER_BODY,
+            stats: BroadPhaseStats::default(),
         }
     }
 
@@ -261,22 +342,42 @@ impl BroadPhase for UniformGrid {
         self.active.clear();
         self.cells.clear();
         self.large.clear();
+        self.stats = BroadPhaseStats {
+            body_count: bodies.len(),
+            ..BroadPhaseStats::default()
+        };
 
         for body in 0..self.aabbs.len() {
             self.insert_body(body);
         }
+        self.stats.occupied_cells = self.cells.len();
+        self.stats.large_bodies = self.large.len();
 
         let mut pairs = HashSet::new();
         for occupants in self.cells.values() {
             for (offset, &first) in occupants.iter().enumerate() {
                 for &second in &occupants[(offset + 1)..] {
-                    add_pair(&mut pairs, bodies, &self.aabbs, first, second);
+                    add_pair(
+                        &mut pairs,
+                        bodies,
+                        &self.aabbs,
+                        &mut self.stats,
+                        first,
+                        second,
+                    );
                 }
             }
         }
         for &large in &self.large {
             for body in 0..self.aabbs.len() {
-                add_pair(&mut pairs, bodies, &self.aabbs, large, body);
+                add_pair(
+                    &mut pairs,
+                    bodies,
+                    &self.aabbs,
+                    &mut self.stats,
+                    large,
+                    body,
+                );
             }
         }
         self.active = pairs.into_iter().collect();
@@ -285,6 +386,12 @@ impl BroadPhase for UniformGrid {
 
     fn active(&self) -> &[(usize, usize)] {
         &self.active
+    }
+
+    fn stats(&self) -> BroadPhaseStats {
+        let mut stats = self.stats;
+        stats.candidate_pairs = self.active.len();
+        stats
     }
 }
 
@@ -321,6 +428,29 @@ mod tests {
         ];
         let mut grid = UniformGrid::new();
         grid.update(&bodies, 0.0);
+        assert_eq!(grid.active(), &[(0, 1)]);
+        let stats = grid.stats();
+        assert_eq!(stats.body_count, 2);
+        assert_eq!(stats.candidate_pairs, 1);
+        assert!(stats.occupied_cells > 1);
+    }
+
+    #[test]
+    fn static_static_pairs_are_skipped_but_static_triggers_are_kept() {
+        let ordinary = vec![
+            RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0),
+            RigidBody::new_box(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0), 0.0),
+        ];
+        let mut grid = UniformGrid::new();
+        grid.update(&ordinary, 0.0);
+        assert!(grid.active().is_empty());
+        assert!(grid.stats().static_static_skips > 0);
+
+        let trigger = vec![
+            RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0).with_trigger(true),
+            RigidBody::new_box(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0), 0.0),
+        ];
+        grid.update(&trigger, 0.0);
         assert_eq!(grid.active(), &[(0, 1)]);
     }
 

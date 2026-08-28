@@ -94,6 +94,9 @@ cargo xtask bca --report      # html to target/bca/index.html
   - запуск вручную через `workflow_dispatch` в Actions;
   - `cargo bench -p ornis-physics --bench solver_bench` — сравнение
     SweepAndPrune / UniformGrid на 1k и 10k телах;
+  - benchmark также печатает `BroadPhaseStats` (pair tests, filtering,
+    static-static skips, cells, large bodies и unique candidates) для
+    breakdown candidate generation;
   - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
   - workflow не влияет на основной quality gate;
   - 100k body зонд запускается вручную: `cargo run -p ornis-physics --release --example probe_100k`;

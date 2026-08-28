@@ -114,6 +114,22 @@ fn bench_step(c: &mut Criterion) {
     group.finish();
 }
 
+fn print_broadphase_stats(backend_name: &str, bodies: u32, physics: &BuiltinPhysicsEngine) {
+    let stats = physics.broadphase_stats();
+    eprintln!(
+        "broadphase/{backend_name}/{bodies}: bodies={} cells={} large={} pair_tests={} "
+        "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}",
+        stats.body_count,
+        stats.occupied_cells,
+        stats.large_bodies,
+        stats.pair_tests,
+        stats.filter_rejections,
+        stats.static_static_skips,
+        stats.aabb_rejections,
+        stats.candidate_pairs,
+    );
+}
+
 /// Body-count scaling: 1k / 10k dynamic bodies in one `step`.
 /// 100k is intentionally not a criterion bench: the step is superlinear
 /// there (2026-08-27: single huge floor AABB degenerates Sweep-and-Prune to
@@ -136,6 +152,7 @@ fn bench_body_scaling(c: &mut Criterion) {
                 for _ in 0..30 {
                     physics.step(1.0 / 60.0);
                 }
+                print_broadphase_stats(backend_name, n, &physics);
                 b.iter(|| black_box(&mut physics).step(black_box(1.0 / 60.0)));
             });
         }

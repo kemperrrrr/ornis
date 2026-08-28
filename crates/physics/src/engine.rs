@@ -4,7 +4,7 @@ use glam::{Quat, Vec3};
 use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
-use crate::broadphase::{BroadPhase, BroadPhaseBackend, BroadPhaseKind};
+use crate::broadphase::{BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats};
 use crate::distance;
 #[cfg(feature = "gpu")]
 use crate::gpu::WgpuContactSolver;
@@ -1436,6 +1436,14 @@ impl BuiltinPhysicsEngine {
     /// Returns the currently selected broadphase backend.
     pub fn broadphase_kind(&self) -> BroadPhaseKind {
         self.broadphase.kind()
+    }
+
+    /// Returns counters from the latest broadphase update.
+    ///
+    /// The values are diagnostics for tuning and benchmarks; they are not
+    /// part of the simulation contract.
+    pub fn broadphase_stats(&self) -> BroadPhaseStats {
+        self.broadphase.stats()
     }
 
     /// Toggle the G7 SIMD-wide contact solver (default: enabled). Disabling
