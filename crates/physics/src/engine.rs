@@ -1751,7 +1751,10 @@ fn swept_shape_overlaps(
     let position = body.position + displacement * fraction;
     let orientation = swept_orientation(body, sub_dt, fraction);
     match (&body.shape, target.shape) {
-        (Shape::Box { half_extents: half_a }, Shape::Box { half_extents: half_b }) => obb_sat(
+        (
+            Shape::Box { half_extents: half_a },
+            Shape::Box { half_extents: half_b },
+        ) => obb_sat(
             position,
             *half_a,
             orientation,
