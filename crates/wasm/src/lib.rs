@@ -18,7 +18,7 @@ use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use ornis_render::scene::{CameraDesc, LightDesc, Scene};
+use ornis_render::scene::{LightDesc, Scene};
 use ornis_render::{
     OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
 };
