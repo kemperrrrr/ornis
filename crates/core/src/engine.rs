@@ -206,8 +206,7 @@ impl FixedTime {
 
     fn start_step(&mut self) {
         debug_assert!(self.accumulator_seconds >= self.delta_seconds);
-        self.accumulator_seconds =
-            (self.accumulator_seconds - self.delta_seconds).max(0.0);
+        self.accumulator_seconds = (self.accumulator_seconds - self.delta_seconds).max(0.0);
         self.tick = self.tick.saturating_add(1);
         self.elapsed_seconds += f64::from(self.delta_seconds);
         self.current_step = self.current_step.saturating_add(1);
@@ -457,9 +456,7 @@ mod tests {
         engine
             .fixed_schedule_mut()
             .add_system(CaptureFixedTime(fixed.clone()));
-        engine
-            .schedule_mut()
-            .add_system(CaptureTime(frame.clone()));
+        engine.schedule_mut().add_system(CaptureTime(frame.clone()));
 
         let delta = FixedTime::default().delta_seconds();
         engine.run_frame(delta * 100.0);
@@ -485,9 +482,7 @@ mod tests {
         engine
             .fixed_schedule_mut()
             .add_system(Trace { fixed: true });
-        engine
-            .schedule_mut()
-            .add_system(Trace { fixed: false });
+        engine.schedule_mut().add_system(Trace { fixed: false });
 
         let delta = FixedTime::default().delta_seconds();
         engine.run_frame(delta * 0.5);

@@ -143,10 +143,7 @@ impl System for OrbitCameraSystem {
         let Some(camera) = resources.get::<Mutex<OrbitCamera>>() else {
             return;
         };
-        camera
-            .lock()
-            .expect("orbit camera lock")
-            .apply_input(input);
+        camera.lock().expect("orbit camera lock").apply_input(input);
     }
 }
 
