@@ -297,7 +297,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 ---
 ## Приложение A — Движок рендеринга и физический движок
 
-> Сверено с кодом (`crates/render`, `crates/physics`) 2026-08-27.
+> Сверено с кодом (`crates/render`, `crates/physics`) 2026-08-28.
 
 ### A1. Движок рендеринга (`crates/render`)
 
@@ -328,13 +328,14 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
     box/capsule в дискретном contact path пока не реализована, хотя
     `distance.rs` поддерживает её для shapecast.
   - **Солвер**: warm-start, friction/restitution, split velocity/position stages, block solver, constraint islands, coherent sleeping/wake и ball/revolute joints; для single-point контактов доступны SIMD-wide и opt-in GPU пути.
-  - **`step`** по умолчанию делится на 12 подшагов; в каждом подшаге идут интеграция скоростей → broadphase/narrowphase → velocity solve → linear CCD → интеграция позиций → NGS position solve.
-  - **Raycast** — t-slab против ориентированного shape AABB с приближённой нормалью. **`shapecast`** — conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
-  - `BodyType` dynamic/static/kinematic, `RigidBody` с ориентацией, угловой скоростью и диагональным body-space inertia.
+  - **`step`** по умолчанию делится на 12 подшагов; в каждом подшаге идут интеграция скоростей → broadphase/narrowphase → velocity solve → linear/bounded angular CCD → интеграция позиций → NGS position solve.
+  - **Raycast** — точные локальные sphere/OBB/capsule intersection'ы с surface normals. **`shapecast`** — conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
+  - `BodyType` dynamic/static/kinematic, `RigidBody` с ориентацией, угловой скоростью, collision layer/mask и trigger-флагом; trigger transitions доступны через `TriggerEvent`.
 - Тесты находятся в `engine.rs`, `engine/contacts.rs`, `engine/islands.rs`, `engine/joints.rs` и `gpu.rs`; editor-only и native showcase используют ECS↔physics sync systems, browser-side physics намеренно не запускается поверх server snapshot.
 
 ### A3. Открытые вопросы для ревью
 1. ~~Рендер: активен ли G-buffer/lighting-путь или только forward?~~ **Закрыто в Фазе 4** — render graph c `Technique` (forward/deferred/hybrid), гибрид == legacy пиксель-в-пиксель.
-2. ~~Физика: какие связки (joints) нужны в первую очередь и нужен ли CCD для быстрых тел?~~ Закрыто G5/G6: ball/revolute joints и linear CCD реализованы; дальше нужны joint limits/motors и angular CCD.
+2. ~~Физика: какие связки (joints) нужны в первую очередь и нужен ли CCD для быстрых тел?~~ Закрыто G5/G6 и 2026-08-28: ball/revolute joints, linear CCD и bounded angular CCD реализованы; полностью аналитический swept-volume TOI остаётся дальнейшим улучшением. Далее нужны joint limits/motors.
 3. ~~`shapecast` — пустая заглушка~~ **Закрыто (G6)** — честный shapecast через conservative advancement (`distance.rs`), покрыт тестами.
 4. ~~Движок рендера не связан с ECS-сценой в браузере~~ **Частично закрыто** — WASM-viewport рендерит живую сцену из `/api/scene`; физика со сценой браузера по-прежнему не связана (см. План B в PLAN.md).
+5. **Broadphase scaling** — открытый performance-вопрос: Sweep-and-Prune остаётся baseline; первым кандидатом для deterministic benchmark-прототипа является uniform grid/spatial hash со static/dynamic split, dynamic AABB tree — второй кандидат для sparse/heterogeneous worlds. Production-выбор ещё не зафиксирован.
