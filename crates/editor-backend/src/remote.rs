@@ -196,7 +196,8 @@ fn serve(
             Err(_) => break,
         };
 
-        if is_websocket_request(&request) && request.url().split('?').next() == Some("/api/events") {
+        if is_websocket_request(&request) && request.url().split('?').next() == Some("/api/events")
+        {
             let cursor = event_cursor(request.url());
             let event_log = Arc::clone(&event_log);
             let stop = Arc::clone(&stop);
