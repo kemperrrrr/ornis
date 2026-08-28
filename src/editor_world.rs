@@ -348,7 +348,13 @@ impl EditorWorld {
         status_json(self)
     }
 
-    /// Result of executing a command on the authoritative editor world.
+    /// Execute one command, emitting state and completion events through `ev_tx`.
+    pub fn handle_command(&mut self, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
+        handle_command(self, cmd, ev_tx);
+    }
+}
+
+/// Result of executing a command on the authoritative editor world.
 struct CommandOutcome {
     success: bool,
     error: Option<String>,
