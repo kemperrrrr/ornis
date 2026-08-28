@@ -40,8 +40,9 @@ pub trait PhysicsEngine: Send + Sync {
     ) -> Option<JointHandle>;
     /// Destroy a joint by handle; no-op for an invalid handle.
     fn remove_joint(&mut self, handle: JointHandle);
-    /// Closest hit of `ray` against dynamic-world bodies within `max_dist`
-    /// (in units of the ray direction's length), or `None` if nothing is hit.
+    /// Closest exact shape hit of `ray` against registered bodies within
+    /// `max_dist` (in units of the ray direction's length), or `None` if
+    /// nothing is hit. Pass a normalized direction for world-distance units.
     fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit>;
     /// Sweep `shape` along the segment `from → to` and report the first body
     /// hit (hit distance measured along the sweep direction), or `None`.
@@ -1697,39 +1698,236 @@ impl BuiltinPhysicsEngine {
     }
 
     fn raycast_body(&self, ray: &Ray, handle: usize, max_dist: f32) -> Option<RaycastHit> {
+        if max_dist.is_nan() || max_dist < 0.0 || !vec3_finite(ray.direction) {
+            return None;
+        }
         let body = &self.bodies[handle];
-        let aabb = body.shape.aabb(body.position, body.orientation);
-        let inv_dir = Vec3::new(
-            1.0 / ray.direction.x,
-            1.0 / ray.direction.y,
-            1.0 / ray.direction.z,
-        );
-
-        let t1 = (aabb.min - ray.origin) * inv_dir;
-        let t2 = (aabb.max - ray.origin) * inv_dir;
-        let t_min = t1.min(t2);
-        let t_max = t1.max(t2);
-        let enter = t_min.x.max(t_min.y.max(t_min.z));
-        let exit = t_max.x.min(t_max.y.min(t_max.z));
-
-        if enter > exit || exit < 0.0 || enter > max_dist {
-            return None;
-        }
-
-        let t = enter.max(0.0);
-        let point = ray.point_at(t);
-        // Approximate surface normal pointing away from the shape centre.
-        let normal = (point - body.position).normalize_or_zero();
-        if normal.length_squared() < 0.5 {
-            return None;
-        }
+        let inverse = body.orientation.inverse();
+        let origin = inverse * (ray.origin - body.position);
+        let direction = inverse * ray.direction;
+        let hit = match &body.shape {
+            Shape::Sphere { radius } => {
+                ray_sphere_hit(origin, direction, Vec3::ZERO, *radius, max_dist)
+            }
+            Shape::Box { half_extents } => {
+                ray_obb_hit(origin, direction, *half_extents, max_dist)
+            }
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => ray_capsule_hit(origin, direction, *radius, *half_height, max_dist),
+        }?;
+        let (distance, local_normal) = hit;
+        let point = ray.point_at(distance);
+        let normal = (body.orientation * local_normal).normalize_or(Vec3::Y);
         Some(RaycastHit {
             handle,
             point,
             normal,
-            distance: t,
+            distance,
         })
     }
+}
+
+/// Ray/sphere intersection in the shape's local frame. The returned normal is
+/// also local so callers can rotate it back into world space.
+fn ray_sphere_hit(
+    origin: Vec3,
+    direction: Vec3,
+    center: Vec3,
+    radius: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let a = direction.length_squared();
+    if a <= 1e-12 {
+        return None;
+    }
+    let offset = origin - center;
+    let half_b = offset.dot(direction);
+    let c = offset.length_squared() - radius * radius;
+    let discriminant = half_b * half_b - a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    let mut distance = (-half_b - root) / a;
+    if distance < 0.0 {
+        distance = (-half_b + root) / a;
+    }
+    if distance < 0.0 || distance > max_dist {
+        return None;
+    }
+    let point = origin + direction * distance;
+    Some((distance, (point - center).normalize_or(Vec3::X)))
+}
+
+/// Update one slab of a local-space OBB ray intersection.
+fn ray_obb_slab(
+    origin: f32,
+    direction: f32,
+    minimum: f32,
+    maximum: f32,
+    axis: Vec3,
+    near: &mut f32,
+    far: &mut f32,
+    near_normal: &mut Vec3,
+    far_normal: &mut Vec3,
+) -> bool {
+    if direction.abs() <= 1e-12 {
+        return origin >= minimum && origin <= maximum;
+    }
+    let (entry, entry_normal, exit, exit_normal) = if direction > 0.0 {
+        (
+            (minimum - origin) / direction,
+            -axis,
+            (maximum - origin) / direction,
+            axis,
+        )
+    } else {
+        (
+            (maximum - origin) / direction,
+            axis,
+            (minimum - origin) / direction,
+            -axis,
+        )
+    };
+    if entry > *near {
+        *near = entry;
+        *near_normal = entry_normal;
+    }
+    if exit < *far {
+        *far = exit;
+        *far_normal = exit_normal;
+    }
+    *near <= *far
+}
+
+/// Exact local-space ray/OBB intersection using a three-axis slab test.
+fn ray_obb_hit(
+    origin: Vec3,
+    direction: Vec3,
+    half_extents: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    if direction.length_squared() <= 1e-12 {
+        return None;
+    }
+    let mut near = f32::NEG_INFINITY;
+    let mut far = max_dist;
+    let mut near_normal = Vec3::ZERO;
+    let mut far_normal = Vec3::ZERO;
+    if !ray_obb_slab(
+        origin.x,
+        direction.x,
+        -half_extents.x,
+        half_extents.x,
+        Vec3::X,
+        &mut near,
+        &mut far,
+        &mut near_normal,
+        &mut far_normal,
+    ) || !ray_obb_slab(
+        origin.y,
+        direction.y,
+        -half_extents.y,
+        half_extents.y,
+        Vec3::Y,
+        &mut near,
+        &mut far,
+        &mut near_normal,
+        &mut far_normal,
+    ) || !ray_obb_slab(
+        origin.z,
+        direction.z,
+        -half_extents.z,
+        half_extents.z,
+        Vec3::Z,
+        &mut near,
+        &mut far,
+        &mut near_normal,
+        &mut far_normal,
+    ) {
+        return None;
+    }
+    if far < 0.0 || near > max_dist {
+        return None;
+    }
+    if near >= 0.0 {
+        Some((near, near_normal))
+    } else {
+        Some((far, far_normal))
+    }
+}
+
+/// Keep the closest candidate hit in a local-space ray query.
+fn keep_closest_hit(
+    best: Option<(f32, Vec3)>,
+    candidate: Option<(f32, Vec3)>,
+) -> Option<(f32, Vec3)> {
+    match (best, candidate) {
+        (None, candidate) => candidate,
+        (best, None) => best,
+        (Some(best), Some(candidate)) => Some(if candidate.0 < best.0 {
+            candidate
+        } else {
+            best
+        }),
+    }
+}
+
+/// Exact intersection with the cylindrical side of a local Y-axis capsule.
+fn ray_capsule_cylinder_hit(
+    origin: Vec3,
+    direction: Vec3,
+    radius: f32,
+    half_height: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let a = direction.x * direction.x + direction.z * direction.z;
+    if a <= 1e-12 {
+        return None;
+    }
+    let half_b = origin.x * direction.x + origin.z * direction.z;
+    let c = origin.x * origin.x + origin.z * origin.z - radius * radius;
+    let discriminant = half_b * half_b - a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    let denominator = a;
+    let roots = [(-half_b - root) / denominator, (-half_b + root) / denominator];
+    let mut best = None;
+    for distance in roots {
+        if distance < 0.0 || distance > max_dist {
+            continue;
+        }
+        let point = origin + direction * distance;
+        if point.y < -half_height || point.y > half_height {
+            continue;
+        }
+        let normal = Vec3::new(point.x, 0.0, point.z).normalize_or(Vec3::X);
+        best = keep_closest_hit(best, Some((distance, normal)));
+    }
+    best
+}
+
+/// Exact local-space ray/capsule intersection: finite cylinder side plus its
+/// two spherical caps. The nearest valid feature is returned.
+fn ray_capsule_hit(
+    origin: Vec3,
+    direction: Vec3,
+    radius: f32,
+    half_height: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let mut best = ray_capsule_cylinder_hit(origin, direction, radius, half_height, max_dist);
+    for center in [Vec3::new(0.0, -half_height, 0.0), Vec3::new(0.0, half_height, 0.0)] {
+        best = keep_closest_hit(
+            best,
+            ray_sphere_hit(origin, direction, center, radius, max_dist),
+        );
+    }
+    best
 }
 
 impl PhysicsEngine for BuiltinPhysicsEngine {
@@ -2155,6 +2353,46 @@ mod tests {
         assert!(hit.is_some());
         let hit = hit.unwrap();
         assert!((hit.distance - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn raycast_obb_uses_exact_surface_and_normal() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.25, 0.25),
+            0.0,
+        ).with_orientation(rotation));
+
+        let ray = Ray::new(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+        let hit = physics.raycast(ray, 10.0).expect("ray must hit the rotated box");
+        let expected_distance = 2.0 - 0.25 * std::f32::consts::SQRT_2;
+        let expected_normal = rotation * Vec3::Y;
+        assert!((hit.distance - expected_distance).abs() < 1e-4);
+        assert!(hit.normal.dot(expected_normal) > 0.999);
+        assert!((hit.point - ray.point_at(expected_distance)).length() < 1e-4);
+    }
+
+    #[test]
+    fn raycast_capsule_uses_spherical_cap_normal() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 0.0));
+
+        let ray = Ray::new(Vec3::new(0.4, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+        let hit = physics.raycast(ray, 10.0).expect("ray must hit the capsule cap");
+        let expected_distance = 2.0 - (1.0 + 0.3);
+        let expected_normal = Vec3::new(0.8, 0.6, 0.0);
+        assert!((hit.distance - expected_distance).abs() < 1e-4);
+        assert!(hit.normal.dot(expected_normal) > 0.999);
+        assert!((hit.point - Vec3::new(0.4, 1.3, 0.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn raycast_ignores_zero_length_rays() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0));
+        assert!(physics.raycast(Ray::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO), 10.0).is_none());
     }
 
     #[test]

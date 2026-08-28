@@ -359,7 +359,8 @@ runtime без отдельной extract-фазы — будущая цель, 
 взаимную фильтрацию `collision_layer`/`collision_mask`; broadphase,
 narrowphase и linear CCD не создают пары для несовместимых фильтров.
 Triggers имеют `Entered`/`Exited` events и не применяют solver/CCD impulses.
-Остаются angular CCD и более точный raycast для OBB/capsule.
+Raycast теперь использует точные sphere/OBB/capsule intersections с
+корректными surface normals. Остаётся angular CCD.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
