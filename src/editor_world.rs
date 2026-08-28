@@ -442,7 +442,6 @@ fn emit_error(ev_tx: &Sender<GameEvent>, command: &str, message: &str) {
     );
 }
 
-
 /// Result of executing a command on the authoritative editor world.
 struct CommandOutcome {
     success: bool,
@@ -1253,10 +1252,7 @@ mod tests {
             } => Some((*request_id, command.clone(), *success, error.clone())),
             _ => None,
         });
-        assert_eq!(
-            completion,
-            Some((77, "create_entity".into(), true, None))
-        );
+        assert_eq!(completion, Some((77, "create_entity".into(), true, None)));
     }
 
     #[test]

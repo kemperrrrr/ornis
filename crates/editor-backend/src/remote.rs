@@ -681,7 +681,10 @@ mod tests {
                 command,
             } => {
                 assert_eq!(request_id, 42);
-                assert!(matches!(*command, UiCommand::SetComponent { entity_id: 5, .. }));
+                assert!(matches!(
+                    *command,
+                    UiCommand::SetComponent { entity_id: 5, .. }
+                ));
             }
             _ => panic!("expected request-id wrapper"),
         }
@@ -708,7 +711,9 @@ mod tests {
                 command,
             } => {
                 assert_eq!(request_id, 3);
-                assert!(matches!(*command, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown"));
+                assert!(
+                    matches!(*command, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown")
+                );
             }
             _ => panic!("expected request-id wrapper"),
         }
