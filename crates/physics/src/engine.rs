@@ -1067,6 +1067,9 @@ fn detect_collisions(
     for &(i, j) in active {
         let a = &bodies[i];
         let b = &bodies[j];
+        if !a.can_collide_with(b) {
+            continue;
+        }
         if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
             continue;
         }
@@ -1244,7 +1247,10 @@ impl SweepAndPrune {
                 if start_j > end {
                     break;
                 }
-                if i < j && sweep_aabb.overlaps(&self.aabbs[j]) {
+                if i < j
+                    && bodies[i].can_collide_with(&bodies[j])
+                    && sweep_aabb.overlaps(&self.aabbs[j])
+                {
                     self.active.push((i, j));
                 }
             }
@@ -1563,6 +1569,8 @@ impl BuiltinPhysicsEngine {
             if disp.length_squared() <= (0.5 * min_dim) * (0.5 * min_dim) {
                 continue;
             }
+            let mover_layer = self.bodies[h].collision_layer;
+            let mover_mask = self.bodies[h].collision_mask;
             let mover = distance::ShapeRef {
                 shape: &self.bodies[h].shape,
                 pos: self.bodies[h].position,
@@ -1572,7 +1580,11 @@ impl BuiltinPhysicsEngine {
                 .bodies
                 .iter()
                 .enumerate()
-                .filter(|&(o, _)| o != h)
+                .filter(move |&(o, b)| {
+                    o != h
+                        && mover_mask & b.collision_layer != 0
+                        && b.collision_mask & mover_layer != 0
+                })
                 .map(|(o, b)| {
                     (
                         o,
@@ -1889,6 +1901,68 @@ mod tests {
         let body_b = physics.get_body(b).unwrap();
         let dist = (body_a.position - body_b.position).length();
         assert!(dist < 1.1);
+    }
+
+    #[test]
+    fn collision_filter_blocks_broadphase_and_narrowphase() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0001, 0b0010),
+        );
+        let b = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0010, 0b0100),
+        );
+
+        physics.step(1.0 / 60.0);
+
+        assert_eq!(physics.debug_contact_count(a), 0);
+        assert_eq!(physics.debug_contact_count(b), 0);
+        assert_eq!(physics.get_body(a).unwrap().position.x, -0.4);
+        assert_eq!(physics.get_body(b).unwrap().position.x, 0.4);
+    }
+
+    #[test]
+    fn collision_filter_allows_mutual_layer_match() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0001, 0b0010),
+        );
+        let b = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0010, 0b0001),
+        );
+
+        physics.step(1.0 / 60.0);
+
+        assert!(physics.debug_contact_count(a) > 0);
+        assert!(physics.debug_contact_count(b) > 0);
+    }
+
+    #[test]
+    fn collision_filter_applies_to_continuous_cast() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(
+            RigidBody::new_box(Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.05, 10.0), 0.0)
+                .with_collision_filter(0b0010, 0b0010),
+        );
+        let bullet = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(0.0, 3.0, 0.0), 0.1, 1.0)
+                .with_collision_filter(0b0001, 0b0001),
+        );
+        physics.get_body_mut(bullet).unwrap().velocity = Vec3::new(0.0, -80.0, 0.0);
+
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+
+        assert_eq!(physics.debug_contact_count(bullet), 0);
+        assert!(
+            physics.get_body(bullet).unwrap().position.y < -0.1,
+            "filtered bullet should pass through the floor"
+        );
     }
 
     #[test]

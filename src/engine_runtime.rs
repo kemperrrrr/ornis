@@ -116,9 +116,12 @@ impl PhysicsRuntime {
         {
             apply_transform_to_body(body, transform);
         }
-        // A newly edited body role/material is reflected at the next sync
-        // only when the ECS source differs from the solver representation.
-        if body.body_type != source.body_type {
+        // A newly edited body role/filter is reflected at the next sync
+        // when the ECS source differs from the solver representation.
+        if body.body_type != source.body_type
+            || body.collision_layer != source.collision_layer
+            || body.collision_mask != source.collision_mask
+        {
             *body = source.clone();
             if let Some(transform) = transform {
                 apply_transform_to_body(body, transform);

@@ -355,6 +355,11 @@ runtime без отдельной extract-фазы — будущая цель, 
 - **High-stack rocking** (качество, не производительность): 32-стек подрагивает, 24/33 спит — остаётся как issue для будущей работы (физически корректно, визуально приемлемо).
 - **Извлечение хелперов**: `build_manifold_state` (единый преамбул), `partition_into_islands`, `dispatch_islands_velocity` — переиспользуются CPU и GPU путём. Итог: 25 тестов, clippy/fmt/AST проверено (в среде без Rust toolchain — код написан, полная компиляция при следующем `cargo test -p ornis-physics`).
 
+**Physics API follow-up (2026-08-28):** `RigidBody` теперь имеет
+взаимную фильтрацию `collision_layer`/`collision_mask`; broadphase,
+narrowphase и linear CCD не создают пары для несовместимых фильтров.
+Остаются triggers, angular CCD и более точный raycast для OBB/capsule.
+
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 

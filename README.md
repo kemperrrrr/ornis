@@ -172,7 +172,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Аудио-база: `AudioSource`/`AudioListener`, декодер (symphonia), бэкенды cpal / Web Audio | ✅ | `crates/audio/`; в настоящий момент файл активно дорабатывается |
 | DSP на GPU, процедурный звук | ❌ | |
-| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, raycast, SIMD-wide батч-солвер G7) | ✅ | `crates/physics/`; G7: `wide.rs` (SIMD-wide CPU), `gpu.rs` (GPU, feature `gpu`; шейдер написан на Rust и транслируется в WGSL макросами `gpu_pipeline`/`WgslStruct`, проверен naga и lavapipe-тестами в quality-гейте) |
+| `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, collision layers/masks, raycast, SIMD-wide батч-солвер G7) | ✅ | `crates/physics/`; `RigidBody` поддерживает взаимную фильтрацию layer/mask в broadphase, narrowphase и linear CCD; G7: `wide.rs` (SIMD-wide CPU), `gpu.rs` (GPU, feature `gpu`; шейдер написан на Rust и транслируется в WGSL макросами `gpu_pipeline`/`WgslStruct`, проверен naga и lavapipe-тестами в quality-гейте) |
 | Подключение Rapier/Jolt через трейт | ❌ | трейт есть, адаптеров нет |
 
 ### Не начато

@@ -56,6 +56,17 @@ pub struct RigidBody {
     pub friction: f32,
     /// Collision primitive; also drives the derived inertia tensor.
     pub shape: Shape,
+    /// Bit identifying the collision layer this body belongs to.
+    ///
+    /// A zero layer is valid and makes the body ineligible for all pairs;
+    /// ordinary layers are represented by one or more set bits.
+    pub collision_layer: u32,
+    /// Bit mask of layers this body is allowed to collide with.
+    ///
+    /// A pair collides only when both bodies' masks include the other
+    /// body's layer. The default is all layers, preserving pre-filter
+    /// behavior.
+    pub collision_mask: u32,
     /// Simulation role; derived from mass at construction, settable after.
     pub body_type: BodyType,
 }
@@ -76,6 +87,8 @@ impl RigidBody {
             restitution,
             friction,
             shape,
+            collision_layer: 1,
+            collision_mask: u32::MAX,
             body_type: if mass > 0.0 {
                 BodyType::Dynamic
             } else {
@@ -109,6 +122,28 @@ impl RigidBody {
                 half_height,
             },
         )
+    }
+
+    /// Builder-style collision-layer and mask configuration.
+    ///
+    /// A pair is eligible only when both directions agree: `self`'s mask
+    /// contains `other`'s layer and vice versa. This keeps filtering
+    /// symmetric even when a body uses a restrictive mask.
+    pub fn with_collision_filter(mut self, layer: u32, mask: u32) -> Self {
+        self.set_collision_filter(layer, mask);
+        self
+    }
+
+    /// Changes the collision layer and mask in place.
+    pub fn set_collision_filter(&mut self, layer: u32, mask: u32) {
+        self.collision_layer = layer;
+        self.collision_mask = mask;
+    }
+
+    /// Returns whether this body and `other` pass their mutual layer masks.
+    pub fn can_collide_with(&self, other: &Self) -> bool {
+        self.collision_mask & other.collision_layer != 0
+            && other.collision_mask & self.collision_layer != 0
     }
 
     /// Builder-style variant of [`RigidBody::set_orientation`].
@@ -169,6 +204,36 @@ mod tests {
         body.apply_torque(Vec3::new(1.0, 0.0, 0.0));
         body.apply_torque(Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(body.torque, Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn collision_filter_defaults_to_all_layers() {
+        let body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0);
+        assert_eq!(body.collision_layer, 1);
+        assert_eq!(body.collision_mask, u32::MAX);
+        assert!(body.can_collide_with(&body));
+    }
+
+    #[test]
+    fn collision_filter_requires_mutual_mask_match() {
+        let a = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0)
+            .with_collision_filter(0b0001, 0b0010);
+        let b = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0)
+            .with_collision_filter(0b0010, 0b0001);
+        assert!(a.can_collide_with(&b));
+
+        let blocked = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0)
+            .with_collision_filter(0b0100, 0b0001);
+        assert!(!a.can_collide_with(&blocked));
+        assert!(!blocked.can_collide_with(&a));
+    }
+
+    #[test]
+    fn collision_filter_setter_updates_layer_and_mask() {
+        let mut body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0);
+        body.set_collision_filter(0b1000, 0b0100);
+        assert_eq!(body.collision_layer, 0b1000);
+        assert_eq!(body.collision_mask, 0b0100);
     }
 
     /// `set_angular_velocity` is a straight setter with the same zombie
