@@ -115,7 +115,7 @@ fn add_pair(
 }
 
 /// Baseline axis sweep-and-prune broadphase.
-struct SweepAndPrune {
+pub(crate) struct SweepAndPrune {
     aabbs: Vec<AABB>,
     active: Vec<(usize, usize)>,
     sort_axis: usize,
@@ -202,7 +202,7 @@ impl CellKey {
 /// Uniform grid broadphase. Bodies spanning too many cells use `large` and
 /// are compared against all bodies once, avoiding an enormous cell expansion
 /// while retaining correctness for large floors and environment pieces.
-struct UniformGrid {
+pub(crate) struct UniformGrid {
     aabbs: Vec<AABB>,
     active: Vec<(usize, usize)>,
     cells: HashMap<CellKey, Vec<usize>>,
@@ -229,7 +229,11 @@ impl UniformGrid {
         let span_x = (i64::from(maximum.x) - i64::from(minimum.x) + 1) as u64;
         let span_y = (i64::from(maximum.y) - i64::from(minimum.y) + 1) as u64;
         let span_z = (i64::from(maximum.z) - i64::from(minimum.z) + 1) as u64;
-        (minimum, maximum, span_x.saturating_mul(span_y).saturating_mul(span_z))
+        (
+            minimum,
+            maximum,
+            span_x.saturating_mul(span_y).saturating_mul(span_z),
+        )
     }
 
     fn insert_body(&mut self, body: usize) {
@@ -335,8 +339,7 @@ mod tests {
     #[test]
     fn filtered_pairs_are_not_emitted_by_either_backend() {
         let bodies = vec![
-            RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0)
-                .with_collision_filter(0b0001, 0b0010),
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0).with_collision_filter(0b0001, 0b0010),
             RigidBody::new_sphere(Vec3::new(0.5, 0.0, 0.0), 1.0, 1.0)
                 .with_collision_filter(0b0010, 0b0100),
         ];
