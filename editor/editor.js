@@ -2,7 +2,8 @@
 // Polls GET /api/scene + GET /api/status and renders the live ECS state
 // into the Hierarchy panel, the Inspector and the footer. Commands
 // (create/rename/destroy entity, set transform/material) go through
-// POST /api/command. The WASM viewport (viewport.js) polls the same
+// POST /api/command and receive an explicit request_id/accepted acknowledgement.
+// The WASM viewport (viewport.js) polls the same
 // /api/scene (~1/s) and renders the live ECS scene, falling back to
 // scene.ron when the server is unavailable.
 
@@ -15,6 +16,9 @@ var POLL_MS = 1500;
 
 var lastScene = null;
 var hasLiveScene = false;   // false until the first successful fetch
+var lastSceneSequence = 0;  // transport sequence; reject out-of-order replies
+var lastStatusSequence = 0;
+var nextRequestId = 1;      // client-generated id echoed by /api/command
 var selectedKey = null;     // "id:generation" of the selected entity
 var lastInspectorKey = '';  // fingerprint of the rendered inspector
 var activeDrag = null;      // slider drag in progress (see makeSlider)
@@ -27,10 +31,22 @@ function fetchJson(url, options) {
 }
 
 function sendCommand(type, data) {
+    var requestId = nextRequestId++;
     return fetchJson('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: type, data: data || {} })
+        body: JSON.stringify({
+            type: type,
+            request_id: requestId,
+            data: data || {}
+        })
+    }).then(function(ack) {
+        // Older development servers returned {}. Keep that response
+        // compatible, but surface an explicit rejection from the current API.
+        if (ack && ack.accepted === false) {
+            throw new Error(ack.error || ('command rejected: ' + type));
+        }
+        return ack;
     });
 }
 
@@ -181,6 +197,9 @@ function selectEntity(key) {
 function refreshScene() {
     return fetchJson('/api/scene')
         .then(function(scene) {
+            var sequence = scene && scene.sequence;
+            if (typeof sequence === 'number' && sequence < lastSceneSequence) return;
+            if (typeof sequence === 'number') lastSceneSequence = sequence;
             hasLiveScene = true;
             lastScene = scene;
             if (selectedKey && !findEntity(scene, selectedKey)) {
@@ -506,7 +525,12 @@ function renderStatus(status) {
 
 function refreshStatus() {
     return fetchJson('/api/status')
-        .then(renderStatus)
+        .then(function(status) {
+            var sequence = status && status.sequence;
+            if (typeof sequence === 'number' && sequence < lastStatusSequence) return;
+            if (typeof sequence === 'number') lastStatusSequence = sequence;
+            renderStatus(status);
+        })
         .catch(function() { /* engine offline — keep last state */ });
 }
 

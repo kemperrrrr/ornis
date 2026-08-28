@@ -129,7 +129,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
 | Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; native и WASM render-клиенты используют ECS-backed `RenderWorld`, editor-only facade использует тот же core World; серверный authoritative World и браузер по-прежнему разделены serialization boundary |
 | Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only physics подключена; native physics и полный cross-domain runtime ещё впереди |
-| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit events уже записываются в ресурс, browser gameplay/input systems ещё впереди |
+| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit и WASM orbit adapters уже записывают input в ресурс, browser gameplay systems ещё впереди |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
@@ -162,8 +162,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 | Браузерный редактор: фронтенд (панели, иконки, раскладка) | 🟡 | `editor/` отдаётся сервером и отрисовывается; WASM-canvas рендерит живую сцену из `/api/scene` (polling ~1/с) с fallback на `scene.ron`, есть orbit-камера |
 | Браузерный редактор: связь с живым движком | 🟡 | В режиме `editor-only` сервер держит editor-only facade (`src/editor_world.rs`) над `ornis_core::World`; browser-side `RenderWorld` остаётся отдельной snapshot-копией после serialization boundary: при старте мир загружает `editor/scene.ron` (5 сфер + свет/камера/ambient как ресурс), у сущностей компоненты Name/Transform/Mesh/Material, есть `version` (инкремент на мутацию). Иерархия и счётчик сущностей в футере обновляются из `/api/scene`/`/api/status`, создание сущности из UI работает; через `POST /api/command` принимаются `create_entity`/`destroy_entity` и generic `set_component` (любой компонент из реестра, serde-каноничный JSON), невалидные команды → событие `error`. Сохранение и загрузка сцены — команды `save_scene`/`load_scene` (см. следующую строку); browser-side `RenderWorld` принимает только versioned snapshots после serialization boundary |
 | Сохранение/загрузка сцены (save/load) | ✅ | `save_scene`/`load_scene` через `POST /api/command` (опциональный `{"path": …}`, по умолчанию `editor/scene.ron`): мир сериализуется в RON и пишется атомарно (sibling `*.tmp` + rename), загрузка заменяет мир из файла; результаты — события `scene_saved {path, version}` / `scene_loaded {path, version, entity_count}` / `error` в `GET /api/events`. В UI — меню File → Save/Reload, результат в футере. WASM-canvas рендерит живую сцену: polling `/api/scene` (~1/с), при недоступности сервера — fallback на `scene.ron` |
-| Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. WebSocket нет. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
-| `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
+| Remote API (HTTP, порт 3420) | 🟡 | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events`, `POST /api/command`, статика из `editor/`. `POST /api/command` возвращает `request_id` + `accepted` ACK; snapshot endpoints получают transport `sequence`; WebSocket и server-side completion correlation ещё впереди. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
+| `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, transport `sequence`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
 | Нативный UI-крейт | 🗑️ | удалён (август 2026): `crates/ui*`, форки, vello/boa-стек; нативный режим рендерит 3D-сцену без UI-overlay |
 
 ### Аудио, физика, прочее
@@ -194,10 +194,11 @@ cargo xtask bca --report      # html to target/bca/index.html
 `SmartStore` и `Schedule`, а `ornis_core::Engine` — минимальную границу
 кадра с ресурсом `Time`. Native и WASM render loops уже используют общий
 `RenderWorld`/`RenderExtract`/`FramePlan` контракт после serialization
-boundary. `InputState` теперь является backend-neutral resource и native
-winit adapter уже записывает keyboard, mouse and wheel events. Следующий
-шаг — добавить browser/gameplay consumers и physics как доменную систему,
-а затем собрать полноценный cross-domain runtime. Это не означает
+boundary. `InputState` теперь является backend-neutral resource; native
+winit и WASM orbit adapters записывают keyboard, mouse, pointer and wheel
+input, а browser render frame публикует его через `Engine`. Следующий шаг —
+добавить gameplay consumers и physics как доменную систему, а затем собрать
+полноценный cross-domain runtime. Это не означает
 немедленно удалять `FramePlan`: он остаётся переходным render/backend-планом.
 
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).

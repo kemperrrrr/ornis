@@ -4,7 +4,8 @@
 //!
 //! Since the D2 rewrite (audit 2026-08-22 §6.2) the contract is generic:
 //! every entity carries a `components` map keyed by the registry name,
-//! and payloads are serde-canonical forms of the component types from
+//! the root also carries a transport `sequence`, and payloads are
+//! serde-canonical forms of the component types from
 //! `ornis_render::scene` (externally-tagged enums) — both sides use the
 //! same types, no per-variant mirror code. The server may answer with a
 //! reduced variant whose entities lack `components` (no live world yet) —
@@ -23,6 +24,10 @@ pub struct ApiScene {
     /// Server-side scene version; the client re-uploads GPU data only when
     /// this changes between polls.
     pub version: u64,
+    /// Transport sequence assigned by the editor backend. It is independent
+    /// of the scene version and lets consumers reject out-of-order replies.
+    #[serde(default)]
+    pub sequence: u64,
     #[serde(default)]
     pub entities: Vec<ApiEntity>,
     #[serde(default)]
@@ -56,7 +61,11 @@ pub struct RenderComponents {
 /// crate's scene description. The WASM runtime inserts it into the shared
 /// [`ornis_render::RenderWorld`] before ECS extraction and GPU upload.
 pub struct LiveScene {
+    /// Authoritative server-side scene version.
     pub version: u64,
+    /// Transport sequence assigned by the editor backend.
+    pub sequence: u64,
+    /// Renderable scene description reconstructed from the snapshot.
     pub scene: Scene,
 }
 
@@ -77,6 +86,7 @@ impl ApiScene {
             .collect();
         LiveScene {
             version: self.version,
+            sequence: self.sequence,
             scene: Scene {
                 name: "live".to_string(),
                 entities,
@@ -98,7 +108,7 @@ pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
 #[cfg(test)]
 /// The full contract payload, in the canonical generic form.
 pub(crate) const FULL_CONTRACT: &str = r#"{
-    "version": 5, "entity_count": 2,
+    "version": 5, "sequence": 12, "entity_count": 2,
     "entities": [{
         "id": 0, "generation": 0,
         "components": {
@@ -121,6 +131,7 @@ mod tests {
     fn parses_full_contract() {
         let live = parse_scene_json(FULL_CONTRACT).expect("full contract must parse");
         assert_eq!(live.version, 5);
+        assert_eq!(live.sequence, 12);
         assert_eq!(live.scene.entities.len(), 1);
         assert_eq!(live.scene.lights.len(), 1);
         assert_eq!(live.scene.ambient, [0.10, 0.10, 0.15]);

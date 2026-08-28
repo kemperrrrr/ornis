@@ -82,15 +82,19 @@ impl Drop for RemoteEditor {
     }
 }
 
-const EMPTY_STATUS: &str = r#"{"entity_count":0,"name":"Ornis Engine","version":0}"#;
+const EMPTY_STATUS: &str =
+    r#"{"entity_count":0,"name":"Ornis Engine","version":0,"sequence":0}"#;
 const EMPTY_SCENE: &str =
-    r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null}"#;
+    r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null,"sequence":0}"#;
 
 /// Snapshot payloads refreshed out of the game-event stream; served by the
 /// `/api/status` and `/api/scene` endpoints until the next snapshot arrives.
+/// `sequence` is transport metadata and is independent of the scene's
+/// authoritative `version`.
 struct Snapshots {
     status: String,
     scene: String,
+    sequence: u64,
 }
 
 impl Default for Snapshots {
@@ -98,6 +102,7 @@ impl Default for Snapshots {
         Self {
             status: EMPTY_STATUS.to_string(),
             scene: EMPTY_SCENE.to_string(),
+            sequence: 0,
         }
     }
 }
@@ -110,6 +115,7 @@ fn serve(
 ) {
     let mut buffer: Vec<GameEvent> = Vec::new();
     let mut snapshots = Snapshots::default();
+    let mut next_request_id = 1_u64;
     let root = assets_root();
 
     loop {
@@ -125,7 +131,14 @@ fn serve(
             Err(_) => break,
         };
 
-        let response = route_request(&root, &mut request, &mut buffer, &snapshots, &game_tx);
+        let response = route_request(
+            &root,
+            &mut request,
+            &mut buffer,
+            &snapshots,
+            &game_tx,
+            &mut next_request_id,
+        );
         let _ = request.respond(response);
     }
 }
@@ -144,14 +157,16 @@ fn drain_game_events(
                 cmd_type,
                 json_data,
             } if cmd_type == "status" => {
-                snaps.status = json_data.clone();
+                snaps.sequence = snaps.sequence.saturating_add(1);
+                snaps.status = add_sequence(json_data, snaps.sequence);
                 continue;
             }
             GameEvent::CustomEvent {
                 cmd_type,
                 json_data,
             } if cmd_type == "scene" => {
-                snaps.scene = json_data.clone();
+                snaps.sequence = snaps.sequence.saturating_add(1);
+                snaps.scene = add_sequence(json_data, snaps.sequence);
                 continue;
             }
             _ => {}
@@ -160,14 +175,81 @@ fn drain_game_events(
     }
 }
 
-/// Serve one HTTP request. `/api/command` posts are forwarded to the game
-/// thread fire-and-forget; everything else is answered synchronously.
+/// Add transport sequence metadata to an object snapshot while preserving
+/// its existing JSON shape. The scene's authoritative `version` remains a
+/// separate field and is never rewritten.
+fn add_sequence(body: &str, sequence: u64) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_owned();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.to_owned();
+    };
+    object.insert("sequence".into(), serde_json::json!(sequence));
+    serde_json::to_string(&value).unwrap_or_else(|_| body.to_owned())
+}
+
+/// A synchronous acknowledgement for one accepted or rejected HTTP command.
+/// The engine may complete the command later; `accepted` only means that the
+/// message was validated and queued successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandAck {
+    request_id: u64,
+    accepted: bool,
+    error: Option<String>,
+}
+
+fn command_ack_json(ack: &CommandAck) -> String {
+    match &ack.error {
+        Some(error) => serde_json::json!({
+            "accepted": ack.accepted,
+            "request_id": ack.request_id,
+            "error": error,
+        })
+        .to_string(),
+        None => serde_json::json!({
+            "accepted": ack.accepted,
+            "request_id": ack.request_id,
+        })
+        .to_string(),
+    }
+}
+
+fn allocate_request_id(next_request_id: &mut u64) -> u64 {
+    let request_id = (*next_request_id).max(1);
+    *next_request_id = request_id.saturating_add(1);
+    request_id
+}
+
+/// Use a client-provided positive request id when present; otherwise allocate
+/// a monotonic server id. Advancing the allocator past a supplied id avoids
+/// collisions with subsequent generated ids.
+fn command_request_id(body: &str, next_request_id: &mut u64) -> u64 {
+    let requested = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("request_id").and_then(|id| id.as_u64()))
+        .filter(|&id| id > 0);
+    if let Some(request_id) = requested {
+        if request_id >= *next_request_id {
+            *next_request_id = request_id.saturating_add(1).max(1);
+        }
+        request_id
+    } else {
+        allocate_request_id(next_request_id)
+    }
+}
+
+/// Serve one HTTP request. `/api/command` posts are validated, forwarded to
+/// the game thread and acknowledged synchronously; snapshot responses carry
+/// transport sequence metadata; everything else is answered from current
+/// server state.
 fn route_request(
     root: &Path,
     request: &mut Request,
     buffer: &mut Vec<GameEvent>,
     snapshots: &Snapshots,
     game_tx: &Sender<UiCommand>,
+    next_request_id: &mut u64,
 ) -> Response<Cursor<Vec<u8>>> {
     let url = request.url().to_string();
     let method = request.method().as_str().to_string();
@@ -184,8 +266,10 @@ fn route_request(
         ("POST", "/api/command") => {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
-            post_command(&body, game_tx);
-            json_response("{}")
+            let request_id = command_request_id(&body, next_request_id);
+            let ack = post_command(&body, game_tx, request_id);
+            let ack_body = command_ack_json(&ack);
+            json_response(&ack_body)
         }
         ("GET", path) => serve_static(root, path),
         _ => not_found(),
@@ -212,15 +296,44 @@ fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
 }
 
 /// Parse a posted command envelope `{"type": …, "data": …}` and forward it
-/// to the game thread. Malformed posts are dropped silently — the endpoint
-/// answers `{}` either way.
-fn post_command(body: &str, game_tx: &Sender<UiCommand>) {
-    let cmd = serde_json::from_str::<serde_json::Value>(body).ok();
-    if let Some(cmd) = cmd
-        && let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str())
-        && let Some(command) = build_command(cmd_type, cmd.get("data"))
-    {
-        game_tx.send(command).ok();
+/// to the game thread. The returned acknowledgement distinguishes malformed
+/// input and a disconnected game channel from a successfully queued command.
+fn post_command(body: &str, game_tx: &Sender<UiCommand>, request_id: u64) -> CommandAck {
+    let cmd = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(cmd) => cmd,
+        Err(_) => {
+            return CommandAck {
+                request_id,
+                accepted: false,
+                error: Some("request body is not valid JSON".into()),
+            };
+        }
+    };
+    let Some(cmd_type) = cmd.get("type").and_then(|value| value.as_str()) else {
+        return CommandAck {
+            request_id,
+            accepted: false,
+            error: Some("command type must be a string".into()),
+        };
+    };
+    let Some(command) = build_command(cmd_type, cmd.get("data")) else {
+        return CommandAck {
+            request_id,
+            accepted: false,
+            error: Some("invalid command data".into()),
+        };
+    };
+    if game_tx.send(command).is_err() {
+        return CommandAck {
+            request_id,
+            accepted: false,
+            error: Some("engine command channel is disconnected".into()),
+        };
+    }
+    CommandAck {
+        request_id,
+        accepted: true,
+        error: None,
     }
 }
 
@@ -285,35 +398,48 @@ fn content_type(path: &Path) -> Header {
     Header::from_bytes("Content-Type", ct).unwrap()
 }
 
+fn event_json_data(json_data: &str) -> serde_json::Value {
+    serde_json::from_str(json_data)
+        .unwrap_or_else(|_| serde_json::Value::String(json_data.to_owned()))
+}
+
+/// Serialize events as valid JSON, escaping all string fields through
+/// `serde_json` and preserving canonical object payloads when `json_data`
+/// contains JSON. Malformed payload strings remain valid JSON strings rather
+/// than corrupting the entire `/api/events` response.
 fn format_events(events: &[GameEvent]) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(events.len());
-    for ev in events {
-        let s = match ev {
+    let values: Vec<serde_json::Value> = events
+        .iter()
+        .map(|event| match event {
             GameEvent::EntityCreated { entity_id } => {
-                format!(r#"{{"EntityCreated":{{"entity_id":{entity_id}}}}}"#)
+                serde_json::json!({"EntityCreated": {"entity_id": entity_id}})
             }
             GameEvent::EntityDestroyed { entity_id } => {
-                format!(r#"{{"EntityDestroyed":{{"entity_id":{entity_id}}}}}"#)
+                serde_json::json!({"EntityDestroyed": {"entity_id": entity_id}})
             }
             GameEvent::ComponentUpdated {
                 entity_id,
                 type_name,
                 json_data,
-            } => {
-                format!(
-                    r#"{{"ComponentUpdated":{{"entity_id":{entity_id},"type_name":"{type_name}","json_data":{json_data}}}}}"#
-                )
-            }
+            } => serde_json::json!({
+                "ComponentUpdated": {
+                    "entity_id": entity_id,
+                    "type_name": type_name,
+                    "json_data": event_json_data(json_data),
+                }
+            }),
             GameEvent::CustomEvent {
                 cmd_type,
                 json_data,
-            } => {
-                format!(r#"{{"CustomEvent":{{"cmd_type":"{cmd_type}","json_data":{json_data}}}}}"#)
-            }
-        };
-        parts.push(s);
-    }
-    format!("[{}]", parts.join(","))
+            } => serde_json::json!({
+                "CustomEvent": {
+                    "cmd_type": cmd_type,
+                    "json_data": event_json_data(json_data),
+                }
+            }),
+        })
+        .collect();
+    serde_json::to_string(&values).expect("event values are serializable")
 }
 
 #[cfg(test)]
@@ -344,11 +470,57 @@ mod tests {
                 json_data: r#"{"v":7}"#.into(),
             },
         ];
-        let out = format_events(&events);
+        let out = serde_json::from_str::<serde_json::Value>(&format_events(&events))
+            .expect("all event variants must serialize as valid JSON");
         assert_eq!(
             out,
-            r#"[{"EntityCreated":{"entity_id":1}},{"EntityDestroyed":{"entity_id":2}},{"ComponentUpdated":{"entity_id":3,"type_name":"Transform","json_data":{"x":1}}},{"CustomEvent":{"cmd_type":"status","json_data":{"v":7}}}]"#
+            serde_json::json!([
+                {"EntityCreated": {"entity_id": 1}},
+                {"EntityDestroyed": {"entity_id": 2}},
+                {"ComponentUpdated": {
+                    "entity_id": 3,
+                    "type_name": "Transform",
+                    "json_data": {"x": 1}
+                }},
+                {"CustomEvent": {
+                    "cmd_type": "status",
+                    "json_data": {"v": 7}
+                }}
+            ])
         );
+    }
+
+    #[test]
+    fn format_events_escapes_text_and_invalid_payloads() {
+        let events = vec![
+            GameEvent::ComponentUpdated {
+                entity_id: 3,
+                type_name: "Transform\"\n".into(),
+                json_data: "not-json".into(),
+            },
+            GameEvent::CustomEvent {
+                cmd_type: "error\\tag".into(),
+                json_data: "also-not-json".into(),
+            },
+        ];
+        let value = serde_json::from_str::<serde_json::Value>(&format_events(&events))
+            .expect("escaped event output must remain valid JSON");
+        assert_eq!(value[0]["ComponentUpdated"]["type_name"], "Transform\"\n");
+        assert_eq!(value[0]["ComponentUpdated"]["json_data"], "not-json");
+        assert_eq!(value[1]["CustomEvent"]["cmd_type"], "error\\tag");
+        assert_eq!(value[1]["CustomEvent"]["json_data"], "also-not-json");
+    }
+
+    #[test]
+    fn add_sequence_preserves_snapshot_fields() {
+        let value = serde_json::from_str::<serde_json::Value>(
+            &add_sequence(r#"{"version":9,"entities":[]}"#, 17),
+        )
+        .expect("sequenced snapshot must be valid JSON");
+        assert_eq!(value["version"], 9);
+        assert_eq!(value["sequence"], 17);
+        assert_eq!(value["entities"], serde_json::json!([]));
+        assert_eq!(add_sequence("not-json", 4), "not-json");
     }
 
     // ── parse_set_component ────────────────────────────────────────────────
@@ -459,29 +631,74 @@ mod tests {
     // ── post_command ───────────────────────────────────────────────────────
 
     #[test]
-    fn post_command_valid_forwards_to_game() {
+    fn post_command_valid_forwards_to_game_with_ack() {
         let (tx, rx) = unbounded::<UiCommand>();
-        post_command(
+        let ack = post_command(
             r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#,
             &tx,
+            42,
+        );
+        assert_eq!(
+            ack,
+            CommandAck {
+                request_id: 42,
+                accepted: true,
+                error: None,
+            }
         );
         let cmd = rx.try_recv().expect("command forwarded");
         assert!(matches!(cmd, UiCommand::SetComponent { entity_id: 5, .. }));
     }
 
     #[test]
-    fn post_command_garbage_dropped_not_panicked() {
+    fn post_command_garbage_returns_rejections_without_panicking() {
         let (tx, rx) = unbounded::<UiCommand>();
         // not JSON at all
-        post_command("this is not json", &tx);
+        let invalid_json = post_command("this is not json", &tx, 1);
+        assert!(!invalid_json.accepted);
+        assert_eq!(invalid_json.request_id, 1);
         // JSON but no "type"
-        post_command(r#"{"foo":1}"#, &tx);
+        let missing_type = post_command(r#"{"foo":1}"#, &tx, 2);
+        assert!(!missing_type.accepted);
         // JSON with unknown type (still a Custom, not dropped)
-        post_command(r#"{"type":"unknown","data":{}}"#, &tx);
+        let accepted = post_command(r#"{"type":"unknown","data":{}}"#, &tx, 3);
+        assert!(accepted.accepted);
         // exactly one command should have been sent (the Custom unknown)
         let cmd = rx.try_recv().expect("one command");
         assert!(matches!(cmd, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown"));
         assert!(rx.try_recv().is_err(), "no more commands");
+    }
+
+    #[test]
+    fn command_request_ids_are_monotonic_and_accept_client_ids() {
+        let mut next = 1;
+        assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 1);
+        assert_eq!(command_request_id(r#"{"type":"ping","request_id":41}"#, &mut next), 41);
+        assert_eq!(next, 42);
+        assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 42);
+        assert_eq!(command_request_id(r#"{"type":"ping","request_id":0}"#, &mut next), 43);
+    }
+
+    #[test]
+    fn command_ack_json_is_explicit_and_valid() {
+        let accepted = serde_json::from_str::<serde_json::Value>(&command_ack_json(&CommandAck {
+            request_id: 7,
+            accepted: true,
+            error: None,
+        }))
+        .expect("accepted ack is valid JSON");
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(accepted["request_id"], 7);
+        assert!(accepted.get("error").is_none());
+
+        let rejected = serde_json::from_str::<serde_json::Value>(&command_ack_json(&CommandAck {
+            request_id: 8,
+            accepted: false,
+            error: Some("bad request".into()),
+        }))
+        .expect("rejected ack is valid JSON");
+        assert_eq!(rejected["accepted"], false);
+        assert_eq!(rejected["error"], "bad request");
     }
 
     // ── content_type ───────────────────────────────────────────────────────
@@ -543,12 +760,12 @@ mod tests {
         // drain_game_events only READS from rx; we send via tx.
         tx.send(GameEvent::CustomEvent {
             cmd_type: "status".into(),
-            json_data: "STAT".into(),
+            json_data: r#"{"value":"STAT"}"#.into(),
         })
         .unwrap();
         tx.send(GameEvent::CustomEvent {
             cmd_type: "scene".into(),
-            json_data: "SCN".into(),
+            json_data: r#"{"value":"SCN"}"#.into(),
         })
         .unwrap();
         tx.send(GameEvent::EntityCreated { entity_id: 11 }).unwrap();
@@ -557,8 +774,15 @@ mod tests {
         let mut snaps = Snapshots::default();
         drain_game_events(&rx, &mut buffer, &mut snaps);
 
-        assert_eq!(snaps.status, "STAT");
-        assert_eq!(snaps.scene, "SCN");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&snaps.status).expect("status JSON")["sequence"],
+            1
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&snaps.scene).expect("scene JSON")["sequence"],
+            2
+        );
+        assert_eq!(snaps.sequence, 2);
         assert_eq!(buffer.len(), 1);
         assert!(matches!(
             buffer[0],

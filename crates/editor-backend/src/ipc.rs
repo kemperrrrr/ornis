@@ -9,8 +9,10 @@
 //! entity-level commands (create/destroy/list), `SetComponent` is produced
 //! by `remote.rs` for `{"type":"set_component"}` posts and executed
 //! generically through the component registry (F0, audit §10 D2), and
-//! `ComponentUpdated` reports successful edits back. The remaining typed
-//! variants are reserved and marked `#[allow(dead_code)]`.
+//! `ComponentUpdated` reports successful edits back. The HTTP transport adds
+//! request acknowledgements and snapshot sequence metadata in `remote.rs`;
+//! engine completion events remain asynchronous. The remaining typed variants
+//! are reserved and marked `#[allow(dead_code)]`.
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 

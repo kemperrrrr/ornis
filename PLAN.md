@@ -77,7 +77,8 @@
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые
   snapshot'ы через polling; WASM отбрасывает устаревшие версии до применения,
-  но WebSocket, request ID/ACK и серверные sequence numbers пока не реализованы.
+  а API возвращает explicit `request_id`/`accepted` ACK и transport `sequence`.
+  Server-side completion correlation и WebSocket пока не реализованы.
   Editor-only `EditorWorld` использует `ornis_core::World`,
   а браузер восстанавливает snapshot в отдельном `RenderWorld` после
   serialization boundary — общей памяти между ними нет.
@@ -110,18 +111,19 @@
 ### a. Протокол движок ↔ редактор
 
 ✅ Реализованы обработчик команд в `editor-only`, `GET /api/scene`,
-подключение `editor.js` к REST, generic `set_component`, а также
-сохранение/загрузка сцены. WASM уже защищает применение от устаревших
-versioned snapshots; остаются WebSocket вместо polling, request ID/ACK и
-серверные sequence numbers.
+подключение `editor.js` к REST, generic `set_component`, сохранение/загрузка
+сцены, explicit command ACK (`request_id`/`accepted`) и transport sequence
+для snapshots. WASM и editor UI отбрасывают устаревшие ответы; остаются
+server-side completion correlation и WebSocket вместо polling.
 
 ### b. Живой ECS в браузере
 
 ✅ WASM-canvas рендерит актуальные snapshot'ы editor-only ECS через
 `/api/scene`, имеет fallback на `scene.ron` и orbit-камеру. После границы
 serialization snapshot восстанавливается в `ornis_render::RenderWorld`,
-где `Engine` запускает общий `RenderExtract`, а `RenderFrame3D` исполняет
-`FramePlan`. Остаются ввод из браузера в движок, WebSocket/live events и
+где `Engine` запускает общий `RenderExtract`, публикует `InputState`, а
+`RenderFrame3D` исполняет `FramePlan`. Orbit pointer/wheel input уже проходит
+через этот ресурс. Остаются gameplay consumers, WebSocket/live events и
 полный cross-domain runtime; серверный `EditorWorld` и browser-side copy
 намеренно не делят память.
 
@@ -201,14 +203,14 @@ cross-domain scheduler. Physics впервые в production editor-only цик�
 полный unified runtime без отдельной extract-фазы — будущая цель, не текущий
 статус.
 
-> **Прогресс 2026-08-27:** `ornis_core::Engine` с `Time` исполняет
+> **Прогресс 2026-08-28:** `ornis_core::Engine` с `Time`/`InputState` исполняет
 > native showcase и browser-side `RenderWorld` frames; общий
 > backend-neutral `RenderExtract` находится в `ornis-render`, а native и WASM
-> используют `RenderFrame3D`/`FramePlan`. Editor-only `EditorWorld` исполняет
-> physics sync/step/sync-out. `InputState` и native event adapter добавлены,
-> остаются browser/gameplay consumers, native physics и единый cross-domain
-> runtime; serialization boundary между сервером и браузером сохраняется
-> намеренно.
+> используют `RenderFrame3D`/`FramePlan`. Native winit и WASM orbit adapters
+> записывают input в ресурс; editor-only `EditorWorld` исполняет physics
+> sync/step/sync-out. Остаются gameplay consumers, native physics и единый
+> cross-domain runtime; serialization boundary между сервером и браузером
+> сохраняется намеренно.
 
 ## ❌ Не делать / отложено (решения владельца)
 

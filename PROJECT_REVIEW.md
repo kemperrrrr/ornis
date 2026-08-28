@@ -12,9 +12,9 @@
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
   `Engine` с ресурсами `Time`/`InputState`; editor-only physics и native/WASM
-  render extraction + `FramePlan` уже подключены. Native input events теперь
-  попадают в ресурс, но полный cross-domain runtime с browser consumers и
-  physics во всех режимах ещё не собран.
+  render extraction + `FramePlan` уже подключены. Native winit и WASM orbit
+  adapters попадают в ресурс, но полный cross-domain runtime с gameplay
+  consumers и physics во всех режимах ещё не собран.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -78,7 +78,9 @@
 
 6. **Улучшить надежность редактора**
 
-   Заменить polling на WebSocket или хотя бы добавить sequence numbers, acknowledgements, обработку ошибок команд и защиту от устаревших snapshots.
+   Базовые request id/ACK, transport sequence numbers, JSON escaping и stale
+   guards уже добавлены. Следующий уровень — связать completion events с
+   request id, добавить replay/cursors и затем заменить polling на WebSocket.
 
 7. **Привести документацию к фактическому состоянию**
 
@@ -227,18 +229,18 @@ Editor-only vertical slice уже работает. Следующий прио�
 Но остаются ограничения:
 
 - polling вместо WebSocket;
-- fire-and-forget команды;
-- `POST /api/command` возвращает `{}` даже для некорректной команды;
-- нет нормального request ID / acknowledgement;
-- нет серверных sequence numbers для snapshot'ов (WASM применяет только
-  более новые `version` и не откатывает уже queued snapshot);
-- ошибка команды приходит отдельно через event;
-- редактор и движок не используют единый надёжный live-протокол;
+- команды получают queue-level `request_id`/`accepted` ACK, но completion event
+  ещё не связан с request id;
+- snapshot endpoints получают transport `sequence`, а scene сохраняет
+  authoritative `version`; сервер не хранит историю и не предоставляет
+  cursor-based replay;
+- ошибка выполнения команды приходит отдельно через event;
+- редактор и движок ещё не используют единый надёжный live-протокол;
 - native runtime по-прежнему выглядит скорее showcase shell, чем полноценный runtime.
 
-Особенно неприятный момент — ручная сериализация событий в `format_events` в [`crates/editor-backend/src/remote.rs`](crates/editor-backend/src/remote.rs). Поля вроде `cmd_type` и `type_name` вставляются в JSON через `format!`, без JSON escaping. Если туда попадёт кавычка, обратный слеш или управляющий символ, endpoint может вернуть невалидный JSON.
-
-Лучше сериализовать структуры через `serde_json`, а не собирать JSON вручную.
+Сериализация событий теперь проходит через `serde_json`: строковые поля
+экранируются, а невалидные embedded payloads выдаются как JSON-строки, поэтому
+`/api/events` не ломается из-за кавычек или обратных слешей.
 
 ### 4. Проект слишком широк для текущего размера
 
@@ -339,13 +341,11 @@ cargo: command not found
 
 Однако для такого проекта важно добавить ещё:
 
-- end-to-end тест editor command → ECS mutation → scene snapshot;
 - браузерный визуальный end-to-end тест snapshot → WASM scene;
-- серверный sequence number / ACK и cross-request stale snapshot test (client-side
-  monotonic version guard уже покрыта unit-тестом);
+- completion-correlation test: command request id → engine event;
+- server-side snapshot replay/cursor test;
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
-- regression test на JSON escaping событий;
 - compile test для всех публичных macro entry points.
 
 ## Что в проекте хорошо
@@ -474,16 +474,11 @@ create entity
 
 ### Приоритет 2 — исправить editor protocol
 
-Минимальный набор:
-
-- request ID;
-- explicit ACK/error response;
-- sequence number у snapshots;
-- version у scene state;
-- typed event serialization через Serde;
-- серверные sequence numbers и explicit stale-update policy (WASM уже
-  имеет базовую monotonic-version guard);
-- WebSocket после стабилизации REST-контракта.
+Базовый REST-шов закрыт: есть client/server request id, explicit
+queue-level ACK/error response, transport sequence snapshots, scene version,
+`serde_json` event serialization и stale guards в WASM/editor UI.
+Остаются completion correlation между событиями движка и запросами,
+server-side replay/cursors и WebSocket после стабилизации REST-контракта.
 
 ### Приоритет 3 — physics scaling
 

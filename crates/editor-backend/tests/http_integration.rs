@@ -50,7 +50,7 @@ fn http_get(port: u16, path: &str) -> (u16, String) {
     (status, body)
 }
 
-fn http_post(port: u16, path: &str, body: &str) -> u16 {
+fn http_post(port: u16, path: &str, body: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -64,11 +64,17 @@ fn http_post(port: u16, path: &str, body: &str) -> u16 {
     let mut raw = Vec::new();
     let _ = stream.read_to_end(&mut raw);
     let text = String::from_utf8_lossy(&raw).to_string();
-    text.lines()
+    let status = text
+        .lines()
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let body = match text.find("\r\n\r\n") {
+        Some(idx) => text[idx + 4..].to_string(),
+        None => String::new(),
+    };
+    (status, body)
 }
 
 #[test]
@@ -97,14 +103,24 @@ fn remote_editor_http_endpoints() {
     assert_eq!(status, 200);
     assert_eq!(body, "[]");
 
-    // POST /api/command answers {} (fire-and-forget; we don't assert the
-    // channel here because the game side is a disconnected stub).
-    let code = http_post(
+    // POST /api/command returns an explicit queue acknowledgement while the
+    // game side remains asynchronous.
+    let (code, body) = http_post(
         port,
         "/api/command",
-        r#"{"type":"set_component","data":{"id":1,"component":"T","value":{}}}"#,
+        r#"{"type":"set_component","request_id":99,"data":{"id":1,"component":"T","value":{}}}"#,
     );
     assert_eq!(code, 200);
+    let ack: serde_json::Value = serde_json::from_str(&body).expect("ack JSON");
+    assert_eq!(ack["accepted"], true);
+    assert_eq!(ack["request_id"], 99);
+
+    let (code, body) = http_post(port, "/api/command", "not-json");
+    assert_eq!(code, 200);
+    let ack: serde_json::Value = serde_json::from_str(&body).expect("rejection JSON");
+    assert_eq!(ack["accepted"], false);
+    assert_eq!(ack["request_id"], 100);
+    assert_eq!(ack["error"], "request body is not valid JSON");
 
     // Unknown path → 404.
     let (status, _) = http_get(port, "/no-such-thing");

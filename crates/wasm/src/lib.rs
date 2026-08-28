@@ -410,14 +410,15 @@ async fn load_initial_scene() -> Result<(Scene, u64, bool), JsValue> {
     if let Some(live) = fetch_live_scene().await {
         console::log_1(
             &format!(
-                "[ornis-wasm] live scene from /api/scene: version={}, {} entities, {} lights",
+                "[ornis-wasm] live scene from /api/scene: version={}, sequence={}, {} entities, {} lights",
                 live.version,
+                live.sequence,
                 live.scene.entities.len(),
                 live.scene.lights.len()
             )
             .into(),
         );
-        let LiveScene { scene, version } = live;
+        let LiveScene { scene, version, .. } = live;
         return Ok((scene, version, true));
     }
 
@@ -630,8 +631,8 @@ fn poll_live_scene(
             if accept_live_scene_version(applied, pending, live.version) {
                 console::log_1(
                     &format!(
-                        "[ornis-wasm] /api/scene changed: v{} -> v{}",
-                        applied, live.version
+                        "[ornis-wasm] /api/scene changed: v{} -> v{} (sequence {})",
+                        applied, live.version, live.sequence
                     )
                     .into(),
                 );
