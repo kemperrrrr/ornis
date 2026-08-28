@@ -82,10 +82,8 @@ impl Drop for RemoteEditor {
     }
 }
 
-const EMPTY_STATUS: &str =
-    r#"{"entity_count":0,"name":"Ornis Engine","version":0,"sequence":0}"#;
-const EMPTY_SCENE: &str =
-    r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null,"sequence":0}"#;
+const EMPTY_STATUS: &str = r#"{"entity_count":0,"name":"Ornis Engine","version":0,"sequence":0}"#;
+const EMPTY_SCENE: &str = r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null,"sequence":0}"#;
 
 /// Snapshot payloads refreshed out of the game-event stream; served by the
 /// `/api/status` and `/api/scene` endpoints until the next snapshot arrives.
@@ -513,9 +511,10 @@ mod tests {
 
     #[test]
     fn add_sequence_preserves_snapshot_fields() {
-        let value = serde_json::from_str::<serde_json::Value>(
-            &add_sequence(r#"{"version":9,"entities":[]}"#, 17),
-        )
+        let value = serde_json::from_str::<serde_json::Value>(&add_sequence(
+            r#"{"version":9,"entities":[]}"#,
+            17,
+        ))
         .expect("sequenced snapshot must be valid JSON");
         assert_eq!(value["version"], 9);
         assert_eq!(value["sequence"], 17);
@@ -673,10 +672,16 @@ mod tests {
     fn command_request_ids_are_monotonic_and_accept_client_ids() {
         let mut next = 1;
         assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 1);
-        assert_eq!(command_request_id(r#"{"type":"ping","request_id":41}"#, &mut next), 41);
+        assert_eq!(
+            command_request_id(r#"{"type":"ping","request_id":41}"#, &mut next),
+            41
+        );
         assert_eq!(next, 42);
         assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 42);
-        assert_eq!(command_request_id(r#"{"type":"ping","request_id":0}"#, &mut next), 43);
+        assert_eq!(
+            command_request_id(r#"{"type":"ping","request_id":0}"#, &mut next),
+            43
+        );
     }
 
     #[test]
