@@ -78,9 +78,11 @@ cargo run -p ornis-physics --release --example probe_100k
 ### Exploratory comparison: Sweep-and-Prune vs UniformGrid (2026-08-28)
 
 Ниже зафиксирован результат отдельного performance workflow по логу,
-предоставленному пользователем. Run ID, CPU/runner metadata и версия
-`rustc` в логе отсутствуют, поэтому это **exploratory comparison**, а не
-замена воспроизводимому Apple M1 baseline выше.
+предоставленному пользователем. Workflow run: `33194136814`, head
+`4fa10c0813f264d9df7c1b1d66002297ea9c5d28`, запуск 2026-08-28 на ветке
+`arena/01a043d9-ornis`. CPU/runner metadata и версия `rustc` в raw log не
+сохранены, поэтому это **exploratory comparison**, а не замена
+воспроизводимому Apple M1 baseline выше.
 
 Команда:
 

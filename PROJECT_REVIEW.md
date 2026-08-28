@@ -221,9 +221,10 @@ backend, а не новый верхний scheduler и не runtime-выбор 
 
 ### Exploratory benchmark (2026-08-28)
 
-По логу отдельного performance workflow (Run ID, CPU/runner metadata и
-`rustc` version не были сохранены) получены следующие центральные оценки
-Criterion:
+По workflow run `33194136814` (head
+`4fa10c0813f264d9df7c1b1d66002297ea9c5d28`, запуск 2026-08-28) получены
+следующие центральные оценки Criterion. CPU/runner metadata и `rustc`
+version в raw log не были сохранены:
 
 | Сценарий | Sweep-and-Prune | UniformGrid | Вывод |
 |---|---:|---:|---|
