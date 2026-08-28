@@ -354,6 +354,95 @@ impl EditorWorld {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Snapshots and command handling — free functions over [`EditorWorld`]
+// ═══════════════════════════════════════════════════════════════════════════
+// The bulk of the snapshot/command logic lives here, not in
+// `impl EditorWorld`, to keep the type under the bca number-of-methods
+// gate; the public methods above are thin delegates.
+
+/// Snapshot `world` as a [`Scene`]: every alive entity becomes an
+/// [`EntityDesc`] (missing components fall back to the spawn defaults),
+/// lights/camera/ambient come from the environment resource.
+fn to_scene(world: &EditorWorld) -> Scene {
+    let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
+    Scene {
+        name: world.scene_name.clone(),
+        entities,
+        lights: world.environment().lights.clone(),
+        camera: world.environment().camera.clone(),
+        ambient: world.environment().ambient,
+    }
+}
+
+/// One alive entity as an [`EntityDesc`] for [`to_scene`].
+fn entity_desc(world: &EditorWorld, entity: Entity) -> EntityDesc {
+    EntityDesc {
+        name: world
+            .name_of(entity)
+            .unwrap_or_else(|| format!("Entity {}", entity.id())),
+        transform: read_component(world.store(), entity).unwrap_or_else(default_transform),
+        mesh: read_component(world.store(), entity).unwrap_or_else(default_mesh),
+        material: read_component(world.store(), entity).unwrap_or_else(default_material),
+    }
+}
+
+/// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
+fn scene_json(world: &EditorWorld) -> String {
+    let entities: Vec<Value> = world
+        .alive
+        .iter()
+        .map(|&e| entity_json(world.store(), e))
+        .collect();
+    let lights = serde_json::to_value(&world.environment().lights).expect("LightDesc serializes");
+    let camera = serde_json::to_value(&world.environment().camera).expect("CameraDesc serializes");
+    serde_json::json!({
+        "version": world.version,
+        "entity_count": world.entity_count(),
+        "entities": entities,
+        "lights": lights,
+        "camera": camera,
+        "ambient": world.environment().ambient,
+    })
+    .to_string()
+}
+
+/// JSON payload for `GET /api/status` (cached by the HTTP server).
+fn status_json(world: &EditorWorld) -> String {
+    serde_json::json!({
+        "entity_count": world.entity_count(),
+        "name": "Ornis Engine",
+        "version": world.version,
+    })
+    .to_string()
+}
+
+/// Publish `status` + `scene` snapshots so the HTTP server's caches
+/// (`GET /api/status`, `GET /api/scene`) reflect the current world.
+fn publish_state(world: &EditorWorld, ev_tx: &Sender<GameEvent>) {
+    emit(ev_tx, "status", world.status_json());
+    emit(ev_tx, "scene", world.scene_json());
+}
+
+fn emit(ev_tx: &Sender<GameEvent>, cmd_type: &str, payload: String) {
+    ev_tx
+        .send(GameEvent::CustomEvent {
+            cmd_type: cmd_type.into(),
+            json_data: payload,
+        })
+        .ok();
+}
+
+/// Invalid commands become `error` events instead of panics.
+fn emit_error(ev_tx: &Sender<GameEvent>, command: &str, message: &str) {
+    emit(
+        ev_tx,
+        "error",
+        serde_json::json!({"command": command, "message": message}).to_string(),
+    );
+}
+
+
 /// Result of executing a command on the authoritative editor world.
 struct CommandOutcome {
     success: bool,
