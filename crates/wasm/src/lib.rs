@@ -14,6 +14,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use glam::{Mat4, Vec3};
+use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
@@ -204,42 +205,40 @@ fn build_gpu_scene(device: &wgpu::Device, render_world: &RenderWorld, scene: &Sc
 
 /// Attach orbit-camera pointer/wheel listeners to the canvas. The closures
 /// are leaked intentionally — they live as long as the page.
-fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, orbit: &Rc<RefCell<OrbitCamera>>) {
-    // Some((last_x, last_y)) while a drag is in progress.
-    let drag = Rc::new(RefCell::new(None::<(f32, f32)>));
-
+fn attach_orbit_controls(
+    canvas: &web_sys::HtmlCanvasElement,
+    input: &Rc<RefCell<InputState>>,
+) {
     let on_pointerdown: Closure<dyn FnMut(web_sys::PointerEvent)> = {
-        let drag = drag.clone();
+        let input = input.clone();
         let canvas = canvas.clone();
         Closure::new(move |e: web_sys::PointerEvent| {
-            *drag.borrow_mut() = Some((e.client_x() as f32, e.client_y() as f32));
+            let mut input = input.borrow_mut();
+            input.set_mouse_button(0, true);
+            input.set_pointer_position([e.client_x() as f32, e.client_y() as f32]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
         })
     };
     let on_pointermove: Closure<dyn FnMut(web_sys::PointerEvent)> = {
-        let drag = drag.clone();
-        let orbit = orbit.clone();
+        let input = input.clone();
         Closure::new(move |e: web_sys::PointerEvent| {
-            let mut drag = drag.borrow_mut();
-            if let Some((last_x, last_y)) = *drag {
-                let (x, y) = (e.client_x() as f32, e.client_y() as f32);
-                orbit.borrow_mut().rotate(x - last_x, y - last_y);
-                *drag = Some((x, y));
-            }
+            input
+                .borrow_mut()
+                .set_pointer_position([e.client_x() as f32, e.client_y() as f32]);
         })
     };
     let on_pointerup: Closure<dyn FnMut(web_sys::PointerEvent)> = {
-        let drag = drag.clone();
+        let input = input.clone();
         Closure::new(move |_e: web_sys::PointerEvent| {
-            *drag.borrow_mut() = None;
+            input.borrow_mut().set_mouse_button(0, false);
         })
     };
     let on_wheel: Closure<dyn FnMut(web_sys::WheelEvent)> = {
-        let orbit = orbit.clone();
+        let input = input.clone();
         Closure::new(move |e: web_sys::WheelEvent| {
             e.prevent_default();
-            orbit.borrow_mut().zoom(e.delta_y() as f32);
+            input.borrow_mut().add_wheel_delta(e.delta_y() as f32);
         })
     };
 
@@ -454,6 +453,7 @@ struct FrameState<'a> {
     mesh: ornis_render::Mesh,
     mesh_params: (u32, u32),
     instance_count: u32,
+    input: Rc<RefCell<InputState>>,
     orbit: Rc<RefCell<OrbitCamera>>,
 }
 
@@ -508,6 +508,32 @@ impl<'a> FrameState<'a> {
             )
             .into(),
         );
+    }
+
+    /// Move platform input into the browser-side Engine resource and consume
+    /// its camera-facing controls. The shared InputState is copied into the
+    /// logical world before `Engine::run_frame`, so custom browser systems
+    /// can read the same snapshot without taking ownership of DOM events.
+    fn sync_input(&mut self) {
+        let snapshot = self.input.borrow().clone();
+        {
+            let mut orbit = self.orbit.borrow_mut();
+            if snapshot.mouse_button_down(0) {
+                let [dx, dy] = snapshot.pointer_delta();
+                orbit.rotate(dx, dy);
+            }
+            orbit.zoom(snapshot.wheel_delta());
+        }
+        if let Some(input) = self
+            .render_world
+            .engine_mut()
+            .world_mut()
+            .resources_mut()
+            .get_mut::<InputState>()
+        {
+            *input = snapshot;
+        }
+        self.input.borrow_mut().clear_frame_transients();
     }
 
     /// Upload the orbit-derived camera for the current aspect ratio.
@@ -626,6 +652,7 @@ struct LoopHandles {
     pending_scene: Rc<RefCell<Option<LiveScene>>>,
     fetch_in_flight: Rc<Cell<bool>>,
     live_mode: bool,
+    input: Rc<RefCell<InputState>>,
 }
 
 /// Browser entry point: initializes WebGPU on the canvas with `canvas_id`,
@@ -662,9 +689,12 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         false,
     );
 
-    // Client-side orbit camera, initialized from the scene camera.
+    // Client-side orbit camera, initialized from the scene camera. DOM events
+    // first enter the backend-neutral InputState; the frame loop consumes
+    // them, so the camera and future browser systems share one input path.
     let orbit = Rc::new(RefCell::new(OrbitCamera::from_desc(&scene.camera)));
-    attach_orbit_controls(&canvas, &orbit);
+    let input = Rc::new(RefCell::new(InputState::new()));
+    attach_orbit_controls(&canvas, &input);
 
     // Live-update plumbing (single-threaded): the render loop spawns a
     // fetch every LIVE_POLL_INTERVAL_FRAMES; the fetch task deposits the
@@ -676,6 +706,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         pending_scene: Rc::new(RefCell::new(None)),
         fetch_in_flight: Rc::new(Cell::new(false)),
         live_mode,
+        input,
     };
 
     spawn_render_loop(
@@ -721,6 +752,7 @@ fn spawn_render_loop(
         mesh: gpu_scene.mesh,
         mesh_params: gpu_scene.mesh_params,
         instance_count: gpu_scene.extracted.instances.len() as u32,
+        input,
         orbit,
     };
 
@@ -730,6 +762,7 @@ fn spawn_render_loop(
         pending_scene,
         fetch_in_flight,
         live_mode,
+        input,
     } = handles;
 
     let f: FrameCallback = Rc::new(RefCell::new(None));
@@ -741,6 +774,8 @@ fn spawn_render_loop(
 
     *f_clone.borrow_mut() = Some(Closure::new(move || {
         frame.handle_resize(&canvas);
+        frame.sync_input();
+        frame.render_world.run_frame(1.0 / 60.0);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
         if live_mode
