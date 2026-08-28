@@ -345,7 +345,7 @@ cargo: command not found
 Однако для такого проекта важно добавить ещё:
 
 - браузерный визуальный end-to-end тест snapshot → WASM scene;
-- browser WebSocket reconnect/close integration test;
+- browser WebSocket reconnect integration test;
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
 - compile test для всех публичных macro entry points.
@@ -481,7 +481,9 @@ queue-level ACK/error response, correlated completion events, transport
 sequence snapshots, scene version, `serde_json` event serialization и stale
 guards в WASM/editor UI. `/api/events?after=<sequence>` даёт bounded replay и
 `EventGap`, а `/api/events` поддерживает WebSocket server-push с тем же
-cursor/event contract. Остаётся hardening reconnect/close paths.
+cursor/event contract. Сервер отслеживает connection handles, отправляет
+normal close при shutdown и heartbeat ping на idle connections; остаётся
+browser reconnect test и полноценное чтение client close frames.
 
 ### Приоритет 3 — physics scaling
 

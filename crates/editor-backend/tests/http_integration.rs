@@ -235,8 +235,17 @@ fn remote_editor_websocket_stream_replays_events() {
     assert_eq!(events[0]["sequence"], 1);
     assert_eq!(events[0]["CommandCompleted"]["request_id"], 17);
 
-    drop(stream);
     editor.stop();
+    let mut close_header = [0_u8; 2];
+    stream
+        .read_exact(&mut close_header)
+        .expect("read server close frame");
+    assert_eq!(close_header, [0x88, 2]);
+    let mut close_code = [0_u8; 2];
+    stream
+        .read_exact(&mut close_code)
+        .expect("read close code");
+    assert_eq!(u16::from_be_bytes(close_code), 1001);
 }
 
 #[test]

@@ -118,8 +118,10 @@
 сцены, explicit command ACK (`request_id`/`accepted`), коррелированные
 `CommandCompleted` events и transport sequence для snapshots. `/api/events`
 поддерживает bounded replay по cursor и сообщает об eviction через `EventGap`;
-WebSocket server-push реализован, а polling остаётся fallback для старых
-proxy/server окружений.
+WebSocket server-push реализован; connection handles отслеживаются, idle
+соединения получают heartbeat ping, shutdown отправляет normal close. Polling
+остаётся fallback для старых proxy/server окружений, чтение client close frames
+пока не завершено.
 
 ### b. Живой ECS в браузере
 
@@ -128,9 +130,9 @@ proxy/server окружений.
 serialization snapshot восстанавливается в `ornis_render::RenderWorld`,
 где `Engine` запускает общий `RenderExtract`, публикует `InputState`, а
 `RenderFrame3D` исполняет `FramePlan`. Orbit pointer/wheel input уже проходит
-через этот ресурс. Остаются gameplay consumers, WebSocket/live events и
-полный cross-domain runtime; серверный `EditorWorld` и browser-side copy
-намеренно не делят память.
+через этот ресурс. WebSocket server-push уже добавлен; остаются gameplay
+consumers, reconnect/close hardening и полный cross-domain runtime; серверный
+`EditorWorld` и browser-side copy намеренно не делят память.
 
 ### c. Фаза 6 — Скриптинг (пересмотрена 2026-08-22, решение D1 аудита)
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use tiny_http::{Header, Request, Response, Server};
@@ -32,10 +33,11 @@ fn assets_root() -> PathBuf {
 }
 
 /// The HTTP remote editor server: serves the static editor assets and the
-/// `/api/*` endpoints from a background thread; `stop` shuts it down and joins.
+/// `/api/*` endpoints from background threads; `stop` shuts them down and joins.
 pub struct RemoteEditor {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl RemoteEditor {
@@ -50,29 +52,50 @@ impl RemoteEditor {
                 return Self {
                     stop: Arc::new(AtomicBool::new(true)),
                     handle: None,
+                    websocket_handles: Arc::new(Mutex::new(Vec::new())),
                 };
             }
         };
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
+        let websocket_handles = Arc::new(Mutex::new(Vec::new()));
+        let websocket_handles_for_server = Arc::clone(&websocket_handles);
         let handle = thread::Builder::new()
             .name("remote-editor".into())
-            .spawn(move || serve(server, stop_clone, game_tx, game_rx))
+            .spawn(move || {
+                serve(
+                    server,
+                    stop_clone,
+                    game_tx,
+                    game_rx,
+                    websocket_handles_for_server,
+                )
+            })
             .expect("spawn remote-editor thread");
 
         eprintln!("ornis: remote editor at http://{addr}");
         Self {
             stop,
             handle: Some(handle),
+            websocket_handles,
         }
     }
 
     /// Signal shutdown and join the server thread.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let handles = std::mem::take(
+            &mut *self
+                .websocket_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for handle in handles {
+            let _ = handle.join();
         }
     }
 }
@@ -172,6 +195,7 @@ fn serve(
     stop: Arc<AtomicBool>,
     game_tx: Sender<UiCommand>,
     game_rx: Receiver<GameEvent>,
+    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
     let event_log = Arc::new(Mutex::new(EventLog::default()));
     let mut snapshots = Snapshots::default();
@@ -201,10 +225,15 @@ fn serve(
             let cursor = event_cursor(request.url());
             let event_log = Arc::clone(&event_log);
             let stop = Arc::clone(&stop);
-            thread::Builder::new()
+            if let Ok(handle) = thread::Builder::new()
                 .name("remote-editor-websocket".into())
                 .spawn(move || serve_websocket(request, event_log, stop, cursor))
-                .ok();
+            {
+                websocket_handles
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(handle);
+            }
             continue;
         }
 
@@ -240,6 +269,9 @@ fn websocket_bad_request(request: Request) {
 /// Serve a WebSocket `/api/events` connection. The endpoint is server-push
 /// only: clients receive replay records after their initial cursor and then
 /// newly appended records; browser-to-server commands continue to use HTTP.
+/// Idle connections receive periodic ping frames, and server shutdown sends a
+/// normal close frame. tiny-http does not expose a non-blocking split reader,
+/// so peer close detection remains write/heartbeat based.
 fn serve_websocket(
     request: Request,
     event_log: Arc<Mutex<EventLog>>,
@@ -260,6 +292,7 @@ fn serve_websocket(
         .with_header(Header::from_bytes("Connection", "Upgrade").unwrap())
         .with_header(Header::from_bytes("Sec-WebSocket-Accept", accept).unwrap());
     let mut stream = request.upgrade("websocket", response);
+    let mut last_heartbeat = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         let records = event_log
@@ -270,18 +303,44 @@ fn serve_websocket(
             cursor = last.sequence;
             let payload = format_event_records(&records);
             if write_websocket_text(&mut stream, &payload).is_err() {
-                break;
+                return;
             }
+        }
+        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(15) {
+            // tiny-http exposes the upgraded socket as one ReadWrite object,
+            // so a non-blocking reader is not available here. A periodic ping
+            // still detects broken peers on the write path and keeps proxies
+            // from expiring an otherwise idle connection.
+            if write_websocket_ping(&mut stream).is_err() {
+                return;
+            }
+            last_heartbeat = Instant::now();
         }
         thread::sleep(std::time::Duration::from_millis(100));
     }
+    let _ = write_websocket_close(&mut stream, 1001);
 }
 
 fn write_websocket_text(stream: &mut impl Write, payload: &str) -> io::Result<()> {
-    let bytes = payload.as_bytes();
-    let length = bytes.len();
+    write_websocket_frame(stream, 0x81, payload.as_bytes())
+}
+
+fn write_websocket_ping(stream: &mut impl Write) -> io::Result<()> {
+    write_websocket_frame(stream, 0x89, &[])
+}
+
+fn write_websocket_close(stream: &mut impl Write, code: u16) -> io::Result<()> {
+    write_websocket_frame(stream, 0x88, &code.to_be_bytes())
+}
+
+fn write_websocket_frame(
+    stream: &mut impl Write,
+    first_byte: u8,
+    payload: &[u8],
+) -> io::Result<()> {
+    let length = payload.len();
     let mut frame = Vec::with_capacity(length + 10);
-    frame.push(0x81); // FIN + text opcode
+    frame.push(first_byte);
     if length <= 125 {
         frame.push(length as u8);
     } else if length <= u16::MAX as usize {
@@ -291,7 +350,7 @@ fn write_websocket_text(stream: &mut impl Write, payload: &str) -> io::Result<()
         frame.push(127);
         frame.extend_from_slice(&(length as u64).to_be_bytes());
     }
-    frame.extend_from_slice(bytes);
+    frame.extend_from_slice(payload);
     stream.write_all(&frame)?;
     stream.flush()
 }
@@ -1188,6 +1247,17 @@ mod tests {
         write_websocket_text(&mut medium, &"x".repeat(126)).expect("medium frame");
         assert_eq!(&medium[..4], &[0x81, 126, 0, 126]);
         assert_eq!(medium.len(), 4 + 126);
+    }
+
+    #[test]
+    fn websocket_control_frames_encode_ping_and_normal_close() {
+        let mut ping = Vec::new();
+        write_websocket_ping(&mut ping).expect("ping frame");
+        assert_eq!(ping, vec![0x89, 0]);
+
+        let mut close = Vec::new();
+        write_websocket_close(&mut close, 1001).expect("close frame");
+        assert_eq!(close, vec![0x88, 2, 0x03, 0xe9]);
     }
 
     // ── drain_game_events ──────────────────────────────────────────────────
