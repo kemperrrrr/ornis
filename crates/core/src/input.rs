@@ -162,7 +162,7 @@ mod tests {
         assert!(input.key_down(17));
         assert!(input.mouse_button_down(1));
         assert_eq!(input.pointer_position(), [13.0, 18.0]);
-        assert_eq!(input.pointer_delta(), [13.0, 18.0]);
+        assert_eq!(input.pointer_delta(), [3.0, -2.0]);
         assert_eq!(input.wheel_delta(), 2.5);
 
         input.clear_frame_transients();
