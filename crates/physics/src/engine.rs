@@ -633,10 +633,7 @@ fn compute_aabb(body: &RigidBody) -> AABB {
 /// margin: a nearby but non-overlapping body must not emit `Entered`. The
 /// broadphase has already applied the mutual layer masks, so this pass only
 /// performs the shape-level check.
-fn detect_trigger_overlaps(
-    bodies: &[RigidBody],
-    active: &[(usize, usize)],
-) -> Vec<(usize, usize)> {
+fn detect_trigger_overlaps(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let mut overlaps = Vec::new();
     for &(i, j) in active {
         let a = &bodies[i];
@@ -1797,8 +1794,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // describe the state visible after this whole physics step, not the
         // state from before the final substep's integration.
         self.broadphase.update(&self.bodies, 0.0);
-        let current_triggers =
-            detect_trigger_overlaps(&self.bodies, &self.broadphase.active);
+        let current_triggers = detect_trigger_overlaps(&self.bodies, &self.broadphase.active);
         let previous_triggers = std::mem::take(&mut self.trigger_pairs);
         self.trigger_pairs = update_trigger_events(
             &previous_triggers,
@@ -1837,12 +1833,13 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 remapped_triggers.insert((a.min(b), a.max(b)));
             }
             removed_triggers.sort_unstable();
-            self.trigger_events
-                .extend(removed_triggers.into_iter().map(|(body_a, body_b)| TriggerEvent {
+            for (body_a, body_b) in removed_triggers {
+                self.trigger_events.push(TriggerEvent {
                     body_a,
                     body_b,
                     kind: TriggerEventKind::Exited,
-                }));
+                });
+            }
             self.trigger_pairs = remapped_triggers;
             self.bodies.swap_remove(handle);
             self.island.swap_remove(handle);
@@ -2088,9 +2085,9 @@ mod tests {
     #[test]
     fn trigger_emits_enter_and_exit_without_solving_contact() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
-        let trigger = physics.add_body(
-            RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0).with_trigger(true),
-        );
+        let mut trigger_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0);
+        trigger_body.set_trigger(true);
+        let trigger = physics.add_body(trigger_body);
         let mover = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.8, 0.0), 0.5, 1.0));
 
         physics.step(1.0 / 60.0);
@@ -2103,7 +2100,10 @@ mod tests {
             }]
         );
         assert_eq!(physics.debug_contact_count(mover), 0);
-        assert_eq!(physics.get_body(mover).unwrap().position, Vec3::new(0.0, 0.8, 0.0));
+        assert_eq!(
+            physics.get_body(mover).unwrap().position,
+            Vec3::new(0.0, 0.8, 0.0)
+        );
 
         physics.step(1.0 / 60.0);
         assert!(physics.drain_trigger_events().is_empty());
@@ -2123,9 +2123,9 @@ mod tests {
     #[test]
     fn removing_trigger_body_queues_exit_and_clears_pair_state() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
-        let trigger = physics.add_body(
-            RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0).with_trigger(true),
-        );
+        let mut trigger_body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0);
+        trigger_body.set_trigger(true);
+        let trigger = physics.add_body(trigger_body);
         let first = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
         let second = physics.add_body(RigidBody::new_sphere(Vec3::new(5.0, 0.0, 0.0), 0.5, 1.0));
         physics.step(1.0 / 60.0);
