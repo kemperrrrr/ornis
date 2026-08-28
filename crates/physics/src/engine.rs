@@ -1751,18 +1751,16 @@ fn swept_shape_overlaps(
     let position = body.position + displacement * fraction;
     let orientation = swept_orientation(body, sub_dt, fraction);
     match (&body.shape, target.shape) {
-        (Shape::Box { half_extents: half_a }, Shape::Box { half_extents: half_b }) => {
-            obb_sat(
-                position,
-                *half_a,
-                orientation,
-                target.pos,
-                *half_b,
-                target.rot,
-                1e-5,
-            )
-            .is_some()
-        }
+        (Shape::Box { half_extents: half_a }, Shape::Box { half_extents: half_b }) => obb_sat(
+            position,
+            *half_a,
+            orientation,
+            target.pos,
+            *half_b,
+            target.rot,
+            1e-5,
+        )
+        .is_some(),
         _ => {
             let distance = distance::shape_distance(
                 distance::ShapeRef {
@@ -1825,11 +1823,44 @@ fn find_linear_continuous_hit(
     })
 }
 
+/// Find the first sampled overlap fraction for one target and binary-search
+/// that sample interval for a more accurate time of impact.
+fn first_angular_overlap_fraction(
+    body: &RigidBody,
+    target: distance::ShapeRef<'_>,
+    displacement: Vec3,
+    sub_dt: f32,
+    samples: u32,
+) -> Option<f32> {
+    if swept_shape_overlaps(body, target, displacement, sub_dt, 0.0) {
+        return None;
+    }
+    let mut previous = 0.0;
+    for sample in 1..=samples {
+        let current = sample as f32 / samples as f32;
+        if !swept_shape_overlaps(body, target, displacement, sub_dt, current) {
+            previous = current;
+            continue;
+        }
+        let mut low = previous;
+        let mut high = current;
+        for _ in 0..8 {
+            let middle = (low + high) * 0.5;
+            if swept_shape_overlaps(body, target, displacement, sub_dt, middle) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        return Some(high);
+    }
+    None
+}
+
 /// Sample the angular sweep at no more than five degrees per interval and
-/// binary-search the first overlap. This is conservative at the physics
-/// scale: a rotating long body cannot jump across a thin target between the
-/// bounded samples, while the final pose is still evaluated by exact shape
-/// distance/SAT rather than an AABB approximation.
+/// binary-search the first overlap. The path is a bounded CCD approximation:
+/// exact shape distance/SAT decides each sampled pose, while a future
+/// analytic swept-volume solver can remove the sampling limit.
 fn find_angular_continuous_hit(
     bodies: &[RigidBody],
     mover_index: usize,
@@ -1840,11 +1871,12 @@ fn find_angular_continuous_hit(
     if body.is_trigger || !shape_rotation_sensitive(&body.shape) {
         return None;
     }
+    const MAX_ANGLE_STEP: f32 = 5.0f32.to_radians();
+    const MIN_ANGLE: f32 = MAX_ANGLE_STEP;
     let angle = (body.angular_velocity * sub_dt).length();
-    if angle <= 1e-5 {
+    if angle <= MIN_ANGLE {
         return None;
     }
-    const MAX_ANGLE_STEP: f32 = 5.0f32.to_radians();
     let samples = (angle / MAX_ANGLE_STEP).ceil().clamp(1.0, 128.0) as u32;
     let mover_layer = body.collision_layer;
     let mover_mask = body.collision_mask;
@@ -1863,39 +1895,22 @@ fn find_angular_continuous_hit(
             pos: target.position,
             rot: target.orientation,
         };
-        if swept_shape_overlaps(body, target_ref, displacement, sub_dt, 0.0) {
+        let Some(fraction) =
+            first_angular_overlap_fraction(body, target_ref, displacement, sub_dt, samples)
+        else {
             continue;
-        }
-        let mut previous = 0.0;
-        for sample in 1..=samples {
-            let current = sample as f32 / samples as f32;
-            if !swept_shape_overlaps(body, target_ref, displacement, sub_dt, current) {
-                previous = current;
-                continue;
-            }
-            let mut low = previous;
-            let mut high = current;
-            for _ in 0..8 {
-                let middle = (low + high) * 0.5;
-                if swept_shape_overlaps(body, target_ref, displacement, sub_dt, middle) {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            let distance = swept_distance(body, target_ref, displacement, sub_dt, high);
-            let position = body.position + displacement * high;
-            let fallback = (position - target.position).normalize_or(Vec3::Y);
-            let normal = (distance.point_a - distance.point_b).normalize_or(fallback);
-            let candidate = ContinuousHit {
-                fraction: high,
-                normal,
-                handle,
-                angular: true,
-            };
-            best = choose_continuous_hit(best, Some(candidate));
-            break;
-        }
+        };
+        let distance = swept_distance(body, target_ref, displacement, sub_dt, fraction);
+        let position = body.position + displacement * fraction;
+        let fallback = (position - target.position).normalize_or(Vec3::Y);
+        let normal = (distance.point_a - distance.point_b).normalize_or(fallback);
+        let candidate = ContinuousHit {
+            fraction,
+            normal,
+            handle,
+            angular: true,
+        };
+        best = choose_continuous_hit(best, Some(candidate));
     }
     best
 }
@@ -2843,11 +2858,7 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut mover = RigidBody::new_box(Vec3::ZERO, Vec3::new(1.5, 0.1, 0.1), 1.0);
         mover.angular_velocity = Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
-        let target = RigidBody::new_box(
-            Vec3::new(0.0, 1.1, 0.0),
-            Vec3::new(0.2, 0.05, 0.2),
-            0.0,
-        );
+        let target = RigidBody::new_box(Vec3::new(0.0, 1.1, 0.0), Vec3::new(0.2, 0.05, 0.2), 0.0);
         let bodies = [mover, target];
 
         let hit = find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt)
