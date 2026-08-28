@@ -1752,8 +1752,12 @@ fn swept_shape_overlaps(
     let orientation = swept_orientation(body, sub_dt, fraction);
     match (&body.shape, target.shape) {
         (
-            Shape::Box { half_extents: half_a },
-            Shape::Box { half_extents: half_b },
+            Shape::Box {
+                half_extents: half_a,
+            },
+            Shape::Box {
+                half_extents: half_b,
+            },
         ) => obb_sat(
             position,
             *half_a,
@@ -1875,7 +1879,10 @@ fn find_angular_continuous_hit(
         return None;
     }
     const MAX_ANGLE_STEP: f32 = 5.0f32.to_radians();
-    const MIN_ANGLE: f32 = MAX_ANGLE_STEP;
+    // Resting-contact jitter is handled by the discrete solver. Reserve the
+    // angular CCD path for genuinely fast rotation (at least 15° per
+    // substep), where tunneling is a meaningful risk.
+    const MIN_ANGLE: f32 = 15.0f32.to_radians();
     let angle = (body.angular_velocity * sub_dt).length();
     if angle <= MIN_ANGLE {
         return None;
