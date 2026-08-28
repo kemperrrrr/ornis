@@ -145,9 +145,7 @@ impl PhysicsRuntime {
 
         self.accumulator = (self.accumulator + delta_seconds).min(PHYSICS_MAX_ACCUMULATOR);
         let mut steps = 0;
-        while self.accumulator >= PHYSICS_FIXED_DELTA
-            && steps < PHYSICS_MAX_STEPS_PER_FRAME
-        {
+        while self.accumulator >= PHYSICS_FIXED_DELTA && steps < PHYSICS_MAX_STEPS_PER_FRAME {
             self.solver.step(PHYSICS_FIXED_DELTA);
             self.accumulator -= PHYSICS_FIXED_DELTA;
             steps += 1;
@@ -624,14 +622,13 @@ mod tests {
 
         engine.run_frame(1.0 / 60.0);
 
-        let transform = engine
+        let transform_lane = engine
             .world()
             .store()
             .expect("world store")
             .read_lane::<TransformDesc>()
-            .expect("transform lane")
-            .get(entity)
-            .expect("entity transform");
+            .expect("transform lane");
+        let transform = transform_lane.get(entity).expect("entity transform");
         assert!(transform.translation[1] < 0.0);
         let extracted = engine
             .world()

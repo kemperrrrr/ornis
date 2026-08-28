@@ -269,11 +269,7 @@ impl GameApp {
             let floor = store.create_entity();
             store.insert(
                 floor,
-                RigidBody::new_box(
-                    Vec3::new(0.0, -2.0, 0.0),
-                    Vec3::new(20.0, 1.0, 20.0),
-                    0.0,
-                ),
+                RigidBody::new_box(Vec3::new(0.0, -2.0, 0.0), Vec3::new(20.0, 1.0, 20.0), 0.0),
             );
         }
         render_world.run_frame(0.0);
