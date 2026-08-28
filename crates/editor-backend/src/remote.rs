@@ -206,11 +206,7 @@ fn serve(
 /// Drain incoming game events into `buffer`. "status"/"scene" snapshots only
 /// refresh the endpoint caches — they are not user-facing events, so they
 /// skip the buffer.
-fn drain_game_events(
-    game_rx: &Receiver<GameEvent>,
-    buffer: &mut EventLog,
-    snaps: &mut Snapshots,
-) {
+fn drain_game_events(game_rx: &Receiver<GameEvent>, buffer: &mut EventLog, snaps: &mut Snapshots) {
     while let Ok(ev) = game_rx.try_recv() {
         match &ev {
             GameEvent::CustomEvent {
@@ -342,7 +338,9 @@ fn event_cursor(url: &str) -> u64 {
         .and_then(|(_, query)| {
             query.split('&').find_map(|part| {
                 let (key, value) = part.split_once('=')?;
-                (key == "after").then(|| value.parse::<u64>().ok()).flatten()
+                (key == "after")
+                    .then(|| value.parse::<u64>().ok())
+                    .flatten()
             })
         })
         .unwrap_or(0)
@@ -534,6 +532,7 @@ fn event_value(event: &GameEvent) -> serde_json::Value {
 /// `serde_json` and preserving canonical object payloads when `json_data`
 /// contains JSON. Malformed payload strings remain valid JSON strings rather
 /// than corrupting the entire `/api/events` response.
+#[cfg(test)]
 fn format_events(events: &[GameEvent]) -> String {
     let values: Vec<serde_json::Value> = events.iter().map(event_value).collect();
     serde_json::to_string(&values).expect("event values are serializable")

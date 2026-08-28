@@ -129,7 +129,6 @@ fn remote_editor_http_endpoints() {
     editor.stop();
 }
 
-
 #[test]
 fn remote_editor_replays_events_after_cursor() {
     let port = free_port();
