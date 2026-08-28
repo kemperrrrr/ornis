@@ -80,7 +80,8 @@
   API возвращает explicit `request_id`/`accepted` ACK, а engine emits
   correlated `CommandCompleted` events; snapshots получают transport
   `sequence`; `/api/events?after=<sequence>` даёт bounded replay и `EventGap`.
-  WebSocket пока не реализован.
+  WebSocket upgrade на `/api/events` реализован для server-push; editor UI
+  предпочитает его и сохраняет cursor polling как fallback.
   Editor-only `EditorWorld` использует `ornis_core::World`,
   а браузер восстанавливает snapshot в отдельном `RenderWorld` после
   serialization boundary — общей памяти между ними нет.
@@ -117,7 +118,8 @@
 сцены, explicit command ACK (`request_id`/`accepted`), коррелированные
 `CommandCompleted` events и transport sequence для snapshots. `/api/events`
 поддерживает bounded replay по cursor и сообщает об eviction через `EventGap`;
-остаётся WebSocket вместо polling.
+WebSocket server-push реализован, а polling остаётся fallback для старых
+proxy/server окружений.
 
 ### b. Живой ECS в браузере
 

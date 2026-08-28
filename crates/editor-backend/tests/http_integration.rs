@@ -159,6 +159,76 @@ fn remote_editor_replays_events_after_cursor() {
     editor.stop();
 }
 
+
+fn read_websocket_text(stream: &mut TcpStream) -> String {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).expect("read WebSocket frame header");
+    assert_eq!(header[0], 0x81, "server sends a final text frame");
+    assert_eq!(header[1] & 0x80, 0, "server frames are not masked");
+    let length = match header[1] & 0x7f {
+        length @ 0..=125 => usize::from(length),
+        126 => {
+            let mut bytes = [0_u8; 2];
+            stream.read_exact(&mut bytes).expect("read medium frame length");
+            usize::from(u16::from_be_bytes(bytes))
+        }
+        127 => {
+            let mut bytes = [0_u8; 8];
+            stream.read_exact(&mut bytes).expect("read large frame length");
+            u64::from_be_bytes(bytes) as usize
+        }
+        _ => unreachable!(),
+    };
+    let mut payload = vec![0_u8; length];
+    stream.read_exact(&mut payload).expect("read WebSocket payload");
+    String::from_utf8(payload).expect("text frame is UTF-8")
+}
+
+#[test]
+fn remote_editor_websocket_stream_replays_events() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect WebSocket");
+    stream
+        .write_all(
+            b"GET /api/events?after=0 HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .expect("write WebSocket handshake");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("WebSocket read timeout");
+
+    let mut handshake = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !handshake.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("read handshake");
+        handshake.push(byte[0]);
+    }
+    let handshake = String::from_utf8(handshake).expect("handshake headers");
+    assert!(handshake.starts_with("HTTP/1.1 101"), "handshake: {handshake}");
+    assert!(handshake.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+
+    ev_tx
+        .send(GameEvent::CommandCompleted {
+            request_id: 17,
+            command: "ping".into(),
+            success: true,
+            error: None,
+        })
+        .expect("send event");
+    let events: serde_json::Value = serde_json::from_str(&read_websocket_text(&mut stream))
+        .expect("WebSocket event JSON");
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[0]["CommandCompleted"]["request_id"], 17);
+
+    drop(stream);
+    editor.stop();
+}
+
 #[test]
 fn remote_editor_bind_failure_is_safe() {
     // Starting two editors on the same port: the second must not panic,

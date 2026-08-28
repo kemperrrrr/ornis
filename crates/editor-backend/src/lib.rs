@@ -3,8 +3,8 @@
 //! editor (`editor/`) and the engine's ECS world.
 //!
 //! This crate holds the editor↔engine IPC protocol (`ipc`) and the remote
-//! HTTP server (`remote`) so both can be unit- and integration-tested as a
-//! normal library (the `ornis` binary depends on it).
+//! HTTP/WebSocket server (`remote`) so both can be unit- and
+//! integration-tested as a normal library (the `ornis` binary depends on it).
 
 pub mod ipc;
 /// HTTP server bridging the browser editor and the engine world.

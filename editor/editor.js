@@ -3,9 +3,10 @@
 // into the Hierarchy panel, the Inspector and the footer. Commands
 // (create/rename/destroy entity, set transform/material) go through
 // POST /api/command and receive an explicit request_id/accepted acknowledgement.
-// The WASM viewport (viewport.js) polls the same
-// /api/scene (~1/s) and renders the live ECS scene, falling back to
-// scene.ron when the server is unavailable.
+// The editor prefers a WebSocket server-push stream for completion/events
+// and falls back to cursor polling. The WASM viewport (viewport.js) polls
+// the same /api/scene (~1/s) and renders the live ECS scene, falling back
+// to scene.ron when the server is unavailable.
 
 // ES module: top-level scope is private to this file; loaded as
 // <script type="module"> from index.html.
@@ -20,6 +21,8 @@ var lastSceneSequence = 0;  // transport sequence; reject out-of-order replies
 var lastStatusSequence = 0;
 var nextRequestId = 1;      // client-generated id echoed by /api/command
 var eventCursor = 0;        // last /api/events sequence applied locally
+var eventSocket = null;
+var eventSocketConnected = false;
 var pendingCommands = new Map(); // request_id -> command type until completion
 var selectedKey = null;     // "id:generation" of the selected entity
 var lastInspectorKey = '';  // fingerprint of the rendered inspector
@@ -596,53 +599,87 @@ function initFileMenu() {
     });
 }
 
-// Poll /api/events after the last cursor and surface scene save/load results
-// in the footer. The server retains a bounded replay window.
+// Apply replay records from either HTTP polling or the WebSocket stream.
+// The event shape remains unchanged; `sequence` is only transport metadata.
+function handleEvents(events) {
+    events.forEach(function(ev) {
+        if (ev && typeof ev.sequence === 'number' && ev.sequence > eventCursor) {
+            eventCursor = ev.sequence;
+        }
+        var gap = ev && ev.EventGap;
+        if (gap) {
+            // The server evicted older events. Reconcile from the
+            // authoritative snapshots, then continue at the oldest
+            // retained sequence instead of replaying the gap forever.
+            eventCursor = Math.max(0, (gap.oldest || 1) - 1);
+            refreshScene();
+            refreshStatus();
+            return;
+        }
+        var completed = ev && ev.CommandCompleted;
+        if (completed) {
+            var pending = pendingCommands.get(completed.request_id);
+            pendingCommands.delete(completed.request_id);
+            if (!completed.success) {
+                var label = completed.command || (pending && pending.type) || 'command';
+                showFileStatus('Command ' + label + ' failed: ' +
+                    (completed.error || 'unknown error'));
+            }
+            return;
+        }
+        var custom = ev && ev.CustomEvent;
+        if (!custom) return;
+        var data = {};
+        try { data = JSON.parse(custom.json_data); } catch (e) { return; }
+        if (custom.cmd_type === 'scene_saved') {
+            showFileStatus('Saved ' + (data.path || 'scene') + ' (v' + data.version + ')');
+        } else if (custom.cmd_type === 'scene_loaded') {
+            showFileStatus('Loaded ' + (data.path || 'scene') + ' — ' +
+                data.entity_count + ' entities (v' + data.version + ')');
+            refreshScene();
+            refreshStatus();
+        } else if (custom.cmd_type === 'error') {
+            showFileStatus('Error (' + data.command + '): ' + data.message);
+        }
+    });
+}
+
+// Poll /api/events after the last cursor when WebSocket is unavailable.
 function refreshEvents() {
+    if (eventSocketConnected) return Promise.resolve();
     return fetchJson('/api/events?after=' + eventCursor)
-        .then(function(events) {
-            events.forEach(function(ev) {
-                if (ev && typeof ev.sequence === 'number' && ev.sequence > eventCursor) {
-                    eventCursor = ev.sequence;
-                }
-                var gap = ev && ev.EventGap;
-                if (gap) {
-                    // The server evicted older events. Reconcile from the
-                    // authoritative snapshots, then continue at the oldest
-                    // retained sequence instead of replaying the gap forever.
-                    eventCursor = Math.max(0, (gap.oldest || 1) - 1);
-                    refreshScene();
-                    refreshStatus();
-                    return;
-                }
-                var completed = ev && ev.CommandCompleted;
-                if (completed) {
-                    var pending = pendingCommands.get(completed.request_id);
-                    pendingCommands.delete(completed.request_id);
-                    if (!completed.success) {
-                        var label = completed.command || (pending && pending.type) || 'command';
-                        showFileStatus('Command ' + label + ' failed: ' +
-                            (completed.error || 'unknown error'));
-                    }
-                    return;
-                }
-                var custom = ev && ev.CustomEvent;
-                if (!custom) return;
-                var data = {};
-                try { data = JSON.parse(custom.json_data); } catch (e) { return; }
-                if (custom.cmd_type === 'scene_saved') {
-                    showFileStatus('Saved ' + (data.path || 'scene') + ' (v' + data.version + ')');
-                } else if (custom.cmd_type === 'scene_loaded') {
-                    showFileStatus('Loaded ' + (data.path || 'scene') + ' — ' +
-                        data.entity_count + ' entities (v' + data.version + ')');
-                    refreshScene();
-                    refreshStatus();
-                } else if (custom.cmd_type === 'error') {
-                    showFileStatus('Error (' + data.command + '): ' + data.message);
-                }
-            });
-        })
+        .then(handleEvents)
         .catch(function() { /* engine offline — keep last state */ });
+}
+
+// Prefer a persistent server-push channel, but retain cursor polling as a
+// fallback for older proxies/servers that do not support HTTP upgrades.
+function connectEventStream() {
+    if (!window.WebSocket) return;
+    var scheme = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+    var socket = new WebSocket(scheme + '//' + location.host +
+        '/api/events?after=' + eventCursor);
+    eventSocket = socket;
+    socket.onopen = function() {
+        if (eventSocket !== socket) return;
+        eventSocketConnected = true;
+    };
+    socket.onmessage = function(message) {
+        try {
+            handleEvents(JSON.parse(message.data));
+        } catch (e) {
+            console.warn('[ornis-editor] invalid WebSocket event payload', e);
+        }
+    };
+    socket.onerror = function() {
+        // onclose schedules the reconnect and polling fallback.
+    };
+    socket.onclose = function() {
+        if (eventSocket !== socket) return;
+        eventSocketConnected = false;
+        eventSocket = null;
+        setTimeout(connectEventStream, 2000);
+    };
 }
 
 // ── Init ────────────────────────────────────────────────────────────
@@ -656,6 +693,7 @@ function init() {
     setInterval(refreshScene, POLL_MS);
     setInterval(refreshStatus, POLL_MS);
     setInterval(refreshEvents, POLL_MS);
+    connectEventStream();
 }
 
 if (document.readyState === 'loading') {

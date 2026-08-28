@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
@@ -173,7 +173,7 @@ fn serve(
     game_tx: Sender<UiCommand>,
     game_rx: Receiver<GameEvent>,
 ) {
-    let mut buffer = EventLog::default();
+    let event_log = Arc::new(Mutex::new(EventLog::default()));
     let mut snapshots = Snapshots::default();
     let mut next_request_id = 1_u64;
     let root = assets_root();
@@ -182,7 +182,12 @@ fn serve(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        drain_game_events(&game_rx, &mut buffer, &mut snapshots);
+        {
+            let mut buffer = event_log
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drain_game_events(&game_rx, &mut buffer, &mut snapshots);
+        }
 
         // Accept one request with a short timeout.
         let mut request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -191,16 +196,206 @@ fn serve(
             Err(_) => break,
         };
 
+        if is_websocket_request(&request)
+            && request.url().split('?').next() == Some("/api/events")
+        {
+            let cursor = event_cursor(request.url());
+            let event_log = Arc::clone(&event_log);
+            let stop = Arc::clone(&stop);
+            thread::Builder::new()
+                .name("remote-editor-websocket".into())
+                .spawn(move || serve_websocket(request, event_log, stop, cursor))
+                .ok();
+            continue;
+        }
+
         let response = route_request(
             &root,
             &mut request,
-            &buffer,
+            &event_log,
             &snapshots,
             &game_tx,
             &mut next_request_id,
         );
         let _ = request.respond(response);
     }
+}
+
+fn header_value(request: &Request, name: &str) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(name))
+        .map(|header| header.value.clone())
+}
+
+fn is_websocket_request(request: &Request) -> bool {
+    header_value(request, "Upgrade")
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn websocket_bad_request(request: Request) {
+    let _ = request.respond(Response::from_string("WebSocket upgrade required").with_status_code(400));
+}
+
+/// Serve a WebSocket `/api/events` connection. The endpoint is server-push
+/// only: clients receive replay records after their initial cursor and then
+/// newly appended records; browser-to-server commands continue to use HTTP.
+fn serve_websocket(
+    request: Request,
+    event_log: Arc<Mutex<EventLog>>,
+    stop: Arc<AtomicBool>,
+    mut cursor: u64,
+) {
+    let Some(key) = header_value(&request, "Sec-WebSocket-Key") else {
+        websocket_bad_request(request);
+        return;
+    };
+    if header_value(&request, "Sec-WebSocket-Version").as_deref() != Some("13") {
+        websocket_bad_request(request);
+        return;
+    }
+    let accept = websocket_accept(&key);
+    let response = Response::new_empty(tiny_http::StatusCode(101))
+        .with_header(Header::from_bytes("Upgrade", "websocket").unwrap())
+        .with_header(Header::from_bytes("Connection", "Upgrade").unwrap())
+        .with_header(Header::from_bytes("Sec-WebSocket-Accept", accept).unwrap());
+    let mut stream = request.upgrade("websocket", response);
+
+    while !stop.load(Ordering::Relaxed) {
+        let records = event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .after(cursor);
+        if let Some(last) = records.last() {
+            cursor = last.sequence;
+            let payload = format_event_records(&records);
+            if write_websocket_text(&mut stream, &payload).is_err() {
+                break;
+            }
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn write_websocket_text(stream: &mut impl Write, payload: &str) -> io::Result<()> {
+    let bytes = payload.as_bytes();
+    let length = bytes.len();
+    let mut frame = Vec::with_capacity(length + 10);
+    frame.push(0x81); // FIN + text opcode
+    match length {
+        0..=125 => frame.push(length as u8),
+        126..=u16::MAX as usize => {
+            frame.push(126);
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+        }
+        _ => {
+            frame.push(127);
+            frame.extend_from_slice(&(length as u64).to_be_bytes());
+        }
+    }
+    frame.extend_from_slice(bytes);
+    stream.write_all(&frame)?;
+    stream.flush()
+}
+
+fn websocket_accept(key: &str) -> String {
+    let mut input = key.as_bytes().to_vec();
+    input.extend_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64_encode(&sha1_digest(&input))
+}
+
+fn sha1_digest(input: &[u8]) -> [u8; 20] {
+    let mut message = input.to_vec();
+    let bit_length = (message.len() as u64).saturating_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_length.to_be_bytes());
+
+    let mut state = [
+        0x67452301_u32,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476,
+        0xc3d2e1f0,
+    ];
+    for chunk in message.chunks_exact(64) {
+        let mut words = [0_u32; 80];
+        for (index, word) in words[..16].iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for index in 16..80 {
+            words[index] = (words[index - 3]
+                ^ words[index - 8]
+                ^ words[index - 14]
+                ^ words[index - 16])
+                .rotate_left(1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e] = state;
+        for (index, &word) in words.iter().enumerate() {
+            let (function, constant) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
+                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                _ => (b ^ c ^ d, 0xca62c1d6),
+            };
+            let temporary = a
+                .rotate_left(5)
+                .wrapping_add(function)
+                .wrapping_add(e)
+                .wrapping_add(constant)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temporary;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+    }
+
+    let mut digest = [0_u8; 20];
+    for (index, word) in state.into_iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut index = 0;
+    while index < bytes.len() {
+        let first = bytes[index];
+        let second = bytes.get(index + 1).copied();
+        let third = bytes.get(index + 2).copied();
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
+        output.push(match second {
+            Some(second) => TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char,
+            None => '=',
+        });
+        output.push(match third {
+            Some(third) => TABLE[(third & 0x3f) as usize] as char,
+            None => '=',
+        });
+        index += 3;
+    }
+    output
 }
 
 /// Drain incoming game events into `buffer`. "status"/"scene" snapshots only
@@ -973,6 +1168,26 @@ mod tests {
             .expect("event records must be valid JSON");
         assert_eq!(value[0]["sequence"], 9);
         assert_eq!(value[0]["EntityCreated"]["entity_id"], 4);
+    }
+
+    #[test]
+    fn websocket_accept_matches_rfc6455_example() {
+        assert_eq!(
+            websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[test]
+    fn websocket_text_frame_encodes_short_and_extended_lengths() {
+        let mut short = Vec::new();
+        write_websocket_text(&mut short, "hello").expect("short frame");
+        assert_eq!(short, vec![0x81, 5, b'h', b'e', b'l', b'l', b'o']);
+
+        let mut medium = Vec::new();
+        write_websocket_text(&mut medium, &"x".repeat(126)).expect("medium frame");
+        assert_eq!(&medium[..4], &[0x81, 126, 0, 126]);
+        assert_eq!(medium.len(), 4 + 126);
     }
 
     // ── drain_game_events ──────────────────────────────────────────────────

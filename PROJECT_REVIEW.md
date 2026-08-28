@@ -80,8 +80,8 @@
 
    Базовые request id/ACK, correlated completion events, transport sequence
    numbers, JSON escaping и stale guards уже добавлены. `/api/events` получил
-   bounded replay по cursor и `EventGap`; следующий уровень — заменить polling
-   на WebSocket.
+   bounded replay по cursor и `EventGap`; WebSocket server-push на `/api/events`
+   теперь реализован, polling остаётся fallback для старых окружений.
 
 7. **Привести документацию к фактическому состоянию**
 
@@ -229,16 +229,16 @@ Editor-only vertical slice уже работает. Следующий прио�
 
 Но остаются ограничения:
 
-- polling вместо WebSocket;
+- editor сохраняет polling fallback для старых proxy/server окружений;
 - команды получают queue-level `request_id`/`accepted` ACK и correlated
   `CommandCompleted` event;
 - snapshot endpoints получают transport `sequence`, а scene сохраняет
   authoritative `version`;
 - `/api/events?after=<sequence>` даёт bounded replay и `EventGap`, если старые
   записи уже вытеснены;
+- WebSocket `/api/events` server-push использует тот же cursor/event shape;
 - ошибка выполнения команды приходит через correlated completion event и
   legacy `error` event;
-- редактор и движок ещё не используют единый WebSocket live-протокол;
 - native runtime по-прежнему выглядит скорее showcase shell, чем полноценный runtime.
 
 Сериализация событий теперь проходит через `serde_json`: строковые поля
@@ -345,7 +345,7 @@ cargo: command not found
 Однако для такого проекта важно добавить ещё:
 
 - браузерный визуальный end-to-end тест snapshot → WASM scene;
-- WebSocket live-channel end-to-end test;
+- browser WebSocket reconnect/close integration test;
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
 - compile test для всех публичных macro entry points.
@@ -480,7 +480,8 @@ create entity
 queue-level ACK/error response, correlated completion events, transport
 sequence snapshots, scene version, `serde_json` event serialization и stale
 guards в WASM/editor UI. `/api/events?after=<sequence>` даёт bounded replay и
-`EventGap`; остаётся WebSocket после стабилизации REST-контракта.
+`EventGap`, а `/api/events` поддерживает WebSocket server-push с тем же
+cursor/event contract. Остаётся hardening reconnect/close paths.
 
 ### Приоритет 3 — physics scaling
 
