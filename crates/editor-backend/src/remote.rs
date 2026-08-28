@@ -321,6 +321,10 @@ fn post_command(body: &str, game_tx: &Sender<UiCommand>, request_id: u64) -> Com
             error: Some("invalid command data".into()),
         };
     };
+    let command = UiCommand::WithRequestId {
+        request_id,
+        command: Box::new(command),
+    };
     if game_tx.send(command).is_err() {
         return CommandAck {
             request_id,
@@ -435,6 +439,19 @@ fn format_events(events: &[GameEvent]) -> String {
                     "json_data": event_json_data(json_data),
                 }
             }),
+            GameEvent::CommandCompleted {
+                request_id,
+                command,
+                success,
+                error,
+            } => serde_json::json!({
+                "CommandCompleted": {
+                    "request_id": request_id,
+                    "command": command,
+                    "success": success,
+                    "error": error,
+                }
+            }),
         })
         .collect();
     serde_json::to_string(&values).expect("event values are serializable")
@@ -467,6 +484,12 @@ mod tests {
                 cmd_type: "status".into(),
                 json_data: r#"{"v":7}"#.into(),
             },
+            GameEvent::CommandCompleted {
+                request_id: 4,
+                command: "set_component".into(),
+                success: true,
+                error: None,
+            },
         ];
         let out = serde_json::from_str::<serde_json::Value>(&format_events(&events))
             .expect("all event variants must serialize as valid JSON");
@@ -483,6 +506,12 @@ mod tests {
                 {"CustomEvent": {
                     "cmd_type": "status",
                     "json_data": {"v": 7}
+                }},
+                {"CommandCompleted": {
+                    "request_id": 4,
+                    "command": "set_component",
+                    "success": true,
+                    "error": null
                 }}
             ])
         );
@@ -646,7 +675,16 @@ mod tests {
             }
         );
         let cmd = rx.try_recv().expect("command forwarded");
-        assert!(matches!(cmd, UiCommand::SetComponent { entity_id: 5, .. }));
+        match cmd {
+            UiCommand::WithRequestId {
+                request_id,
+                command,
+            } => {
+                assert_eq!(request_id, 42);
+                assert!(matches!(*command, UiCommand::SetComponent { entity_id: 5, .. }));
+            }
+            _ => panic!("expected request-id wrapper"),
+        }
     }
 
     #[test]
@@ -664,7 +702,16 @@ mod tests {
         assert!(accepted.accepted);
         // exactly one command should have been sent (the Custom unknown)
         let cmd = rx.try_recv().expect("one command");
-        assert!(matches!(cmd, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown"));
+        match cmd {
+            UiCommand::WithRequestId {
+                request_id,
+                command,
+            } => {
+                assert_eq!(request_id, 3);
+                assert!(matches!(*command, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown"));
+            }
+            _ => panic!("expected request-id wrapper"),
+        }
         assert!(rx.try_recv().is_err(), "no more commands");
     }
 

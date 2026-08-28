@@ -35,7 +35,9 @@
 //! }
 //! ```
 //!
-//! Commands (`POST /api/command`, body `{"type": …, "data": …}`):
+//! Commands (`POST /api/command`, body `{"type": …, "request_id"?: u64,
+//! "data": …}`) receive a queue-level ACK; the engine emits a correlated
+//! `CommandCompleted` event after execution:
 //!
 //! * `create_entity` — `{"name"?: string, "components"?: {"Transform": {…}, …}}`;
 //!   overrides are validated **before** the spawn, an invalid payload
@@ -346,112 +348,55 @@ impl EditorWorld {
         status_json(self)
     }
 
-    /// Execute one command from the HTTP server, emitting the corresponding
-    /// events (`entity_created`/`entity_destroyed`/`entity_list`,
-    /// `ComponentUpdated`, `status`/`scene` snapshots or `error`). Invalid
-    /// commands never mutate the world — they produce an `error` event.
-    pub fn handle_command(&mut self, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
-        handle_command(self, cmd, ev_tx);
+    /// Result of executing a command on the authoritative editor world.
+struct CommandOutcome {
+    success: bool,
+    error: Option<String>,
+}
+
+impl CommandOutcome {
+    fn success() -> Self {
+        Self {
+            success: true,
+            error: None,
+        }
     }
-}
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Snapshots and command handling — free functions over [`EditorWorld`]
-// ═══════════════════════════════════════════════════════════════════════════
-// The bulk of the snapshot/command logic lives here, not in
-// `impl EditorWorld`, to keep the type under the bca number-of-methods
-// gate; the public methods above are thin delegates.
-
-/// Snapshot `world` as a [`Scene`]: every alive entity becomes an
-/// [`EntityDesc`] (missing components fall back to the spawn defaults),
-/// lights/camera/ambient come from the environment resource.
-fn to_scene(world: &EditorWorld) -> Scene {
-    let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
-    Scene {
-        name: world.scene_name.clone(),
-        entities,
-        lights: world.environment().lights.clone(),
-        camera: world.environment().camera.clone(),
-        ambient: world.environment().ambient,
+    fn failure(error: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            error: Some(error.into()),
+        }
     }
-}
-
-/// One alive entity as an [`EntityDesc`] for [`to_scene`].
-fn entity_desc(world: &EditorWorld, entity: Entity) -> EntityDesc {
-    EntityDesc {
-        name: world
-            .name_of(entity)
-            .unwrap_or_else(|| format!("Entity {}", entity.id())),
-        transform: read_component(world.store(), entity).unwrap_or_else(default_transform),
-        mesh: read_component(world.store(), entity).unwrap_or_else(default_mesh),
-        material: read_component(world.store(), entity).unwrap_or_else(default_material),
-    }
-}
-
-/// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
-fn scene_json(world: &EditorWorld) -> String {
-    let entities: Vec<Value> = world
-        .alive
-        .iter()
-        .map(|&e| entity_json(world.store(), e))
-        .collect();
-    let lights = serde_json::to_value(&world.environment().lights).expect("LightDesc serializes");
-    let camera = serde_json::to_value(&world.environment().camera).expect("CameraDesc serializes");
-    serde_json::json!({
-        "version": world.version,
-        "entity_count": world.entity_count(),
-        "entities": entities,
-        "lights": lights,
-        "camera": camera,
-        "ambient": world.environment().ambient,
-    })
-    .to_string()
-}
-
-/// JSON payload for `GET /api/status` (cached by the HTTP server).
-fn status_json(world: &EditorWorld) -> String {
-    serde_json::json!({
-        "entity_count": world.entity_count(),
-        "name": "Ornis Engine",
-        "version": world.version,
-    })
-    .to_string()
-}
-
-/// Publish `status` + `scene` snapshots so the HTTP server's caches
-/// (`GET /api/status`, `GET /api/scene`) reflect the current world.
-fn publish_state(world: &EditorWorld, ev_tx: &Sender<GameEvent>) {
-    emit(ev_tx, "status", world.status_json());
-    emit(ev_tx, "scene", world.scene_json());
-}
-
-fn emit(ev_tx: &Sender<GameEvent>, cmd_type: &str, payload: String) {
-    ev_tx
-        .send(GameEvent::CustomEvent {
-            cmd_type: cmd_type.into(),
-            json_data: payload,
-        })
-        .ok();
-}
-
-/// Invalid commands become `error` events instead of panics.
-fn emit_error(ev_tx: &Sender<GameEvent>, command: &str, message: &str) {
-    emit(
-        ev_tx,
-        "error",
-        serde_json::json!({"command": command, "message": message}).to_string(),
-    );
 }
 
 /// Execute one command from the HTTP server, emitting the corresponding
 /// events (`entity_created`/`entity_destroyed`/`entity_list`,
-/// `ComponentUpdated`, `status`/`scene` snapshots or `error`). Invalid
-/// commands never mutate the world — they produce an `error` event.
+/// `ComponentUpdated`, `status`/`scene` snapshots or `error`). A transport
+/// wrapped command additionally receives a correlated completion event.
 fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
+    if let UiCommand::WithRequestId {
+        request_id,
+        command,
+    } = cmd
+    {
+        let outcome = execute_command(world, command, ev_tx);
+        emit_command_completed(ev_tx, *request_id, command_name(command), outcome);
+    } else {
+        let _ = execute_command(world, cmd, ev_tx);
+    }
+}
+
+fn execute_command(
+    world: &mut EditorWorld,
+    cmd: &UiCommand,
+    ev_tx: &Sender<GameEvent>,
+) -> CommandOutcome {
     match cmd {
         UiCommand::CreateEntity => {
             world.spawn(None);
             publish_state(world, ev_tx);
+            CommandOutcome::success()
         }
         UiCommand::DestroyEntity { entity_id } => {
             // The typed variant carries no generation; match any alive
@@ -459,6 +404,9 @@ fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameE
             if let Ok(entity) = resolve_alive(&world.alive, *entity_id, None) {
                 world.despawn(entity.id(), entity.generation());
                 publish_state(world, ev_tx);
+                CommandOutcome::success()
+            } else {
+                CommandOutcome::failure(format!("entity {entity_id} not found"))
             }
         }
         UiCommand::Custom {
@@ -471,7 +419,36 @@ fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameE
             type_name,
             json_data,
         } => handle_set_component(world, *entity_id, *generation, type_name, json_data, ev_tx),
+        UiCommand::WithRequestId { .. } => {
+            CommandOutcome::failure("nested request-id command is not supported")
+        }
     }
+}
+
+fn command_name(cmd: &UiCommand) -> String {
+    match cmd {
+        UiCommand::CreateEntity => "create_entity".into(),
+        UiCommand::DestroyEntity { .. } => "destroy_entity".into(),
+        UiCommand::SetComponent { .. } => "set_component".into(),
+        UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
+        UiCommand::WithRequestId { command, .. } => command_name(command),
+    }
+}
+
+fn emit_command_completed(
+    ev_tx: &Sender<GameEvent>,
+    request_id: u64,
+    command: String,
+    outcome: CommandOutcome,
+) {
+    ev_tx
+        .send(GameEvent::CommandCompleted {
+            request_id,
+            command,
+            success: outcome.success,
+            error: outcome.error,
+        })
+        .ok();
 }
 
 /// Typed `SetComponent` (remote maps the `set_component` POST here):
@@ -486,7 +463,7 @@ fn handle_set_component(
     type_name: &str,
     json_data: &str,
     ev_tx: &Sender<GameEvent>,
-) {
+) -> CommandOutcome {
     match set_component(world, entity_id, generation, type_name, json_data) {
         Ok(value) => {
             ev_tx
@@ -497,8 +474,12 @@ fn handle_set_component(
                 })
                 .ok();
             publish_state(world, ev_tx);
+            CommandOutcome::success()
         }
-        Err(e) => emit_error(ev_tx, "set_component", &e),
+        Err(e) => {
+            emit_error(ev_tx, "set_component", &e);
+            CommandOutcome::failure(e)
+        }
     }
 }
 
@@ -526,12 +507,12 @@ fn handle_custom(
     cmd_type: &str,
     json_data: &str,
     ev_tx: &Sender<GameEvent>,
-) {
+) -> CommandOutcome {
     let data = match parse_data(json_data) {
         Ok(data) => data,
         Err(e) => {
             emit_error(ev_tx, cmd_type, &e);
-            return;
+            return CommandOutcome::failure(e);
         }
     };
     match cmd_type {
@@ -539,33 +520,48 @@ fn handle_custom(
             Ok(payload) => {
                 emit(ev_tx, "entity_created", payload);
                 publish_state(world, ev_tx);
+                CommandOutcome::success()
             }
-            Err(e) => emit_error(ev_tx, cmd_type, &e),
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
         },
         "destroy_entity" => match cmd_destroy_entity(world, &data) {
             Ok(payload) => {
                 emit(ev_tx, "entity_destroyed", payload);
                 publish_state(world, ev_tx);
+                CommandOutcome::success()
             }
-            Err(e) => emit_error(ev_tx, cmd_type, &e),
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
         },
         "list_entities" => {
             let payload = list_entities_json(world);
             emit(ev_tx, "entity_list", payload);
+            CommandOutcome::success()
         }
         "save_scene" => {
             let path = command_path(&data);
             match world.save_scene_file(&path) {
-                Ok(()) => emit(
-                    ev_tx,
-                    "scene_saved",
-                    serde_json::json!({
-                        "path": path.display().to_string(),
-                        "version": world.version,
-                    })
-                    .to_string(),
-                ),
-                Err(e) => emit_error(ev_tx, cmd_type, &e),
+                Ok(()) => {
+                    emit(
+                        ev_tx,
+                        "scene_saved",
+                        serde_json::json!({
+                            "path": path.display().to_string(),
+                            "version": world.version,
+                        })
+                        .to_string(),
+                    );
+                    CommandOutcome::success()
+                }
+                Err(e) => {
+                    emit_error(ev_tx, cmd_type, &e);
+                    CommandOutcome::failure(e)
+                }
             }
         }
         "load_scene" => {
@@ -583,11 +579,18 @@ fn handle_custom(
                         .to_string(),
                     );
                     publish_state(world, ev_tx);
+                    CommandOutcome::success()
                 }
-                Err(e) => emit_error(ev_tx, cmd_type, &e),
+                Err(e) => {
+                    emit_error(ev_tx, cmd_type, &e);
+                    CommandOutcome::failure(e)
+                }
             }
         }
-        other => emit_error(ev_tx, other, "unknown command"),
+        other => {
+            emit_error(ev_tx, other, "unknown command");
+            CommandOutcome::failure("unknown command")
+        }
     }
 }
 
@@ -1132,6 +1135,33 @@ mod tests {
         assert_eq!(world.version, 5);
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
         assert_eq!(scene["version"], 5);
+    }
+
+    #[test]
+    fn request_id_command_emits_correlated_completion() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        world.handle_command(
+            &UiCommand::WithRequestId {
+                request_id: 77,
+                command: Box::new(custom("create_entity", r#"{"name":"Hero"}"#)),
+            },
+            &ev_tx,
+        );
+
+        let events = drain_all(&ev_rx);
+        let completion = events.iter().find_map(|event| match event {
+            GameEvent::CommandCompleted {
+                request_id,
+                command,
+                success,
+                error,
+            } => Some((*request_id, command.clone(), *success, error.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            completion,
+            Some((77, "create_entity".into(), true, None))
+        );
     }
 
     #[test]

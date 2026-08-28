@@ -12,9 +12,9 @@
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
   `Engine` с ресурсами `Time`/`InputState`; editor-only physics и native/WASM
-  render extraction + `FramePlan` уже подключены. Native winit и WASM orbit
-  adapters попадают в ресурс, но полный cross-domain runtime с gameplay
-  consumers и physics во всех режимах ещё не собран.
+  render extraction + `FramePlan` уже подключены. Editor protocol теперь
+  имеет queue ACK и correlated completion events, но полный cross-domain
+  runtime с gameplay consumers и physics во всех режимах ещё не собран.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -229,13 +229,14 @@ Editor-only vertical slice уже работает. Следующий прио�
 Но остаются ограничения:
 
 - polling вместо WebSocket;
-- команды получают queue-level `request_id`/`accepted` ACK, но completion event
-  ещё не связан с request id;
+- команды получают queue-level `request_id`/`accepted` ACK и correlated
+  `CommandCompleted` event, но server-side replay/cursor ещё отсутствует;
 - snapshot endpoints получают transport `sequence`, а scene сохраняет
   authoritative `version`; сервер не хранит историю и не предоставляет
   cursor-based replay;
-- ошибка выполнения команды приходит отдельно через event;
-- редактор и движок ещё не используют единый надёжный live-протокол;
+- ошибка выполнения команды приходит через correlated completion event и
+  legacy `error` event;
+- редактор и движок ещё не используют единый WebSocket live-протокол;
 - native runtime по-прежнему выглядит скорее showcase shell, чем полноценный runtime.
 
 Сериализация событий теперь проходит через `serde_json`: строковые поля
@@ -342,7 +343,6 @@ cargo: command not found
 Однако для такого проекта важно добавить ещё:
 
 - браузерный визуальный end-to-end тест snapshot → WASM scene;
-- completion-correlation test: command request id → engine event;
 - server-side snapshot replay/cursor test;
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
@@ -475,10 +475,10 @@ create entity
 ### Приоритет 2 — исправить editor protocol
 
 Базовый REST-шов закрыт: есть client/server request id, explicit
-queue-level ACK/error response, transport sequence snapshots, scene version,
-`serde_json` event serialization и stale guards в WASM/editor UI.
-Остаются completion correlation между событиями движка и запросами,
-server-side replay/cursors и WebSocket после стабилизации REST-контракта.
+queue-level ACK/error response, correlated completion events, transport
+sequence snapshots, scene version, `serde_json` event serialization и stale
+guards в WASM/editor UI. Остаются server-side replay/cursors и WebSocket
+после стабилизации REST-контракта.
 
 ### Приоритет 3 — physics scaling
 

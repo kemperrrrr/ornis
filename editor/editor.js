@@ -19,6 +19,7 @@ var hasLiveScene = false;   // false until the first successful fetch
 var lastSceneSequence = 0;  // transport sequence; reject out-of-order replies
 var lastStatusSequence = 0;
 var nextRequestId = 1;      // client-generated id echoed by /api/command
+var pendingCommands = new Map(); // request_id -> command type until completion
 var selectedKey = null;     // "id:generation" of the selected entity
 var lastInspectorKey = '';  // fingerprint of the rendered inspector
 var activeDrag = null;      // slider drag in progress (see makeSlider)
@@ -45,6 +46,9 @@ function sendCommand(type, data) {
         // compatible, but surface an explicit rejection from the current API.
         if (ack && ack.accepted === false) {
             throw new Error(ack.error || ('command rejected: ' + type));
+        }
+        if (ack && ack.accepted === true && typeof ack.request_id === 'number') {
+            pendingCommands.set(ack.request_id, { type: type });
         }
         return ack;
     });
@@ -597,6 +601,17 @@ function refreshEvents() {
     return fetchJson('/api/events')
         .then(function(events) {
             events.forEach(function(ev) {
+                var completed = ev && ev.CommandCompleted;
+                if (completed) {
+                    var pending = pendingCommands.get(completed.request_id);
+                    pendingCommands.delete(completed.request_id);
+                    if (!completed.success) {
+                        var label = completed.command || (pending && pending.type) || 'command';
+                        showFileStatus('Command ' + label + ' failed: ' +
+                            (completed.error || 'unknown error'));
+                    }
+                    return;
+                }
                 var custom = ev && ev.CustomEvent;
                 if (!custom) return;
                 var data = {};

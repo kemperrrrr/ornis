@@ -10,8 +10,9 @@
 //! by `remote.rs` for `{"type":"set_component"}` posts and executed
 //! generically through the component registry (F0, audit §10 D2), and
 //! `ComponentUpdated` reports successful edits back. The HTTP transport adds
-//! request acknowledgements and snapshot sequence metadata in `remote.rs`;
-//! engine completion events remain asynchronous. The remaining typed variants
+//! request acknowledgements and snapshot sequence metadata in `remote.rs`,
+//! while wrapped commands receive correlated completion events. The remaining
+//! typed variants
 //! are reserved and marked `#[allow(dead_code)]`.
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -47,6 +48,18 @@ pub enum UiCommand {
         /// JSON object payload for the command.
         json_data: String,
     },
+    /// Transport wrapper carrying the request id through the engine queue.
+    ///
+    /// The HTTP layer sends this variant after returning its queue-level ACK;
+    /// the engine emits a matching [`GameEvent::CommandCompleted`] when the
+    /// wrapped command finishes. Existing in-process callers may continue to
+    /// use the unwrapped variants.
+    WithRequestId {
+        /// Request id assigned by the HTTP transport.
+        request_id: u64,
+        /// Command to execute on the engine thread.
+        command: Box<UiCommand>,
+    },
 }
 
 /// Events pushed from the game thread back to the UI thread
@@ -79,6 +92,17 @@ pub enum GameEvent {
         cmd_type: String,
         /// JSON payload of the event.
         json_data: String,
+    },
+    /// Completion result correlated with a transport request id.
+    CommandCompleted {
+        /// Request id from [`UiCommand::WithRequestId`].
+        request_id: u64,
+        /// Normalized command name (`create_entity`, `set_component`, ...).
+        command: String,
+        /// Whether the engine completed the command successfully.
+        success: bool,
+        /// Human-readable failure reason, if `success` is false.
+        error: Option<String>,
     },
 }
 

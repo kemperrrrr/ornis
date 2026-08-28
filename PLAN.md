@@ -77,8 +77,9 @@
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые
   snapshot'ы через polling; WASM отбрасывает устаревшие версии до применения,
-  а API возвращает explicit `request_id`/`accepted` ACK и transport `sequence`.
-  Server-side completion correlation и WebSocket пока не реализованы.
+  API возвращает explicit `request_id`/`accepted` ACK, а engine emits
+  correlated `CommandCompleted` events; snapshots получают transport
+  `sequence`. Replay/cursors и WebSocket пока не реализованы.
   Editor-only `EditorWorld` использует `ornis_core::World`,
   а браузер восстанавливает snapshot в отдельном `RenderWorld` после
   serialization boundary — общей памяти между ними нет.
@@ -112,9 +113,10 @@
 
 ✅ Реализованы обработчик команд в `editor-only`, `GET /api/scene`,
 подключение `editor.js` к REST, generic `set_component`, сохранение/загрузка
-сцены, explicit command ACK (`request_id`/`accepted`) и transport sequence
-для snapshots. WASM и editor UI отбрасывают устаревшие ответы; остаются
-server-side completion correlation и WebSocket вместо polling.
+сцены, explicit command ACK (`request_id`/`accepted`), коррелированные
+`CommandCompleted` events и transport sequence для snapshots. WASM и editor UI
+отбрасывают устаревшие ответы; остаются replay/cursors и WebSocket вместо
+polling.
 
 ### b. Живой ECS в браузере
 

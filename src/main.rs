@@ -251,34 +251,68 @@ impl GameApp {
     }
 
     fn process_remote_commands(ctx: &mut GameContext) {
-        while let Ok(cmd) = ctx.remote_cmd_rx.try_recv() {
-            if let UiCommand::Custom {
-                cmd_type,
-                json_data: _,
-            } = cmd
-            {
-                match cmd_type.as_str() {
-                    "create_entity" => {
-                        ctx.entity_count += 1;
-                        let id = ctx.entity_count;
-                        ctx.remote_ev_tx
-                            .send(GameEvent::CustomEvent {
-                                cmd_type: "entity_created".into(),
-                                json_data: format!(r#"{{"entity_id":{id}}}"#),
-                            })
-                            .ok();
-                    }
-                    "list_entities" => {
-                        ctx.remote_ev_tx
-                            .send(GameEvent::CustomEvent {
-                                cmd_type: "entity_list".into(),
-                                json_data: format!(r#"{{"count":{}}}"#, ctx.entity_count),
-                            })
-                            .ok();
-                    }
-                    _ => {}
-                }
+        while let Ok(command) = ctx.remote_cmd_rx.try_recv() {
+            let (request_id, command) = match command {
+                UiCommand::WithRequestId {
+                    request_id,
+                    command,
+                } => (Some(request_id), *command),
+                command => (None, command),
+            };
+            let success = Self::execute_native_command(ctx, &command);
+            if let Some(request_id) = request_id {
+                ctx.remote_ev_tx
+                    .send(GameEvent::CommandCompleted {
+                        request_id,
+                        command: Self::command_name(&command),
+                        success,
+                        error: (!success).then_some("native showcase command is a stub".into()),
+                    })
+                    .ok();
             }
+        }
+    }
+
+    fn execute_native_command(ctx: &mut GameContext, command: &UiCommand) -> bool {
+        let UiCommand::Custom {
+            cmd_type,
+            json_data: _,
+        } = command
+        else {
+            return false;
+        };
+        match cmd_type.as_str() {
+            "create_entity" => {
+                ctx.entity_count += 1;
+                let id = ctx.entity_count;
+                ctx.remote_ev_tx
+                    .send(GameEvent::CustomEvent {
+                        cmd_type: "entity_created".into(),
+                        json_data: format!(r#"{{"entity_id":{id}}}"#),
+                    })
+                    .ok();
+                true
+            }
+            "list_entities" => {
+                ctx.remote_ev_tx
+                    .send(GameEvent::CustomEvent {
+                        cmd_type: "entity_list".into(),
+                        json_data: format!(r#"{{"count":{}}}"#, ctx.entity_count),
+                    })
+                    .ok();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn command_name(command: &UiCommand) -> String {
+        match command {
+            UiCommand::CreateEntity => "create_entity".into(),
+            UiCommand::DestroyEntity { .. } => "destroy_entity".into(),
+            UiCommand::SetComponent { .. } => "set_component".into(),
+            UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
+            UiCommand::WithRequestId { command, .. } => Self::command_name(command),
         }
     }
 
