@@ -1709,9 +1709,7 @@ impl BuiltinPhysicsEngine {
             Shape::Sphere { radius } => {
                 ray_sphere_hit(origin, direction, Vec3::ZERO, *radius, max_dist)
             }
-            Shape::Box { half_extents } => {
-                ray_obb_hit(origin, direction, *half_extents, max_dist)
-            }
+            Shape::Box { half_extents } => ray_obb_hit(origin, direction, *half_extents, max_dist),
             Shape::Capsule {
                 radius,
                 half_height,
@@ -1762,6 +1760,9 @@ fn ray_sphere_hit(
 }
 
 /// Update one slab of a local-space OBB ray intersection.
+// Keep the scalar slab state explicit: the helper is also the normal-tracking
+// boundary for entry/exit faces.
+#[allow(clippy::too_many_arguments)]
 fn ray_obb_slab(
     origin: f32,
     direction: f32,
@@ -1895,7 +1896,10 @@ fn ray_capsule_cylinder_hit(
     }
     let root = discriminant.sqrt();
     let denominator = a;
-    let roots = [(-half_b - root) / denominator, (-half_b + root) / denominator];
+    let roots = [
+        (-half_b - root) / denominator,
+        (-half_b + root) / denominator,
+    ];
     let mut best = None;
     for distance in roots {
         if distance < 0.0 || distance > max_dist {
@@ -1921,7 +1925,10 @@ fn ray_capsule_hit(
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
     let mut best = ray_capsule_cylinder_hit(origin, direction, radius, half_height, max_dist);
-    for center in [Vec3::new(0.0, -half_height, 0.0), Vec3::new(0.0, half_height, 0.0)] {
+    for center in [
+        Vec3::new(0.0, -half_height, 0.0),
+        Vec3::new(0.0, half_height, 0.0),
+    ] {
         best = keep_closest_hit(
             best,
             ray_sphere_hit(origin, direction, center, radius, max_dist),
@@ -2359,11 +2366,14 @@ mod tests {
     fn raycast_obb_uses_exact_surface_and_normal() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
         let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
-        physics.add_body(RigidBody::new_box(
-            Vec3::ZERO,
-            Vec3::new(1.0, 0.25, 0.25),
-            0.0,
-        ).with_orientation(rotation));
+        physics.add_body(
+            RigidBody::new_box(
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.25, 0.25),
+                0.0,
+            )
+            .with_orientation(rotation),
+        );
 
         let ray = Ray::new(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
         let hit = physics.raycast(ray, 10.0).expect("ray must hit the rotated box");
@@ -2380,7 +2390,9 @@ mod tests {
         physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 0.0));
 
         let ray = Ray::new(Vec3::new(0.4, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
-        let hit = physics.raycast(ray, 10.0).expect("ray must hit the capsule cap");
+        let hit = physics
+            .raycast(ray, 10.0)
+            .expect("ray must hit the capsule cap");
         let expected_distance = 2.0 - (1.0 + 0.3);
         let expected_normal = Vec3::new(0.8, 0.6, 0.0);
         assert!((hit.distance - expected_distance).abs() < 1e-4);
@@ -2392,7 +2404,11 @@ mod tests {
     fn raycast_ignores_zero_length_rays() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0));
-        assert!(physics.raycast(Ray::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO), 10.0).is_none());
+        assert!(
+            physics
+                .raycast(Ray::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO), 10.0)
+                .is_none()
+        );
     }
 
     #[test]
