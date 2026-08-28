@@ -20,8 +20,8 @@ use web_sys::console;
 
 use ornis_render::scene::{LightDesc, Scene};
 use ornis_render::{
-    install_orbit_camera, read_orbit_camera, OrbitCamera, RenderContext, RenderExtracted,
-    RenderFrame3D, RenderWorld, Renderer3D, Technique,
+    OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
+    install_orbit_camera, read_orbit_camera,
 };
 
 mod scene_api;

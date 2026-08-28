@@ -83,8 +83,8 @@ mod native {
 
     pub use ornis_render::scene::Scene;
     pub use ornis_render::{
-        install_orbit_camera, read_orbit_camera, Mesh, OrbitCamera, RenderContext,
-        RenderFrame3D, RenderWorld, Renderer3D, Technique, create_sphere,
+        Mesh, OrbitCamera, RenderContext, RenderFrame3D, RenderWorld, Renderer3D, Technique,
+        create_sphere, install_orbit_camera, read_orbit_camera,
     };
 }
 
