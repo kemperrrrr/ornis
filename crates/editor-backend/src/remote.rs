@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -196,9 +196,7 @@ fn serve(
             Err(_) => break,
         };
 
-        if is_websocket_request(&request)
-            && request.url().split('?').next() == Some("/api/events")
-        {
+        if is_websocket_request(&request) && request.url().split('?').next() == Some("/api/events") {
             let cursor = event_cursor(request.url());
             let event_log = Arc::clone(&event_log);
             let stop = Arc::clone(&stop);
@@ -230,12 +228,12 @@ fn header_value(request: &Request, name: &'static str) -> Option<String> {
 }
 
 fn is_websocket_request(request: &Request) -> bool {
-    header_value(request, "Upgrade")
-        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+    header_value(request, "Upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
 }
 
 fn websocket_bad_request(request: Request) {
-    let _ = request.respond(Response::from_string("WebSocket upgrade required").with_status_code(400));
+    let _ =
+        request.respond(Response::from_string("WebSocket upgrade required").with_status_code(400));
 }
 
 /// Serve a WebSocket `/api/events` connection. The endpoint is server-push
@@ -331,11 +329,9 @@ fn sha1_digest(input: &[u8]) -> [u8; 20] {
             ]);
         }
         for index in 16..80 {
-            words[index] = (words[index - 3]
-                ^ words[index - 8]
-                ^ words[index - 14]
-                ^ words[index - 16])
-                .rotate_left(1);
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e] = state;
@@ -373,8 +369,7 @@ fn sha1_digest(input: &[u8]) -> [u8; 20] {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut index = 0;
     while index < bytes.len() {
@@ -384,7 +379,9 @@ fn base64_encode(bytes: &[u8]) -> String {
         output.push(TABLE[(first >> 2) as usize] as char);
         output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
         output.push(match second {
-            Some(second) => TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char,
+            Some(second) => {
+                TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char
+            }
             None => '=',
         });
         output.push(match third {

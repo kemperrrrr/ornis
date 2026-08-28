@@ -159,28 +159,35 @@ fn remote_editor_replays_events_after_cursor() {
     editor.stop();
 }
 
-
 fn read_websocket_text(stream: &mut TcpStream) -> String {
     let mut header = [0_u8; 2];
-    stream.read_exact(&mut header).expect("read WebSocket frame header");
+    stream
+        .read_exact(&mut header)
+        .expect("read WebSocket frame header");
     assert_eq!(header[0], 0x81, "server sends a final text frame");
     assert_eq!(header[1] & 0x80, 0, "server frames are not masked");
     let length = match header[1] & 0x7f {
         length @ 0..=125 => usize::from(length),
         126 => {
             let mut bytes = [0_u8; 2];
-            stream.read_exact(&mut bytes).expect("read medium frame length");
+            stream
+                .read_exact(&mut bytes)
+                .expect("read medium frame length");
             usize::from(u16::from_be_bytes(bytes))
         }
         127 => {
             let mut bytes = [0_u8; 8];
-            stream.read_exact(&mut bytes).expect("read large frame length");
+            stream
+                .read_exact(&mut bytes)
+                .expect("read large frame length");
             u64::from_be_bytes(bytes) as usize
         }
         _ => unreachable!(),
     };
     let mut payload = vec![0_u8; length];
-    stream.read_exact(&mut payload).expect("read WebSocket payload");
+    stream
+        .read_exact(&mut payload)
+        .expect("read WebSocket payload");
     String::from_utf8(payload).expect("text frame is UTF-8")
 }
 
@@ -209,7 +216,10 @@ fn remote_editor_websocket_stream_replays_events() {
         handshake.push(byte[0]);
     }
     let handshake = String::from_utf8(handshake).expect("handshake headers");
-    assert!(handshake.starts_with("HTTP/1.1 101"), "handshake: {handshake}");
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "handshake: {handshake}"
+    );
     assert!(handshake.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
 
     ev_tx
@@ -220,8 +230,8 @@ fn remote_editor_websocket_stream_replays_events() {
             error: None,
         })
         .expect("send event");
-    let events: serde_json::Value = serde_json::from_str(&read_websocket_text(&mut stream))
-        .expect("WebSocket event JSON");
+    let events: serde_json::Value =
+        serde_json::from_str(&read_websocket_text(&mut stream)).expect("WebSocket event JSON");
     assert_eq!(events[0]["sequence"], 1);
     assert_eq!(events[0]["CommandCompleted"]["request_id"], 17);
 
