@@ -220,8 +220,8 @@ mod tests {
         let b = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0).with_collision_filter(0b0010, 0b0001);
         assert!(a.can_collide_with(&b));
 
-        let blocked = RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0)
-            .with_collision_filter(0b0100, 0b0001);
+        let blocked =
+            RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0).with_collision_filter(0b0100, 0b0001);
         assert!(!a.can_collide_with(&blocked));
         assert!(!blocked.can_collide_with(&a));
     }
