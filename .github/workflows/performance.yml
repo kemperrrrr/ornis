@@ -1,0 +1,97 @@
+name: Performance Benchmarks
+
+on:
+  # Manual trigger for on-demand performance runs
+  workflow_dispatch:
+  # Optional: run on schedule (e.g. weekly) to track performance trends
+  # schedule:
+  #   - cron: '0 0 * * 0'  # Every Sunday at midnight UTC
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # System dependencies (same as quality.yml)
+      - name: Install system dependencies
+        timeout-minutes: 10
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+            /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update \
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Run criterion benchmarks for physics solver (SweepAndPrune / UniformGrid comparison)
+      - name: Run solver benchmarks
+        id: bench
+        run: |
+          mkdir -p target
+          cargo bench -p ornis-physics --bench solver_bench -- --verbose 2>&1 | tee target/bench.log
+
+      # Extract and publish summary to job summary
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          {
+            echo "## 📊 Performance Benchmark Results"
+            echo
+            if [ -f target/bench.log ]; then
+              # Extract the benchmark summary from criterion output
+              echo '```text'
+              grep -A 50 'physics_' target/bench.log | head -60 || echo "(see full log below)"
+              echo '```'
+              echo
+              echo "### Full Benchmark Log"
+              echo '<details><summary>Click to expand</summary>'
+              echo
+              echo '```text'
+              tail -n 100 target/bench.log
+              echo '```'
+              echo '</details>'
+            else
+              echo "⚠️  Benchmark log not found"
+            fi
+            echo
+            echo "**Note:** These benchmarks measure SweepAndPrune vs UniformGrid performance on 1k and 10k bodies."
+            echo "For 100k body probe, run manually: \`cargo run -p ornis-physics --release --example probe_100k\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      # Upload criterion results as artifact for trend analysis
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-results
+          path: target/criterion/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Upload raw benchmark log
+      - name: Upload benchmark log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-log
+          path: target/bench.log
+          retention-days: 30
+          if-no-files-found: warn
