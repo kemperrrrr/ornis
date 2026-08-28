@@ -2,6 +2,8 @@
 //! frame-plan layer ([`frame_plan`]/[`frame_exec`]/[`frame_passes`]),
 //! procedural meshes, scene descriptions and the WGSL shader assembly.
 #![warn(missing_docs)]
+/// Client-side orbit camera and backend-neutral input consumer.
+pub mod camera;
 /// Final PBR/UI blend pass (legacy path).
 pub mod composite;
 /// Shared ECS-to-render extraction and logical render-world frame host.
@@ -27,6 +29,7 @@ pub mod system;
 /// Local-to-world transform component.
 pub mod transform;
 
+pub use camera::OrbitCamera;
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};

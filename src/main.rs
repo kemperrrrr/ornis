@@ -69,7 +69,7 @@ fn main() {
 #[cfg(not(feature = "editor-only"))]
 mod native {
     pub use crossbeam_channel::{Receiver, Sender};
-    pub use glam::{Mat4, Vec3};
+    pub use glam::Mat4;
     pub use ornis_core::InputState;
     pub use winit::application::ApplicationHandler;
     pub use winit::dpi::PhysicalSize;
@@ -80,7 +80,8 @@ mod native {
 
     pub use ornis_render::scene::Scene;
     pub use ornis_render::{
-        Mesh, RenderContext, RenderFrame3D, RenderWorld, Renderer3D, Technique, create_sphere,
+        Mesh, OrbitCamera, RenderContext, RenderFrame3D, RenderWorld, Renderer3D, Technique,
+        create_sphere,
     };
 }
 
@@ -104,6 +105,7 @@ struct GameContext {
     frame_plan: RenderFrame3D,
     sphere_mesh: Mesh,
     render_world: RenderWorld,
+    orbit: OrbitCamera,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
@@ -211,7 +213,7 @@ impl GameApp {
         );
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
-        let (render_world, entity_count) = Self::showcase_engine();
+        let (render_world, entity_count, orbit) = Self::showcase_engine();
 
         Ok(GameContext {
             window,
@@ -223,19 +225,21 @@ impl GameApp {
             frame_plan,
             sphere_mesh,
             render_world,
+            orbit,
             remote_cmd_rx,
             remote_ev_tx,
             entity_count,
         })
     }
 
-    fn showcase_engine() -> (RenderWorld, u32) {
+    fn showcase_engine() -> (RenderWorld, u32, OrbitCamera) {
         let scene = Scene::from_ron(include_str!("../assets/scene.ron"))
             .expect("shipped showcase scene must parse");
         let entity_count = scene.entities.len() as u32;
+        let orbit = OrbitCamera::from_desc(&scene.camera);
         let mut render_world = RenderWorld::from_scene(&scene);
         render_world.run_frame(0.0);
-        (render_world, entity_count)
+        (render_world, entity_count, orbit)
     }
 
     fn update_input(ctx: &mut GameContext, update: impl FnOnce(&mut InputState)) {
@@ -317,6 +321,15 @@ impl GameApp {
     }
 
     fn render_frame(ctx: &mut GameContext) {
+        let input = ctx
+            .render_world
+            .engine()
+            .world()
+            .resources()
+            .get::<InputState>()
+            .expect("render world input resource")
+            .clone();
+        ctx.orbit.apply_input(&input);
         ctx.render_world.run_frame(1.0 / 60.0);
         let extracted = ctx.render_world.extracted();
         if extracted.mesh_params != (32, 24) {
@@ -332,12 +345,16 @@ impl GameApp {
         let h = ctx.surface_config.height as f64;
         let aspect = w as f32 / h as f32;
 
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 2.5, 9.0), Vec3::ZERO, Vec3::Y);
-        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_3, aspect, 0.1, 100.0);
+        let (cam_pos, cam_target, cam_up, fov, near, far) = ctx.orbit.view_parameters();
+        let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
+        let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
 
-        ctx.renderer3d
-            .set_camera(&ctx.queue, &view_proj.to_cols_array_2d(), [0.0, 2.5, 9.0]);
+        ctx.renderer3d.set_camera(
+            &ctx.queue,
+            &view_proj.to_cols_array_2d(),
+            cam_pos.to_array(),
+        );
         ctx.renderer3d.set_lights(
             &ctx.queue,
             [0.10, 0.10, 0.15],

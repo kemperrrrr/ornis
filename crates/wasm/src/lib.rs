@@ -13,14 +13,14 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use ornis_render::scene::{CameraDesc, LightDesc, Scene};
 use ornis_render::{
-    RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
+    OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
 };
 
 mod scene_api;
@@ -99,65 +99,6 @@ async fn fetch_live_scene() -> Option<LiveScene> {
             console::warn_1(&format!("[ornis-wasm] /api/scene parse failed: {e}").into());
             None
         }
-    }
-}
-
-/// Client-side orbit camera: azimuth/elevation around a target plus a zoom
-/// radius. Initialized from the scene camera; never sent to the server.
-struct OrbitCamera {
-    target: Vec3,
-    up: Vec3,
-    azimuth: f32,
-    elevation: f32,
-    radius: f32,
-    fov: f32,
-    near: f32,
-    far: f32,
-}
-
-impl OrbitCamera {
-    const MIN_RADIUS: f32 = 0.5;
-    const MAX_RADIUS: f32 = 1000.0;
-    /// Keep elevation off the poles so `look_at` never degenerates.
-    const ELEVATION_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
-    const ROTATE_SPEED: f32 = 0.005;
-    const ZOOM_SPEED: f32 = 0.001;
-
-    fn from_desc(cam: &CameraDesc) -> Self {
-        let target = Vec3::from(cam.target);
-        let offset = Vec3::from(cam.position) - target;
-        let radius = offset.length().max(Self::MIN_RADIUS);
-        // offset = radius * (cos(el)*cos(az), sin(el), cos(el)*sin(az))
-        let elevation = (offset.y / radius).clamp(-1.0, 1.0).asin();
-        let azimuth = offset.z.atan2(offset.x);
-        Self {
-            target,
-            up: Vec3::from(cam.up),
-            azimuth,
-            elevation,
-            radius,
-            fov: cam.fov,
-            near: cam.near,
-            far: cam.far,
-        }
-    }
-
-    fn position(&self) -> Vec3 {
-        let (ce, se) = (self.elevation.cos(), self.elevation.sin());
-        let (ca, sa) = (self.azimuth.cos(), self.azimuth.sin());
-        self.target + self.radius * Vec3::new(ce * ca, se, ce * sa)
-    }
-
-    fn rotate(&mut self, dx: f32, dy: f32) {
-        self.azimuth -= dx * Self::ROTATE_SPEED;
-        self.elevation = (self.elevation + dy * Self::ROTATE_SPEED)
-            .clamp(-Self::ELEVATION_LIMIT, Self::ELEVATION_LIMIT);
-    }
-
-    /// `delta_y` from a wheel event: positive scrolls down/away (zoom out).
-    fn zoom(&mut self, delta_y: f32) {
-        self.radius = (self.radius * (delta_y * Self::ZOOM_SPEED).exp())
-            .clamp(Self::MIN_RADIUS, Self::MAX_RADIUS);
     }
 }
 
@@ -515,12 +456,7 @@ impl<'a> FrameState<'a> {
     fn sync_input(&mut self) {
         let snapshot = self.input.borrow().clone();
         {
-            let mut orbit = self.orbit.borrow_mut();
-            if snapshot.mouse_button_down(0) {
-                let [dx, dy] = snapshot.pointer_delta();
-                orbit.rotate(dx, dy);
-            }
-            orbit.zoom(snapshot.wheel_delta());
+            self.orbit.borrow_mut().apply_input(&snapshot);
         }
         if let Some(input) = self
             .render_world
@@ -537,17 +473,7 @@ impl<'a> FrameState<'a> {
     /// Upload the orbit-derived camera for the current aspect ratio.
     fn update_camera(&mut self) {
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let (cam_pos, cam_target, cam_up, fov, near, far) = {
-            let orbit = self.orbit.borrow();
-            (
-                orbit.position(),
-                orbit.target,
-                orbit.up,
-                orbit.fov,
-                orbit.near,
-                orbit.far,
-            )
-        };
+        let (cam_pos, cam_target, cam_up, fov, near, far) = self.orbit.borrow().view_parameters();
         let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
         let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
@@ -866,7 +792,7 @@ mod integration_tests {
         assert_eq!(extracted.instances[0].material_index, 0);
         assert_eq!(
             extracted.instances[0].model_matrix.w_axis.truncate(),
-            Vec3::new(-5.6, 0.0, 0.0)
+            glam::Vec3::new(-5.6, 0.0, 0.0)
         );
     }
 
