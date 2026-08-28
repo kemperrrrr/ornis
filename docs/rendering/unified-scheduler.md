@@ -514,13 +514,15 @@ scheduler'ом», соблюдает контракт:
 у рендера. Иерархия: верхний `Schedule` планирует домены, домен
 планирует своё нутро — вложенность, а не конкуренция.
 
-**Веха интеграции** (срез 2026-08-27): native и WASM render loops уже
+**Веха интеграции** (срез 2026-08-28): native и WASM render loops уже
 проходят через верхний `Engine`/`Schedule` frame host, общий
-`ornis-render::RenderExtract` и `RenderFrame3D`/`FramePlan`. Physics systems
-живут в editor-only цикле; input и cross-domain physics/render ещё впереди.
-`RenderExtract` остаётся явной переходной serialization/ECS boundary —
-критерий «без отдельной extract-фазы» относится только к будущему полному
-unified scheduler, а не к текущему runtime.
+`ornis-render::RenderExtract` и `RenderFrame3D`/`FramePlan`. `Engine` также
+предоставляет bounded `FixedTime` schedule; physics systems в editor-only и
+native showcase используют этот host-level accumulator. Gameplay systems и
+cross-domain physics/render/input ещё впереди. `RenderExtract` остаётся
+явной переходной serialization/ECS boundary — критерий «без отдельной
+extract-фазы» относится только к будущему полному unified scheduler, а не к
+текущему runtime.
 
 ## S6 — ратификация (✅ 2026-08-19): реестр + отладочная проекция
 

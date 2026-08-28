@@ -20,7 +20,8 @@ use web_sys::console;
 
 use ornis_render::scene::{LightDesc, Scene};
 use ornis_render::{
-    OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
+    install_orbit_camera, read_orbit_camera, OrbitCamera, RenderContext, RenderExtracted,
+    RenderFrame3D, RenderWorld, Renderer3D, Technique,
 };
 
 mod scene_api;
@@ -393,7 +394,6 @@ struct FrameState<'a> {
     mesh_params: (u32, u32),
     instance_count: u32,
     input: Rc<RefCell<InputState>>,
-    orbit: Rc<RefCell<OrbitCamera>>,
 }
 
 impl<'a> FrameState<'a> {
@@ -449,15 +449,11 @@ impl<'a> FrameState<'a> {
         );
     }
 
-    /// Move platform input into the browser-side Engine resource and consume
-    /// its camera-facing controls. The shared InputState is copied into the
-    /// logical world before `Engine::run_frame`, so custom browser systems
-    /// can read the same snapshot without taking ownership of DOM events.
+    /// Move platform input into the browser-side Engine resource. The
+    /// scheduled orbit-camera consumer and future browser systems then read
+    /// the same snapshot without taking ownership of DOM events.
     fn sync_input(&mut self) {
         let snapshot = self.input.borrow().clone();
-        {
-            self.orbit.borrow_mut().apply_input(&snapshot);
-        }
         if let Some(input) = self
             .render_world
             .engine_mut()
@@ -473,7 +469,9 @@ impl<'a> FrameState<'a> {
     /// Upload the orbit-derived camera for the current aspect ratio.
     fn update_camera(&mut self) {
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let (cam_pos, cam_target, cam_up, fov, near, far) = self.orbit.borrow().view_parameters();
+        let orbit = read_orbit_camera(self.render_world.engine())
+            .expect("browser render world installs orbit camera");
+        let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
         let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
         let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
@@ -602,6 +600,10 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     // authoritative world: the serialized scene crosses the boundary once,
     // then the same Engine/RenderExtract contract as native is used locally.
     let mut render_world = RenderWorld::from_scene(&scene);
+    install_orbit_camera(
+        render_world.engine_mut(),
+        OrbitCamera::from_desc(&scene.camera),
+    );
     render_world.run_frame(0.0);
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
@@ -613,10 +615,10 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         false,
     );
 
-    // Client-side orbit camera, initialized from the scene camera. DOM events
-    // first enter the backend-neutral InputState; the frame loop consumes
-    // them, so the camera and future browser systems share one input path.
-    let orbit = Rc::new(RefCell::new(OrbitCamera::from_desc(&scene.camera)));
+    // Client-side orbit camera, initialized from the scene camera and
+    // registered as a once-per-frame Engine system. DOM events first enter
+    // the backend-neutral InputState; the camera and future browser systems
+    // share one input path.
     let input = Rc::new(RefCell::new(InputState::new()));
     attach_orbit_controls(&canvas, &input);
 
@@ -640,7 +642,6 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         frame_plan,
         render_world,
         gpu_scene,
-        orbit,
         initial_version,
     )?;
     Ok(())
@@ -656,7 +657,6 @@ fn spawn_render_loop(
     frame_plan: RenderFrame3D,
     render_world: RenderWorld,
     gpu_scene: GpuScene,
-    orbit: Rc<RefCell<OrbitCamera>>,
     initial_version: u64,
 ) -> Result<(), JsValue> {
     renderer.upload_materials(&ctx.queue, &gpu_scene.extracted.materials);
@@ -686,7 +686,6 @@ fn spawn_render_loop(
         mesh_params: gpu_scene.mesh_params,
         instance_count: gpu_scene.extracted.instances.len() as u32,
         input,
-        orbit,
     };
 
     let f: FrameCallback = Rc::new(RefCell::new(None));

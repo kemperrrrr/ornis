@@ -4,8 +4,9 @@
 //! [`Resources`]. It gives systems, physics, rendering and tooling one
 //! authoritative container without imposing an archetype layout: components
 //! remain in Ornis' independent sparse-set lanes. [`crate::Engine`] provides
-//! the small backend-neutral frame boundary that publishes time and runs the
-//! common [`Schedule`]. Domain runtimes should be registered as resources.
+//! the small backend-neutral frame boundary that publishes `Time`/`FixedTime`
+//! and runs the common [`Schedule`] plans. Domain runtimes should be
+//! registered as resources.
 
 use std::any::Any;
 

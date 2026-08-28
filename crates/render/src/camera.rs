@@ -1,12 +1,14 @@
-//! Backend-neutral orbit camera and input consumer.
+//! Backend-neutral orbit camera and scheduled input consumer.
 //!
 //! The camera is useful to both the native showcase and the browser viewport:
-//! platform adapters only update [`ornis_core::InputState`], while this type
-//! consumes held left-button pointer deltas and wheel movement at the frame
-//! boundary. It owns no window, DOM or GPU state.
+//! platform adapters only update [`ornis_core::InputState`], while the shared
+//! frame schedule consumes held left-button pointer deltas and wheel movement.
+//! It owns no window, DOM or GPU state.
+
+use std::sync::Mutex;
 
 use glam::Vec3;
-use ornis_core::InputState;
+use ornis_core::{Engine, InputState, Resources, System, SystemAccess};
 
 use crate::scene::CameraDesc;
 
@@ -72,8 +74,8 @@ impl OrbitCamera {
     }
 
     /// Applies the shared input contract: left-button drag rotates and wheel
-    /// movement zooms. Transient deltas are cleared by [`ornis_core::Engine`]
-    /// after the schedule consumes the same input resource.
+    /// movement zooms. Transient deltas are cleared by [`Engine`] after the
+    /// once-per-frame schedule consumes the same input resource.
     pub fn apply_input(&mut self, input: &InputState) {
         if input.mouse_button_down(0) {
             let [dx, dy] = input.pointer_delta();
@@ -92,6 +94,59 @@ impl OrbitCamera {
     fn zoom(&mut self, delta_y: f32) {
         self.radius = (self.radius * (delta_y * Self::ZOOM_SPEED).exp())
             .clamp(Self::MIN_RADIUS, Self::MAX_RADIUS);
+    }
+}
+
+/// Registers an [`OrbitCamera`] as a client-side resource and schedules its
+/// once-per-frame [`InputState`] consumer.
+///
+/// The camera is intentionally stored in a mutex because systems receive a
+/// shared `Resources` reference. This is a small view-state resource, not a
+/// second authoritative world or a GPU representation.
+pub fn install_orbit_camera(engine: &mut Engine, camera: OrbitCamera) {
+    let _ = engine.world_mut().insert(Mutex::new(camera));
+    engine.schedule_mut().add_system(OrbitCameraSystem);
+}
+
+/// Clones the current client-side orbit camera from an engine resource.
+///
+/// Returns `None` when [`install_orbit_camera`] has not been called. The
+/// accessor is intended for the platform renderer after [`Engine::run_frame`]
+/// has allowed the scheduled input consumer to update the camera.
+pub fn read_orbit_camera(engine: &Engine) -> Option<OrbitCamera> {
+    engine
+        .world()
+        .resources()
+        .get::<Mutex<OrbitCamera>>()
+        .map(|camera| camera.lock().expect("orbit camera lock").clone())
+}
+
+/// Once-per-frame system that applies the backend-neutral input snapshot to
+/// the client-side orbit camera.
+struct OrbitCameraSystem;
+
+impl System for OrbitCameraSystem {
+    fn name(&self) -> &'static str {
+        "orbit_camera_input"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .reads::<InputState>()
+            .writes::<Mutex<OrbitCamera>>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let Some(input) = resources.get::<InputState>() else {
+            return;
+        };
+        let Some(camera) = resources.get::<Mutex<OrbitCamera>>() else {
+            return;
+        };
+        camera
+            .lock()
+            .expect("orbit camera lock")
+            .apply_input(input);
     }
 }
 
@@ -124,6 +179,37 @@ mod tests {
         assert_ne!(orbit.position(), initial);
         assert!(orbit.position().length() > 0.5);
         assert_eq!(orbit.view_parameters().3, 60.0);
+    }
+
+    #[test]
+    fn scheduled_camera_consumes_input_resource_once_per_frame() {
+        let mut engine = Engine::new();
+        let initial = OrbitCamera::from_desc(&camera()).position();
+        install_orbit_camera(&mut engine, OrbitCamera::from_desc(&camera()));
+        {
+            let input = engine
+                .world_mut()
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("engine input resource");
+            input.set_mouse_button(0, true);
+            input.set_pointer_position([10.0, 4.0]);
+            input.add_wheel_delta(100.0);
+        }
+
+        engine.run_frame(0.0);
+
+        let updated = read_orbit_camera(&engine)
+            .expect("scheduled camera resource")
+            .position();
+        assert_ne!(updated, initial);
+        let input = engine
+            .world()
+            .resources()
+            .get::<InputState>()
+            .expect("engine input resource");
+        assert_eq!(input.pointer_delta(), [0.0, 0.0]);
+        assert_eq!(input.wheel_delta(), 0.0);
     }
 
     #[test]

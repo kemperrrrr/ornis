@@ -67,13 +67,14 @@
 
 - **Логический `World` + frame host (foundation)**: `ornis_core::World`
   объединяет `Resources` и авторитетный `SmartStore`, а `ornis_core::Engine`
-  добавляет `Time` и `run_frame` поверх `Schedule`. Editor-only facade уже
-  использует этот host и physics sync/step/sync-out; native и WASM render
-  используют общий library-level `RenderWorld`/`RenderExtract`/`FramePlan`
-  contract. Backend-neutral `InputState` уже публикуется Engine и native
-  winit/WASM orbit adapters его заполняют; native showcase physics подключена
-  с bounded 60 Hz accumulator, browser gameplay consumers и полный
-  cross-domain runtime пока не завершены.
+  добавляет `Time`/`FixedTime`, два rate-плана и `run_frame` поверх
+  `Schedule`. Editor-only facade уже использует этот host и physics
+  sync/step/sync-out; native и WASM render используют общий library-level
+  `RenderWorld`/`RenderExtract`/`FramePlan` contract. Backend-neutral
+  `InputState` уже публикуется Engine и native winit/WASM orbit adapters его
+  заполняют; native showcase и editor-only physics подключены к общему
+  bounded 60 Hz fixed host, browser gameplay consumers и полный cross-domain
+  runtime пока не завершены.
 - **Remote Editor**: REST, обработчик команд в `editor-only`, `GET /api/scene`,
   подключение `editor.js` к `/api/scene`/`/api/status`, generic
   `set_component`, а также save/load сцены — ✅. Рендер получает живые
@@ -131,9 +132,11 @@ WebSocket server-push реализован; connection handles отслежив�
 serialization snapshot восстанавливается в `ornis_render::RenderWorld`,
 где `Engine` запускает общий `RenderExtract`, публикует `InputState`, а
 `RenderFrame3D` исполняет `FramePlan`. Orbit pointer/wheel input уже проходит
-через этот ресурс. WebSocket server-push уже добавлен; остаются gameplay
-consumers, fixed-timestep orchestration и полный cross-domain runtime;
-серверный `EditorWorld` и browser-side copy намеренно не делят память.
+через этот ресурс и scheduled `OrbitCamera` consumer. Общий `Engine` уже
+предоставляет `FixedTime` и
+bounded fixed schedule; WebSocket server-push уже добавлен. Остаются
+browser/gameplay consumers и полный cross-domain runtime; серверный
+`EditorWorld` и browser-side copy намеренно не делят память.
 
 ### c. Фаза 6 — Скриптинг (пересмотрена 2026-08-22, решение D1 аудита)
 
@@ -207,20 +210,23 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
 системы-домены (внутренние острова/уровни — внутренность); критерий:
 главный цикл (натив и wasm) исполняет render-кадр через `Engine`, а
 render extraction остаётся явной переходной boundary-стадией до полного
-cross-domain scheduler. Physics впервые живёт в production editor-only и
-native showcase циклах; browser-side physics остаётся за serialization
-boundary. Полный unified runtime без отдельной extract-фазы — будущая цель,
-не текущий статус.
+cross-domain scheduler. Общий `FixedTime`/fixed schedule уже является
+host-level orchestration для подключённых physics systems; полноценные
+системы gameplay и остальные cross-domain consumers ещё впереди.
+Physics живёт в production editor-only и native showcase циклах;
+browser-side physics остаётся за serialization boundary. Полный unified
+runtime без отдельной extract-фазы — будущая цель, не текущий статус.
 
-> **Прогресс 2026-08-28:** `ornis_core::Engine` с `Time`/`InputState` исполняет
-> native showcase и browser-side `RenderWorld` frames; общий
+> **Прогресс 2026-08-28:** `ornis_core::Engine` с `Time`/`FixedTime`/`InputState`
+> исполняет native showcase и browser-side `RenderWorld` frames; общий
 > backend-neutral `RenderExtract` находится в `ornis-render`, а native и WASM
-> используют `RenderFrame3D`/`FramePlan`. Native winit и WASM orbit adapters
-> записывают input в ресурс; editor-only `EditorWorld` и native showcase
-> исполняют physics sync/step/sync-out, native physics использует bounded
-> fixed 60 Hz accumulator. Остаются gameplay consumers, расширение fixed
-> timestep на остальные домены и единый cross-domain runtime; serialization
-> boundary между сервером и браузером сохраняется намеренно.
+> используют `RenderFrame3D`/`FramePlan`. Engine bounded fixed schedule теперь
+> является общим host-level accumulator'ом; editor-only `EditorWorld` и
+> native showcase исполняют physics sync/step/sync-out через него. Native
+> winit и WASM orbit adapters записывают input в ресурс. Остаются полноценные
+> gameplay consumers, расширение orchestration на остальные домены и единый
+> cross-domain runtime; serialization boundary между сервером и браузером
+> сохраняется намеренно.
 
 ## ❌ Не делать / отложено (решения владельца)
 
@@ -356,8 +362,10 @@ boundary. Полный unified runtime без отдельной extract-фаз�
 > инфраструктурную ветку scheduler/render-plan. `ornis_core::World` и
 > `Engine` теперь являются frame host'ом для native и browser-side render
 > extraction; `RenderWorld`/`RenderExtract` вынесены в `ornis-render`, а
-> `RenderFrame3D`/`FramePlan` используются обоими render loops. Полный
-> cross-domain runtime с physics/input всё ещё не подключён.
+> `RenderFrame3D`/`FramePlan` используются обоими render loops. Общий
+> `Engine` fixed host уже подключает physics systems в editor-only и native
+> showcase; полный cross-domain runtime с gameplay/input consumers всё ещё не
+> подключён.
 
 > План по [`IDEAS.md`](IDEAS.md) §28 («третий путь» между Frostbite
 > FrameGraph и Bevy 0.19: один scheduler + автоматический lifetime/aliasing +

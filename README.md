@@ -128,8 +128,8 @@ cargo xtask bca --report      # html to target/bca/index.html
 |---|---|---|
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
 | Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | 🟡 | `crates/core/src/world.rs`; native и WASM render-клиенты используют ECS-backed `RenderWorld`, editor-only facade использует тот же core World; серверный authoritative World и браузер по-прежнему разделены serialization boundary |
-| Backend-neutral `Engine` (`World` + `Schedule` + `Time`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует время и запускает системы, native и WASM render loops подключены, editor-only и native showcase physics подключены; browser physics и полный cross-domain runtime ещё впереди |
-| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit и WASM orbit adapters записывают input, общий `OrbitCamera` его потребляет; остальные browser gameplay systems ещё впереди |
+| Backend-neutral `Engine` (`World` + variable/fixed `Schedule` + `Time`/`FixedTime`) | 🟡 | `crates/core/src/engine.rs`; `run_frame` публикует оба clock-ресурса, ограниченно выполняет fixed schedule, затем один раз запускает frame schedule; native и WASM render loops подключены, editor-only и native showcase physics используют общий fixed host; browser physics и полный cross-domain runtime ещё впереди |
+| Backend-neutral `InputState` resource | 🟡 | `crates/core/src/input.rs`; Engine публикует held key/button state и per-frame pointer/wheel deltas; native winit и WASM orbit adapters записывают input, scheduled `OrbitCamera` consumer (`crates/render/src/camera.rs`) его потребляет; остальные browser gameplay systems ещё впереди |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
@@ -151,7 +151,7 @@ cargo xtask bca --report      # html to target/bca/index.html
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
 | Frame Plan (бывш. Render Graph; модули `frame_plan.rs`/`frame_exec.rs`, rename от 2026-08-23): `RenderFrame3D` + `Technique` (forward/deferred/hybrid как конфигурация плана) + блум-каскад | ✅ |
-| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d) | 🟡 | инфраструктура и render frame contract реализованы; native и WASM render loops проходят через `Engine`/`RenderWorld`/`RenderExtract`/`FramePlan`, но единый cross-domain runtime с input и physics ещё не собран; `crates/render/src/{extraction.rs,frame_plan.rs,frame_exec.rs}`; детали: `docs/rendering/render-graph.md` |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d), backend-neutral fixed schedule/accumulator (`FixedTime`) для domain orchestration | 🟡 | инфраструктура и render frame contract реализованы; `Engine` теперь разделяет fixed systems и once-per-frame systems: native/editor-only physics используют общий bounded 60 Hz host, native и WASM render loops проходят через `Engine`/`RenderWorld`/`RenderExtract`/`FramePlan`; единый cross-domain runtime с полноценными gameplay systems всё ещё не собран; `crates/render/src/{extraction.rs,frame_plan.rs,frame_exec.rs}`; детали: `docs/rendering/render-graph.md` |
 
 ### Платформы и редактор
 
@@ -191,17 +191,19 @@ cargo xtask bca --report      # html to target/bca/index.html
 ### Следующий интеграционный этап
 
 `ornis_core::World` уже даёт общий логический контейнер `Resources` с
-`SmartStore` и `Schedule`, а `ornis_core::Engine` — минимальную границу
-кадра с ресурсом `Time`. Native и WASM render loops уже используют общий
-`RenderWorld`/`RenderExtract`/`FramePlan` контракт после serialization
-boundary. `InputState` теперь является backend-neutral resource; native
-winit и WASM orbit adapters записывают keyboard, mouse, pointer and wheel
-input, а browser render frame публикует его через `Engine`. Следующий шаг —
-добавить gameplay consumers и расширить fixed-timestep orchestration на
-остальные домены, а затем собрать полноценный cross-domain runtime. Native
-showcase physics уже подключена с bounded 60 Hz accumulator; server/browser
-physics остаётся отдельным вопросом из-за serialization boundary. Это не означает
-немедленно удалять `FramePlan`: он остаётся переходным render/backend-планом.
+`SmartStore` и `Schedule`, а `ornis_core::Engine` — frame host с ресурсами
+`Time`/`FixedTime`: fixed schedule выполняется bounded 60 Hz accumulator'ом,
+после чего once-per-frame schedule запускается один раз. Native и WASM
+render loops уже используют общий `RenderWorld`/`RenderExtract`/`FramePlan`
+контракт после serialization boundary. `InputState` теперь является
+backend-neutral resource; native winit и WASM orbit adapters записывают
+keyboard, mouse, pointer and wheel input, а browser render frame публикует
+его через `Engine`. Следующий шаг — подключить полноценные gameplay
+consumers и расширить orchestration на остальные домены, а затем собрать
+полный cross-domain runtime. Native showcase и editor-only physics уже
+подключены к общему fixed host; server/browser physics остаётся отдельным
+вопросом из-за serialization boundary. Это не означает немедленно удалять
+`FramePlan`: он остаётся переходным render/backend-планом.
 
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).
 
@@ -228,7 +230,8 @@ physics остаётся отдельным вопросом из-за serializa
    viewport восстанавливает snapshot в общем library-level `RenderWorld`,
    запускает `Engine`/`RenderExtract` и рисует через `FramePlan`; источник —
    `/api/scene` (polling ~1/с, fallback на `scene.ron`), есть orbit-камера.
-   Browser pointer/wheel input уже проходит через `InputState`; впереди —
+   Browser pointer/wheel input уже проходит через `InputState`, а
+   `RenderWorld` получает общий `Engine`/`FixedTime` host; впереди —
    gameplay consumers и physics.
 5. WebSocket server-push для `/api/events` уже добавлен; дальше — hardening
    reconnect/close paths и постепенный отказ от polling fallback.

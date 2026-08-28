@@ -495,6 +495,14 @@ pub struct ComponentStore<T> {
 > идеи единого *логического* World. Полное слияние render/physics/input в
 > верхний scheduler и устранение отдельной extraction boundary остаются
 > долгосрочной целью этого раздела.
+>
+> **Срез 2026-08-28:** `ornis_core::Engine` теперь предоставляет общий
+> `FixedTime` resource и bounded fixed schedule. Подключённые physics systems
+> используют его для fixed updates, а once-per-frame schedule запускается
+> после substeps. Это host-level orchestration, а не завершённое слияние
+> gameplay, physics, render и browser execution contexts; serialization
+> boundary между server-side authoritative world и browser-side `RenderWorld`
+> сохраняется намеренно.
 
 ### 28.3 Memory budget как first-class цель оптимизации
 

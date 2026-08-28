@@ -11,11 +11,12 @@
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
-  `Engine` с ресурсами `Time`/`InputState`; editor-only physics и native/WASM
-  render extraction + `FramePlan` уже подключены. Editor protocol теперь
-  имеет queue ACK и correlated completion events, native showcase physics
-  также подключена; полный cross-domain runtime с gameplay consumers,
-  fixed timestep и browser physics во всех режимах ещё не собран.
+  `Engine` с ресурсами `Time`/`FixedTime`/`InputState`; editor-only physics и
+  native/WASM render extraction + `FramePlan` уже подключены. Editor protocol
+  теперь имеет queue ACK и correlated completion events, native showcase
+  physics также подключена к общему bounded fixed host; полный cross-domain
+  runtime с gameplay consumers и browser physics во всех режимах ещё не
+  собран.
 - Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
   не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
@@ -160,8 +161,9 @@
 
 Editor-only vertical slice уже работает поверх `ornis_core::World` и общего
 frame contract. Native/WASM render и native/editor-only physics seams также
-подключены; следующий приоритет — fixed-timestep/gameplay orchestration и
-масштабирование broadphase, не создавая второй authoritative-модели состояния.
+подключены; общий bounded fixed host теперь вынесен в `ornis_core::Engine`.
+Следующий приоритет — gameplay consumers и масштабирование broadphase, не
+создавая второй authoritative-модели состояния.
 
 
 ---
@@ -657,10 +659,12 @@ RenderWorld::run_frame
 #### Physics Scheduler
 
 `ornis-physics` сохраняет собственный оптимизированный внутренний pipeline и
-вызывает `BuiltinPhysicsEngine::step(delta_time)` как одну доменную операцию.
-В editor-only режиме этот шаг обёрнут core systems
-`PhysicsSyncIn` → `PhysicsStep` → `PhysicsSyncOut` и исполняется через
-`Engine::run_frame`; native/WASM physics пока не подключены.
+вызывает `BuiltinPhysicsEngine::step(fixed_delta)` как одну доменную
+операцию. В editor-only и native showcase этот шаг обёрнут core systems
+`PhysicsSyncIn` → `PhysicsStep` → `PhysicsSyncOut`, зарегистрированными в
+`Engine::fixed_schedule`; `Engine::run_frame` выбирает bounded число fixed
+updates и запускает frame schedule после них. WASM physics намеренно не
+подключается за serialization boundary.
 
 В `ornis-physics` есть собственный внутренний pipeline:
 
@@ -705,7 +709,7 @@ fn run(&self, resources: &Resources)
 
 А `SmartStore` содержит ECS-компоненты.
 
-Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Дополнительно `ornis_core::Engine` публикует `Time` и `InputState` и запускает один frame schedule; после schedule transient input deltas очищаются. Native winit adapter заполняет ресурс, но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, browser input consumers и полным frame lifecycle, пока не собран.
+Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Дополнительно `ornis_core::Engine` публикует `Time`, `FixedTime` и `InputState`, запускает bounded fixed schedule, затем один once-per-frame schedule, после чего очищает transient input deltas. Native winit adapter заполняет ресурс, но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, browser input consumers и полным frame lifecycle, пока не собран.
 
 #### Что реально существует
 
@@ -781,14 +785,16 @@ struct GameContext {
 - запускает общий `RenderExtract` через `RenderWorld::run_frame`;
 - хранит wgpu surface/renderer/mesh отдельно как backend-ресурсы;
 - использует общий `RenderFrame3D`/`FramePlan` для native frame recording;
-- содержит shared `OrbitCamera`, который потребляет `InputState`;
+- содержит shared `OrbitCamera`, зарегистрированный как once-per-frame
+  `InputState` consumer в Engine schedule;
 - содержит `PhysicsRuntime` и скрытый static floor с одним dynamic showcase body;
 - рисует фиксированную showcase-сцену из пяти ECS-сущностей.
 
 Native rendering и physics уже получают данные через ECS/World schedule;
-physics использует bounded fixed 60 Hz accumulator. Gameplay stages,
-общий accumulator для всех доменов и полный cross-domain frame contract ещё
-не подключены.
+`Engine` владеет bounded fixed 60 Hz accumulator, а physics systems получают
+фиксированный шаг через `FixedTime`. Полный набор gameplay stages и
+cross-domain frame contract ещё не подключён; отдельный render extraction и
+backend-owned GPU lifecycle остаются переходными границами.
 
 ##### WASM RenderWorld и GPU adapter
 
@@ -1004,25 +1010,25 @@ RedrawRequested
 ```
 
 В этом цикле уже есть ECS systems execution, общий render extraction,
-shared input consumer, native showcase physics и native/WASM `FramePlan`, но
-пока отсутствуют отдельные стадии:
+shared input consumer, native showcase physics и native/WASM `FramePlan`.
+`Engine` теперь предоставляет отдельный bounded `FixedTime` host: fixed
+systems выполняются перед once-per-frame schedule, а `RenderExtract` не
+повторяется для каждого substep. Полноценные именованные gameplay stages
+пока не выделены:
 
 ```text
-pre_update
-input/gameplay systems
-fixed_update accumulator
-post_update
-cleanup
+fixed schedule (physics + future fixed gameplay)
+→ once-per-frame schedule (input consumers/render extraction)
+→ backend render/present
 ```
 
 Также нет:
 
-- общего runtime accumulator, который координирует все домены;
-- gameplay systems, читающих `InputState`;
+- полного набора gameplay systems, читающих `InputState` и меняющих ECS;
 - physics step в browser-side RenderWorld (это намеренно отдельный snapshot client);
 - post-frame systems;
 - frame statistics;
-- deterministic cross-domain update stage.
+- deterministic cross-domain update stage beyond the bounded fixed host.
 
 #### Editor-only mode
 
@@ -1143,10 +1149,11 @@ resize
 
 `ornis_core::World` уже существует как логический контейнер
 `Resources` + `SmartStore`, а `ornis_core::Engine` — как минимальный
-backend-neutral frame host с `Time` и `Schedule`. Editor-only physics и
-native/WASM render extraction уже используют этот host. Нужен следующий
-слой, который доведёт интеграцию до общего cross-domain physics/render/input
-pipeline; serialization boundary server↔browser при этом сохраняется:
+backend-neutral frame host с `Time`/`FixedTime` и двумя schedule-планами.
+Editor-only physics, native showcase physics и native/WASM render extraction
+уже используют этот host. Нужен следующий слой, который доведёт
+интеграцию до общего cross-domain physics/render/input pipeline;
+serialization boundary server↔browser при этом сохраняется:
 
 ```rust
 pub struct GameRuntime {
@@ -1161,14 +1168,15 @@ pub struct GameRuntime {
 
 ```rust
 fn frame(&mut self, dt: Duration) {
-    self.frame_host.run_frame(dt.as_secs_f32()); // publishes Time + runs scheduled systems
-    self.physics_step();
-    self.extract_render_data();
+    // Fixed systems (physics/gameplay) run first; the once-per-frame
+    // schedule then performs extraction before the backend presents.
+    self.frame_host.run_frame(dt.as_secs_f32());
     self.render_frame();
 }
 ```
 
-Более правильный вариант с фазами:
+Более правильный вариант с именованными фазами (следующий слой поверх
+текущего fixed/frame разделения):
 
 ```text
 PreUpdate
@@ -1181,6 +1189,10 @@ PreUpdate
 → Present
 → PostFrame
 ```
+
+Сейчас реализованы `Engine::fixed_schedule`/`FixedTime` и
+`Engine::schedule` для once-per-frame работы; отдельные `PreUpdate`,
+`Gameplay`, `PostFrame` и backend render stages ещё не выделены.
 
 При этом Physics и Render должны быть **потребителями данных из World**, а не независимыми владельцами параллельных копий состояния.
 
@@ -1744,14 +1756,14 @@ FramePlan
 
 ### Эволюционный план
 
-1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time`/`InputState` (`crates/core/src/{world.rs,engine.rs,input.rs}`);
+1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time`/`FixedTime`/`InputState`, fixed schedule и bounded accumulator (`crates/core/src/{world.rs,engine.rs,input.rs}`);
 2. ✅ зарегистрировать `PhysicsRuntime` в editor-only и native showcase World (Time, InputState и SmartStore предоставляет core foundation); asset resources ещё впереди;
 3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only и native showcase runtime; browser-side physics намеренно не запускается;
 4. ✅ добавить backend-neutral `RenderExtract` и вынести его в `ornis-render::extraction`;
 5. ✅ перевести native showcase loop на общий `RenderWorld::run_frame` для ECS-backed extraction и shared OrbitCamera;
 6. ✅ подключить `RenderFrame3D`/`FramePlan` к native render path;
 7. ✅ перевести WASM loop на тот же `RenderWorld`/`Engine`/`RenderExtract`/`FramePlan` contract после serialization boundary;
-8. завершить browser/gameplay input consumers, добавить fixed timestep/accumulator и полноценный cross-domain runtime; browser physics остаётся за serialization boundary;
+8. завершить browser/gameplay input consumers и собрать полноценный cross-domain runtime поверх общего fixed host; browser physics остаётся за serialization boundary;
 9. добавить `AssetServer` и handles;
 10. только после этого развивать WebSocket, scripting и сложный hot reload.
 

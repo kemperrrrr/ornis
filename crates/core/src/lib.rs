@@ -5,8 +5,9 @@
 //! with generational reuse, dense ([`ComponentStore`]) and packed
 //! ([`SmartStore`]) component storage, a dependency-driven [`Schedule`],
 //! and a [`Dispatcher`] that routes work between CPU lanes and GPU compute.
-//! [`Engine`] adds a backend-neutral frame boundary with [`Time`] and
-//! [`InputState`] resources over the logical [`World`]. The [`material`]
+//! [`Engine`] adds a backend-neutral frame boundary with [`Time`],
+//! [`FixedTime`] and [`InputState`] resources over the logical [`World`].
+//! The [`material`]
 //! module holds the GPU-ready OpenPBR material layout.
 #![warn(missing_docs)]
 
@@ -35,7 +36,9 @@ pub use command_sync::{
 };
 pub use component_store::{ChunkedIterMut, ComponentStore, ZipIter};
 pub use dispatcher::{CpuExecutor, Dispatchable, Dispatcher, ExecutionTarget, SmartDispatcher};
-pub use engine::{Engine, Time};
+pub use engine::{
+    DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, FixedTime, Time,
+};
 pub use entity::{Entity, EntityAllocator};
 pub use input::InputState;
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};

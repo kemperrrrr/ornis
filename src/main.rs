@@ -12,7 +12,7 @@ use editor_backend::{GameEvent, UiCommand};
 use engine_runtime::install_physics;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
-// in native mode nothing calls it yet (the native loop is a counter stub).
+// native mode also installs the physics systems into the showcase Engine.
 #[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
 mod editor_world;
 mod engine_runtime;
@@ -83,8 +83,8 @@ mod native {
 
     pub use ornis_render::scene::Scene;
     pub use ornis_render::{
-        Mesh, OrbitCamera, RenderContext, RenderFrame3D, RenderWorld, Renderer3D, Technique,
-        create_sphere,
+        install_orbit_camera, read_orbit_camera, Mesh, OrbitCamera, RenderContext, RenderFrame3D,
+        RenderWorld, Renderer3D, Technique, create_sphere,
     };
 }
 
@@ -108,7 +108,6 @@ struct GameContext {
     frame_plan: RenderFrame3D,
     sphere_mesh: Mesh,
     render_world: RenderWorld,
-    orbit: OrbitCamera,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
@@ -216,7 +215,7 @@ impl GameApp {
         );
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
-        let (render_world, entity_count, orbit) = Self::showcase_engine();
+        let (render_world, entity_count) = Self::showcase_engine();
 
         Ok(GameContext {
             window,
@@ -228,19 +227,21 @@ impl GameApp {
             frame_plan,
             sphere_mesh,
             render_world,
-            orbit,
             remote_cmd_rx,
             remote_ev_tx,
             entity_count,
         })
     }
 
-    fn showcase_engine() -> (RenderWorld, u32, OrbitCamera) {
+    fn showcase_engine() -> (RenderWorld, u32) {
         let scene = Scene::from_ron(include_str!("../assets/scene.ron"))
             .expect("shipped showcase scene must parse");
         let entity_count = scene.entities.len() as u32;
-        let orbit = OrbitCamera::from_desc(&scene.camera);
         let mut render_world = RenderWorld::from_scene(&scene);
+        install_orbit_camera(
+            render_world.engine_mut(),
+            OrbitCamera::from_desc(&scene.camera),
+        );
         install_physics(render_world.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
         {
             let entities = render_world.entities().to_vec();
@@ -273,7 +274,7 @@ impl GameApp {
             );
         }
         render_world.run_frame(0.0);
-        (render_world, entity_count, orbit)
+        (render_world, entity_count)
     }
 
     fn update_input(ctx: &mut GameContext, update: impl FnOnce(&mut InputState)) {
@@ -355,15 +356,6 @@ impl GameApp {
     }
 
     fn render_frame(ctx: &mut GameContext) {
-        let input = ctx
-            .render_world
-            .engine()
-            .world()
-            .resources()
-            .get::<InputState>()
-            .expect("render world input resource")
-            .clone();
-        ctx.orbit.apply_input(&input);
         ctx.render_world.run_frame(1.0 / 60.0);
         let extracted = ctx.render_world.extracted();
         if extracted.mesh_params != (32, 24) {
@@ -379,7 +371,9 @@ impl GameApp {
         let h = ctx.surface_config.height as f64;
         let aspect = w as f32 / h as f32;
 
-        let (cam_pos, cam_target, cam_up, fov, near, far) = ctx.orbit.view_parameters();
+        let orbit = read_orbit_camera(ctx.render_world.engine())
+            .expect("native showcase installs orbit camera");
+        let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
         let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
         let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
