@@ -242,9 +242,7 @@ fn remote_editor_websocket_stream_replays_events() {
         .expect("read server close frame");
     assert_eq!(close_header, [0x88, 2]);
     let mut close_code = [0_u8; 2];
-    stream
-        .read_exact(&mut close_code)
-        .expect("read close code");
+    stream.read_exact(&mut close_code).expect("read close code");
     assert_eq!(u16::from_be_bytes(close_code), 1001);
 }
 
