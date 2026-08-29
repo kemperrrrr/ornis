@@ -1,0 +1,83 @@
+name: Performance probe (100k bodies)
+
+on:
+  # Manual trigger for 100k probe (can take 30+ minutes)
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  probe-100k:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # System dependencies (same as performance.yml)
+      - name: Install system dependencies
+        timeout-minutes: 10
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+            /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update \
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Run 100k body probe with step-by-step timing
+      - name: Run 100k probe
+        id: probe
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target
+          cargo run -p ornis-physics --release --example probe_100k 2>&1 | tee target/probe_100k.log
+
+      # Extract results and publish to job summary
+      - name: Publish probe results
+        if: always()
+        run: |
+          {
+            echo "## 📊 100k Bodies Probe Results"
+            echo
+            echo "**Duration:** ~30–60+ minutes (depending on broadphase backend)"
+            echo
+            if [ -f target/probe_100k.log ]; then
+              echo "### Results"
+              echo '<details><summary>Click to expand</summary>'
+              echo
+              echo '```text'
+              cat target/probe_100k.log
+              echo '```'
+              echo '</details>'
+            else
+              echo "⚠️  Probe log not found"
+            fi
+            echo
+            echo "**Note:** Probes 100k dynamic bodies on tiled floor, measures Sweep-and-Prune/"
+            echo "UniformGrid behavior at scale. Times vary significantly with system load and hardware."
+          } >> $GITHUB_STEP_SUMMARY
+
+      # Upload probe log for reference
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-100k-log
+          path: target/probe_100k.log
+          retention-days: 30
+          if-no-files-found: warn
