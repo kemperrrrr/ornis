@@ -1,26 +1,49 @@
 # Ornis: текущие ограничения и план развития
 
+> **Актуальный срез: 2026-08-28.** Этот документ объединяет
+> аудит и план работ. Формулировки в разделах с датами —
+> исторические снимки; текущие статусы сверены ниже с кодом и
+> последующими коммитами.
+
 ## Главные ограничения сейчас
 
 - GPU-диспетчеризация в `core` пока фактически является заглушкой: `Dispatcher` умеет выбрать GPU, но `GpuExecutor::execute` не выполняет GPU-операцию.
 - `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
-- Scheduler вынесен в отдельный crate и хорошо протестирован, но еще не стал единым runtime-планировщиком всего движка.
+- В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
+  авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
+  `Engine` с ресурсами `Time`/`FixedTime`/`InputState`; editor-only physics и
+  native/WASM render extraction + `FramePlan` уже подключены. Editor protocol
+  теперь имеет queue ACK и correlated completion events, native showcase
+  physics также подключена к общему bounded fixed host; полный cross-domain
+  runtime с gameplay consumers и browser physics во всех режимах ещё не
+  собран.
+- Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
+  не стал единым runtime-планировщиком всего движка.
 - Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
 - Проект одновременно развивает ECS, GPU compute, WASM editor, MaterialX, audio, physics и собственные макросы. Такой широкий scope увеличивает стоимость сопровождения и риск распыления усилий.
 - Native-приложение пока скорее showcase/runtime shell, чем полноценная игровая платформа.
 
 ## План дальнейшей работы
 
-1. ~~**Закончить вертикальный сценарий редактора**~~ — ✅ закрыт (2026-08-26)
+1. ~~**Закончить вертикальный сценарий редактора**~~ — ✅ закрыт (2026-08-26);
+   следующий этап — довести cross-domain runtime поверх `ornis_core::World`.
 
    Создание entity → изменение Transform/Material → обновление WASM-сцены →
    сохранение и загрузка сцены (`save_scene`/`load_scene` через
    `POST /api/command`, атомарная запись `editor/scene.ron`, меню File →
    Save/Reload в UI, события `scene_saved`/`scene_loaded` в `/api/events`).
+   Editor-only vertical slice использует `EditorWorld` на core World и
+   polling; браузер после serialization boundary восстанавливает snapshot
+   в отдельный `ornis_render::RenderWorld`.
 
-2. **Довести physics API**
+2. **Довести physics API** — 🟡
 
-   Добавить фильтры столкновений, collision layers, триггеры, CCD-ротацию и более точный `raycast` для OBB и capsule.
+   Collision layers/masks уже добавлены в `RigidBody` и применяются
+   симметрично в broadphase, narrowphase и linear CCD. Triggers генерируют
+   deterministic enter/exit events без solver impulses, а raycast использует
+   точные sphere/OBB/capsule intersection'ы и surface normals. Angular CCD
+   теперь имеет bounded sweep для вращающихся box/capsule; fully analytic
+   swept-volume TOI остаётся отдельным улучшением.
 
 3. **Укрепить GPU-путь**
 
@@ -42,7 +65,7 @@
    > render (layout + запись пассов), MaterialX. Добавлены бенчи:
    > `physics_bodies` (1k/10k), `deep_stack_128`, `materialx parse_bench`.
    > ⚠️ Находка: на 100k тел `step` сверхлинеен (единый пол-AABB вырождает
-   > Sweep-and-Prune в O(n²), ~48 с/шаг; с тайловым полом — 80–110 с/шаг,
+   > Sweep-and-Prune в O(n²), ~45–56 с/шаг; с тайловым полом — 80–110 с/шаг,
    > квадратичная составляющая остаётся) — 100k в criterion не помещается,
    > числа сняты зондом `crates/physics/examples/probe_100k.rs`. Это вход
    > для п.2/п.3.
@@ -62,13 +85,17 @@
 
 6. **Улучшить надежность редактора**
 
-   Заменить polling на WebSocket или хотя бы добавить sequence numbers, acknowledgements, обработку ошибок команд и защиту от устаревших snapshots.
+   Базовые request id/ACK, correlated completion events, transport sequence
+   numbers, JSON escaping и stale guards уже добавлены. `/api/events` получил
+   bounded replay по cursor и `EventGap`; WebSocket server-push на `/api/events`
+   теперь реализован, polling остаётся fallback для старых окружений.
 
 7. **Привести документацию к фактическому состоянию**
 
    Уточнить заявления про «единый scheduler», CPU/GPU dispatch и invisible ECS, чтобы README отражал именно текущую реализацию.
 
-   > ✅ 2026-08-27: README сверен с кодом. Исправлено: `src/` без Vello;
+   > ✅ 2026-08-27: README и связанные текущие статусы сверены с кодом.
+   > Исправлено: `src/` без Vello;
    > IPC-типы — в `crates/editor-backend/src/ipc.rs` (не `src/ipc.rs`);
    > линтер `#[smart_pipeline]` — deprecated-note трюк вместо `compile_warning!`;
    > `Pack` → ✅ (`for_each_packed` + совместимость лент с `for_each_entity!`);
@@ -79,13 +106,13 @@
 
 8. **Единый источник шейдеров: перевести render на Rust→WGSL (путь 2)**
 
-   Сейчас проект непоследователен: физика генерирует шейдеры из Rust
-   (`#[gpu_pipeline]` + `#[derive(WgslStruct)]`, рукописного WGSL нет —
-   идея №4 «CPU↔GPU из одного Rust-кода»), а render содержит рукописные
-   WGSL-литералы прямо в .rs: `shader.rs` (~108 строк WGSL),
-   `shaders/mod.rs` (~116), `composite.rs` (8). Это уже привело к
-   двойной ручной правке при изменении `coat_darkening` (копии в shader.rs
-   и shaders/mod.rs пришлось менять синхронно).
+   После удаления мёртвого `shader.rs` канонический источник render-шейдеров
+   — builder'ы в `crates/render/src/shaders/`. Физика уже генерирует шейдеры
+   из Rust (`#[gpu_pipeline]` + `#[derive(WgslStruct)]`, идея №4
+   «CPU↔GPU из одного Rust-кода»), но render всё ещё содержит рукописные
+   WGSL-литералы в `shaders/mod.rs` и `composite.rs`. Поэтому задача ниже
+   остаётся актуальной: постепенно перевести render-пассы на общий
+   Rust→WGSL путь, не возвращая второй источник истины.
 
    Выбранный путь — **вариант 2: постепенный перевод рендерных пассов на
    `#[gpu_pipeline]` / `WgslStruct`**, чтобы весь WGSL выводился из одного
@@ -109,60 +136,39 @@
    naga-валидацией в тестах, чтобы строки шейдеров хотя бы не жили внутри
    Rust-кода.
 
-   > Находка аудита 2026-08-26: `shader.rs` — мёртвый дубль, как раньше
-   > `materialx/src/codegen.rs`. Его WGSL-константы (`PBR_VERTEX`,
-   > `PBR_FRAGMENT`, `GBUFFER_*`, `LIGHTING_*`, `COMPOSITE_*`, ~1343
-   > строки) потребляются только re-export'ом в `lib.rs`; реальный рендер
-   > строит все пайплайны из `shaders::*()` builder'ов (`renderer.rs`
-   > использует исключительно `shaders::pbr_fragment()` и т.п.). Внутри
-   > `shader.rs` к тому же 27 kernel-функций, инлайн-дублирующих
-   > `shaders/math.rs` (включая две копии `coat_base_darkening`). Ни один
-   > тест не сравнивает копии — рассинхрон уже возможен незаметно.
-   > Действие: удалить `shader.rs` (или сделать его тонким re-export над
-   > builder'ами), прежде чем начинать миграцию по пути 2.
-   >
-   > ✅ **Выполнено 2026-08-26**: `shader.rs` удалён (−1343 строки),
-   > re-export вычищен из `lib.rs`; workspace собирается, тесты зелёные.
-   > Канонический источник шейдеров теперь один: `shaders/` builder'ы.
+   > Историческая находка аудита 2026-08-26: `shader.rs` был мёртвым
+   > дублем и содержал около 1343 строк лишнего WGSL/kernel-кода.
+   > ✅ **Выполнено 2026-08-26**: файл удалён, re-export вычищен из `lib.rs`,
+   > канонический источник шейдеров закреплён за `shaders/` builder'ами.
+   > Оставшаяся часть задачи — перевести сами render-пассы на Rust→WGSL.
 
 9. **Документация Rust-кода: массовые пропуски, но мало лжи**
 
    Аудит 2026-08-26 (два параллельных прохода, все крейты):
 
-   - **Покрытие docs плохое и неровное** — публичных элементов без `///`:
-     core 169/267 (~63%), render ~60 (весь публичный фасад `Renderer3D`:
-     `new`, `resize`, `set_camera`, `render_gbuffer/lighting/...`),
-     materialx 20 (весь converter API), macros 42/45 (**все 8 экспортных
-     proc-macro точек входа**), physics 35/53, audio 34. Итого ~726+
-     недокументированных публичных элементов; lint `missing_docs` нигде
-     не включён.
-   - **Модульные `//!` хедеры отсутствуют у 28 файлов**, включая `lib.rs`
-     всех трёх ключевых крейтов (core, physics — 5 файлов, macros — 8,
-     audio — все 7, render — 10).
-   - **Расхождение доков с кодом почти НЕ подтверждено** — это хорошая
-     новость после раунда рефакторинга: найдена ровно одна битая ссылка
-     (`physics/src/engine/islands.rs:38` → несуществующий
-     `resolve_manifolds`, пережиток сплита engine.rs) и 2 неразрешимые
-     rustdoc-ссылки в `core/src/pipeline.rs:104,107`. Существующие доки —
-     глубокие, с обоснованием, и корректно пережили дробление функций.
-   - **План**: (а) немедленно — починить 1 битую ссылку, задокументировать
-     каноничность шейдер-источников (см. находку выше); (б) включить
-     `#![warn(missing_docs)]` в lib.rs крейтов и закрыть предупреждения
-     волной, начиная с публичного фасада (`Renderer3D`, `SmartStore`,
-     `ComponentStore`, `Entity`, proc-macro entry points, `AudioEngine`);
-     (в) правило для будущего: новый публичный API — только с `///`.
-   >
-   > Прогресс 2026-08-26:
-   > ✅ (а) битые ссылки исправлены: `islands.rs:38` → `wake_on_impact`
-   > (`engine/contacts.rs`), `pipeline.rs` — атрибут в backticks;
-   > rustdoc --workspace теперь **0 warnings**.
-   > 🔄 (б) в работе: `#![warn(missing_docs)]` включается по крейтам,
-   > волна документирования публичного фасада идёт параллельно.
-   > ⬜ (в) правило — зафиксировать в AGENTS.md/CONTRIBUTING после (б).
+   - **Покрытие docs было плохим и неровным** — аудит 2026-08-26 насчитал
+     ~726+ публичных элементов без `///` (это исторический baseline, а не
+     текущая цифра).
+   - **Модульные `//!` хедеры также были неполными** — в baseline отсутствовали
+     хедеры у 28 файлов; новые файлы теперь должны начинаться с `//!` по
+     правилу `AGENTS.md`.
+   - **Расхождение доков с кодом почти НЕ подтверждено** — после раунда
+     рефакторинга были найдены одна битая ссылка и две неразрешимые
+     rustdoc-ссылки; все они исправлены, rustdoc CI даёт **0 warnings**.
+   - **Текущий статус (2026-08-27):** `#![warn(missing_docs)]` включён во
+     всех workspace-крейтах и бинаре; основная волна публичной документации
+     уже прошла. Остаток — доведение отдельных `//!` хедеров и поддержание
+     правила для нового API. Каноничность render-шэйдеров зафиксирована:
+     мёртвый `shader.rs` удалён, но полный Rust→WGSL перевод render ещё не
+     выполнен.
 
 ## Ближайший приоритет
 
-Самая полезная следующая задача — полноценная live-сцена редактора. Она свяжет ECS, physics, render, WASM и HTTP backend в один проверяемый продуктовый сценарий.
+Editor-only vertical slice уже работает поверх `ornis_core::World` и общего
+frame contract. Native/WASM render и native/editor-only physics seams также
+подключены; общий bounded fixed host теперь вынесен в `ornis_core::Engine`.
+Следующий приоритет — gameplay consumers и масштабирование broadphase, не
+создавая второй authoritative-модели состояния.
 
 
 ---
@@ -197,6 +203,89 @@
 7. отдельный benchmark для worst-case broad phase.
 
 До решения этой проблемы я бы не позиционировал движок как пригодный для больших сцен.
+
+### Решение по следующему broadphase (срез 2026-08-28)
+
+Конкретный production default пока не выбран. В коде уже есть opt-in
+экспериментальный `BroadPhaseKind::UniformGrid` с deterministic candidate
+pairs, static/dynamic-friendly cell decomposition и large-body escape path;
+крупные static AABB (например, пол) не обязаны порождать одну пару со всеми
+телами через линейный axis sweep. `Sweep-and-Prune` остаётся default
+baseline/fallback для сравнения.
+
+**Dynamic AABB tree** остаётся вторым кандидатом для разреженных миров с
+сильно различающимися размерами тел. Выбор default не фиксируется до
+benchmark-матрицы 1k/10k/100k тел, большого единого пола, tiled floor,
+sparse world, плотных islands и worst-case broadphase. Это выбор broadphase
+backend, а не новый верхний scheduler и не runtime-выбор без измерений.
+
+Сверка с исходниками Box3D и Jolt уточнила приоритет: перед adaptive
+`cell_size` нужно проверить persistent proxy/lifetime, fat AABB, разделение
+static/moving structures и active/moved-body queries. Архитектурные заметки и
+официальные ссылки: [`docs/quality/broadphase-reference-2026-08-29.md`](docs/quality/broadphase-reference-2026-08-29.md).
+
+### Exploratory benchmark (2026-08-28)
+
+По workflow run `33194136814` (head
+`4fa10c0813f264d9df7c1b1d66002297ea9c5d28`, запуск 2026-08-28) получены
+следующие центральные оценки Criterion. CPU/runner metadata и `rustc`
+version в raw log не были сохранены:
+
+| Сценарий | Sweep-and-Prune | UniformGrid | Вывод |
+|---|---:|---:|---|
+| 1k тел | 1.4029 µs | 1.4075 µs | практически паритет, около +0.3% для grid |
+| 10k тел | 1.1167 s | 288.58 ms | grid быстрее примерно в 3.87 раза, −74.2% |
+
+Это подтверждает UniformGrid как provisional candidate для текущего
+CPU tiled-floor workload, но не закрывает масштабирование: 288.58 ms на
+10k тел всё ещё значительно выше бюджета 16.7 ms; на момент этого среза
+100k не были измерены, а 10k-прогон использовал только 10 samples и содержал
+warning Criterion.
+`Gnuplot not found` не является ошибкой — использован Plotters backend.
+GPU physics в этом прогоне не участвовала: benchmark не включал
+`--features gpu` и не подключал `WgpuContactSolver`.
+
+Benchmark теперь печатает `BroadPhaseStats`: body count, raw pair tests,
+layer/mask rejections, static-static skips, AABB rejections, unique
+candidate pairs, occupied grid cells и large-body count. Он сравнивает
+UniformGrid с cell size 1.0/2.0/4.0/8.0/16.0. Это закрывает первый
+candidate-pair breakdown; отдельный timing broadphase против solver и 100k
+probe для обоих CPU backend'ов ещё впереди. До этих измерений
+Sweep-and-Prune остаётся default, UniformGrid — opt-in.
+
+### Cell-size follow-up (2026-08-29)
+
+Workflow run `33240643444` на head
+`7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job
+в 60 минут, но присланный benchmark output содержит измерения всех шести
+конфигураций. На 1k тел все варианты остаются в пределах шума. На 10k
+центральные оценки составили: SAP — `1.1130 s`, grid 1.0 — `469.99 ms`,
+grid 2.0 — `271.36 ms`, grid 4.0 — `196.69 ms`, grid 8.0 — `180.00 ms`,
+grid 16.0 — `198.59 ms`. `cell_size = 8.0` — лучший проверенный вариант,
+примерно 6.18x быстрее SAP и на 8.5% быстрее `4.0`; `16.0` на 10.3%
+медленнее `8.0`. Полная таблица и `BroadPhaseStats` — в
+`docs/quality/perf-baseline-2026-08-27.md`.
+
+Это меняет provisional tuning conclusion для tiled-floor сцены: теперь
+кандидат — `cell_size = 8.0`, но измерено end-to-end `step`, а не изолированное
+время broadphase. Grid по-прежнему выдаёт `14161` candidate pairs против
+`11781` у SAP и остаётся примерно в 10.8 раза медленнее бюджета кадра 16.7 ms.
+
+Targeted 100k probes `33245718111` (Grid 8.0) и `33251548032` (SAP)
+успешно сравнили оба backend на tiled floor: около `8.02 s/step` против
+`79.49 s/step` в steady state. На первом SAP step было `5417936560` raw pair
+tests против `2349246` у Grid; оба backend выдали `100000` candidates. Это
+сильное подтверждение Grid 8.0 против SAP на 100k, но два запуска были на
+отдельных unlabeled runner'ах и не являются machine-normalized baseline.
+Оба варианта всё ещё далеко от real-time, поэтому production default пока не
+переключается.
+
+Ручной `probe_100k` умеет выбирать `--sweep`/`--grid`, cell size, число тел и
+число шагов. Adaptive grid пока не добавляется: без timing breakdown он
+может оптимизировать counters, но ухудшить wall-clock из-за пересборки и
+нестабильного выбора. Следующие шаги — timing
+broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
+остаётся редкой cost-based настройкой с hysteresis после этого.
 
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
@@ -234,18 +323,21 @@
 
 Но остаются ограничения:
 
-- polling вместо WebSocket;
-- fire-and-forget команды;
-- `POST /api/command` возвращает `{}` даже для некорректной команды;
-- нет нормального request ID / acknowledgement;
-- нет sequence numbers для snapshot'ов;
-- ошибка команды приходит отдельно через event;
-- редактор и движок не используют единый надёжный live-протокол;
+- editor сохраняет polling fallback для старых proxy/server окружений;
+- команды получают queue-level `request_id`/`accepted` ACK и correlated
+  `CommandCompleted` event;
+- snapshot endpoints получают transport `sequence`, а scene сохраняет
+  authoritative `version`;
+- `/api/events?after=<sequence>` даёт bounded replay и `EventGap`, если старые
+  записи уже вытеснены;
+- WebSocket `/api/events` server-push использует тот же cursor/event shape;
+- ошибка выполнения команды приходит через correlated completion event и
+  legacy `error` event;
 - native runtime по-прежнему выглядит скорее showcase shell, чем полноценный runtime.
 
-Особенно неприятный момент — ручная сериализация событий в `format_events` в [`crates/editor-backend/src/remote.rs`](crates/editor-backend/src/remote.rs). Поля вроде `cmd_type` и `type_name` вставляются в JSON через `format!`, без JSON escaping. Если туда попадёт кавычка, обратный слеш или управляющий символ, endpoint может вернуть невалидный JSON.
-
-Лучше сериализовать структуры через `serde_json`, а не собирать JSON вручную.
+Сериализация событий теперь проходит через `serde_json`: строковые поля
+экранируются, а невалидные embedded payloads выдаются как JSON-строки, поэтому
+`/api/events` не ломается из-за кавычек или обратных слешей.
 
 ### 4. Проект слишком широк для текущего размера
 
@@ -346,12 +438,10 @@ cargo: command not found
 
 Однако для такого проекта важно добавить ещё:
 
-- end-to-end тест editor command → ECS mutation → scene snapshot;
-- end-to-end тест snapshot → WASM scene;
-- тест stale snapshot / sequence number;
+- браузерный визуальный end-to-end тест snapshot → WASM scene;
+- browser WebSocket reconnect integration test;
 - fuzzing HTTP command payloads;
 - benchmark worst-case broad phase;
-- regression test на JSON escaping событий;
 - compile test для всех публичных macro entry points.
 
 ## Что в проекте хорошо
@@ -480,15 +570,14 @@ create entity
 
 ### Приоритет 2 — исправить editor protocol
 
-Минимальный набор:
-
-- request ID;
-- explicit ACK/error response;
-- sequence number у snapshots;
-- version у scene state;
-- typed event serialization через Serde;
-- защита от stale updates;
-- WebSocket после стабилизации REST-контракта.
+Базовый REST-шов закрыт: есть client/server request id, explicit
+queue-level ACK/error response, correlated completion events, transport
+sequence snapshots, scene version, `serde_json` event serialization и stale
+guards в WASM/editor UI. `/api/events?after=<sequence>` даёт bounded replay и
+`EventGap`, а `/api/events` поддерживает WebSocket server-push с тем же
+cursor/event contract. Сервер отслеживает connection handles, отправляет
+normal close при shutdown и heartbeat ping на idle connections; остаётся
+browser reconnect test и полноценное чтение client close frames.
 
 ### Приоритет 3 — physics scaling
 
@@ -583,15 +672,16 @@ crates/schedule/src/lib.rs
 
 По фактическому использованию:
 
-- в `crates/core` он преимущественно тестируется;
+- в `crates/core` он тестируется и исполняется через `Engine::run_frame`;
 - в `crates/render/tests/scheduler_parity.rs` проверяется соответствие render-планировщика;
-- в `crates/render/src/frame_exec.rs` используется общий `ornis_schedule::run_levels`;
-- физика его не использует;
-- native game loop его не использует;
-- WASM render loop его не использует;
-- editor world его не использует.
+- в `crates/render/src/frame_exec.rs` используется общий `ornis_schedule::run_levels` для render-пассов;
+- editor-only physics systems исполняются core `Schedule` через `EditorWorld::tick`;
+- native loop запускает `RenderWorld::run_frame`, а WASM loop — тот же library-level host;
+- полный scheduler всех доменов (input, physics, render и gameplay) ещё не собран.
 
-То есть `ornis-core::Schedule` сейчас — это **готовая инфраструктура и API**, но не главный исполнитель кадра движка.
+То есть `ornis-core::Schedule` уже является frame executor для подключённых
+runtime-доменов, но пока не единым главным планировщиком всего движка:
+`FramePlan` сохраняет специализированное управление render resources/pass'ами.
 
 #### Render Scheduler / FramePlan
 
@@ -621,22 +711,22 @@ FrameExecutor
 - исполнять pass'ы через `FrameExecutor`;
 - использовать общий `ornis_schedule::run_levels`.
 
-Но это **не общий игровой Scheduler**. Это scheduler именно для render frame.
+Но это **не общий игровой Scheduler**. Это scheduler именно для render frame
+и его transient GPU resources; он остаётся специализированным внутренним
+планом, пока верхний `Engine` orchestrates domain systems.
 
-Более того, существующие native и WASM entry points сейчас используют в основном старый прямой путь:
-
-```rust
-renderer.render_scene(...)
-```
+Текущие production render paths используют один и тот же concrete plan-capable
+pipeline:
 
 Native:
 
 ```text
 src/main.rs
-GameApp::about_to_wait
-GameApp::window_event
-render_frame
-Renderer3D::render_scene
+GameApp::render_frame
+RenderWorld::run_frame
+→ RenderExtract
+→ Renderer3D uploads
+→ RenderFrame3D::render / FramePlan
 ```
 
 WASM:
@@ -644,21 +734,25 @@ WASM:
 ```text
 crates/wasm/src/lib.rs
 requestAnimationFrame
-FrameState::draw
-Renderer3D / RenderBackend
+RenderWorld::run_frame
+→ RenderExtract
+→ Renderer3D uploads
+→ RenderFrame3D::render / FramePlan
 ```
 
-`RenderFrame3D` полноценно используется в тестах, benchmark'ах и examples, но **не является пока центральным render pipeline основного native/WASM runtime**.
+`RenderBackend::render_scene` остаётся compatibility/plugin и reference API;
+основные native/WASM loops больше не вызывают этот legacy shortcut и не
+дублируют pass recording logic.
 
 #### Physics Scheduler
 
-Physics Scheduler не использует.
-
-Физика вызывается напрямую:
-
-```rust
-physics.step(delta_time)
-```
+`ornis-physics` сохраняет собственный оптимизированный внутренний pipeline и
+вызывает `BuiltinPhysicsEngine::step(fixed_delta)` как одну доменную
+операцию. В editor-only и native showcase этот шаг обёрнут core systems
+`PhysicsSyncIn` → `PhysicsStep` → `PhysicsSyncOut`, зарегистрированными в
+`Engine::fixed_schedule`; `Engine::run_frame` выбирает bounded число fixed
+updates и запускает frame schedule после них. WASM physics намеренно не
+подключается за serialization boundary.
 
 В `ornis-physics` есть собственный внутренний pipeline:
 
@@ -703,7 +797,7 @@ fn run(&self, resources: &Resources)
 
 А `SmartStore` содержит ECS-компоненты.
 
-Это хорошая основа для мира, но **структуры `World`, объединяющей ECS, Physics, Renderer, GPU context, resources и schedules, сейчас нет**.
+Это уже реализованный фундамент логического `ornis_core::World`: он объединяет `SmartStore` и singleton-ресурсы через `Resources` и умеет запускать `Schedule`. Дополнительно `ornis_core::Engine` публикует `Time`, `FixedTime` и `InputState`, запускает bounded fixed schedule, затем один once-per-frame schedule, после чего очищает transient input deltas. Native winit adapter заполняет ресурс, но **engine-level runtime**, связывающий этот World с Physics, Renderer, GPU context, browser input consumers и полным frame lifecycle, пока не собран.
 
 #### Что реально существует
 
@@ -713,24 +807,20 @@ fn run(&self, resources: &Resources)
 
 ```rust
 pub struct EditorWorld {
-    store: SmartStore,
+    engine: ornis_core::Engine,
     alive: Vec<Entity>,
-    environment: SceneEnvironment,
     scene_name: String,
     version: u64,
 }
 ```
 
-Это настоящий мир, но только для editor-only режима.
+Это editor-only facade над общим core runtime host'ом.
 
 Он содержит:
 
-- `SmartStore`;
+- `ornis_core::Engine` с `World`, `SmartStore` и `SceneEnvironment`-ресурсом;
 - список живых entities;
-- Transform/Mesh/Material/Name;
-- camera;
-- lights;
-- ambient;
+- Transform/Mesh/Material/Name в ECS-лентах;
 - scene version;
 - команды редактора.
 
@@ -746,13 +836,14 @@ pub struct EditorWorld {
 
 Но:
 
-- в нём нет `BuiltinPhysicsEngine`;
-- в нём нет `Renderer3D`;
-- в нём нет `Schedule`;
-- он не запускает игровой frame loop;
+- содержит `BuiltinPhysicsEngine` через ресурс `PhysicsRuntime` и три
+  physics systems (`sync_in`/`step`/`sync_out`);
+- не содержит `Renderer3D` и не является полным native/WASM frame loop;
+- запускает physics frame через `Engine::run_frame` при timeout между командами;
 - WASM получает от него JSON snapshot через HTTP.
 
-То есть `EditorWorld` — это **мир редактора**, а не общий engine world.
+То есть `EditorWorld` уже использует **общий core World**, но остаётся
+editor-only facade, а не полным engine runtime.
 
 ##### Native GameContext
 
@@ -764,62 +855,64 @@ struct GameContext {
     device,
     queue,
     surface,
-    renderer3d,
+    renderer3d: Renderer3D,
+    frame_plan: RenderFrame3D,
     sphere_mesh,
-    materials,
-    instance_data,
+    render_world: ornis_render::RenderWorld,
+    orbit: ornis_render::OrbitCamera,
     remote_cmd_rx,
     remote_ev_tx,
     entity_count,
 }
 ```
 
-Это уже больше похоже на runtime context, но он:
+Это всё ещё минимальный showcase context, но теперь он:
 
-- не содержит `SmartStore`;
-- не содержит Physics;
-- не содержит `Schedule`;
-- не содержит общего ECS world;
-- хранит `materials` и `instance_data` отдельно;
-- рисует фиксированную showcase-сцену из пяти сфер.
+- содержит `ornis_render::RenderWorld` (внутри `ornis_core::Engine`) с
+  ECS-компонентами сцены;
+- запускает общий `RenderExtract` через `RenderWorld::run_frame`;
+- хранит wgpu surface/renderer/mesh отдельно как backend-ресурсы;
+- использует общий `RenderFrame3D`/`FramePlan` для native frame recording;
+- содержит shared `OrbitCamera`, зарегистрированный как once-per-frame
+  `InputState` consumer в Engine schedule;
+- содержит `PhysicsRuntime` и скрытый static floor с одним dynamic showcase body;
+- рисует фиксированную showcase-сцену из пяти ECS-сущностей.
 
-Native rendering сейчас не берёт данные из ECS.
+Native rendering и physics уже получают данные через ECS/World schedule;
+`Engine` владеет bounded fixed 60 Hz accumulator, а physics systems получают
+фиксированный шаг через `FixedTime`. Полный набор gameplay stages и
+cross-domain frame contract ещё не подключён; отдельный render extraction и
+backend-owned GPU lifecycle остаются переходными границами.
 
-##### WASM GpuScene
+##### WASM RenderWorld и GPU adapter
 
-В WASM создаётся отдельная структура:
-
-```rust
-struct GpuScene {
-    mesh,
-    mesh_params,
-    materials,
-    instances,
-    lights,
-}
-```
-
-Она строится из `Scene` / `LiveScene`, полученной через JSON.
-
-Это уже связь:
+В WASM серверный `Scene` / `LiveScene`, полученный через JSON, сначала
+проходит serialization boundary и восстанавливается в общий с native
+library-level `ornis_render::RenderWorld`:
 
 ```text
 EditorWorld
 → /api/scene
-→ WASM
-→ GpuScene
-→ Renderer3D
+→ RenderWorld (Engine + SmartStore + Schedule)
+→ RenderExtracted
+→ Renderer3D / RenderFrame3D
 ```
 
-Но это не общий in-process world. Это:
+Внутренний `GpuScene` WASM теперь содержит только mesh, extracted snapshot
+и light tuples — он не повторяет ECS-to-material/instance conversion.
+`RenderWorld::run_frame` запускает тот же `Engine`/`RenderExtract` контракт,
+а `RenderFrame3D` записывает тот же typed `FramePlan`, что и native.
+
+Это не общий in-process world между сервером и браузером:
 
 ```text
-server-side world
-→ serialized snapshot
-→ browser-side copy
+server-side authoritative world
+→ versioned serialized snapshot
+→ browser-side RenderWorld copy
 ```
 
-Между ними нет общей памяти и нет общей ECS-ссылки.
+Между ними нет общей памяти и общей ECS-ссылки; это намеренная
+serialization boundary из IDEAS §28.
 
 ### 3. Откуда сейчас берёт данные рендеринг?
 
@@ -827,17 +920,14 @@ server-side world
 
 #### Native runtime
 
-В `src/main.rs` данные создаются вручную:
+В `src/main.rs` showcase-сцена теперь создаётся как ECS-компоненты
+`TransformDesc`/`MeshDesc`/`MaterialDesc` внутри `ornis_core::Engine`.
+`RenderExtract` запускается через `Engine::run_frame` и формирует
+backend-neutral `RenderExtracted`, после чего native renderer загружает
+полученные материалы и instances в GPU.
 
-```rust
-materials = vec![...]
-instance_data = ...
-sphere_mesh = create_sphere(...)
-```
-
-Рендеринг получает данные из `GameContext`.
-
-Это демонстрационная сцена, не ECS.
+`Renderer3D` и `sphere_mesh` пока остаются native-owned ресурсами, поэтому
+это уже ECS-backed extraction, но ещё не полный FramePlan/runtime pipeline.
 
 #### Editor/WASM runtime
 
@@ -852,68 +942,62 @@ editor/scene.ron
 Дальше:
 
 ```text
-Scene
-→ build_gpu_scene
-→ materials
-→ instances
-→ lights
+Scene / LiveScene
+→ RenderWorld::replace_scene
+→ Engine::run_frame
+→ RenderExtracted
+→ mesh/material/instance uploads
 → Renderer3D
 ```
 
-Это работает как scene serialization pipeline.
+Это сохраняет scene serialization boundary, но conversion logic живёт в
+`crates/render/src/extraction.rs`, а не в WASM adapter.
 
 #### FramePlan rendering
 
-`RenderFrame3D` получает render-specific pass data и GPU resources. Он не получает напрямую `SmartStore` и не извлекает автоматически ECS-компоненты.
+`RenderFrame3D` получает render-specific pass data и GPU resources. Native и
+WASM runtime вызывают его после `RenderWorld::run_frame`/`RenderExtract`:
+ECS-компоненты превращаются в общий `RenderExtracted`, затем загружаются в
+`Renderer3D` и записываются через один и тот же typed `FramePlan`.
 
-То есть рендер пока не делает:
-
-```text
-world.query::<Transform, Mesh, Material>()
-→ render instances
-```
-
-Такого общего extraction слоя нет.
+`RenderBackend::render_scene` остаётся legacy compatibility path для
+плагинов, тестов и reference probes; production native/WASM loops его не
+вызывают.
 
 ### 4. Откуда сейчас берёт данные физика?
 
-Физика живёт полностью отдельно.
+Физика всё ещё владеет оптимизированным внутренним представлением
+`BuiltinPhysicsEngine`, editor-only и native showcase runtime подключают его
+как доменный ресурс `PhysicsRuntime`; browser-side physics намеренно остаётся
+за serialization boundary.
 
-`BuiltinPhysicsEngine` владеет своими:
-
-- rigid bodies;
-- shapes;
-- handles;
-- velocities;
-- contacts;
-- joints;
-- islands.
-
-Она не читает автоматически:
-
-```rust
-SmartStore<Transform>
-SmartStore<RigidBody>
-SmartStore<Collider>
-```
-
-и не записывает автоматически результаты обратно в ECS.
-
-В текущем коде нет интеграции вида:
+В editor-only путь выглядит так:
 
 ```text
-ECS Transform + Collider
-→ Physics step
-→ ECS Transform update
+ECS RigidBody + TransformDesc
+→ PhysicsSyncIn
+→ BuiltinPhysicsEngine::step
+→ PhysicsSyncOut
+→ ECS RigidBody + TransformDesc
 ```
 
-Есть physics API и собственный physics state, но нет physics system, зарегистрированной в общем мире.
+Синхронизация и системы находятся в `src/engine_runtime.rs`. `RigidBody`
+остаётся внутренним physics-компонентом runtime facade и не входит в текущий
+serde scene snapshot. Native showcase подключает скрытый static floor и один
+dynamic body, а WASM physics не запускает: браузер остаётся snapshot client.
+
+То есть первый ECS ↔ physics шов уже есть, но полноценный physics pipeline
+для всех runtime-платформ и единый Collider/Transform data lifecycle ещё
+не реализованы.
 
 ### 5. Есть ли общие CPU/GPU данные?
 
-Пока нет единой data model.
+Полной автоматической CPU/GPU data model пока нет, но общий логический
+render input уже существует: `RenderWorld`/`SmartStore` → `RenderExtracted` →
+platform-owned GPU buffers. Физика и GPU residency пока имеют отдельные
+physical representations.
 
-Существуют отдельные механизмы.
+Существуют следующие механизмы.
 
 #### CPU ECS storage
 
@@ -949,18 +1033,9 @@ FrameExecutor
 
 В `ornis-physics` есть отдельный GPU solver.
 
-Но сейчас нет единого объекта вроде:
-
-```rust
-struct World {
-    ecs: SmartStore,
-    physics: PhysicsWorld,
-    renderer: Renderer,
-    resources: Resources,
-    schedule: Schedule,
-    gpu: GpuContext,
-}
-```
+Core `World` и backend-neutral `Engine` уже существуют, но пока не
+содержат одновременно domain resources physics/render/GPU и не являются
+владельцами полного production frame lifecycle.
 
 И нет единой автоматической схемы:
 
@@ -997,8 +1072,9 @@ GameApp::resumed
 → request adapter
 → create device/queue
 → create surface
-→ create Renderer3D
-→ create mesh/materials/instances
+→ create Renderer3D + RenderFrame3D
+→ create RenderWorld from `assets/scene.ron`
+→ run initial RenderExtract
 ```
 
 Каждый кадр:
@@ -1009,48 +1085,38 @@ about_to_wait
 → request_redraw
 
 RedrawRequested
-→ render_frame
+→ consume InputState with OrbitCamera
+→ Engine::run_frame
+   ├── RenderExtract
+   └── native PhysicsSyncIn / PhysicsStep / PhysicsSyncOut
 → acquire surface texture
-→ set camera
-→ set lights
-→ upload materials
-→ upload instances
-→ render_scene
+→ set camera/lights
+→ upload extracted materials/instances
+→ FramePlan / RenderFrame3D
 → submit
 → present
 ```
 
-Но в этом цикле отсутствуют отдельные стадии:
+В этом цикле уже есть ECS systems execution, общий render extraction,
+shared input consumer, native showcase physics и native/WASM `FramePlan`.
+`Engine` теперь предоставляет отдельный bounded `FixedTime` host: fixed
+systems выполняются перед once-per-frame schedule, а `RenderExtract` не
+повторяется для каждого substep. Полноценные именованные gameplay stages
+пока не выделены:
 
 ```text
-pre_update
-input
-fixed_update
-physics
-post_update
-extract
-render
-cleanup
-```
-
-Фактически есть:
-
-```text
-process remote commands
-→ render
+fixed schedule (physics + future fixed gameplay)
+→ once-per-frame schedule (input consumers/render extraction)
+→ backend render/present
 ```
 
 Также нет:
 
-- фиксированного physics timestep;
-- accumulator;
-- `delta_time` для gameplay;
-- ECS systems execution;
-- physics step в игровом цикле;
-- render extraction;
+- полного набора gameplay systems, читающих `InputState` и меняющих ECS;
+- physics step в browser-side RenderWorld (это намеренно отдельный snapshot client);
 - post-frame systems;
 - frame statistics;
-- deterministic update stage.
+- deterministic cross-domain update stage beyond the bounded fixed host.
 
 #### Editor-only mode
 
@@ -1068,14 +1134,16 @@ main
 
 ```text
 load editor/scene.ron
-→ ждать UiCommand
+→ publish initial snapshot
+→ ждать UiCommand с timeout
 → выполнить команду
-→ отправить GameEvent/snapshot
+→ Engine::run_frame (physics sync/step/sync-out)
+→ при изменении позы отправить snapshot
 ```
 
-Это **command-processing loop**, но не игровой цикл.
-
-Там нет render tick и physics tick.
+Это пока не полный игровой цикл: editor-only runtime имеет physics tick,
+но не рендерит кадр и не подключает `FramePlan`; WASM получает состояние
+через HTTP snapshot'ы.
 
 #### WASM mode
 
@@ -1085,8 +1153,9 @@ load editor/scene.ron
 start_renderer
 → init WebGPU
 → load scene
-→ create GpuScene
-→ create Renderer
+→ create RenderWorld (Engine + SmartStore + Schedule)
+→ initial Engine::run_frame / RenderExtract
+→ create Renderer3D + RenderFrame3D
 → spawn_render_loop
 → requestAnimationFrame
 ```
@@ -1096,95 +1165,90 @@ start_renderer
 ```text
 resize
 → иногда poll /api/scene
-→ применить live scene
+→ RenderWorld::replace_scene
+→ Engine::run_frame / RenderExtract
+→ upload extracted data
 → update camera
 → acquire surface texture
-→ draw
+→ RenderFrame3D::render / FramePlan
 → present
 → requestAnimationFrame
 ```
 
-Это настоящий render loop, но он:
+Это настоящий render loop с ECS extraction и render plan, но он:
 
-- не вызывает общий Scheduler;
+- не является общим in-process world с сервером — состояние приходит
+  versioned snapshot'ами;
 - не запускает Physics;
-- не запускает ECS systems;
-- получает состояние snapshot'ами;
-- содержит только client-side camera update и rendering.
+- не содержит input/gameplay systems;
+- содержит только client-side camera update и rendering после boundary.
 
 ### Итоговая схема текущего состояния
 
 Сейчас архитектура выглядит так:
 
 ```text
-                    ┌────────────────────┐
-                    │ Ornis-core Schedule│
-                    │  готов, но не wired │
-                    └────────────────────┘
-
-┌────────────────┐       REST/JSON       ┌────────────────┐
-│  EditorWorld   │ ────────────────────> │  WASM GpuScene │
-│ SmartStore     │                        │  Renderer3D    │
-│ scene state    │                        │ requestFrame   │
-└────────────────┘                        └────────────────┘
-
-
-┌────────────────┐
-│ Native GameApp │
-│ GameContext    │
-│ direct render  │
-│ fixed showcase │
-└────────────────┘
-
-
-┌─────────────────────────┐
-│ BuiltinPhysicsEngine    │
-│ own bodies/shapes/state  │
-│ direct physics.step()   │
-└─────────────────────────┘
-
-
-┌─────────────────────────┐
-│ RenderFrame3D/FramePlan │
-│ render-only scheduler   │
-│ tests/examples/benches  │
-└─────────────────────────┘
+                    ┌──────────────────────────────┐
+                    │ Ornis-core Engine             │
+                    │ World + Schedule + Time       │
+                    └──────────────┬───────────────┘
+                                   │
+             ┌─────────────────────┴─────────────────────┐
+             │                                           │
+┌────────────▼────────────┐                 ┌────────────▼────────────┐
+│ EditorWorld              │                 │ Native GameContext      │
+│ core World + physics     │                 │ core Engine +            │
+│ sync/step/sync-out       │                 │ RenderExtract            │
+└────────────┬────────────┘                 └────────────┬────────────┘
+             │ REST/JSON                                 │ GPU upload
+             ▼                                           ▼
+┌────────────────────────┐                 ┌──────────────────────────┐
+│ WASM RenderWorld        │                 │ Native RenderWorld        │
+│ snapshot → Engine       │                 │ assets → Engine           │
+│ → RenderExtract         │                 │ → RenderExtract           │
+└────────────┬───────────┘                 └────────────┬─────────────┘
+             │                                          │
+             └──────────────┬───────────────────────────┘
+                            ▼
+                 ┌──────────────────────────┐
+                 │ Renderer3D + FramePlan    │
+                 │ shared typed pass path    │
+                 └──────────────────────────┘
 ```
 
 То есть:
 
-- **Scheduler есть**, но не является главным scheduler'ом движка;
-- **Render FramePlan есть**, но это отдельный render scheduler;
-- **Physics есть**, но он не подключён как system;
-- **EditorWorld есть**, но он не является общим World;
-- **Native loop есть**, но это showcase loop;
-- **WASM loop есть**, но это browser render loop;
-- **единого authoritative world нет**;
+- **Core `Engine`/`Schedule` уже исполняется** для подключённых render- и
+  editor-only/native showcase physics-систем;
+- **Render `FramePlan` остаётся отдельным render scheduler** для lifetime,
+  aliasing и typed pass execution;
+- **Physics подключена как systems в editor-only и native showcase runtime**;
+- **RenderExtract, shared OrbitCamera и `FramePlan` подключены к native и WASM render loops**;
+- **EditorWorld использует core `World`, но остаётся server-side facade**;
+- **Native loop всё ещё showcase loop**, несмотря на ECS-backed extraction;
+- **WASM loop — browser-side snapshot client** с собственным `RenderWorld`;
+- **единый authoritative world между server и browser не требуется**:
+  serialization boundary сохраняется по IDEAS §28;
 - **единого CPU/GPU data lifecycle нет**;
-- **physics/render/ECS не проходят через один frame schedule**.
+- **полный native/WASM physics/render/ECS кадр не проходит через один
+  cross-domain schedule**.
 
 ### Что нужно сделать, чтобы появилась настоящая единая архитектура
 
-Нужен верхнеуровневый runtime, например:
+`ornis_core::World` уже существует как логический контейнер
+`Resources` + `SmartStore`, а `ornis_core::Engine` — как минимальный
+backend-neutral frame host с `Time`/`FixedTime` и двумя schedule-планами.
+Editor-only physics, native showcase physics и native/WASM render extraction
+уже используют этот host. Нужен следующий слой, который доведёт
+интеграцию до общего cross-domain physics/render/input pipeline;
+serialization boundary server↔browser при этом сохраняется:
 
 ```rust
-pub struct World {
-    pub ecs: SmartStore,
-    pub resources: Resources,
-    pub physics: PhysicsEngineResource,
-    pub renderer: RendererResource,
-    pub gpu: GpuResources,
-}
-```
-
-И единый frame runner:
-
-```rust
-pub struct Engine {
-    world: World,
-    schedule: Schedule,
+pub struct GameRuntime {
+    frame_host: ornis_core::Engine,
+    physics: PhysicsRuntime,
+    renderer: RendererRuntime,
     render_frame: RenderFrame3D,
-    time: Time,
 }
 ```
 
@@ -1192,17 +1256,15 @@ pub struct Engine {
 
 ```rust
 fn frame(&mut self, dt: Duration) {
-    self.world.resources.insert(Time::new(dt));
-
-    self.schedule.run(&self.world.resources);
-
-    self.physics_step();
-    self.extract_render_data();
+    // Fixed systems (physics/gameplay) run first; the once-per-frame
+    // schedule then performs extraction before the backend presents.
+    self.frame_host.run_frame(dt.as_secs_f32());
     self.render_frame();
 }
 ```
 
-Более правильный вариант с фазами:
+Более правильный вариант с именованными фазами (следующий слой поверх
+текущего fixed/frame разделения):
 
 ```text
 PreUpdate
@@ -1215,6 +1277,10 @@ PreUpdate
 → Present
 → PostFrame
 ```
+
+Сейчас реализованы `Engine::fixed_schedule`/`FixedTime` и
+`Engine::schedule` для once-per-frame работы; отдельные `PreUpdate`,
+`Gameplay`, `PostFrame` и backend render stages ещё не выделены.
 
 При этом Physics и Render должны быть **потребителями данных из World**, а не независимыми владельцами параллельных копий состояния.
 
@@ -1648,21 +1714,29 @@ Editor command
 ```text
 EditorWorld
 → JSON
-→ отдельный WASM state
+→ отдельный ad-hoc GpuScene conversion
 ```
 
 а такая:
 
 ```text
-Engine World
+Engine World (server authoritative)
 ├── ECS state
 ├── Physics state
 ├── Asset state
 ├── Render extraction state
 └── Editor protocol
+              │ versioned serialization boundary
+              ▼
+Browser RenderWorld (Engine + SmartStore + RenderExtract)
+→ Renderer3D + FramePlan
 ```
 
-Для браузера всё равно останется serialization boundary, если WASM и сервер живут в разных контекстах. Но authoritative state должен быть один — на стороне engine world, а браузер должен получать versioned snapshots/events.
+Для браузера serialization boundary остаётся обязательной, если WASM и
+сервер живут в разных контекстах. Authoritative state находится на стороне
+server engine world; browser-side `RenderWorld` — typed snapshot replica, а
+не второй источник истины. Общими остаются contract и data-flow, но не
+память и не физический solver state.
 
 ### Целевая архитектура
 
@@ -1705,17 +1779,13 @@ Engine World
 
 Целевая структура может выглядеть так:
 
-```rust
-pub struct World {
-    pub ecs: SmartStore,
-    pub resources: Resources,
-    pub assets: AssetServer,
-    pub time: Time,
-}
+`ornis_core::World` уже предоставляет логический контейнер ресурсов и
+`SmartStore`. Runtime-обвязка должна добавлять специализированные ресурсы,
+не дублируя ECS-состояние:
 
-pub struct Engine {
-    pub world: World,
-    pub schedule: Schedule,
+```rust
+pub struct GameRuntime {
+    pub frame_host: ornis_core::Engine,
     pub physics: PhysicsRuntime,
     pub renderer: RendererRuntime,
     pub render_frame: RenderFrame3D,
@@ -1770,19 +1840,20 @@ FramePlan
 
 #### World
 
-Создать единый logical `World`, но не превращать его в огромный god-object. Внутри могут быть специализированные ресурсы, однако все они должны быть доступны единому планировщику через общий контракт.
+`ornis_core::World` уже создан как логический контейнер `Resources` с авторитетным `SmartStore`; не превращать его в огромный god-object. Специализированные physics/render/assets ресурсы должны быть доступны единому планировщику через общий контракт.
 
 ### Эволюционный план
 
-1. создать `EngineWorld`/`World`;
-2. зарегистрировать `Time`, `SmartStore`, `PhysicsRuntime`, asset resources;
-3. добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut`;
-4. добавить `RenderExtract`;
-5. перевести native loop на `Engine::run_frame`;
-6. подключить `RenderFrame3D` как внутренность `RenderSystem`;
-7. перевести WASM loop на тот же frame contract;
-8. добавить `AssetServer` и handles;
-9. только после этого развивать WebSocket, scripting и сложный hot reload.
+1. ✅ создать фундамент `ornis_core::World` и backend-neutral `Engine` с `Time`/`FixedTime`/`InputState`, fixed schedule и bounded accumulator (`crates/core/src/{world.rs,engine.rs,input.rs}`);
+2. ✅ зарегистрировать `PhysicsRuntime` в editor-only и native showcase World (Time, InputState и SmartStore предоставляет core foundation); asset resources ещё впереди;
+3. ✅ добавить `PhysicsSyncIn`, `PhysicsStep`, `PhysicsSyncOut` для editor-only и native showcase runtime; browser-side physics намеренно не запускается;
+4. ✅ добавить backend-neutral `RenderExtract` и вынести его в `ornis-render::extraction`;
+5. ✅ перевести native showcase loop на общий `RenderWorld::run_frame` для ECS-backed extraction и shared OrbitCamera;
+6. ✅ подключить `RenderFrame3D`/`FramePlan` к native render path;
+7. ✅ перевести WASM loop на тот же `RenderWorld`/`Engine`/`RenderExtract`/`FramePlan` contract после serialization boundary;
+8. завершить browser/gameplay input consumers и собрать полноценный cross-domain runtime поверх общего fixed host; browser physics остаётся за serialization boundary;
+9. добавить `AssetServer` и handles;
+10. только после этого развивать WebSocket, scripting и сложный hot reload.
 
 ### Итог
 

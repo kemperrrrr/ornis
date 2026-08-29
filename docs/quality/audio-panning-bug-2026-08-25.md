@@ -1,17 +1,21 @@
-# Audio spatial panning: azimuth contract mismatch (bug)
+# Audio spatial panning: azimuth contract mismatch (fixed)
+
+> **Статус:** исправлено в коммитах `925d2c5` и `06fd801`. Таблица и
+> первоначальный вариант решения ниже сохранены как история диагностики;
+> финальный контракт и реализация указаны в отдельном разделе.
 
 **Date:** 2026-08-25
-**Status:** found during coverage work on `crates/audio`; fix applied in
-this session (see commit referenced in changelog). Documented for review.
+**Final status:** fixed; the pre-fix diagnosis and final contract are
+recorded below.
 
-## Summary
+## Summary of the pre-fix defect
 
-`SpatialParams.azimuth` has **no documented contract**, and the three
-places that produce / consume it disagree on its meaning. This causes a
+`SpatialParams.azimuth` had **no documented contract**, and the three
+places that produced / consumed it disagreed on its meaning. This caused a
 real, audible defect (channel inversion at wide angles) plus a silent
 geometry loss.
 
-## What each site does
+## What each site did before the fix
 
 | Site | Treatment of `azimuth` | Issue |
 |------|------------------------|-------|
@@ -29,14 +33,14 @@ geometry loss.
   vs. world-space X coordinate), so the browser and native builds pan
   **differently** for the same scene — a determinism / correctness break.
 
-## Chosen fix (variant Y: true geometric angle in radians)
+## Final contract and implementation
 
 Rationale: a 3D engine's spatial audio should reflect the real direction
-of the source relative to the listener. `engine.rs` already computes the
-true azimuth (`asin(diff.x/dist)`); we keep that and make both backends
-consume radians consistently.
+of the source relative to the listener. `engine.rs` computes the true
+azimuth (`asin(diff.x/dist)`) in radians; both backends now consume that
+same geometric contract.
 
-1. **`engine.rs`** — drop the bogus clamp; `asin` is already bounded:
+1. **`engine.rs`** — the bogus clamp was removed; `asin` is already bounded:
    ```rust
    let azimuth = if distance > 0.001 {
        (diff.x / distance).asin()
@@ -44,31 +48,34 @@ consume radians consistently.
        0.0
    };
    ```
-2. **`native.rs::pan_sample`** — map radians to equal-power:
+2. **`native.rs::pan_sample`** — the final product choice is equal-gain
+   linear panning (not the equal-power formula from the initial fix):
    ```rust
-   let phi = azimuth / 2.0 + std::f32::consts::FRAC_PI_4;
-   let left = (phi.cos() * sample).clamp(-1.0, 1.0);
-   let right = (phi.sin() * sample).clamp(-1.0, 1.0);
+   let t = (azimuth / std::f32::consts::FRAC_PI_2).clamp(-1.0, 1.0);
+   let left = ((1.0 - t).clamp(0.0, 1.0) * sample).clamp(-1.0, 1.0);
+   let right = ((1.0 + t).clamp(0.0, 1.0) * sample).clamp(-1.0, 1.0);
    ```
-   Checks: `θ=−π/2` → `(1, 0)`; `θ=0` → `(1/√2, 1/√2)` (equal-power center);
-   `θ=+π/2` → `(0, 1)`; no inversion at any angle.
-3. **`wasm.rs`** — derive a world position from angle + distance:
+   Checks: `θ=−π/2` → `(1, 0)`; `θ=0` → `(1, 1)`; `θ=+π/2` →
+   `(0, 1)` for a normalized positive sample, with no channel inversion.
+3. **`wasm.rs`** — `PannerNode` receives the same angle-derived position,
+   including elevation, and is configured with the linear distance model,
+   reference distance and rolloff factor:
    ```rust
-   p.position_x().set_value(sp.distance * sp.azimuth.sin());
-   p.position_z().set_value(-sp.distance * sp.azimuth.cos());
+   let x = sp.distance * sp.azimuth.sin() * sp.elevation.cos();
+   let y = sp.distance * sp.elevation.sin();
+   let z = -sp.distance * sp.azimuth.cos() * sp.elevation.cos();
    ```
 
 ## Verification
 
-Added unit tests in `crates/audio/src/backend/native.rs` (the `pan_sample_*`
-suite) asserting the three cardinal directions and that **no channel
-inverts** for any `azimuth ∈ [-π/2, π/2]`. Regression: the old formula
-failed `azimuth = π/2` (expected pure right, got `L≈−0.42·s`).
+Added unit tests in `crates/audio/src/backend/native.rs` (the `pan_sample_`
+suite) asserting the three cardinal directions, monotonic linear gains and
+that **no channel inverts** for any `azimuth ∈ [-π/2, π/2]`. Regression:
+the old formula failed `azimuth = π/2` (expected pure right, got
+`L≈−0.42·s`). The final center behavior is intentionally equal-gain, so it
+is not an equal-power energy invariant.
 
-## Out of scope
-
-`wasm.rs` panner also ignores `elevation`, `rolloff_factor`,
-`reference_distance` (only `azimuth`/`distance` wired). Distance attenuation
-(`distance_attenuation` in native) is separate and correct; wasm delegates
-attenuation to the browser `PannerNode` (acceptable). Documented here so the
-gap is visible, not silently dropped.
+`wasm.rs` now consumes elevation and configures the browser panner's linear
+distance model with `rolloff_factor` and `reference_distance`. The current
+`AudioEngine` derives `elevation = 0` and fixed rolloff/reference values from
+its 3D position input; richer listener/source orientation is future work.

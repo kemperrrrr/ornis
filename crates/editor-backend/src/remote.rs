@@ -1,9 +1,11 @@
+use std::collections::VecDeque;
 use std::fs;
-use std::io::Cursor;
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use tiny_http::{Header, Request, Response, Server};
@@ -31,10 +33,11 @@ fn assets_root() -> PathBuf {
 }
 
 /// The HTTP remote editor server: serves the static editor assets and the
-/// `/api/*` endpoints from a background thread; `stop` shuts it down and joins.
+/// `/api/*` endpoints from background threads; `stop` shuts them down and joins.
 pub struct RemoteEditor {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl RemoteEditor {
@@ -49,29 +52,50 @@ impl RemoteEditor {
                 return Self {
                     stop: Arc::new(AtomicBool::new(true)),
                     handle: None,
+                    websocket_handles: Arc::new(Mutex::new(Vec::new())),
                 };
             }
         };
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
+        let websocket_handles = Arc::new(Mutex::new(Vec::new()));
+        let websocket_handles_for_server = Arc::clone(&websocket_handles);
         let handle = thread::Builder::new()
             .name("remote-editor".into())
-            .spawn(move || serve(server, stop_clone, game_tx, game_rx))
+            .spawn(move || {
+                serve(
+                    server,
+                    stop_clone,
+                    game_tx,
+                    game_rx,
+                    websocket_handles_for_server,
+                )
+            })
             .expect("spawn remote-editor thread");
 
         eprintln!("ornis: remote editor at http://{addr}");
         Self {
             stop,
             handle: Some(handle),
+            websocket_handles,
         }
     }
 
     /// Signal shutdown and join the server thread.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let handles = std::mem::take(
+            &mut *self
+                .websocket_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for handle in handles {
+            let _ = handle.join();
         }
     }
 }
@@ -82,15 +106,17 @@ impl Drop for RemoteEditor {
     }
 }
 
-const EMPTY_STATUS: &str = r#"{"entity_count":0,"name":"Ornis Engine","version":0}"#;
-const EMPTY_SCENE: &str =
-    r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null}"#;
+const EMPTY_STATUS: &str = r#"{"entity_count":0,"name":"Ornis Engine","version":0,"sequence":0}"#;
+const EMPTY_SCENE: &str = r#"{"version":0,"entity_count":0,"entities":[],"lights":[],"camera":null,"ambient":null,"sequence":0}"#;
 
 /// Snapshot payloads refreshed out of the game-event stream; served by the
 /// `/api/status` and `/api/scene` endpoints until the next snapshot arrives.
+/// `sequence` is transport metadata and is independent of the scene's
+/// authoritative `version`.
 struct Snapshots {
     status: String,
     scene: String,
+    sequence: u64,
 }
 
 impl Default for Snapshots {
@@ -98,7 +124,69 @@ impl Default for Snapshots {
         Self {
             status: EMPTY_STATUS.to_string(),
             scene: EMPTY_SCENE.to_string(),
+            sequence: 0,
         }
+    }
+}
+
+const EVENT_HISTORY_CAPACITY: usize = 256;
+
+/// One user-facing event plus its server-side replay sequence.
+#[derive(Debug, Clone)]
+struct EventRecord {
+    sequence: u64,
+    event: GameEvent,
+}
+
+/// Bounded replay log for `/api/events?after=<sequence>`.
+///
+/// Snapshot cache updates use their own sequence field; this cursor covers
+/// command/completion/domain events that are returned by `/api/events`.
+#[derive(Debug)]
+struct EventLog {
+    records: VecDeque<EventRecord>,
+    next_sequence: u64,
+}
+
+impl Default for EventLog {
+    fn default() -> Self {
+        Self {
+            records: VecDeque::new(),
+            next_sequence: 1,
+        }
+    }
+}
+
+impl EventLog {
+    fn push(&mut self, event: GameEvent) {
+        let sequence = self.next_sequence.max(1);
+        self.next_sequence = sequence.saturating_add(1);
+        if self.records.len() == EVENT_HISTORY_CAPACITY {
+            self.records.pop_front();
+        }
+        self.records.push_back(EventRecord { sequence, event });
+    }
+
+    fn after(&self, cursor: u64) -> Vec<EventRecord> {
+        let mut events = Vec::new();
+        if let Some(first) = self.records.front()
+            && cursor.saturating_add(1) < first.sequence
+        {
+            events.push(EventRecord {
+                sequence: first.sequence.saturating_sub(1),
+                event: GameEvent::EventGap {
+                    after: cursor,
+                    oldest: first.sequence,
+                },
+            });
+        }
+        events.extend(
+            self.records
+                .iter()
+                .filter(|record| record.sequence > cursor)
+                .cloned(),
+        );
+        events
     }
 }
 
@@ -107,16 +195,23 @@ fn serve(
     stop: Arc<AtomicBool>,
     game_tx: Sender<UiCommand>,
     game_rx: Receiver<GameEvent>,
+    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
-    let mut buffer: Vec<GameEvent> = Vec::new();
+    let event_log = Arc::new(Mutex::new(EventLog::default()));
     let mut snapshots = Snapshots::default();
+    let mut next_request_id = 1_u64;
     let root = assets_root();
 
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        drain_game_events(&game_rx, &mut buffer, &mut snapshots);
+        {
+            let mut buffer = event_log
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drain_game_events(&game_rx, &mut buffer, &mut snapshots);
+        }
 
         // Accept one request with a short timeout.
         let mut request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -125,33 +220,259 @@ fn serve(
             Err(_) => break,
         };
 
-        let response = route_request(&root, &mut request, &mut buffer, &snapshots, &game_tx);
+        if is_websocket_request(&request) && request.url().split('?').next() == Some("/api/events")
+        {
+            let cursor = event_cursor(request.url());
+            let event_log = Arc::clone(&event_log);
+            let stop = Arc::clone(&stop);
+            if let Ok(handle) = thread::Builder::new()
+                .name("remote-editor-websocket".into())
+                .spawn(move || serve_websocket(request, event_log, stop, cursor))
+            {
+                websocket_handles
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(handle);
+            }
+            continue;
+        }
+
+        let response = route_request(
+            &root,
+            &mut request,
+            &event_log,
+            &snapshots,
+            &game_tx,
+            &mut next_request_id,
+        );
         let _ = request.respond(response);
     }
+}
+
+fn header_value(request: &Request, name: &'static str) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(name))
+        .map(|header| header.value.to_string())
+}
+
+fn is_websocket_request(request: &Request) -> bool {
+    header_value(request, "Upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn websocket_bad_request(request: Request) {
+    let _ =
+        request.respond(Response::from_string("WebSocket upgrade required").with_status_code(400));
+}
+
+/// Serve a WebSocket `/api/events` connection. The endpoint is server-push
+/// only: clients receive replay records after their initial cursor and then
+/// newly appended records; browser-to-server commands continue to use HTTP.
+/// Idle connections receive periodic ping frames, and server shutdown sends a
+/// normal close frame. tiny-http does not expose a non-blocking split reader,
+/// so peer close detection remains write/heartbeat based.
+fn serve_websocket(
+    request: Request,
+    event_log: Arc<Mutex<EventLog>>,
+    stop: Arc<AtomicBool>,
+    mut cursor: u64,
+) {
+    let Some(key) = header_value(&request, "Sec-WebSocket-Key") else {
+        websocket_bad_request(request);
+        return;
+    };
+    if header_value(&request, "Sec-WebSocket-Version").as_deref() != Some("13") {
+        websocket_bad_request(request);
+        return;
+    }
+    let accept = websocket_accept(&key);
+    let response = Response::new_empty(tiny_http::StatusCode(101))
+        .with_header(Header::from_bytes("Upgrade", "websocket").unwrap())
+        .with_header(Header::from_bytes("Connection", "Upgrade").unwrap())
+        .with_header(Header::from_bytes("Sec-WebSocket-Accept", accept).unwrap());
+    let mut stream = request.upgrade("websocket", response);
+    let mut last_heartbeat = Instant::now();
+
+    while !stop.load(Ordering::Relaxed) {
+        let records = event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .after(cursor);
+        if let Some(last) = records.last() {
+            cursor = last.sequence;
+            let payload = format_event_records(&records);
+            if write_websocket_text(&mut stream, &payload).is_err() {
+                return;
+            }
+        }
+        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(15) {
+            // tiny-http exposes the upgraded socket as one ReadWrite object,
+            // so a non-blocking reader is not available here. A periodic ping
+            // still detects broken peers on the write path and keeps proxies
+            // from expiring an otherwise idle connection.
+            if write_websocket_ping(&mut stream).is_err() {
+                return;
+            }
+            last_heartbeat = Instant::now();
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = write_websocket_close(&mut stream, 1001);
+}
+
+fn write_websocket_text(stream: &mut impl Write, payload: &str) -> io::Result<()> {
+    write_websocket_frame(stream, 0x81, payload.as_bytes())
+}
+
+fn write_websocket_ping(stream: &mut impl Write) -> io::Result<()> {
+    write_websocket_frame(stream, 0x89, &[])
+}
+
+fn write_websocket_close(stream: &mut impl Write, code: u16) -> io::Result<()> {
+    write_websocket_frame(stream, 0x88, &code.to_be_bytes())
+}
+
+fn write_websocket_frame(
+    stream: &mut impl Write,
+    first_byte: u8,
+    payload: &[u8],
+) -> io::Result<()> {
+    let length = payload.len();
+    let mut frame = Vec::with_capacity(length + 10);
+    frame.push(first_byte);
+    if length <= 125 {
+        frame.push(length as u8);
+    } else if length <= u16::MAX as usize {
+        frame.push(126);
+        frame.extend_from_slice(&(length as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(length as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    stream.write_all(&frame)?;
+    stream.flush()
+}
+
+fn websocket_accept(key: &str) -> String {
+    let mut input = key.as_bytes().to_vec();
+    input.extend_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64_encode(&sha1_digest(&input))
+}
+
+fn sha1_digest(input: &[u8]) -> [u8; 20] {
+    let mut message = input.to_vec();
+    let bit_length = (message.len() as u64).saturating_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_length.to_be_bytes());
+
+    let mut state = [
+        0x67452301_u32,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476,
+        0xc3d2e1f0,
+    ];
+    for chunk in message.chunks_exact(64) {
+        let mut words = [0_u32; 80];
+        for (index, word) in words[..16].iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for index in 16..80 {
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e] = state;
+        for (index, &word) in words.iter().enumerate() {
+            let (function, constant) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
+                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                _ => (b ^ c ^ d, 0xca62c1d6),
+            };
+            let temporary = a
+                .rotate_left(5)
+                .wrapping_add(function)
+                .wrapping_add(e)
+                .wrapping_add(constant)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temporary;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+    }
+
+    let mut digest = [0_u8; 20];
+    for (index, word) in state.into_iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut index = 0;
+    while index < bytes.len() {
+        let first = bytes[index];
+        let second = bytes.get(index + 1).copied();
+        let third = bytes.get(index + 2).copied();
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
+        output.push(match second {
+            Some(second) => {
+                TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char
+            }
+            None => '=',
+        });
+        output.push(match third {
+            Some(third) => TABLE[(third & 0x3f) as usize] as char,
+            None => '=',
+        });
+        index += 3;
+    }
+    output
 }
 
 /// Drain incoming game events into `buffer`. "status"/"scene" snapshots only
 /// refresh the endpoint caches — they are not user-facing events, so they
 /// skip the buffer.
-fn drain_game_events(
-    game_rx: &Receiver<GameEvent>,
-    buffer: &mut Vec<GameEvent>,
-    snaps: &mut Snapshots,
-) {
+fn drain_game_events(game_rx: &Receiver<GameEvent>, buffer: &mut EventLog, snaps: &mut Snapshots) {
     while let Ok(ev) = game_rx.try_recv() {
         match &ev {
             GameEvent::CustomEvent {
                 cmd_type,
                 json_data,
             } if cmd_type == "status" => {
-                snaps.status = json_data.clone();
+                snaps.sequence = snaps.sequence.saturating_add(1);
+                snaps.status = add_sequence(json_data, snaps.sequence);
                 continue;
             }
             GameEvent::CustomEvent {
                 cmd_type,
                 json_data,
             } if cmd_type == "scene" => {
-                snaps.scene = json_data.clone();
+                snaps.sequence = snaps.sequence.saturating_add(1);
+                snaps.scene = add_sequence(json_data, snaps.sequence);
                 continue;
             }
             _ => {}
@@ -160,36 +481,123 @@ fn drain_game_events(
     }
 }
 
-/// Serve one HTTP request. `/api/command` posts are forwarded to the game
-/// thread fire-and-forget; everything else is answered synchronously.
+/// Add transport sequence metadata to an object snapshot while preserving
+/// its existing JSON shape. The scene's authoritative `version` remains a
+/// separate field and is never rewritten.
+fn add_sequence(body: &str, sequence: u64) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_owned();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.to_owned();
+    };
+    object.insert("sequence".into(), serde_json::json!(sequence));
+    serde_json::to_string(&value).unwrap_or_else(|_| body.to_owned())
+}
+
+/// A synchronous acknowledgement for one accepted or rejected HTTP command.
+/// The engine may complete the command later; `accepted` only means that the
+/// message was validated and queued successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandAck {
+    request_id: u64,
+    accepted: bool,
+    error: Option<String>,
+}
+
+fn command_ack_json(ack: &CommandAck) -> String {
+    match &ack.error {
+        Some(error) => serde_json::json!({
+            "accepted": ack.accepted,
+            "request_id": ack.request_id,
+            "error": error,
+        })
+        .to_string(),
+        None => serde_json::json!({
+            "accepted": ack.accepted,
+            "request_id": ack.request_id,
+        })
+        .to_string(),
+    }
+}
+
+fn allocate_request_id(next_request_id: &mut u64) -> u64 {
+    let request_id = (*next_request_id).max(1);
+    *next_request_id = request_id.saturating_add(1);
+    request_id
+}
+
+/// Use a client-provided positive request id when present; otherwise allocate
+/// a monotonic server id. Advancing the allocator past a supplied id avoids
+/// collisions with subsequent generated ids.
+fn command_request_id(body: &str, next_request_id: &mut u64) -> u64 {
+    let requested = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("request_id").and_then(|id| id.as_u64()))
+        .filter(|&id| id > 0);
+    if let Some(request_id) = requested {
+        if request_id >= *next_request_id {
+            *next_request_id = request_id.saturating_add(1).max(1);
+        }
+        request_id
+    } else {
+        allocate_request_id(next_request_id)
+    }
+}
+
+/// Serve one HTTP request. `/api/command` posts are validated, forwarded to
+/// the game thread and acknowledged synchronously; snapshot responses carry
+/// transport sequence metadata; everything else is answered from current
+/// server state.
 fn route_request(
     root: &Path,
     request: &mut Request,
-    buffer: &mut Vec<GameEvent>,
+    buffer: &Arc<Mutex<EventLog>>,
     snapshots: &Snapshots,
     game_tx: &Sender<UiCommand>,
+    next_request_id: &mut u64,
 ) -> Response<Cursor<Vec<u8>>> {
     let url = request.url().to_string();
     let method = request.method().as_str().to_string();
+    let path = url.split('?').next().unwrap_or(url.as_str());
 
-    match (method.as_str(), url.as_str()) {
+    match (method.as_str(), path) {
         ("GET", "/") | ("GET", "/index.html") => serve_static(root, "index.html"),
         ("GET", "/api/status") => json_response(&snapshots.status),
         ("GET", "/api/scene") => json_response(&snapshots.scene),
         ("GET", "/api/events") => {
-            let body = format_events(buffer);
-            buffer.clear();
+            let cursor = event_cursor(&url);
+            let records = buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .after(cursor);
+            let body = format_event_records(&records);
             json_response(&body)
         }
         ("POST", "/api/command") => {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
-            post_command(&body, game_tx);
-            json_response("{}")
+            let request_id = command_request_id(&body, next_request_id);
+            let ack = post_command(&body, game_tx, request_id);
+            let ack_body = command_ack_json(&ack);
+            json_response(&ack_body)
         }
-        ("GET", path) => serve_static(root, path),
+        ("GET", _) => serve_static(root, &url),
         _ => not_found(),
     }
+}
+
+fn event_cursor(url: &str) -> u64 {
+    url.split_once('?')
+        .and_then(|(_, query)| {
+            query.split('&').find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                (key == "after")
+                    .then(|| value.parse::<u64>().ok())
+                    .flatten()
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
@@ -212,15 +620,48 @@ fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
 }
 
 /// Parse a posted command envelope `{"type": …, "data": …}` and forward it
-/// to the game thread. Malformed posts are dropped silently — the endpoint
-/// answers `{}` either way.
-fn post_command(body: &str, game_tx: &Sender<UiCommand>) {
-    let cmd = serde_json::from_str::<serde_json::Value>(body).ok();
-    if let Some(cmd) = cmd
-        && let Some(cmd_type) = cmd.get("type").and_then(|v| v.as_str())
-        && let Some(command) = build_command(cmd_type, cmd.get("data"))
-    {
-        game_tx.send(command).ok();
+/// to the game thread. The returned acknowledgement distinguishes malformed
+/// input and a disconnected game channel from a successfully queued command.
+fn post_command(body: &str, game_tx: &Sender<UiCommand>, request_id: u64) -> CommandAck {
+    let cmd = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(cmd) => cmd,
+        Err(_) => {
+            return CommandAck {
+                request_id,
+                accepted: false,
+                error: Some("request body is not valid JSON".into()),
+            };
+        }
+    };
+    let Some(cmd_type) = cmd.get("type").and_then(|value| value.as_str()) else {
+        return CommandAck {
+            request_id,
+            accepted: false,
+            error: Some("command type must be a string".into()),
+        };
+    };
+    let Some(command) = build_command(cmd_type, cmd.get("data")) else {
+        return CommandAck {
+            request_id,
+            accepted: false,
+            error: Some("invalid command data".into()),
+        };
+    };
+    let command = UiCommand::WithRequestId {
+        request_id,
+        command: Box::new(command),
+    };
+    if game_tx.send(command).is_err() {
+        return CommandAck {
+            request_id,
+            accepted: false,
+            error: Some("engine command channel is disconnected".into()),
+        };
+    }
+    CommandAck {
+        request_id,
+        accepted: true,
+        error: None,
     }
 }
 
@@ -285,35 +726,87 @@ fn content_type(path: &Path) -> Header {
     Header::from_bytes("Content-Type", ct).unwrap()
 }
 
-fn format_events(events: &[GameEvent]) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(events.len());
-    for ev in events {
-        let s = match ev {
-            GameEvent::EntityCreated { entity_id } => {
-                format!(r#"{{"EntityCreated":{{"entity_id":{entity_id}}}}}"#)
+fn event_json_data(json_data: &str) -> serde_json::Value {
+    serde_json::from_str(json_data)
+        .unwrap_or_else(|_| serde_json::Value::String(json_data.to_owned()))
+}
+
+/// Convert one event to its canonical externally-tagged JSON value.
+fn event_value(event: &GameEvent) -> serde_json::Value {
+    match event {
+        GameEvent::EntityCreated { entity_id } => {
+            serde_json::json!({"EntityCreated": {"entity_id": entity_id}})
+        }
+        GameEvent::EntityDestroyed { entity_id } => {
+            serde_json::json!({"EntityDestroyed": {"entity_id": entity_id}})
+        }
+        GameEvent::ComponentUpdated {
+            entity_id,
+            type_name,
+            json_data,
+        } => serde_json::json!({
+            "ComponentUpdated": {
+                "entity_id": entity_id,
+                "type_name": type_name,
+                "json_data": event_json_data(json_data),
             }
-            GameEvent::EntityDestroyed { entity_id } => {
-                format!(r#"{{"EntityDestroyed":{{"entity_id":{entity_id}}}}}"#)
+        }),
+        GameEvent::CustomEvent {
+            cmd_type,
+            json_data,
+        } => serde_json::json!({
+            "CustomEvent": {
+                "cmd_type": cmd_type,
+                "json_data": event_json_data(json_data),
             }
-            GameEvent::ComponentUpdated {
-                entity_id,
-                type_name,
-                json_data,
-            } => {
-                format!(
-                    r#"{{"ComponentUpdated":{{"entity_id":{entity_id},"type_name":"{type_name}","json_data":{json_data}}}}}"#
-                )
+        }),
+        GameEvent::CommandCompleted {
+            request_id,
+            command,
+            success,
+            error,
+        } => serde_json::json!({
+            "CommandCompleted": {
+                "request_id": request_id,
+                "command": command,
+                "success": success,
+                "error": error,
             }
-            GameEvent::CustomEvent {
-                cmd_type,
-                json_data,
-            } => {
-                format!(r#"{{"CustomEvent":{{"cmd_type":"{cmd_type}","json_data":{json_data}}}}}"#)
+        }),
+        GameEvent::EventGap { after, oldest } => serde_json::json!({
+            "EventGap": {
+                "after": after,
+                "oldest": oldest,
             }
-        };
-        parts.push(s);
+        }),
     }
-    format!("[{}]", parts.join(","))
+}
+
+/// Serialize events as valid JSON, escaping all string fields through
+/// `serde_json` and preserving canonical object payloads when `json_data`
+/// contains JSON. Malformed payload strings remain valid JSON strings rather
+/// than corrupting the entire `/api/events` response.
+#[cfg(test)]
+fn format_events(events: &[GameEvent]) -> String {
+    let values: Vec<serde_json::Value> = events.iter().map(event_value).collect();
+    serde_json::to_string(&values).expect("event values are serializable")
+}
+
+/// Serialize replay records with a transport `sequence` sibling next to the
+/// canonical event variant, keeping existing consumers' `ev.CustomEvent`
+/// shape intact.
+fn format_event_records(records: &[EventRecord]) -> String {
+    let values: Vec<serde_json::Value> = records
+        .iter()
+        .map(|record| {
+            let mut value = event_value(&record.event);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("sequence".into(), serde_json::json!(record.sequence));
+            }
+            value
+        })
+        .collect();
+    serde_json::to_string(&values).expect("event record values are serializable")
 }
 
 #[cfg(test)]
@@ -343,12 +836,71 @@ mod tests {
                 cmd_type: "status".into(),
                 json_data: r#"{"v":7}"#.into(),
             },
+            GameEvent::CommandCompleted {
+                request_id: 4,
+                command: "set_component".into(),
+                success: true,
+                error: None,
+            },
         ];
-        let out = format_events(&events);
+        let out = serde_json::from_str::<serde_json::Value>(&format_events(&events))
+            .expect("all event variants must serialize as valid JSON");
         assert_eq!(
             out,
-            r#"[{"EntityCreated":{"entity_id":1}},{"EntityDestroyed":{"entity_id":2}},{"ComponentUpdated":{"entity_id":3,"type_name":"Transform","json_data":{"x":1}}},{"CustomEvent":{"cmd_type":"status","json_data":{"v":7}}}]"#
+            serde_json::json!([
+                {"EntityCreated": {"entity_id": 1}},
+                {"EntityDestroyed": {"entity_id": 2}},
+                {"ComponentUpdated": {
+                    "entity_id": 3,
+                    "type_name": "Transform",
+                    "json_data": {"x": 1}
+                }},
+                {"CustomEvent": {
+                    "cmd_type": "status",
+                    "json_data": {"v": 7}
+                }},
+                {"CommandCompleted": {
+                    "request_id": 4,
+                    "command": "set_component",
+                    "success": true,
+                    "error": null
+                }}
+            ])
         );
+    }
+
+    #[test]
+    fn format_events_escapes_text_and_invalid_payloads() {
+        let events = vec![
+            GameEvent::ComponentUpdated {
+                entity_id: 3,
+                type_name: "Transform\"\n".into(),
+                json_data: "not-json".into(),
+            },
+            GameEvent::CustomEvent {
+                cmd_type: "error\\tag".into(),
+                json_data: "also-not-json".into(),
+            },
+        ];
+        let value = serde_json::from_str::<serde_json::Value>(&format_events(&events))
+            .expect("escaped event output must remain valid JSON");
+        assert_eq!(value[0]["ComponentUpdated"]["type_name"], "Transform\"\n");
+        assert_eq!(value[0]["ComponentUpdated"]["json_data"], "not-json");
+        assert_eq!(value[1]["CustomEvent"]["cmd_type"], "error\\tag");
+        assert_eq!(value[1]["CustomEvent"]["json_data"], "also-not-json");
+    }
+
+    #[test]
+    fn add_sequence_preserves_snapshot_fields() {
+        let value = serde_json::from_str::<serde_json::Value>(&add_sequence(
+            r#"{"version":9,"entities":[]}"#,
+            17,
+        ))
+        .expect("sequenced snapshot must be valid JSON");
+        assert_eq!(value["version"], 9);
+        assert_eq!(value["sequence"], 17);
+        assert_eq!(value["entities"], serde_json::json!([]));
+        assert_eq!(add_sequence("not-json", 4), "not-json");
     }
 
     // ── parse_set_component ────────────────────────────────────────────────
@@ -459,29 +1011,103 @@ mod tests {
     // ── post_command ───────────────────────────────────────────────────────
 
     #[test]
-    fn post_command_valid_forwards_to_game() {
+    fn post_command_valid_forwards_to_game_with_ack() {
         let (tx, rx) = unbounded::<UiCommand>();
-        post_command(
+        let ack = post_command(
             r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#,
             &tx,
+            42,
+        );
+        assert_eq!(
+            ack,
+            CommandAck {
+                request_id: 42,
+                accepted: true,
+                error: None,
+            }
         );
         let cmd = rx.try_recv().expect("command forwarded");
-        assert!(matches!(cmd, UiCommand::SetComponent { entity_id: 5, .. }));
+        match cmd {
+            UiCommand::WithRequestId {
+                request_id,
+                command,
+            } => {
+                assert_eq!(request_id, 42);
+                assert!(matches!(
+                    *command,
+                    UiCommand::SetComponent { entity_id: 5, .. }
+                ));
+            }
+            _ => panic!("expected request-id wrapper"),
+        }
     }
 
     #[test]
-    fn post_command_garbage_dropped_not_panicked() {
+    fn post_command_garbage_returns_rejections_without_panicking() {
         let (tx, rx) = unbounded::<UiCommand>();
         // not JSON at all
-        post_command("this is not json", &tx);
+        let invalid_json = post_command("this is not json", &tx, 1);
+        assert!(!invalid_json.accepted);
+        assert_eq!(invalid_json.request_id, 1);
         // JSON but no "type"
-        post_command(r#"{"foo":1}"#, &tx);
+        let missing_type = post_command(r#"{"foo":1}"#, &tx, 2);
+        assert!(!missing_type.accepted);
         // JSON with unknown type (still a Custom, not dropped)
-        post_command(r#"{"type":"unknown","data":{}}"#, &tx);
+        let accepted = post_command(r#"{"type":"unknown","data":{}}"#, &tx, 3);
+        assert!(accepted.accepted);
         // exactly one command should have been sent (the Custom unknown)
         let cmd = rx.try_recv().expect("one command");
-        assert!(matches!(cmd, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown"));
+        match cmd {
+            UiCommand::WithRequestId {
+                request_id,
+                command,
+            } => {
+                assert_eq!(request_id, 3);
+                assert!(
+                    matches!(*command, UiCommand::Custom { cmd_type, .. } if cmd_type == "unknown")
+                );
+            }
+            _ => panic!("expected request-id wrapper"),
+        }
         assert!(rx.try_recv().is_err(), "no more commands");
+    }
+
+    #[test]
+    fn command_request_ids_are_monotonic_and_accept_client_ids() {
+        let mut next = 1;
+        assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 1);
+        assert_eq!(
+            command_request_id(r#"{"type":"ping","request_id":41}"#, &mut next),
+            41
+        );
+        assert_eq!(next, 42);
+        assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 42);
+        assert_eq!(
+            command_request_id(r#"{"type":"ping","request_id":0}"#, &mut next),
+            43
+        );
+    }
+
+    #[test]
+    fn command_ack_json_is_explicit_and_valid() {
+        let accepted = serde_json::from_str::<serde_json::Value>(&command_ack_json(&CommandAck {
+            request_id: 7,
+            accepted: true,
+            error: None,
+        }))
+        .expect("accepted ack is valid JSON");
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(accepted["request_id"], 7);
+        assert!(accepted.get("error").is_none());
+
+        let rejected = serde_json::from_str::<serde_json::Value>(&command_ack_json(&CommandAck {
+            request_id: 8,
+            accepted: false,
+            error: Some("bad request".into()),
+        }))
+        .expect("rejected ack is valid JSON");
+        assert_eq!(rejected["accepted"], false);
+        assert_eq!(rejected["error"], "bad request");
     }
 
     // ── content_type ───────────────────────────────────────────────────────
@@ -535,6 +1161,105 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn event_cursor_reads_optional_after_query() {
+        assert_eq!(event_cursor("/api/events"), 0);
+        assert_eq!(event_cursor("/api/events?after=41"), 41);
+        assert_eq!(event_cursor("/api/events?foo=1&after=9"), 9);
+        assert_eq!(event_cursor("/api/events?after=bad"), 0);
+    }
+
+    #[test]
+    fn event_log_replays_after_cursor_without_consuming_history() {
+        let mut log = EventLog::default();
+        log.push(GameEvent::EntityCreated { entity_id: 1 });
+        log.push(GameEvent::CommandCompleted {
+            request_id: 7,
+            command: "create_entity".into(),
+            success: true,
+            error: None,
+        });
+
+        let first = log.after(0);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].sequence, 1);
+        assert_eq!(first[1].sequence, 2);
+        assert!(matches!(
+            log.after(1).as_slice(),
+            [EventRecord {
+                sequence: 2,
+                event: GameEvent::CommandCompleted { request_id: 7, .. }
+            }]
+        ));
+        assert!(log.after(2).is_empty());
+        assert_eq!(log.records.len(), 2, "replay must not drain history");
+    }
+
+    #[test]
+    fn event_log_reports_gap_after_bounded_history_rollover() {
+        let mut log = EventLog::default();
+        for entity_id in 0..(EVENT_HISTORY_CAPACITY as u32 + 2) {
+            log.push(GameEvent::EntityCreated { entity_id });
+        }
+
+        let replay = log.after(0);
+        assert_eq!(replay.len(), EVENT_HISTORY_CAPACITY + 1);
+        assert!(matches!(
+            replay[0],
+            EventRecord {
+                sequence: 2,
+                event: GameEvent::EventGap {
+                    after: 0,
+                    oldest: 3
+                }
+            }
+        ));
+        assert_eq!(replay[1].sequence, 3);
+    }
+
+    #[test]
+    fn event_records_keep_legacy_event_shape_and_add_cursor_metadata() {
+        let records = vec![EventRecord {
+            sequence: 9,
+            event: GameEvent::EntityCreated { entity_id: 4 },
+        }];
+        let value = serde_json::from_str::<serde_json::Value>(&format_event_records(&records))
+            .expect("event records must be valid JSON");
+        assert_eq!(value[0]["sequence"], 9);
+        assert_eq!(value[0]["EntityCreated"]["entity_id"], 4);
+    }
+
+    #[test]
+    fn websocket_accept_matches_rfc6455_example() {
+        assert_eq!(
+            websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[test]
+    fn websocket_text_frame_encodes_short_and_extended_lengths() {
+        let mut short = Vec::new();
+        write_websocket_text(&mut short, "hello").expect("short frame");
+        assert_eq!(short, vec![0x81, 5, b'h', b'e', b'l', b'l', b'o']);
+
+        let mut medium = Vec::new();
+        write_websocket_text(&mut medium, &"x".repeat(126)).expect("medium frame");
+        assert_eq!(&medium[..4], &[0x81, 126, 0, 126]);
+        assert_eq!(medium.len(), 4 + 126);
+    }
+
+    #[test]
+    fn websocket_control_frames_encode_ping_and_normal_close() {
+        let mut ping = Vec::new();
+        write_websocket_ping(&mut ping).expect("ping frame");
+        assert_eq!(ping, vec![0x89, 0]);
+
+        let mut close = Vec::new();
+        write_websocket_close(&mut close, 1001).expect("close frame");
+        assert_eq!(close, vec![0x88, 2, 0x03, 0xe9]);
+    }
+
     // ── drain_game_events ──────────────────────────────────────────────────
 
     #[test]
@@ -543,25 +1268,33 @@ mod tests {
         // drain_game_events only READS from rx; we send via tx.
         tx.send(GameEvent::CustomEvent {
             cmd_type: "status".into(),
-            json_data: "STAT".into(),
+            json_data: r#"{"value":"STAT"}"#.into(),
         })
         .unwrap();
         tx.send(GameEvent::CustomEvent {
             cmd_type: "scene".into(),
-            json_data: "SCN".into(),
+            json_data: r#"{"value":"SCN"}"#.into(),
         })
         .unwrap();
         tx.send(GameEvent::EntityCreated { entity_id: 11 }).unwrap();
 
-        let mut buffer = Vec::new();
+        let mut buffer = EventLog::default();
         let mut snaps = Snapshots::default();
         drain_game_events(&rx, &mut buffer, &mut snaps);
 
-        assert_eq!(snaps.status, "STAT");
-        assert_eq!(snaps.scene, "SCN");
-        assert_eq!(buffer.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&snaps.status).expect("status JSON")["sequence"],
+            1
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&snaps.scene).expect("scene JSON")["sequence"],
+            2
+        );
+        assert_eq!(snaps.sequence, 2);
+        assert_eq!(buffer.records.len(), 1);
+        assert_eq!(buffer.records[0].sequence, 1);
         assert!(matches!(
-            buffer[0],
+            buffer.records[0].event,
             GameEvent::EntityCreated { entity_id: 11 }
         ));
     }

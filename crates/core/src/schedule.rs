@@ -481,6 +481,24 @@ impl Schedule {
         self
     }
 
+    /// Добавляет систему перед всеми уже зарегистрированными системами.
+    ///
+    /// Используется платформенными адаптерами, которым нужно поставить
+    /// domain systems перед уже установленным render/extract-пассом. Явные
+    /// рёбра автоматически сдвигаются на один индекс; порядок регистрации
+    /// остальных систем сохраняется.
+    pub fn prepend_system<S: System + 'static>(&mut self, system: S) -> &mut Self {
+        self.accesses.insert(0, system.access());
+        self.systems.insert(0, Box::new(system));
+        self.ordering = self
+            .ordering
+            .iter()
+            .map(|&(before, after)| (before.saturating_add(1), after.saturating_add(1)))
+            .collect();
+        self.invalidate_plan();
+        self
+    }
+
     fn invalidate_plan(&mut self) {
         self.plan.invalidate();
     }
@@ -820,6 +838,20 @@ mod tests {
         // Мультимножество событий совпадает; порядок внутри уровня
         // недетерминирован — потому сравниваем отсортированными.
         assert_eq!(seq_events, par_events);
+    }
+
+    #[test]
+    fn prepend_system_preserves_explicit_edges_and_registration_order() {
+        let mut sched = Schedule::new();
+        sched
+            .add_system(NamedNoop("source", SystemAccess::new().writes::<A>()))
+            .add_system(NamedNoop("sink", SystemAccess::new().reads::<A>()));
+        sched.order_before("source", "sink");
+        sched.prepend_system(NamedNoop("prefix", SystemAccess::new().writes::<B>()));
+
+        assert_eq!(sched.levels(), vec![vec![0, 1], vec![2]]);
+        assert!(sched.try_order_before("prefix", "source").is_ok());
+        assert_eq!(sched.levels(), vec![vec![0], vec![1], vec![2]]);
     }
 
     #[test]

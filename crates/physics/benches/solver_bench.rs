@@ -3,7 +3,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use glam::Vec3;
 
-use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BroadPhaseKind, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
 
 /// A GxG grid of independent 4-box stacks on one big static floor: many
 /// disjoint islands — the best case for per-island parallel dispatch (G7).
@@ -114,6 +114,43 @@ fn bench_step(c: &mut Criterion) {
     group.finish();
 }
 
+fn settled_body_grid(
+    bodies: u32,
+    backend: BroadPhaseKind,
+    cell_size: Option<f32>,
+) -> BuiltinPhysicsEngine {
+    let mut physics = setup_body_grid(bodies);
+    if let Some(cell_size) = cell_size {
+        physics.set_uniform_grid_cell_size(cell_size);
+    } else {
+        physics.set_broadphase(backend);
+    }
+    for _ in 0..30 {
+        physics.step(1.0 / 60.0);
+    }
+    physics
+}
+
+fn print_broadphase_stats(backend_name: &str, bodies: u32, physics: &BuiltinPhysicsEngine) {
+    let stats = physics.broadphase_stats();
+    eprintln!(
+        concat!(
+            "broadphase/{}/{}: bodies={} cells={} large={} pair_tests={} ",
+            "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}"
+        ),
+        backend_name,
+        bodies,
+        stats.body_count,
+        stats.occupied_cells,
+        stats.large_bodies,
+        stats.pair_tests,
+        stats.filter_rejections,
+        stats.static_static_skips,
+        stats.aabb_rejections,
+        stats.candidate_pairs,
+    );
+}
+
 /// Body-count scaling: 1k / 10k dynamic bodies in one `step`.
 /// 100k is intentionally not a criterion bench: the step is superlinear
 /// there (2026-08-27: single huge floor AABB degenerates Sweep-and-Prune to
@@ -125,14 +162,26 @@ fn bench_body_scaling(c: &mut Criterion) {
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(6));
-    for n in [1_000u32, 10_000] {
-        group.bench_function(BenchmarkId::from_parameter(n), |b| {
-            let mut physics = setup_body_grid(n);
-            for _ in 0..30 {
-                physics.step(1.0 / 60.0);
-            }
-            b.iter(|| black_box(&mut physics).step(black_box(1.0 / 60.0)));
-        });
+    // The performance workflow is manual, so keep the larger cells in the
+    // matrix while we locate the knee of the cell-size curve. This is still
+    // intentionally not a production default or an adaptive policy.
+    let configurations = vec![
+        ("sweep_and_prune", BroadPhaseKind::SweepAndPrune, None),
+        ("uniform_grid_cell_1", BroadPhaseKind::UniformGrid, Some(1.0)),
+        ("uniform_grid_cell_2", BroadPhaseKind::UniformGrid, Some(2.0)),
+        ("uniform_grid_cell_4", BroadPhaseKind::UniformGrid, Some(4.0)),
+        ("uniform_grid_cell_8", BroadPhaseKind::UniformGrid, Some(8.0)),
+        ("uniform_grid_cell_16", BroadPhaseKind::UniformGrid, Some(16.0)),
+    ];
+    for (backend_name, backend, cell_size) in configurations {
+        for n in [1_000u32, 10_000] {
+            let diagnostic = settled_body_grid(n, backend, cell_size);
+            print_broadphase_stats(backend_name, n, &diagnostic);
+            group.bench_function(BenchmarkId::new(backend_name, n), |b| {
+                let mut physics = settled_body_grid(n, backend, cell_size);
+                b.iter(|| black_box(&mut physics).step(black_box(1.0 / 60.0)));
+            });
+        }
     }
     group.finish();
 }

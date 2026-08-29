@@ -36,6 +36,7 @@ license.workspace = true
 
 [dependencies]
 ornis-core = { path = "crates/core" }
+ornis-physics = { path = "crates/physics" }
 ornis-render = { path = "crates/render" }
 editor-backend = { path = "crates/editor-backend" }
 wgpu = "29"

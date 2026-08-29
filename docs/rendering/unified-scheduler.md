@@ -1,6 +1,6 @@
-# Unified Scheduler — S0/S1 (кеш FrameLayout)
+# Unified Scheduler — S0–S6 (кеш FrameLayout и общая механика)
 
-> Рабочий документ этапов S0–S1 из **Приложения C** [`PLAN.md`](../../PLAN.md)
+> Рабочий документ этапов S0–S6 из **Приложения C** [`PLAN.md`](../../PLAN.md)
 > (идея — [`IDEAS.md`](../../IDEAS.md) §28). Каждый прогон бенчей/тестов
 > обновляет числа в этом файле.
 
@@ -14,6 +14,10 @@
 > → `FrameOwned`), пример → `frame_plan_probe`. Датированные секции
 > хронологии ниже (S0–S5, Hardening 2026-08-21…) используют имена своего
 > дня; канон имён — карта и глоссарий под этим указателем.
+
+> Датированные исторические секции ниже могут использовать прежние
+> имена `RenderGraph`/`GraphLayout`/`GraphExecutor`; актуальный код
+> называется `FramePlan`/`FrameLayout`/`FrameExecutor`.
 
 > **Срез 1b (2026-08-23)**: отладочная mermaid-проекция обобщена в
 > движок — `ornis-schedule::MermaidDiagram` (уровни подграфами, потоки
@@ -114,28 +118,28 @@ physics-агрегаты) — только во фронтенд. Исполня
 
 | Граф | Пассов | Ресурсов | Время/вызов | Примечание |
 |---|---|---|---|---|
-| Forward+блум | 7 | 12 | _заполнить после первого `cargo bench -p ornis-render`_ | |
-| Deferred+блум | 8 | 12 | _—_ | |
-| Hybrid+блум | 9 | 12 | _—_ | |
+| Forward+блум | 7 | 12 | **5.89 µs** | Apple M1, release, один criterion-прогон |
+| Deferred+блум | 8 | 12 | **5.33 µs** | Apple M1, release, один criterion-прогон |
+| Hybrid+блум | 9 | 12 | **12.1 µs** | Apple M1, release, один criterion-прогон |
 
 ### Кеш-попадание (S1)
 
 | Граф | Время `layout()` (cache hit) | Выигрыш vs compute | Примечание |
 |---|---|---|---|
-| Forward+блум | _—_ | _—_ | |
-| Deferred+блум | _—_ | _—_ | |
-| Hybrid+блум | _—_ | _—_ | |
+| Forward/Deferred/Hybrid (диапазон замера) | **4.4–4.9 ns** | примерно **1.1–2.7 тыс. раз** | В baseline сохранён общий диапазон `layout/cache_hit/*`, без разбивки по техникам |
 
-> ⚠️ Окружение, в котором написан S0/S1 (2026-08-18), не имеет Rust
-> toolchain — числа появятся после первого прогона
-> `cargo bench -p ornis-render` и `cargo xtask quality`. Прецедент
-> оформления: заметка G7 в PLAN.md.
+> Числа сняты 2026-08-27 на Apple M1 (release, criterion; один прогон) и
+> вынесены в [`docs/quality/perf-baseline-2026-08-27.md`](../quality/perf-baseline-2026-08-27.md).
+> Среда, в которой писался S0/S1 (2026-08-18), действительно не имела Rust
+> toolchain — это историческое объяснение прежних плейсхолдеров. Полную
+> матрицу texture budget и отдельные GPU probe-диффы по всем конфигурациям
+> нужно снять отдельным ручным прогоном.
 
 ### Пул текстур по техникам (`texture_budget`, lavapipe/Metal)
 
-_Заполнить с первым прогоном `cargo run --example render_graph_probe`_:
-слоты/байты уже печатаются примером. Точка сравнения из B1-R7: 9 ресурсов →
-7 слотов, −20,0% на 1280×720 (без блума); +3 слота и +3,8 MB с блумом.
+Частично зафиксировано в [`render-graph.md`](render-graph.md): без блума
+9 ресурсов → 7 слотов и −20,0% на 1280×720; с блумом добавляются 3 слота
+(+3,8 MB). Полная матрица техник × bloom × разрешение пока не архивирована.
 
 ## Верификация
 
@@ -329,9 +333,10 @@ HRTB-грани `for<'a> ViewsFor<'a>` в трейте `GraphPass` + `where Self
 CI-телеметрия xtask (аннотации со strip_ansi) — попутный вклад: гейт
 теперь сам печатает таблицу стадий и ошибки как аннотации GitHub.
 
-Осталось вне CI: пиксельные probe-диффы (`render_graph_probe` — нужен
-GPU-адаптер; ожидаемо 0 отличий: проводка идентична, тела пассов не
-менялись) и числа `cargo bench -p ornis-render` для таблиц S0.
+Осталось вне CI: пиксельные probe-диффы (`frame_plan_probe`/
+`render_probe` — нужен GPU-адаптер) и полная матрица texture budget.
+Основные benchmark-числа S0/S1 уже зафиксированы выше и в
+`docs/quality/perf-baseline-2026-08-27.md`.
 
 ```
 cargo test -p ornis-render          # +6 тестов к существующим
@@ -509,12 +514,15 @@ scheduler'ом», соблюдает контракт:
 у рендера. Иерархия: верхний `Schedule` планирует домены, домен
 планирует своё нутро — вложенность, а не конкуренция.
 
-**Веха интеграции** (после S6, вместе с приоритетом «a»): кадр гоняется
-через верхний `Schedule` над `Resources`-миром (`Res<Device>`,
-`Res<Queue>`, время, ввод): физика и рендер — системы-домены, скрипты
-фазы 6 — data-фронтенд. Критерий приёмки: главный цикл (натив и wasm)
-исполняет кадр через `Schedule`; физика впервые живёт в продакшн-цикле;
-extract-фаза отсутствует by construction.
+**Веха интеграции** (срез 2026-08-28): native и WASM render loops уже
+проходят через верхний `Engine`/`Schedule` frame host, общий
+`ornis-render::RenderExtract` и `RenderFrame3D`/`FramePlan`. `Engine` также
+предоставляет bounded `FixedTime` schedule; physics systems в editor-only и
+native showcase используют этот host-level accumulator. Gameplay systems и
+cross-domain physics/render/input ещё впереди. `RenderExtract` остаётся
+явной переходной serialization/ECS boundary — критерий «без отдельной
+extract-фазы» относится только к будущему полному unified scheduler, а не к
+текущему runtime.
 
 ## S6 — ратификация (✅ 2026-08-19): реестр + отладочная проекция
 

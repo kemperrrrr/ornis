@@ -4,12 +4,14 @@ use glam::{Quat, Vec3};
 use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::broadphase::{BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats};
 use crate::distance;
 #[cfg(feature = "gpu")]
 use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
-use crate::math::{AABB, Ray, RaycastHit};
+use crate::math::{Ray, RaycastHit};
 use crate::shape::Shape;
+use crate::trigger::{TriggerEvent, TriggerEventKind};
 use crate::wide::{SolverStep, build_solver_steps};
 
 /// Physics engine trait: a single step of simulation, plus body/joint management
@@ -39,12 +41,21 @@ pub trait PhysicsEngine: Send + Sync {
     ) -> Option<JointHandle>;
     /// Destroy a joint by handle; no-op for an invalid handle.
     fn remove_joint(&mut self, handle: JointHandle);
-    /// Closest hit of `ray` against dynamic-world bodies within `max_dist`
-    /// (in units of the ray direction's length), or `None` if nothing is hit.
+    /// Closest exact shape hit of `ray` against registered bodies within
+    /// `max_dist` (in units of the ray direction's length), or `None` if
+    /// nothing is hit. Pass a normalized direction for world-distance units.
     fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit>;
     /// Sweep `shape` along the segment `from → to` and report the first body
     /// hit (hit distance measured along the sweep direction), or `None`.
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit>;
+    /// Drain trigger enter/exit transitions produced by completed steps.
+    ///
+    /// Engines without trigger support may keep the default empty result;
+    /// the builtin engine reports canonical body-handle pairs in deterministic
+    /// order.
+    fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
+        Vec::new()
+    }
 }
 
 struct Contact {
@@ -614,8 +625,63 @@ fn commit_active_set(
     }
 }
 
-fn compute_aabb(body: &RigidBody) -> AABB {
-    body.shape.aabb(body.position, body.orientation)
+/// Detect actual (not speculative) overlaps for pairs containing a trigger.
+///
+/// Trigger geometry uses the exact distance oracle rather than the contact
+/// margin: a nearby but non-overlapping body must not emit `Entered`. The
+/// broadphase has already applied the mutual layer masks, so this pass only
+/// performs the shape-level check.
+fn detect_trigger_overlaps(bodies: &[RigidBody], active: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut overlaps = Vec::new();
+    for &(i, j) in active {
+        let a = &bodies[i];
+        let b = &bodies[j];
+        if !(a.is_trigger || b.is_trigger) || !a.can_collide_with(b) {
+            continue;
+        }
+        let distance = distance::shape_distance(
+            distance::ShapeRef {
+                shape: &a.shape,
+                pos: a.position,
+                rot: a.orientation,
+            },
+            distance::ShapeRef {
+                shape: &b.shape,
+                pos: b.position,
+                rot: b.orientation,
+            },
+        );
+        if distance.dist <= 0.0 {
+            overlaps.push((i, j));
+        }
+    }
+    overlaps
+}
+
+/// Reconcile the current overlap set with the previous step and queue sorted
+/// enter/exit events. Sorting keeps event order independent of broadphase
+/// sweep-axis rotation and hash-set iteration order.
+fn update_trigger_events(
+    previous: &HashSet<(usize, usize)>,
+    current: Vec<(usize, usize)>,
+    events: &mut Vec<TriggerEvent>,
+) -> HashSet<(usize, usize)> {
+    let current_set: HashSet<(usize, usize)> = current.into_iter().collect();
+    let mut entered: Vec<_> = current_set.difference(previous).copied().collect();
+    let mut exited: Vec<_> = previous.difference(&current_set).copied().collect();
+    entered.sort_unstable();
+    exited.sort_unstable();
+    events.extend(entered.into_iter().map(|(body_a, body_b)| TriggerEvent {
+        body_a,
+        body_b,
+        kind: TriggerEventKind::Entered,
+    }));
+    events.extend(exited.into_iter().map(|(body_a, body_b)| TriggerEvent {
+        body_a,
+        body_b,
+        kind: TriggerEventKind::Exited,
+    }));
+    current_set
 }
 
 // ---- Narrow-phase: world-frame analytic contact tests (oriented shapes) ----
@@ -1067,6 +1133,9 @@ fn detect_collisions(
     for &(i, j) in active {
         let a = &bodies[i];
         let b = &bodies[j];
+        if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
+            continue;
+        }
         if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
             continue;
         }
@@ -1175,83 +1244,6 @@ fn detect_collisions(
     manifolds
 }
 
-struct SweepAndPrune {
-    aabbs: Vec<AABB>,
-    active: Vec<(usize, usize)>,
-    sort_axis: usize,
-}
-
-impl SweepAndPrune {
-    fn new() -> Self {
-        Self {
-            aabbs: Vec::new(),
-            active: Vec::new(),
-            sort_axis: 0,
-        }
-    }
-
-    /// Rebuild AABBs and the active pair list. G6: dynamic bodies get a
-    /// SWEPT AABB (extended by this substep's displacement) and everything
-    /// is inflated by half the base speculative margin — a fast pair must
-    /// reach the narrow phase before its shapes can interpenetrate.
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
-        const HALF_SPEC_MARGIN: f32 = 0.025; // SPEC_BASE / 2 in detect_collisions
-        self.aabbs = bodies
-            .iter()
-            .map(|b| {
-                let mut aabb = compute_aabb(b);
-                if b.body_type == BodyType::Dynamic {
-                    let d = b.velocity * sub_dt;
-                    aabb.expand(aabb.min + d);
-                    aabb.expand(aabb.max + d);
-                }
-                let m = Vec3::splat(HALF_SPEC_MARGIN);
-                aabb.expand(aabb.min - m);
-                aabb.expand(aabb.max + m);
-                aabb
-            })
-            .collect();
-        self.sort_axis = (self.sort_axis + 1) % 3;
-        self.active.clear();
-
-        let n = self.aabbs.len();
-        let mut starts: Vec<(f32, usize)> = self
-            .aabbs
-            .iter()
-            .enumerate()
-            .map(|(i, aabb)| match self.sort_axis {
-                0 => (aabb.min.x, i),
-                1 => (aabb.min.y, i),
-                _ => (aabb.min.z, i),
-            })
-            .collect();
-        starts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        for sweep_pos in 0..n {
-            let i = starts[sweep_pos].1;
-            let sweep_aabb = &self.aabbs[i];
-            let end = match self.sort_axis {
-                0 => sweep_aabb.max.x,
-                1 => sweep_aabb.max.y,
-                _ => sweep_aabb.max.z,
-            };
-            for &(_pos, j) in &starts[(sweep_pos + 1)..] {
-                let start_j = match self.sort_axis {
-                    0 => self.aabbs[j].min.x,
-                    1 => self.aabbs[j].min.y,
-                    _ => self.aabbs[j].min.z,
-                };
-                if start_j > end {
-                    break;
-                }
-                if i < j && sweep_aabb.overlaps(&self.aabbs[j]) {
-                    self.active.push((i, j));
-                }
-            }
-        }
-    }
-}
-
 /// Cached contact point for warm starting (G2b): world-space point plus the
 /// accumulated normal impulse from the previous substep.
 #[derive(Clone, Copy, Debug)]
@@ -1343,9 +1335,11 @@ mod contacts;
 mod islands;
 mod joints;
 
-/// The CPU reference physics engine: sequential-impulse solver with sweep-and-
-/// prune broadphase, manifold generation, island-coherent sleeping, warm-started
-/// contacts and joints, and optional SIMD-wide / GPU contact solving.
+/// The CPU reference physics engine: sequential-impulse solver with a
+/// selectable broadphase, manifold generation, island-coherent sleeping,
+/// warm-started contacts and joints, and optional SIMD-wide / GPU contact
+/// solving. Sweep-and-Prune is the default; UniformGrid is opt-in while its
+/// workload tradeoffs are benchmarked.
 ///
 /// Step pipeline per [`PhysicsEngine::step`]: rebuild AABBs and broadphase
 /// pairs → narrowphase manifolds → union-find islands (contacts + joints) →
@@ -1354,7 +1348,7 @@ mod joints;
 /// sleep as a whole island and wake together.
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
-    broadphase: SweepAndPrune,
+    broadphase: BroadPhaseBackend,
     gravity: Vec3,
     substeps: u32,
     velocity_iterations: u32,
@@ -1383,6 +1377,10 @@ pub struct BuiltinPhysicsEngine {
     joint_pairs: HashSet<(usize, usize)>,
     /// Diagnostics: (body_a, body_b) of the last substep's manifolds.
     debug_pairs: Vec<(usize, usize)>,
+    /// Trigger pairs overlapping on the previous completed step.
+    trigger_pairs: HashSet<(usize, usize)>,
+    /// Enter/exit transitions waiting for the caller to drain.
+    trigger_events: Vec<TriggerEvent>,
     /// G7: enable SIMD-wide contact solver for single-point manifolds.
     /// Default true. Set to false for bit-exact scalar reproduction.
     wide_solver: bool,
@@ -1401,7 +1399,7 @@ impl BuiltinPhysicsEngine {
     pub fn new(gravity: Vec3) -> Self {
         Self {
             bodies: Vec::new(),
-            broadphase: SweepAndPrune::new(),
+            broadphase: BroadPhaseBackend::new(BroadPhaseKind::SweepAndPrune),
             gravity,
             substeps: 12,
             velocity_iterations: 8,
@@ -1414,10 +1412,49 @@ impl BuiltinPhysicsEngine {
             joints: Vec::new(),
             joint_pairs: HashSet::new(),
             debug_pairs: Vec::new(),
+            trigger_pairs: HashSet::new(),
+            trigger_events: Vec::new(),
             wide_solver: true,
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
+    }
+
+    /// Select the broadphase candidate-pair backend.
+    ///
+    /// The default is [`BroadPhaseKind::SweepAndPrune`].
+    /// [`BroadPhaseKind::UniformGrid`] is an opt-in experimental backend
+    /// with a fixed default cell size; compare both through the physics
+    /// benchmarks before choosing a production default.
+    pub fn set_broadphase(&mut self, kind: BroadPhaseKind) {
+        if self.broadphase.kind() != kind {
+            self.broadphase = BroadPhaseBackend::new(kind);
+            self.warm_impulses.clear();
+        }
+    }
+
+    /// Returns the currently selected broadphase backend.
+    pub fn broadphase_kind(&self) -> BroadPhaseKind {
+        self.broadphase.kind()
+    }
+
+    /// Selects the uniform-grid backend and configures its cell size.
+    ///
+    /// Smaller cells reduce false candidate pairs at the cost of more cell
+    /// bookkeeping. The default grid size is 2.0 world units. This method
+    /// resets the warm-start cache because changing the backend is a
+    /// diagnostic/configuration boundary between simulation runs.
+    pub fn set_uniform_grid_cell_size(&mut self, cell_size: f32) {
+        self.broadphase = BroadPhaseBackend::uniform_grid(cell_size);
+        self.warm_impulses.clear();
+    }
+
+    /// Returns counters from the latest broadphase update.
+    ///
+    /// The values are diagnostics for tuning and benchmarks; they are not
+    /// part of the simulation contract.
+    pub fn broadphase_stats(&self) -> BroadPhaseStats {
+        self.broadphase.stats()
     }
 
     /// Toggle the G7 SIMD-wide contact solver (default: enabled). Disabling
@@ -1532,15 +1569,13 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    /// Time-of-impact pass (G6, b3SolveContinuous analog in its linear form):
-    /// runs after the velocity solve, before positions move. A body whose
-    /// predicted substep displacement exceeds half its smallest dimension is
-    /// cast along that displacement (exact distances, rotation fixed) and
-    /// clamped to the first impact; the clamped body is flagged in `skip` so
-    /// `integrate_positions` leaves it where the cast put it. This is the
-    /// safety net under the speculative contacts for extreme speeds — a true
-    /// pass-through needs the displacement to exceed margin + thickness +
-    /// radii in one substep.
+    /// Time-of-impact pass (G6, b3SolveContinuous analog): runs after the
+    /// velocity solve, before positions move. Linear movers use conservative
+    /// advancement; rotating boxes/capsules use the bounded angular sweep
+    /// helper. The body is clamped to the first detected impact and flagged in
+    /// `skip` so `integrate_positions` does not move it a second time. The
+    /// angular path is deliberately a bounded approximation until an analytic
+    /// swept-volume solver is available.
     // The loop indexes bodies/asleep/skip in parallel; a range loop is the
     // clearest form here (same policy as the solver loops above).
     #[allow(clippy::needless_range_loop)]
@@ -1555,105 +1590,542 @@ impl BuiltinPhysicsEngine {
             }
             let disp = self.bodies[h].velocity * sub_dt;
             debug_assert!(vec3_finite(disp), "velocity*sub_dt overflowed for body {h}");
-            let min_dim = match &self.bodies[h].shape {
-                Shape::Sphere { radius } => *radius,
-                Shape::Box { half_extents } => half_extents.min_element(),
-                Shape::Capsule { radius, .. } => *radius,
-            };
-            if disp.length_squared() <= (0.5 * min_dim) * (0.5 * min_dim) {
+            let Some(hit) = find_continuous_hit(&self.bodies, h, disp, sub_dt) else {
                 continue;
-            }
-            let mover = distance::ShapeRef {
-                shape: &self.bodies[h].shape,
-                pos: self.bodies[h].position,
-                rot: self.bodies[h].orientation,
             };
-            let targets = self
-                .bodies
-                .iter()
-                .enumerate()
-                .filter(|&(o, _)| o != h)
-                .map(|(o, b)| {
-                    (
-                        o,
-                        distance::ShapeRef {
-                            shape: &b.shape,
-                            pos: b.position,
-                            rot: b.orientation,
-                        },
-                    )
-                });
-            let hit = distance::cast_shape(mover, disp, targets);
-            if let Some(hit) = hit {
-                let n = hit.normal; // from the target toward the mover
-                let e = self.bodies[h]
-                    .restitution
-                    .min(self.bodies[hit.handle].restitution);
-                let b = &mut self.bodies[h];
-                // Back off a hair so the discrete narrow phase sees a clean
-                // touching contact next substep, not a zero-gap flicker.
-                // hit.t is an ABSOLUTE distance along the displacement.
-                b.position += disp.normalize() * hit.t + n * 1e-3;
-                skip[h] = true;
-                let vn = b.velocity.dot(n);
-                if vn < 0.0 {
-                    // Inelastic below the shared restitution threshold; a
-                    // genuine impact bounces (one-shot, like the discrete
-                    // restitution stage).
-                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
-                    b.velocity -= n * (bounce * vn);
-                }
+            let orientation = swept_orientation(&self.bodies[h], sub_dt, hit.fraction);
+            let e = self.bodies[h]
+                .restitution
+                .min(self.bodies[hit.handle].restitution);
+            let b = &mut self.bodies[h];
+            // Back off a hair so the discrete narrow phase sees a clean
+            // touching contact next substep, not a zero-gap flicker.
+            b.position += disp * hit.fraction + hit.normal * 1e-3;
+            b.orientation = orientation;
+            skip[h] = true;
+            if hit.angular {
+                // The angular path has stopped the body at the first sampled
+                // rotational impact. A later joint/contact pass may provide
+                // a more precise angular response.
+                b.angular_velocity = Vec3::ZERO;
+            }
+            let vn = b.velocity.dot(hit.normal);
+            if vn < 0.0 {
+                // Inelastic below the shared restitution threshold; a
+                // genuine impact bounces (one-shot, like the discrete
+                // restitution stage).
+                let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
+                b.velocity -= hit.normal * (bounce * vn);
             }
         }
     }
 
     fn raycast_body(&self, ray: &Ray, handle: usize, max_dist: f32) -> Option<RaycastHit> {
+        if max_dist.is_nan() || max_dist < 0.0 || !vec3_finite(ray.direction) {
+            return None;
+        }
         let body = &self.bodies[handle];
-        let aabb = body.shape.aabb(body.position, body.orientation);
-        let inv_dir = Vec3::new(
-            1.0 / ray.direction.x,
-            1.0 / ray.direction.y,
-            1.0 / ray.direction.z,
-        );
-
-        let t1 = (aabb.min - ray.origin) * inv_dir;
-        let t2 = (aabb.max - ray.origin) * inv_dir;
-        let t_min = t1.min(t2);
-        let t_max = t1.max(t2);
-        let enter = t_min.x.max(t_min.y.max(t_min.z));
-        let exit = t_max.x.min(t_max.y.min(t_max.z));
-
-        if enter > exit || exit < 0.0 || enter > max_dist {
-            return None;
-        }
-
-        let t = enter.max(0.0);
-        let point = ray.point_at(t);
-        // Approximate surface normal pointing away from the shape centre.
-        let normal = (point - body.position).normalize_or_zero();
-        if normal.length_squared() < 0.5 {
-            return None;
-        }
+        let inverse = body.orientation.inverse();
+        let origin = inverse * (ray.origin - body.position);
+        let direction = inverse * ray.direction;
+        let hit = match &body.shape {
+            Shape::Sphere { radius } => {
+                ray_sphere_hit(origin, direction, Vec3::ZERO, *radius, max_dist)
+            }
+            Shape::Box { half_extents } => ray_obb_hit(origin, direction, *half_extents, max_dist),
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => ray_capsule_hit(origin, direction, *radius, *half_height, max_dist),
+        }?;
+        let (distance, local_normal) = hit;
+        let point = ray.point_at(distance);
+        let normal = (body.orientation * local_normal).normalize_or(Vec3::Y);
         Some(RaycastHit {
             handle,
             point,
             normal,
-            distance: t,
+            distance,
         })
     }
 }
 
+/// Candidate returned by the linear or angular continuous collision query.
+struct ContinuousHit {
+    fraction: f32,
+    normal: Vec3,
+    handle: usize,
+    angular: bool,
+}
+
+fn shape_min_dimension(shape: &Shape) -> f32 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        Shape::Box { half_extents } => half_extents.min_element(),
+        Shape::Capsule { radius, .. } => *radius,
+    }
+}
+
+fn shape_rotation_sensitive(shape: &Shape) -> bool {
+    !matches!(shape, Shape::Sphere { .. })
+}
+
+/// Orientation at a fraction of the current substep's angular motion.
+fn swept_orientation(body: &RigidBody, sub_dt: f32, fraction: f32) -> Quat {
+    (Quat::from_scaled_axis(body.angular_velocity * (sub_dt * fraction)) * body.orientation)
+        .normalize()
+}
+
+/// Exact shape distance at a pose on the combined linear/angular sweep.
+fn swept_distance(
+    body: &RigidBody,
+    target: distance::ShapeRef<'_>,
+    displacement: Vec3,
+    sub_dt: f32,
+    fraction: f32,
+) -> distance::Distance {
+    distance::shape_distance(
+        distance::ShapeRef {
+            shape: &body.shape,
+            pos: body.position + displacement * fraction,
+            rot: swept_orientation(body, sub_dt, fraction),
+        },
+        target,
+    )
+}
+
+/// Conservative overlap predicate for a swept pose. OBB pairs use SAT because
+/// the generic OBB distance oracle is unsigned while overlapping boxes need a
+/// signed contact decision; the other pairs use their analytic signed distance.
+fn swept_shape_overlaps(
+    body: &RigidBody,
+    target: distance::ShapeRef<'_>,
+    displacement: Vec3,
+    sub_dt: f32,
+    fraction: f32,
+) -> bool {
+    let position = body.position + displacement * fraction;
+    let orientation = swept_orientation(body, sub_dt, fraction);
+    match (&body.shape, target.shape) {
+        (
+            Shape::Box {
+                half_extents: half_a,
+            },
+            Shape::Box {
+                half_extents: half_b,
+            },
+        ) => obb_sat(
+            position,
+            *half_a,
+            orientation,
+            target.pos,
+            *half_b,
+            target.rot,
+            1e-5,
+        )
+        .is_some(),
+        _ => {
+            let distance = distance::shape_distance(
+                distance::ShapeRef {
+                    shape: &body.shape,
+                    pos: position,
+                    rot: orientation,
+                },
+                target,
+            );
+            distance.dist <= 1e-5
+        }
+    }
+}
+
+fn find_linear_continuous_hit(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+) -> Option<ContinuousHit> {
+    let body = &bodies[mover_index];
+    if body.is_trigger {
+        return None;
+    }
+    let length = displacement.length();
+    let min_dimension = shape_min_dimension(&body.shape);
+    if length <= 0.5 * min_dimension {
+        return None;
+    }
+    let mover_layer = body.collision_layer;
+    let mover_mask = body.collision_mask;
+    let mover = distance::ShapeRef {
+        shape: &body.shape,
+        pos: body.position,
+        rot: body.orientation,
+    };
+    let targets = bodies
+        .iter()
+        .enumerate()
+        .filter(move |&(handle, target)| {
+            handle != mover_index
+                && !target.is_trigger
+                && mover_mask & target.collision_layer != 0
+                && target.collision_mask & mover_layer != 0
+        })
+        .map(|(handle, target)| {
+            (
+                handle,
+                distance::ShapeRef {
+                    shape: &target.shape,
+                    pos: target.position,
+                    rot: target.orientation,
+                },
+            )
+        });
+    distance::cast_shape(mover, displacement, targets).map(|hit| ContinuousHit {
+        fraction: (hit.t / length).clamp(0.0, 1.0),
+        normal: hit.normal,
+        handle: hit.handle,
+        angular: false,
+    })
+}
+
+/// Find the first sampled overlap fraction for one target and binary-search
+/// that sample interval for a more accurate time of impact.
+fn first_angular_overlap_fraction(
+    body: &RigidBody,
+    target: distance::ShapeRef<'_>,
+    displacement: Vec3,
+    sub_dt: f32,
+    samples: u32,
+) -> Option<f32> {
+    if swept_shape_overlaps(body, target, displacement, sub_dt, 0.0) {
+        return None;
+    }
+    let mut previous = 0.0;
+    for sample in 1..=samples {
+        let current = sample as f32 / samples as f32;
+        if !swept_shape_overlaps(body, target, displacement, sub_dt, current) {
+            previous = current;
+            continue;
+        }
+        let mut low = previous;
+        let mut high = current;
+        for _ in 0..8 {
+            let middle = (low + high) * 0.5;
+            if swept_shape_overlaps(body, target, displacement, sub_dt, middle) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        return Some(high);
+    }
+    None
+}
+
+/// Sample the angular sweep at no more than five degrees per interval and
+/// binary-search the first overlap. The path is a bounded CCD approximation:
+/// exact shape distance/SAT decides each sampled pose, while a future
+/// analytic swept-volume solver can remove the sampling limit.
+fn find_angular_continuous_hit(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+    sub_dt: f32,
+) -> Option<ContinuousHit> {
+    let body = &bodies[mover_index];
+    if body.is_trigger || !shape_rotation_sensitive(&body.shape) {
+        return None;
+    }
+    const MAX_ANGLE_STEP: f32 = 5.0f32.to_radians();
+    // Resting-contact jitter is handled by the discrete solver. Reserve the
+    // angular CCD path for genuinely fast rotation (at least 15° per
+    // substep), where tunneling is a meaningful risk.
+    const MIN_ANGLE: f32 = 15.0f32.to_radians();
+    let angle = (body.angular_velocity * sub_dt).length();
+    if angle <= MIN_ANGLE {
+        return None;
+    }
+    let samples = (angle / MAX_ANGLE_STEP).ceil().clamp(1.0, 128.0) as u32;
+    let mover_layer = body.collision_layer;
+    let mover_mask = body.collision_mask;
+    let mut best = None;
+
+    for (handle, target) in bodies.iter().enumerate() {
+        if handle == mover_index
+            || target.is_trigger
+            || mover_mask & target.collision_layer == 0
+            || target.collision_mask & mover_layer == 0
+        {
+            continue;
+        }
+        let target_ref = distance::ShapeRef {
+            shape: &target.shape,
+            pos: target.position,
+            rot: target.orientation,
+        };
+        let Some(fraction) =
+            first_angular_overlap_fraction(body, target_ref, displacement, sub_dt, samples)
+        else {
+            continue;
+        };
+        let distance = swept_distance(body, target_ref, displacement, sub_dt, fraction);
+        let position = body.position + displacement * fraction;
+        let fallback = (position - target.position).normalize_or(Vec3::Y);
+        let normal = (distance.point_a - distance.point_b).normalize_or(fallback);
+        let candidate = ContinuousHit {
+            fraction,
+            normal,
+            handle,
+            angular: true,
+        };
+        best = choose_continuous_hit(best, Some(candidate));
+    }
+    best
+}
+
+fn choose_continuous_hit(
+    best: Option<ContinuousHit>,
+    candidate: Option<ContinuousHit>,
+) -> Option<ContinuousHit> {
+    match (best, candidate) {
+        (None, candidate) => candidate,
+        (best, None) => best,
+        (Some(best), Some(candidate)) => Some(if candidate.fraction < best.fraction {
+            candidate
+        } else {
+            best
+        }),
+    }
+}
+
+/// Find the earliest linear or angular time of impact for one dynamic body.
+fn find_continuous_hit(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+    sub_dt: f32,
+) -> Option<ContinuousHit> {
+    let linear = find_linear_continuous_hit(bodies, mover_index, displacement);
+    let angular = find_angular_continuous_hit(bodies, mover_index, displacement, sub_dt);
+    choose_continuous_hit(linear, angular)
+}
+
+/// Ray/sphere intersection in the shape's local frame. The returned normal is
+/// also local so callers can rotate it back into world space.
+fn ray_sphere_hit(
+    origin: Vec3,
+    direction: Vec3,
+    center: Vec3,
+    radius: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let a = direction.length_squared();
+    if a <= 1e-12 {
+        return None;
+    }
+    let offset = origin - center;
+    let half_b = offset.dot(direction);
+    let c = offset.length_squared() - radius * radius;
+    let discriminant = half_b * half_b - a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    let mut distance = (-half_b - root) / a;
+    if distance < 0.0 {
+        distance = (-half_b + root) / a;
+    }
+    if distance < 0.0 || distance > max_dist {
+        return None;
+    }
+    let point = origin + direction * distance;
+    Some((distance, (point - center).normalize_or(Vec3::X)))
+}
+
+/// Mutable interval and normal state for a local-space OBB ray query.
+struct RayObbState {
+    near: f32,
+    far: f32,
+    near_normal: Vec3,
+    far_normal: Vec3,
+}
+
+/// Update one slab of a local-space OBB ray intersection.
+fn ray_obb_slab(
+    origin: f32,
+    direction: f32,
+    minimum: f32,
+    maximum: f32,
+    axis: Vec3,
+    state: &mut RayObbState,
+) -> bool {
+    if direction.abs() <= 1e-12 {
+        return origin >= minimum && origin <= maximum;
+    }
+    let (entry, entry_normal, exit, exit_normal) = if direction > 0.0 {
+        (
+            (minimum - origin) / direction,
+            -axis,
+            (maximum - origin) / direction,
+            axis,
+        )
+    } else {
+        (
+            (maximum - origin) / direction,
+            axis,
+            (minimum - origin) / direction,
+            -axis,
+        )
+    };
+    if entry > state.near {
+        state.near = entry;
+        state.near_normal = entry_normal;
+    }
+    if exit < state.far {
+        state.far = exit;
+        state.far_normal = exit_normal;
+    }
+    state.near <= state.far
+}
+
+/// Exact local-space ray/OBB intersection using a three-axis slab test.
+fn ray_obb_hit(
+    origin: Vec3,
+    direction: Vec3,
+    half_extents: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    if direction.length_squared() <= 1e-12 {
+        return None;
+    }
+    let mut state = RayObbState {
+        near: f32::NEG_INFINITY,
+        far: max_dist,
+        near_normal: Vec3::ZERO,
+        far_normal: Vec3::ZERO,
+    };
+    if !ray_obb_slab(
+        origin.x,
+        direction.x,
+        -half_extents.x,
+        half_extents.x,
+        Vec3::X,
+        &mut state,
+    ) || !ray_obb_slab(
+        origin.y,
+        direction.y,
+        -half_extents.y,
+        half_extents.y,
+        Vec3::Y,
+        &mut state,
+    ) || !ray_obb_slab(
+        origin.z,
+        direction.z,
+        -half_extents.z,
+        half_extents.z,
+        Vec3::Z,
+        &mut state,
+    ) {
+        return None;
+    }
+    if state.far < 0.0 || state.near > max_dist {
+        return None;
+    }
+    if state.near >= 0.0 {
+        Some((state.near, state.near_normal))
+    } else {
+        Some((state.far, state.far_normal))
+    }
+}
+
+/// Keep the closest candidate hit in a local-space ray query.
+fn keep_closest_hit(
+    best: Option<(f32, Vec3)>,
+    candidate: Option<(f32, Vec3)>,
+) -> Option<(f32, Vec3)> {
+    match (best, candidate) {
+        (None, candidate) => candidate,
+        (best, None) => best,
+        (Some(best), Some(candidate)) => Some(if candidate.0 < best.0 {
+            candidate
+        } else {
+            best
+        }),
+    }
+}
+
+/// Exact intersection with the cylindrical side of a local Y-axis capsule.
+fn ray_capsule_cylinder_hit(
+    origin: Vec3,
+    direction: Vec3,
+    radius: f32,
+    half_height: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let a = direction.x * direction.x + direction.z * direction.z;
+    if a <= 1e-12 {
+        return None;
+    }
+    let half_b = origin.x * direction.x + origin.z * direction.z;
+    let c = origin.x * origin.x + origin.z * origin.z - radius * radius;
+    let discriminant = half_b * half_b - a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    let denominator = a;
+    let roots = [
+        (-half_b - root) / denominator,
+        (-half_b + root) / denominator,
+    ];
+    let mut best = None;
+    for distance in roots {
+        if distance < 0.0 || distance > max_dist {
+            continue;
+        }
+        let point = origin + direction * distance;
+        if point.y < -half_height || point.y > half_height {
+            continue;
+        }
+        let normal = Vec3::new(point.x, 0.0, point.z).normalize_or(Vec3::X);
+        best = keep_closest_hit(best, Some((distance, normal)));
+    }
+    best
+}
+
+/// Exact local-space ray/capsule intersection: finite cylinder side plus its
+/// two spherical caps. The nearest valid feature is returned.
+fn ray_capsule_hit(
+    origin: Vec3,
+    direction: Vec3,
+    radius: f32,
+    half_height: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let mut best = ray_capsule_cylinder_hit(origin, direction, radius, half_height, max_dist);
+    for center in [
+        Vec3::new(0.0, -half_height, 0.0),
+        Vec3::new(0.0, half_height, 0.0),
+    ] {
+        best = keep_closest_hit(
+            best,
+            ray_sphere_hit(origin, direction, center, radius, max_dist),
+        );
+    }
+    best
+}
+
 impl PhysicsEngine for BuiltinPhysicsEngine {
     fn step(&mut self, dt: f32) {
-        // G7: a fully sleeping world cannot change — skip the whole substep
-        // loop (broadphase re-sort included) instead of paying ~10 ms/frame
-        // to rediscover that nothing moves.
-        if self
+        // G7: a fully sleeping world with no trigger state cannot change —
+        // skip the whole substep loop (broadphase re-sort included) instead
+        // of paying to rediscover that nothing moves. Trigger-only worlds
+        // still run the overlap reconciliation pass below.
+        let has_awake_dynamic = self
             .bodies
             .iter()
             .enumerate()
-            .all(|(h, b)| b.body_type != BodyType::Dynamic || self.asleep[h])
-        {
+            .any(|(h, b)| b.body_type == BodyType::Dynamic && !self.asleep[h]);
+        let has_trigger = self.bodies.iter().any(|body| body.is_trigger);
+        if !has_awake_dynamic && !has_trigger && self.trigger_pairs.is_empty() {
             return;
         }
         let sub_dt = dt / self.substeps as f32;
@@ -1668,11 +2140,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // Jointed pairs never collide: their parts legitimately sweep
             // through each other's space (a hinge pin passes through the arm).
             let manifolds = if self.joint_pairs.is_empty() {
-                detect_collisions(&self.bodies, &self.broadphase.active, &self.asleep, sub_dt)
+                detect_collisions(&self.bodies, self.broadphase.active(), &self.asleep, sub_dt)
             } else {
                 let pairs: Vec<(usize, usize)> = self
                     .broadphase
-                    .active
+                    .active()
                     .iter()
                     .copied()
                     .filter(|p| !self.joint_pairs.contains(p))
@@ -1698,6 +2170,18 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             .extend(last_manifolds.iter().map(|m| (m.body_a, m.body_b)));
         self.rebuild_islands(&last_manifolds);
         self.update_sleep(dt);
+
+        // Rebuild the broadphase at the completed poses so trigger events
+        // describe the state visible after this whole physics step, not the
+        // state from before the final substep's integration.
+        self.broadphase.update(&self.bodies, 0.0);
+        let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
+        let previous_triggers = std::mem::take(&mut self.trigger_pairs);
+        self.trigger_pairs = update_trigger_events(
+            &previous_triggers,
+            current_triggers,
+            &mut self.trigger_events,
+        );
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
@@ -1716,6 +2200,28 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
     fn remove_body(&mut self, handle: BodyHandle) {
         if handle < self.bodies.len() {
             let last = self.bodies.len() - 1;
+            let previous_triggers = std::mem::take(&mut self.trigger_pairs);
+            let mut removed_triggers = Vec::new();
+            let mut remapped_triggers = HashSet::new();
+            for (body_a, body_b) in previous_triggers {
+                if body_a == handle || body_b == handle {
+                    removed_triggers.push((body_a, body_b));
+                    continue;
+                }
+                let map = |body: usize| if body == last { handle } else { body };
+                let a = map(body_a);
+                let b = map(body_b);
+                remapped_triggers.insert((a.min(b), a.max(b)));
+            }
+            removed_triggers.sort_unstable();
+            for (body_a, body_b) in removed_triggers {
+                self.trigger_events.push(TriggerEvent {
+                    body_a,
+                    body_b,
+                    kind: TriggerEventKind::Exited,
+                });
+            }
+            self.trigger_pairs = remapped_triggers;
             self.bodies.swap_remove(handle);
             self.island.swap_remove(handle);
             self.asleep.swap_remove(handle);
@@ -1850,6 +2356,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             distance: h.t,
         })
     }
+
+    fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
+        std::mem::take(&mut self.trigger_events)
+    }
 }
 
 #[cfg(test)]
@@ -1880,6 +2390,18 @@ mod tests {
     }
 
     #[test]
+    fn broadphase_backend_can_be_selected_explicitly() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
+        physics.set_broadphase(BroadPhaseKind::UniformGrid);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
+        physics.set_uniform_grid_cell_size(1.0);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
+        physics.set_broadphase(BroadPhaseKind::SweepAndPrune);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
+    }
+
+    #[test]
     fn sphere_vs_sphere_collision() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
         let a = physics.add_body(RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0));
@@ -1892,6 +2414,132 @@ mod tests {
     }
 
     #[test]
+    fn collision_filter_blocks_broadphase_and_narrowphase() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0001, 0b0010),
+        );
+        let b = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0010, 0b0100),
+        );
+
+        physics.step(1.0 / 60.0);
+
+        assert_eq!(physics.debug_contact_count(a), 0);
+        assert_eq!(physics.debug_contact_count(b), 0);
+        assert_eq!(physics.get_body(a).unwrap().position.x, -0.4);
+        assert_eq!(physics.get_body(b).unwrap().position.x, 0.4);
+    }
+
+    #[test]
+    fn collision_filter_allows_mutual_layer_match() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0001, 0b0010),
+        );
+        let b = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(0.4, 0.0, 0.0), 0.5, 1.0)
+                .with_collision_filter(0b0010, 0b0001),
+        );
+
+        physics.step(1.0 / 60.0);
+
+        assert!(physics.debug_contact_count(a) > 0);
+        assert!(physics.debug_contact_count(b) > 0);
+    }
+
+    #[test]
+    fn collision_filter_applies_to_continuous_cast() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(
+            RigidBody::new_box(Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.05, 10.0), 0.0)
+                .with_collision_filter(0b0010, 0b0010),
+        );
+        let bullet = physics.add_body(
+            RigidBody::new_sphere(Vec3::new(0.0, 3.0, 0.0), 0.1, 1.0)
+                .with_collision_filter(0b0001, 0b0001),
+        );
+        physics.get_body_mut(bullet).unwrap().velocity = Vec3::new(0.0, -80.0, 0.0);
+
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+
+        assert_eq!(physics.debug_contact_count(bullet), 0);
+        assert!(
+            physics.get_body(bullet).unwrap().position.y < -0.1,
+            "filtered bullet should pass through the floor"
+        );
+    }
+
+    #[test]
+    fn trigger_emits_enter_and_exit_without_solving_contact() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut trigger_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0);
+        trigger_body.set_trigger(true);
+        let trigger = physics.add_body(trigger_body);
+        let mover = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.8, 0.0), 0.5, 1.0));
+
+        physics.step(1.0 / 60.0);
+        assert_eq!(
+            physics.drain_trigger_events(),
+            vec![TriggerEvent {
+                body_a: trigger.min(mover),
+                body_b: trigger.max(mover),
+                kind: TriggerEventKind::Entered,
+            }]
+        );
+        assert_eq!(physics.debug_contact_count(mover), 0);
+        assert_eq!(
+            physics.get_body(mover).unwrap().position,
+            Vec3::new(0.0, 0.8, 0.0)
+        );
+
+        physics.step(1.0 / 60.0);
+        assert!(physics.drain_trigger_events().is_empty());
+
+        physics.get_body_mut(mover).unwrap().position = Vec3::new(0.0, 3.0, 0.0);
+        physics.step(1.0 / 60.0);
+        assert_eq!(
+            physics.drain_trigger_events(),
+            vec![TriggerEvent {
+                body_a: trigger.min(mover),
+                body_b: trigger.max(mover),
+                kind: TriggerEventKind::Exited,
+            }]
+        );
+    }
+
+    #[test]
+    fn removing_trigger_body_queues_exit_and_clears_pair_state() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut trigger_body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0);
+        trigger_body.set_trigger(true);
+        let trigger = physics.add_body(trigger_body);
+        let first = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
+        let second = physics.add_body(RigidBody::new_sphere(Vec3::new(5.0, 0.0, 0.0), 0.5, 1.0));
+        physics.step(1.0 / 60.0);
+        assert_eq!(physics.drain_trigger_events().len(), 1);
+
+        physics.remove_body(trigger);
+        assert_eq!(
+            physics.drain_trigger_events(),
+            vec![TriggerEvent {
+                body_a: trigger,
+                body_b: first,
+                kind: TriggerEventKind::Exited,
+            }]
+        );
+        physics.get_body_mut(second - 1).unwrap().position = Vec3::ZERO;
+        physics.step(1.0 / 60.0);
+        let events = physics.drain_trigger_events();
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn raycast_hits_sphere() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, -5.0), 1.0, 1.0));
@@ -1900,6 +2548,53 @@ mod tests {
         assert!(hit.is_some());
         let hit = hit.unwrap();
         assert!((hit.distance - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn raycast_obb_uses_exact_surface_and_normal() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        physics.add_body(
+            RigidBody::new_box(Vec3::ZERO, Vec3::new(1.0, 0.25, 0.25), 0.0)
+                .with_orientation(rotation),
+        );
+
+        let ray = Ray::new(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+        let hit = physics
+            .raycast(ray, 10.0)
+            .expect("ray must hit the rotated box");
+        let expected_distance = 2.0 - 0.25 * std::f32::consts::SQRT_2;
+        let expected_normal = rotation * Vec3::Y;
+        assert!((hit.distance - expected_distance).abs() < 1e-4);
+        assert!(hit.normal.dot(expected_normal) > 0.999);
+        assert!((hit.point - ray.point_at(expected_distance)).length() < 1e-4);
+    }
+
+    #[test]
+    fn raycast_capsule_uses_spherical_cap_normal() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 0.0));
+
+        let ray = Ray::new(Vec3::new(0.4, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+        let hit = physics
+            .raycast(ray, 10.0)
+            .expect("ray must hit the capsule cap");
+        let expected_distance = 2.0 - (1.0 + 0.3);
+        let expected_normal = Vec3::new(0.8, 0.6, 0.0);
+        assert!((hit.distance - expected_distance).abs() < 1e-4);
+        assert!(hit.normal.dot(expected_normal) > 0.999);
+        assert!((hit.point - Vec3::new(0.4, 1.3, 0.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn raycast_ignores_zero_length_rays() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0));
+        assert!(
+            physics
+                .raycast(Ray::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO), 10.0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2133,6 +2828,53 @@ mod tests {
         assert!(
             (y - 0.15).abs() < 0.05,
             "bullet did not settle on the floor: y={y}"
+        );
+    }
+
+    #[test]
+    fn angular_sweep_finds_rotating_box_impact() {
+        let dt = 1.0 / 60.0;
+        let mut mover = RigidBody::new_box(Vec3::ZERO, Vec3::new(1.5, 0.1, 0.1), 1.0);
+        mover.angular_velocity = Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+        let target = RigidBody::new_box(Vec3::new(0.0, 1.1, 0.0), Vec3::new(0.2, 0.05, 0.2), 0.0);
+        let bodies = [mover, target];
+
+        let hit = find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt)
+            .expect("angular sweep must find the rotating box impact");
+        assert_eq!(hit.handle, 1);
+        assert!(hit.angular);
+        assert!(hit.fraction > 0.0 && hit.fraction < 1.0);
+    }
+
+    #[test]
+    fn angular_continuous_motion_stops_at_first_impact() {
+        let dt = 1.0 / 60.0;
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.set_substeps(1);
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 1.1, 0.0),
+            Vec3::new(0.2, 0.05, 0.2),
+            0.0,
+        ));
+        let mover = physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(1.5, 0.1, 0.1),
+            1.0,
+        ));
+        physics.get_body_mut(mover).unwrap().angular_velocity =
+            Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+
+        physics.step(dt);
+
+        let body = physics.get_body(mover).expect("mover remains alive");
+        assert!(
+            body.angular_velocity.length() < 1e-5,
+            "angular CCD must stop the rotating body"
+        );
+        assert_ne!(
+            body.orientation,
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            "rotating body must not jump through the target"
         );
     }
 

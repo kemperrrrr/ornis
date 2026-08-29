@@ -48,9 +48,10 @@ bca diff-baseline old new --format markdown
 
 Chosen from upstream defaults (`bca init`) tuned for physics engine (3251 LOC):
 
-* `cognitive=25`, `cyclomatic=25`, `halstead.effort=150k` global
-* Rust override: 20 / 20 / 120k
-* JS/TS: 30 / 25
+* Global defaults: `cognitive=25`, `cyclomatic=25`, `halstead.effort=150k`
+* Rust override: `cognitive=20`, `cyclomatic=20`, `halstead.effort=500k`,
+  `loc.ploc=5000`, `loc.sloc=8000`, `abc=60`
+* JS/TS: cognitive 30 / cyclomatic 25 / halstead 100k
 
 All violations are ratcheted via `.bca-baseline.toml` — the committed baseline
 absorbs the current offender set, so only regressions and new offenders fail.

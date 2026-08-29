@@ -1,8 +1,17 @@
-# Render Graph для гибридного рендеринга — черновик для ревью
+# Render Graph для гибридного рендеринга — design/implementation note
 
-> ⚠️ **Статус: ЧЕРНОВИК ДЛЯ РЕВЬЮ.** Не коммитить до ревью. Правки — дописывать в конец.
-> Дата: 2026-08-10.
+> **Статус (2026-08-27):** это зафиксированная design/implementation
+> note, а не незакоммиченный черновик. Фазы 0–4 реализованы и
+> верифицированы; будущие изменения должны синхронизироваться с
+> `PLAN.md`, `README.md` и актуальными именами `FramePlan`/`FrameExecutor`.
+> Дата исходного дизайна: 2026-08-10.
 > Источник: исследование Hermes (дисциплина web-research), первоисточники в разделе «Источники».
+>
+> **Интеграция 2026-08-27:** native и WASM render loops используют
+> `ornis_render::RenderWorld`/`RenderExtracted` для ECS-backed extraction и
+> `RenderFrame3D`/`FramePlan` для записи кадра. `RenderBackend::render_scene`
+> остаётся compatibility/reference API; server↔browser serialization boundary
+> сохраняется.
 >
 > **Переименование 2026-08-23**: модули/типы — `render_graph.rs` → `frame_plan.rs`
 > (`RenderGraph` → `FramePlan`, `GraphLayout` → `FrameLayout`), `graph_frame.rs` →
@@ -67,7 +76,11 @@ fwd.set_depth_stencil_input("depth");
 - Хочешь SSAO/тени/TAA — узлы вставляются между `gbuffer` и `lighting`.
 - Прозрачные уходят от проблем deferred естественным образом (отдельный forward-узел).
 
-## 4. Текущее состояние Ornis: гибрид уже есть, но императивный
+## 4. Историческое состояние Ornis до FramePlan (снимок 2026-08-10)
+
+> Следующее описание фиксирует проблему, которую закрыли фазы 0–4;
+> оно не является текущим состоянием кода.
+
 
 В `crates/render/src/renderer.rs` (`Renderer3D`, ~1550 строк) уже живут оба мира, связанные вручную в одном `render()`:
 

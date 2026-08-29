@@ -15,6 +15,7 @@
 ## Воспроизведение
 
 ### Локально
+
 ```bash
 cargo bench -p ornis-core        # ECS storage
 cargo bench -p ornis-physics     # physics step (solver_bench)
@@ -24,12 +25,19 @@ cargo bench -p ornis-materialx   # MaterialX parse/convert
 
 ### На GitHub Actions
 
-**Отдельный performance workflow** (`.github/workflows/performance.yml`):
-- Запускается вручную через workflow_dispatch в Actions
-- Выполняет `cargo bench -p ornis-physics --bench solver_bench`
-- Сохраняет результаты criterion в артефакты
-- Публикует сводку в job summary
-- **Не влияет на основной quality gate** (runs-on: ubuntu-latest, не на critical path CI)
+Отдельный performance workflow (`.github/workflows/performance.yml`):
+
+- запускается вручную через `workflow_dispatch`;
+- выполняет `cargo bench -p ornis-physics --bench solver_bench`;
+- сохраняет результаты Criterion в артефакты;
+- публикует краткую сводку в job summary;
+- не влияет на основной Quality gate.
+
+Для 100k тел зонд запускается отдельно:
+
+```bash
+cargo run -p ornis-physics --release --example probe_100k
+```
 
 ## ECS storage (`crates/core`)
 
@@ -67,23 +75,195 @@ cargo bench -p ornis-materialx   # MaterialX parse/convert
 | physics_bodies/10000 (сетка на тайловом полу) | 767 ms | тела не успевают уснуть за 30 шагов — бодрствующий шаг |
 | physics_bodies/100000 | **не измерим criterion** — см. находку ниже |
 
-### Находка: сверхлинейный рост step на 100k тел
+### Exploratory comparison: Sweep-and-Prune vs UniformGrid (2026-08-28)
 
-Ручной зонд (`crates/physics/examples/probe_100k.rs`, `step` с попешаговым
-таймингом, тот же сценарий сетки; запуск: `cargo run -p ornis-physics
---release --example probe_100k`):
+Ниже зафиксирован результат отдельного performance workflow по логу,
+предоставленному пользователем. Workflow run: `33194136814`, head
+`4fa10c0813f264d9df7c1b1d66002297ea9c5d28`, запуск 2026-08-28 на ветке
+`arena/01a043d9-ornis`. CPU/runner metadata и версия `rustc` в raw log не
+сохранены, поэтому это **exploratory comparison**, а не замена
+воспроизводимому Apple M1 baseline выше.
 
-- Единый пол-AABB на всю сцену: **~45–56 с/шаг** — Sweep-and-Prune
-  вырождается в O(n²), т.к. гигантский AABB перекрывает все тела и
-  sweep держит весь набор в активном списке.
-- Тайловый пол (тайлы 10×10): **80–110 с/шаг и растёт** — значит,
-  квадратичная составляющая есть не только в giant-AABB случае.
-  Линейная экстраполяция от 10k (767 ms) дала бы ~8 с; наблюдаемое
-  в ~10 раз хуже.
+Команда:
 
-Вывод: масштаб 100k тел сейчас непрактичен для реального времени;
-это вход для работ по physics (PROJECT_REVIEW п.2/п.3). В criterion-бенче
-100k намеренно отсутствует (см. комментарий в `solver_bench.rs`).
+```bash
+cargo bench -p ornis-physics --bench solver_bench -- --verbose
+```
+
+Центральная оценка Criterion (`time: [low estimate high]`):
+
+| Сценарий | Sweep-and-Prune | UniformGrid | Сравнение |
+|---|---:|---:|---|
+| `physics_bodies/1000` | 1.4029 µs | 1.4075 µs | разница около +0.3% для UniformGrid, в пределах шума |
+| `physics_bodies/10000` | 1.1167 s | 288.58 ms | UniformGrid примерно в 3.87 раза быстрее, −74.2% |
+
+На 1k тел измерения практически равны. На 10k тел UniformGrid
+подтверждает исходную гипотезу для tiled-floor workload, но абсолютное
+время остаётся около 289 ms и всё ещё далеко от бюджета real-time кадра
+16.7 ms. В 10k-прогоне было всего 10 samples, Criterion предупредил о
+длительном сборе, а Sweep-and-Prune получил один outlier; относительный
+вывод нужно повторить с большим числом samples.
+
+`Gnuplot not found` не влияет на измерения: Criterion использовал Plotters
+backend. Этот прогон не включал GPU physics — benchmark использовал обычный
+CPU path без `--features gpu` и без подключения `WgpuContactSolver`.
+
+**Промежуточное решение:** UniformGrid — сильный provisional candidate для
+текущей CPU-сцены, но Sweep-and-Prune остаётся default до профилирования
+candidate pairs/solver и отдельного прогона 100k на обоих backend'ах.
+Следующий benchmark-код теперь печатает `BroadPhaseStats` для обоих
+backend'ов и сравнивает grid cell size 1.0/2.0/4.0; эти счётчики помогут
+отделить лишние candidate checks от solver cost, но не заменяют отдельный
+timing breakdown.
+
+### Cell-size follow-up (2026-08-29)
+
+Успешный performance workflow run `33235046208` на head
+`8183a76c462367b0783c71c362c92dfca7689f6a` завершил сравнение трёх размеров
+UniformGrid. Runner/CPU metadata в raw log отсутствуют; значения ниже —
+exploratory данные для выбора конфигурации, а не новый machine-normalized
+baseline.
+
+Центральная оценка Criterion (`time: [low estimate high]`):
+
+| Сценарий | Sweep-and-Prune | Grid 1.0 | Grid 2.0 | Grid 4.0 |
+|---|---:|---:|---:|---:|
+| 1k тел | 1.5264 µs | 1.5268 µs | 1.5268 µs | 1.5273 µs |
+| 10k тел | 1.0931 s | 542.51 ms | 273.32 ms | 198.45 ms |
+
+На 10k тел `cell_size = 4.0` — лучший из проверенных вариантов: примерно
+в 5.51 раза быстрее Sweep-and-Prune и на 27.4% быстрее `cell_size = 2.0`.
+`cell_size = 1.0` оказался хуже из-за bookkeeping: 123052 ячейки против
+20808 у `2.0` и 5408 у `4.0`. На 1k все варианты находятся в пределах шума.
+
+Диагностика на 10k тел (10400 тел вместе с 400 tiles пола):
+
+| Backend | Cells | Raw pair tests | Static skips | AABB rejects | Candidates |
+|---|---:|---:|---:|---:|---:|
+| Sweep-and-Prune | 0 | 599346 | 11400 | 576165 | 11781 |
+| UniformGrid 1.0 | 123052 | 176672 | 63384 | 0 | 14161 |
+| UniformGrid 2.0 | 20808 | 297812 | 27056 | 157468 | 14161 |
+| UniformGrid 4.0 | 5408 | 298024 | 12096 | 222560 | 14161 |
+
+Grid сокращает raw pair checks примерно вдвое, но оставляет примерно на
+20.2% больше candidate pairs, чем Sweep-and-Prune. Значит, следующий шаг —
+отделить timing broadphase от solver и проверить, не является ли часть
+оставшихся 198.45 ms solver/narrowphase cost.
+
+Criterion сообщал об отсутствии `base/sample.json` для чистого runner;
+workflow всё равно завершился успешно, и текущие измерения были получены.
+GPU physics в этом прогоне не участвовала.
+
+### Расширенный cell-size follow-up (2026-08-29)
+
+Workflow run `33240643444` на head
+`7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job
+в 60 минут (`cancelled`), но присланный benchmark output содержит измерения
+всех шести конфигураций. Runner/CPU metadata в raw log отсутствуют, поэтому
+это exploratory данные, а не machine-normalized baseline.
+
+На 10k тел фактический body count равен 10400 (10000 dynamic + 400 floor
+tiles). Центральные оценки Criterion:
+
+| Backend | 1k тел | 10k тел |
+|---|---:|---:|
+| Sweep-and-Prune | 1.4015 µs | 1.1130 s |
+| UniformGrid 1.0 | 1.4208 µs | 469.99 ms |
+| UniformGrid 2.0 | 1.3809 µs | 271.36 ms |
+| UniformGrid 4.0 | 1.4329 µs | 196.69 ms |
+| UniformGrid 8.0 | 1.4541 µs | **180.00 ms** |
+| UniformGrid 16.0 | 1.4140 µs | 198.59 ms |
+
+`cell_size = 8.0` — лучший из проверенных вариантов: примерно 6.18x быстрее
+SAP и на 8.5% быстрее `4.0`. Увеличение до `16.0` уже ухудшает результат на
+10.3% относительно `8.0`. На 1k различия находятся в пределах шума.
+
+Диагностика на 10k:
+
+| Backend | Cells | Raw pair tests | Static skips | AABB rejects | Candidates |
+|---|---:|---:|---:|---:|---:|
+| Sweep-and-Prune | 0 | 599346 | 11400 | 576165 | 11781 |
+| UniformGrid 1.0 | 123052 | 176672 | 63384 | 0 | 14161 |
+| UniformGrid 2.0 | 20808 | 297812 | 27056 | 157468 | 14161 |
+| UniformGrid 4.0 | 5408 | 298024 | 12096 | 222560 | 14161 |
+| UniformGrid 8.0 | 1352 | 487298 | 7104 | 435792 | 14161 |
+| UniformGrid 16.0 | 392 | 1159602 | 8704 | 1114448 | 14161 |
+
+Это показывает, что минимальное число cells не равно минимальному wall-clock:
+`8.0` обслуживает в 4 раза меньше cells, чем `4.0`, и выдерживает рост raw
+pair tests; `16.0` уже создаёт примерно в 2.4 раза больше raw pair tests, чем
+`8.0`. Все Grid варианты сохраняют одинаковый набор `14161` candidate pairs,
+но он примерно на 20.2% больше SAP (`11781`).
+
+`physics_bodies` измеряет полный `step`, поэтому результат не отделяет
+broadphase от narrowphase/solver. `cell_size = 8.0` — текущий provisional
+лучший tuning choice для этой сцены, но не production default: 100k и timing
+breakdown ещё впереди. `probe_100k` поддерживает, например:
+
+```text
+cargo run -p ornis-physics --release --example probe_100k -- --sweep
+cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 8
+cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 16
+```
+
+Adaptive grid пока не объявляется следующим default. После timing breakdown
+broadphase/narrowphase/solver можно реализовать редкую cost-based настройку с
+hysteresis и ограниченным набором кандидатов; пересчитывать cell size каждый
+кадр было бы слишком дорогим и может вызвать oscillation. После сверки с
+Box3D и Jolt основной следующий архитектурный кандидат — persistent dynamic
+AABB tree с moved/active-body queries, а не ещё один full-rebuild grid; разбор
+ссылок находится в [`broadphase-reference-2026-08-29.md`](broadphase-reference-2026-08-29.md).
+
+### 100k probes: Grid 8.0 vs Sweep-and-Prune (2026-08-29)
+
+Два targeted probe workflow были успешно завершены на одном и том же
+сценарии tiled floor: 100000 dynamic bodies и 4096 floor tiles, всего
+**104096 тел**, по 3 шага каждый. Workflow source брался из `master`, а код
+выбирался через `target_ref` PR.
+
+- [UniformGrid 8.0, run `33245718111`](https://github.com/kemperrrrr/ornis/actions/runs/33245718111)
+  — `success`, 2m 6s.
+- [Sweep-and-Prune, run `33251548032`](https://github.com/kemperrrrr/ornis/actions/runs/33251548032)
+  — `success`, 5m 10s.
+
+Runner/CPU metadata не сохранены, поэтому это exploratory comparison между
+двумя отдельными `ubuntu-latest` запусками, а не machine-normalized baseline.
+
+| Backend | Step 0 | Step 1 | Step 2 | Steady state |
+|---|---:|---:|---:|---:|
+| UniformGrid 8.0 | 8.1867 s | 8.0282 s | 8.0236 s | ~8.02 s |
+| Sweep-and-Prune | 97.6264 s | 79.4794 s | 79.5051 s | ~79.49 s |
+
+На этом workload Grid 8.0 примерно в **9.9 раза быстрее SAP в steady state**
+и примерно в **11.9 раза быстрее на первом шаге**. Grid всё ещё занимает
+около 480 бюджетов кадра 16.7 ms, поэтому 100k не является real-time
+сценарием.
+
+Диагностика broadphase:
+
+| Backend / step | Cells | Raw pair tests | Static skips | AABB rejects | Candidates |
+|---|---:|---:|---:|---:|---:|
+| Grid 8.0 / step 0–2 | 13448 | 2349246 | 74256 | 2074990 | 100000 |
+| SAP / step 0 | 0 | 5417936560 | 8386560 | 5409450000 | 100000 |
+| SAP / step 2 | 0 | 22509982 | 387072 | 22022910 | 100000 |
+
+Первый SAP step особенно показателен: выбранная sweep axis совпала с
+плоским распределением тел и породила **5.42 млрд raw pair tests**. На
+последующих шагах после смены оси их стало около 22.5 млн, но это всё равно
+примерно в 9.6 раза больше Grid 8.0. Оба backend в итоге выдали одинаковые
+`100000` candidate pairs; разница — в объёме ложных broadphase checks.
+
+Прямое сравнение с 10k Criterion (`180.00 ms` для Grid 8.0) всё ещё не
+является строгим scaling ratio: 10k сценарий предварительно выполняет 30
+settle steps, а 100k probe стартует с новой сцены. В criterion-бенче 100k
+намеренно отсутствует (см. комментарий в `solver_bench.rs`).
+
+Это подтверждает Grid 8.0 как сильный provisional backend для tiled-floor
+workload и показывает, что SAP имеет неприемлемый worst-case на 100k. Однако
+production default пока не переключается: нужен timing breakdown
+broadphase/narrowphase/solver и проверка sparse/heterogeneous сцен. Следующий
+архитектурный кандидат — persistent dynamic AABB tree; adaptive cell size
+пока не реализуется.
 
 ## Render (`crates/render`)
 
