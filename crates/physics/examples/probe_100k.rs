@@ -119,8 +119,11 @@ fn main() {
         if step == 0 || step + 1 == steps {
             let stats = physics.broadphase_stats();
             println!(
-                "stats after step {step}: bodies={} cells={} large={} pair_tests={} "
-                "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}",
+                concat!(
+                    "stats after step {}: bodies={} cells={} large={} pair_tests={} ",
+                    "filter_rejections={} static_static_skips={} aabb_rejections={} candidates={}"
+                ),
+                step,
                 stats.body_count,
                 stats.occupied_cells,
                 stats.large_bodies,
