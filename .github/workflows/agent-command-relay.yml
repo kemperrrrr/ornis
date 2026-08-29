@@ -72,7 +72,8 @@ jobs:
           # (grid backend, cell size 8, 3 steps)
           gh workflow run performance-probe.yml \
             --repo "${REPOSITORY}" \
-            --ref "${pr_ref}" \
+            --ref master \
             -f backend=grid \
             -f cell_size=8 \
-            -f steps=3
+            -f steps=3 \
+            -f target_ref="${pr_ref}"
