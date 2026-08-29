@@ -1,0 +1,42 @@
+name: Agent command relay
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  dispatch-performance:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/run-performance' &&
+      github.event.comment.user.login == 'arena-ai-coding-agent[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Resolve PR head and dispatch benchmark
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          # Fetch PR metadata from API
+          pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+
+          # Ensure it's an open PR from the same repo (not a fork)
+          test "$(jq -r '.state' <<<"${pr_json}")" = "open"
+          test "$(jq -r '.head.repo.full_name' <<<"${pr_json}")" = "${REPOSITORY}"
+
+          pr_ref="$(jq -r '.head.ref' <<<"${pr_json}")"
+
+          # Dispatch the performance workflow on the PR head ref
+          gh workflow run performance.yml \
+            --repo "${REPOSITORY}" \
+            --ref "${pr_ref}"
