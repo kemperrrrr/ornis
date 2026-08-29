@@ -77,6 +77,11 @@ impl BroadPhaseBackend {
         }
     }
 
+    /// Creates a uniform grid with an explicit cell size.
+    pub(crate) fn uniform_grid(cell_size: f32) -> Self {
+        Self::UniformGrid(UniformGrid::with_cell_size(cell_size))
+    }
+
     /// Returns the selected backend kind.
     pub(crate) fn kind(&self) -> BroadPhaseKind {
         match self {
@@ -293,12 +298,20 @@ pub(crate) struct UniformGrid {
 
 impl UniformGrid {
     fn new() -> Self {
+        Self::with_cell_size(DEFAULT_GRID_CELL_SIZE)
+    }
+
+    fn with_cell_size(cell_size: f32) -> Self {
+        assert!(
+            cell_size.is_finite() && cell_size > 0.0,
+            "uniform grid cell size must be finite and positive, got {cell_size}"
+        );
         Self {
             aabbs: Vec::new(),
             active: Vec::new(),
             cells: HashMap::new(),
             large: Vec::new(),
-            cell_size: DEFAULT_GRID_CELL_SIZE,
+            cell_size,
             max_cells_per_body: DEFAULT_MAX_CELLS_PER_BODY,
             stats: BroadPhaseStats::default(),
         }
@@ -433,6 +446,17 @@ mod tests {
         assert_eq!(stats.body_count, 2);
         assert_eq!(stats.candidate_pairs, 1);
         assert!(stats.occupied_cells > 1);
+    }
+
+    #[test]
+    fn grid_cell_size_keeps_pairs_while_changing_cell_occupancy() {
+        let bodies = scene();
+        let mut fine = UniformGrid::with_cell_size(1.0);
+        let mut coarse = UniformGrid::with_cell_size(4.0);
+        fine.update(&bodies, 0.0);
+        coarse.update(&bodies, 0.0);
+        assert_eq!(fine.active(), coarse.active());
+        assert_ne!(fine.stats().occupied_cells, coarse.stats().occupied_cells);
     }
 
     #[test]

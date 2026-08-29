@@ -1438,6 +1438,17 @@ impl BuiltinPhysicsEngine {
         self.broadphase.kind()
     }
 
+    /// Selects the uniform-grid backend and configures its cell size.
+    ///
+    /// Smaller cells reduce false candidate pairs at the cost of more cell
+    /// bookkeeping. The default grid size is 2.0 world units. This method
+    /// resets the warm-start cache because changing the backend is a
+    /// diagnostic/configuration boundary between simulation runs.
+    pub fn set_uniform_grid_cell_size(&mut self, cell_size: f32) {
+        self.broadphase = BroadPhaseBackend::uniform_grid(cell_size);
+        self.warm_impulses.clear();
+    }
+
     /// Returns counters from the latest broadphase update.
     ///
     /// The values are diagnostics for tuning and benchmarks; they are not
@@ -2383,6 +2394,8 @@ mod tests {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
         physics.set_broadphase(BroadPhaseKind::UniformGrid);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
+        physics.set_uniform_grid_cell_size(1.0);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
         physics.set_broadphase(BroadPhaseKind::SweepAndPrune);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);

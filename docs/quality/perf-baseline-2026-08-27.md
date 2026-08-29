@@ -112,8 +112,9 @@ CPU path без `--features gpu` и без подключения `WgpuContactSo
 текущей CPU-сцены, но Sweep-and-Prune остаётся default до профилирования
 candidate pairs/solver и отдельного прогона 100k на обоих backend'ах.
 Следующий benchmark-код теперь печатает `BroadPhaseStats` для обоих
-backend'ов; эти счётчики помогут отделить лишние candidate checks от solver
-cost, но не заменяют отдельный timing breakdown.
+backend'ов и сравнивает grid cell size 1.0/2.0/4.0; эти счётчики помогут
+отделить лишние candidate checks от solver cost, но не заменяют отдельный
+timing breakdown.
 
 ### Находка: сверхлинейный рост step на 100k тел
 

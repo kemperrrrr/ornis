@@ -96,7 +96,7 @@ cargo xtask bca --report      # html to target/bca/index.html
     SweepAndPrune / UniformGrid на 1k и 10k телах;
   - benchmark также печатает `BroadPhaseStats` (pair tests, filtering,
     static-static skips, cells, large bodies и unique candidates) для
-    breakdown candidate generation;
+    breakdown candidate generation и сравнивает grid cell size 1.0/2.0/4.0;
   - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
   - workflow не влияет на основной quality gate;
   - 100k body зонд запускается вручную: `cargo run -p ornis-physics --release --example probe_100k`;

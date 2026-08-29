@@ -241,10 +241,11 @@ GPU physics в этом прогоне не участвовала: benchmark н
 
 Benchmark теперь печатает `BroadPhaseStats`: body count, raw pair tests,
 layer/mask rejections, static-static skips, AABB rejections, unique
-candidate pairs, occupied grid cells и large-body count. Это закрывает
-первый candidate-pair breakdown; отдельный timing broadphase против solver
-и повторный 100k probe для обоих CPU backend'ов ещё впереди. До этих
-измерений Sweep-and-Prune остаётся default, UniformGrid — opt-in.
+candidate pairs, occupied grid cells и large-body count. Он также сравнивает
+UniformGrid с cell size 1.0/2.0/4.0. Это закрывает первый candidate-pair
+breakdown; отдельный timing broadphase против solver и повторный 100k probe
+для обоих CPU backend'ов ещё впереди. До этих измерений Sweep-and-Prune
+остаётся default, UniformGrid — opt-in.
 
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 

@@ -385,10 +385,11 @@ real-time бюджету 16.7 ms.
 
 **Следующий benchmark-срез:** benchmark уже печатает `BroadPhaseStats`
 (body count, raw pair tests, layer/mask rejections, static-static skips,
-AABB rejections, unique candidates, occupied grid cells и large bodies).
-Это даёт candidate-pair breakdown; отдельный timing broadphase против solver
-и 100k probe для обоих backend'ов ещё впереди. UniformGrid пока остаётся
-opt-in provisional candidate, а Sweep-and-Prune — default до этих измерений.
+AABB rejections, unique candidates, occupied grid cells и large bodies) и
+сравнивает UniformGrid с cell size 1.0/2.0/4.0. Это даёт candidate-pair
+breakdown; отдельный timing broadphase против solver и 100k probe для обоих
+backend'ов ещё впереди. UniformGrid пока остаётся opt-in provisional
+candidate, а Sweep-and-Prune — default до этих измерений.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
