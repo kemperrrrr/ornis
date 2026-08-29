@@ -167,11 +167,31 @@ fn bench_body_scaling(c: &mut Criterion) {
     // intentionally not a production default or an adaptive policy.
     let configurations = vec![
         ("sweep_and_prune", BroadPhaseKind::SweepAndPrune, None),
-        ("uniform_grid_cell_1", BroadPhaseKind::UniformGrid, Some(1.0)),
-        ("uniform_grid_cell_2", BroadPhaseKind::UniformGrid, Some(2.0)),
-        ("uniform_grid_cell_4", BroadPhaseKind::UniformGrid, Some(4.0)),
-        ("uniform_grid_cell_8", BroadPhaseKind::UniformGrid, Some(8.0)),
-        ("uniform_grid_cell_16", BroadPhaseKind::UniformGrid, Some(16.0)),
+        (
+            "uniform_grid_cell_1",
+            BroadPhaseKind::UniformGrid,
+            Some(1.0),
+        ),
+        (
+            "uniform_grid_cell_2",
+            BroadPhaseKind::UniformGrid,
+            Some(2.0),
+        ),
+        (
+            "uniform_grid_cell_4",
+            BroadPhaseKind::UniformGrid,
+            Some(4.0),
+        ),
+        (
+            "uniform_grid_cell_8",
+            BroadPhaseKind::UniformGrid,
+            Some(8.0),
+        ),
+        (
+            "uniform_grid_cell_16",
+            BroadPhaseKind::UniformGrid,
+            Some(16.0),
+        ),
     ];
     for (backend_name, backend, cell_size) in configurations {
         for n in [1_000u32, 10_000] {

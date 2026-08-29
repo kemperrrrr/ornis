@@ -241,13 +241,7 @@ impl BroadPhase for SweepAndPrune {
                 }
                 if first < second {
                     self.stats.pair_tests += 1;
-                    if candidate_allowed(
-                        bodies,
-                        &self.aabbs,
-                        &mut self.stats,
-                        first,
-                        second,
-                    ) {
+                    if candidate_allowed(bodies, &self.aabbs, &mut self.stats, first, second) {
                         self.active.push((first, second));
                     }
                 }

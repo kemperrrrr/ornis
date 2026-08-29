@@ -58,9 +58,7 @@ where
 }
 
 fn print_usage() {
-    println!(
-        "Usage: probe_100k [--sweep | --grid] [--cell-size SIZE] [--bodies N] [--steps N]"
-    );
+    println!("Usage: probe_100k [--sweep | --grid] [--cell-size SIZE] [--bodies N] [--steps N]");
     println!("  --sweep              use the Sweep-and-Prune baseline (default)");
     println!("  --grid               use UniformGrid (default cell size: 4.0)");
     println!("  --cell-size SIZE     select UniformGrid and set its cell size");
