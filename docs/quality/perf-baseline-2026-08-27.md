@@ -171,7 +171,10 @@ cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 
 нужно сравнивать с выигрышем от выбранного размера. После timing breakdown
 broadphase/narrowphase/solver можно реализовать редкую cost-based настройку
 с hysteresis и ограниченным набором кандидатов; пересчитывать cell size
-каждый кадр было бы слишком дорогим и может вызвать oscillation.
+каждый кадр было бы слишком дорогим и может вызвать oscillation. После
+сверки с Box3D и Jolt основной следующий кандидат — persistent dynamic AABB
+Tree с moved/active-body queries, а не ещё один full-rebuild grid; разбор
+ссылок находится в [`broadphase-reference-2026-08-29.md`](broadphase-reference-2026-08-29.md).
 
 ### Находка: сверхлинейный рост step на 100k тел
 

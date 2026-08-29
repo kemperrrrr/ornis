@@ -319,6 +319,12 @@ runtime без отдельной extract-фазы — будущая цель, 
 > islands/sleeping, joints, linear CCD/shapecast, CPU/SIMD/GPU paths. Следующий
 > практический риск — масштабирование broadphase и оставшиеся ограничения G7;
 > исторические описания стартового состояния ниже сохранены как хронология.
+>
+> Отдельная сверка broadphase с актуальными исходниками Box3D/Jolt показывает,
+> что следующий риск — не только подбор `UniformGrid` cell size: зрелые
+> реализации используют persistent proxies, fat AABB, static/dynamic layers и
+> active/moved-body queries. Зафиксированные выводы и ссылки:
+> [`docs/quality/broadphase-reference-2026-08-29.md`](docs/quality/broadphase-reference-2026-08-29.md).
 
 | Этап | Что делаем | Основание (реальный код) | Статус |
 |---|---|---|---|

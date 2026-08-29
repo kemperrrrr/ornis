@@ -219,6 +219,11 @@ benchmark-матрицы 1k/10k/100k тел, большого единого п�
 sparse world, плотных islands и worst-case broadphase. Это выбор broadphase
 backend, а не новый верхний scheduler и не runtime-выбор без измерений.
 
+Сверка с исходниками Box3D и Jolt уточнила приоритет: перед adaptive
+`cell_size` нужно проверить persistent proxy/lifetime, fat AABB, разделение
+static/moving structures и active/moved-body queries. Архитектурные заметки и
+официальные ссылки: [`docs/quality/broadphase-reference-2026-08-29.md`](docs/quality/broadphase-reference-2026-08-29.md).
+
 ### Exploratory benchmark (2026-08-28)
 
 По workflow run `33194136814` (head
