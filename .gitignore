@@ -22,3 +22,6 @@ editor_test.html
 # cargo-mutants output (regenerated on every run)
 /mutants.out/
 /mutants.out.old/
+
+# CodeGraph local knowledge-graph index (12 MB SQLite, rebuilt by `codegraph init`)
+.codegraph/
