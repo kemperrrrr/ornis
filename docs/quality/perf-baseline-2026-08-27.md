@@ -214,43 +214,56 @@ Box3D и Jolt основной следующий архитектурный к�
 AABB tree с moved/active-body queries, а не ещё один full-rebuild grid; разбор
 ссылок находится в [`broadphase-reference-2026-08-29.md`](broadphase-reference-2026-08-29.md).
 
-### 100k probe: UniformGrid 8.0 (2026-08-29)
+### 100k probes: Grid 8.0 vs Sweep-and-Prune (2026-08-29)
 
-Успешный targeted probe workflow `33245718111` (`success`, 2m 6s) запустил
-код head `65bf6f23b577d0aaad22b1981a0ecda305f73d9a` через workflow source из
-master с `target_ref` PR. Сценарий — tiled floor, 100000 dynamic bodies и
-4096 floor tiles, то есть всего **104096 тел**:
+Два targeted probe workflow были успешно завершены на одном и том же
+сценарии tiled floor: 100000 dynamic bodies и 4096 floor tiles, всего
+**104096 тел**, по 3 шага каждый. Workflow source брался из `master`, а код
+выбирался через `target_ref` PR.
 
-```text
-probe: backend=uniform_grid bodies=100000 steps=3 cell_size=8
-setup 100000: 6.445996ms
-step 0: 8.186687556s
-step 1: 8.028165981s
-step 2: 8.023638459s
-stats after step 0: bodies=104096 cells=13448 large=0 pair_tests=2349246
-filter_rejections=0 static_static_skips=74256 aabb_rejections=2074990 candidates=100000
-stats after step 2: bodies=104096 cells=13448 large=0 pair_tests=2349246
-filter_rejections=0 static_static_skips=74256 aabb_rejections=2074990 candidates=100000
-```
+- [UniformGrid 8.0, run `33245718111`](https://github.com/kemperrrrr/ornis/actions/runs/33245718111)
+  — `success`, 2m 6s.
+- [Sweep-and-Prune, run `33251548032`](https://github.com/kemperrrrr/ornis/actions/runs/33251548032)
+  — `success`, 5m 10s.
 
-После первого шага время стабилизируется около **8.02 s/step**. Это
-примерно **480 бюджетов кадра 16.7 ms**, поэтому 100k всё ещё далеко от
-real-time. В сравнении со старым tiled-floor SAP probe (**80–110 s/step**)
-это ориентировочно 10–14x быстрее, но значения сняты разными запусками и
-runner metadata отсутствуют — это не machine-normalized comparison.
+Runner/CPU metadata не сохранены, поэтому это exploratory comparison между
+двумя отдельными `ubuntu-latest` запусками, а не machine-normalized baseline.
 
-Проба показала `13448` занятых cells, `2349246` raw pair tests и `100000`
-unique candidates; large-body escape path не использовался. Важно, что
-100k probe стартует с новой сцены и делает только 3 шага, тогда как 10k
-Criterion-сценарий предварительно выполняет 30 settle steps. Поэтому прямое
-сравнение `8.02 s` с `180.00 ms` не является строгим scaling ratio.
+| Backend | Step 0 | Step 1 | Step 2 | Steady state |
+|---|---:|---:|---:|---:|
+| UniformGrid 8.0 | 8.1867 s | 8.0282 s | 8.0236 s | ~8.02 s |
+| Sweep-and-Prune | 97.6264 s | 79.4794 s | 79.5051 s | ~79.49 s |
 
-Текущий 100k результат подтверждает Grid 8.0 как рабочий provisional
-кандидат для этой tiled-floor сцены, но не доказывает superiority над SAP на
-том же runner. Следующий обязательный запуск — тот же probe с
-`--sweep`; затем нужен timing breakdown broadphase/narrowphase/solver.
-В criterion-бенче 100k намеренно отсутствует (см. комментарий в
-`solver_bench.rs`).
+На этом workload Grid 8.0 примерно в **9.9 раза быстрее SAP в steady state**
+и примерно в **11.9 раза быстрее на первом шаге**. Grid всё ещё занимает
+около 480 бюджетов кадра 16.7 ms, поэтому 100k не является real-time
+сценарием.
+
+Диагностика broadphase:
+
+| Backend / step | Cells | Raw pair tests | Static skips | AABB rejects | Candidates |
+|---|---:|---:|---:|---:|---:|
+| Grid 8.0 / step 0–2 | 13448 | 2349246 | 74256 | 2074990 | 100000 |
+| SAP / step 0 | 0 | 5417936560 | 8386560 | 5409450000 | 100000 |
+| SAP / step 2 | 0 | 22509982 | 387072 | 22022910 | 100000 |
+
+Первый SAP step особенно показателен: выбранная sweep axis совпала с
+плоским распределением тел и породила **5.42 млрд raw pair tests**. На
+последующих шагах после смены оси их стало около 22.5 млн, но это всё равно
+примерно в 9.6 раза больше Grid 8.0. Оба backend в итоге выдали одинаковые
+`100000` candidate pairs; разница — в объёме ложных broadphase checks.
+
+Прямое сравнение с 10k Criterion (`180.00 ms` для Grid 8.0) всё ещё не
+является строгим scaling ratio: 10k сценарий предварительно выполняет 30
+settle steps, а 100k probe стартует с новой сцены. В criterion-бенче 100k
+намеренно отсутствует (см. комментарий в `solver_bench.rs`).
+
+Это подтверждает Grid 8.0 как сильный provisional backend для tiled-floor
+workload и показывает, что SAP имеет неприемлемый worst-case на 100k. Однако
+production default пока не переключается: нужен timing breakdown
+broadphase/narrowphase/solver и проверка sparse/heterogeneous сцен. Следующий
+архитектурный кандидат — persistent dynamic AABB tree; adaptive cell size
+пока не реализуется.
 
 ## Render (`crates/render`)
 

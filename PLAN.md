@@ -409,14 +409,14 @@ metadata отсутствуют; targeted 100k Grid 8.0 уже измерен, �
 probe ещё не запускался, поэтому production default не переключается.
 
 Текущий результат меняет provisional tuning conclusion: для tiled-floor
-сцены следующий кандидат — `cell_size = 8.0`, но это end-to-end `step`
-время, а не изолированный broadphase timing. Grid по-прежнему создаёт
-`14161` candidate pairs против `11781` у SAP. Targeted 100k probe
-`33245718111` успешно дал для Grid 8.0 около `8.02 s/step` после первого
-шага (`104096` тел, `13448` cells, `2349246` raw pair tests, `100000`
-candidates). Это не строгое сравнение с SAP: SAP на том же targeted probe
-ещё не запускался, а 10k Criterion предварительно settle'ит сцену. Далее
-нужны SAP 100k, timing breakdown broadphase/narrowphase/solver и persistent
+сцены лучший проверенный cell size — `8.0`, но это end-to-end `step` время,
+а не изолированный broadphase timing. Grid по-прежнему создаёт `14161`
+candidate pairs против `11781` у SAP на 10k. Targeted 100k probes
+`33245718111` (Grid 8.0) и `33251548032` (SAP) сравнили оба backend: около
+`8.02 s/step` против `79.49 s/step` в steady state; на первом SAP step было
+`5417936560` raw pair tests против `2349246` у Grid. Оба запуска используют
+отдельные runner'ы и свежую 100k сцену, поэтому это exploratory comparison.
+Далее нужны timing breakdown broadphase/narrowphase/solver и persistent
 `DynamicAabbTree`; adaptive cell size пока не реализован.
 
 ---

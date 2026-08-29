@@ -271,16 +271,19 @@ grid 16.0 — `198.59 ms`. `cell_size = 8.0` — лучший проверенн
 время broadphase. Grid по-прежнему выдаёт `14161` candidate pairs против
 `11781` у SAP и остаётся примерно в 10.8 раза медленнее бюджета кадра 16.7 ms.
 
-Targeted 100k probe `33245718111` успешно измерил Grid 8.0: после первого
-шага около `8.02 s/step`, `104096` тел, `13448` cells, `2349246` raw pair tests
-и `100000` candidates. SAP на том же targeted probe ещё не запускался, а
-10k Criterion предварительно settle'ит сцену, поэтому строгий scaling ratio
-пока не фиксируется и production default не переключается.
+Targeted 100k probes `33245718111` (Grid 8.0) и `33251548032` (SAP)
+успешно сравнили оба backend на tiled floor: около `8.02 s/step` против
+`79.49 s/step` в steady state. На первом SAP step было `5417936560` raw pair
+tests против `2349246` у Grid; оба backend выдали `100000` candidates. Это
+сильное подтверждение Grid 8.0 против SAP на 100k, но два запуска были на
+отдельных unlabeled runner'ах и не являются machine-normalized baseline.
+Оба варианта всё ещё далеко от real-time, поэтому production default пока не
+переключается.
 
 Ручной `probe_100k` умеет выбирать `--sweep`/`--grid`, cell size, число тел и
 число шагов. Adaptive grid пока не добавляется: без timing breakdown он
 может оптимизировать counters, но ухудшить wall-clock из-за пересборки и
-нестабильного выбора. Следующие шаги — SAP 100k, timing
+нестабильного выбора. Следующие шаги — timing
 broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 остаётся редкой cost-based настройкой с hysteresis после этого.
 
