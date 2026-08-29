@@ -116,6 +116,44 @@ backend'ов и сравнивает grid cell size 1.0/2.0/4.0; эти счёт
 отделить лишние candidate checks от solver cost, но не заменяют отдельный
 timing breakdown.
 
+### Cell-size follow-up (2026-08-29)
+
+Успешный performance workflow run `33235046208` на head
+`8183a76c462367b0783c71c362c92dfca7689f6a` завершил сравнение трёх размеров
+UniformGrid. Runner/CPU metadata в raw log отсутствуют; значения ниже —
+exploratory данные для выбора конфигурации, а не новый machine-normalized
+baseline.
+
+Центральная оценка Criterion (`time: [low estimate high]`):
+
+| Сценарий | Sweep-and-Prune | Grid 1.0 | Grid 2.0 | Grid 4.0 |
+|---|---:|---:|---:|---:|
+| 1k тел | 1.5264 µs | 1.5268 µs | 1.5268 µs | 1.5273 µs |
+| 10k тел | 1.0931 s | 542.51 ms | 273.32 ms | 198.45 ms |
+
+На 10k тел `cell_size = 4.0` — лучший из проверенных вариантов: примерно
+в 5.51 раза быстрее Sweep-and-Prune и на 27.4% быстрее `cell_size = 2.0`.
+`cell_size = 1.0` оказался хуже из-за bookkeeping: 123052 ячейки против
+20808 у `2.0` и 5408 у `4.0`. На 1k все варианты находятся в пределах шума.
+
+Диагностика на 10k тел (10400 тел вместе с 400 tiles пола):
+
+| Backend | Cells | Raw pair tests | Static skips | AABB rejects | Candidates |
+|---|---:|---:|---:|---:|---:|
+| Sweep-and-Prune | 0 | 599346 | 11400 | 576165 | 11781 |
+| UniformGrid 1.0 | 123052 | 176672 | 63384 | 0 | 14161 |
+| UniformGrid 2.0 | 20808 | 297812 | 27056 | 157468 | 14161 |
+| UniformGrid 4.0 | 5408 | 298024 | 12096 | 222560 | 14161 |
+
+Grid сокращает raw pair checks примерно вдвое, но оставляет примерно на
+20.2% больше candidate pairs, чем Sweep-and-Prune. Значит, следующий шаг —
+отделить timing broadphase от solver и проверить, не является ли часть
+оставшихся 198.45 ms solver/narrowphase cost.
+
+Criterion сообщал об отсутствии `base/sample.json` для чистого runner;
+workflow всё равно завершился успешно, и текущие измерения были получены.
+GPU physics в этом прогоне не участвовала.
+
 ### Находка: сверхлинейный рост step на 100k тел
 
 Ручной зонд (`crates/physics/examples/probe_100k.rs`, `step` с попешаговым

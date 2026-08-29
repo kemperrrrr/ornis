@@ -391,6 +391,13 @@ breakdown; отдельный timing broadphase против solver и 100k prob
 backend'ов ещё впереди. UniformGrid пока остаётся opt-in provisional
 candidate, а Sweep-and-Prune — default до этих измерений.
 
+**Cell-size follow-up (2026-08-29):** workflow run `33235046208` на head
+`8183a76c462367b0783c71c362c92dfca7689f6a` показал на 10k тел: SAP —
+`1.0931 s`, grid 1.0 — `542.51 ms`, grid 2.0 — `273.32 ms`, grid 4.0 —
+`198.45 ms`. Cell size 4.0 — лучший проверенный вариант, примерно 5.51x
+быстрее SAP; на 1k все варианты около 1.527 µs. Runner metadata отсутствуют,
+100k не измерены, поэтому production default не переключается.
+
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 

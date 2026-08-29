@@ -247,6 +247,18 @@ breakdown; отдельный timing broadphase против solver и повт�
 для обоих CPU backend'ов ещё впереди. До этих измерений Sweep-and-Prune
 остаётся default, UniformGrid — opt-in.
 
+### Cell-size follow-up (2026-08-29)
+
+Workflow run `33235046208` на head `8183a76c462367b0783c71c362c92dfca7689f6a`
+сравнил UniformGrid с cell size 1.0/2.0/4.0. На 1k тел все варианты дали
+около 1.527 µs. На 10k центральные оценки составили 542.51 ms, 273.32 ms и
+198.45 ms соответственно, против 1.0931 s у Sweep-and-Prune. `cell_size =
+4.0` — лучший проверенный вариант (5.51x быстрее SAP), но 198.45 ms всё ещё
+не real-time, 100k не измерены, а candidate pairs остаются выше SAP
+(14161 против 11781). Полная таблица и `BroadPhaseStats` — в
+`docs/quality/perf-baseline-2026-08-27.md`; production default пока не
+переключается.
+
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
 В [`crates/core/src/dispatcher.rs`](crates/core/src/dispatcher.rs):
