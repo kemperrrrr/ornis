@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Resolve PR head and dispatch benchmark
+      - name: Resolve PR head and dispatch performance workflow
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,3 +40,39 @@ jobs:
           gh workflow run performance.yml \
             --repo "${REPOSITORY}" \
             --ref "${pr_ref}"
+
+  dispatch-probe:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/run-probe' &&
+      github.event.comment.user.login == 'arena-ai-coding-agent[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Resolve PR head and dispatch probe workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          # Fetch PR metadata from API
+          pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+
+          # Ensure it's an open PR from the same repo (not a fork)
+          test "$(jq -r '.state' <<<"${pr_json}")" = "open"
+          test "$(jq -r '.head.repo.full_name' <<<"${pr_json}")" = "${REPOSITORY}"
+
+          pr_ref="$(jq -r '.head.ref' <<<"${pr_json}")"
+
+          # Dispatch the probe workflow on the PR head ref with defaults
+          # (grid backend, cell size 8, 3 steps)
+          gh workflow run performance-probe.yml \
+            --repo "${REPOSITORY}" \
+            --ref "${pr_ref}" \
+            -f backend=grid \
+            -f cell_size=8 \
+            -f steps=3

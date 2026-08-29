@@ -3,6 +3,22 @@ name: Performance probe (100k bodies)
 on:
   # Manual trigger for 100k probe (can take 30+ minutes)
   workflow_dispatch:
+    inputs:
+      backend:
+        description: 'Broadphase backend'
+        type: choice
+        options:
+          - sweep
+          - grid
+        default: grid
+      cell_size:
+        description: 'Grid cell size (for grid backend only)'
+        type: string
+        default: '8'
+      steps:
+        description: 'Number of simulation steps'
+        type: number
+        default: 3
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,16 +61,37 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target
-          cargo run -p ornis-physics --release --example probe_100k 2>&1 | tee target/probe_100k.log
+          
+          # Build command with parameters
+          BACKEND_FLAG=""
+          if [ "${{ inputs.backend }}" = "grid" ]; then
+            BACKEND_FLAG="--grid --cell-size ${{ inputs.cell_size }}"
+          fi
+          
+          cargo run -p ornis-physics --release --example probe_100k -- \
+            ${BACKEND_FLAG} --bodies 100000 --steps ${{ inputs.steps }} \
+            2>&1 | tee target/probe_100k.log
 
       # Extract results and publish to job summary
       - name: Publish probe results
         if: always()
+        env:
+          BACKEND: ${{ inputs.backend }}
+          CELL_SIZE: ${{ inputs.cell_size }}
+          STEPS: ${{ inputs.steps }}
         run: |
           {
             echo "## 📊 100k Bodies Probe Results"
             echo
-            echo "**Duration:** ~30–60+ minutes (depending on broadphase backend)"
+            echo "**Config:**"
+            echo "- Backend: \`${BACKEND}\`"
+            if [ "${BACKEND}" = "grid" ]; then
+              echo "- Cell size: \`${CELL_SIZE}\`"
+            fi
+            echo "- Steps: \`${STEPS}\`"
+            echo "- Bodies: 100,000"
+            echo
+            echo "**Duration:** Varies with backend and system load"
             echo
             if [ -f target/probe_100k.log ]; then
               echo "### Results"
