@@ -405,14 +405,18 @@ provisional candidate, а Sweep-and-Prune — default до этих измере
 16.0 — `198.59 ms`. `cell_size = 8.0` — лучший проверенный вариант,
 примерно 6.18x быстрее SAP и на 8.5% быстрее `4.0`; `16.0` на 10.3%
 медленнее `8.0`. На 1k все варианты остаются в пределах шума. Runner
-metadata отсутствуют, 100k не измерены, поэтому production default не
-переключается.
+metadata отсутствуют; targeted 100k Grid 8.0 уже измерен, но SAP на том же
+probe ещё не запускался, поэтому production default не переключается.
 
 Текущий результат меняет provisional tuning conclusion: для tiled-floor
 сцены следующий кандидат — `cell_size = 8.0`, но это end-to-end `step`
 время, а не изолированный broadphase timing. Grid по-прежнему создаёт
-`14161` candidate pairs против `11781` у SAP. Далее нужны 100k comparison,
-timing breakdown broadphase/narrowphase/solver и persistent
+`14161` candidate pairs против `11781` у SAP. Targeted 100k probe
+`33245718111` успешно дал для Grid 8.0 около `8.02 s/step` после первого
+шага (`104096` тел, `13448` cells, `2349246` raw pair tests, `100000`
+candidates). Это не строгое сравнение с SAP: SAP на том же targeted probe
+ещё не запускался, а 10k Criterion предварительно settle'ит сцену. Далее
+нужны SAP 100k, timing breakdown broadphase/narrowphase/solver и persistent
 `DynamicAabbTree`; adaptive cell size пока не реализован.
 
 ---

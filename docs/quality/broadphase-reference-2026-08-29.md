@@ -185,7 +185,9 @@ backend:
 
 1. ✅ Получить фактические результаты для grid `8/16` на 10k: `8.0` оказался
    лучшим измеренным вариантом, `16.0` уже хуже.
-2. Запустить 100k probe для SAP и нескольких grid sizes.
+2. 🟡 100k Grid 8.0 probe выполнен (`33245718111`, около `8.02 s/step`);
+   остаётся запустить тот же targeted probe для SAP и при необходимости
+   контрольных grid sizes.
 3. Добавить timing breakdown broadphase / narrowphase / solver.
 4. Реализовать маленький корректный `DynamicAabbTree` модуль с brute-force
    oracle-тестами.

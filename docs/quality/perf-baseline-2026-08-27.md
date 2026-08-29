@@ -214,23 +214,43 @@ Box3D и Jolt основной следующий архитектурный к�
 AABB tree с moved/active-body queries, а не ещё один full-rebuild grid; разбор
 ссылок находится в [`broadphase-reference-2026-08-29.md`](broadphase-reference-2026-08-29.md).
 
-### Находка: сверхлинейный рост step на 100k тел
+### 100k probe: UniformGrid 8.0 (2026-08-29)
 
-Ручной зонд (`crates/physics/examples/probe_100k.rs`, `step` с попешаговым
-таймингом, тот же сценарий сетки; запуск: `cargo run -p ornis-physics
---release --example probe_100k`):
+Успешный targeted probe workflow `33245718111` (`success`, 2m 6s) запустил
+код head `65bf6f23b577d0aaad22b1981a0ecda305f73d9a` через workflow source из
+master с `target_ref` PR. Сценарий — tiled floor, 100000 dynamic bodies и
+4096 floor tiles, то есть всего **104096 тел**:
 
-- Единый пол-AABB на всю сцену: **~45–56 с/шаг** — Sweep-and-Prune
-  вырождается в O(n²), т.к. гигантский AABB перекрывает все тела и
-  sweep держит весь набор в активном списке.
-- Тайловый пол (тайлы 10×10): **80–110 с/шаг и растёт** — значит,
-  квадратичная составляющая есть не только в giant-AABB случае.
-  Линейная экстраполяция от 10k (767 ms) дала бы ~8 с; наблюдаемое
-  в ~10 раз хуже.
+```text
+probe: backend=uniform_grid bodies=100000 steps=3 cell_size=8
+setup 100000: 6.445996ms
+step 0: 8.186687556s
+step 1: 8.028165981s
+step 2: 8.023638459s
+stats after step 0: bodies=104096 cells=13448 large=0 pair_tests=2349246
+filter_rejections=0 static_static_skips=74256 aabb_rejections=2074990 candidates=100000
+stats after step 2: bodies=104096 cells=13448 large=0 pair_tests=2349246
+filter_rejections=0 static_static_skips=74256 aabb_rejections=2074990 candidates=100000
+```
 
-Вывод: масштаб 100k тел сейчас непрактичен для реального времени;
-это вход для работ по physics (PROJECT_REVIEW п.2/п.3). В criterion-бенче
-100k намеренно отсутствует (см. комментарий в `solver_bench.rs`).
+После первого шага время стабилизируется около **8.02 s/step**. Это
+примерно **480 бюджетов кадра 16.7 ms**, поэтому 100k всё ещё далеко от
+real-time. В сравнении со старым tiled-floor SAP probe (**80–110 s/step**)
+это ориентировочно 10–14x быстрее, но значения сняты разными запусками и
+runner metadata отсутствуют — это не machine-normalized comparison.
+
+Проба показала `13448` занятых cells, `2349246` raw pair tests и `100000`
+unique candidates; large-body escape path не использовался. Важно, что
+100k probe стартует с новой сцены и делает только 3 шага, тогда как 10k
+Criterion-сценарий предварительно выполняет 30 settle steps. Поэтому прямое
+сравнение `8.02 s` с `180.00 ms` не является строгим scaling ratio.
+
+Текущий 100k результат подтверждает Grid 8.0 как рабочий provisional
+кандидат для этой tiled-floor сцены, но не доказывает superiority над SAP на
+том же runner. Следующий обязательный запуск — тот же probe с
+`--sweep`; затем нужен timing breakdown broadphase/narrowphase/solver.
+В criterion-бенче 100k намеренно отсутствует (см. комментарий в
+`solver_bench.rs`).
 
 ## Render (`crates/render`)
 

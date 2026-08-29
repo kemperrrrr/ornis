@@ -238,8 +238,9 @@ version в raw log не были сохранены:
 
 Это подтверждает UniformGrid как provisional candidate для текущего
 CPU tiled-floor workload, но не закрывает масштабирование: 288.58 ms на
-10k тел всё ещё значительно выше бюджета 16.7 ms, 100k не измерены, а
-10k-прогон использовал только 10 samples и содержал warning Criterion.
+10k тел всё ещё значительно выше бюджета 16.7 ms; на момент этого среза
+100k не были измерены, а 10k-прогон использовал только 10 samples и содержал
+warning Criterion.
 `Gnuplot not found` не является ошибкой — использован Plotters backend.
 GPU physics в этом прогоне не участвовала: benchmark не включал
 `--features gpu` и не подключал `WgpuContactSolver`.
@@ -269,14 +270,19 @@ grid 16.0 — `198.59 ms`. `cell_size = 8.0` — лучший проверенн
 кандидат — `cell_size = 8.0`, но измерено end-to-end `step`, а не изолированное
 время broadphase. Grid по-прежнему выдаёт `14161` candidate pairs против
 `11781` у SAP и остаётся примерно в 10.8 раза медленнее бюджета кадра 16.7 ms.
-100k не измерены, поэтому production default пока не переключается.
+
+Targeted 100k probe `33245718111` успешно измерил Grid 8.0: после первого
+шага около `8.02 s/step`, `104096` тел, `13448` cells, `2349246` raw pair tests
+и `100000` candidates. SAP на том же targeted probe ещё не запускался, а
+10k Criterion предварительно settle'ит сцену, поэтому строгий scaling ratio
+пока не фиксируется и production default не переключается.
 
 Ручной `probe_100k` умеет выбирать `--sweep`/`--grid`, cell size, число тел и
 число шагов. Adaptive grid пока не добавляется: без timing breakdown он
 может оптимизировать counters, но ухудшить wall-clock из-за пересборки и
-нестабильного выбора. Следующие шаги — 100k, timing broadphase/narrowphase/
-solver и persistent `DynamicAabbTree`; adaptive policy остаётся редкой
-cost-based настройкой с hysteresis после этого.
+нестабильного выбора. Следующие шаги — SAP 100k, timing
+broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
+остаётся редкой cost-based настройкой с hysteresis после этого.
 
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
