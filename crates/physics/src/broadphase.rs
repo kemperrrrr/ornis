@@ -10,9 +10,10 @@ use std::collections::{HashMap, HashSet};
 use glam::Vec3;
 
 use crate::body::{BodyType, RigidBody};
+use crate::broadphase_tree::DynamicAabbTree;
 use crate::math::AABB;
 
-const HALF_SPEC_MARGIN: f32 = 0.025;
+pub(crate) const HALF_SPEC_MARGIN: f32 = 0.025;
 const DEFAULT_GRID_CELL_SIZE: f32 = 2.0;
 const DEFAULT_MAX_CELLS_PER_BODY: usize = 4096;
 
@@ -40,6 +41,34 @@ pub struct BroadPhaseStats {
     pub large_bodies: usize,
 }
 
+/// Wall-clock breakdown of a single [`crate::BuiltinPhysicsEngine::step`].
+///
+/// Diagnostics for benchmarks only; not part of the simulation contract.
+/// Per-substep phases are summed across the substep loop, so totals reflect
+/// the whole step rather than the last substep.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StepTiming {
+    /// Time spent rebuilding swept AABBs and candidate pairs.
+    pub broad_phase_ms: f64,
+    /// Time spent in narrowphase manifold generation over the pair list.
+    pub narrow_phase_ms: f64,
+    /// Time spent in velocity/position solving, joints and continuous pass.
+    pub solver_ms: f64,
+    /// Number of substeps the timings were summed over.
+    pub substeps: u32,
+}
+
+impl StepTiming {
+    /// Per-substep average for a phase (0.0 when no substeps ran).
+    pub fn per_substep_ms(&self) -> f64 {
+        if self.substeps == 0 {
+            0.0
+        } else {
+            (self.broad_phase_ms + self.narrow_phase_ms + self.solver_ms) / self.substeps as f64
+        }
+    }
+}
+
 /// Available candidate-pair backends for [`crate::BuiltinPhysicsEngine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadPhaseKind {
@@ -47,6 +76,8 @@ pub enum BroadPhaseKind {
     SweepAndPrune,
     /// Uniform spatial grid with a large-body escape path.
     UniformGrid,
+    /// Experimental persistent dynamic AABB tree.
+    DynamicAabbTree,
 }
 
 /// Internal broadphase contract: update world AABBs and expose deterministic
@@ -66,6 +97,8 @@ pub(crate) enum BroadPhaseBackend {
     SweepAndPrune(SweepAndPrune),
     /// Experimental uniform grid implementation.
     UniformGrid(UniformGrid),
+    /// Experimental persistent dynamic AABB tree implementation.
+    DynamicAabbTree(DynamicAabbTree),
 }
 
 impl BroadPhaseBackend {
@@ -74,6 +107,7 @@ impl BroadPhaseBackend {
         match kind {
             BroadPhaseKind::SweepAndPrune => Self::SweepAndPrune(SweepAndPrune::new()),
             BroadPhaseKind::UniformGrid => Self::UniformGrid(UniformGrid::new()),
+            BroadPhaseKind::DynamicAabbTree => Self::DynamicAabbTree(DynamicAabbTree::new()),
         }
     }
 
@@ -87,6 +121,7 @@ impl BroadPhaseBackend {
         match self {
             Self::SweepAndPrune(_) => BroadPhaseKind::SweepAndPrune,
             Self::UniformGrid(_) => BroadPhaseKind::UniformGrid,
+            Self::DynamicAabbTree(_) => BroadPhaseKind::DynamicAabbTree,
         }
     }
 }
@@ -96,6 +131,7 @@ impl BroadPhase for BroadPhaseBackend {
         match self {
             Self::SweepAndPrune(backend) => backend.update(bodies, sub_dt),
             Self::UniformGrid(backend) => backend.update(bodies, sub_dt),
+            Self::DynamicAabbTree(backend) => backend.update(bodies, sub_dt),
         }
     }
 
@@ -103,6 +139,7 @@ impl BroadPhase for BroadPhaseBackend {
         match self {
             Self::SweepAndPrune(backend) => backend.active(),
             Self::UniformGrid(backend) => backend.active(),
+            Self::DynamicAabbTree(backend) => backend.active(),
         }
     }
 
@@ -110,11 +147,12 @@ impl BroadPhase for BroadPhaseBackend {
         match self {
             Self::SweepAndPrune(backend) => backend.stats(),
             Self::UniformGrid(backend) => backend.stats(),
+            Self::DynamicAabbTree(backend) => backend.stats(),
         }
     }
 }
 
-fn swept_aabbs(bodies: &[RigidBody], sub_dt: f32) -> Vec<AABB> {
+pub(crate) fn swept_aabbs(bodies: &[RigidBody], sub_dt: f32) -> Vec<AABB> {
     bodies
         .iter()
         .map(|body| {

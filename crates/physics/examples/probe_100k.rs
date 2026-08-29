@@ -58,9 +58,12 @@ where
 }
 
 fn print_usage() {
-    println!("Usage: probe_100k [--sweep | --grid] [--cell-size SIZE] [--bodies N] [--steps N]");
+    println!(
+        "Usage: probe_100k [--sweep | --grid | --tree] [--cell-size SIZE] [--bodies N] [--steps N]"
+    );
     println!("  --sweep              use the Sweep-and-Prune baseline (default)");
     println!("  --grid               use UniformGrid (default cell size: 4.0)");
+    println!("  --tree               use the experimental DynamicAabbTree backend");
     println!("  --cell-size SIZE     select UniformGrid and set its cell size");
     println!("  --bodies N           number of dynamic bodies (default: 100000)");
     println!("  --steps N             number of measured steps (default: 35)");
@@ -80,6 +83,7 @@ fn main() {
                 cell_size = None;
             }
             "--grid" => backend = BroadPhaseKind::UniformGrid,
+            "--tree" => backend = BroadPhaseKind::DynamicAabbTree,
             "--cell-size" => {
                 cell_size = Some(parse_value("--cell-size", args.next()));
                 backend = BroadPhaseKind::UniformGrid;
@@ -98,12 +102,14 @@ fn main() {
     let backend_name = match backend {
         BroadPhaseKind::SweepAndPrune => "sweep_and_prune",
         BroadPhaseKind::UniformGrid => "uniform_grid",
+        BroadPhaseKind::DynamicAabbTree => "dynamic_aabb_tree",
     };
     let setup_started = Instant::now();
     let mut physics = setup_body_grid(bodies);
     match backend {
         BroadPhaseKind::SweepAndPrune => physics.set_broadphase(BroadPhaseKind::SweepAndPrune),
         BroadPhaseKind::UniformGrid => physics.set_uniform_grid_cell_size(selected_cell_size),
+        BroadPhaseKind::DynamicAabbTree => physics.set_broadphase(BroadPhaseKind::DynamicAabbTree),
     }
     println!(
         "probe: backend={backend_name} bodies={bodies} steps={steps} cell_size={selected_cell_size}"

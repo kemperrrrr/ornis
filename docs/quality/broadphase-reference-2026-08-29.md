@@ -188,11 +188,43 @@ backend:
 2. ✅ 100k targeted probes выполнены для Grid 8.0 (`33245718111`, около
    `8.02 s/step`) и SAP (`33251548032`, около `79.49 s/step`); Grid примерно
    в 9.9x быстрее SAP в steady state на tiled-floor workload.
-3. Добавить timing breakdown broadphase / narrowphase / solver.
-4. Реализовать маленький корректный `DynamicAabbTree` модуль с brute-force
-   oracle-тестами.
-5. Сравнить tree, grid и SAP на tiled floor, giant floor, sparse world,
-   dense islands и heterogeneous body sizes.
+3. ✅ Добавлен timing breakdown broadphase / narrowphase / solver.
+   `StepTiming` (`crates/physics/src/broadphase.rs`) суммирует фазы по substep-циклу
+   в `BuiltinPhysicsEngine::step`; `step_timing()` отдаёт разбивку, `perf_probe`
+   печатает среднее + peak-frame. Замер на активном мире (2026-08-29, dev build,
+   aarch64):
+   - islands_grid 16×16 (1025 тел): broad 28.7 ms | narrow 142.0 ms | solver 437.1 ms
+     за шаг (~612 ms/frame). Solver — 71% шага, narrow — 23%, broad — 4.7%.
+   - big_stack 32 (33 тела): broad 0.55 ms | narrow 10.4 ms | solver 34.4 ms
+     (~45.6 ms/frame). То же соотношение: solver ≫ narrow ≫ broad.
+   Вывод: на текущих сценах broadphase — лишь ~5% стоимости шага; дальнейшее
+   ускорение broadphase (п.4/п.5) даст малый выигрыш до оптимизации solver/narrow.
+   Это не снимает п.4/п.5 (для 100k+ и худших паттернов broadphase доминирует),
+   но смещает приоритет измерений на профиль solver.
+4. ✅ Реализован экспериментальный `DynamicAabbTree` backend
+   (`crates/physics/src/broadphase_tree.rs`), переносящий идеи Box3D/Jolt:
+   persistent proxy per body, fat AABB margin, отдельные static/dynamic деревья,
+   moved/awake body list (только moved dynamic тел перезапрашиваются). Подключён
+   в `BroadPhaseBackend` + `BroadPhaseKind::DynamicAabbTree`, выбирается через
+   `set_broadphase`. Корректность — brute-force oracle-тест
+   (`dynamic_tree_matches_brute_force_oracle` + пересчёт пар после перемещения),
+   а не сравнение с SAP: при отладке вскрылся дефект самого SAP — он теряет пары,
+   где тело с бОльшим индексом сортируется раньше на оси sweep (сравнение индексов
+   вместо позиций в отсортированном массиве). SAP годится как baseline для сцен без
+   огромных static AABB, но не как полный oracle. `probe_100k` получил флаг `--tree`.
+   bca/clippy/fmt чисты, 112 тестов физики проходят.
+5. ⏳ Сравнение tree / grid / SAP на матрице сцен (tiled floor, giant floor,
+   sparse world, dense islands, heterogeneous sizes). Корректность tree уже
+   подтверждена: на tiled floor 10k (dev build, aarch64) tree выдаёт те же
+   `14161` candidate pairs, что grid и SAP; wall-clock tree ~13–16 s/step против
+   ~11 s/step у grid 8.0 (оба в unoptimized dev — реальные цифры требуют
+   criterion/release прогона, см. ниже). Дефект moved-list исправлен: в Ornis
+   `update` зовётся на проинтегрированных позах каждый substep, поэтому tree
+   пере-запрашивает ВСЕ dynamic прокси, а не только moved (иначе терялись пары
+   после первого substep). Полная матрица сцен ещё не замерена — нужен
+   `cargo xtask quality --bench` (criterion, release) и, возможно, отдельные
+   setup-функции сцен в `probe_100k`/`bench`. Решение о default/adaptive routing
+   откладывается до этой матрицы.
 6. Только после этого принимать решение о default или adaptive routing.
 
 ## Границы и лицензии

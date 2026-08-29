@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use glam::{Quat, Vec3};
 use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
-use crate::broadphase::{BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats};
+use crate::broadphase::{
+    BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats, StepTiming,
+};
 use crate::distance;
 #[cfg(feature = "gpu")]
 use crate::gpu::WgpuContactSolver;
@@ -1379,6 +1382,8 @@ pub struct BuiltinPhysicsEngine {
     debug_pairs: Vec<(usize, usize)>,
     /// Trigger pairs overlapping on the previous completed step.
     trigger_pairs: HashSet<(usize, usize)>,
+    /// Wall-clock breakdown of the last completed `step` (diagnostics only).
+    last_step_timing: StepTiming,
     /// Enter/exit transitions waiting for the caller to drain.
     trigger_events: Vec<TriggerEvent>,
     /// G7: enable SIMD-wide contact solver for single-point manifolds.
@@ -1413,6 +1418,7 @@ impl BuiltinPhysicsEngine {
             joint_pairs: HashSet::new(),
             debug_pairs: Vec::new(),
             trigger_pairs: HashSet::new(),
+            last_step_timing: StepTiming::default(),
             trigger_events: Vec::new(),
             wide_solver: true,
             #[cfg(feature = "gpu")]
@@ -1455,6 +1461,14 @@ impl BuiltinPhysicsEngine {
     /// part of the simulation contract.
     pub fn broadphase_stats(&self) -> BroadPhaseStats {
         self.broadphase.stats()
+    }
+
+    /// Wall-clock breakdown of the last completed `step`.
+    ///
+    /// Diagnostic only: per-substep phases are summed across the substep loop.
+    /// Zeroed until the first step runs.
+    pub fn step_timing(&self) -> StepTiming {
+        self.last_step_timing
     }
 
     /// Toggle the G7 SIMD-wide contact solver (default: enabled). Disabling
@@ -2126,19 +2140,29 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             .any(|(h, b)| b.body_type == BodyType::Dynamic && !self.asleep[h]);
         let has_trigger = self.bodies.iter().any(|body| body.is_trigger);
         if !has_awake_dynamic && !has_trigger && self.trigger_pairs.is_empty() {
+            // Fully sleeping world: no substep loop ran, so no phase work
+            // happened this step.
+            self.last_step_timing = StepTiming::default();
             return;
         }
         let sub_dt = dt / self.substeps as f32;
         let mut last_manifolds = Vec::new();
+        let mut timing = StepTiming {
+            substeps: self.substeps,
+            ..StepTiming::default()
+        };
         for s in 0..self.substeps {
             // Box3D stage order: solve velocities BEFORE moving positions, so
             // a resting contact kills gravity's velocity gain in the same
             // substep instead of letting the body free-fall and snapping it
             // back (the snap is an inelastic collision and bleeds energy).
             self.integrate_velocities(sub_dt);
+            let t0 = Instant::now();
             self.broadphase.update(&self.bodies, sub_dt);
+            timing.broad_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
             // Jointed pairs never collide: their parts legitimately sweep
             // through each other's space (a hinge pin passes through the arm).
+            let t0 = Instant::now();
             let manifolds = if self.joint_pairs.is_empty() {
                 detect_collisions(&self.bodies, self.broadphase.active(), &self.asleep, sub_dt)
             } else {
@@ -2151,7 +2175,9 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     .collect();
                 detect_collisions(&self.bodies, &pairs, &self.asleep, sub_dt)
             };
+            timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
             // Restitution is one-shot per step, evaluated on the first substep.
+            let t0 = Instant::now();
             let mut islands = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt);
             self.solve_joints_velocity();
             // Continuous pass on the solver-adjusted velocities: clamp fast
@@ -2161,6 +2187,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             self.integrate_positions(sub_dt, &clamped);
             self.solve_contacts_position(&mut islands);
             self.solve_joints_position();
+            timing.solver_ms += t0.elapsed().as_secs_f64() * 1000.0;
             last_manifolds = manifolds;
         }
         // Diagnostics: contact-manifold partners per body from the last
@@ -2170,6 +2197,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             .extend(last_manifolds.iter().map(|m| (m.body_a, m.body_b)));
         self.rebuild_islands(&last_manifolds);
         self.update_sleep(dt);
+        self.last_step_timing = timing;
 
         // Rebuild the broadphase at the completed poses so trigger events
         // describe the state visible after this whole physics step, not the

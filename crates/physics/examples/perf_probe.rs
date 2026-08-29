@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use glam::Vec3;
-use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody, StepTiming};
 
 fn setup_islands_grid(g: u32) -> BuiltinPhysicsEngine {
     let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
@@ -46,19 +46,37 @@ fn setup_big_stack(n: u32) -> BuiltinPhysicsEngine {
 }
 
 fn time_steps(label: &str, physics: &mut BuiltinPhysicsEngine, settle: u32, measure: u32) {
-    let t0 = Instant::now();
     for _ in 0..settle {
         physics.step(1.0 / 60.0);
     }
-    let t_settle = t0.elapsed();
     let t0 = Instant::now();
+    let mut timing_sum = StepTiming::default();
+    let mut timing_peak = StepTiming::default();
     for _ in 0..measure {
         physics.step(1.0 / 60.0);
+        let t = physics.step_timing();
+        timing_sum.broad_phase_ms += t.broad_phase_ms;
+        timing_sum.narrow_phase_ms += t.narrow_phase_ms;
+        timing_sum.solver_ms += t.solver_ms;
+        timing_peak.broad_phase_ms = timing_peak.broad_phase_ms.max(t.broad_phase_ms);
+        timing_peak.narrow_phase_ms = timing_peak.narrow_phase_ms.max(t.narrow_phase_ms);
+        timing_peak.solver_ms = timing_peak.solver_ms.max(t.solver_ms);
     }
     let t = t0.elapsed();
+    let per_frame = t.as_secs_f64() * 1000.0 / measure as f64;
+    let bp = timing_sum.broad_phase_ms / measure as f64;
+    let np = timing_sum.narrow_phase_ms / measure as f64;
+    let sl = timing_sum.solver_ms / measure as f64;
     println!(
-        "{label}: settle {settle} frames in {t_settle:?}, then {:.3} ms/frame over {measure} frames",
-        t.as_secs_f64() * 1000.0 / measure as f64
+        "{label}: {per_frame:.3} ms/frame over {measure} frames | broad {bp:.3} ms | narrow {np:.3} ms | solver {sl:.3} ms | peak-frame broad {peak_bp:.3} narrow {peak_np:.3} solver {peak_sl:.3}",
+        per_frame = per_frame,
+        measure = measure,
+        bp = bp,
+        np = np,
+        sl = sl,
+        peak_bp = timing_peak.broad_phase_ms,
+        peak_np = timing_peak.narrow_phase_ms,
+        peak_sl = timing_peak.solver_ms,
     );
 }
 
@@ -168,7 +186,7 @@ fn log_stack_diagnostics(stack: &mut BuiltinPhysicsEngine) {
 
 fn main() {
     let mut grid = setup_islands_grid(16);
-    time_steps("islands_grid_16x16 (1025 bodies)", &mut grid, 60, 60);
+    time_steps("islands_grid_16x16 (1025 bodies)", &mut grid, 0, 60);
 
     log_grid_sleep_summary(&grid);
     log_awake_oscillation(&mut grid);

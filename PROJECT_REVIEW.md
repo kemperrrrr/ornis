@@ -287,6 +287,28 @@ tests против `2349246` у Grid; оба backend выдали `100000` candi
 broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 остаётся редкой cost-based настройкой с hysteresis после этого.
 
+> **Статус 2026-08-29 (audit follow-up):** timing breakdown ✅ добавлен.
+> `StepTiming` суммирует фазы по substep-циклу в `BuiltinPhysicsEngine::step`,
+> `step_timing()` отдаёт разбивку, `perf_probe` печатает среднее + peak-frame.
+> Замер на активном мире (dev build, aarch64): islands_grid 16×16 (1025 тел)
+> broad 28.7 ms / narrow 142 ms / solver 437 ms за шаг; big_stack 32
+> broad 0.55 ms / narrow 10.4 ms / solver 34.4 ms. **Broadphase — лишь ~5%
+> стоимости шага**, solver доминирует. Вывод: п.4/п.5 (DynamicAabbTree) всё ещё
+> нужны для 100k+ и худших паттернов, но на текущих сценах их выигрыш мал до
+> профилирования/оптимизации solver и narrowphase.
+>
+> **Статус 2026-08-29 (п.4/п.5):** `DynamicAabbTree` backend ✅ реализован
+> (`crates/physics/src/broadphase_tree.rs`), подключён в `BroadPhaseBackend` +
+> `BroadPhaseKind::DynamicAabbTree`, выбирается через `set_broadphase`, флаг
+> `--tree` в `probe_100k`. Oracle-тест (brute-force, не SAP) проходит; при
+> отладке вскрыт дефект SAP (теряет пары при несовпадении индекса и позиции на
+> оси sweep) — SAP не полный oracle. Корректность tree подтверждена на tiled
+> floor 10k: те же `14161` candidate pairs, что у grid/SAP (dev wall-clock tree
+> ~13–16 s/step vs grid 8.0 ~11 s/step). Moved-list исправлен на re-query всех
+> dynamic (иначе терялись пары после первого substep). Полная матрица сцен
+> (giant floor / sparse / dense islands / heterogeneous) ещё не замерена —
+> нужен criterion/release прогон; решение о default откладывается. bca/clippy/fmt
+> чисты, 112 тестов физики проходят.
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
 В [`crates/core/src/dispatcher.rs`](crates/core/src/dispatcher.rs):
