@@ -398,6 +398,16 @@ candidate, а Sweep-and-Prune — default до этих измерений.
 быстрее SAP; на 1k все варианты около 1.527 µs. Runner metadata отсутствуют,
 100k не измерены, поэтому production default не переключается.
 
+Для следующего focused tuning pass benchmark получил варианты
+`cell_size = 8.0/16.0` в manual performance workflow, а `probe_100k`
+принимает `--sweep`, `--grid`, `--cell-size`, `--bodies` и `--steps`. Это
+позволяет проверить, где начинается рост occupancy/pair tests; дополнительные
+варианты остаются только в ручном performance workflow, а не в Quality gate.
+Адаптивный выбор
+cell size пока не реализован: сначала нужен timing breakdown broadphase vs
+narrowphase/solver и 100k comparison, затем можно добавить hysteresis и
+редкое переобучение по стоимости кандидатов, а не менять размер каждый кадр.
+
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 

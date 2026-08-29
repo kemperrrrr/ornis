@@ -259,6 +259,16 @@ Workflow run `33235046208` на head `8183a76c462367b0783c71c362c92dfca7689f6a`
 `docs/quality/perf-baseline-2026-08-27.md`; production default пока не
 переключается.
 
+Для следующего focused tuning pass доступны варианты `cell_size =
+8.0/16.0` в manual performance workflow; этот workflow не входит в Quality
+gate. Ручной
+`probe_100k` теперь умеет выбирать `--sweep`/`--grid`, cell size, число тел и
+число шагов. Адаптивный grid пока не добавляется: без timing breakdown он
+может оптимизировать counters, но ухудшить wall-clock из-за пересборки и
+нестабильного выбора. Если 100k подтвердит выигрыш, следующий вариант —
+редкая cost-based перенастройка с hysteresis, а не изменение cell size на
+каждом кадре.
+
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
 В [`crates/core/src/dispatcher.rs`](crates/core/src/dispatcher.rs):

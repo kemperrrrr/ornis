@@ -154,6 +154,25 @@ Criterion сообщал об отсутствии `base/sample.json` для ч�
 workflow всё равно завершился успешно, и текущие измерения были получены.
 GPU physics в этом прогоне не участвовала.
 
+### Следующий tuning pass
+
+Размеры `cell_size = 8.0` и `16.0` добавлены в Criterion-матрицу manual
+performance workflow. Это расширяет ручной exploratory run, поэтому он может
+занять дольше предыдущего прогона четырёх конфигураций; в Quality gate эти
+варианты не входят. Для 100k `probe_100k` теперь поддерживает, например:
+
+```text
+cargo run -p ornis-physics --release --example probe_100k -- --sweep
+cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 8
+cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 16
+```
+
+Адаптивный grid намеренно не объявляется следующим default: его стоимость
+нужно сравнивать с выигрышем от выбранного размера. После timing breakdown
+broadphase/narrowphase/solver можно реализовать редкую cost-based настройку
+с hysteresis и ограниченным набором кандидатов; пересчитывать cell size
+каждый кадр было бы слишком дорогим и может вызвать oscillation.
+
 ### Находка: сверхлинейный рост step на 100k тел
 
 Ручной зонд (`crates/physics/examples/probe_100k.rs`, `step` с попешаговым
