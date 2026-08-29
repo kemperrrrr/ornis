@@ -135,8 +135,11 @@ static-static пары отбрасываются после генерации 
 1. `Sweep-and-Prune` остаётся default baseline/fallback.
 2. `UniformGrid` остаётся opt-in backend и полезным специализированным
    вариантом для tiled/static worlds.
-3. `cell_size = 8.0/16.0` проверяется отдельным manual benchmark pass.
-4. Production default не меняется по одним результатам tiled-floor сцены.
+3. Расширенный manual pass уже проверил `cell_size = 8.0/16.0`: для текущей
+   tiled-floor сцены лучший измеренный вариант — `8.0`, но он остаётся только
+   provisional tuning choice.
+4. Production default не меняется по одной tiled-floor сцене и одному 10k
+   прогону.
 
 ### Следующий архитектурный кандидат
 
@@ -180,7 +183,8 @@ backend:
 
 ## План проверки
 
-1. Получить фактические результаты для grid `8/16` на 10k.
+1. ✅ Получить фактические результаты для grid `8/16` на 10k: `8.0` оказался
+   лучшим измеренным вариантом, `16.0` уже хуже.
 2. Запустить 100k probe для SAP и нескольких grid sizes.
 3. Добавить timing breakdown broadphase / narrowphase / solver.
 4. Реализовать маленький корректный `DynamicAabbTree` модуль с brute-force

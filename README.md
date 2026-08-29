@@ -96,12 +96,11 @@ cargo xtask bca --report      # html to target/bca/index.html
     SweepAndPrune / UniformGrid на 1k и 10k телах;
   - benchmark также печатает `BroadPhaseStats` (pair tests, filtering,
     static-static skips, cells, large bodies и unique candidates) для
-    breakdown candidate generation и сравнивает grid cell size 1.0/2.0/4.0;
+    breakdown candidate generation и сравнивает grid cell size 1.0/2.0/4.0/8.0/16.0;
   - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
   - workflow не влияет на основной quality gate;
   - 100k body зонд запускается вручную с выбором backend: `cargo run -p ornis-physics --release --example probe_100k -- --sweep` или `... -- --grid --cell-size 4`; probe также принимает `--cell-size 8/16`, `--bodies` и `--steps`;
-  - дополнительные Criterion-варианты `cell_size = 8.0/16.0` включены в manual performance workflow для расширенного cell-size pass;
-  - exploratory follow-up run `33235046208` от 2026-08-29: на 1k все варианты около 1.527 µs; на 10k SAP — 1.0931 s, grid 1.0 — 542.51 ms, grid 2.0 — 273.32 ms, grid 4.0 — 198.45 ms; `cell_size = 4.0` — лучший проверенный вариант, примерно 5.51x быстрее SAP; это не полный baseline, 100k не измерены;
+  - cell-size follow-up run `33240643444` на head `7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job в 60 минут, но benchmark output содержит измерения всех вариантов: на 10k SAP — `1.1130 s`, grid 1.0 — `469.99 ms`, grid 2.0 — `271.36 ms`, grid 4.0 — `196.69 ms`, grid 8.0 — `180.00 ms`, grid 16.0 — `198.59 ms`; `cell_size = 8.0` — лучший проверенный вариант, примерно 6.18x быстрее SAP и на 8.5% быстрее `4.0`, а `16.0` на 10.3% медленнее `8.0`; это exploratory data, 100k и отдельный timing breakdown ещё не измерены;
   - подробности, `BroadPhaseStats` и ограничения сравнения: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
 
 Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md),

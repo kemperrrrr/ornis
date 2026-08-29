@@ -154,12 +154,51 @@ Criterion сообщал об отсутствии `base/sample.json` для ч�
 workflow всё равно завершился успешно, и текущие измерения были получены.
 GPU physics в этом прогоне не участвовала.
 
-### Следующий tuning pass
+### Расширенный cell-size follow-up (2026-08-29)
 
-Размеры `cell_size = 8.0` и `16.0` добавлены в Criterion-матрицу manual
-performance workflow. Это расширяет ручной exploratory run, поэтому он может
-занять дольше предыдущего прогона четырёх конфигураций; в Quality gate эти
-варианты не входят. Для 100k `probe_100k` теперь поддерживает, например:
+Workflow run `33240643444` на head
+`7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job
+в 60 минут (`cancelled`), но присланный benchmark output содержит измерения
+всех шести конфигураций. Runner/CPU metadata в raw log отсутствуют, поэтому
+это exploratory данные, а не machine-normalized baseline.
+
+На 10k тел фактический body count равен 10400 (10000 dynamic + 400 floor
+tiles). Центральные оценки Criterion:
+
+| Backend | 1k тел | 10k тел |
+|---|---:|---:|
+| Sweep-and-Prune | 1.4015 µs | 1.1130 s |
+| UniformGrid 1.0 | 1.4208 µs | 469.99 ms |
+| UniformGrid 2.0 | 1.3809 µs | 271.36 ms |
+| UniformGrid 4.0 | 1.4329 µs | 196.69 ms |
+| UniformGrid 8.0 | 1.4541 µs | **180.00 ms** |
+| UniformGrid 16.0 | 1.4140 µs | 198.59 ms |
+
+`cell_size = 8.0` — лучший из проверенных вариантов: примерно 6.18x быстрее
+SAP и на 8.5% быстрее `4.0`. Увеличение до `16.0` уже ухудшает результат на
+10.3% относительно `8.0`. На 1k различия находятся в пределах шума.
+
+Диагностика на 10k:
+
+| Backend | Cells | Raw pair tests | Static skips | AABB rejects | Candidates |
+|---|---:|---:|---:|---:|---:|
+| Sweep-and-Prune | 0 | 599346 | 11400 | 576165 | 11781 |
+| UniformGrid 1.0 | 123052 | 176672 | 63384 | 0 | 14161 |
+| UniformGrid 2.0 | 20808 | 297812 | 27056 | 157468 | 14161 |
+| UniformGrid 4.0 | 5408 | 298024 | 12096 | 222560 | 14161 |
+| UniformGrid 8.0 | 1352 | 487298 | 7104 | 435792 | 14161 |
+| UniformGrid 16.0 | 392 | 1159602 | 8704 | 1114448 | 14161 |
+
+Это показывает, что минимальное число cells не равно минимальному wall-clock:
+`8.0` обслуживает в 4 раза меньше cells, чем `4.0`, и выдерживает рост raw
+pair tests; `16.0` уже создаёт примерно в 3.9 раза больше raw pair tests, чем
+`8.0`. Все Grid варианты сохраняют одинаковый набор `14161` candidate pairs,
+но он примерно на 20.2% больше SAP (`11781`).
+
+`physics_bodies` измеряет полный `step`, поэтому результат не отделяет
+broadphase от narrowphase/solver. `cell_size = 8.0` — текущий provisional
+лучший tuning choice для этой сцены, но не production default: 100k и timing
+breakdown ещё впереди. `probe_100k` поддерживает, например:
 
 ```text
 cargo run -p ornis-physics --release --example probe_100k -- --sweep
@@ -167,13 +206,12 @@ cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 
 cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 16
 ```
 
-Адаптивный grid намеренно не объявляется следующим default: его стоимость
-нужно сравнивать с выигрышем от выбранного размера. После timing breakdown
-broadphase/narrowphase/solver можно реализовать редкую cost-based настройку
-с hysteresis и ограниченным набором кандидатов; пересчитывать cell size
-каждый кадр было бы слишком дорогим и может вызвать oscillation. После
-сверки с Box3D и Jolt основной следующий кандидат — persistent dynamic AABB
-Tree с moved/active-body queries, а не ещё один full-rebuild grid; разбор
+Adaptive grid пока не объявляется следующим default. После timing breakdown
+broadphase/narrowphase/solver можно реализовать редкую cost-based настройку с
+hysteresis и ограниченным набором кандидатов; пересчитывать cell size каждый
+кадр было бы слишком дорогим и может вызвать oscillation. После сверки с
+Box3D и Jolt основной следующий архитектурный кандидат — persistent dynamic
+AABB tree с moved/active-body queries, а не ещё один full-rebuild grid; разбор
 ссылок находится в [`broadphase-reference-2026-08-29.md`](broadphase-reference-2026-08-29.md).
 
 ### Находка: сверхлинейный рост step на 100k тел

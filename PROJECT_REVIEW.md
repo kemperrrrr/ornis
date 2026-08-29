@@ -246,33 +246,37 @@ GPU physics в этом прогоне не участвовала: benchmark н
 
 Benchmark теперь печатает `BroadPhaseStats`: body count, raw pair tests,
 layer/mask rejections, static-static skips, AABB rejections, unique
-candidate pairs, occupied grid cells и large-body count. Он также сравнивает
-UniformGrid с cell size 1.0/2.0/4.0. Это закрывает первый candidate-pair
-breakdown; отдельный timing broadphase против solver и повторный 100k probe
-для обоих CPU backend'ов ещё впереди. До этих измерений Sweep-and-Prune
-остаётся default, UniformGrid — opt-in.
+candidate pairs, occupied grid cells и large-body count. Он сравнивает
+UniformGrid с cell size 1.0/2.0/4.0/8.0/16.0. Это закрывает первый
+candidate-pair breakdown; отдельный timing broadphase против solver и 100k
+probe для обоих CPU backend'ов ещё впереди. До этих измерений
+Sweep-and-Prune остаётся default, UniformGrid — opt-in.
 
 ### Cell-size follow-up (2026-08-29)
 
-Workflow run `33235046208` на head `8183a76c462367b0783c71c362c92dfca7689f6a`
-сравнил UniformGrid с cell size 1.0/2.0/4.0. На 1k тел все варианты дали
-около 1.527 µs. На 10k центральные оценки составили 542.51 ms, 273.32 ms и
-198.45 ms соответственно, против 1.0931 s у Sweep-and-Prune. `cell_size =
-4.0` — лучший проверенный вариант (5.51x быстрее SAP), но 198.45 ms всё ещё
-не real-time, 100k не измерены, а candidate pairs остаются выше SAP
-(14161 против 11781). Полная таблица и `BroadPhaseStats` — в
-`docs/quality/perf-baseline-2026-08-27.md`; production default пока не
-переключается.
+Workflow run `33240643444` на head
+`7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job
+в 60 минут, но присланный benchmark output содержит измерения всех шести
+конфигураций. На 1k тел все варианты остаются в пределах шума. На 10k
+центральные оценки составили: SAP — `1.1130 s`, grid 1.0 — `469.99 ms`,
+grid 2.0 — `271.36 ms`, grid 4.0 — `196.69 ms`, grid 8.0 — `180.00 ms`,
+grid 16.0 — `198.59 ms`. `cell_size = 8.0` — лучший проверенный вариант,
+примерно 6.18x быстрее SAP и на 8.5% быстрее `4.0`; `16.0` на 10.3%
+медленнее `8.0`. Полная таблица и `BroadPhaseStats` — в
+`docs/quality/perf-baseline-2026-08-27.md`.
 
-Для следующего focused tuning pass доступны варианты `cell_size =
-8.0/16.0` в manual performance workflow; этот workflow не входит в Quality
-gate. Ручной
-`probe_100k` теперь умеет выбирать `--sweep`/`--grid`, cell size, число тел и
-число шагов. Адаптивный grid пока не добавляется: без timing breakdown он
+Это меняет provisional tuning conclusion для tiled-floor сцены: теперь
+кандидат — `cell_size = 8.0`, но измерено end-to-end `step`, а не изолированное
+время broadphase. Grid по-прежнему выдаёт `14161` candidate pairs против
+`11781` у SAP и остаётся примерно в 10.8 раза медленнее бюджета кадра 16.7 ms.
+100k не измерены, поэтому production default пока не переключается.
+
+Ручной `probe_100k` умеет выбирать `--sweep`/`--grid`, cell size, число тел и
+число шагов. Adaptive grid пока не добавляется: без timing breakdown он
 может оптимизировать counters, но ухудшить wall-clock из-за пересборки и
-нестабильного выбора. Если 100k подтвердит выигрыш, следующий вариант —
-редкая cost-based перенастройка с hysteresis, а не изменение cell size на
-каждом кадре.
+нестабильного выбора. Следующие шаги — 100k, timing broadphase/narrowphase/
+solver и persistent `DynamicAabbTree`; adaptive policy остаётся редкой
+cost-based настройкой с hysteresis после этого.
 
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 

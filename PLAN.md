@@ -389,30 +389,31 @@ worst-case broadphase.
 прогоне не участвовал. Абсолютные 288.58 ms всё ещё не соответствуют
 real-time бюджету 16.7 ms.
 
-**Следующий benchmark-срез:** benchmark уже печатает `BroadPhaseStats`
+**Диагностический benchmark-срез:** benchmark печатает `BroadPhaseStats`
 (body count, raw pair tests, layer/mask rejections, static-static skips,
 AABB rejections, unique candidates, occupied grid cells и large bodies) и
-сравнивает UniformGrid с cell size 1.0/2.0/4.0. Это даёт candidate-pair
-breakdown; отдельный timing broadphase против solver и 100k probe для обоих
-backend'ов ещё впереди. UniformGrid пока остаётся opt-in provisional
-candidate, а Sweep-and-Prune — default до этих измерений.
+сравнивает UniformGrid с cell size 1.0/2.0/4.0/8.0/16.0. Это даёт
+candidate-pair breakdown; отдельный timing broadphase против solver и 100k
+probe для обоих backend'ов ещё впереди. UniformGrid пока остаётся opt-in
+provisional candidate, а Sweep-and-Prune — default до этих измерений.
 
-**Cell-size follow-up (2026-08-29):** workflow run `33235046208` на head
-`8183a76c462367b0783c71c362c92dfca7689f6a` показал на 10k тел: SAP —
-`1.0931 s`, grid 1.0 — `542.51 ms`, grid 2.0 — `273.32 ms`, grid 4.0 —
-`198.45 ms`. Cell size 4.0 — лучший проверенный вариант, примерно 5.51x
-быстрее SAP; на 1k все варианты около 1.527 µs. Runner metadata отсутствуют,
-100k не измерены, поэтому production default не переключается.
+**Cell-size follow-up (2026-08-29):** workflow run `33240643444` на head
+`7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job
+в 60 минут, но присланный benchmark output содержит измерения всех шести
+конфигураций. На 10k тел: SAP — `1.1130 s`, grid 1.0 — `469.99 ms`, grid
+2.0 — `271.36 ms`, grid 4.0 — `196.69 ms`, grid 8.0 — `180.00 ms`, grid
+16.0 — `198.59 ms`. `cell_size = 8.0` — лучший проверенный вариант,
+примерно 6.18x быстрее SAP и на 8.5% быстрее `4.0`; `16.0` на 10.3%
+медленнее `8.0`. На 1k все варианты остаются в пределах шума. Runner
+metadata отсутствуют, 100k не измерены, поэтому production default не
+переключается.
 
-Для следующего focused tuning pass benchmark получил варианты
-`cell_size = 8.0/16.0` в manual performance workflow, а `probe_100k`
-принимает `--sweep`, `--grid`, `--cell-size`, `--bodies` и `--steps`. Это
-позволяет проверить, где начинается рост occupancy/pair tests; дополнительные
-варианты остаются только в ручном performance workflow, а не в Quality gate.
-Адаптивный выбор
-cell size пока не реализован: сначала нужен timing breakdown broadphase vs
-narrowphase/solver и 100k comparison, затем можно добавить hysteresis и
-редкое переобучение по стоимости кандидатов, а не менять размер каждый кадр.
+Текущий результат меняет provisional tuning conclusion: для tiled-floor
+сцены следующий кандидат — `cell_size = 8.0`, но это end-to-end `step`
+время, а не изолированный broadphase timing. Grid по-прежнему создаёт
+`14161` candidate pairs против `11781` у SAP. Далее нужны 100k comparison,
+timing breakdown broadphase/narrowphase/solver и persistent
+`DynamicAabbTree`; adaptive cell size пока не реализован.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
