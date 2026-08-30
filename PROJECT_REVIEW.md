@@ -1944,6 +1944,28 @@ FramePlan
 9. добавить `AssetServer` и handles;
 10. только после этого развивать WebSocket, scripting и сложный hot reload.
 
+### Quality gate: BCA → rustqual (2026-08-30)
+
+**Решение:** BCA заменяется на rustqual.
+
+Аргументы: BCA MPL-2.0 — нельзя встраивать в код как lib без лицензионных последствий; rustqual MIT — можно. Ornis на 100% Rust, фронтенд JS будет заменён Rust (blitz, Boa незрелая) — мульти-язык BCA не нужен. rustqual покрывает BCA + структурные измерения (IOSP, DRY, SRP, Coupling, Test Quality, Architecture call_parity).
+
+**Фильтр вкуса (нарезка + magic) зафиксирован в `rustqual.toml`:**
+- `max_function_lines = 80` (было 60) — режем только если можно дать доменное имя `calc_total/save`; нет имени → `// qual:allow(iosp) reason: match-dispatcher`.
+- `max_cognitive = 20`, `max_cyclomatic = 20` — как в `bca.toml` (hard), не 15/10 default.
+- magic: пока без allow-листа (725 находок) — доменные числа в `const` (`MAX_WS_PAYLOAD`, `SLEEP_THR`), тривиальные `0/1` глушить `// qual:allow(complexity, magic)` до патча allow-листа; не плодить `const ZERO = 0`.
+- `max_suppression_ratio = 0.10` — клапан: если `qual:allow` >10% функций → warning, ratchet а не цель.
+- IOSP leniency: `strict_closures=false`, `strict_iterator_chains=false`, `strict_error_propagation=false`.
+
+**План перехода (ladder rung 5):**
+1. `cargo run --manifest-path /tmp/rustqual -- . --save-baseline baseline.json` — baseline текущий Score 11% / 1707 findings.
+2. В CI `quality.yml`: `rustqual --compare baseline.json --fail-on-regression` рядом с `bca check` (две недели параллельно).
+3. Поднимать `min-quality-score` по 5% за итерацию, чиня только новые нарушения.
+4. `cargo uninstall big-code-analysis && rm bca.toml .bca-baseline.toml` когда Score ≥80% и 2 недели без регресса.
+5. `bca.toml` до удаления остаётся tiered fallback, уже `nexits=9` для `poll_one_frame`.
+
+> ponytail: `rustqual.toml` — единственный source of truth, не дублировать пороги в `xtask/quality.rs`.
+
 ### Итог
 
 Более логичная цель для Ornis:

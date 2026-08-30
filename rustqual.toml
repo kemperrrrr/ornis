@@ -1,0 +1,51 @@
+# rustqual.toml — Ornis quality gate (replaces bca.toml)
+# MIT counterpart to MPL-2.0 bca. Run: cargo run --manifest-path /tmp/rustqual -- .  (без глобальной установки)
+# Docs: https://github.com/SaschaOnTour/rustqual
+
+exclude_files = ["editor/**", "target/**"]
+
+# ponytail: 60→80 — solver/render не режем контекст ради счётчика; magic пока без allow-листа — 0/1/2/-1 глушить через // qual:allow
+# IOSP leniency по умолчанию (closures/iterator/match-as-dispatch — не logic)
+
+max_suppression_ratio = 0.10
+
+[complexity]
+enabled = true
+max_cognitive = 20
+max_cyclomatic = 20
+max_nesting_depth = 4
+max_function_lines = 80
+detect_unsafe = true
+detect_error_handling = true
+allow_expect = false
+
+[duplicates]
+enabled = true
+
+[boilerplate]
+enabled = true
+
+[srp]
+enabled = true
+
+[coupling]
+enabled = true
+
+[structural]
+enabled = true
+
+[test_quality]
+enabled = true
+
+[tests]
+max_function_lines = 120
+file_length = 500
+
+[weights]
+iosp = 0.22
+complexity = 0.18
+dry = 0.13
+srp = 0.18
+coupling = 0.05
+test_quality = 0.12
+architecture = 0.12
