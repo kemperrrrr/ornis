@@ -1498,6 +1498,32 @@ impl BuiltinPhysicsEngine {
         self.velocity_iterations = n;
     }
 
+    /// Adaptive substep count for this step: keep each sub-dt at or below a
+    /// target so fast bodies get enough solver passes to settle without
+    /// tunnelling, while resting/low-speed scenes drop to `MIN_SUBSTEPS` so the
+    /// world can sleep cheaply. `self.substeps` is the upper bound (set by the
+    /// caller); the solver never runs more than that.
+    ///
+    /// ponytail: global heuristic clamped to a fixed min — per-island or
+    /// penetration-driven substepping is the upgrade path when heterogeneous
+    /// scenes show regressions.
+    fn effective_substeps(&self, dt: f32) -> u32 {
+        const MIN_SUBSTEPS: u32 = 4;
+        const SUB_DT_TARGET: f32 = 1.0 / 240.0;
+        let mut max_speed = 0.0f32;
+        for (h, b) in self.bodies.iter().enumerate() {
+            if b.body_type == BodyType::Dynamic && !self.asleep[h] {
+                max_speed = max_speed.max(b.velocity.length());
+            }
+        }
+        // Adaptive substepping only *lowers* the caller's cap (self.substeps)
+        // on low-speed scenes so the world can sleep cheaply; it never raises
+        // above the cap (so explicit set_substeps(1) for CCD tests is kept).
+        let lower = MIN_SUBSTEPS.min(self.substeps);
+        let wanted = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;
+        wanted.clamp(lower, self.substeps)
+    }
+
     /// Baumgarte positional-correction iterations per substep (default 4).
     pub fn set_position_iterations(&mut self, n: u32) {
         self.position_iterations = n;
@@ -2145,13 +2171,14 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             self.last_step_timing = StepTiming::default();
             return;
         }
-        let sub_dt = dt / self.substeps as f32;
+        let eff_substeps = self.effective_substeps(dt);
+        let sub_dt = dt / eff_substeps as f32;
         let mut last_manifolds = Vec::new();
         let mut timing = StepTiming {
-            substeps: self.substeps,
+            substeps: eff_substeps,
             ..StepTiming::default()
         };
-        for s in 0..self.substeps {
+        for s in 0..eff_substeps {
             // Box3D stage order: solve velocities BEFORE moving positions, so
             // a resting contact kills gravity's velocity gain in the same
             // substep instead of letting the body free-fall and snapping it
@@ -2427,6 +2454,46 @@ mod tests {
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
         physics.set_broadphase(BroadPhaseKind::SweepAndPrune);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
+    }
+
+    #[test]
+    fn adaptive_substeps_scale_with_body_speed() {
+        // A fast body needs the full substep cap; a resting scene drops to the
+        // minimum so it can sleep cheaply.
+        let mut fast = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        fast.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            0.0,
+        ));
+        let mut ball = RigidBody::new_box(Vec3::new(0.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        ball.velocity = Vec3::new(0.0, -40.0, 0.0);
+        fast.add_body(ball);
+        fast.step(1.0 / 60.0);
+        assert_eq!(fast.step_timing().substeps, 12, "fast body uses full cap");
+
+        // Resting grid: after settling, velocities are ~0 -> minimum substeps.
+        let mut rest = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        rest.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(100.0, 0.5, 100.0),
+            0.0,
+        ));
+        for i in 0..4 {
+            rest.add_body(RigidBody::new_box(
+                Vec3::new(0.0, 0.4 + i as f32 * 0.82, 0.0),
+                Vec3::splat(0.4),
+                1.0,
+            ));
+        }
+        for _ in 0..240 {
+            rest.step(1.0 / 60.0);
+        }
+        assert!(
+            rest.step_timing().substeps < 12,
+            "resting scene adapts below the 12 cap (got {})",
+            rest.step_timing().substeps
+        );
     }
 
     #[test]

@@ -218,8 +218,15 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 >   (жирна для осевших сцен, недостаточна/не та для жёстких). Честный fix —
 >   адаптивный substepping (по max скорости/прониканию) или понижение default +
 >   подъём sleep-threshold; отдельная задача с риском регресса стабильности.
->   `perf_probe` расширен сценами many_islands / contact_cluster / tall_stack /
-> fast_drop + tuning-sweep и `log_stability`. Gate (fmt/clippy/bca) чист.
+>   **Adaptive substepping ✅ реализован** (`effective_substeps` в `engine.rs`):
+>   выбирает substeps по max скорости awake dynamic, clamp в [4, self.substeps]
+>   (не поднимает выше заданного `set_substeps`, чтобы не ломать CCD-тесты с
+>   sub=1). islands_grid под default теперь 10.25 ms/фрейм (solver 6.9) против
+>   33.7 при фикс. sub=12 — мир засыпает; fast_drop адаптивно держит 12 и
+>   гасит до 0 (без дребезга sub=4). `perf_probe` расширен сценами
+>   many_islands / contact_cluster / tall_stack / fast_drop + tuning-sweep и
+>   `log_stability`. Gate (fmt/clippy/bca) чист, 114 тестов проходят (в т.ч.
+>   `adaptive_substeps_scale_with_body_speed`).
 >
 > ### Решение по следующему broadphase (срез 2026-08-28)
 
