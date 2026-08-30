@@ -264,6 +264,7 @@ impl BuiltinPhysicsEngine {
         manifolds: &[Manifold],
         allow_restitution: bool,
         sub_dt: f32,
+        dt: f32,
     ) -> Vec<IslandWork> {
         // Build global states for ALL active manifolds (shared preamble).
         let mut global_states: Vec<ManifoldState> = Vec::with_capacity(active.len());
@@ -341,7 +342,7 @@ impl BuiltinPhysicsEngine {
             Vec::new()
         } else {
             let mut islands = self.partition_into_islands(&multi_mi, manifolds);
-            self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt);
+            self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt, dt);
             islands
         };
         self.warm_impulses.extend(gpu_warm);
@@ -362,6 +363,7 @@ impl BuiltinPhysicsEngine {
         manifolds: &[Manifold],
         allow_restitution: bool,
         sub_dt: f32,
+        dt: f32,
     ) -> Vec<IslandWork> {
         let active = self.collect_active_manifolds(manifolds);
         if active.is_empty() {
@@ -378,7 +380,13 @@ impl BuiltinPhysicsEngine {
         // correct but not bit-identical to the pure CPU path (see PLAN.md).
         #[cfg(feature = "gpu")]
         if self.gpu_solver.is_some() {
-            return self.solve_contacts_velocity_gpu(active, manifolds, allow_restitution, sub_dt);
+            return self.solve_contacts_velocity_gpu(
+                active,
+                manifolds,
+                allow_restitution,
+                sub_dt,
+                dt,
+            );
         }
 
         // --- Partition into islands + dispatch (G7) ---
@@ -386,7 +394,7 @@ impl BuiltinPhysicsEngine {
         // concurrent solves are race-free and bit-identical for any thread
         // count (Strong Confluence).
         let mut islands = self.partition_into_islands(&active, manifolds);
-        self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt);
+        self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt, dt);
         islands
     }
 
@@ -397,7 +405,7 @@ impl BuiltinPhysicsEngine {
     /// corrections distribute evenly across the manifold set instead of
     /// one-shot rigid pushes. β is kept low (0.2): stronger pseudo-correction
     /// resonates with the velocity solve on rocking contacts.
-    pub(super) fn solve_contacts_position(&mut self, islands: &mut [IslandWork]) {
+    pub(super) fn solve_contacts_position(&mut self, islands: &mut [IslandWork], dt: f32) {
         const PAR_MIN_ISLANDS: usize = 2;
         const PAR_MIN_MANIFOLDS: usize = 24;
         if islands.is_empty() {
@@ -410,22 +418,43 @@ impl BuiltinPhysicsEngine {
                 isl.bodies[l] = self.bodies[g].clone();
             }
         }
-        let iters = self.position_iterations;
+        let base_iters = self.position_iterations;
         let softness = self.contact_softness;
         let total_manifolds: usize = islands.iter().map(|i| i.manifolds.len()).sum();
-        let solve = |isl: &mut IslandWork| {
-            Self::solve_island_position(
-                &mut isl.bodies,
-                &isl.manifolds,
-                &isl.states,
-                iters,
-                softness,
-            );
-        };
+        let iters_per_island: Vec<u32> = islands
+            .iter()
+            .map(|isl| {
+                let max_speed = isl
+                    .bodies
+                    .iter()
+                    .filter(|b| b.body_type == BodyType::Dynamic)
+                    .map(|b| b.velocity.length().max(b.angular_velocity.length()))
+                    .fold(0.0f32, f32::max);
+                self.adaptive_iters_for_island(max_speed, dt, base_iters)
+            })
+            .collect();
         if islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS {
-            islands.par_iter_mut().for_each(solve);
+            islands.par_iter_mut().enumerate().for_each(|(idx, isl)| {
+                let iters = iters_per_island[idx];
+                Self::solve_island_position(
+                    &mut isl.bodies,
+                    &isl.manifolds,
+                    &isl.states,
+                    iters,
+                    softness,
+                );
+            });
         } else {
-            islands.iter_mut().for_each(solve);
+            islands.iter_mut().enumerate().for_each(|(idx, isl)| {
+                let iters = iters_per_island[idx];
+                Self::solve_island_position(
+                    &mut isl.bodies,
+                    &isl.manifolds,
+                    &isl.states,
+                    iters,
+                    softness,
+                );
+            });
         }
         for isl in islands.iter() {
             for (l, &g) in isl.body_idx.iter().enumerate() {

@@ -193,6 +193,7 @@ impl BuiltinPhysicsEngine {
         islands: &mut Vec<IslandWork>,
         allow_restitution: bool,
         sub_dt: f32,
+        dt: f32,
     ) {
         const PAR_MIN_ISLANDS: usize = 2;
         const PAR_MIN_MANIFOLDS: usize = 24;
@@ -202,26 +203,54 @@ impl BuiltinPhysicsEngine {
         let parallel = islands.len() >= PAR_MIN_ISLANDS
             && islands.iter().map(|i| i.manifolds.len()).sum::<usize>() >= PAR_MIN_MANIFOLDS;
         let warm_in = &self.warm_impulses;
-        let iters = self.velocity_iterations;
+        let base_iters = self.velocity_iterations;
         let wide_on = self.wide_solver;
-        let solve = |isl: &mut IslandWork| {
-            let (states, warm) = Self::solve_island_velocity(
-                &mut isl.bodies,
-                &isl.manifolds,
-                &isl.keys,
-                warm_in,
-                iters,
-                allow_restitution,
-                sub_dt,
-                wide_on,
-            );
-            isl.states = states;
-            isl.warm = warm;
-        };
+        // per-island adaptive iters: precompute outside the parallel closure
+        // so we don't borrow `self` inside `par_iter_mut` (borrow checker).
+        let iters_per_island: Vec<u32> = islands
+            .iter()
+            .map(|isl| {
+                let max_speed = isl
+                    .bodies
+                    .iter()
+                    .filter(|b| b.body_type == BodyType::Dynamic)
+                    .map(|b| b.velocity.length().max(b.angular_velocity.length()))
+                    .fold(0.0f32, f32::max);
+                self.adaptive_iters_for_island(max_speed, dt, base_iters)
+            })
+            .collect();
         if parallel {
-            islands.par_iter_mut().for_each(solve);
+            islands.par_iter_mut().enumerate().for_each(|(idx, isl)| {
+                let iters = iters_per_island[idx];
+                let (states, warm) = Self::solve_island_velocity(
+                    &mut isl.bodies,
+                    &isl.manifolds,
+                    &isl.keys,
+                    warm_in,
+                    iters,
+                    allow_restitution,
+                    sub_dt,
+                    wide_on,
+                );
+                isl.states = states;
+                isl.warm = warm;
+            });
         } else {
-            islands.iter_mut().for_each(solve);
+            islands.iter_mut().enumerate().for_each(|(idx, isl)| {
+                let iters = iters_per_island[idx];
+                let (states, warm) = Self::solve_island_velocity(
+                    &mut isl.bodies,
+                    &isl.manifolds,
+                    &isl.keys,
+                    warm_in,
+                    iters,
+                    allow_restitution,
+                    sub_dt,
+                    wide_on,
+                );
+                isl.states = states;
+                isl.warm = warm;
+            });
         }
         let mut next: WarmCache = HashMap::new();
         for isl in islands.iter() {

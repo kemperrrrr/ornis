@@ -1524,6 +1524,32 @@ impl BuiltinPhysicsEngine {
         wanted.clamp(lower, self.substeps)
     }
 
+    /// Per-island iteration scaling: fast islands get the full budget,
+    /// slow islands are solved cheaply. Derived from the same target sub-dt
+    /// as `effective_substeps` so the two heuristics stay coherent.
+    ///
+    /// ponytail: 2 iters minimum for velocity, 1 for position — per-island
+    /// sub-dt splitting (instead of iteration scaling) is the upgrade path
+    /// if heterogeneous scenes still show solver jitter.
+    pub(super) fn adaptive_iters_for_island(
+        &self,
+        max_speed: f32,
+        dt: f32,
+        base_iters: u32,
+    ) -> u32 {
+        const MIN_SUBSTEPS: u32 = 4;
+        const SUB_DT_TARGET: f32 = 1.0 / 240.0;
+        // Keep at least 2 velocity / 1 position iteration so even resting
+        // islands still correct residual penetration.
+        let min_iters = if base_iters > 4 { 2 } else { 1 };
+        let max_sub = self.substeps.max(1);
+        let lower = MIN_SUBSTEPS.min(max_sub);
+        let wanted = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;
+        let wanted = wanted.clamp(lower, max_sub);
+        let scaled = ((wanted as f32 / max_sub as f32) * base_iters as f32).ceil() as u32;
+        scaled.clamp(min_iters, base_iters)
+    }
+
     /// Baumgarte positional-correction iterations per substep (default 4).
     pub fn set_position_iterations(&mut self, n: u32) {
         self.position_iterations = n;
@@ -2205,14 +2231,14 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
             // Restitution is one-shot per step, evaluated on the first substep.
             let t0 = Instant::now();
-            let mut islands = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt);
+            let mut islands = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt, dt);
             self.solve_joints_velocity();
             // Continuous pass on the solver-adjusted velocities: clamp fast
             // movers to their first impact and keep them there this substep.
             let mut clamped = vec![false; self.bodies.len()];
             self.solve_continuous(sub_dt, &mut clamped);
             self.integrate_positions(sub_dt, &clamped);
-            self.solve_contacts_position(&mut islands);
+            self.solve_contacts_position(&mut islands, dt);
             self.solve_joints_position();
             timing.solver_ms += t0.elapsed().as_secs_f64() * 1000.0;
             last_manifolds = manifolds;
@@ -2494,6 +2520,22 @@ mod tests {
             "resting scene adapts below the 12 cap (got {})",
             rest.step_timing().substeps
         );
+    }
+
+    #[test]
+    fn per_island_iters_scale_with_speed() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let dt = 1.0 / 60.0;
+        // slow island → minimal iters (3 vel from 4/12*8), fast → full cap
+        assert_eq!(physics.adaptive_iters_for_island(0.0, dt, 8), 3);
+        assert_eq!(physics.adaptive_iters_for_island(0.1, dt, 8), 3);
+        assert!(physics.adaptive_iters_for_island(2.0, dt, 8) > 3);
+        assert!(physics.adaptive_iters_for_island(2.0, dt, 8) < 8);
+        assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 8), 8);
+        assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 4), 4);
+        // respects substeps cap — still returns scaled within base
+        physics.set_substeps(1);
+        assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 8), 8);
     }
 
     #[test]

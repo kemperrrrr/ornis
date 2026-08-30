@@ -313,6 +313,23 @@ fn main() {
     let mut cluster5k = setup_contact_cluster(5000);
     time_steps("contact_cluster_5k (5000 bodies)", &mut cluster5k, 0, 20);
 
+    // per-island demo: many slow islands + one fast tower (heterogeneous
+    // velocities). Global adaptive would push all islands to 12 substeps;
+    // per-island keeps slow islands at 2-3 iters.
+    {
+        let mut hetero = setup_many_islands(256);
+        // kick the top of the first tower (handle 3) — one fast island
+        if let Some(b) = hetero.get_body_mut(3) {
+            b.velocity = Vec3::new(0.0, -40.0, 0.0);
+        }
+        time_steps(
+            "hetero_many_islands 255 slow +1 fast (1024 bodies)",
+            &mut hetero,
+            0,
+            60,
+        );
+    }
+
     // Stability vs substeps: does lowering substeps (4) cause jitter or
     // tunnelling on stiff scenes where the default (12) is conservative?
     for sub in [12u32, 4u32] {
