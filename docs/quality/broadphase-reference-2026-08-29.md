@@ -242,9 +242,13 @@ backend:
    - `candidate_pairs` идентичны у всех backend → корректность матрицы подтверждена.
    Дефект moved-list в tree исправлен (re-query всех dynamic), но это сделало
    tree медленнее; возврат к selective moved-list — отдельная оптимизация.
-6. Решение: default оставить **UniformGrid** (победитель матрицы), не SAP.
-   Adaptive routing (SAP↔grid↔tree по паттерну сцены) — будущая работа; пока
-   единый grid-default. DynamicAabbTree — experimental, не default.
+6. ✅ Решение: **default = UniformGrid** (победитель матрицы), не SAP.
+   Изменено в `BuiltinPhysicsEngine::new` (`engine.rs`): `BroadPhaseBackend::new
+   (BroadPhaseKind::UniformGrid)`. SAP оставлен как compatibility baseline
+   (явный выбор через `set_broadphase`). Tree — experimental. Adaptive routing
+   (SAP↔grid↔tree по паттерну сцены) — будущая работа. Тест
+   `broadphase_backend_can_be_selected_explicitly` обновлён под новый default.
+   План broadphase (п.3–п.6) закрыт.
 
 ## Границы и лицензии
 

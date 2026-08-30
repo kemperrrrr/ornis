@@ -1404,7 +1404,7 @@ impl BuiltinPhysicsEngine {
     pub fn new(gravity: Vec3) -> Self {
         Self {
             bodies: Vec::new(),
-            broadphase: BroadPhaseBackend::new(BroadPhaseKind::SweepAndPrune),
+            broadphase: BroadPhaseBackend::new(BroadPhaseKind::UniformGrid),
             gravity,
             substeps: 12,
             velocity_iterations: 8,
@@ -1428,10 +1428,10 @@ impl BuiltinPhysicsEngine {
 
     /// Select the broadphase candidate-pair backend.
     ///
-    /// The default is [`BroadPhaseKind::SweepAndPrune`].
-    /// [`BroadPhaseKind::UniformGrid`] is an opt-in experimental backend
-    /// with a fixed default cell size; compare both through the physics
-    /// benchmarks before choosing a production default.
+    /// The default is [`BroadPhaseKind::UniformGrid`] (wins the local 10k-body
+    /// scene matrix: tiled / giant_floor / sparse / islands / heterogeneous).
+    /// [`BroadPhaseKind::SweepAndPrune`] is retained as the compatibility
+    /// baseline; [`BroadPhaseKind::DynamicAabbTree`] is experimental.
     pub fn set_broadphase(&mut self, kind: BroadPhaseKind) {
         if self.broadphase.kind() != kind {
             self.broadphase = BroadPhaseBackend::new(kind);
@@ -2420,7 +2420,7 @@ mod tests {
     #[test]
     fn broadphase_backend_can_be_selected_explicitly() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
-        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
         physics.set_broadphase(BroadPhaseKind::UniformGrid);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
         physics.set_uniform_grid_cell_size(1.0);
