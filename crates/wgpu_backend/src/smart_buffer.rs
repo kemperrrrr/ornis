@@ -20,6 +20,12 @@ bitflags! {
 /// side stale; [`sync_to_gpu`](Self::sync_to_gpu) and
 /// [`sync_to_cpu_blocking`](Self::sync_to_cpu_blocking) then move the bytes
 /// on demand instead of eagerly.
+///
+/// **Experimental — not production-ready.** Residency *decisions* are
+/// manual: nothing automatically chooses where a buffer lives or migrates
+/// it; the caller must know which side is authoritative and when to sync.
+/// The automatic "copy only when needed" residency layer from the engine
+/// design docs is not implemented yet.
 pub struct SmartBuffer<T: bytemuck::Pod> {
     cpu_data: Vec<T>,
     gpu_buffer: Option<wgpu::Buffer>,

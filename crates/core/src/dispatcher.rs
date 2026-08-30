@@ -4,6 +4,11 @@
 //! operation's element count against a configurable threshold and route it
 //! to CPU or GPU executors, falling back to CPU whenever no GPU executor is
 //! wired up or the `gpu` feature is off.
+//!
+//! **Status:** the GPU route is a reserved extension point — `GpuExecutor`
+//! is an experimental stub that performs no GPU work, so every dispatch
+//! effectively executes on CPU today. Working GPU compute dispatch lives in
+//! `ornis-wgpu-backend` (`CommandSync`).
 use crate::component_store::ComponentStore;
 use crate::pipeline::PipelineConfig;
 use crate::smart_store::SmartStore;
@@ -92,7 +97,14 @@ impl CpuExecutor {
     }
 }
 
-/// GPU executor (requires gpu feature)
+/// GPU executor (requires gpu feature).
+///
+/// **Experimental — not production-ready.** This is a reserved extension
+/// point: `execute` is a stub that performs no GPU work (and the `gpu`
+/// feature of `ornis-core` does not compile against wgpu yet). Real GPU
+/// compute lives in `ornis-wgpu-backend` (`CommandSync`); treat this type
+/// as a placeholder for the future automatic ECS→GPU dispatch, not as a
+/// working executor.
 #[cfg(feature = "gpu")]
 pub struct GpuExecutor {
     // GPU device and queue would be stored here
@@ -122,7 +134,12 @@ impl GpuExecutor {
     }
 }
 
-/// High-level smart dispatcher that combines CPU and GPU execution
+/// High-level smart dispatcher that combines CPU and GPU execution.
+///
+/// Note: the GPU side is currently a stub — see `GpuExecutor` (behind the
+/// `gpu` feature). When the dispatcher picks [`ExecutionTarget::Gpu`] the
+/// work silently falls back to the CPU executor, so `SmartDispatcher` is
+/// effectively CPU-only today.
 pub struct SmartDispatcher {
     dispatcher: Dispatcher,
     #[cfg(feature = "gpu")]

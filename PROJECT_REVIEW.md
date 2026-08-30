@@ -677,6 +677,15 @@ browser reconnect test и полноценное чтение client close frame
 
 Для таких API стоит использовать явные маркеры вроде `Experimental`, `Unstable`, `not production-ready`, feature flags и отдельные разделы документации. При этом API должны оставаться видимыми разработчику: задача не скрыть технический долг, а не допустить ошибочного восприятия экспериментального контракта как стабильного.
 
+> ✅ 2026-08-30 (частично): маркеры проставлены в rustdoc — `GpuExecutor`
+> и модуль `crates/core/src/dispatcher.rs` помечены как experimental stub
+> (GPU-диспетчер фактически CPU-fallback), `SmartBuffer` в
+> `ornis-wgpu-backend` — как manual-residency без автоматического слоя.
+> `Engine`/`Schedule` уже честно описаны как minimal frame host.
+> Спекулятивных scripting-интерфейсов в коде нет (фаза 6 не начата) —
+> маркировать нечего. README-строки диспетчера и SmartBuffer уже несут
+> эти оговорки.
+
 ### Приоритет 5 — documentation lint
 
 В репозитории уже зафиксировано большое количество недокументированного public API. Стоит:
