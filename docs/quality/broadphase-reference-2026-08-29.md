@@ -219,19 +219,32 @@ backend:
    `sweep_and_prune_keeps_pairs_where_higher_index_sorts_first` (floor индекс 2 +
    динамики 0/1 → пары (0,1),(0,2),(1,2)). Без чинки SAP терял (0,2)/(1,2).
    Теперь SAP — корректный oracle для tree-тестов.
-5. ⏳ Сравнение tree / grid / SAP на матрице сцен (tiled floor, giant floor,
-   sparse world, dense islands, heterogeneous sizes). Корректность tree уже
-   подтверждена: на tiled floor 10k (dev build, aarch64) tree выдаёт те же
-   `14161` candidate pairs, что grid и SAP; wall-clock tree ~13–16 s/step против
-   ~11 s/step у grid 8.0 (оба в unoptimized dev — реальные цифры требуют
-   criterion/release прогона, см. ниже). Дефект moved-list исправлен: в Ornis
-   `update` зовётся на проинтегрированных позах каждый substep, поэтому tree
-   пере-запрашивает ВСЕ dynamic прокси, а не только moved (иначе терялись пары
-   после первого substep). Полная матрица сцен ещё не замерена — нужен
-   `cargo xtask quality --bench` (criterion, release) и, возможно, отдельные
-   setup-функции сцен в `probe_100k`/`bench`. Решение о default/adaptive routing
-   откладывается до этой матрицы.
-6. Только после этого принимать решение о default или adaptive routing.
+5. ⏳ Сравнение tree / grid / SAP на матрице сцен. Корректность tree подтверждена
+   (те же candidate pairs, что у grid/SAP на всех сценах). Локальные замеры
+   (Mac aarch64, `--release`, 10k тел, 20 шагов, mean steady-state, мс/step):
+   | сцена        | sweep  | grid   | tree   | candidates |
+   |--------------|--------|--------|--------|-----------|
+   | tiled        | 1500   | 598    | 2425   | 14161     |
+   | giant_floor  | 636    | 732    | 697    | 10000     |
+   | sparse       | 813    | 46     | 433    | 0         |
+   | islands      | 297    | 43     | 157    | 0         |
+   | heterogeneous| 1138   | 88     | 395    | 5642      |
+   Выводы:
+   - **Grid — лучший на 4/5 сцен** (кроме giant_floor, где чуть медленнее
+     sweep из-за cell-прохода по огромному floor-AABB; large-body escape-path
+     работает: large=1).
+   - **SAP (sweep) квадратичен на dense** (tiled 1500ms, heterogeneous 1138ms,
+     raw pair_tests ~50M) — оставлять default нельзя.
+   - **Tree проигрывает grid везде**: полный re-query всех dynamic каждый
+     substep даёт минимальный pair_tests, но дорог по query-cost (рекурсия +
+     аллокации Vec в query). Требует moved-list fast-path (спящие тела), чтобы
+     выиграть — пока experimental.
+   - `candidate_pairs` идентичны у всех backend → корректность матрицы подтверждена.
+   Дефект moved-list в tree исправлен (re-query всех dynamic), но это сделало
+   tree медленнее; возврат к selective moved-list — отдельная оптимизация.
+6. Решение: default оставить **UniformGrid** (победитель матрицы), не SAP.
+   Adaptive routing (SAP↔grid↔tree по паттерну сцены) — будущая работа; пока
+   единый grid-default. DynamicAabbTree — experimental, не default.
 
 ## Границы и лицензии
 
