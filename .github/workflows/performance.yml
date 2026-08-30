@@ -41,6 +41,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Cheap baseline (reuses existing examples, <2 min on ubuntu):
+      # grid 1k + islands many_islands catch solver/broadphase regress.
+      # ponytail: 10k/100k skipped, add when cheap probe is green but prod regresses.
+      - name: Quick probe (grid 1k + perf_probe)
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target
+          cargo build -p ornis-physics --release --example probe_100k --example perf_probe
+          ./target/release/examples/probe_100k --grid --bodies 1000 --steps 20 --scene tiled 2>&1 | tee target/probe.log
+          ./target/release/examples/perf_probe 2>&1 | tee target/perf.log
+
       # Run criterion benchmarks for physics solver (SweepAndPrune / UniformGrid comparison)
       - name: Run solver benchmarks
         id: bench
@@ -76,7 +88,26 @@ jobs:
             echo
             echo "**Note:** These benchmarks measure SweepAndPrune vs UniformGrid performance on 1k and 10k bodies."
             echo "For 100k body probe, run manually: \`cargo run -p ornis-physics --release --example probe_100k\`"
+            echo
+            if [ -f target/probe.log ]; then
+              echo "### Quick probe (1k grid + perf_probe)"
+              echo '```text'
+              cat target/probe.log target/perf.log | head -n 80
+              echo '```'
+            fi
           } >> $GITHUB_STEP_SUMMARY
+
+      # Upload probe logs
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-logs
+          path: |
+            target/probe.log
+            target/perf.log
+          retention-days: 14
+          if-no-files-found: warn
 
       # Upload criterion results as artifact for trend analysis
       - name: Upload benchmark results
