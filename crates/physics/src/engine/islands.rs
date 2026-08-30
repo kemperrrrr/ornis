@@ -37,38 +37,12 @@ impl BuiltinPhysicsEngine {
     /// whole; islands are woken as a whole by contact with an awake body
     /// (see `wake_on_impact` in `engine/contacts.rs`).
     pub(super) fn update_sleep(&mut self, dt: f32) {
-        // Well below anything gameplay-visible, above the solver's settled
-        // jitter floor (~0.01-0.03).
-        const LIN_SLEEP: f32 = 0.15;
-        const ANG_SLEEP: f32 = 0.15;
-        // ponytail: adaptive per-island sleep — small islands sleep fast,
-        // large stacks require longer quiet. Fixed 0.3s was the lazy middle.
-        let n = self.bodies.len();
-        // An island is quiet only if every awake member is slow.
-        let mut quiet: HashMap<u32, bool> = HashMap::new();
-        for h in 0..n {
-            if self.island[h] == u32::MAX || self.asleep[h] {
-                continue;
-            }
-            let b = &self.bodies[h];
-            let slow = b.velocity.length() < LIN_SLEEP && b.angular_velocity.length() < ANG_SLEEP;
-            quiet
-                .entry(self.island[h])
-                .and_modify(|q| *q &= slow)
-                .or_insert(slow);
-        }
-        // per-island size for adaptive sleep time
-        let mut island_size: HashMap<u32, usize> = HashMap::new();
-        for &r in &self.island {
-            if r != u32::MAX {
-                *island_size.entry(r).or_insert(0) += 1;
-            }
-        }
+        let quiet = Self::collect_quiet_islands(self);
+        let island_size = Self::collect_island_sizes(self);
         let mut to_sleep: Vec<u32> = Vec::new();
         for (root, q) in quiet {
-            let size = island_size.get(&root).copied().unwrap_or(1);
-            // 0.2s for 1 body, +0.02s per body, clamp 0.2..0.6s — tall_stack 50 → 0.6s
-            let sleep_time = (0.2 + 0.02 * size as f32).clamp(0.2, 0.6);
+            let sleep_time =
+                Self::sleep_time_for_size(island_size.get(&root).copied().unwrap_or(1));
             let timer = self.island_timers.entry(root).or_insert(0.0);
             if q {
                 *timer += dt;
@@ -80,7 +54,7 @@ impl BuiltinPhysicsEngine {
             }
         }
         for root in to_sleep {
-            for h in 0..n {
+            for h in 0..self.bodies.len() {
                 if self.island[h] == root {
                     self.asleep[h] = true;
                     let b = &mut self.bodies[h];
@@ -115,6 +89,41 @@ impl BuiltinPhysicsEngine {
             }
         }
         self.island_timers.insert(root, 0.0);
+    }
+
+    fn sleep_time_for_size(size: usize) -> f32 {
+        (0.2 + 0.02 * size as f32).clamp(0.2, 0.6)
+    }
+
+    fn is_body_slow(b: &RigidBody) -> bool {
+        const LIN_SLEEP: f32 = 0.15;
+        const ANG_SLEEP: f32 = 0.15;
+        b.velocity.length() < LIN_SLEEP && b.angular_velocity.length() < ANG_SLEEP
+    }
+
+    fn collect_quiet_islands(engine: &Self) -> HashMap<u32, bool> {
+        let mut quiet: HashMap<u32, bool> = HashMap::new();
+        for h in 0..engine.bodies.len() {
+            if engine.island[h] == u32::MAX || engine.asleep[h] {
+                continue;
+            }
+            let slow = Self::is_body_slow(&engine.bodies[h]);
+            quiet
+                .entry(engine.island[h])
+                .and_modify(|q| *q &= slow)
+                .or_insert(slow);
+        }
+        quiet
+    }
+
+    fn collect_island_sizes(engine: &Self) -> HashMap<u32, usize> {
+        let mut m: HashMap<u32, usize> = HashMap::new();
+        for &r in &engine.island {
+            if r != u32::MAX {
+                *m.entry(r).or_insert(0) += 1;
+            }
+        }
+        m
     }
 
     /// Partition `active` (manifold indices) into islands and build work

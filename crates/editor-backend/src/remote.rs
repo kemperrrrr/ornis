@@ -62,6 +62,7 @@ impl RemoteEditor {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let websocket_handles = Arc::new(Mutex::new(Vec::new()));
+        let ws_port = port;
         let websocket_handles_for_server = Arc::clone(&websocket_handles);
         let handle = thread::Builder::new()
             .name("remote-editor".into())
@@ -72,6 +73,7 @@ impl RemoteEditor {
                     game_tx,
                     game_rx,
                     websocket_handles_for_server,
+                    ws_port,
                 )
             })
             .expect("spawn remote-editor thread");
@@ -198,6 +200,7 @@ fn serve(
     game_tx: Sender<UiCommand>,
     game_rx: Receiver<GameEvent>,
     websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    server_port: u16,
 ) {
     let event_log = Arc::new(Mutex::new(EventLog::default()));
     let mut snapshots = Snapshots::default();
@@ -229,7 +232,7 @@ fn serve(
             let stop = Arc::clone(&stop);
             if let Ok(handle) = thread::Builder::new()
                 .name("remote-editor-websocket".into())
-                .spawn(move || serve_websocket(request, event_log, stop, cursor))
+                .spawn(move || serve_websocket(request, event_log, stop, cursor, server_port))
             {
                 websocket_handles
                     .lock()
@@ -278,6 +281,7 @@ fn serve_websocket(
     event_log: Arc<Mutex<EventLog>>,
     stop: Arc<AtomicBool>,
     mut cursor: u64,
+    server_port: u16,
 ) {
     let Some(key) = header_value(&request, "Sec-WebSocket-Key") else {
         websocket_bad_request(request);
@@ -293,48 +297,8 @@ fn serve_websocket(
         .with_header(Header::from_bytes("Connection", "Upgrade").unwrap())
         .with_header(Header::from_bytes("Sec-WebSocket-Accept", accept).unwrap());
     let mut stream = request.upgrade("websocket", response);
-    // Make client->server reads time out quickly so the push loop can poll
-    // for close frames without blocking. tiny-http erases the TcpStream
-    // behind Box<dyn ReadWrite>, so we extract the raw fd(s) by scanning
-    // the boxed object's memory for the embedded fd value and set
-    // SO_RCVTIMEO only on those fds. No new deps, no global brute-force
-    // over all process fds (which would also time out the client's
-    // socket in tests).
     #[cfg(unix)]
-    {
-        let timeout = Some(Duration::from_millis(10));
-        // SAFETY: Box<dyn ReadWrite> returned by tiny_http is
-        // CustomStream<RefinedTcpStream, RefinedTcpStream> which contains
-        // two TcpStreams (reader+writer clones). The fd is stored as an
-        // i32 inside. We scan the object's memory for plausible fd values.
-        unsafe {
-            use std::os::unix::io::FromRawFd;
-            let ptr = &mut *stream as *mut dyn ReadWrite as *mut *mut u8;
-            let data = *ptr;
-            // Scan first 256 bytes (covers CustomStream + inner structs)
-            for offset in (0..256).step_by(4) {
-                let candidate = *(data.add(offset) as *const i32);
-                if !(3..512).contains(&candidate) {
-                    continue;
-                }
-                let fd = candidate;
-                // Try to set timeout only if this fd looks like our stream's
-                // TCP connection (peer_addr succeeds and local port matches
-                // — but we just test peer_addr to filter non-sockets).
-                // We create a borrowed TcpStream and immediately forget it
-                // so the fd is not closed.
-                let tcp = std::net::TcpStream::from_raw_fd(fd);
-                let is_candidate = tcp.peer_addr().is_ok();
-                if is_candidate {
-                    let _ = tcp.set_read_timeout(timeout);
-                }
-                std::mem::forget(tcp);
-                // If we found a valid fd, we have likely set both reader
-                // and writer (clones share same socket but different fds due
-                // to try_clone). Continue scanning to catch the second clone.
-            }
-        }
-    }
+    ws_set_read_timeout(&mut *stream, Duration::from_millis(10), server_port);
     let mut last_heartbeat = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
@@ -381,27 +345,10 @@ fn serve_websocket(
 /// All client frames are masked per RFC 6455.
 fn poll_client_frames(stream: &mut dyn ReadWrite) -> io::Result<bool> {
     loop {
-        let mut hdr = [0u8; 2];
-        match stream.read(&mut hdr) {
-            Ok(0) => return Ok(true), // EOF
-            Ok(1) => {
-                // Partial header — try to read the second byte.
-                let mut second = [0u8; 1];
-                match stream.read(&mut second) {
-                    Ok(0) => return Ok(true),
-                    Ok(1) => hdr[1] = second[0],
-                    Ok(_) => unreachable!(),
-                    Err(e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::TimedOut =>
-                    {
-                        return Ok(false);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(2) => {}
-            Ok(_) => unreachable!(),
+        match poll_one_frame(stream) {
+            Ok(Some(true)) => return Ok(true),
+            Ok(Some(false)) => continue,
+            Ok(None) => return Ok(false),
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
@@ -409,98 +356,152 @@ fn poll_client_frames(stream: &mut dyn ReadWrite) -> io::Result<bool> {
             }
             Err(e) => return Err(e),
         }
-
-        let opcode = hdr[0] & 0x0F;
-        let masked = hdr[1] & 0x80 != 0;
-        let mut payload_len = (hdr[1] & 0x7F) as usize;
-
-        if payload_len == 126 {
-            let mut ext = [0u8; 2];
-            if let Err(e) = read_exact_with_timeout(stream, &mut ext) {
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
-                    return Ok(false);
-                }
-                return Err(e);
-            }
-            payload_len = u16::from_be_bytes(ext) as usize;
-        } else if payload_len == 127 {
-            let mut ext = [0u8; 8];
-            if let Err(e) = read_exact_with_timeout(stream, &mut ext) {
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
-                    return Ok(false);
-                }
-                return Err(e);
-            }
-            let len = u64::from_be_bytes(ext) as usize;
-            // ponytail: cap insane lengths to avoid OOM on malicious frame
-            if len > 1_048_576 {
-                return Ok(true);
-            }
-            payload_len = len;
-        }
-
-        let mask_key = if masked {
-            let mut key = [0u8; 4];
-            if let Err(e) = read_exact_with_timeout(stream, &mut key) {
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
-                    return Ok(false);
-                }
-                return Err(e);
-            }
-            Some(key)
-        } else {
-            None
-        };
-
-        let mut payload = vec![0u8; payload_len];
-        if payload_len > 0 {
-            if let Err(e) = read_exact_with_timeout(stream, &mut payload) {
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
-                    return Ok(false);
-                }
-                return Err(e);
-            }
-            if let Some(key) = mask_key {
-                for (i, byte) in payload.iter_mut().enumerate() {
-                    *byte ^= key[i % 4];
-                }
-            }
-        }
-
-        match opcode {
-            0x8 => {
-                // Client close — echo payload (status code + reason) if
-                // present, then signal the caller to break.
-                // Payload already unmasked; server close frames are not masked.
-                let code = if payload.len() >= 2 {
-                    u16::from_be_bytes([payload[0], payload[1]])
-                } else {
-                    1000
-                };
-                // Echo whole payload if it contains a valid code+reason,
-                // otherwise just the code.
-                if payload.len() >= 2 {
-                    let _ = write_websocket_frame(stream, 0x88, &payload);
-                } else {
-                    let _ = write_websocket_close(stream, code);
-                }
-                return Ok(true);
-            }
-            0x9 => {
-                // Ping — reply with pong carrying same payload.
-                let _ = write_websocket_frame(stream, 0x8A, &payload);
-            }
-            0xA => {
-                // Pong — ignore.
-            }
-            _ => {
-                // Data or continuation — server is push-only, ignore.
-            }
-        }
-        // If more data is buffered, loop to drain it; otherwise the
-        // next read will return WouldBlock/TimedOut and we return.
     }
 }
+
+fn poll_one_frame(stream: &mut dyn ReadWrite) -> io::Result<Option<bool>> {
+    let Some((opcode, masked, len_byte)) = ws_read_header(stream)? else {
+        return Ok(None);
+    };
+    // ponytail: helper returns Err(WouldBlock) on timeout during ext reads — bubbled as Ok(false) above
+    let payload_len = ws_decode_len(stream, len_byte)?;
+    if payload_len == usize::MAX {
+        return Ok(Some(true));
+    }
+    let mask = ws_read_mask(stream, masked)?;
+    let payload = ws_read_payload(stream, payload_len, mask)?;
+    Ok(Some(ws_dispatch_frame(stream, opcode, &payload)?))
+}
+
+fn ws_read_header(stream: &mut dyn ReadWrite) -> io::Result<Option<(u8, bool, u8)>> {
+    let mut hdr = [0u8; 2];
+    match stream.read(&mut hdr) {
+        Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
+        Ok(1) => {
+            let mut second = [0u8; 1];
+            match stream.read(&mut second) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
+                Ok(1) => hdr[1] = second[0],
+                Ok(_) => unreachable!(),
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(2) => {}
+        Ok(_) => unreachable!(),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(Some((hdr[0] & 0x0F, hdr[1] & 0x80 != 0, hdr[1] & 0x7F)))
+}
+
+fn ws_decode_len(stream: &mut dyn ReadWrite, len_byte: u8) -> io::Result<usize> {
+    match len_byte {
+        126 => {
+            let mut ext = [0u8; 2];
+            read_exact_with_timeout(stream, &mut ext)?;
+            Ok(u16::from_be_bytes(ext) as usize)
+        }
+        127 => {
+            let mut ext = [0u8; 8];
+            read_exact_with_timeout(stream, &mut ext)?;
+            let len = u64::from_be_bytes(ext) as usize;
+            if len > 1_048_576 {
+                Ok(usize::MAX)
+            } else {
+                Ok(len)
+            }
+        }
+        n => Ok(n as usize),
+    }
+}
+
+fn ws_read_mask(stream: &mut dyn ReadWrite, masked: bool) -> io::Result<Option<[u8; 4]>> {
+    if !masked {
+        return Ok(None);
+    }
+    let mut key = [0u8; 4];
+    read_exact_with_timeout(stream, &mut key)?;
+    Ok(Some(key))
+}
+
+fn ws_read_payload(
+    stream: &mut dyn ReadWrite,
+    len: usize,
+    mask: Option<[u8; 4]>,
+) -> io::Result<Vec<u8>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut buf = vec![0u8; len];
+    read_exact_with_timeout(stream, &mut buf)?;
+    if let Some(key) = mask {
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b ^= key[i % 4];
+        }
+    }
+    Ok(buf)
+}
+
+fn ws_dispatch_frame(stream: &mut dyn ReadWrite, opcode: u8, payload: &[u8]) -> io::Result<bool> {
+    match opcode {
+        0x8 => {
+            let code = if payload.len() >= 2 {
+                u16::from_be_bytes([payload[0], payload[1]])
+            } else {
+                1000
+            };
+            if payload.len() >= 2 {
+                let _ = write_websocket_frame(stream, 0x88, payload);
+            } else {
+                let _ = write_websocket_close(stream, code);
+            }
+            Ok(true)
+        }
+        0x9 => {
+            let _ = write_websocket_frame(stream, 0x8A, payload);
+            Ok(false)
+        }
+        0xA => Ok(false),
+        _ => Ok(false),
+    }
+}
+
+#[cfg(unix)]
+fn ws_set_read_timeout(stream: &mut dyn ReadWrite, timeout: Duration, server_port: u16) {
+    // ponytail: only touch fds whose local port == server port — avoids poisoning client socket in tests
+    unsafe {
+        use std::os::unix::io::FromRawFd;
+        let ptr = &mut *stream as *mut dyn ReadWrite as *mut *mut u8;
+        let data = *ptr;
+        let mut seen = std::collections::HashSet::new();
+        for offset in (0..256).step_by(4) {
+            let fd = *(data.add(offset) as *const i32);
+            if !(3..512).contains(&fd) || !seen.insert(fd) {
+                continue;
+            }
+            let tcp = std::net::TcpStream::from_raw_fd(fd);
+            let ok = tcp
+                .local_addr()
+                .map(|a| a.port() == server_port)
+                .unwrap_or(false)
+                && tcp.peer_addr().is_ok();
+            if ok {
+                let _ = tcp.set_read_timeout(Some(timeout));
+            }
+            std::mem::forget(tcp);
+        }
+    }
+}
+#[cfg(not(unix))]
+fn ws_set_read_timeout(_stream: &mut dyn ReadWrite, _timeout: Duration, _server_port: u16) {}
 
 fn read_exact_with_timeout(stream: &mut dyn ReadWrite, buf: &mut [u8]) -> io::Result<()> {
     let mut offset = 0;

@@ -1,7 +1,7 @@
 error[E0433]: cannot find module or crate `wgpu` in this scope
- --> tests/ui/kernel_rejects_non_integer_attr.rs:5:1
+ --> tests/ui/kernel_rejects_non_integer_attr.rs:7:1
   |
-5 | #[kernel("not_an_int")]
+7 | #[kernel("not_an_int")]
   | ^^^^^^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `wgpu`
   |
   = help: if you wanted to use a crate named `wgpu`, use `cargo add wgpu` to add it to your `Cargo.toml`

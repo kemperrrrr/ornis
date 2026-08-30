@@ -45,6 +45,7 @@ wmc = 80
 [thresholds.lang.rust]
 cognitive = 20
 cyclomatic = 20
+nexits = 9
 # halstead.effort raised to 500000: on dense physics math (solver kernels like
 # solve_normal_block, solve_small) the operator/operand count is structurally
 # high but the code is correct and test-covered. The Mozilla-default 120000

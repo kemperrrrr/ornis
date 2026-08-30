@@ -1,5 +1,5 @@
 error: unknown gpu_pipeline option `unknown_option`; expected `workgroup_size`, `storage`, `uniform` or `builtin`
- --> tests/ui/gpu_pipeline_rejects_unknown_option.rs:5:16
+ --> tests/ui/gpu_pipeline_rejects_unknown_option.rs:7:16
   |
-5 | #[gpu_pipeline(unknown_option)]
+7 | #[gpu_pipeline(unknown_option)]
   |                ^^^^^^^^^^^^^^

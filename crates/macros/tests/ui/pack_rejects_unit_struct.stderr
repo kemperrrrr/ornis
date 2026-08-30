@@ -1,7 +1,7 @@
 error: #[derive(Pack)] requires named fields
- --> tests/ui/pack_rejects_unit_struct.rs:4:10
+ --> tests/ui/pack_rejects_unit_struct.rs:6:10
   |
-4 | #[derive(Pack)]
+6 | #[derive(Pack)]
   |          ^^^^
   |
   = note: this error originates in the derive macro `Pack` (in Nightly builds, run with -Z macro-backtrace for more info)

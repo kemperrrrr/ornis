@@ -1,5 +1,5 @@
 error: #[derive(Pack)] only works on structs
- --> tests/ui/pack_rejects_enum.rs:5:6
+ --> tests/ui/pack_rejects_enum.rs:7:6
   |
-5 | enum NotAStruct {
+7 | enum NotAStruct {
   |      ^^^^^^^^^^
