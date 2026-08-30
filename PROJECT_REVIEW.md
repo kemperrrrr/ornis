@@ -204,7 +204,24 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 
 До решения этой проблемы я бы не позиционировал движок как пригодный для больших сцен.
 
-### Решение по следующему broadphase (срез 2026-08-28)
+> **Статус 2026-08-29 (вариант А: профиль solver, локально Mac aarch64, --release):**
+> bottleneck локализован — это **tuning substeps/sleep, не архитектура solver**.
+> - `perf_probe` (islands_grid 1025, settle=0): sub=12 → solver **21 ms**/кадр
+>   (33.7 ms/фрейм, мир не засыпает); **sub=4 → solver 1.4 ms** (2.3 ms/фрейм,
+>   сон срабатывает). Рычаг №1 — `substeps`, не iterations.
+> - **Зависимость от сцены доказана:** на жёстких сценах sub=4 *проигрывает*:
+>   - tall_stack_50 (50 ярусов): оба режима ДРЕБЕЗЖАТ (max_awake_v 16–21 м/с,
+>     башня не спит) — нужны iterations/softness, не substeps;
+>   - fast_drop (v=-40 м/с в пол): sub=12 гасит до 0 (спит), sub=4 оставляет
+>     дребезг 0.32 м/с и тело не спит. Туннелирования нет (min_body_bottom_y=-0.9).
+> - Вывод: **глобальная константа `substeps=12` субоптимальна в обе стороны**
+>   (жирна для осевших сцен, недостаточна/не та для жёстких). Честный fix —
+>   адаптивный substepping (по max скорости/прониканию) или понижение default +
+>   подъём sleep-threshold; отдельная задача с риском регресса стабильности.
+>   `perf_probe` расширен сценами many_islands / contact_cluster / tall_stack /
+> fast_drop + tuning-sweep и `log_stability`. Gate (fmt/clippy/bca) чист.
+>
+> ### Решение по следующему broadphase (срез 2026-08-28)
 
 Конкретный production default пока не выбран. В коде уже есть opt-in
 экспериментальный `BroadPhaseKind::UniformGrid` с deterministic candidate
