@@ -1,3 +1,10 @@
+//! `wgpu` instance/adapter/device initialization.
+//!
+//! [`WgpuContext`] picks a high-performance adapter across all backends and
+//! requests a device with downlevel-compatible limits, so the same context
+//! works on native and web targets. Construction panics when no compatible
+//! adapter exists.
+
 /// Fully initialized `wgpu` handles for a high-performance adapter.
 ///
 /// Construction picks the best available backend and requests a device with

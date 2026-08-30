@@ -1,3 +1,11 @@
+//! Dual-resident CPU/GPU buffer with dirty-flag synchronization.
+//!
+//! [`SmartBuffer`] keeps a CPU `Vec` and a GPU buffer of the same data;
+//! mutations on either side set the opposite [`ResidencyFlags`] bit, and
+//! the sync methods transfer bytes only when a side is stale. Experimental:
+//! residency decisions are manual — the caller picks the authoritative side
+//! and when to sync.
+
 use bitflags::bitflags;
 use wgpu::util::DeviceExt;
 

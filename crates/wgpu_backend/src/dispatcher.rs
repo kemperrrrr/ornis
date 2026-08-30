@@ -1,3 +1,10 @@
+//! CPU/GPU placement policy for individual dispatches.
+//!
+//! [`ExecutionTarget`] (forced CPU, forced GPU, or a size threshold)
+//! resolves to a concrete [`Platform`] for a given workload size;
+//! [`DispatchConfig`] bundles the policy with the compute workgroup size
+//! and a debug label for GPU captures.
+
 /// Where a piece of work should run: forced CPU, forced GPU, or decided by
 /// workload size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

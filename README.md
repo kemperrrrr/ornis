@@ -248,8 +248,7 @@ consumers и расширить orchestration на остальные домен
    Browser pointer/wheel input уже проходит через `InputState`, а
    `RenderWorld` получает общий `Engine`/`FixedTime` host; впереди —
    gameplay consumers и physics.
-5. WebSocket server-push для `/api/events` уже добавлен; дальше — hardening
-   reconnect/close paths и постепенный отказ от polling fallback.
+5. ~~WebSocket server-push для `/api/events`~~ — ✅ реализован: upgrade на `/api/events`, heartbeat ping, reconnect; polling остаётся fallback.
 
 ### Фаза 6 — Скриптинг (рамка пересмотрена 2026-08-22)
 

@@ -1,3 +1,10 @@
+//! Implementation of the `#[kernel]` attribute: validated Rust fn → WGSL.
+//!
+//! The function AST is validated first — no heap types, no dynamic
+//! allocation, no recursion, no `while` loops, `match` nesting at most 2 —
+//! then translated to WGSL via [`crate::wgsl`]. Violations surface as
+//! compile errors pointing at the offending syntax.
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, Type, parse_macro_input, visit, visit::Visit};

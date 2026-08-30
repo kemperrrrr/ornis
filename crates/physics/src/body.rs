@@ -1,3 +1,12 @@
+//! Rigid-body data model: handles, body types and mass properties.
+//!
+//! [`RigidBody`] bundles pose, velocities, material coefficients and the
+//! collision [`Shape`]; [`BodyType`] decides which solver terms apply. The
+//! solver reads only inverse quantities, so `mass` and `inv_mass` must stay
+//! consistent when mutated directly. [`BodyHandle`] is a plain vector index:
+//! removal shifts later handles, so handles must not be cached across
+//! removals.
+
 use glam::{Quat, Vec3};
 
 use crate::shape::Shape;

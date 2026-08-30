@@ -1,3 +1,12 @@
+//! ECS-driven audio engine bridging the world and the platform backend.
+//!
+//! [`AudioEngine`] owns the clip registry and the active-source map. Each
+//! [`step`](AudioEngine::step) scans entities carrying an [`AudioSource`],
+//! submits a mix input once for every source newly entering
+//! [`AudioState::Playing`] (spatial parameters derived relative to the
+//! listener) and untracks paused, stopped or despawned entities. Clip
+//! registration ids are never reused.
+
 use std::collections::HashMap;
 
 use glam::Vec3;

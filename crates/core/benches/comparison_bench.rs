@@ -1,3 +1,5 @@
+//! Benchmarks comparing `ComponentStore` against a naive sparse `HashMap` store.
+
 use std::collections::HashMap;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};

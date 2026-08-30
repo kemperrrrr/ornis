@@ -1,3 +1,5 @@
+//! Strong confluence tests: parallel execution determinism across thread counts.
+
 // Strong Confluence Tests - Determinism across thread counts
 // Tests that parallel execution produces bitwise-identical results
 // regardless of RAYON_NUM_THREADS setting.

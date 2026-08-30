@@ -1,3 +1,11 @@
+//! Symphonia-based decoding of audio files and in-memory bytes into clips.
+//!
+//! [`decode_file`] / [`decode_bytes`] probe the container (the path's
+//! extension feeds the format hint), pick a codec decoder and produce
+//! interleaved f32 samples normalized to [-1, 1]. Undecodable packets are
+//! skipped rather than failing the whole decode; unknown sample rate or
+//! channel layout falls back to 44.1 kHz stereo.
+
 use std::path::Path;
 use std::sync::Arc;
 

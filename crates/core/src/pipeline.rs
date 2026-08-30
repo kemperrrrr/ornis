@@ -1,3 +1,12 @@
+//! Compile-time lane routing between CPU and GPU executors.
+//!
+//! ZST markers ([`CpuLane`], [`GpuLane`], [`HybridLane`]) map to a
+//! [`TargetDiscriminant`] through the [`Route`] trait; components declare
+//! their marker via [`LaneTarget`], so [`lane_target_of`] monomorphizes to
+//! a constant with no runtime branch. [`AutoPipeline`] and
+//! [`PipelineConfig`] are the traits implemented by the derive macros in
+//! `ornis-macros`, with manual impls here for primitive component types.
+
 use crate::smart_store::SmartStore;
 
 /// Result of the static profiler: where to execute the lane.

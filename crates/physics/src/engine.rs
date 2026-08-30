@@ -1,3 +1,12 @@
+//! Physics engine trait and the builtin CPU implementation.
+//!
+//! [`PhysicsEngine`] defines a single simulation step (broadphase →
+//! narrowphase → island partitioning → substepped contact/joint solving →
+//! integration; `dt` must be positive and finite) plus body/joint
+//! management and ray/shape cast queries. [`BuiltinPhysicsEngine`] is the
+//! reference implementation: parallelized with rayon, with optional GPU
+//! contact solving behind the `gpu` feature.
+
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 

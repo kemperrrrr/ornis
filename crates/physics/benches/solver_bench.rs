@@ -1,3 +1,5 @@
+//! Benchmarks for the physics solver step and island configurations.
+
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};

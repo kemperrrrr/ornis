@@ -1,5 +1,10 @@
 #![warn(missing_docs)]
-//! MaterialX parser and OpenPBR material converter for Ornis Engine
+//! MaterialX parser and OpenPBR material converter for Ornis Engine.
+//!
+//! [`parser`] streams `.mtlx` XML into the serde-friendly [`nodes`] AST;
+//! [`graph`] evaluates node graphs and converts them into the engine's
+//! GPU-ready [`OpenPBRMaterial`]. [`load_materialx`] is the one-shot
+//! convenience entry point.
 
 /// Graph evaluation and conversion of parsed documents to [`OpenPBRMaterial`].
 pub mod graph;

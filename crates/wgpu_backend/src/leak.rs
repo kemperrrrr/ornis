@@ -1,3 +1,10 @@
+//! Self-contained LEAK-style kernel generation and dispatch.
+//!
+//! [`leak_wgsl`] / [`leak_wgsl_typed`] build WGSL compute shaders that
+//! stage a block in workgroup memory, apply a caller-supplied per-element
+//! expression and write dirty flags where the output changed;
+//! [`LeakDispatch`] runs such kernels end to end.
+
 /// Build a LEAK-style WGSL compute shader string.
 /// The shader loads a block into shared memory, processes it, and writes dirty flags.
 ///

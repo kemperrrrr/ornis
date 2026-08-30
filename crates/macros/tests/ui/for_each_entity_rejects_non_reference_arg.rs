@@ -1,3 +1,5 @@
+//! UI test: `for_each_entity` rejects non-reference arguments.
+
 use ornis_macros::for_each_entity;
 
 // `for_each_entity!` requires every closure argument to be `&T` or `&mut T`.

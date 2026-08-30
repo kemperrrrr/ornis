@@ -1,3 +1,5 @@
+//! UI test: `Pack` derive rejects tuple structs.
+
 use ornis_macros::Pack;
 
 // #[derive(Pack)] requires named fields — tuple structs are rejected.

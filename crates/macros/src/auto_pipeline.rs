@@ -1,3 +1,10 @@
+//! Implementation of `#[derive(AutoPipeline)]`.
+//!
+//! Without `#[pack]`, the derive registers the component type in the
+//! `SmartStore` and routes it to the CPU lane. With `#[pack]`, each named
+//! field becomes its own component lane via generated `pack_register` /
+//! `pack_insert` helpers. Only structs with named fields are supported.
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};

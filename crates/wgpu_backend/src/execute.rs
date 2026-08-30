@@ -1,3 +1,10 @@
+//! Zero-cost lane executors bridging `ornis_core` routing and recording.
+//!
+//! [`ExecuteLane`] is implemented by the [`CpuExecutor`] / [`GpuExecutor`]
+//! ZSTs: the CPU lane records a closure, the GPU lane a compute dispatch
+//! sized from the element count. Resolution through [`LaneTarget`]
+//! monomorphizes away any runtime branch.
+
 use crate::command_sync::CommandSync;
 use crate::router::PipelineRouter;
 use ornis_core::{LaneTarget, Route};

@@ -1,3 +1,5 @@
+//! Tests for `gpu_pipeline` and `kernel` macro code generation.
+
 use ornis_macros::{gpu_pipeline, kernel};
 
 #[gpu_pipeline]

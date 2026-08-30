@@ -1,3 +1,5 @@
+//! UI test: `kernel` rejects non-integer attribute.
+
 use ornis_macros::kernel;
 
 // `#[kernel]` accepts an optional integer dispatch id; a string literal is

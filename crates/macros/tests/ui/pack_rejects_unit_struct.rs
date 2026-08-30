@@ -1,3 +1,5 @@
+//! UI test: `Pack` derive rejects unit structs.
+
 use ornis_macros::Pack;
 
 // #[derive(Pack)] requires at least one named field — unit structs are rejected.

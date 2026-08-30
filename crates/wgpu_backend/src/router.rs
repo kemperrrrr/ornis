@@ -1,3 +1,10 @@
+//! Compile-time mapping from component lanes to execution platforms.
+//!
+//! [`PipelineRouter`] resolves a component's [`LaneTarget`] marker to a
+//! concrete [`Platform`] — `Hybrid` and `Auto` currently route to GPU — and
+//! maps a [`TargetDiscriminant`] back to an [`ExecutionTarget`]. Both paths
+//! monomorphize to constants, with no runtime branching.
+
 use crate::dispatcher::{ExecutionTarget, Platform};
 use ornis_core::{LaneTarget, Route, TargetDiscriminant, lane_target_of};
 

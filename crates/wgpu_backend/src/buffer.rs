@@ -1,3 +1,9 @@
+//! Helpers for creating `wgpu` buffers from CPU-side data.
+//!
+//! [`create_buffer_from_store`] uploads a [`ComponentStore`]'s dense data
+//! array and [`create_buffer_from_slice`] any `bytemuck::Pod` slice, both
+//! as initialized device buffers with caller-chosen usage flags.
+
 use ornis_core::ComponentStore;
 use wgpu::util::DeviceExt;
 

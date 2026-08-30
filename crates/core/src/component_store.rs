@@ -1,3 +1,12 @@
+//! Dense sparse-set component storage.
+//!
+//! [`ComponentStore<T>`] keeps every live component of one type contiguous
+//! for cache-linear iteration: a [`PageTable`] maps entity id → dense index
+//! and a bitset marks live ids. Lookups verify the entity generation, so a
+//! stale handle can never observe or delete another entity's component.
+//! Removal is O(1) swap-with-last — dense order is not stable across
+//! removals; [`ComponentStore::defrag`] restores id order.
+
 use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
 

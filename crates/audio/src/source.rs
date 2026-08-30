@@ -1,3 +1,11 @@
+//! Audio data model: clips, per-entity sources and mix inputs.
+//!
+//! [`SampleBuffer`] shares interleaved f32 samples cheaply via `Arc`.
+//! [`AudioSource`] is the per-entity component whose [`AudioState`]
+//! transitions are observed by [`crate::engine::AudioEngine::step`];
+//! [`MixInput`] and [`SpatialParams`] are the per-play snapshots handed to
+//! the backend for mixing.
+
 use std::sync::Arc;
 
 /// Interleaved f32 samples normalized to [-1, 1], cheaply shared on clone.

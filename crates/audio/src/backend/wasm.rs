@@ -1,3 +1,10 @@
+//! Web Audio backend for the wasm target.
+//!
+//! Each [`MixInput`] becomes an `AudioBufferSourceNode` → `GainNode` →
+//! optional `PannerNode` chain on a shared `AudioContext`. All state lives
+//! in `Rc<RefCell<..>>` — the backend is single-threaded, matching the
+//! browser event loop.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 

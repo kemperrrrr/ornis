@@ -1,3 +1,5 @@
+//! Integration tests for `ornis_macros` derives and `for_each_entity` expansion.
+
 #![allow(dead_code)]
 
 use ornis_core::{Pack as _, PipelineConfig as _, SmartStore};

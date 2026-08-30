@@ -1,3 +1,5 @@
+//! Benchmarks for `ComponentStore` insert and iteration throughput.
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rayon::iter::ParallelIterator;
 

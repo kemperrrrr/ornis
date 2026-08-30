@@ -1,3 +1,11 @@
+//! Implementation of the `for_each_entity!` lane-iteration macro.
+//!
+//! Parses `store, |a: &T, mut b: &mut U| body` and expands to read/write
+//! lane guards plus iteration over the `SmartStore` lanes. A single lane
+//! iterates directly; multiple lanes first collect the entities present in
+//! *all* declared lanes (generation-checked), so the per-lane lookups in the
+//! body never hit an entity missing from a later lane.
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{

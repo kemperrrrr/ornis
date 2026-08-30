@@ -1,3 +1,10 @@
+//! Hardware calibration of the GPU/CPU crossover threshold.
+//!
+//! [`AutoProfiler`] times CPU and GPU dispatches over a fixed set of
+//! workload sizes and derives the element count where the GPU starts to
+//! win. The resulting [`ProfilerConfig`] is persisted as JSON in the user
+//! config directory and reused on later runs until recalibration.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Instant;

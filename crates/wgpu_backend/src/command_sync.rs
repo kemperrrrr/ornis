@@ -1,3 +1,11 @@
+//! Unified recording and flushing of GPU dispatches and CPU closures.
+//!
+//! [`CommandSync`] accumulates compute command buffers and `Send` CPU
+//! closures, then flushes them together — CPU work is sent to where the
+//! data already lives instead of forcing eager PCIe transfers.
+//! [`dispatch_auto`](CommandSync::dispatch_auto) picks the side from the
+//! element count via a [`DispatchConfig`] threshold.
+
 use crate::dispatcher::{DispatchConfig, Platform, choose_platform};
 
 type CpuCommand = Box<dyn FnOnce() + Send>;

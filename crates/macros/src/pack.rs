@@ -1,3 +1,10 @@
+//! Implementation of `#[derive(Pack)]`: struct → per-field component lanes.
+//!
+//! Each named field gets a unique wrapper type acting as its lane marker,
+//! and `Option<T>` fields are unwrapped to the inner lane type. The derive
+//! emits the registration/insertion code that splits the struct across the
+//! store's lanes. Only structs with named fields are supported.
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};

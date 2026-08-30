@@ -1,3 +1,10 @@
+//! Implementation of `#[derive(PipelineConfig)]`: static lane profiling.
+//!
+//! Walks the type and its `impl` methods to estimate size, heap/GPU type
+//! usage, branching and loop counts, then classifies the lane target
+//! (CPU / GPU / `Auto(threshold)`) — or honors an explicit placement
+//! attribute — and emits the matching `ornis_core::PipelineConfig` impl.
+
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal, TokenStream as TokenStream2};
 use quote::quote;

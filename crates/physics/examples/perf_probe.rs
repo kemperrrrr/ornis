@@ -1,3 +1,5 @@
+//! Performance probe example for physics solver timing across scenarios.
+
 use std::time::Instant;
 
 use glam::Vec3;

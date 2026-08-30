@@ -1,3 +1,10 @@
+//! Native audio output backend built on cpal.
+//!
+//! Spawns a dedicated mixer thread owning the device stream and mixing
+//! queued [`MixInput`]s at 48 kHz; control goes through a crossbeam command
+//! channel, so `play`/`stop`/`set_volume` never block the calling thread.
+//! Dropping the backend signals shutdown and joins the thread.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;

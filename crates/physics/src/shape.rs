@@ -1,3 +1,10 @@
+//! Convex collision primitives: sphere, box, capsule.
+//!
+//! All [`Shape`] variants are centered on the body origin (box and capsule
+//! are symmetric about local +Y) and provide the two queries the pipeline
+//! relies on: an exact world-space AABB projection for the broadphase and a
+//! diagonal inertia tensor for the solver.
+
 use glam::{Quat, Vec3};
 
 use crate::math::AABB;

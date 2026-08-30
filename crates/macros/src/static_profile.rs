@@ -1,3 +1,10 @@
+//! AST operation counters backing static CPU/GPU lane classification.
+//!
+//! [`StaticProfile`] visits a function body counting arithmetic ops and
+//! branch points (`if` / `match`); [`StaticProfile::prefers_gpu`] treats a
+//! branch ratio of at most 5 % as GPU-friendly. The analysis is purely
+//! syntactic — no type or runtime information is consulted.
+
 use syn::{visit, visit::Visit};
 
 #[derive(Default)]

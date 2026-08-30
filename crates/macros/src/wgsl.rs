@@ -1,3 +1,10 @@
+//! Rust AST → WGSL source translation for `#[kernel]` functions.
+//!
+//! [`WgslGen`] walks the supported expression subset (literals, paths,
+//! field access, calls, control flow) and emits WGSL text; unsupported
+//! constructs produce a compile error in the generated source. Rust casts
+//! are dropped — WGSL infers types from context.
+
 use syn::{FnArg, ItemFn};
 
 #[allow(dead_code)]

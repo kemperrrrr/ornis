@@ -1,3 +1,10 @@
+//! Memoization of compiled compute pipelines.
+//!
+//! [`PsoCache`] keys pipelines by (kernel, component) `TypeId` pair so each
+//! WGSL source is compiled at most once per process, and mirrors the
+//! sources into a cache directory (`$CACHE_DIR/ornis/pso_cache`) for
+//! inspection and warm-up.
+
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::path::PathBuf;

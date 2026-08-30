@@ -1,3 +1,11 @@
+//! Concurrent component storage via epoch-based copy-on-write lanes.
+//!
+//! [`LockFreeStore`] holds one lane per component type. Reads load the
+//! current [`ComponentStore`] snapshot under a crossbeam-epoch guard without
+//! locking; writes clone-modify-swap the snapshot and defer destruction of
+//! the old one to the epoch reclaimer. Entity allocation stays under a
+//! mutex. Invariant: a published snapshot is never mutated in place.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;

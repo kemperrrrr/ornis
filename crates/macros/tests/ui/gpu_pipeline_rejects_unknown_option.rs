@@ -1,3 +1,5 @@
+//! UI test: `gpu_pipeline` rejects unknown options.
+
 use ornis_macros::gpu_pipeline;
 
 // `#[gpu_pipeline]` only accepts `workgroup_size`, `storage`, `uniform`,
