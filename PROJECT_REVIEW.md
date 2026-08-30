@@ -227,7 +227,24 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 >   many_islands / contact_cluster / tall_stack / fast_drop + tuning-sweep и
 >   `log_stability`. Gate (fmt/clippy/bca) чист, 114 тестов проходят (в т.ч.
 >   `adaptive_substeps_scale_with_body_speed`).
->
+>   **Per-island adaptive ✅ реализован** (`e9a096b`):
+>   `adaptive_iters_for_island(max_speed,dt,base)` — каждый остров получает
+>   `iters = ceil(wanted/max_sub * base)` по `wanted=ceil(|v|*dt/1/240)`;
+>   медленные острова — 3 vel / 1 pos, быстрые — 8/4. `dispatch_islands_velocity`
+>   и `solve_contacts_position` предвычисляют `iters_per_island` вне `par_iter`.
+>   `many_islands 1024` **30→22.5мс** (solver 19→13.6, -30%), `islands_grid 1025`
+>   **10.2→5.7мс** (solver 6.9→2.6), hetero 1 fast+255 slow — 29мс solver 18
+>   (экономия ~6мс vs global). Test `per_island_iters_scale_with_speed`,
+>   115 тестов, clippy/bca/fmt 0. Потолок: только по `|v|`, без `max_pen`;
+>   upgrade — `wanted = max(|v|*dt, max_pen/slop)` когда `min_bottom_y < -0.02`
+>   при `|v|<0.2`.
+>   **Backlog CPU (не предел, ×3 до Jolt):**
+>   1. `wide_solver` ON + SIMD 4/8 контактов — reuse `wide.rs` (сейчас off);
+>   2. убрать аллокации в кадре (`Vec<Manifold>`, `HashMap` warm, клон shard);
+>   3. penetration-driven — `wanted = max(|v|*dt, max_pen/slop)`;
+>   4. агрессивнее сон / `SLEEP_TIME` tuning.
+>   ponytail: `3` — когда `min_bottom_y < -0.02` при `|v|<0.2` (сейчас 1/3), `1` — шире `perf_probe tiled`.
+
 > ### Решение по следующему broadphase (срез 2026-08-28)
 
 Конкретный production default пока не выбран. В коде уже есть opt-in
