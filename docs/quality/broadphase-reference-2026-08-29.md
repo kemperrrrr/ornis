@@ -213,6 +213,12 @@ backend:
    вместо позиций в отсортированном массиве). SAP годится как baseline для сцен без
    огромных static AABB, но не как полный oracle. `probe_100k` получил флаг `--tree`.
    bca/clippy/fmt чисты, 112 тестов физики проходят.
+   **SAP-дефект ✅ исправлен** (коммит после `01fe84b`): в `SweepAndPrune::update`
+   убран guard `if first < second` (сравнивал body-индексы, а не позиции sweep) —
+   пары теперь канонизуются в `(min,max)` всегда. Добавлен регрессионный тест
+   `sweep_and_prune_keeps_pairs_where_higher_index_sorts_first` (floor индекс 2 +
+   динамики 0/1 → пары (0,1),(0,2),(1,2)). Без чинки SAP терял (0,2)/(1,2).
+   Теперь SAP — корректный oracle для tree-тестов.
 5. ⏳ Сравнение tree / grid / SAP на матрице сцен (tiled floor, giant floor,
    sparse world, dense islands, heterogeneous sizes). Корректность tree уже
    подтверждена: на tiled floor 10k (dev build, aarch64) tree выдаёт те же

@@ -300,15 +300,17 @@ broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 > **Статус 2026-08-29 (п.4/п.5):** `DynamicAabbTree` backend ✅ реализован
 > (`crates/physics/src/broadphase_tree.rs`), подключён в `BroadPhaseBackend` +
 > `BroadPhaseKind::DynamicAabbTree`, выбирается через `set_broadphase`, флаг
-> `--tree` в `probe_100k`. Oracle-тест (brute-force, не SAP) проходит; при
-> отладке вскрыт дефект SAP (теряет пары при несовпадении индекса и позиции на
-> оси sweep) — SAP не полный oracle. Корректность tree подтверждена на tiled
-> floor 10k: те же `14161` candidate pairs, что у grid/SAP (dev wall-clock tree
-> ~13–16 s/step vs grid 8.0 ~11 s/step). Moved-list исправлен на re-query всех
-> dynamic (иначе терялись пары после первого substep). Полная матрица сцен
-> (giant floor / sparse / dense islands / heterogeneous) ещё не замерена —
-> нужен criterion/release прогон; решение о default откладывается. bca/clippy/fmt
-> чисты, 112 тестов физики проходят.
+> `--tree` в `probe_100k`. Oracle-тест (brute-force, не SAP) проходит; SAP-дефект
+> **исправлен**: `SweepAndPrune::update` терял пары, где больший body-индекс
+> сортируется раньше на оси sweep (сравнение индексов вместо позиций) — пары
+> теперь канонизуются в `(min,max)`, добавлен регрессионный тест. SAP снова
+> корректный oracle. Корректность tree подтверждена на tiled floor 10k: те же
+> `14161` candidate pairs, что у grid/SAP (dev wall-clock tree ~13–16 s/step vs
+> grid 8.0 ~11 s/step). Moved-list исправлен на re-query всех dynamic (иначе
+> терялись пары после первого substep). Полная матрица сцен (giant floor / sparse
+> / dense islands / heterogeneous) ещё не замерена — нужен criterion/release
+> прогон; решение о default откладывается. bca/clippy/fmt чисты, 113 тестов
+> физики проходят.
 ### 2. GPU-диспетчеризация в `ornis-core` всё ещё заглушка
 
 В [`crates/core/src/dispatcher.rs`](crates/core/src/dispatcher.rs):

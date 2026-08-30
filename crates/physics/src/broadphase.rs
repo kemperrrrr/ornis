@@ -277,11 +277,18 @@ impl BroadPhase for SweepAndPrune {
                 if start > end {
                     break;
                 }
-                if first < second {
-                    self.stats.pair_tests += 1;
-                    if candidate_allowed(bodies, &self.aabbs, &mut self.stats, first, second) {
-                        self.active.push((first, second));
-                    }
+                self.stats.pair_tests += 1;
+                // Canonicalize to (lower, higher) — do NOT skip on `first < second`:
+                // `first`/`second` are body indices, not sweep positions, so a
+                // higher-index body that sorts earlier on the axis would otherwise
+                // lose its pair (e.g. a large static floor vs lower-index dynamics).
+                let (a, b) = if first < second {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                if candidate_allowed(bodies, &self.aabbs, &mut self.stats, a, b) {
+                    self.active.push((a, b));
                 }
             }
         }
@@ -451,6 +458,24 @@ mod tests {
             RigidBody::new_sphere(Vec3::new(4.0, 0.0, 0.0), 0.5, 1.0),
             RigidBody::new_box(Vec3::new(-4.0, 0.0, 0.0), Vec3::splat(0.5), 1.0),
         ]
+    }
+
+    #[test]
+    fn sweep_and_prune_keeps_pairs_where_higher_index_sorts_first() {
+        // Regression: SAP must not skip a pair just because the body with the
+        // higher index sorts earlier on the sweep axis. A large static floor
+        // (index 2) sorts first by min.x but must still pair with lower-index
+        // dynamics that overlap it.
+        let bodies = vec![
+            RigidBody::new_box(Vec3::new(0.0, 0.5, 0.0), Vec3::splat(0.5), 1.0),
+            RigidBody::new_box(Vec3::new(0.0, -0.5, 0.0), Vec3::splat(0.5), 1.0),
+            RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 0.0),
+        ];
+        let mut sweep = SweepAndPrune::new();
+        sweep.update(&bodies, 0.0);
+        let mut pairs = sweep.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)]);
     }
 
     #[test]
