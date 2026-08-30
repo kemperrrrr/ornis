@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 
 [dev-dependencies]
+naga = "29"
 pollster = "0.3"
 png = "0.17"
 proptest = "1"

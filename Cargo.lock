@@ -1875,6 +1875,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "glam 0.30.10",
+ "naga",
  "ornis-core",
  "ornis-macros",
  "ornis-schedule",
