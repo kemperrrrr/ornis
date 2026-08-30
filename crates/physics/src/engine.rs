@@ -1531,21 +1531,34 @@ impl BuiltinPhysicsEngine {
     /// ponytail: 2 iters minimum for velocity, 1 for position — per-island
     /// sub-dt splitting (instead of iteration scaling) is the upgrade path
     /// if heterogeneous scenes still show solver jitter.
+    #[allow(dead_code)]
     pub(super) fn adaptive_iters_for_island(
         &self,
         max_speed: f32,
         dt: f32,
         base_iters: u32,
     ) -> u32 {
+        self.adaptive_iters_for_island_with_pen(max_speed, 0.0, dt, base_iters)
+    }
+
+    pub(super) fn adaptive_iters_for_island_with_pen(
+        &self,
+        max_speed: f32,
+        max_pen: f32,
+        dt: f32,
+        base_iters: u32,
+    ) -> u32 {
         const MIN_SUBSTEPS: u32 = 4;
         const SUB_DT_TARGET: f32 = 1.0 / 240.0;
+        const PEN_SLOP: f32 = 0.01;
         // Keep at least 2 velocity / 1 position iteration so even resting
         // islands still correct residual penetration.
         let min_iters = if base_iters > 4 { 2 } else { 1 };
         let max_sub = self.substeps.max(1);
         let lower = MIN_SUBSTEPS.min(max_sub);
-        let wanted = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;
-        let wanted = wanted.clamp(lower, max_sub);
+        let wanted_vel = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;
+        let wanted_pen = (max_pen / PEN_SLOP).ceil() as u32;
+        let wanted = wanted_vel.max(wanted_pen).clamp(lower, max_sub);
         let scaled = ((wanted as f32 / max_sub as f32) * base_iters as f32).ceil() as u32;
         scaled.clamp(min_iters, base_iters)
     }
@@ -2533,6 +2546,12 @@ mod tests {
         assert!(physics.adaptive_iters_for_island(2.0, dt, 8) < 8);
         assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 8), 8);
         assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 4), 4);
+        // penetration drives iters even when speed is zero
+        assert_eq!(
+            physics.adaptive_iters_for_island_with_pen(0.0, 0.12, dt, 8),
+            8
+        );
+        assert!(physics.adaptive_iters_for_island_with_pen(0.0, 0.06, dt, 8) > 3);
         // respects substeps cap — still returns scaled within base
         physics.set_substeps(1);
         assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 8), 8);

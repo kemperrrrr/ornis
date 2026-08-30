@@ -430,7 +430,12 @@ impl BuiltinPhysicsEngine {
                     .filter(|b| b.body_type == BodyType::Dynamic)
                     .map(|b| b.velocity.length().max(b.angular_velocity.length()))
                     .fold(0.0f32, f32::max);
-                self.adaptive_iters_for_island(max_speed, dt, base_iters)
+                let max_pen = isl
+                    .manifolds
+                    .iter()
+                    .flat_map(|m| m.points[..m.point_count].iter().map(|p| p.penetration))
+                    .fold(0.0f32, f32::max);
+                self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
             })
             .collect();
         if islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS {

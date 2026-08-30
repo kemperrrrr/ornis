@@ -41,7 +41,9 @@ impl BuiltinPhysicsEngine {
         // jitter floor (~0.01-0.03).
         const LIN_SLEEP: f32 = 0.15;
         const ANG_SLEEP: f32 = 0.15;
-        const SLEEP_TIME: f32 = 0.5;
+        const SLEEP_TIME: f32 = 0.3;
+        // ponytail: 0.3s vs 0.5s — islands sleep 12 frames earlier, perf win
+        // on many_islands without visible jitter; raise to 0.5 if tall stacks jitter.
         let n = self.bodies.len();
         // An island is quiet only if every awake member is slow.
         let mut quiet: HashMap<u32, bool> = HashMap::new();
@@ -216,7 +218,12 @@ impl BuiltinPhysicsEngine {
                     .filter(|b| b.body_type == BodyType::Dynamic)
                     .map(|b| b.velocity.length().max(b.angular_velocity.length()))
                     .fold(0.0f32, f32::max);
-                self.adaptive_iters_for_island(max_speed, dt, base_iters)
+                let max_pen = isl
+                    .manifolds
+                    .iter()
+                    .flat_map(|m| m.points[..m.point_count].iter().map(|p| p.penetration))
+                    .fold(0.0f32, f32::max);
+                self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
             })
             .collect();
         if parallel {
