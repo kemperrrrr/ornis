@@ -41,9 +41,8 @@ impl BuiltinPhysicsEngine {
         // jitter floor (~0.01-0.03).
         const LIN_SLEEP: f32 = 0.15;
         const ANG_SLEEP: f32 = 0.15;
-        const SLEEP_TIME: f32 = 0.3;
-        // ponytail: 0.3s vs 0.5s — islands sleep 12 frames earlier, perf win
-        // on many_islands without visible jitter; raise to 0.5 if tall stacks jitter.
+        // ponytail: adaptive per-island sleep — small islands sleep fast,
+        // large stacks require longer quiet. Fixed 0.3s was the lazy middle.
         let n = self.bodies.len();
         // An island is quiet only if every awake member is slow.
         let mut quiet: HashMap<u32, bool> = HashMap::new();
@@ -58,12 +57,22 @@ impl BuiltinPhysicsEngine {
                 .and_modify(|q| *q &= slow)
                 .or_insert(slow);
         }
+        // per-island size for adaptive sleep time
+        let mut island_size: HashMap<u32, usize> = HashMap::new();
+        for &r in &self.island {
+            if r != u32::MAX {
+                *island_size.entry(r).or_insert(0) += 1;
+            }
+        }
         let mut to_sleep: Vec<u32> = Vec::new();
         for (root, q) in quiet {
+            let size = island_size.get(&root).copied().unwrap_or(1);
+            // 0.2s for 1 body, +0.02s per body, clamp 0.2..0.6s — tall_stack 50 → 0.6s
+            let sleep_time = (0.2 + 0.02 * size as f32).clamp(0.2, 0.6);
             let timer = self.island_timers.entry(root).or_insert(0.0);
             if q {
                 *timer += dt;
-                if *timer >= SLEEP_TIME {
+                if *timer >= sleep_time {
                     to_sleep.push(root);
                 }
             } else {
