@@ -239,11 +239,11 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 >   upgrade — `wanted = max(|v|*dt, max_pen/slop)` когда `min_bottom_y < -0.02`
 >   при `|v|<0.2`.
 >   **Backlog CPU (не предел, ×3 до Jolt):**
->   1. `wide_solver` ON + SIMD 4/8 контактов — reuse `wide.rs` (сейчас off);
->   2. убрать аллокации в кадре (`Vec<Manifold>`, `HashMap` warm, клон shard);
->   3. penetration-driven — `wanted = max(|v|*dt, max_pen/slop)`;
->   4. агрессивнее сон / `SLEEP_TIME` tuning.
->   ponytail: `3` — когда `min_bottom_y < -0.02` при `|v|<0.2` (сейчас 1/3), `1` — шире `perf_probe tiled`.
+>   1. `wide_solver` ON + SIMD 4/8 контактов — reuse `wide.rs` ✅ уже ON (`engine.rs:1423` wide_solver=true, `dispatch_islands_velocity` wide_on);
+>   2. убрать аллокации в кадре (`Vec<Manifold>`, `HashMap` warm, клон shard) — ⏭️ отложено (требует убрать клон shard + HashMap, add когда `perf_probe tiled` покажет alloc flame — ponytail: no allocs per frame);
+>   3. penetration-driven — `wanted = max(|v|*dt, max_pen/slop)` ✅ `31e6b6e` (`adaptive_iters_for_island_with_pen`, slop 0.01, 115 тестов);
+>   4. агрессивнее сон / `SLEEP_TIME` tuning ✅ `31e6b6e` (0.5→0.3с, 12 кадров раньше, `ponytail` ceiling).
+>   3/4 done, 1 уже был, 1 отложен.
 
 > ### Решение по следующему broadphase (срез 2026-08-28)
 
