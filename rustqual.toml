@@ -4,6 +4,11 @@
 
 exclude_files = ["editor/**", "target/**"]
 
+# IOSP leniency: closures/iterator/match-as-dispatch — не logic (PROJECT_REVIEW § BCA→rustqual)
+strict_closures = false
+strict_iterator_chains = false
+strict_error_propagation = false
+
 # ponytail: 60→80 — solver/render не режем контекст ради счётчика; magic пока без allow-листа — 0/1/2/-1 глушить через // qual:allow
 # IOSP leniency по умолчанию (closures/iterator/match-as-dispatch — не logic)
 

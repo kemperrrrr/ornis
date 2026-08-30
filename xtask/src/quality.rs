@@ -73,10 +73,10 @@ impl QualityFlags {
 
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
-    /// Level 1 now: fmt, clippy, bca, test, test (physics gpu),
-    /// clippy (physics gpu), audit, deny, outdated = 9
+    /// Level 1 now: fmt, clippy, bca, rustqual, test, test (physics gpu),
+    /// clippy (physics gpu), audit, deny, outdated = 10
     fn total_stages(&self) -> usize {
-        9 + usize::from(self.ci) * 2
+        10 + usize::from(self.ci) * 2
             + usize::from(self.full) * 2
             + usize::from(self.bench)
             + usize::from(self.everything) * 2
@@ -122,6 +122,24 @@ impl<'a> StageList<'a> {
         c.arg("check").current_dir(self.root);
         c
     }
+
+    fn rustqual(&self) -> Command {
+        let mut c = Command::new("rustqual");
+        // ponytail: rustqual.toml — единственный source of truth, не дублировать пороги здесь.
+        // Ratchet: --compare baseline.json --fail-on-regression --no-fail — падает только при регрессе,
+        // иначе baseline содержит 14% Score / 1633 findings и обычный check всегда красный.
+        let baseline = self.root.join("baseline.json");
+        if baseline.exists() {
+            c.args([
+                "--compare",
+                "baseline.json",
+                "--fail-on-regression",
+                "--no-fail",
+            ]);
+        }
+        c.current_dir(self.root);
+        c
+    }
 }
 
 /// ── Level 1 (mandatory set) ───────────────────────────────
@@ -157,6 +175,24 @@ fn level1(stages: &mut StageList<'_>) {
         stages.skip(
             "bca",
             "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
+        );
+    }
+
+    // Structural quality gate — MIT counterpart, replaces bca after 2-week parallel run.
+    // Single source of truth: rustqual.toml (no thresholds duplicated here).
+    // Ratchet mode: --compare baseline.json --fail-on-regression --no-fail — fails only on regression,
+    // new violations are ratcheted via baseline update, not immediate break.
+    if binary_exists("rustqual") {
+        let desc = if stages.root.join("baseline.json").exists() {
+            "rustqual --compare baseline.json --fail-on-regression --no-fail"
+        } else {
+            "rustqual (no baseline.json — run: rustqual --save-baseline baseline.json)"
+        };
+        stages.run("rustqual", desc, stages.rustqual(), false);
+    } else {
+        stages.skip(
+            "rustqual",
+            "rustqual not installed — structural gate skipped (cargo install rustqual --locked)",
         );
     }
 
@@ -372,16 +408,18 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy, bca, test, audit, deny, outdated\n  \
+         cargo xtask quality           quick set (level 1): fmt, clippy, bca, rustqual, test, audit, deny, outdated\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n\
          \n\
-         External tools (audit, deny, outdated, llvm-cov, bca) are optional:\n  \
+         External tools (audit, deny, outdated, llvm-cov, bca, rustqual) are optional:\n  \
          missing → SKIP with install hint. bca is MPL-2.0 as external binary\n  \
-         and does NOT affect Ornis license (MIT OR Apache-2.0)."
+         and does NOT affect Ornis license (MIT OR Apache-2.0); rustqual is MIT.\n  \
+         rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
+         Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression"
     );
     exit(code);
 }

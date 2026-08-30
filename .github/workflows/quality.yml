@@ -80,6 +80,14 @@ jobs:
         continue-on-error: true
         run: cargo install big-code-analysis-cli --locked
 
+      # rustqual — MIT replacement for bca (PROJECT_REVIEW § BCA→rustqual).
+      # Runs alongside bca for 2 weeks, then bca will be removed when
+      # Score ≥80% and no regression. Same optional-install contract: if
+      # this step fails, xtask quality SKIPs the rustqual stage.
+      - name: Install rustqual (optional, structural gate)
+        continue-on-error: true
+        run: cargo install rustqual --locked
+
       - uses: Swatinem/rust-cache@v2
 
       # The one command. Locally: same flags, same result.
