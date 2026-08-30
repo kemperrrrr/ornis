@@ -515,8 +515,12 @@ cargo: command not found
 Однако для такого проекта важно добавить ещё:
 
 - браузерный визуальный end-to-end тест snapshot → WASM scene;
-- browser WebSocket reconnect integration test;
-- fuzzing HTTP command payloads;
+- ~~browser WebSocket reconnect integration test~~ — ✅ добавлен (2026-08-30):
+  `crates/editor-backend/tests/http_integration.rs`, reconnect по
+  `/api/events?after=<sequence>` без дублей/потерь + сценарий `EventGap`
+  после вытеснения истории;
+- ~~fuzzing HTTP command payloads~~ — ✅ добавлен (2026-08-30): fuzz-target
+  `editor_command` против `editor_backend::remote::parse_command_payload`;
 - benchmark worst-case broad phase;
 - compile test для всех публичных macro entry points.
 

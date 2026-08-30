@@ -14,6 +14,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+editor-backend = { path = "../crates/editor-backend" }
 ornis-render = { path = "../crates/render" }
 ornis-materialx = { path = "../crates/materialx" }
 
@@ -29,5 +30,11 @@ doc = false
 [[bin]]
 name = "materialx_parse"
 path = "fuzz_targets/materialx_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "editor_command"
+path = "fuzz_targets/editor_command.rs"
 test = false
 doc = false

@@ -62,7 +62,7 @@ fn usage(code: i32) -> ! {
                   --full           --init + cargo xtask quality\n      \
                   (MPL-2.0 external binary, does NOT affect MIT OR Apache-2.0)\n  \
          fuzz <target> [-- <args>]\n      \
-         Run a cargo-fuzz target (scene_ron, materialx_parse) via +nightly\n  \
+         Run a cargo-fuzz target (scene_ron, materialx_parse, editor_command) via +nightly\n  \
          mutants [-- <args>]\n      \
          Run cargo-mutants against ornis-core"
     );

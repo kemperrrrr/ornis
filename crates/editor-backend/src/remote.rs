@@ -665,6 +665,22 @@ fn post_command(body: &str, game_tx: &Sender<UiCommand>, request_id: u64) -> Com
     }
 }
 
+/// Parse a raw `/api/command` request body into a validated `UiCommand`.
+///
+/// Pure protocol-parser entry point: it never touches the game channel and
+/// never panics on arbitrary input. Returns `Some` for a well-formed
+/// `{"type": …, "data": …}` envelope and `None` for malformed JSON, a
+/// missing/non-string `type`, or schema-violating `set_component` data.
+/// `post_command` keeps its finer-grained ack errors by performing the same
+/// steps itself; this function exists for fuzzing and other callers that
+/// only need the valid/garbage distinction.
+#[must_use]
+pub fn parse_command_payload(body: &str) -> Option<UiCommand> {
+    let cmd = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let cmd_type = cmd.get("type").and_then(|value| value.as_str())?;
+    build_command(cmd_type, cmd.get("data"))
+}
+
 /// Route a posted command to its `UiCommand`: `set_component` is the typed
 /// generic lane (registry); anything else is a Custom pass-through.
 /// Malformed `set_component` shapes are dropped (`None`) like any garbage
@@ -1006,6 +1022,27 @@ mod tests {
             }
             _ => panic!("expected Custom"),
         }
+    }
+
+    // ── parse_command_payload ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_command_payload_accepts_valid_and_rejects_garbage() {
+        let valid = parse_command_payload(
+            r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#,
+        );
+        assert!(matches!(
+            valid,
+            Some(UiCommand::SetComponent { entity_id: 5, .. })
+        ));
+
+        let custom = parse_command_payload(r#"{"type":"ping"}"#);
+        assert!(matches!(custom, Some(UiCommand::Custom { .. })));
+
+        assert!(parse_command_payload("this is not json").is_none());
+        assert!(parse_command_payload(r#"{"foo":1}"#).is_none());
+        assert!(parse_command_payload(r#"{"type":7}"#).is_none());
+        assert!(parse_command_payload(r#"{"type":"set_component","data":{"id":1}}"#).is_none());
     }
 
     // ── post_command ───────────────────────────────────────────────────────

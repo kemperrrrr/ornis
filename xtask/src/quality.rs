@@ -308,9 +308,26 @@ fn deep_stages(stages: &mut StageList<'_>) {
             stages.cargo(&["+nightly", "fuzz", "run", "scene_ron", "--", "-runs=200"]),
             false,
         );
+        stages.run(
+            "fuzz smoke (editor_command)",
+            "cargo +nightly fuzz run editor_command -- -runs=200",
+            stages.cargo(&[
+                "+nightly",
+                "fuzz",
+                "run",
+                "editor_command",
+                "--",
+                "-runs=200",
+            ]),
+            false,
+        );
     } else {
         stages.skip(
             "fuzz smoke (scene_ron)",
+            "cargo-fuzz or nightly toolchain missing",
+        );
+        stages.skip(
+            "fuzz smoke (editor_command)",
             "cargo-fuzz or nightly toolchain missing",
         );
     }
@@ -711,7 +728,7 @@ pub fn fuzz(args: &[String]) {
              \n\
              USAGE:\n  \
              cargo xtask fuzz <target> [-- <libfuzzer args>]\n  \
-             available targets: scene_ron, materialx_parse\n\
+             available targets: scene_ron, materialx_parse, editor_command\n\
              \n\
              Example:  cargo xtask fuzz scene_ron -- -runs=1000"
         );

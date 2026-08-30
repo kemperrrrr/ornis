@@ -246,6 +246,152 @@ fn remote_editor_websocket_stream_replays_events() {
     assert_eq!(u16::from_be_bytes(close_code), 1001);
 }
 
+/// Open a WebSocket `/api/events` connection over a raw TcpStream: write the
+/// RFC 6455 upgrade request and assert the 101 handshake response.
+fn websocket_connect(port: u16, path: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect WebSocket");
+    stream
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write WebSocket handshake");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("WebSocket read timeout");
+
+    let mut handshake = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !handshake.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("read handshake");
+        handshake.push(byte[0]);
+    }
+    let handshake = String::from_utf8(handshake).expect("handshake headers");
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "handshake: {handshake}"
+    );
+    stream
+}
+
+/// Read WebSocket text frames until at least `count` events have
+/// accumulated: the server may deliver several records batched per frame.
+fn collect_websocket_events(stream: &mut TcpStream, count: usize) -> Vec<serde_json::Value> {
+    let mut events = Vec::new();
+    while events.len() < count {
+        let frame = read_websocket_text(stream);
+        let batch: Vec<serde_json::Value> =
+            serde_json::from_str(&frame).expect("WebSocket event JSON");
+        events.extend(batch);
+    }
+    events
+}
+
+#[test]
+fn remote_editor_websocket_reconnect_resumes_after_cursor() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    let send_completed = |request_id: u64| {
+        ev_tx
+            .send(GameEvent::CommandCompleted {
+                request_id,
+                command: "ping".into(),
+                success: true,
+                error: None,
+            })
+            .expect("send event");
+    };
+
+    // First connection: consume two live events and remember the cursor.
+    let mut stream = websocket_connect(port, "/api/events?after=0");
+    send_completed(101);
+    send_completed(102);
+    let events = collect_websocket_events(&mut stream, 2);
+    let last_sequence = events[1]["sequence"].as_u64().expect("sequence");
+    assert_eq!(last_sequence, 2);
+
+    // Client-side disconnect, then two more events land while no client is
+    // connected. The drop is detected by the server on its next write.
+    drop(stream);
+    send_completed(103);
+    send_completed(104);
+
+    // Reconnect with the cursor at the last received event: the server must
+    // replay exactly the missed ones — no duplicates, no losses, no gap.
+    let mut stream = websocket_connect(port, &format!("/api/events?after={last_sequence}"));
+    let replayed = collect_websocket_events(&mut stream, 2);
+    let sequences: Vec<u64> = replayed
+        .iter()
+        .map(|event| event["sequence"].as_u64().expect("sequence"))
+        .collect();
+    assert_eq!(sequences, vec![3, 4], "replay must resume after the cursor");
+    let request_ids: Vec<u64> = replayed
+        .iter()
+        .map(|event| {
+            event["CommandCompleted"]["request_id"]
+                .as_u64()
+                .expect("request_id")
+        })
+        .collect();
+    assert_eq!(request_ids, vec![103, 104]);
+    assert!(
+        replayed.iter().all(|event| event.get("EventGap").is_none()),
+        "no history gap expected: {replayed:?}"
+    );
+
+    // Nothing else is replayed: the next read must time out.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .expect("short read timeout");
+    let mut header = [0_u8; 2];
+    assert!(
+        stream.read_exact(&mut header).is_err(),
+        "no extra frames after the replay"
+    );
+
+    editor.stop();
+}
+
+#[test]
+fn remote_editor_websocket_reconnect_reports_gap_after_history_rollover() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Overflow the bounded replay history (capacity 256) so a reconnect with
+    // a prehistoric cursor can no longer be served losslessly.
+    for entity_id in 0..260_u32 {
+        ev_tx
+            .send(GameEvent::EntityCreated { entity_id })
+            .expect("send event");
+    }
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Kept records carry sequences 5..=260; the replay must start with an
+    // EventGap marker instead of silently skipping sequences 1..=4.
+    let mut stream = websocket_connect(port, "/api/events?after=0");
+    let events = collect_websocket_events(&mut stream, 257);
+    assert_eq!(
+        events[0]["EventGap"],
+        serde_json::json!({"after": 0, "oldest": 5}),
+        "rollover must be signalled: {:?}",
+        events[0]
+    );
+    assert_eq!(events[0]["sequence"], 4);
+    assert_eq!(events[1]["sequence"], 5);
+    assert_eq!(events[1]["EntityCreated"]["entity_id"], 4);
+
+    editor.stop();
+}
+
 #[test]
 fn remote_editor_bind_failure_is_safe() {
     // Starting two editors on the same port: the second must not panic,
