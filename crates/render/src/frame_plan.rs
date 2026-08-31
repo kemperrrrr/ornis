@@ -36,6 +36,7 @@ pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
         wgpu::TextureFormat::Rgba8Unorm
         | wgpu::TextureFormat::Rgba8UnormSrgb
+        | wgpu::TextureFormat::Bgra8UnormSrgb
         | wgpu::TextureFormat::R32Uint
         | wgpu::TextureFormat::Rg16Float
         | wgpu::TextureFormat::Depth32Float
