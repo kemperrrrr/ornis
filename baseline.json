@@ -1,13 +1,13 @@
 {
   "version": 2,
-  "quality_score": 0.1320939742336783,
+  "quality_score": 0.13154206884603015,
   "iosp_score": 0.9157381615598886,
   "violations": 121,
   "total": 2283,
   "complexity_warnings": 3,
   "magic_number_warnings": 728,
   "nesting_depth_warnings": 1,
-  "function_length_warnings": 24,
+  "function_length_warnings": 25,
   "unsafe_warnings": 8,
   "error_handling_warnings": 81,
   "duplicate_groups": 40,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
   "structural_coupling_warnings": 19,
-  "total_findings": 1631,
+  "total_findings": 1634,
   "violation_details": [
     {
       "name": "serve_websocket",
