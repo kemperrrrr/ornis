@@ -73,10 +73,10 @@ impl QualityFlags {
 
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
-    /// Level 1 now: fmt, clippy, rustqual, test, test (physics gpu),
-    /// clippy (physics gpu), audit, deny, outdated = 9
+    /// Level 1 now: fmt, clippy, rustqual, smoke (editor-only), test, test (physics gpu),
+    /// clippy (physics gpu), audit, deny, outdated = 10
     fn total_stages(&self) -> usize {
-        9 + usize::from(self.ci) * 2
+        10 + usize::from(self.ci) * 2
             + usize::from(self.full) * 2
             + usize::from(self.bench)
             + usize::from(self.everything) * 2
@@ -176,6 +176,10 @@ fn level1(stages: &mut StageList<'_>) {
             "rustqual not installed — structural gate skipped (cargo install rustqual --locked)",
         );
     }
+
+    // Smoke: `cargo run --features editor-only` должен стартовать HTTP на 3420 и не падать.
+    // ponytail: без окна/GPU, 15s таймаут (сборка + старт), poll TcpStream — без curl/timeout deps.
+    smoke_stage(stages);
 
     stages.run(
         "test",
@@ -389,7 +393,7 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy, rustqual, test, audit, deny, outdated\n  \
+         cargo xtask quality           quick set (level 1): fmt, clippy, rustqual, smoke, test, audit, deny, outdated\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
@@ -399,7 +403,8 @@ fn quality_usage(code: i32) -> ! {
          External tools (audit, deny, outdated, llvm-cov, rustqual) are optional:\n  \
          missing → SKIP with install hint. rustqual is MIT.\n  \
          rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
-         Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression --no-fail"
+         Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression --no-fail\n  \
+         Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 30s and stay alive"
     );
     exit(code);
 }
@@ -700,6 +705,80 @@ fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult
         name: name.to_string(),
         status: Status::Skip,
         note: note.to_string(),
+    }
+}
+
+/// Smoke: `cargo run --features editor-only` must compile, bind 127.0.0.1:3420 and stay alive.
+/// ponytail: 30s ceiling (cold cargo build + bind), poll TcpStream every 300ms, no curl/timeout dep.
+fn smoke_stage(stages: &mut StageList<'_>) {
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    stages.n += 1;
+    let (idx, total) = (stages.n, stages.total);
+    let name = "smoke (editor-only)";
+    let desc = "cargo run --features editor-only (bind 127.0.0.1:3420, 30s)";
+    eprintln!();
+    eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
+    let mut child = match Command::new("cargo")
+        .args(["run", "--features", "editor-only"])
+        .current_dir(stages.root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let r = StageResult {
+                name: name.into(),
+                status: Status::Fail,
+                note: format!("spawn: {e}"),
+            };
+            eprintln!("── {name}: FAIL (spawn: {e}) ──");
+            stages.results.push(r);
+            return;
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut ok = false;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().ok().flatten() {
+            let note = format!("exited early: {status}");
+            eprintln!("── {name}: FAIL ({note}) ──");
+            stages.results.push(StageResult {
+                name: name.into(),
+                status: Status::Fail,
+                note,
+            });
+            return;
+        }
+        if TcpStream::connect("127.0.0.1:3420").is_ok() {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    // Give OS time to release port for next run.
+    std::thread::sleep(Duration::from_millis(200));
+    if ok {
+        eprintln!("── {name}: PASS ──");
+        stages.results.push(StageResult {
+            name: name.into(),
+            status: Status::Pass,
+            note: String::new(),
+        });
+    } else {
+        let note = "timeout 30s: 127.0.0.1:3420 not reachable".to_string();
+        eprintln!("── {name}: FAIL ({note}) ──");
+        if ci_annotations() {
+            annotate(format!("quality-{}", name.replace(' ', "-")), &note);
+        }
+        stages.results.push(StageResult {
+            name: name.into(),
+            status: Status::Fail,
+            note,
+        });
     }
 }
 

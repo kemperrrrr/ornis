@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.13450216968427242,
-  "iosp_score": 0.9156794425087108,
+  "quality_score": 0.1320939742336783,
+  "iosp_score": 0.9157381615598886,
   "violations": 121,
-  "total": 2282,
+  "total": 2283,
   "complexity_warnings": 3,
-  "magic_number_warnings": 725,
+  "magic_number_warnings": 728,
   "nesting_depth_warnings": 1,
   "function_length_warnings": 24,
   "unsafe_warnings": 8,
@@ -14,7 +14,7 @@
   "dead_code_warnings": 154,
   "dead_type_warnings": 1,
   "fragment_groups": 108,
-  "boilerplate_warnings": 98,
+  "boilerplate_warnings": 100,
   "srp_struct_warnings": 5,
   "srp_module_warnings": 30,
   "wildcard_import_warnings": 11,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 123,
+  "tq_untested_warnings": 124,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
   "structural_coupling_warnings": 19,
-  "total_findings": 1625,
+  "total_findings": 1631,
   "violation_details": [
     {
       "name": "serve_websocket",
@@ -603,7 +603,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 353
+      "line": 357
     },
     {
       "name": "GameApp::showcase_engine",
