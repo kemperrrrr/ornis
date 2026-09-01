@@ -309,6 +309,8 @@ runtime без отдельной extract-фазы — будущая цель, 
 
 ### B2. Физика (`crates/physics`) — план работ
 
+> **Статус п1/п2/контакты на 2026-09-02:** п1 incremental broadphase **✅ готов** (`UniformGrid::body_cells`/`prev_meta`, dirty-set, retained clean-clean, honest `BroadPhaseStats`, heuristic >50% → full rebuild); п2 narrow cache **✅ готов** (`NarrowCacheEntry`, `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с, HashMap) + SAT cache **✅ готов (отдельный PR, 16-шард `Vec<Mutex>` sequential-only, parallel bypass без регресса)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`); **box↔capsule ✅** + fully analytic TOI ✅ (conservative advancement). **Полный 8→2 на больших parallel (14k пар)** — следующий шаг (lock-free/DashMap, расширенный EPS);
+
 > Архитектура сверена с реальными исходниками **Box3D** (`github.com/erincatto/box3d`,
 > soltimeer 3D-преемник Box2D, Catto, июнь 2026) и **Jolt** (`github.com/jrouwe/JoltPhysics`):
 > multisolver = joint-солверы + широкий (SIMD) контактный солвер + manifold-солвер,
@@ -430,8 +432,7 @@ pre-filter до SAT через `scratch_pairs`; no-alloc scratch
 **many_islands 16.33 мс (61.2 FPS)**, **hetero 16.33 мс**,
 **islands_grid 2.81 мс (355 FPS)**, **contact_cluster 3.16 мс (316 FPS)**,
 **big_stack 925 FPS**, шум **±1.5 мс**. Бюджет **60 FPS (16.7 мс) достигнут**.
-Далее: **п1** incremental broadphase (4.8→1 мс), **п2** narrow cache
-(8→2 мс) к цели **~10 мс / 100 FPS**; **GPU solver 2.9 мс — не бутылка, отложен**.
+Далее: **п1 incremental broadphase ✅ готов** (2026-09-01: `body_cells`/`prev_meta`, dirty-set, retained clean-clean, heuristic >50% → full rebuild, honest stats; 4.8→~1 мс ожидание), **п2 narrow cache ✅** (2026-09-01: `NarrowCacheEntry` + `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с bypass) + **SAT cache ✅ 2026-09-02 (16-шард `Vec<Mutex>`, sequential-only, parallel bypass 9→89 мс регресс избежан, `obb_sat_cached`/`box_manifold_cached`)** к цели **~10 мс / 100 FPS**; полный 8→2 на больших parallel — следующий шаг (lock-free/DashMap); **GPU solver 2.9 мс — не бутылка, отложен**. **box↔capsule ✅ 2026-09-01** (оба narrowphase-пути через `box_vs_capsule` + `distance::shape_distance`, analytic TOI `cast_shape` conservative advancement).
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

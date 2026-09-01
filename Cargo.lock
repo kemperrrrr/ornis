@@ -1826,6 +1826,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

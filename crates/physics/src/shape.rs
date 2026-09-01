@@ -4,6 +4,11 @@
 //! are symmetric about local +Y) and provide the two queries the pipeline
 //! relies on: an exact world-space AABB projection for the broadphase and a
 //! diagonal inertia tensor for the solver.
+//!
+//! The box↔capsule pair (G1-остаток) is now a first-class discrete contact
+//! via `crate::distance::shape_distance` and `engine::box_vs_capsule`
+//! (both `detect_collisions_into` paths, speculative `margin`, analytic TOI
+//! through `distance::cast_shape`).
 
 use glam::{Quat, Vec3};
 

@@ -1,5 +1,10 @@
 //! Axis-aligned bounding boxes and rays — the geometric query primitives
 //! shared by broadphase culling, sleep-region checks and raycasts.
+//!
+//! `AABB` is the unit used for swept broadphase (`broadphase::swept_aabbs`,
+//! incremental `UniformGrid` with `body_cells`/`prev_meta`), `Ray`/`RaycastHit`
+//! back the exact sphere/OBB/capsule ray intersections and the analytic
+//! `distance::cast_shape` TOI path.
 
 pub use glam::Vec3;
 

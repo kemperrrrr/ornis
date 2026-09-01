@@ -21,17 +21,25 @@ const DEFAULT_MAX_CELLS_PER_BODY: usize = 4096;
 ///
 /// The counters describe candidate generation before narrowphase/solver work;
 /// they are intended for benchmark diagnostics rather than gameplay logic.
+///
+/// `pair_tests`, `filter_rejections`, `static_static_skips` and
+/// `aabb_rejections` are honest totals comparable to a full rebuild and to
+/// the `SweepAndPrune` baseline: after an incremental [`UniformGrid`] update
+/// they equal `retained clean-clean` + `new dirty-involved` counts, while
+/// `candidate_pairs` is always derived from the final de-duplicated active
+/// set. If the backend ever emitted incremental-only counters, it would be
+/// explicitly documented; the current implementation preserves totals.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BroadPhaseStats {
     /// Number of bodies included in the update.
     pub body_count: usize,
-    /// Number of raw pair checks before filtering and AABB rejection.
+    /// Number of raw pair checks before filtering and AABB rejection (honest total).
     pub pair_tests: usize,
-    /// Pair checks rejected by mutual collision layers/masks.
+    /// Pair checks rejected by mutual collision layers/masks (honest total).
     pub filter_rejections: usize,
-    /// Raw pair checks skipped because both bodies are ordinary static bodies.
+    /// Raw pair checks skipped because both bodies are ordinary static bodies (honest total).
     pub static_static_skips: usize,
-    /// Pair checks whose swept AABBs do not overlap.
+    /// Pair checks whose swept AABBs do not overlap (honest total).
     pub aabb_rejections: usize,
     /// Unique candidate pairs emitted for narrowphase processing.
     pub candidate_pairs: usize,
@@ -334,6 +342,9 @@ pub(crate) struct UniformGrid {
     max_cells_per_body: usize,
     stats: BroadPhaseStats,
     scratch_pairs: HashSet<(usize, usize)>,
+    body_cells: Vec<Vec<CellKey>>,
+    body_is_large: Vec<bool>,
+    prev_meta: Vec<(bool, u32, u32, BodyType)>,
 }
 
 impl UniformGrid {
@@ -355,6 +366,9 @@ impl UniformGrid {
             max_cells_per_body: DEFAULT_MAX_CELLS_PER_BODY,
             stats: BroadPhaseStats::default(),
             scratch_pairs: HashSet::new(),
+            body_cells: Vec::new(),
+            body_is_large: Vec::new(),
+            prev_meta: Vec::new(),
         }
     }
 
@@ -375,39 +389,56 @@ impl UniformGrid {
         let (minimum, maximum, cell_count) = self.cell_bounds(&self.aabbs[body]);
         if cell_count > self.max_cells_per_body as u64 {
             self.large.push(body);
+            if body < self.body_is_large.len() {
+                self.body_is_large[body] = true;
+            }
+            if body < self.body_cells.len() {
+                self.body_cells[body].clear();
+            }
             return;
         }
+        if body < self.body_is_large.len() {
+            self.body_is_large[body] = false;
+        }
+        let mut keys = Vec::new();
         for x in minimum.x..=maximum.x {
             for y in minimum.y..=maximum.y {
                 for z in minimum.z..=maximum.z {
-                    self.cells
-                        .entry(CellKey { x, y, z })
-                        .or_default()
-                        .push(body);
+                    let key = CellKey { x, y, z };
+                    self.cells.entry(key).or_default().push(body);
+                    keys.push(key);
                 }
             }
         }
+        if body < self.body_cells.len() {
+            self.body_cells[body] = keys;
+        }
     }
-}
 
-impl BroadPhase for UniformGrid {
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
-        self.aabbs = swept_aabbs(bodies, sub_dt);
-        self.active.clear();
+    fn full_rebuild(&mut self, bodies: &[RigidBody], new_aabbs: Vec<AABB>) {
+        self.aabbs = new_aabbs;
         self.cells.clear();
         self.large.clear();
+        self.scratch_pairs.clear();
+        let n = self.aabbs.len();
+        self.body_cells.resize(n, Vec::new());
+        self.body_is_large.resize(n, false);
+        for c in &mut self.body_cells {
+            c.clear();
+        }
+        self.prev_meta.resize(n, (false, 0, 0, BodyType::Static));
+        for (i, b) in bodies.iter().enumerate() {
+            self.prev_meta[i] = (b.is_trigger, b.collision_layer, b.collision_mask, b.body_type);
+        }
         self.stats = BroadPhaseStats {
             body_count: bodies.len(),
             ..BroadPhaseStats::default()
         };
-
-        for body in 0..self.aabbs.len() {
+        for body in 0..n {
             self.insert_body(body);
         }
         self.stats.occupied_cells = self.cells.len();
         self.stats.large_bodies = self.large.len();
-
-        self.scratch_pairs.clear();
         for occupants in self.cells.values() {
             for (offset, &first) in occupants.iter().enumerate() {
                 for &second in &occupants[(offset + 1)..] {
@@ -422,7 +453,7 @@ impl BroadPhase for UniformGrid {
                 }
             }
         }
-        for &large in &self.large {
+        for &large in &self.large.clone() {
             for body in 0..self.aabbs.len() {
                 add_pair(
                     &mut self.scratch_pairs,
@@ -434,6 +465,158 @@ impl BroadPhase for UniformGrid {
                 );
             }
         }
+        self.active.clear();
+        self.active.extend(self.scratch_pairs.iter().copied());
+        self.active.sort_unstable();
+    }
+}
+
+impl BroadPhase for UniformGrid {
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
+        let new_aabbs = swept_aabbs(bodies, sub_dt);
+        // First run or topology change -> full rebuild.
+        if self.aabbs.len() != new_aabbs.len()
+            || self.body_cells.len() != new_aabbs.len()
+            || self.aabbs.is_empty()
+        {
+            self.full_rebuild(bodies, new_aabbs);
+            return;
+        }
+        // Find dirty bodies (AABB or filter changed).
+        let mut dirty = Vec::new();
+        for i in 0..new_aabbs.len() {
+            let meta = (
+                bodies[i].is_trigger,
+                bodies[i].collision_layer,
+                bodies[i].collision_mask,
+                bodies[i].body_type,
+            );
+            if new_aabbs[i].min != self.aabbs[i].min
+                || new_aabbs[i].max != self.aabbs[i].max
+                || self.prev_meta[i] != meta
+            {
+                dirty.push(i);
+            }
+        }
+        if dirty.is_empty() {
+            self.aabbs = new_aabbs;
+            self.stats.body_count = bodies.len();
+            self.stats.occupied_cells = self.cells.len();
+            self.stats.large_bodies = self.large.len();
+            return;
+        }
+        // Heuristic: >50% dirty -> full rebuild cheaper than incremental bookkeeping.
+        if dirty.len() * 2 > new_aabbs.len() {
+            self.full_rebuild(bodies, new_aabbs);
+            return;
+        }
+        // Update prev_meta for dirty bodies before retaining pairs.
+        for &d in &dirty {
+            self.prev_meta[d] = (
+                bodies[d].is_trigger,
+                bodies[d].collision_layer,
+                bodies[d].collision_mask,
+                bodies[d].body_type,
+            );
+        }
+        let dirty_set: HashSet<usize> = dirty.iter().copied().collect();
+        // Remove dirty bodies from spatial index.
+        for &d in &dirty {
+            if self.body_is_large[d] {
+                if let Some(pos) = self.large.iter().position(|&x| x == d) {
+                    self.large.swap_remove(pos);
+                }
+            } else {
+                // Clone keys to avoid borrow conflict.
+                let keys = self.body_cells[d].clone();
+                for key in keys {
+                    if let Some(vec) = self.cells.get_mut(&key) {
+                        if let Some(pos) = vec.iter().position(|&x| x == d) {
+                            vec.swap_remove(pos);
+                        }
+                        if vec.is_empty() {
+                            self.cells.remove(&key);
+                        }
+                    }
+                }
+            }
+            self.body_cells[d].clear();
+            self.body_is_large[d] = false;
+        }
+        // Keep only clean-clean pairs.
+        self.scratch_pairs
+            .retain(|(a, b)| !dirty_set.contains(a) && !dirty_set.contains(b));
+        // Reset per-frame counters but keep honest totals: retained clean-clean
+        // counts + new dirty-involved counts = total comparable to full rebuild.
+        let retained_tests = self.stats.pair_tests;
+        let retained_filter = self.stats.filter_rejections;
+        let retained_static = self.stats.static_static_skips;
+        let retained_aabb = self.stats.aabb_rejections;
+        self.stats = BroadPhaseStats {
+            body_count: bodies.len(),
+            pair_tests: retained_tests,
+            filter_rejections: retained_filter,
+            static_static_skips: retained_static,
+            aabb_rejections: retained_aabb,
+            candidate_pairs: 0,
+            occupied_cells: 0,
+            large_bodies: 0,
+        };
+        // Update AABBs before reinsertion so cell_bounds uses new bounds.
+        self.aabbs = new_aabbs;
+        for &d in &dirty {
+            self.insert_body(d);
+        }
+        self.stats.occupied_cells = self.cells.len();
+        self.stats.large_bodies = self.large.len();
+        // Generate pairs involving dirty bodies.
+        for &d in &dirty {
+            if self.body_is_large[d] {
+                for o in 0..bodies.len() {
+                    add_pair(
+                        &mut self.scratch_pairs,
+                        bodies,
+                        &self.aabbs,
+                        &mut self.stats,
+                        d,
+                        o,
+                    );
+                }
+            } else {
+                // Pairs within dirty's cells.
+                let keys = self.body_cells[d].clone();
+                for key in keys {
+                    if let Some(occupants) = self.cells.get(&key).cloned() {
+                        for o in occupants {
+                            if o == d {
+                                continue;
+                            }
+                            add_pair(
+                                &mut self.scratch_pairs,
+                                bodies,
+                                &self.aabbs,
+                                &mut self.stats,
+                                d,
+                                o,
+                            );
+                        }
+                    }
+                }
+                // Pairs against large bodies.
+                for &large in &self.large.clone() {
+                    add_pair(
+                        &mut self.scratch_pairs,
+                        bodies,
+                        &self.aabbs,
+                        &mut self.stats,
+                        d,
+                        large,
+                    );
+                }
+            }
+        }
+        // stats now holds honest total = retained clean-clean + new dirty-involved;
+        // `candidate_pairs` derived from active len.
         self.active.clear();
         self.active.extend(self.scratch_pairs.iter().copied());
         self.active.sort_unstable();

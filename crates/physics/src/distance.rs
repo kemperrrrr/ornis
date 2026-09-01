@@ -3,6 +3,11 @@
 //! and the TOI pass: every query returns the surface-to-surface distance and
 //! witness points. Exact (not sampled) — casts can never tunnel through
 //! geometry thinner than the step length.
+//!
+//! The module now backs the **box↔capsule discrete contact** as well:
+//! `engine::box_vs_capsule` is a thin wrapper over `shape_distance` with a
+//! speculative `margin` (both narrowphase paths), and `cast_shape` provides
+//! the analytic linear TOI used by `solve_continuous`.
 
 use glam::{Quat, Vec3};
 

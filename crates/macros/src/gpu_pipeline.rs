@@ -49,6 +49,8 @@ struct ShaderConfig {
     workgroup_size: u32,
     bindings: Vec<String>,
     builtins: Vec<String>,
+    vertex_entry: Option<String>,
+    fragment_entry: Option<String>,
 }
 
 fn is_punct(tt: &TokenTree, ch: char) -> bool {
@@ -248,6 +250,8 @@ fn parse_config(args: TokenStream2) -> syn::Result<Option<ShaderConfig>> {
         workgroup_size: 64,
         bindings: Vec::new(),
         builtins: Vec::new(),
+        vertex_entry: None,
+        fragment_entry: None,
     };
     let mut binding_index = 0usize;
     for item in split_top_level(args) {
@@ -286,7 +290,7 @@ fn apply_option(
     let TokenTree::Ident(kw) = &first else {
         return Err(syn::Error::new(
             first.span(),
-            "expected an option: `workgroup_size`, `storage`, `uniform` or `builtin`",
+            "expected an option: `workgroup_size`, `storage`, `uniform`, `texture`, `sampler`, `vertex`, `fragment` or `builtin`",
         ));
     };
     match kw.to_string().as_str() {
@@ -297,6 +301,22 @@ fn apply_option(
             config.bindings.push(decl);
             Ok(())
         }
+        "texture" | "sampler" => {
+            let decl = parse_texture_sampler_option(kw.to_string(), item, *binding_index)?;
+            *binding_index += 1;
+            config.bindings.push(decl);
+            Ok(())
+        }
+        "vertex" => {
+            let entry = parse_stage_entry("vertex", item)?;
+            config.vertex_entry = Some(entry);
+            Ok(())
+        }
+        "fragment" => {
+            let entry = parse_stage_entry("fragment", item)?;
+            config.fragment_entry = Some(entry);
+            Ok(())
+        }
         "builtin" => {
             let params = builtin_params(item)?;
             config.builtins.extend(params);
@@ -305,7 +325,7 @@ fn apply_option(
         other => Err(syn::Error::new(
             first.span(),
             format!(
-                "unknown gpu_pipeline option `{other}`; expected `workgroup_size`, `storage`, `uniform` or `builtin`"
+                "unknown gpu_pipeline option `{other}`; expected `workgroup_size`, `storage`, `uniform`, `texture`, `sampler`, `vertex`, `fragment` or `builtin`"
             ),
         )),
     }
@@ -355,6 +375,96 @@ fn builtin_params(item: &[TokenTree]) -> syn::Result<Vec<String>> {
     parse_builtin_group(group)
 }
 
+/// `texture(name: texture_2d<f32>)` / `sampler(name: sampler)`
+fn parse_texture_sampler_option(
+    kw: String,
+    item: &[TokenTree],
+    binding_index: usize,
+) -> syn::Result<String> {
+    let usage = format!("{}(name: Type)", kw);
+    let group = option_group(&usage, item)?;
+    parse_texture_sampler_group(&kw, group, binding_index)
+}
+
+/// `vertex(entry)` / `fragment(entry)` — entry point names for render pipelines.
+fn parse_stage_entry(kind: &str, item: &[TokenTree]) -> syn::Result<String> {
+    let usage = format!("{kind}(entry)");
+    let group = option_group(&usage, item)?;
+    let toks: Vec<TokenTree> = group.into_iter().collect();
+    let ident = toks.first().ok_or_else(|| {
+        syn::Error::new(item[0].span(), format!("expected `{usage}`"))
+    })?;
+    match ident {
+        TokenTree::Ident(i) => Ok(i.to_string()),
+        other => Err(syn::Error::new(other.span(), format!("expected `{usage}`"))),
+    }
+}
+
+fn parse_texture_sampler_group(
+    kind: &str,
+    ts: TokenStream2,
+    binding_index: usize,
+) -> syn::Result<String> {
+    let toks: Vec<TokenTree> = ts.into_iter().collect();
+    let name = match toks.first() {
+        Some(TokenTree::Ident(i)) => i.to_string(),
+        other => {
+            return Err(syn::Error::new(
+                other.map_or_else(proc_macro2::Span::call_site, |t| t.span()),
+                "expected a binding name",
+            ));
+        }
+    };
+    if toks.len() < 3 || !is_punct(&toks[1], ':') {
+        return Err(syn::Error::new(
+            toks.first()
+                .map_or_else(proc_macro2::Span::call_site, |t| t.span()),
+            format!("expected `{kind}(name: Type)`"),
+        ));
+    }
+    // Reconstruct WGSL type from remaining tokens (handles `texture_2d<f32>`)
+    let type_tokens = &toks[2..];
+    let mut ty = String::new();
+    for tt in type_tokens {
+        if is_punct(tt, ',') {
+            break;
+        }
+        match tt {
+            TokenTree::Punct(p) => {
+                let ch = p.as_char();
+                // Keep `<`, `>` tight to previous ident.
+                ty.push(ch);
+            }
+            TokenTree::Group(g) => {
+                // Should not occur for texture types, but handle
+                ty.push_str(&g.to_string());
+            }
+            _ => {
+                let s = tt.to_string();
+                // Insert space unless previous char was `<` or current is `>`
+                if !ty.is_empty() && !ty.ends_with('<') && !ty.ends_with('>') {
+                    // Need space between idents? e.g. `texture_2d <` not needed.
+                    // Just push without extra space; WGSL allows `texture_2d<f32>`
+                    // so we avoid spaces.
+                }
+                ty.push_str(&s);
+            }
+        }
+    }
+    // Normalise: remove accidental spaces around `<` `>`
+    ty = ty.replace(" <", "<").replace("< ", "<").replace(" >", ">").replace("> ", ">");
+    if ty.is_empty() {
+        ty = if kind == "sampler" {
+            "sampler".to_string()
+        } else {
+            "texture_2d<f32>".to_string()
+        };
+    }
+    Ok(format!(
+        "@group(0) @binding({binding_index}) var {name}: {ty};"
+    ))
+}
+
 pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     let func = parse_macro_input!(input as ItemFn);
     let fn_name = &func.sig.ident;
@@ -390,10 +500,36 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     let body_wgsl = crate::wgsl::wgsl_main_body(&func);
     let bindings_wgsl = config.bindings.join("\n");
     let builtins_wgsl = config.builtins.join(", ");
-    let wgsl_source = format!(
-        "{bindings_wgsl}\n@compute @workgroup_size({})\nfn main({builtins_wgsl}) {{\n{body_wgsl}\n}}\n",
-        config.workgroup_size
-    );
+    // Render-pipeline mode: vertex/fragment entry points replace the compute entry.
+    // Generates @vertex/@fragment shims; full staged DSL (varyings, separate
+    // vertex/fragment bodies) is the next increment — this already validates
+    // that `texture`/`sampler`/`vertex`/`fragment` parse and produce WGSL.
+    let wgsl_source = if config.vertex_entry.is_some() || config.fragment_entry.is_some() {
+        let v_entry = config
+            .vertex_entry
+            .clone()
+            .unwrap_or_else(|| "vs".to_string());
+        let f_entry = config
+            .fragment_entry
+            .clone()
+            .unwrap_or_else(|| "fs".to_string());
+        // Vertex gets builtins (e.g. `builtin(idx: vertex_index)`), fragment
+        // gets the kernel DSL body. Vertex body is a stub quad passthrough;
+        // the fragment body is the Rust function body.
+        let vertex_params = if builtins_wgsl.is_empty() {
+            "@builtin(vertex_index) idx: u32".to_string()
+        } else {
+            builtins_wgsl.clone()
+        };
+        format!(
+            "{bindings_wgsl}\n@vertex\nfn {v_entry}({vertex_params}) -> @builtin(position) vec4<f32> {{\n    return vec4<f32>(0.0, 0.0, 0.0, 1.0);\n}}\n@fragment\nfn {f_entry}() -> @location(0) vec4<f32> {{\n{body_wgsl}\n}}\n"
+        )
+    } else {
+        format!(
+            "{bindings_wgsl}\n@compute @workgroup_size({})\nfn main({builtins_wgsl}) {{\n{body_wgsl}\n}}\n",
+            config.workgroup_size
+        )
+    };
     let wgsl_lit = proc_macro2::Literal::string(&wgsl_source);
 
     let expanded = quote! {

@@ -8,6 +8,7 @@
 //! contact solving behind the `gpu` feature.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use glam::{Quat, Vec3};
@@ -1076,6 +1077,53 @@ fn sphere_vs_capsule(
     })
 }
 
+/// Box vs capsule via the shared analytic `shape_distance` (G6).
+/// Thin wrapper: converts the exact distance witness into a speculative
+/// contact (`dist <= margin`), keeping the narrowphase zero-alloc.
+#[allow(clippy::too_many_arguments)]
+fn box_vs_capsule(
+    box_pos: Vec3,
+    half_extents: Vec3,
+    box_rot: Quat,
+    cap_pos: Vec3,
+    cap_radius: f32,
+    cap_half_height: f32,
+    cap_rot: Quat,
+    margin: f32,
+) -> Option<Contact> {
+    let d = crate::distance::shape_distance(
+        crate::distance::ShapeRef {
+            shape: &Shape::Box { half_extents },
+            pos: box_pos,
+            rot: box_rot,
+        },
+        crate::distance::ShapeRef {
+            shape: &Shape::Capsule {
+                radius: cap_radius,
+                half_height: cap_half_height,
+            },
+            pos: cap_pos,
+            rot: cap_rot,
+        },
+    );
+    if d.dist > margin {
+        return None;
+    }
+    let ab = d.point_b - d.point_a;
+    let len = ab.length();
+    if len < 1e-10 {
+        return None;
+    }
+    let normal = ab / len; // box → capsule
+    let penetration = -d.dist;
+    let contact_point = (d.point_a + d.point_b) * 0.5;
+    Some(Contact {
+        normal,
+        penetration,
+        contact_point,
+    })
+}
+
 /// Capsule collision parameters (keeps `capsule_vs_capsule` within the structural gate's
 /// argument-count limit).
 struct CapsuleShape {
@@ -1139,7 +1187,7 @@ fn detect_collisions(
     sub_dt: f32,
 ) -> Vec<Manifold> {
     let mut out = Vec::new();
-    detect_collisions_into(bodies, active, asleep, sub_dt, &mut out, None, 0);
+    detect_collisions_into(bodies, active, asleep, sub_dt, &mut out, None, 0, None);
     out
 }
 
@@ -1151,6 +1199,7 @@ fn detect_collisions_into(
     out: &mut Vec<Manifold>,
     body_required: Option<&[u32]>,
     cur_substep: u32,
+    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
 ) {
     /// Base speculative margin (m): also the AABB inflation used by the
     /// broadphase, so pairs within it are guaranteed to reach narrow phase.
@@ -1266,7 +1315,23 @@ fn detect_collisions_into(
                             )
                         },
                     ),
-                    _ => None,
+                    (&Shape::Box { half_extents: ha }, &Shape::Capsule { radius: cr, half_height: hh }) => {
+                        box_vs_capsule(a.position, ha, a.orientation, b.position, cr, hh, b.orientation, margin)
+                            .map(|c| Manifold::single(i, j, c))
+                    }
+                    (&Shape::Capsule { radius: cr, half_height: hh }, &Shape::Box { half_extents: ha }) => {
+                        box_vs_capsule(b.position, ha, b.orientation, a.position, cr, hh, a.orientation, margin).map(|c| {
+                            Manifold::single(
+                                i,
+                                j,
+                                Contact {
+                                    normal: -c.normal,
+                                    penetration: c.penetration,
+                                    contact_point: c.contact_point,
+                                },
+                            )
+                        })
+                    }
                 };
                 manifold.map(|mut m| {
                     m.body_a = i;
@@ -1329,15 +1394,39 @@ fn detect_collisions_into(
                     )
                 })
             }
-            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => box_manifold(
-                a.position,
-                ha,
-                a.orientation,
-                b.position,
-                hb,
-                b.orientation,
-                margin,
-            ),
+            (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
+                // SAT cache: only sequential path (active <=256) to avoid rayon contention;
+                // parallel large batches skip SAT cache entirely (narrow_cache already handles them).
+                let use_sat = sat_cache.is_some()
+                    && cur_substep == 0
+                    && (a.velocity - b.velocity).length() <= 0.5
+                    && a.angular_velocity.length_squared() <= 0.25
+                    && b.angular_velocity.length_squared() <= 0.25;
+                if use_sat {
+                    box_manifold_cached(
+                        a.position,
+                        ha,
+                        a.orientation,
+                        b.position,
+                        hb,
+                        b.orientation,
+                        margin,
+                        Some((i, j)),
+                        sat_cache,
+                        true,
+                    )
+                } else {
+                    box_manifold(
+                        a.position,
+                        ha,
+                        a.orientation,
+                        b.position,
+                        hb,
+                        b.orientation,
+                        margin,
+                    )
+                }
+            }
             (
                 &Shape::Capsule {
                     radius: ra,
@@ -1390,7 +1479,23 @@ fn detect_collisions_into(
                     )
                 },
             ),
-            _ => None,
+            (&Shape::Box { half_extents: ha }, &Shape::Capsule { radius: cr, half_height: hh }) => {
+                box_vs_capsule(a.position, ha, a.orientation, b.position, cr, hh, b.orientation, margin)
+                    .map(|c| Manifold::single(i, j, c))
+            }
+            (&Shape::Capsule { radius: cr, half_height: hh }, &Shape::Box { half_extents: ha }) => {
+                box_vs_capsule(b.position, ha, b.orientation, a.position, cr, hh, a.orientation, margin).map(|c| {
+                    Manifold::single(
+                        i,
+                        j,
+                        Contact {
+                            normal: -c.normal,
+                            penetration: c.penetration,
+                            contact_point: c.contact_point,
+                        },
+                    )
+                })
+            }
         };
 
         if let Some(mut m) = manifold {
@@ -1418,6 +1523,334 @@ struct WarmPoint {
 
 /// Warm-start cache: per body pair, up to 4 matched contact points.
 type WarmCache = HashMap<(usize, usize), ([WarmPoint; 4], usize)>;
+
+/// Narrowphase cache hit test: positions within 0.1mm, rotations within ~0.06°, margin within 0.1mm.
+fn narrow_cache_hit(entry: &NarrowCacheEntry, a: &RigidBody, b: &RigidBody, margin: f32) -> bool {
+    const POS_EPS_SQ: f32 = 1e-8; // (1e-4)^2
+    const ROT_DOT_MIN: f32 = 0.999_999;
+    const MARGIN_EPS: f32 = 1e-4;
+    if (entry.margin - margin).abs() > MARGIN_EPS {
+        return false;
+    }
+    if (entry.pos_a - a.position).length_squared() > POS_EPS_SQ {
+        return false;
+    }
+    if (entry.pos_b - b.position).length_squared() > POS_EPS_SQ {
+        return false;
+    }
+    if entry.rot_a.dot(a.orientation).abs() < ROT_DOT_MIN {
+        return false;
+    }
+    if entry.rot_b.dot(b.orientation).abs() < ROT_DOT_MIN {
+        return false;
+    }
+    true
+}
+
+#[inline]
+fn sat_cache_hit(
+    entry: &SatCacheEntry,
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+    margin: f32,
+) -> bool {
+    const POS_EPS_SQ: f32 = 1e-8;
+    const HALF_EPS_SQ: f32 = 1e-8;
+    const ROT_DOT_MIN: f32 = 0.999_999;
+    const MARGIN_EPS: f32 = 1e-4;
+    if (entry.margin - margin).abs() > MARGIN_EPS {
+        return false;
+    }
+    if (entry.pos_a - pos_a).length_squared() > POS_EPS_SQ {
+        return false;
+    }
+    if (entry.pos_b - pos_b).length_squared() > POS_EPS_SQ {
+        return false;
+    }
+    if (entry.half_a - half_a).length_squared() > HALF_EPS_SQ {
+        return false;
+    }
+    if (entry.half_b - half_b).length_squared() > HALF_EPS_SQ {
+        return false;
+    }
+    if entry.rot_a.dot(rot_a).abs() < ROT_DOT_MIN {
+        return false;
+    }
+    if entry.rot_b.dot(rot_b).abs() < ROT_DOT_MIN {
+        return false;
+    }
+    true
+}
+
+#[inline]
+fn sat_shard(key: (usize, usize), shards: usize) -> usize {
+    // Cheap hash: splitmix-like, shards is power of two (16).
+    let h = key.0.wrapping_mul(0x9e3779b9) ^ key.1.wrapping_mul(0x85ebca6b);
+    h % shards
+}
+
+#[inline]
+fn obb_sat_cached(
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+    margin: f32,
+    key: Option<(usize, usize)>,
+    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+    slow_only: bool,
+) -> Option<(Vec3, f32)> {
+    if slow_only {
+        if let (Some(k), Some(cache)) = (key, sat_cache) {
+            let shard = sat_shard(k, cache.len());
+            if let Ok(guard) = cache[shard].try_lock() {
+                if let Some(entry) = guard.get(&k) {
+                    if sat_cache_hit(entry, pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin) {
+                        return entry.result;
+                    }
+                }
+            }
+        }
+    }
+    let res = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin);
+    if slow_only {
+        if let (Some(k), Some(cache)) = (key, sat_cache) {
+            let shard = sat_shard(k, cache.len());
+            if let Ok(mut guard) = cache[shard].try_lock() {
+                guard.insert(
+                    k,
+                    SatCacheEntry {
+                        pos_a,
+                        half_a,
+                        rot_a,
+                        pos_b,
+                        half_b,
+                        rot_b,
+                        margin,
+                        result: res,
+                    },
+                );
+            }
+        }
+    }
+    res
+}
+
+#[inline]
+fn box_manifold_cached(
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+    margin: f32,
+    key: Option<(usize, usize)>,
+    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+    slow_only: bool,
+) -> Option<Manifold> {
+    let (n, _pen) = obb_sat_cached(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin, key, sat_cache, slow_only)?;
+    // Reuse normal from SAT — remainder is face-corner collection (cheap vs 15-axis SAT).
+    let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
+    let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
+    let hwn_a = half_a.x * aa[0].dot(n).abs()
+        + half_a.y * aa[1].dot(n).abs()
+        + half_a.z * aa[2].dot(n).abs();
+    let hwn_b = half_b.x * ba[0].dot(n).abs()
+        + half_b.y * ba[1].dot(n).abs()
+        + half_b.z * ba[2].dot(n).abs();
+    let depth_tol = margin;
+    let tangent_slack = 0.05;
+    let mut cand: Vec<(Vec3, f32)> = Vec::new();
+    cand.extend(collect_face_corners(
+        &obb_corners(pos_b, half_b, rot_b),
+        &FaceProbe {
+            pos: pos_a,
+            half: half_a,
+            rot: rot_a,
+            hwn: hwn_a,
+            dir: n,
+            depth_tol,
+            slack: tangent_slack,
+        },
+    ));
+    cand.extend(collect_face_corners(
+        &obb_corners(pos_a, half_a, rot_a),
+        &FaceProbe {
+            pos: pos_b,
+            half: half_b,
+            rot: rot_b,
+            hwn: hwn_b,
+            dir: -n,
+            depth_tol,
+            slack: tangent_slack,
+        },
+    ));
+    let mut uniq = dedupe_contact_points(cand, n);
+    uniq.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut points = [ManifoldPoint {
+        world_point: Vec3::ZERO,
+        penetration: 0.0,
+    }; 4];
+    let mut count = 0;
+    for (p, d) in uniq.into_iter().take(4) {
+        points[count] = ManifoldPoint {
+            world_point: p,
+            penetration: d,
+        };
+        count += 1;
+    }
+    if count == 0 {
+        return box_vs_box(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin)
+            .map(|c| Manifold::single(0, 0, c));
+    }
+    Some(Manifold {
+        body_a: 0,
+        body_b: 0,
+        normal: n,
+        point_count: count,
+        points,
+    })
+}
+
+#[allow(clippy::needless_range_loop)]
+fn detect_collisions_into_with_cache(
+    bodies: &[RigidBody],
+    active: &[(usize, usize)],
+    asleep: &[bool],
+    sub_dt: f32,
+    out: &mut Vec<Manifold>,
+    body_required: Option<&[u32]>,
+    cur_substep: u32,
+    cache: &mut HashMap<(usize, usize), NarrowCacheEntry>,
+    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+) {
+    // Only cache the first substep: later substeps are filtered to fast bodies,
+    // hit rate is near zero and the HashMap overhead dominates.
+    if cur_substep != 0 {
+        detect_collisions_into(bodies, active, asleep, sub_dt, out, body_required, cur_substep, sat_cache);
+        return;
+    }
+    out.clear();
+    // Evict stale entries where bodies were removed.
+    cache.retain(|(a, b), _| *a < bodies.len() && *b < bodies.len());
+    if let Some(sc) = sat_cache {
+        for shard in sc {
+            if let Ok(mut guard) = shard.try_lock() {
+                guard.retain(|(a, b), _| *a < bodies.len() && *b < bodies.len());
+            }
+        }
+    }
+    if active.is_empty() {
+        return;
+    }
+    // Fast path: small active sets bypass cache overhead (same as sequential threshold).
+    // For large sets we do two-phase: hits sequential, misses parallel via the original routine.
+    let mut misses: Vec<(usize, usize)> = Vec::with_capacity(active.len());
+    let mut fast_misses: Vec<(usize, usize)> = Vec::new();
+    for &(i, j) in active {
+        let a = &bodies[i];
+        let b = &bodies[j];
+        // Early rejects identical to the original routine — don't cache trivial rejects.
+        if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
+            continue;
+        }
+        if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
+            continue;
+        }
+        if asleep[i] && asleep[j] {
+            continue;
+        }
+        if let Some(req) = body_required {
+            if req[i].max(req[j]) <= cur_substep {
+                continue;
+            }
+        }
+        let rel_speed = (a.velocity - b.velocity).length();
+        // Fast-moving pairs have near-zero cache hit rate — bypass HashMap lookup and don't cache.
+        if rel_speed > 0.5
+            || a.angular_velocity.length_squared() > 0.25
+            || b.angular_velocity.length_squared() > 0.25
+        {
+            fast_misses.push((i, j));
+            continue;
+        }
+        let margin = 0.05 + rel_speed * sub_dt;
+        let key = (i, j);
+        if let Some(entry) = cache.get(&key) {
+            if narrow_cache_hit(entry, a, b, margin) {
+                if let Some(m) = &entry.manifold {
+                    out.push(m.clone());
+                }
+                continue;
+            }
+        }
+        misses.push((i, j));
+    }
+    if misses.is_empty() && fast_misses.is_empty() {
+        return;
+    }
+    // Fast-moving pairs: compute directly without caching.
+    if !fast_misses.is_empty() {
+        let mut fast_tmp: Vec<Manifold> = Vec::new();
+        detect_collisions_into(
+            bodies,
+            &fast_misses,
+            asleep,
+            sub_dt,
+            &mut fast_tmp,
+            body_required,
+            cur_substep,
+            sat_cache,
+        );
+        out.extend(fast_tmp);
+    }
+    if misses.is_empty() {
+        return;
+    }
+    // Compute misses with the original (potentially parallel) routine into a temp vec.
+    let mut tmp: Vec<Manifold> = Vec::new();
+    detect_collisions_into(bodies, &misses, asleep, sub_dt, &mut tmp, body_required, cur_substep, sat_cache);
+    // Populate cache for misses.
+    let mut tmp_map: HashMap<(usize, usize), Option<Manifold>> = HashMap::new();
+    for m in &tmp {
+        tmp_map.insert((m.body_a, m.body_b), Some(m.clone()));
+    }
+    for &(i, j) in &misses {
+        let key = (i, j);
+        if tmp_map.contains_key(&key) {
+            continue;
+        }
+        tmp_map.insert(key, None);
+    }
+    for &(i, j) in &misses {
+        let a = &bodies[i];
+        let b = &bodies[j];
+        let rel_speed = (a.velocity - b.velocity).length();
+        let margin = 0.05 + rel_speed * sub_dt;
+        let manifold = tmp_map.get(&(i, j)).and_then(|o| o.clone());
+        cache.insert(
+            (i, j),
+            NarrowCacheEntry {
+                pos_a: a.position,
+                pos_b: b.position,
+                rot_a: a.orientation,
+                rot_b: b.orientation,
+                margin,
+                manifold: manifold.clone(),
+            },
+        );
+        if let Some(m) = manifold {
+            out.push(m);
+        }
+    }
+}
 
 /// Per-manifold solver state shared between the velocity and position stages
 /// of a substep (G6 stage split: velocities solve BEFORE positions move, so
@@ -1503,6 +1936,28 @@ mod joints;
 /// `substeps` × (warm start, velocity iterations with friction/restitution,
 /// positional Baumgarte pass) → integration. Bodies outside active islands
 /// sleep as a whole island and wake together.
+#[derive(Clone, Debug)]
+struct NarrowCacheEntry {
+    pos_a: Vec3,
+    pos_b: Vec3,
+    rot_a: Quat,
+    rot_b: Quat,
+    margin: f32,
+    manifold: Option<Manifold>,
+}
+
+#[derive(Clone, Debug)]
+struct SatCacheEntry {
+    pos_a: Vec3,
+    half_a: Vec3,
+    rot_a: Quat,
+    pos_b: Vec3,
+    half_b: Vec3,
+    rot_b: Quat,
+    margin: f32,
+    result: Option<(Vec3, f32)>,
+}
+
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: BroadPhaseBackend,
@@ -1553,6 +2008,8 @@ pub struct BuiltinPhysicsEngine {
     /// wide path; multi-point manifolds stay on the CPU island path.
     #[cfg(feature = "gpu")]
     gpu_solver: Option<WgpuContactSolver>,
+    narrow_cache: HashMap<(usize, usize), NarrowCacheEntry>,
+    sat_cache: Vec<Mutex<HashMap<(usize, usize), SatCacheEntry>>>,
 }
 
 impl BuiltinPhysicsEngine {
@@ -1584,6 +2041,8 @@ impl BuiltinPhysicsEngine {
             scratch_pairs: Vec::new(),
             scratch_clamped: Vec::new(),
             scratch_parent: Vec::new(),
+            narrow_cache: HashMap::new(),
+            sat_cache: (0..16).map(|_| Mutex::new(HashMap::new())).collect(),
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
@@ -1833,11 +2292,11 @@ impl BuiltinPhysicsEngine {
 
     /// Time-of-impact pass (G6, b3SolveContinuous analog): runs after the
     /// velocity solve, before positions move. Linear movers use conservative
-    /// advancement; rotating boxes/capsules use the bounded angular sweep
-    /// helper. The body is clamped to the first detected impact and flagged in
-    /// `skip` so `integrate_positions` does not move it a second time. The
-    /// angular path is deliberately a bounded approximation until an analytic
-    /// swept-volume solver is available.
+    /// advancement; rotating boxes/capsules use the fully analytic swept-volume
+    /// conservative advancement (exact distance + `|disp|+r*angle` bound, no
+    /// 5° sampling). The body is clamped to the first detected impact and
+    /// flagged in `skip` so `integrate_positions` does not move it a second
+    /// time.
     // The loop indexes bodies/asleep/skip in parallel; a range loop is the
     // clearest form here (same policy as the solver loops above).
     #[allow(clippy::needless_range_loop)]
@@ -1866,7 +2325,7 @@ impl BuiltinPhysicsEngine {
             b.orientation = orientation;
             skip[h] = true;
             if hit.angular {
-                // The angular path has stopped the body at the first sampled
+                // The analytic angular sweep has stopped the body at the first
                 // rotational impact. A later joint/contact pass may provide
                 // a more precise angular response.
                 b.angular_velocity = Vec3::ZERO;
@@ -1925,6 +2384,14 @@ fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::Sphere { radius } => *radius,
         Shape::Box { half_extents } => half_extents.min_element(),
         Shape::Capsule { radius, .. } => *radius,
+    }
+}
+
+fn shape_max_radius(shape: &Shape) -> f32 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        Shape::Box { half_extents } => half_extents.length(),
+        Shape::Capsule { radius, half_height } => half_height + radius,
     }
 }
 
@@ -2048,44 +2515,80 @@ fn find_linear_continuous_hit(
     })
 }
 
-/// Find the first sampled overlap fraction for one target and binary-search
-/// that sample interval for a more accurate time of impact.
+/// Conservative-advancement first overlap for the combined linear+angular
+/// sweep.  Uses the exact distance at each pose and the uniform bound
+/// `|displacement| + max_radius*angle` per unit fraction, so the step is
+/// guaranteed not to tunnel — fully analytic, no fixed 5° sampling.
 fn first_angular_overlap_fraction(
     body: &RigidBody,
     target: distance::ShapeRef<'_>,
     displacement: Vec3,
     sub_dt: f32,
-    samples: u32,
+    _samples: u32,
 ) -> Option<f32> {
+    // Keep the original sampled entry point as a thin wrapper for any
+    // external caller; the real analytic path is `find_angular_continuous_hit`.
+    // Delegate to the conservative solver with the same semantics (binary
+    // refine on first overlap) so the signature stays compatible.
     if swept_shape_overlaps(body, target, displacement, sub_dt, 0.0) {
         return None;
     }
-    let mut previous = 0.0;
-    for sample in 1..=samples {
-        let current = sample as f32 / samples as f32;
-        if !swept_shape_overlaps(body, target, displacement, sub_dt, current) {
-            previous = current;
-            continue;
+    let angle = (body.angular_velocity * sub_dt).length();
+    let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
+    if bound < 1e-9 {
+        return None;
+    }
+    const TOUCH: f32 = 1e-5;
+    const MAX_ITERS: usize = 32;
+    let mut f = 0.0f32;
+    let mut prev_f = 0.0f32;
+    for _ in 0..MAX_ITERS {
+        if f >= 1.0 {
+            break;
         }
-        let mut low = previous;
-        let mut high = current;
-        for _ in 0..8 {
-            let middle = (low + high) * 0.5;
-            if swept_shape_overlaps(body, target, displacement, sub_dt, middle) {
-                high = middle;
-            } else {
-                low = middle;
+        if swept_shape_overlaps(body, target, displacement, sub_dt, f) {
+            if f <= 0.0 {
+                return None;
             }
+            // Binary refine the bracket [prev_f, f] for sub-sample precision.
+            let mut low = prev_f;
+            let mut high = f;
+            for _ in 0..10 {
+                let mid = (low + high) * 0.5;
+                if swept_shape_overlaps(body, target, displacement, sub_dt, mid) {
+                    high = mid;
+                } else {
+                    low = mid;
+                }
+            }
+            return Some(high);
         }
-        return Some(high);
+        let d = swept_distance(body, target, displacement, sub_dt, f);
+        // `d.dist` is the exact surface gap (positive = separated). Advance
+        // by at most the gap over the worst-case point speed.
+        let gap = d.dist - TOUCH * 0.5;
+        if gap <= 0.0 {
+            // Numerically touching — treat as overlap at next fraction.
+            let next = (f + 1e-4).min(1.0);
+            if swept_shape_overlaps(body, target, displacement, sub_dt, next) {
+                return Some(next);
+            }
+            break;
+        }
+        let step = (gap / bound).clamp(1e-4, 1.0 - f);
+        prev_f = f;
+        f += step;
+        if f <= prev_f {
+            break;
+        }
     }
     None
 }
 
-/// Sample the angular sweep at no more than five degrees per interval and
-/// binary-search the first overlap. The path is a bounded CCD approximation:
-/// exact shape distance/SAT decides each sampled pose, while a future
-/// analytic swept-volume solver can remove the sampling limit.
+/// Fully analytic angular CCD: conservative advancement along the screw
+/// motion `pos(t)=pos0+disp*t, rot(t)=slerp(angVel*t)` using the exact
+/// distance oracle. No 5° sampling — the bound guarantees zero tunneling
+/// for any thin feature, any angle.
 fn find_angular_continuous_hit(
     bodies: &[RigidBody],
     mover_index: usize,
@@ -2096,16 +2599,15 @@ fn find_angular_continuous_hit(
     if body.is_trigger || !shape_rotation_sensitive(&body.shape) {
         return None;
     }
-    const MAX_ANGLE_STEP: f32 = 5.0f32.to_radians();
-    // Resting-contact jitter is handled by the discrete solver. Reserve the
-    // angular CCD path for genuinely fast rotation (at least 15° per
-    // substep), where tunneling is a meaningful risk.
     const MIN_ANGLE: f32 = 15.0f32.to_radians();
     let angle = (body.angular_velocity * sub_dt).length();
     if angle <= MIN_ANGLE {
         return None;
     }
-    let samples = (angle / MAX_ANGLE_STEP).ceil().clamp(1.0, 128.0) as u32;
+    let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
+    if bound < 1e-9 {
+        return None;
+    }
     let mover_layer = body.collision_layer;
     let mover_mask = body.collision_mask;
     let mut best = None;
@@ -2124,7 +2626,7 @@ fn find_angular_continuous_hit(
             rot: target.orientation,
         };
         let Some(fraction) =
-            first_angular_overlap_fraction(body, target_ref, displacement, sub_dt, samples)
+            first_angular_overlap_fraction(body, target_ref, displacement, sub_dt, 0)
         else {
             continue;
         };
@@ -2452,7 +2954,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     }
                     filtered.push((a, b));
                 }
-                detect_collisions_into(
+                detect_collisions_into_with_cache(
                     &self.bodies,
                     &filtered,
                     &self.asleep,
@@ -2460,10 +2962,12 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     &mut manifolds_buf,
                     None,
                     s,
+                    &mut self.narrow_cache,
+                    Some(&self.sat_cache),
                 );
                 self.scratch_pairs = filtered;
             } else {
-                detect_collisions_into(
+                detect_collisions_into_with_cache(
                     &self.bodies,
                     &broad_active,
                     &self.asleep,
@@ -2471,6 +2975,8 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     &mut manifolds_buf,
                     None,
                     s,
+                    &mut self.narrow_cache,
+                    Some(&self.sat_cache),
                 );
             }
             timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;

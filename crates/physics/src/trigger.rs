@@ -3,6 +3,10 @@
 //! Triggers participate in broadphase overlap detection but never contribute
 //! impulses to the solver. Events are reported as deterministic body-handle
 //! pairs and are drained from the physics engine after a step.
+//!
+//! Triggers are filtered symmetrically in broadphase, narrowphase and the
+//! linear CCD path, and share the same collision `layer`/`mask` model as
+//! solid bodies (see `body::RigidBody`).
 
 use crate::body::BodyHandle;
 

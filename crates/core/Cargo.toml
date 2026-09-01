@@ -26,8 +26,12 @@ ornis-schedule = { path = "../schedule" }
 [features]
 default = []
 # Reserved extension points (used via cfg in code):
-gpu = []        # GpuExecutor in the dispatcher (CPU-fallback for now)
+gpu = ["dep:wgpu"]  # GpuExecutor STUB in dispatcher — CPU-fallback; real GPU in ornis-wgpu-backend::CommandSync
 lock-free = []  # experimental lock-free lanes
+
+[dependencies.wgpu]
+version = "29"
+optional = true
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }

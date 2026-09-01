@@ -5,7 +5,12 @@
 //! UI bytes to linear light first (see the WGSL comment) so the hardware's
 //! single OETF re-encode lands on the correct value.
 
-const COMPOSITE_SHADER: &str = include_str!("shaders/wgsl/composite.wgsl");
+//! Legacy composite дан теперь через Rust→WGSL: см. `crate::shaders::composite_generated`.
+
+/// WGSL источник composite-пасса, сгенерированный из Rust (единственный источник истины).
+fn composite_shader_source() -> String {
+    crate::shaders::composite_generated::wgsl_source()
+}
 
 /// Final full-screen pass blending the lit PBR image with the 2D UI layer.
 pub struct CompositePass {
@@ -20,9 +25,10 @@ pub struct CompositePass {
 impl CompositePass {
     /// Build the pipeline against `surface_format` (the final output format).
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let shader_source = composite_shader_source();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(COMPOSITE_SHADER)),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(shader_source)),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -199,7 +205,8 @@ mod tests {
 
     #[test]
     fn composite_shader_validates_with_naga() {
-        let module = naga::front::wgsl::parse_str(COMPOSITE_SHADER)
+        let source = crate::shaders::composite_generated::wgsl_source();
+        let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("composite shader must parse: {e}"));
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),

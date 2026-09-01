@@ -5,6 +5,7 @@
 //! [`math`]) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
+pub mod composite_generated;
 pub mod math;
 
 /// ── COMPOSITE_VERTEX ────────────────────────────────────────────────

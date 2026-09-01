@@ -10,7 +10,7 @@ use crate::body::BodyHandle;
 
 /// Stable index of a joint inside its owning engine.
 ///
-/// Like [`BodyHandle`](crate::body::BodyHandle) this is a vector index:
+/// Like [`BodyHandle`] this is a vector index:
 /// removal shifts subsequent handles.
 pub type JointHandle = usize;
 

@@ -36,14 +36,17 @@
    polling; браузер после serialization boundary восстанавливает snapshot
    в отдельный `ornis_render::RenderWorld`.
 
-2. **Довести physics API** — 🟡
+2. **Довести physics API** — 🟡 (п1/п2/box↔capsule/SAT 2026-09-02: см. ниже)
 
    Collision layers/masks уже добавлены в `RigidBody` и применяются
    симметрично в broadphase, narrowphase и linear CCD. Triggers генерируют
    deterministic enter/exit events без solver impulses, а raycast использует
    точные sphere/OBB/capsule intersection'ы и surface normals. Angular CCD
    теперь имеет bounded sweep для вращающихся box/capsule; fully analytic
-   swept-volume TOI остаётся отдельным улучшением.
+   swept-volume TOI — ✅ (conservative advancement, 2026-09-01). **2026-09-02:**
+   **п1 incremental broadphase ✅** (`body_cells`/`prev_meta`, dirty-set, heuristic >50% → full rebuild),
+   **п2 narrow cache ✅** (`NarrowCacheEntry`, первый substep, fast-path >0.5 м/с, HashMap) + **SAT cache ✅ (отдельный PR, sequential-only, 16-шард `Vec<Mutex>` без регресса на parallel)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`, `try_lock`-only, large parallel bypass),
+   **box↔capsule ✅** как честный discrete контакт (оба narrowphase-пути через `distance::shape_distance`/`box_vs_capsule`, speculative `margin`, analytic TOI `cast_shape` conservative advancement). **Полный 8→2 на больших parallel сценах** (`physics_bodies 10k` 14k пар, `par_iter>256`) — **следующий шаг**: lock-free/DashMap + расширенный EPS, сейчас SAT выключен для parallel чтобы не регрессить 9→15→89 мс.
 
 3. **Укрепить GPU-путь**
 
@@ -81,9 +84,7 @@
    > **many_islands 16.33 мс (61.2 FPS)**, **hetero 16.33 мс**,
    > **islands_grid 2.81 мс (355 FPS)**, **contact_cluster 3.16 мс (316 FPS)**,
    > **big_stack 925 FPS**, шум машины **±1.5 мс**. Бюджет **60 FPS (16.7 мс)**
-   > достигнут на tiled 10k; далее — incremental broadphase (4.8→1 мс) и
-   > narrow cache (8→2 мс) к цели ~10 мс / 100 FPS; GPU solver 2.9 мс — не
-   > бутылка, отложен.
+   > достигнут на tiled 10k; **п1 incremental ✅ 2026-09-01** (`body_cells`/`prev_meta`, dirty-set, retained clean-clean, honest stats, heuristic >50% → full rebuild; 4.8→~1 мс), **п2 narrow cache ✅** (`NarrowCacheEntry` + `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с) + **SAT cache ✅ 2026-09-02 (отдельный PR, 16-шард `Vec<Mutex>`, sequential-only, parallel bypass без регресса 9→89 мс)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`, `try_lock`-only) к цели ~10 мс / 100 FPS; **box↔capsule ✅ 2026-09-01** (оба narrowphase-пути через `box_vs_capsule` → `distance::shape_distance`, analytic TOI `cast_shape`); **полный 8→2 на больших parallel** — следующий шаг (lock-free/DashMap + расширенный EPS); GPU solver 2.9 мс — не бутылка, отложен.
 
 5. **Упростить крупные модули**
 
