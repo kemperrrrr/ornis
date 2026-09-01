@@ -419,6 +419,20 @@ candidate pairs против `11781` у SAP на 10k. Targeted 100k probes
 Далее нужны timing breakdown broadphase/narrowphase/solver и persistent
 `DynamicAabbTree`; adaptive cell size пока не реализован.
 
+**Этап B — 2026-09-01 (perf_probe, Apple M1, --release):** broadphase
+**1×/кадр** (swept `dt`, клон `broad_active`) + per-body required
+substeps **[4..12]** = `ceil(|v|*dt/1/240)` с порогом `max-min>=4` и
+pre-filter до SAT через `scratch_pairs`; no-alloc scratch
+(`UniformGrid::scratch_pairs`, `Engine::scratch_manifolds/pairs/clamped/parent`,
+`detect_collisions_into`), narrow параллельно (rayon `>256` пар).
+**tiled 10k: 103.4 → 15.82 мс** (broad 4.86 / narrow 8.01 / solver 2.95,
+**63 FPS**), **solver_bench: 74 → 17.07 мс** (−77% от 180 мс baseline),
+**many_islands 16.33 мс (61.2 FPS)**, **hetero 16.33 мс**,
+**islands_grid 2.81 мс (355 FPS)**, **contact_cluster 3.16 мс (316 FPS)**,
+**big_stack 925 FPS**, шум **±1.5 мс**. Бюджет **60 FPS (16.7 мс) достигнут**.
+Далее: **п1** incremental broadphase (4.8→1 мс), **п2** narrow cache
+(8→2 мс) к цели **~10 мс / 100 FPS**; **GPU solver 2.9 мс — не бутылка, отложен**.
+
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 

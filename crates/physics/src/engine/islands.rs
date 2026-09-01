@@ -15,8 +15,11 @@ impl BuiltinPhysicsEngine {
     /// they anchor them, like in Jolt.
     pub(super) fn rebuild_islands(&mut self, manifolds: &[Manifold]) {
         let n = self.bodies.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-
+        // Reuse scratch_parent to avoid Vec alloc per rebuild (called once per step,
+        // plus per substep in partition). Capacity kept across frames.
+        self.scratch_parent.clear();
+        self.scratch_parent.extend(0..n);
+        let mut parent = std::mem::take(&mut self.scratch_parent);
         union_contact_edges(&mut parent, &self.bodies, manifolds);
         // Joints are constraint-graph edges too (G5): jointed dynamic bodies
         // belong to one island and sleep/wake together.
@@ -30,6 +33,7 @@ impl BuiltinPhysicsEngine {
         // forever and the island never sleeps (measured on a 1025-body grid:
         // half of the perfectly quiet scene stayed awake at ~200 ms/frame).
         assign_canonical_islands(self, &mut parent, n);
+        self.scratch_parent = parent;
     }
 
     /// Island-coherent sleep bookkeeping, run once per step (G4): an island
@@ -130,12 +134,14 @@ impl BuiltinPhysicsEngine {
     /// items. Extracted so both the CPU path and the GPU hybrid path reuse
     /// the same island-building logic.
     pub(super) fn partition_into_islands(
-        &self,
+        &mut self,
         active: &[usize],
         manifolds: &[Manifold],
     ) -> Vec<IslandWork> {
         let n = self.bodies.len();
-        let mut parent: Vec<usize> = (0..n).collect();
+        self.scratch_parent.clear();
+        self.scratch_parent.extend(0..n);
+        let mut parent = std::mem::take(&mut self.scratch_parent);
         for &mi in active {
             let m = &manifolds[mi];
             let (a, b) = (m.body_a, m.body_b);
@@ -166,6 +172,9 @@ impl BuiltinPhysicsEngine {
                 }
             }
         }
+        // Return parent buffer before heavy island building so group loop can reuse it later if needed.
+        self.scratch_parent = parent;
+
 
         let mut islands: Vec<IslandWork> = Vec::with_capacity(groups.len());
         for group in groups {

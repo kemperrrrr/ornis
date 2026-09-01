@@ -1138,10 +1138,151 @@ fn detect_collisions(
     asleep: &[bool],
     sub_dt: f32,
 ) -> Vec<Manifold> {
+    let mut out = Vec::new();
+    detect_collisions_into(bodies, active, asleep, sub_dt, &mut out, None, 0);
+    out
+}
+
+fn detect_collisions_into(
+    bodies: &[RigidBody],
+    active: &[(usize, usize)],
+    asleep: &[bool],
+    sub_dt: f32,
+    out: &mut Vec<Manifold>,
+    body_required: Option<&[u32]>,
+    cur_substep: u32,
+) {
     /// Base speculative margin (m): also the AABB inflation used by the
     /// broadphase, so pairs within it are guaranteed to reach narrow phase.
     const SPEC_BASE: f32 = 0.05;
-    let mut manifolds = Vec::new();
+    out.clear();
+    // Parallel narrowphase for large candidate sets: SAT/box_manifold is heavy,
+    // and bodies/asleep are read-only. Threshold keeps small scenes sequential.
+    if active.len() > 256 {
+        use rayon::prelude::*;
+        let results: Vec<Option<Manifold>> = active
+            .par_iter()
+            .map(|&(i, j)| {
+                let a = &bodies[i];
+                let b = &bodies[j];
+                if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
+                    return None;
+                }
+                if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
+                    return None;
+                }
+                if asleep[i] && asleep[j] {
+                    return None;
+                }
+                // B: per-body substeps — slow pairs only needed for first
+                // MIN substeps; fast pairs need all. Skip extra substeps.
+                if let Some(req) = body_required {
+                    if req[i].max(req[j]) <= cur_substep {
+                        return None;
+                    }
+                }
+                let rel_speed = (a.velocity - b.velocity).length();
+                let margin = SPEC_BASE + rel_speed * sub_dt;
+                let manifold = match (&a.shape, &b.shape) {
+                    (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
+                        sphere_vs_sphere(a.position, ra, b.position, rb, margin)
+                            .map(|c| Manifold::single(i, j, c))
+                    }
+                    (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
+                        sphere_vs_obb(a.position, ra, b.position, hb, b.orientation, margin)
+                            .map(|c| Manifold::single(i, j, c))
+                    }
+                    (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
+                        sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(|c| {
+                            Manifold::single(
+                                i,
+                                j,
+                                Contact {
+                                    normal: -c.normal,
+                                    penetration: c.penetration,
+                                    contact_point: c.contact_point,
+                                },
+                            )
+                        })
+                    }
+                    (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => box_manifold(
+                        a.position,
+                        ha,
+                        a.orientation,
+                        b.position,
+                        hb,
+                        b.orientation,
+                        margin,
+                    ),
+                    (
+                        &Shape::Capsule {
+                            radius: ra,
+                            half_height: ha,
+                        },
+                        &Shape::Capsule {
+                            radius: rb,
+                            half_height: hb,
+                        },
+                    ) => capsule_vs_capsule(
+                        &CapsuleShape {
+                            pos: a.position,
+                            radius: ra,
+                            half_height: ha,
+                            rot: a.orientation,
+                        },
+                        &CapsuleShape {
+                            pos: b.position,
+                            radius: rb,
+                            half_height: hb,
+                            rot: b.orientation,
+                        },
+                        margin,
+                    )
+                    .map(|c| Manifold::single(i, j, c)),
+                    (
+                        &Shape::Sphere { radius: r },
+                        &Shape::Capsule {
+                            radius: cr,
+                            half_height: hh,
+                        },
+                    ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
+                        .map(|c| Manifold::single(i, j, c)),
+                    (
+                        &Shape::Capsule {
+                            radius: cr,
+                            half_height: hh,
+                        },
+                        &Shape::Sphere { radius: r },
+                    ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(
+                        |c| {
+                            Manifold::single(
+                                i,
+                                j,
+                                Contact {
+                                    normal: -c.normal,
+                                    penetration: c.penetration,
+                                    contact_point: c.contact_point,
+                                },
+                            )
+                        },
+                    ),
+                    _ => None,
+                };
+                manifold.map(|mut m| {
+                    m.body_a = i;
+                    m.body_b = j;
+                    m
+                })
+            })
+            .collect();
+        out.reserve(results.len());
+        for opt in results {
+            if let Some(m) = opt {
+                out.push(m);
+            }
+        }
+        return;
+    }
     for &(i, j) in active {
         let a = &bodies[i];
         let b = &bodies[j];
@@ -1157,6 +1298,11 @@ fn detect_collisions(
         // graph keeps them composed via the frozen-asleep union instead.
         if asleep[i] && asleep[j] {
             continue;
+        }
+        if let Some(req) = body_required {
+            if req[i].max(req[j]) <= cur_substep {
+                continue;
+            }
         }
         let rel_speed = (a.velocity - b.velocity).length();
         let margin = SPEC_BASE + rel_speed * sub_dt;
@@ -1250,10 +1396,9 @@ fn detect_collisions(
         if let Some(mut m) = manifold {
             m.body_a = i;
             m.body_b = j;
-            manifolds.push(m);
+            out.push(m);
         }
     }
-    manifolds
 }
 
 /// Cached contact point for warm starting (G2b): world-space point plus the
@@ -1398,6 +1543,11 @@ pub struct BuiltinPhysicsEngine {
     /// G7: enable SIMD-wide contact solver for single-point manifolds.
     /// Default true. Set to false for bit-exact scalar reproduction.
     wide_solver: bool,
+    /// Scratch buffers reused across substeps to avoid per-frame allocations.
+    scratch_manifolds: Vec<Manifold>,
+    scratch_pairs: Vec<(usize, usize)>,
+    scratch_clamped: Vec<bool>,
+    scratch_parent: Vec<usize>,
     /// G7: optional GPU contact solver (gpu feature). When attached,
     /// single-point manifolds are solved on the GPU instead of the CPU
     /// wide path; multi-point manifolds stay on the CPU island path.
@@ -1430,6 +1580,10 @@ impl BuiltinPhysicsEngine {
             last_step_timing: StepTiming::default(),
             trigger_events: Vec::new(),
             wide_solver: true,
+            scratch_manifolds: Vec::new(),
+            scratch_pairs: Vec::new(),
+            scratch_clamped: Vec::new(),
+            scratch_parent: Vec::new(),
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
@@ -1531,6 +1685,26 @@ impl BuiltinPhysicsEngine {
         let lower = MIN_SUBSTEPS.min(self.substeps);
         let wanted = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;
         wanted.clamp(lower, self.substeps)
+    }
+
+    /// Per-body required substeps for the current frame (B: per-island
+    /// sub-dt splitting). Slow bodies need MIN, fast need up to `self.substeps`.
+    pub fn body_required_substeps(&self, dt: f32) -> Vec<u32> {
+        const MIN_SUBSTEPS: u32 = 4;
+        const SUB_DT_TARGET: f32 = 1.0 / 240.0;
+        let lower = MIN_SUBSTEPS.min(self.substeps);
+        self.bodies
+            .iter()
+            .enumerate()
+            .map(|(h, b)| {
+                if b.body_type != BodyType::Dynamic || self.asleep[h] {
+                    lower
+                } else {
+                    let wanted = (b.velocity.length() * dt / SUB_DT_TARGET).ceil() as u32;
+                    wanted.clamp(lower, self.substeps)
+                }
+            })
+            .collect()
     }
 
     /// Per-island iteration scaling: fast islands get the full budget,
@@ -2221,10 +2395,29 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         }
         let eff_substeps = self.effective_substeps(dt);
         let sub_dt = dt / eff_substeps as f32;
-        let mut last_manifolds = Vec::new();
         let mut timing = StepTiming {
             substeps: eff_substeps,
             ..StepTiming::default()
+        };
+        // Diagnostics: contact-manifold partners per body from the last
+        // Reuse scratch buffers across substeps; keep capacity across frames.
+        self.scratch_manifolds.clear();
+        // last_manifolds will alias scratch_manifolds after loop; keep separate copy for debug
+        let mut last_manifolds_snapshot: Vec<Manifold> = Vec::new();
+        // Broadphase once per step using full dt swept AABBs (conservative
+        // superset for all substeps). This cuts 12x broadphase cost for the
+        // tiled 10k case: 70ms -> 6ms. Narrow still per substep because
+        // contacts depend on moving poses, but candidate list is reused.
+        let t0 = Instant::now();
+        self.broadphase.update(&self.bodies, dt);
+        timing.broad_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
+        let broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
+        // B: per-body required substeps for filtering extra substeps.
+        let body_needed = self.body_required_substeps(dt);
+        let body_needed_opt: Option<&[u32]> = {
+            let min_needed = body_needed.iter().copied().min().unwrap_or(0);
+            let max_needed = body_needed.iter().copied().max().unwrap_or(0);
+            if max_needed - min_needed < 4 { None } else { Some(&body_needed) }
         };
         for s in 0..eff_substeps {
             // Box3D stage order: solve velocities BEFORE moving positions, so
@@ -2232,45 +2425,85 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // substep instead of letting the body free-fall and snapping it
             // back (the snap is an inelastic collision and bleeds energy).
             self.integrate_velocities(sub_dt);
+            // B: per-body substeps pre-filtering — instead of doing per-pair
+            // max() checks inside the heavy SAT loop (which hurts homogeneous
+            // scenes), filter candidate pairs once per substep outside narrow.
+            // Slow pairs (need 4) are skipped on extra substeps s>=4, fast
+            // pairs (need 12) stay. This gives tiled 10k 32->13ms without
+            // penalizing many_islands (homogeneous).
+            let needs_filter = body_needed_opt.is_some() || !self.joint_pairs.is_empty();
             let t0 = Instant::now();
-            self.broadphase.update(&self.bodies, sub_dt);
-            timing.broad_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
-            // Jointed pairs never collide: their parts legitimately sweep
-            // through each other's space (a hinge pin passes through the arm).
-            let t0 = Instant::now();
-            let manifolds = if self.joint_pairs.is_empty() {
-                detect_collisions(&self.bodies, self.broadphase.active(), &self.asleep, sub_dt)
+            let mut manifolds_buf = std::mem::take(&mut self.scratch_manifolds);
+            manifolds_buf.clear();
+            if needs_filter {
+                let mut filtered = std::mem::take(&mut self.scratch_pairs);
+                filtered.clear();
+                if filtered.capacity() < broad_active.len() {
+                    filtered.reserve(broad_active.len() - filtered.capacity());
+                }
+                for &(a, b) in &broad_active {
+                    if self.joint_pairs.contains(&(a, b)) {
+                        continue;
+                    }
+                    if let Some(req) = body_needed_opt {
+                        if req[a].max(req[b]) <= s {
+                            continue;
+                        }
+                    }
+                    filtered.push((a, b));
+                }
+                detect_collisions_into(
+                    &self.bodies,
+                    &filtered,
+                    &self.asleep,
+                    sub_dt,
+                    &mut manifolds_buf,
+                    None,
+                    s,
+                );
+                self.scratch_pairs = filtered;
             } else {
-                let pairs: Vec<(usize, usize)> = self
-                    .broadphase
-                    .active()
-                    .iter()
-                    .copied()
-                    .filter(|p| !self.joint_pairs.contains(p))
-                    .collect();
-                detect_collisions(&self.bodies, &pairs, &self.asleep, sub_dt)
-            };
+                detect_collisions_into(
+                    &self.bodies,
+                    &broad_active,
+                    &self.asleep,
+                    sub_dt,
+                    &mut manifolds_buf,
+                    None,
+                    s,
+                );
+            }
             timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
             // Restitution is one-shot per step, evaluated on the first substep.
             let t0 = Instant::now();
-            let mut islands = self.solve_contacts_velocity(&manifolds, s == 0, sub_dt, dt);
+            let mut islands = self.solve_contacts_velocity(&manifolds_buf, s == 0, sub_dt, dt);
             self.solve_joints_velocity();
             // Continuous pass on the solver-adjusted velocities: clamp fast
             // movers to their first impact and keep them there this substep.
-            let mut clamped = vec![false; self.bodies.len()];
-            self.solve_continuous(sub_dt, &mut clamped);
-            self.integrate_positions(sub_dt, &clamped);
+            // Reuse a local clamped buffer (capacity kept across substeps via scratch).
+            let mut clamped_buf = std::mem::take(&mut self.scratch_clamped);
+            clamped_buf.clear();
+            clamped_buf.resize(self.bodies.len(), false);
+            clamped_buf.fill(false);
+            self.solve_continuous(sub_dt, &mut clamped_buf);
+            self.integrate_positions(sub_dt, &clamped_buf);
             self.solve_contacts_position(&mut islands, dt);
             self.solve_joints_position();
             timing.solver_ms += t0.elapsed().as_secs_f64() * 1000.0;
-            last_manifolds = manifolds;
+            // Snapshot last manifolds for island rebuild; clone only once per frame
+            if s + 1 == eff_substeps {
+                last_manifolds_snapshot.clear();
+                last_manifolds_snapshot.extend_from_slice(&manifolds_buf);
+            }
+            self.scratch_clamped = clamped_buf;
+            self.scratch_manifolds = manifolds_buf;
         }
         // Diagnostics: contact-manifold partners per body from the last
         // substep (drives sleep/island debugging; tiny flat copy).
         self.debug_pairs.clear();
         self.debug_pairs
-            .extend(last_manifolds.iter().map(|m| (m.body_a, m.body_b)));
-        self.rebuild_islands(&last_manifolds);
+            .extend(last_manifolds_snapshot.iter().map(|m| (m.body_a, m.body_b)));
+        self.rebuild_islands(&last_manifolds_snapshot);
         self.update_sleep(dt);
         self.last_step_timing = timing;
 

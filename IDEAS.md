@@ -420,6 +420,23 @@ pub struct ComponentStore<T> {
 
 ---
 
+## 29. Soft Bodies / Particles — AVBD vs XPBD (LegitParticles)
+
+- **Референс:** [Raikiri/LegitParticles](https://github.com/Raikiri/LegitParticles) — CPU `AVBD` (Giles et al) на линках, 10 итераций, `LegitVulkan+entt`.
+- **Вывод автора:** без warmstart чуть жёстче PBD, с warmstart — заметно жёстче, но параметры `beta/min_stiffness/max_stiffness/max_lambda` магические, сцено-зависимые, взрываются/дубеют. Код — `ProjectVBD` с `grad/hessian + m/dt²`.
+- **Для Ornis:** текущий `ornis-physics` — `sequential impulse + islands/sleep` для rigid (Box/Sphere/Capsule). Для жёстких контактов `AVBD` менее стабилен, чем `SI` — те же проблемы, что в LegitParticles, усилятся на `tiled 10k`.
+- **Когда брать:** только для будущей фазы **Soft Bodies / Particles** (обломки, ткань, канаты). Тогда смотреть на **XPBD** (Müller), а не чистый `AVBD` — меньше магии. Warmstart/ constraint graph уже есть в Ornis (`warm_impulses`, islands) — переносить не нужно, брать как негативный пример.
+- **Статус:** занесено 2026-09-01 как `IDEAS §29`, не в приоритете a–g.
+
+## 30. GPU Physics — single-point WGPU solver (оценка 2026-09-01)
+
+- **Что есть:** `crates/physics/src/gpu.rs` G7 — `WgpuContactSolver` (feature `gpu`): Rust→WGSL compute, workgroup 4× `WideBatch` для single-point контактов, CPU SIMD-wide fallback (`wide.rs`). Hybrid в `engine.rs`: GPU для single-point islands, CPU для multi-point/joints. Написан на Rust, транслируется макросами `gpu_pipeline`/`WgslStruct`, проверен naga+lavapipe в quality-гейте.
+- **Замер после B (2026-09-01):** tiled 10k — broad 4.86мс + narrow 8.01мс + solver 2.95мс = 15.8мс (63 FPS). Solver 18% кадра, не бутылка. Narrow+BF доминируют. На hetero/many_islands solver ещё меньше.
+- **Вывод:** GPU solver отложен до п1–п2 (incremental broadphase 4.8→1мс + narrow cache 1×/кадр 8→2мс → цель ~10мс/100 FPS). Тогда single-point выигрыш проявится на 10k+ сценах; сейчас оптимизировать GPU-солвер — преждевременно (Amdahl). Прицельно включать только когда islands >70% single-point.
+- **След. шаг:** п1 incremental UniformGrid (грязные ячейки), п2 narrow cache (кэш par SAT). После них — повторный замер и решение о GPU по профилю.
+
+---
+
 ## Сводная таблица преимуществ
 
 | Критерий | Bevy (Архетипы) | Unity DOTS | Предлагаемый движок (Sparse Sets + Smart GPU/CPU) |
@@ -531,3 +548,33 @@ pub struct ComponentStore<T> {
 Собственно, **это и есть тот scheduler graph, который был задуман как «надстройка над RenderGraph»**, но эволюционно, а не как greenfield-проект.
 
 **Референсы**: Frostbite FrameGraph (GDC 2017), Bevy 0.19 release notes (19.06.2026, PR #22144 — render-graph-as-systems), migration guide 0.18→0.19, Granite Engine «Render Graphs» (themaister), Confetti The Forge (FramePipeline), «Borrow checker as a scheduling primitive» (академические работы по type-driven parallel scheduling).
+
+---
+
+## 30. GPU Physics — Bulk Single-Point Solver (WgpuContactSolver) — оценка пути
+
+> **Статус (2026-09-01):** реализовано как гибрид, отложено до п1–п2. §29 (AVBD/XPBD) сохранён без изменений.
+> **Исходники:** `crates/physics/src/gpu.rs` (≤150 строк — Rust→WGSL, `WgslStruct`/`gpu_pipeline`), `crates/physics/src/engine.rs:1543–1651` (`gpu_solver: Option<WgpuContactSolver>` + `set_gpu_solver`), `crates/physics/src/engine/contacts.rs:254–399` (hybrid dispatch).
+
+### Что реализовано
+
+- **`WgpuContactSolver` (G7, feature `gpu`):** single-point контакты — GPU compute (WGSL генерируется из Rust: `GpuBodyState`/`GpuBatch` с `#[derive(WgslStruct)]`, ядро `contact_solver()` с `#[gpu_pipeline(workgroup_size=4)]` — 1 workgroup = 1 `WideBatch` на 4 контакта, тот же SoA-батчинг что и CPU SIMD-wide путь). Валидация naga в тестах, software-adapter тесты `gpu_solver_*`.
+- **Hybrid модель:** GPU решает только single-point islands, multi-point (block-LCP) остаётся на CPU island-пути. GPU и CPU пассы **не interleaved на Gauss-Seidel итерацию** — идут последовательно за итерацию → Jacobi/GS гибрид, **не bit-identical** CPU-пути. Off by default (`BuiltInPhysicsEngine::gpu_solver: None`), включается `set_gpu_solver()`. Предназначен для visual-scale сцен, где Strong-Confluence CPU достаточен для детерминизма.
+- **Fallback:** `solve_contacts_velocity()` → если `gpu_solver.is_some()` → `solve_contacts_velocity_gpu(active, manifolds, ...)` (делит `global_states` на `single_si`/`multi_mi`, `pack_single_point_batches` → `upload_bodies/upload_batches` → `gpu.solve(num_batches, velocity_iterations, allow_restitution)` → `download_bodies/download_acc` + `write_back_acc` + merge warm cache), иначе чистый CPU island-dispatch. Multi-point острова всё равно идут через `partition_into_islands` + `dispatch_islands_velocity` (rayon).
+
+### Почему отложен
+
+- **Solver уже не бутылка после B:** на целевых сцена Ornis `velocity solve ~2.95 мс` (12 substeps × 8 iters, islands + warmstart), а доминируют **`narrowphase ~8 мс` + `broadphase (UniformGrid) ~4.8 мс`**. GPU bulk solver экономит долю от 2.95 мс минус overhead `upload/download + dispatch` — выигрыш отрицательный или околонулевой на текущих 1–3k контактах.
+- **Цена интеграции:** `wgpu` device/queue, pipeline, 3 буфера (`body_buf`/`batch_buf`/`uniform_buf` + staging), per-substep copies. Окупается только когда single-point батчей на порядок больше и broad/narrow уже поджаты.
+
+### Когда имеет смысл включать
+
+- **Порог ~10k+ single-point контактов** на сцену (tiled/stack спам, обломки/частицы без block-LCP) — тогда GPU batch-throughput перекроет PCIe+dispatch overhead. На типичных gscene `tiled 10k body` большинство островов всё равно multi-point → GPU простаивает.
+
+### Next step (п1–п2, приоритет над GPU)
+
+1. **п1 — incremental broadphase (UniformGrid):** diff по двигавшимся AABB вместо полного ребилда → цель `broadphase 4.8 мс → ~1 мс` на когерентных сценах.
+2. **п2 — narrowphase cache:** персистентный `distance + manifold` кэш по парам островов, инвалидация по генерациям тел → `narrow 8 мс → ~3–4 мс` на resting/sleeping сценах.
+3. **Итого frame ~10 мс** без трогания solver'а. После этого — повторный замер; если solver снова вылезает (>30% frame) и `single-point >10k` — включать GPU path профилированно (`cargo bench --features gpu` + `wgpu` timeline trace).
+
+**Решение:** GPU bulk single-point solver остаётся в дереве как опциональный `gpu` feature для экспериментов/visual bulk, **не в приоритете a–g**. До п1–п2 — не трогать.

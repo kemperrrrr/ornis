@@ -333,6 +333,7 @@ pub(crate) struct UniformGrid {
     cell_size: f32,
     max_cells_per_body: usize,
     stats: BroadPhaseStats,
+    scratch_pairs: HashSet<(usize, usize)>,
 }
 
 impl UniformGrid {
@@ -353,6 +354,7 @@ impl UniformGrid {
             cell_size,
             max_cells_per_body: DEFAULT_MAX_CELLS_PER_BODY,
             stats: BroadPhaseStats::default(),
+            scratch_pairs: HashSet::new(),
         }
     }
 
@@ -405,12 +407,12 @@ impl BroadPhase for UniformGrid {
         self.stats.occupied_cells = self.cells.len();
         self.stats.large_bodies = self.large.len();
 
-        let mut pairs = HashSet::new();
+        self.scratch_pairs.clear();
         for occupants in self.cells.values() {
             for (offset, &first) in occupants.iter().enumerate() {
                 for &second in &occupants[(offset + 1)..] {
                     add_pair(
-                        &mut pairs,
+                        &mut self.scratch_pairs,
                         bodies,
                         &self.aabbs,
                         &mut self.stats,
@@ -423,7 +425,7 @@ impl BroadPhase for UniformGrid {
         for &large in &self.large {
             for body in 0..self.aabbs.len() {
                 add_pair(
-                    &mut pairs,
+                    &mut self.scratch_pairs,
                     bodies,
                     &self.aabbs,
                     &mut self.stats,
@@ -432,7 +434,8 @@ impl BroadPhase for UniformGrid {
                 );
             }
         }
-        self.active = pairs.into_iter().collect();
+        self.active.clear();
+        self.active.extend(self.scratch_pairs.iter().copied());
         self.active.sort_unstable();
     }
 

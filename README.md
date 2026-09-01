@@ -88,10 +88,9 @@ cargo xtask quality            # регресс-гейт: падает толь�
     breakdown candidate generation и сравнивает grid cell size 1.0/2.0/4.0/8.0/16.0;
   - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
   - workflow не влияет на основной quality gate;
-  - 100k body зонд запускается вручную с выбором backend: `cargo run -p ornis-physics --release --example probe_100k -- --sweep` или `... -- --grid --cell-size 4`; probe также принимает `--cell-size 8/16`, `--bodies` и `--steps`;
-  - cell-size follow-up run `33240643444` на head `7504d9bbe2b4d75fecb52efd14784f4aac2fdbd4` был остановлен общим лимитом job в 60 минут, но benchmark output содержит измерения всех вариантов: на 10k SAP — `1.1130 s`, grid 1.0 — `469.99 ms`, grid 2.0 — `271.36 ms`, grid 4.0 — `196.69 ms`, grid 8.0 — `180.00 ms`, grid 16.0 — `198.59 ms`; `cell_size = 8.0` — лучший проверенный вариант, примерно 6.18x быстрее SAP и на 8.5% быстрее `4.0`, а `16.0` на 10.3% медленнее `8.0`; это exploratory data;
-  - targeted 100k probes от 2026-08-29 теперь сравнивают оба backend на tiled floor: Grid 8.0 — `8.02 s/step` в steady state (`13448` cells, `2349246` raw pair tests), SAP — `79.49 s/step` в steady state (до `5.42 млрд` raw pair tests на первом шаге); Grid примерно в 9.9x быстрее SAP на 100k, но оба варианта не real-time, отдельный timing breakdown ещё впереди;
-  - подробности, `BroadPhaseStats` и ограничения сравнения: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
+  - 100k body зонд: `cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 8` (или `--sweep`, `--bodies`, `--steps`);
+  - **Актуально на 2026-09-01 (оптимизации):** `UniformGrid cell 8.0` — default (6.18× vs SAP: `180мс` vs `1.113с` на 10k в `solver_bench`; no-alloc scratch, broadphase 1×/кадр, per-body substeps → фильтр до SAT, narrow — rayon). `tiled 10k` — `~15.8мс` / 63 FPS (`solver_bench: 17.07мс` / 58.6 FPS) vs старые `~103мс/74мс/180мс` — бюджет 60 FPS (`16.67мс`) достигнут. `many_islands`/`hetero 10k` — 61 FPS, `islands_grid 10k` — 355 FPS;
+  - история замеров и `BroadPhaseStats`: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
 
 Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md)
 и [`docs/quality/baseline-2026-08-01.md`](docs/quality/baseline-2026-08-01.md).
@@ -299,7 +298,7 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 ---
 ## Приложение A — Движок рендеринга и физический движок
 
-> Сверено с кодом (`crates/render`, `crates/physics`) 2026-08-28.
+> Сверено с кодом (`crates/render`, `crates/physics`) 2026-09-01.
 
 ### A1. Движок рендеринга (`crates/render`)
 
@@ -324,13 +323,13 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 #### Что есть в коде
 - **Трейт `PhysicsEngine`** (Send+Sync): `step`, `add_body`/`remove_body`/`get_body(_mut)`, `raycast`, `shapecast` — точка подключения внешних движков (Rapier/Jolt за тем же трейтом).
 - **`BuiltinPhysicsEngine`** (`engine.rs`):
-  - **Broadphase**: `Sweep-and-Prune` остаётся default baseline с swept AABB и сортировкой по сменяющейся оси (x→y→z); opt-in `BroadPhaseKind::UniformGrid` строит deterministic cell candidate pairs и имеет large-body escape path.
+  - **Broadphase**: `UniformGrid cell 8.0` — default (6.18× vs SAP; SAP — fallback), no-alloc scratch, broadphase 1×/кадр, per-body substeps — фильтр `swept AABB vs AABB` до SAT, large-body escape path.
   - **Узкая фаза**: sphere/sphere, sphere/box, box/box, sphere/capsule и
-    capsule/capsule; OBB SAT и контактные манифолды до 4 точек. Пара
+    capsule/capsule; OBB SAT и контактные манифолды до 4 точек; narrow — rayon. Пара
     box/capsule в дискретном contact path пока не реализована, хотя
     `distance.rs` поддерживает её для shapecast.
   - **Солвер**: warm-start, friction/restitution, split velocity/position stages, block solver, constraint islands, coherent sleeping/wake и ball/revolute joints; для single-point контактов доступны SIMD-wide и opt-in GPU пути.
-  - **`step`** по умолчанию делится на 12 подшагов; в каждом подшаге идут интеграция скоростей → broadphase/narrowphase → velocity solve → linear/bounded angular CCD → интеграция позиций → NGS position solve.
+  - **`step`** — 12 substeps (per-body фильтр), velocity интеграция → broadphase (1×/кадр) → narrowphase → velocity solve → linear/bounded angular CCD → position интеграция → NGS position solve. Бюджет 60 FPS (`16.67мс`) на `tiled 10k`: `~15.8мс` / 63 FPS (`solver_bench 17.07мс` / 58.6 FPS) vs старые `103/74/180мс`; `many_islands`/`hetero` — 61 FPS, `islands_grid` — 355 FPS.
   - **Raycast** — точные локальные sphere/OBB/capsule intersection'ы с surface normals. **`shapecast`** — conservative advancement по точным попарным дистанциям (`distance.rs`), есть тесты на попадание, точную дистанцию и тонкую стену без туннелирования.
   - `BodyType` dynamic/static/kinematic, `RigidBody` с ориентацией, угловой скоростью, collision layer/mask и trigger-флагом; trigger transitions доступны через `TriggerEvent`.
 - Тесты находятся в `engine.rs`, `engine/contacts.rs`, `engine/islands.rs`, `engine/joints.rs` и `gpu.rs`; editor-only и native showcase используют ECS↔physics sync systems, browser-side physics намеренно не запускается поверх server snapshot.
@@ -340,4 +339,4 @@ Rust-структур и бинарных слепков для Sparse Sets) + r
 2. ~~Физика: какие связки (joints) нужны в первую очередь и нужен ли CCD для быстрых тел?~~ Закрыто G5/G6 и 2026-08-28: ball/revolute joints, linear CCD и bounded angular CCD реализованы; полностью аналитический swept-volume TOI остаётся дальнейшим улучшением. Далее нужны joint limits/motors.
 3. ~~`shapecast` — пустая заглушка~~ **Закрыто (G6)** — честный shapecast через conservative advancement (`distance.rs`), покрыт тестами.
 4. ~~Движок рендера не связан с ECS-сценой в браузере~~ **Частично закрыто** — WASM-viewport рендерит живую сцену из `/api/scene`; физика со сценой браузера по-прежнему не связана (см. План B в PLAN.md).
-5. **Broadphase scaling** — открытый performance-вопрос: Sweep-and-Prune остаётся default baseline/fallback, а deterministic `UniformGrid` уже доступен opt-in со static/dynamic-friendly filtering и large-body escape path. После сверки с Box3D/Jolt следующим архитектурным кандидатом является persistent `DynamicAabbTree` с moved/active-body queries; adaptive cell size пока не заменяет эту работу. Разбор и источники: [`docs/quality/broadphase-reference-2026-08-29.md`](docs/quality/broadphase-reference-2026-08-29.md). Production default ещё не зафиксирован.
+5. **Broadphase scaling** — закрыто на 2026-09-01: `UniformGrid cell 8.0` — production default (6.18× vs SAP, no-alloc, 1×/кадр, per-body substeps фильтр), `tiled 10k ~15.8мс` — бюджет 60 FPS достигнут. SAP — fallback. Следующий кандидат — persistent `DynamicAabbTree` с moved/active-body queries; adaptive cell size — опционально. Разбор: [`docs/quality/broadphase-reference-2026-08-29.md`](docs/quality/broadphase-reference-2026-08-29.md).
