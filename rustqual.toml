@@ -1,5 +1,5 @@
-# rustqual.toml — Ornis quality gate (replaces bca.toml)
-# MIT counterpart to MPL-2.0 bca. Run: cargo run --manifest-path /tmp/rustqual -- .  (без глобальной установки)
+# rustqual.toml — Ornis quality gate (MIT)
+# Run: cargo run --manifest-path /tmp/rustqual -- .  (без глобальной установки)
 # Docs: https://github.com/SaschaOnTour/rustqual
 
 exclude_files = ["editor/**", "target/**"]

@@ -28,10 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Полная история + ветка master: bca (complexity gate) вычисляет
-          # diff-scope через `git diff origin/master...HEAD`; при дефолтном
-          # fetch-depth=1 base ref недоступен, и гейт молча деградирует к
-          # проверке всего дерева (лог run 32586229447, стадия bca).
           fetch-depth: 0
       # Системные зависимости для Linux-сборки:
       # libasound2-dev — cpal (аудио), libudev-dev — gilrs/winit input,
@@ -71,19 +67,8 @@ jobs:
         with:
           tool: cargo-deny,cargo-audit,cargo-outdated
 
-      # bca (big-code-analysis-cli) is not in taiki-e/install-action's tool
-      # manifest, so install it with the same command `cargo xtask bca
-      # --install` uses. The tool is optional: if this step fails, the
-      # quality gate SKIPs the complexity stage (same contract as
-      # audit/deny/outdated) instead of failing.
-      - name: Install bca (optional, complexity gate)
-        continue-on-error: true
-        run: cargo install big-code-analysis-cli --locked
-
-      # rustqual — MIT replacement for bca (PROJECT_REVIEW § BCA→rustqual).
-      # Runs alongside bca for 2 weeks, then bca will be removed when
-      # Score ≥80% and no regression. Same optional-install contract: if
-      # this step fails, xtask quality SKIPs the rustqual stage.
+      # rustqual — structural quality gate (MIT).
+      # Optional-install contract: if this step fails, xtask quality SKIPs the rustqual stage.
       - name: Install rustqual (optional, structural gate)
         continue-on-error: true
         run: cargo install rustqual --locked

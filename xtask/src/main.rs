@@ -3,7 +3,6 @@
 //! Usage:
 //!   cargo xtask editor  [--skip-wasm] [--editor-dir <path>]
 //!   cargo xtask quality [--ci] [--full] [--bench] [--everything]
-//!   cargo xtask bca [--install] [--write-baseline] [--report] [--full] [--init]
 //!   cargo xtask fuzz <target> [-- <libfuzzer args>]
 //!   cargo xtask mutants [-- <cargo-mutants args>]
 //!   cargo editor   [--skip-wasm] [--editor-dir <path>]   (alias)
@@ -12,7 +11,6 @@
 //! remote editor server. Cross-platform: everything goes through
 //! std::process::Command without a shell.
 
-mod bca;
 mod quality;
 
 use std::path::PathBuf;
@@ -26,7 +24,6 @@ fn main() {
     match cmd.as_str() {
         "editor" => editor(&args[1..]),
         "quality" => quality::quality(&args[1..]),
-        "bca" => bca::bca(&args[1..]),
         "fuzz" => quality::fuzz(&args[1..]),
         "mutants" => quality::mutants(&args[1..]),
         "-h" | "--help" | "help" => usage(0),
@@ -48,19 +45,11 @@ fn usage(code: i32) -> ! {
          --skip-wasm    reuse the existing editor/pkg build\n      \
          --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
          quality [--ci] [--full] [--bench] [--everything]\n      \
-                  Quality gate: fmt, clippy, bca, test, audit, deny, outdated (level 1);\n      \
+                  Quality gate: fmt, clippy, rustqual, test, audit, deny, outdated (level 1);\n      \
                   --ci adds rustdoc + wasm32 check (the exact set CI runs);\n      \
                   --full adds llvm-cov coverage + bench compile-check (level 2);\n      \
                   --bench runs the full criterion suite (long);\n      \
                   --everything = --ci + --full + --bench + mutants + fuzz smoke\n  \
-         bca [--install] [--write-baseline] [--report] [--full] [--init]\n      \
-                  big-code-analysis gate: complexity metrics\n      \
-                  --install        cargo install big-code-analysis-cli --locked\n      \
-                  --write-baseline bca check --write-baseline (updates .bca-baseline.toml)\n      \
-                  --report         bca report HTML + Markdown to target/bca/\n      \
-                  --init           install (if needed) + baseline + report\n      \
-                  --full           --init + cargo xtask quality\n      \
-                  (MPL-2.0 external binary, does NOT affect MIT OR Apache-2.0)\n  \
          fuzz <target> [-- <args>]\n      \
          Run a cargo-fuzz target (scene_ron, materialx_parse, editor_command) via +nightly\n  \
          mutants [-- <args>]\n      \

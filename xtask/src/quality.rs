@@ -73,10 +73,10 @@ impl QualityFlags {
 
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
-    /// Level 1 now: fmt, clippy, bca, rustqual, test, test (physics gpu),
-    /// clippy (physics gpu), audit, deny, outdated = 10
+    /// Level 1 now: fmt, clippy, rustqual, test, test (physics gpu),
+    /// clippy (physics gpu), audit, deny, outdated = 9
     fn total_stages(&self) -> usize {
-        10 + usize::from(self.ci) * 2
+        9 + usize::from(self.ci) * 2
             + usize::from(self.full) * 2
             + usize::from(self.bench)
             + usize::from(self.everything) * 2
@@ -115,12 +115,6 @@ impl<'a> StageList<'a> {
 
     fn cargo(&self, args: &[&str]) -> Command {
         cmd(self.root, "cargo", args)
-    }
-
-    fn bca(&self) -> Command {
-        let mut c = Command::new("bca");
-        c.arg("check").current_dir(self.root);
-        c
     }
 
     fn rustqual(&self) -> Command {
@@ -165,20 +159,7 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
-    // Maintainability / complexity gate (optional, external tool).
-    // If `bca` is not found, SKIP with install hint — does not fail the gate.
-    // License: bca is MPL-2.0, but used as external binary it does NOT affect
-    // Ornis distribution (MIT OR Apache-2.0). Do NOT add as library dependency.
-    if binary_exists("bca") {
-        stages.run("bca", "bca check", stages.bca(), false);
-    } else {
-        stages.skip(
-            "bca",
-            "bca not installed — complexity gate skipped (cargo install big-code-analysis-cli --locked)",
-        );
-    }
-
-    // Structural quality gate — MIT counterpart, replaces bca after 2-week parallel run.
+    // Structural quality gate — MIT (rustqual).
     // Single source of truth: rustqual.toml (no thresholds duplicated here).
     // Ratchet mode: --compare baseline.json --fail-on-regression --no-fail — fails only on regression,
     // new violations are ratcheted via baseline update, not immediate break.
@@ -408,18 +389,17 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy, bca, rustqual, test, audit, deny, outdated\n  \
+         cargo xtask quality           quick set (level 1): fmt, clippy, rustqual, test, audit, deny, outdated\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n\
          \n\
-         External tools (audit, deny, outdated, llvm-cov, bca, rustqual) are optional:\n  \
-         missing → SKIP with install hint. bca is MPL-2.0 as external binary\n  \
-         and does NOT affect Ornis license (MIT OR Apache-2.0); rustqual is MIT.\n  \
+         External tools (audit, deny, outdated, llvm-cov, rustqual) are optional:\n  \
+         missing → SKIP with install hint. rustqual is MIT.\n  \
          rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
-         Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression"
+         Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression --no-fail"
     );
     exit(code);
 }
@@ -477,7 +457,7 @@ fn run_stage(
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             // Re-printing child output verbatim re-emits the child's
-            // workflow commands (::error …): bca floods ~60 annotations and
+            // workflow commands (::error …): rustqual floods annotations and
             // crowds out this gate's curated diagnostics. Break the command
             // prefix in the re-print — the gate emits its own annotations.
             print!("{}", stdout.replace("::error", "::·error"));
@@ -747,10 +727,6 @@ fn install_hint(sub: &str) -> String {
             .to_string(),
         "fuzz" => "Install:  cargo install cargo-fuzz --locked".to_string(),
         "mutants" => "Install:  cargo install cargo-mutants --locked".to_string(),
-        "bca" => "Install:  cargo install big-code-analysis-cli --locked\n\
-             or prebuilt binary: https://github.com/dekobon/big-code-analysis/releases\n\
-             (external tool, MPL-2.0, does NOT affect Ornis MIT OR Apache-2.0 license)"
-            .to_string(),
         other => format!("Install:  cargo install cargo-{other} --locked"),
     }
 }
