@@ -211,8 +211,8 @@ impl GpuBatch {
 
     /// Fill one lane from CPU-side contact data.
     /// The per-lane scalars are packed into `LaneInput` (which mirrors the
-    /// WGSL batch layout: one scalar per field) to stay within the bca
-    /// argument-count limit.
+    /// WGSL batch layout: one scalar per field) to stay within the structural
+    /// gate's argument-count limit.
     fn fill_lane(&mut self, input: LaneInput<'_>) {
         let LaneInput {
             lane,
@@ -416,7 +416,7 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
 /// `batch_buf` accumulators go through the full buffer path so that they
 /// persist across dispatches (the `let b = ...` copy is read-only).
 //
-// bca: suppress(abc) — kernel-DSL body: every statement is translated
+// qual:allow(abc) — kernel-DSL body: every statement is translated
 // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
 // ONLY this function's body into `fn main`. Extracting helpers would emit
 // calls to functions that do not exist in the shader; splitting requires a
@@ -429,7 +429,7 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
     builtin(gid: workgroup_id, lid: local_invocation_id),
 )]
 fn contact_solver() {
-    // bca: suppress(abc) — kernel-DSL body: every statement is translated
+    // qual:allow(abc) — kernel-DSL body: every statement is translated
     // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
     // ONLY this function's body into `fn main`. Extracting helpers would emit
     // calls to functions that do not exist in the shader; splitting requires a

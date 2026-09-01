@@ -404,7 +404,7 @@ fn quality_usage(code: i32) -> ! {
          missing → SKIP with install hint. rustqual is MIT.\n  \
          rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
          Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression --no-fail\n  \
-         Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 30s and stay alive"
+         Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
 }
@@ -709,21 +709,22 @@ fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult
 }
 
 /// Smoke: `cargo run --features editor-only` must compile, bind 127.0.0.1:3420 and stay alive.
-/// ponytail: 30s ceiling (cold cargo build + bind), poll TcpStream every 300ms, no curl/timeout dep.
+/// ponytail: 90s ceiling — cold CI-cache-miss cargo build dominates (cargo run includes compile).
+/// Poll TcpStream every 300ms, no curl/timeout dep; collect child stderr on timeout for diagnostics.
 fn smoke_stage(stages: &mut StageList<'_>) {
     use std::net::TcpStream;
     use std::time::{Duration, Instant};
     stages.n += 1;
     let (idx, total) = (stages.n, stages.total);
     let name = "smoke (editor-only)";
-    let desc = "cargo run --features editor-only (bind 127.0.0.1:3420, 30s)";
+    let desc = "cargo run --features editor-only (bind 127.0.0.1:3420, 90s)";
     eprintln!();
     eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
     let mut child = match Command::new("cargo")
         .args(["run", "--features", "editor-only"])
         .current_dir(stages.root)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -738,11 +739,27 @@ fn smoke_stage(stages: &mut StageList<'_>) {
             return;
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut ok = false;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().ok().flatten() {
-            let note = format!("exited early: {status}");
+            // Child exited before binding — drain stderr for the real error.
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut s| {
+                    use std::io::Read;
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    String::from_utf8_lossy(&buf[..n]).into_owned()
+                })
+                .unwrap_or_default();
+            let note = if stderr.trim().is_empty() {
+                format!("exited early: {status}")
+            } else {
+                let tail = stderr.lines().last().unwrap_or("").trim();
+                format!("exited early: {status} — {tail}")
+            };
             eprintln!("── {name}: FAIL ({note}) ──");
             stages.results.push(StageResult {
                 name: name.into(),
@@ -769,7 +786,7 @@ fn smoke_stage(stages: &mut StageList<'_>) {
             note: String::new(),
         });
     } else {
-        let note = "timeout 30s: 127.0.0.1:3420 not reachable".to_string();
+        let note = "timeout 90s: 127.0.0.1:3420 not reachable".to_string();
         eprintln!("── {name}: FAIL ({note}) ──");
         if ci_annotations() {
             annotate(format!("quality-{}", name.replace(' ', "-")), &note);

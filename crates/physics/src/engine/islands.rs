@@ -1,7 +1,7 @@
 //! Island management for `BuiltinPhysicsEngine` (G4/G7): union-find island
 //! rebuild, island-coherent sleep/wake, partitioning into parallel work items,
 //! and the per-island velocity dispatch. Split out of `engine.rs` to keep each
-//! type's method count within the bca nom/wmc thresholds.
+//! type's method count within the structural gate's thresholds.
 
 use std::collections::HashMap;
 

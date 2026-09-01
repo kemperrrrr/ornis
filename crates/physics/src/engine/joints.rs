@@ -1,6 +1,6 @@
 //! Joint sub-solver for `BuiltinPhysicsEngine` (G5): velocity and position
 //! stages of the ball/revolute joint constraints. Split out of `engine.rs`
-//! to keep each type's method count within the bca nom/wmc thresholds.
+//! to keep each type's method count within the structural gate's thresholds.
 
 use glam::Quat;
 use glam::Vec3;

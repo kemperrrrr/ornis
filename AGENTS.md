@@ -15,9 +15,7 @@
 - Единая точка входа — `cargo xtask quality` (локально и в CI одно и то же).
 - Перед коммитом минимум: `cargo test --workspace` и
   `cargo clippy --all-targets -- -D warnings`.
-- Complexity-гейт: `bca check` против `.bca-baseline.toml`. Рост сложности
-  — осознанно: обновить запись baseline точечно, с датированным
-  комментарием-причиной (см. существующие записи).
+- Complexity-гейт: `rustqual` против `baseline.json` (ratchet: `rustqual --compare baseline.json --fail-on-regression --no-fail`). Рост сложности — осознанно: обновить baseline точечно (`rustqual --save-baseline baseline.json`), с проверкой `rustqual` Score не регрессирует.
 
 ## Границы изменений
 

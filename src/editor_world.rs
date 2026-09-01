@@ -358,8 +358,8 @@ impl EditorWorld {
 // Snapshots and command handling — free functions over [`EditorWorld`]
 // ═══════════════════════════════════════════════════════════════════════════
 // The bulk of the snapshot/command logic lives here, not in
-// `impl EditorWorld`, to keep the type under the bca number-of-methods
-// gate; the public methods above are thin delegates.
+// `impl EditorWorld`, to keep the type's method count within the structural
+// gate's thresholds; the public methods above are thin delegates.
 
 /// Snapshot `world` as a [`Scene`]: every alive entity becomes an
 /// [`EntityDesc`] (missing components fall back to the spawn defaults),

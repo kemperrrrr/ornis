@@ -1076,7 +1076,7 @@ fn sphere_vs_capsule(
     })
 }
 
-/// Capsule collision parameters (keeps `capsule_vs_capsule` within the bca
+/// Capsule collision parameters (keeps `capsule_vs_capsule` within the structural gate's
 /// argument-count limit).
 struct CapsuleShape {
     pos: Vec3,
@@ -1330,7 +1330,7 @@ struct IslandWork {
 }
 
 /// Context for building a ManifoldState (packs the per-manifold parameters,
-/// keeping `build_manifold_state` below the bca nargs limit).
+/// keeping `build_manifold_state` below the structural gate's nargs limit).
 // Only consumed by the `gpu` feature's GPU contact path today.
 #[allow(dead_code)]
 struct ManifoldCtx<'a> {

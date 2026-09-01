@@ -1,8 +1,8 @@
 //! Contact solver stages for `BuiltinPhysicsEngine` (G2b-G7): warm-started
 //! Gauss-Seidel velocity solve with block-LCP normals, one-shot restitution,
 //! NGS position pass, and the island dispatch plumbing. Split out of
-//! `engine.rs` to keep each type's method count within the bca nom/wmc
-//! thresholds.
+//! `engine.rs` to keep each type's method count within the structural
+//! gate's thresholds.
 
 #[cfg(feature = "gpu")]
 use crate::gpu::{pack_single_point_batches, write_back_acc};
@@ -682,7 +682,7 @@ impl BuiltinPhysicsEngine {
         }
     }
 
-    /// Friction step for a single manifold (extracted to reduce bca
+    /// Friction step for a single manifold (extracted to reduce
     /// cognitive complexity of solve_scalar_velocity_step).
     #[allow(clippy::needless_range_loop)]
     pub(super) fn solve_scalar_friction(
