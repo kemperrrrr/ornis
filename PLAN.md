@@ -94,7 +94,7 @@
 - **Линтер параллелизуемости**: `#[smart_pipeline]` выдаёт предупреждения
   через deprecated-note трюк; IDE-интеграции и расширяемого набора правил нет.
 - **WASM**: viewport получает актуальные scene snapshot'ы из `/api/scene`
-  через polling (~1/с), имеет fallback на `scene.ron` и orbit-камеру; каждый
+  через polling (~1/с), без fallback на `scene.ron` (единый `Engine/World/Schedule` — `InputState::apply_snapshot` + `POST /api/input`/WS), имеет orbit-камеру; каждый
   snapshot восстанавливается в общий для native/WASM library-level
   `RenderWorld`, проходит `Engine::run_frame`/`RenderExtract` и записывается
   через `RenderFrame3D`/`FramePlan`. Ввода из браузера обратно в движок и
@@ -309,7 +309,7 @@ runtime без отдельной extract-фазы — будущая цель, 
 
 ### B2. Физика (`crates/physics`) — план работ
 
-> **Статус п1/п2/контакты на 2026-09-02:** п1 incremental broadphase **✅ готов** (`UniformGrid::body_cells`/`prev_meta`, dirty-set, retained clean-clean, honest `BroadPhaseStats`, heuristic >50% → full rebuild); п2 narrow cache **✅ готов** (`NarrowCacheEntry`, `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с, HashMap) + SAT cache **✅ готов (отдельный PR, 16-шард `Vec<Mutex>` sequential-only, parallel bypass без регресса)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`); **box↔capsule ✅** + fully analytic TOI ✅ (conservative advancement). **Полный 8→2 на больших parallel (14k пар)** — следующий шаг (lock-free/DashMap, расширенный EPS);
+> **Статус п1/п2/контакты на 2026-09-03:** п1 incremental broadphase **✅ готов** (`UniformGrid::body_cells`/`prev_meta`, dirty-set, retained clean-clean, honest `BroadPhaseStats`, heuristic >50% → full rebuild); п2 narrow cache **✅ готов** (`NarrowCacheEntry`, `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с, HashMap) + SAT cache **✅ готов (16-шард `Vec<Mutex>` try_lock-only, parallel+sequential, 8→2 без регресса 9→89 мс избежан)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`); **box↔capsule ✅** + fully analytic TOI ✅ (conservative advancement). **Полный 8→2 на больших parallel (14k пар) — закрыт try_lock-only; DashMap — опционально;**
 
 > Архитектура сверена с реальными исходниками **Box3D** (`github.com/erincatto/box3d`,
 > soltimeer 3D-преемник Box2D, Catto, июнь 2026) и **Jolt** (`github.com/jrouwe/JoltPhysics`):
@@ -432,7 +432,7 @@ pre-filter до SAT через `scratch_pairs`; no-alloc scratch
 **many_islands 16.33 мс (61.2 FPS)**, **hetero 16.33 мс**,
 **islands_grid 2.81 мс (355 FPS)**, **contact_cluster 3.16 мс (316 FPS)**,
 **big_stack 925 FPS**, шум **±1.5 мс**. Бюджет **60 FPS (16.7 мс) достигнут**.
-Далее: **п1 incremental broadphase ✅ готов** (2026-09-01: `body_cells`/`prev_meta`, dirty-set, retained clean-clean, heuristic >50% → full rebuild, honest stats; 4.8→~1 мс ожидание), **п2 narrow cache ✅** (2026-09-01: `NarrowCacheEntry` + `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с bypass) + **SAT cache ✅ 2026-09-02 (16-шард `Vec<Mutex>`, sequential-only, parallel bypass 9→89 мс регресс избежан, `obb_sat_cached`/`box_manifold_cached`)** к цели **~10 мс / 100 FPS**; полный 8→2 на больших parallel — следующий шаг (lock-free/DashMap); **GPU solver 2.9 мс — не бутылка, отложен**. **box↔capsule ✅ 2026-09-01** (оба narrowphase-пути через `box_vs_capsule` + `distance::shape_distance`, analytic TOI `cast_shape` conservative advancement).
+Далее: **п1 incremental broadphase ✅ готов** (2026-09-01: `body_cells`/`prev_meta`, dirty-set, retained clean-clean, heuristic >50% → full rebuild, honest stats; 4.8→~1 мс ожидание), **п2 narrow cache ✅** (2026-09-01: `NarrowCacheEntry` + `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с bypass) + **SAT cache ✅ 2026-09-03 (16-шард `Vec<Mutex>` try_lock-only, sequential+parallel, 8→2 без регресса 9→89 мс, `obb_sat_cached`/`box_manifold_cached` + par_iter)** к цели **~10 мс / 100 FPS**; **GPU solver 2.9 мс — не бутылка, отложен**. **box↔capsule ✅ 2026-09-01** (оба narrowphase-пути через `box_vs_capsule` + `distance::shape_distance`, analytic TOI `cast_shape` conservative advancement).
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
