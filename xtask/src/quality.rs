@@ -1,4 +1,4 @@
-//! Quality gate: fmt, clippy, tests, supply-chain (audit/deny/outdated),
+//! Quality gate: fmt, clippy, tests, supply-chain (audit/deny/outdated/upgrade),
 //! plus level 2 (--full: coverage + bench compile-check; --bench: criterion).
 //!
 //! Stage architecture: each stage prints a header and PASS/FAIL/SKIP/INFO;
@@ -14,7 +14,7 @@ enum Status {
     Fail,
     /// The tool is missing — the stage is skipped (not counted as a failure).
     Skip,
-    /// Informational stage (outdated): the result does not affect the exit code.
+    /// Informational stages do not affect the exit code (kept for optional tools).
     Info,
 }
 
@@ -74,9 +74,9 @@ impl QualityFlags {
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
     /// Level 1 now: fmt, clippy, rustqual, smoke (editor-only), test, test (physics gpu),
-    /// clippy (physics gpu), audit, deny, outdated = 10
+    /// clippy (physics gpu), audit, deny, outdated, upgrade-check = 11
     fn total_stages(&self) -> usize {
-        10 + usize::from(self.ci) * 2
+        11 + usize::from(self.ci) * 2
             + usize::from(self.full) * 2
             + usize::from(self.bench)
             + usize::from(self.everything) * 2
@@ -226,14 +226,97 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
-    // Informational stage: cargo-outdated returns a non-zero code when
-    // dependencies are outdated — that is not a reason to fail the gate.
     stages.run(
-        "outdated (info)",
-        "cargo outdated --workspace",
-        stages.cargo(&["outdated", "--workspace"]),
-        true,
+        "outdated",
+        "cargo outdated --workspace --exit-code 1 (hard gate: must be latest)",
+        stages.cargo(&["outdated", "--workspace", "--exit-code", "1"]),
+        false,
     );
+
+    // Hard gate: majors must be latest — cargo upgrade (cargo-edit) dry-run.
+    // `cargo upgrade` is the same tool the project uses for `cargo upgrade --incompatible allow`;
+    // dry-run prints `old req / latest` table if any crate lags behind latest.
+    dependencies_upgrade_stage(stages);
+}
+
+fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
+    // cargo-edit's `cargo upgrade --dry-run --incompatible allow` prints a table
+    // with `old req` rows when a dependency lags behind latest. Exit code is 0
+    // even when outdated, so we inspect stdout/stderr instead of relying on exit.
+    stages.n += 1;
+    let (idx, total) = (stages.n, stages.total);
+    let name = "upgrade-check";
+    let desc = "cargo upgrade --dry-run --incompatible allow (must be clean)";
+    eprintln!();
+    eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
+    if !cargo_subcommand_exists("upgrade") {
+        // cargo-edit not installed — skip with hint instead of failing the gate.
+        let hint = "Install:  cargo install cargo-edit --locked";
+        eprintln!("── {name}: SKIP (cargo-upgrade not installed — {hint}) ──");
+        stages.results.push(StageResult {
+            name: name.into(),
+            status: Status::Skip,
+            note: "cargo-upgrade not installed".into(),
+        });
+        return;
+    }
+    let output = Command::new("cargo")
+        .args(["upgrade", "--dry-run", "--incompatible", "allow"])
+        .current_dir(stages.root)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let combined = format!("{stdout}\n{stderr}");
+            // `cargo upgrade` prints a table header `old req` when outdated.
+            // When up-to-date it prints only `note: Re-run...` or nothing.
+            let has_outdated = combined
+                .lines()
+                .any(|l| l.trim_start().starts_with("old req") || l.contains("old req"));
+            // Fallback: also treat any `Updating` line with `->` as outdated (covers alternative output).
+            let has_update_table = combined.contains("Updating") && combined.contains("->");
+            if has_outdated || has_update_table || combined.contains("outdated") {
+                // Check if the table actually contains data rows (not just header).
+                // Heuristic: if output contains a version number like `0.` after header, it's real.
+                let outdated = combined
+                    .lines()
+                    .any(|l| l.contains("0.") && l.contains("->"))
+                    || has_outdated;
+                if outdated {
+                    eprintln!("{combined}");
+                    eprintln!("── {name}: FAIL (dependencies not latest — run `cargo upgrade --incompatible allow`) ──");
+                    if ci_annotations() {
+                        annotate(
+                            format!("quality-{name}"),
+                            "dependencies not latest — run `cargo upgrade --incompatible allow`",
+                        );
+                    }
+                    stages.results.push(StageResult {
+                        name: name.into(),
+                        status: Status::Fail,
+                        note: "outdated".into(),
+                    });
+                    return;
+                }
+            }
+            // No table rows → clean.
+            eprintln!("── {name}: PASS ──");
+            stages.results.push(StageResult {
+                name: name.into(),
+                status: Status::Pass,
+                note: String::new(),
+            });
+        }
+        Err(e) => {
+            eprintln!("── {name}: FAIL (spawn error: {e}) ──");
+            stages.results.push(StageResult {
+                name: name.into(),
+                status: Status::Fail,
+                note: format!("spawn: {e}"),
+            });
+        }
+    }
 }
 
 /// ── Level 2 (--full): coverage + bench compile check ──────
@@ -393,14 +476,14 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy, rustqual, smoke, test, audit, deny, outdated\n  \
+         cargo xtask quality           quick set (level 1): fmt, clippy, rustqual, smoke, test, audit, deny, outdated, upgrade-check\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n\
          \n\
-         External tools (audit, deny, outdated, llvm-cov, rustqual) are optional:\n  \
+         External tools (audit, deny, outdated, upgrade, llvm-cov, rustqual) are optional:\n  \
          missing → SKIP with install hint. rustqual is MIT.\n  \
          rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
          Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression --no-fail\n  \
@@ -818,6 +901,7 @@ fn install_hint(sub: &str) -> String {
         "audit" => "Install:  cargo install cargo-audit --locked".to_string(),
         "deny" => "Install:  cargo install cargo-deny --locked".to_string(),
         "outdated" => "Install:  cargo install cargo-outdated --locked".to_string(),
+        "upgrade" => "Install:  cargo install cargo-edit --locked".to_string(),
         "llvm-cov" => "Install:  cargo install cargo-llvm-cov --locked\n\
              and the component:  rustup component add llvm-tools-preview"
             .to_string(),
