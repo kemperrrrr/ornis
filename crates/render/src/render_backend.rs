@@ -278,4 +278,245 @@ mod tests {
         );
         queue.submit([encoder.finish()]);
     }
+
+    /// Golden-frame: offscreen 1280×720 render of `assets/scene.ron` (5 entities)
+    /// через `RenderBackend` — пининг регрессов реального GPU пайплайна.
+    ///
+    /// Сравнивает текущий кадр попиксельно с чекином
+    /// `crates/render/tests/data/golden_probe_1280x720.png` (снятым на Apple M1
+    /// via `cargo run -p ornis-render --example render_probe`), допускает
+    /// канальный дрейф ≤2 (округление sRGB/тоновая компрессия между драйверами).
+    /// Если адаптера нет (CI без GPU) — пропускается.
+    #[test]
+    fn golden_full_scene_probe_matches_snapshot() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter; skipping golden probe");
+            return;
+        };
+
+        // ── Scene RON ───────────────────────────────────────────────
+        let ron_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scene.ron");
+        let ron = std::fs::read_to_string(&ron_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", ron_path.display()));
+        let scene = crate::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
+
+        // ── Gold PNG → bytes ───────────────────────────────────────
+        let gold_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/golden_probe_1280x720.png");
+        let gold_bytes = std::fs::read(&gold_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", gold_path.display()));
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&gold_bytes));
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let mut reader = decoder.read_info().expect("png header");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("png frame");
+        assert_eq!(info.width, 1280);
+        assert_eq!(info.height, 720);
+        let gold_pixels = buf[..info.buffer_size()].to_vec();
+
+        // ── Render current frame 1280×720 offscreen ─────────────────
+        const W: u32 = 1280;
+        const H: u32 = 720;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("golden probe target"),
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: W,
+            height: H,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        let backend_config = RenderBackendConfig {
+            surface_config: surface_config.clone(),
+            sample_count: 1,
+            max_objects: 256,
+            max_materials: 64,
+        };
+        let mut backend = create_render_backend(&device, &backend_config);
+
+        // Build mesh/materials/instances как в render_probe::build_scene_data.
+        let first = scene.entities.first().expect("scene has entities");
+        let mesh = match &first.mesh {
+            crate::scene::MeshDesc::Sphere {
+                radius,
+                segments,
+                rings,
+            } => crate::mesh::create_sphere(&device, *radius, *segments, *rings),
+        };
+        let mut materials = Vec::new();
+        let mut instances = Vec::new();
+        for (i, ent) in scene.entities.iter().enumerate() {
+            let mat = match &ent.material {
+                crate::scene::MaterialDesc::Dielectric {
+                    base_color,
+                    roughness,
+                } => {
+                    let mut m = ornis_core::OpenPBRMaterial::dielectric();
+                    m.base.color_rgb(*base_color);
+                    m.specular.roughness(*roughness);
+                    m
+                }
+                crate::scene::MaterialDesc::Metal {
+                    base_color,
+                    roughness,
+                } => {
+                    let mut m = ornis_core::OpenPBRMaterial::metal();
+                    m.base.color_rgb(*base_color);
+                    m.specular.roughness(*roughness);
+                    m
+                }
+                crate::scene::MaterialDesc::Coat {
+                    base_color,
+                    coat_weight,
+                    coat_roughness,
+                } => {
+                    let mut m = ornis_core::OpenPBRMaterial::coat();
+                    m.base.color_rgb(*base_color);
+                    m.coat.weight(*coat_weight);
+                    m.coat.roughness(*coat_roughness);
+                    m
+                }
+            };
+            materials.push(mat);
+            let t = &ent.transform;
+            let model = glam::Mat4::from_scale_rotation_translation(
+                glam::Vec3::from(t.scale),
+                glam::Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3])
+                    .normalize(),
+                glam::Vec3::from(t.translation),
+            );
+            instances.push(crate::renderer::InstanceData {
+                model_matrix: model,
+                normal_matrix: model.inverse().transpose(),
+                material_index: i as u32,
+            });
+        }
+        backend.upload_materials(&queue, &materials);
+        backend.upload_instances(&queue, &instances);
+        let lights: Vec<([f32; 3], f32, [f32; 3])> = scene
+            .lights
+            .iter()
+            .map(|l| match l {
+                crate::scene::LightDesc::Directional {
+                    direction,
+                    intensity,
+                    color,
+                } => (*direction, *intensity, *color),
+            })
+            .collect();
+        backend.set_lights(&queue, scene.ambient, &lights);
+        let (view, proj) = {
+            let cam = &scene.camera;
+            let aspect = W as f32 / H as f32;
+            let view = glam::Mat4::look_at_rh(
+                glam::Vec3::from(cam.position),
+                glam::Vec3::from(cam.target),
+                glam::Vec3::from(cam.up),
+            );
+            let proj = glam::Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
+            (view, proj)
+        };
+        let view_proj = (proj * view).to_cols_array_2d();
+        backend.set_camera(&queue, &view_proj, scene.camera.position);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("golden probe encoder"),
+        });
+        backend.render_scene(
+            RenderContext {
+                device: &device,
+                queue: &queue,
+                encoder: &mut encoder,
+                target: &target_view,
+            },
+            &mesh,
+            instances.len() as u32,
+        );
+
+        // Read-back (та же логика что в render_probe::read_back_pixels).
+        let bpp = 4u32;
+        let unpadded = W * bpp;
+        let padded = unpadded.div_ceil(256) * 256;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("golden readback"),
+            size: (padded * H) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(H),
+                },
+            },
+            wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let data = slice.get_mapped_range();
+        let mut pixels = vec![0u8; (unpadded * H) as usize];
+        for y in 0..H as usize {
+            pixels[y * unpadded as usize..][..unpadded as usize]
+                .copy_from_slice(&data[y * padded as usize..][..unpadded as usize]);
+        }
+        drop(data);
+        readback.unmap();
+
+        // ── Compare ────────────────────────────────────────────────
+        assert_eq!(pixels.len(), gold_pixels.len());
+        let mut max_diff: u8 = 0;
+        let mut bad: usize = 0;
+        for (a, b) in pixels.iter().zip(gold_pixels.iter()) {
+            let d = a.abs_diff(*b);
+            max_diff = max_diff.max(d);
+            if d > 2 {
+                bad += 1;
+            }
+        }
+        let bad_pct = bad as f64 / pixels.len() as f64 * 100.0;
+        eprintln!("golden probe: max_diff={max_diff} bad>2={bad} ({bad_pct:.4}%)");
+        assert!(
+            bad_pct < 0.01,
+            "golden frame drifted: {bad} bytes diff >2 ({bad_pct:.4}%); max_diff={max_diff} — update tests/data/golden_probe_1280x720.png via render_probe if change is intentional"
+        );
+        // Санитарка: центр не чёрный, как в probe логе [52,52,186].
+        let center_off = ((H / 2 * W + W / 2) * bpp) as usize;
+        let center = &pixels[center_off..center_off + 4];
+        assert!(center[2] > 80, "center blue must dominate: {center:?}");
+    }
 }

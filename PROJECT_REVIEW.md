@@ -36,7 +36,7 @@
    polling; браузер после serialization boundary восстанавливает snapshot
    в отдельный `ornis_render::RenderWorld`.
 
-2. **Довести physics API** — 🟡 (п1/п2/box↔capsule/SAT 2026-09-02: см. ниже)
+2. **Довести physics API** — ✅ done 2026-09-03 (п1 incremental broadphase, п2 narrow cache, SAT 16×Mutex try_lock parallel+sequential, box↔capsule + analytic TOI)
 
    Collision layers/masks уже добавлены в `RigidBody` и применяются
    симметрично в broadphase, narrowphase и linear CCD. Triggers генерируют
@@ -115,7 +115,7 @@
    > IPC-типы — в `crates/editor-backend/src/ipc.rs` (не `src/ipc.rs`);
    > линтер `#[smart_pipeline]` — deprecated-note трюк вместо `compile_warning!`;
    > `Pack` → ✅ (`for_each_packed` + совместимость лент с `for_each_entity!`);
-   > WASM-viewport рендерит живую сцену из `/api/scene` (fallback на `scene.ron`,
+   > WASM-viewport рендерит живую сцену из `/api/scene` (без fallback, единый runtime,
    > orbit-камера) — статусы редактора и roadmap п.4 обновлены; Приложение A
    > подтверждено кодом (убран удалённый `shader.rs`, `shapecast` реализован —
    > G6, A3.3/A3.4 закрыты). Заодно обновлён комментарий в шапке `editor/editor.js`.
@@ -276,7 +276,7 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 pairs, static/dynamic-friendly cell decomposition и large-body escape path;
 крупные static AABB (например, пол) не обязаны порождать одну пару со всеми
 телами через линейный axis sweep. `Sweep-and-Prune` остаётся default
-baseline/fallback для сравнения.
+baseline/fallback для сравнения (SAP — только baseline).
 
 **Dynamic AABB tree** остаётся вторым кандидатом для разреженных миров с
 сильно различающимися размерами тел. Выбор default не фиксируется до

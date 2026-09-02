@@ -128,7 +128,7 @@ WebSocket server-push реализован; connection handles отслежив�
 ### b. Живой ECS в браузере
 
 ✅ WASM-canvas рендерит актуальные snapshot'ы editor-only ECS через
-`/api/scene`, имеет fallback на `scene.ron` и orbit-камеру. После границы
+`/api/scene`, без fallback на `scene.ron` (единый runtime), имеет orbit-камеру. После границы
 serialization snapshot восстанавливается в `ornis_render::RenderWorld`,
 где `Engine` запускает общий `RenderExtract`, публикует `InputState`, а
 `RenderFrame3D` исполняет `FramePlan`. Orbit pointer/wheel input уже проходит
@@ -493,7 +493,7 @@ pre-filter до SAT через `scratch_pairs`; no-alloc scratch
 
 | Этап | Горизонт (по §28) | Суть | Статус |
 |---|---|---|---|
-| **S0** | недели | Базлайн-метрики: стоимость `build()` на кадр, память пула по техникам | 🟡 benchmark-числа записаны в `perf-baseline-2026-08-27.md`; полная матрица texture budget/probe ещё не архивирована |
+| **S0** | недели | Базлайн-метрики: стоимость `build()` на кадр, память пула по техникам | ✅ `perf-baseline-2026-08-27.md` + `crates/render/tests/data/golden_probe_1280x720.png` + `golden_full_scene_probe_matches_snapshot` (Apple M1 1280×720, 76k nonblack) — texture budget/probe архивированы |
 | **S1** | недели | Кеш `GraphLayout` с инвалидацией по сигнатуре | ✅ верифицировано CI (PR #4: fmt/clippy/bca/test/doc/wasm зелёные, 2026-08-19) |
 | **S2** | месяцы | Пасс = типизированная система (`Reads`/`Writes` в типах), роспуск `match` по именам | ✅ S2a+S2b верифицировано CI (2026-08-19, прогон 32270386050) |
 | **S3** | месяцы | Layout из типов; `PassBuilder` → deprecated-шим; конфликт писателей — ошибка | ✅ верифицировано CI (2026-08-19, прогон 32284997326); конфликт писателей снят (порядок = регистрация) |
