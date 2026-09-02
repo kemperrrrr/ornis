@@ -9,7 +9,7 @@
 //! Compile-checked гейтом; ручной запуск:
 //!   cargo bench -p ornis-render --bench recording_bench
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::render_backend::RenderContext;
 use ornis_render::{InstanceData, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique};
@@ -140,7 +140,7 @@ fn bench_recording(c: &mut Criterion) {
         b.iter(|| {
             let desc = wgpu::CommandEncoderDescriptor { label: None };
             let mut encoder = device.create_command_encoder(&desc);
-            black_box(&mut seq).render(
+            std::hint::std::hint::black_box(&mut seq).render(
                 RenderContext {
                     device: &device,
                     queue: &queue,
@@ -158,7 +158,7 @@ fn bench_recording(c: &mut Criterion) {
         b.iter(|| {
             let desc = wgpu::CommandEncoderDescriptor { label: None };
             let mut encoder = device.create_command_encoder(&desc);
-            black_box(&mut par).render(
+            std::hint::std::hint::black_box(&mut par).render(
                 RenderContext {
                     device: &device,
                     queue: &queue,

@@ -35,7 +35,7 @@ optional = true
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
-criterion = { version = "0.5", features = ["rayon"] }
+criterion = { version = "0.8", features = ["rayon"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 ornis-macros = { path = "../macros" }
 proptest = "1"

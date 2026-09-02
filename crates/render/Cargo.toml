@@ -19,11 +19,11 @@ ron = "0.12"
 [dev-dependencies]
 naga = "30"
 pollster = "1.0"
-png = "0.17"
+png = "0.18"
 proptest = "1"
 wgpu = "30"
 glam = "0.33"
-criterion = { version = "0.5", features = ["rayon"] }
+criterion = { version = "0.8", features = ["rayon"] }
 
 [[bench]]
 name = "layout_bench"

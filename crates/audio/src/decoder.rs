@@ -5,16 +5,16 @@
 //! interleaved f32 samples normalized to [-1, 1]. Undecodable packets are
 //! skipped rather than failing the whole decode; unknown sample rate or
 //! channel layout falls back to 44.1 kHz stereo.
-
+//!
 use std::path::Path;
 use std::sync::Arc;
 
-use symphonia::core::audio::SampleBuffer as SymphSampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::TrackType;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use crate::source::AudioClip;
 
@@ -47,6 +47,78 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+fn decode_inner(
+    mss: MediaSourceStream,
+    hint: Hint,
+    format_opts: FormatOptions,
+    metadata_opts: MetadataOptions,
+    decoder_opts: AudioDecoderOptions,
+) -> Result<AudioClip, DecodeError> {
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, format_opts, metadata_opts)
+        .map_err(|_| DecodeError::Format("failed to probe format"))?;
+
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or(DecodeError::Unsupported)?;
+
+    let track_id = track.id;
+    let codec_params = track
+        .codec_params
+        .as_ref()
+        .ok_or(DecodeError::Unsupported)?;
+    let audio_params = codec_params.audio().ok_or(DecodeError::Unsupported)?;
+    let sample_rate = audio_params.sample_rate.unwrap_or(44100);
+    let channels = audio_params
+        .channels
+        .as_ref()
+        .map(|c| c.count() as u16)
+        .unwrap_or(2);
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(audio_params, &decoder_opts)
+        .map_err(|_| DecodeError::Unsupported)?;
+
+    let mut all_samples: Vec<f32> = Vec::new();
+    let mut tmp: Vec<f32> = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(pkt)) => pkt,
+            Ok(None) => break,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(_) => break,
+        };
+
+        if packet.track_id != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let interleaved = decoded.samples_interleaved();
+        if tmp.len() < interleaved {
+            tmp.resize(interleaved, 0.0);
+        }
+        decoded.copy_to_slice_interleaved(&mut tmp[..interleaved]);
+        all_samples.extend_from_slice(&tmp[..interleaved]);
+    }
+
+    Ok(AudioClip {
+        sample_rate,
+        channels,
+        samples: Arc::new(all_samples),
+    })
+}
+
 /// Decode any Symphonia-supported audio file into an interleaved f32 clip.
 ///
 /// The path's extension feeds the format probe's hint. Samples come out
@@ -66,66 +138,13 @@ pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<AudioClip, DecodeError> {
         hint.with_extension(ext);
     }
 
-    let format_opts = FormatOptions::default();
-    let metadata_opts = MetadataOptions::default();
-    let decoder_opts = DecoderOptions::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|_| DecodeError::Format("failed to probe format"))?;
-
-    let mut format = probed.format;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-        .ok_or(DecodeError::Unsupported)?;
-
-    let codec_params = &track.codec_params;
-    let track_id = track.id;
-    let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-    let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(codec_params, &decoder_opts)
-        .map_err(|_| DecodeError::Unsupported)?;
-
-    let mut all_samples: Vec<f32> = Vec::new();
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(pkt) => pkt,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        let frames_count = decoded.frames();
-        let spec = *decoded.spec();
-        let mut buf = SymphSampleBuffer::<f32>::new(frames_count as u64, spec);
-        buf.copy_interleaved_ref(decoded);
-        let frames = buf.samples().to_vec();
-        let num_samples = frames_count * spec.channels.count();
-        all_samples.extend_from_slice(&frames[..num_samples.min(frames.len())]);
-    }
-
-    Ok(AudioClip {
-        sample_rate,
-        channels,
-        samples: Arc::new(all_samples),
-    })
+    decode_inner(
+        mss,
+        hint,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+        AudioDecoderOptions::default(),
+    )
 }
 
 /// In-memory counterpart of [`decode_file`] for embedded/fetched audio.
@@ -139,69 +158,17 @@ pub fn decode_bytes(data: &[u8], extension: &str) -> Result<AudioClip, DecodeErr
     let mut hint = Hint::new();
     hint.with_extension(extension);
 
-    let format_opts = FormatOptions::default();
-    let metadata_opts = MetadataOptions::default();
-    let decoder_opts = DecoderOptions::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|_| DecodeError::Format("failed to probe format"))?;
-
-    let mut format = probed.format;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-        .ok_or(DecodeError::Unsupported)?;
-
-    let codec_params = &track.codec_params;
-    let track_id = track.id;
-    let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-    let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(codec_params, &decoder_opts)
-        .map_err(|_| DecodeError::Unsupported)?;
-
-    let mut all_samples: Vec<f32> = Vec::new();
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(pkt) => pkt,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        let frames_count = decoded.frames();
-        let spec = *decoded.spec();
-        let mut buf = SymphSampleBuffer::<f32>::new(frames_count as u64, spec);
-        buf.copy_interleaved_ref(decoded);
-        let frames = buf.samples().to_vec();
-        let num_samples = frames_count * spec.channels.count();
-        all_samples.extend_from_slice(&frames[..num_samples.min(frames.len())]);
-    }
-
-    Ok(AudioClip {
-        sample_rate,
-        channels: channels as u16,
-        samples: Arc::new(all_samples),
-    })
+    decode_inner(
+        mss,
+        hint,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+        AudioDecoderOptions::default(),
+    )
 }
 
 #[cfg(test)]
+
 mod tests {
     use super::*;
 

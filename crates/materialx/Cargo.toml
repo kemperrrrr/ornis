@@ -15,7 +15,7 @@ glam = "0.33"
 
 [dev-dependencies]
 ornis-core = { path = "../core" }
-criterion = { version = "0.5", features = ["rayon"] }
+criterion = { version = "0.8", features = ["rayon"] }
 
 [[bench]]
 name = "parse_bench"

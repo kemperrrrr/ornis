@@ -290,7 +290,7 @@ fn smart_pipeline_preserves_code_between_loops() {
 
 // `total` is mutated across iterations, so the loop must stay sequential —
 // and, critically, still iterate over every entity (not run its body once).
-#[allow(deprecated)] // the macro intentionally warns that the loops stay sequential
+#[expect(deprecated)] // sequential fallback is intentional — macro warns via deprecated-note trick
 #[smart_pipeline]
 fn sum_positions_x(store: &SmartStore) -> f32 {
     let mut warmup = 0;

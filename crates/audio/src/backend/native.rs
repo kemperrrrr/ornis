@@ -113,7 +113,7 @@ fn run_audio_thread(
     let err_fn = move |err| eprintln!("Audio stream error: {}", err);
 
     let stream = device.build_output_stream(
-        &config.into(),
+        config.into(),
         move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
             let mut guard = match stream_samples.lock() {
                 Ok(g) => g,

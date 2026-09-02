@@ -1,6 +1,6 @@
 //! Benchmarks for `ComponentStore` insert and iteration throughput.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rayon::iter::ParallelIterator;
 
 use ornis_core::{ComponentStore, Entity, EntityAllocator};
@@ -34,7 +34,7 @@ fn bench_insert(c: &mut Criterion) {
         b.iter(|| {
             let e = alloc.allocate();
             let mut store = ComponentStore::new();
-            store.insert(black_box(e), black_box(1.0f32));
+            store.insert(std::hint::black_box(e), std::hint::black_box(1.0f32));
         });
     });
 }
@@ -44,7 +44,7 @@ fn bench_iterate(c: &mut Criterion) {
         let (_, _, store, _) = setup(100_000);
         b.iter(|| {
             for val in store.iter() {
-                black_box(val);
+                std::hint::black_box(val);
             }
         });
     });
@@ -55,7 +55,7 @@ fn bench_random_access(c: &mut Criterion) {
         let (_, entities, store, _) = setup(100_000);
         b.iter(|| {
             for &e in &entities {
-                black_box(store.get(e));
+                std::hint::black_box(store.get(e));
             }
         });
     });
@@ -66,7 +66,7 @@ fn bench_intersection(c: &mut Criterion) {
         let (_, _, store_a, store_b) = setup(100_000);
         b.iter(|| {
             for (_, val_a, val_b) in store_a.iter_zip(&store_b) {
-                black_box((val_a, val_b));
+                std::hint::black_box((val_a, val_b));
             }
         });
     });
@@ -77,7 +77,7 @@ fn bench_par_iterate(c: &mut Criterion) {
         let (_, _, store, _) = setup(100_000);
         b.iter(|| {
             store.par_iter().for_each(|val| {
-                black_box(val);
+                std::hint::black_box(val);
             });
         });
     });

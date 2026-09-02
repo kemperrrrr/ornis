@@ -5,7 +5,7 @@
 //! Run: `cargo bench -p ornis-render`. Record the numbers in
 //! `docs/rendering/unified-scheduler.md` (S0 table).
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use ornis_render::{RenderFrame3D, Technique};
 
@@ -33,7 +33,7 @@ fn bench_layout_compute(c: &mut Criterion) {
                 // A mutation-driven recompute: the cost the cache removes
                 // from steady-state frames.
                 g3.plan_mut().invalidate();
-                black_box(g3.plan_mut().layout());
+                std::hint::std::hint::black_box(g3.plan_mut().layout());
             });
         });
     }
@@ -52,7 +52,7 @@ fn bench_layout_cache_hit(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 // Steady-state frame: no mutations → cache hit.
-                black_box(g3.plan_mut().layout());
+                std::hint::std::hint::black_box(g3.plan_mut().layout());
             });
         });
     }
@@ -67,7 +67,9 @@ fn bench_levels(c: &mut Criterion) {
     ] {
         let mut g3 = make(technique);
         let layout = g3.plan_mut().layout().clone();
-        group.bench_function(name, |b| b.iter(|| black_box(layout.levels())));
+        group.bench_function(name, |b| {
+            b.iter(|| std::hint::std::hint::black_box(layout.levels()))
+        });
     }
     group.finish();
 }

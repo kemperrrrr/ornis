@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use ornis_core::{ComponentStore, Entity, EntityAllocator};
 
@@ -137,7 +137,7 @@ fn bench_insert(c: &mut Criterion) {
             for _ in 0..COUNT {
                 store.insert(alloc.allocate(), 1.0);
             }
-            black_box(store.len());
+            std::hint::black_box(store.len());
         });
     });
 
@@ -148,7 +148,7 @@ fn bench_insert(c: &mut Criterion) {
             for _ in 0..COUNT {
                 store.insert(alloc.allocate(), 1.0);
             }
-            black_box(store.data.len());
+            std::hint::black_box(store.data.len());
         });
     });
 
@@ -159,7 +159,7 @@ fn bench_insert(c: &mut Criterion) {
             for _ in 0..COUNT {
                 store.insert(alloc.allocate(), 1.0);
             }
-            black_box(store.len());
+            std::hint::black_box(store.len());
         });
     });
 
@@ -170,7 +170,7 @@ fn bench_insert(c: &mut Criterion) {
             for _ in 0..COUNT {
                 store.insert(alloc.allocate(), 1.0);
             }
-            black_box(store.chunks[0].len());
+            std::hint::black_box(store.chunks[0].len());
         });
     });
 
@@ -189,7 +189,7 @@ fn bench_iterate(c: &mut Criterion) {
     group.bench_function("hybrid", |b| {
         b.iter(|| {
             for v in hybrid.iter() {
-                black_box(v);
+                std::hint::black_box(v);
             }
         });
     });
@@ -197,7 +197,7 @@ fn bench_iterate(c: &mut Criterion) {
     group.bench_function("pure_sparse", |b| {
         b.iter(|| {
             for v in pure.iter() {
-                black_box(v);
+                std::hint::black_box(v);
             }
         });
     });
@@ -205,7 +205,7 @@ fn bench_iterate(c: &mut Criterion) {
     group.bench_function("hashmap", |b| {
         b.iter(|| {
             for v in hash.values() {
-                black_box(v);
+                std::hint::black_box(v);
             }
         });
     });
@@ -213,7 +213,7 @@ fn bench_iterate(c: &mut Criterion) {
     group.bench_function("archetype", |b| {
         b.iter(|| {
             for v in arch.iter() {
-                black_box(v);
+                std::hint::black_box(v);
             }
         });
     });
@@ -233,7 +233,7 @@ fn bench_random_access(c: &mut Criterion) {
     group.bench_function("hybrid", |b| {
         b.iter(|| {
             for &e in &entities {
-                black_box(hybrid.get(e));
+                std::hint::black_box(hybrid.get(e));
             }
         });
     });
@@ -241,7 +241,7 @@ fn bench_random_access(c: &mut Criterion) {
     group.bench_function("pure_sparse", |b| {
         b.iter(|| {
             for &e in &entities {
-                black_box(pure.get(e));
+                std::hint::black_box(pure.get(e));
             }
         });
     });
@@ -249,7 +249,7 @@ fn bench_random_access(c: &mut Criterion) {
     group.bench_function("hashmap", |b| {
         b.iter(|| {
             for &e in &entities {
-                black_box(hash.get(&e));
+                std::hint::black_box(hash.get(&e));
             }
         });
     });
@@ -257,7 +257,7 @@ fn bench_random_access(c: &mut Criterion) {
     group.bench_function("archetype", |b| {
         b.iter(|| {
             for &e in &entities {
-                black_box(arch.get(e));
+                std::hint::black_box(arch.get(e));
             }
         });
     });
@@ -280,7 +280,7 @@ fn bench_memory(c: &mut Criterion) {
         b.iter(|| {
             let size = hybrid.data.capacity() * std::mem::size_of::<f32>()
                 + hybrid.entities.capacity() * std::mem::size_of::<Entity>();
-            black_box(size);
+            std::hint::black_box(size);
         });
     });
 
@@ -288,14 +288,14 @@ fn bench_memory(c: &mut Criterion) {
         b.iter(|| {
             let size = pure.data.capacity() * std::mem::size_of::<f32>()
                 + pure.sparse.capacity() * std::mem::size_of::<Option<usize>>();
-            black_box(size);
+            std::hint::black_box(size);
         });
     });
 
     group.bench_function("hashmap", |b| {
         b.iter(|| {
             let size = hash.capacity();
-            black_box(size);
+            std::hint::black_box(size);
         });
     });
 
@@ -306,7 +306,7 @@ fn bench_memory(c: &mut Criterion) {
                 .iter()
                 .map(|c| c.capacity() * std::mem::size_of::<f32>())
                 .sum();
-            black_box(size);
+            std::hint::black_box(size);
         });
     });
 
