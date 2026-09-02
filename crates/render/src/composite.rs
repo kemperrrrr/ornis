@@ -357,7 +357,7 @@ mod tests {
             })
             .ok();
         rx.recv().ok()?.ok()?;
-        let view = slice.get_mapped_range();
+        let view = slice.get_mapped_range().unwrap();
         let pixel = [view[0], view[1], view[2], view[3]];
         Some(pixel)
     }

@@ -6,23 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-wgpu = "29"
+wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.30"
+glam = "0.33"
 ornis-core = { path = "../core" }
 ornis-macros = { path = "../macros" }
 # Фаза A (аудит §7): общий engine уровней/рёбер/OrderError.
 ornis-schedule = { path = "../schedule" }
 serde = { version = "1", features = ["derive"] }
-ron = "0.8"
+ron = "0.12"
 
 [dev-dependencies]
-naga = "29"
+naga = "30"
 pollster = "1.0"
 png = "0.17"
 proptest = "1"
-wgpu = "29"
-glam = "0.30"
+wgpu = "30"
+glam = "0.33"
 criterion = { version = "0.5", features = ["rayon"] }
 
 [[bench]]

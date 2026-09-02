@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Backend-neutral rendering interface.
 //!
 //! [`RenderBackend`] abstracts the deferred renderer behind a small trait so
@@ -36,6 +37,7 @@ impl Default for RenderBackendConfig {
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
             sample_count: 1,
             max_objects: 256,
@@ -343,6 +345,7 @@ mod tests {
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         let backend_config = RenderBackendConfig {
             surface_config: surface_config.clone(),
@@ -488,7 +491,7 @@ mod tests {
         device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().unwrap();
         let mut pixels = vec![0u8; (unpadded * H) as usize];
         for y in 0..H as usize {
             pixels[y * unpadded as usize..][..unpadded as usize]

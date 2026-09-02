@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! S5b bench: sequential vs parallel command recording, CPU side.
 //!
 //! Параллельная запись оптимизирует CPU-сторону кадра (запись команд в
@@ -68,6 +69,7 @@ fn bench_recording(c: &mut Criterion) {
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
+        color_space: wgpu::SurfaceColorSpace::Auto,
     };
     let renderer = Renderer3D::new(&device, &surface_config, 1);
     let mesh = ornis_render::create_sphere(&device, 1.0, 16, 12);

@@ -144,7 +144,7 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
                 })
                 .ok();
             if let Ok(Ok(())) = receiver.recv() {
-                let view = buffer_slice.get_mapped_range();
+                let view = buffer_slice.get_mapped_range().unwrap();
                 let downloaded: &[T] = bytemuck::cast_slice(&view);
                 self.cpu_data.copy_from_slice(downloaded);
                 drop(view);

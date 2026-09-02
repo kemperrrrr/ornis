@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Бинарь `ornis`: нативный режим (winit + wgpu) и `editor-only`
 //! (HTTP-сервер редактора на порту 3420 без нативного окна).
 
@@ -162,6 +163,7 @@ impl GameApp {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
         }))
         .map_err(|_| "no adapter found".to_string())?;
 
@@ -205,6 +207,7 @@ impl GameApp {
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &surface_config);
 
@@ -477,7 +480,7 @@ impl GameApp {
         );
 
         ctx.queue.submit(Some(encoder.finish()));
-        frame.present();
+        ctx.queue.present(frame);
     }
 }
 

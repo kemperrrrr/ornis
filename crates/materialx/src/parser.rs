@@ -9,43 +9,43 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 /// Kept in sync with the node types `GraphEvaluator` can execute; the same
 /// set is used for Start and End events so the two can never diverge
 /// (a node opened but never closed here is silently dropped).
-fn is_node_element(name: &[u8]) -> bool {
+fn is_node_element(name: &str) -> bool {
     matches!(
         name,
-        b"node"
-            | b"output"
-            | b"open_pbr_surface"
-            | b"open_pbr_anisotropy"
-            | b"mix"
-            | b"layer"
-            | b"add"
-            | b"multiply"
-            | b"divide"
-            | b"subtract"
-            | b"invert"
-            | b"clamp"
-            | b"max"
-            | b"min"
-            | b"power"
-            | b"sqrt"
-            | b"ifgreater"
-            | b"convert"
-            | b"combine2"
-            | b"combine3"
-            | b"combine4"
-            | b"constant"
-            | b"subsurface_bsdf"
-            | b"dielectric_bsdf"
-            | b"conductor_bsdf"
-            | b"oren_nayar_diffuse_bsdf"
-            | b"sheen_bsdf"
-            | b"thin_film_bsdf"
-            | b"translucent_bsdf"
-            | b"generalized_schlick_bsdf"
-            | b"uniform_edf"
-            | b"generalized_schlick_edf"
-            | b"anisotropic_vdf"
-            | b"surface"
+        "node"
+            | "output"
+            | "open_pbr_surface"
+            | "open_pbr_anisotropy"
+            | "mix"
+            | "layer"
+            | "add"
+            | "multiply"
+            | "divide"
+            | "subtract"
+            | "invert"
+            | "clamp"
+            | "max"
+            | "min"
+            | "power"
+            | "sqrt"
+            | "ifgreater"
+            | "convert"
+            | "combine2"
+            | "combine3"
+            | "combine4"
+            | "constant"
+            | "subsurface_bsdf"
+            | "dielectric_bsdf"
+            | "conductor_bsdf"
+            | "oren_nayar_diffuse_bsdf"
+            | "sheen_bsdf"
+            | "thin_film_bsdf"
+            | "translucent_bsdf"
+            | "generalized_schlick_bsdf"
+            | "uniform_edf"
+            | "generalized_schlick_edf"
+            | "anisotropic_vdf"
+            | "surface"
     )
 }
 
@@ -80,15 +80,15 @@ impl ParseState {
     }
 
     fn handle_start(&mut self, e: &BytesStart) -> Result<(), MaterialXError> {
-        match e.name().as_ref() {
-            b"nodedef" => {
+        match e.name().into_inner() {
+            "nodedef" => {
                 self.current_nodedef = Some(NodeDef::from_bytes_start(e)?);
             }
-            b"nodegraph" => {
+            "nodegraph" => {
                 self.in_nodegraph = true;
                 self.current_nodegraph = Some(NodeGraph::from_bytes_start(e)?);
             }
-            b"input" | b"parameter" => {
+            "input" | "parameter" => {
                 if let Some(node) = &mut self.current_node {
                     node.inputs.push(Input::from_bytes_start(e)?);
                 } else if let Some(nodedef) = &mut self.current_nodedef {
@@ -104,13 +104,13 @@ impl ParseState {
     }
 
     fn handle_end(&mut self, e: &BytesEnd) {
-        match e.name().as_ref() {
-            b"nodedef" => {
+        match e.name().into_inner() {
+            "nodedef" => {
                 if let Some(nd) = self.current_nodedef.take() {
                     self.document.nodedefs.push(nd);
                 }
             }
-            b"nodegraph" => {
+            "nodegraph" => {
                 self.in_nodegraph = false;
                 if let Some(ng) = self.current_nodegraph.take() {
                     self.document.nodegraphs.push(ng);
@@ -184,8 +184,8 @@ impl NodeDef {
 
         for attr in e.attributes() {
             let attr = attr?;
-            let key = std::str::from_utf8(attr.key.as_ref())?;
-            let value = std::str::from_utf8(&attr.value)?;
+            let key = attr.key.into_inner();
+            let value: &str = &attr.value;
 
             match key {
                 "name" => nodedef.name = value.to_string(),
@@ -214,8 +214,8 @@ impl NodeGraph {
 
         for attr in e.attributes() {
             let attr = attr?;
-            let key = std::str::from_utf8(attr.key.as_ref())?;
-            let value = std::str::from_utf8(&attr.value)?;
+            let key = attr.key.into_inner();
+            let value: &str = &attr.value;
 
             match key {
                 "name" => graph.name = value.to_string(),
@@ -239,14 +239,13 @@ impl Node {
         };
 
         let name_binding = e.name();
-        let name_bytes = name_binding.as_ref();
-        let name = std::str::from_utf8(name_bytes)?;
+        let name = name_binding.into_inner();
         node.node_type = name.to_string();
 
         for attr in e.attributes() {
             let attr = attr?;
-            let key = std::str::from_utf8(attr.key.as_ref())?;
-            let value = std::str::from_utf8(&attr.value)?;
+            let key = attr.key.into_inner();
+            let value: &str = &attr.value;
 
             match key {
                 "name" => node.name = value.to_string(),
@@ -283,8 +282,8 @@ impl NodeDefInput {
 
         for attr in e.attributes() {
             let attr = attr?;
-            let key = std::str::from_utf8(attr.key.as_ref())?;
-            let value = std::str::from_utf8(&attr.value)?;
+            let key = attr.key.into_inner();
+            let value: &str = &attr.value;
 
             match key {
                 "name" => input.name = value.to_string(),
@@ -343,8 +342,8 @@ impl Input {
 
         for attr in e.attributes() {
             let attr = attr?;
-            let key = std::str::from_utf8(attr.key.as_ref())?;
-            let value = std::str::from_utf8(&attr.value)?;
+            let key = attr.key.into_inner();
+            let value: &str = &attr.value;
 
             match key {
                 "name" => input.name = value.to_string(),

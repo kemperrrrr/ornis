@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Offscreen probe: renders assets/scene.ron through Renderer3D (RenderBackend
 //! trait) into a headless wgpu texture and saves the frame as PNG.
 //!
@@ -231,7 +232,7 @@ fn read_back_pixels(
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().unwrap();
 
     let mut pixels = vec![0u8; (unpadded_bytes_per_row * HEIGHT) as usize];
     for y in 0..HEIGHT as usize {
@@ -300,6 +301,7 @@ async fn run(scene: &Scene, out_path: &str) {
         present_mode: wgpu::PresentMode::AutoNoVsync,
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![],
+        color_space: wgpu::SurfaceColorSpace::Auto,
         desired_maximum_frame_latency: 2,
     };
 

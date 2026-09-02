@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! S5b gate (PLAN Приложение C): parallel command recording must be
 //! pixel-identical to the sequential path. Runs headless — on CI via
 //! lavapipe, locally on any adapter; skipped when no adapter is found.
@@ -93,7 +94,7 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture
         .recv()
         .expect("map callback")
         .expect("map readback");
-    let data = slice.get_mapped_range().to_vec();
+    let data = slice.get_mapped_range().unwrap().to_vec();
     buffer.unmap();
     data
 }
@@ -114,6 +115,7 @@ fn parallel_recording_matches_sequential_pixels() {
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
+        color_space: wgpu::SurfaceColorSpace::Auto,
     };
     let renderer = Renderer3D::new(&device, &surface_config, 1);
     let mesh = ornis_render::create_sphere(&device, 1.0, 16, 12);

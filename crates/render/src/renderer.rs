@@ -493,7 +493,7 @@ impl Renderer3D {
             vertex: wgpu::VertexState {
                 module: &vs_module,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -762,7 +762,7 @@ impl Renderer3D {
             vertex: wgpu::VertexState {
                 module: &vs_module,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1128,7 +1128,7 @@ impl Renderer3D {
             vertex: wgpu::VertexState {
                 module: &vs_module,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1887,7 +1887,7 @@ impl Renderer3D {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Buffer(
-                        self.bloom_pass.params_buffer.slice(..).into(),
+                        self.bloom_pass.params_buffer.as_entire_buffer_binding(),
                     ),
                 },
             ],
@@ -2004,7 +2004,7 @@ impl Renderer3D {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(
-                        self.bloom_pass.params_buffer.slice(..).into(),
+                        self.bloom_pass.params_buffer.as_entire_buffer_binding(),
                     ),
                 },
             ],
@@ -2055,7 +2055,7 @@ impl Renderer3D {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(
-                        self.bloom_pass.params_buffer.slice(..).into(),
+                        self.bloom_pass.params_buffer.as_entire_buffer_binding(),
                     ),
                 },
             ],

@@ -9,7 +9,7 @@ license.workspace = true
 ornis-core = { path = "../core" }
 ornis-physics = { path = "../physics" }
 ornis-render = { path = "../render" }
-glam = "0.30"
+glam = "0.33"
 serde = { version = "1", features = ["derive"] }
 
 [lints]

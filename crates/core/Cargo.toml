@@ -10,7 +10,7 @@ rayon = "1.10"
 fixedbitset = "0.5"
 crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
-glam = "0.30"
+glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
 # Provides the #[mutants::skip] attribute used in prefetch.rs; a no-op at
 # runtime (see https://mutants.rs/attrs.html). Must be a regular

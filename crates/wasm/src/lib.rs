@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Ornis WASM — WebGPU entry point for the browser editor.
 
 #![warn(missing_docs)]

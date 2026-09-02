@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Phase 1 verification: renders assets/scene.ron through the legacy
 //! `Renderer3D::render_scene` path AND through the render-graph path
 //! (`RenderFrame3D`), reads both back and asserts byte-identical pixels.
@@ -108,6 +109,7 @@ fn surface_config_for(format: wgpu::TextureFormat) -> wgpu::SurfaceConfiguration
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
+        color_space: wgpu::SurfaceColorSpace::Auto,
     }
 }
 
@@ -222,7 +224,7 @@ async fn read_target(
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().unwrap();
     let mut pixels = vec![0u8; (unpadded * HEIGHT) as usize];
     for y in 0..HEIGHT as usize {
         let src = &data[y * padded as usize..][..unpadded as usize];

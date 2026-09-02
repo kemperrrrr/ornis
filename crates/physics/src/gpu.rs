@@ -753,7 +753,7 @@ impl WgpuContactSolver {
                 timeout: None,
             })
             .ok();
-        let mapped = slice.get_mapped_range();
+        let mapped = slice.get_mapped_range().unwrap();
         let states: &[GpuBodyState] = bytemuck::cast_slice(&mapped);
         for (i, b) in bodies.iter_mut().enumerate().take(n) {
             states[i].write_to_body(b);
