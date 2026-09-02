@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Offscreen probe: renders assets/scene.ron through Renderer3D (RenderBackend
 //! trait) into a headless wgpu texture and saves the frame as PNG.
 //!
@@ -179,12 +178,17 @@ fn lights_of(scene: &Scene) -> Vec<([f32; 3], f32, [f32; 3])> {
 
 fn camera_view_proj(cam: &CameraDesc) -> (Mat4, Mat4, [[f32; 4]; 4]) {
     let aspect = WIDTH as f32 / HEIGHT as f32;
-    let view = Mat4::look_at_rh(
+    let view = glam::camera::rh::view::look_at_mat4(
         Vec3::from(cam.position),
         Vec3::from(cam.target),
         Vec3::from(cam.up),
     );
-    let proj = Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
+    let proj = glam::camera::rh::proj::directx::perspective(
+        cam.fov.to_radians(),
+        aspect,
+        cam.near,
+        cam.far,
+    );
     (view, proj, (proj * view).to_cols_array_2d())
 }
 

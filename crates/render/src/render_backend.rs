@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Backend-neutral rendering interface.
 //!
 //! [`RenderBackend`] abstracts the deferred renderer behind a small trait so
@@ -429,12 +428,17 @@ mod tests {
         let (view, proj) = {
             let cam = &scene.camera;
             let aspect = W as f32 / H as f32;
-            let view = glam::Mat4::look_at_rh(
+            let view = glam::camera::rh::view::look_at_mat4(
                 glam::Vec3::from(cam.position),
                 glam::Vec3::from(cam.target),
                 glam::Vec3::from(cam.up),
             );
-            let proj = glam::Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
+            let proj = glam::camera::rh::proj::directx::perspective(
+                cam.fov.to_radians(),
+                aspect,
+                cam.near,
+                cam.far,
+            );
             (view, proj)
         };
         let view_proj = (proj * view).to_cols_array_2d();

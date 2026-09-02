@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! S5b gate (PLAN Приложение C): parallel command recording must be
 //! pixel-identical to the sequential path. Runs headless — on CI via
 //! lavapipe, locally on any adapter; skipped when no adapter is found.
@@ -140,8 +139,8 @@ fn parallel_recording_matches_sequential_pixels() {
         &[([0.3, -1.0, 0.5], 1.0, [1.0, 1.0, 1.0])],
     );
 
-    let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
-    let proj = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 10.0);
+    let view = glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(60f32.to_radians(), 1.0, 0.1, 10.0);
     let view_proj = proj * view;
     renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), [0.0, 0.0, 3.0]);
 

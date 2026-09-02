@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Бинарь `ornis`: нативный режим (winit + wgpu) и `editor-only`
 //! (HTTP-сервер редактора на порту 3420 без нативного окна).
 
@@ -74,7 +73,7 @@ fn main() {
 #[cfg(not(feature = "editor-only"))]
 mod native {
     pub use crossbeam_channel::{Receiver, Sender};
-    pub use glam::{Mat4, Vec3};
+    pub use glam::Vec3;
     pub use ornis_core::InputState;
     pub use ornis_physics::RigidBody;
     pub use winit::application::ApplicationHandler;
@@ -420,8 +419,9 @@ impl GameApp {
         let orbit = read_orbit_camera(ctx.render_world.engine())
             .expect("native showcase installs orbit camera");
         let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
-        let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
-        let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
+        let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
+        let proj =
+            glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
 
         ctx.renderer3d.set_camera(

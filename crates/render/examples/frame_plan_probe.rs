@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Phase 1 verification: renders assets/scene.ron through the legacy
 //! `Renderer3D::render_scene` path AND through the render-graph path
 //! (`RenderFrame3D`), reads both back and asserts byte-identical pixels.
@@ -172,12 +171,17 @@ fn build_scene_data(
 
 fn camera_view_proj(cam: &CameraDesc) -> [[f32; 4]; 4] {
     let aspect = WIDTH as f32 / HEIGHT as f32;
-    let view = Mat4::look_at_rh(
+    let view = glam::camera::rh::view::look_at_mat4(
         Vec3::from(cam.position),
         Vec3::from(cam.target),
         Vec3::from(cam.up),
     );
-    let proj = Mat4::perspective_rh(cam.fov.to_radians(), aspect, cam.near, cam.far);
+    let proj = glam::camera::rh::proj::directx::perspective(
+        cam.fov.to_radians(),
+        aspect,
+        cam.near,
+        cam.far,
+    );
     (proj * view).to_cols_array_2d()
 }
 

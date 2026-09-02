@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Ornis WASM — WebGPU entry point for the browser editor.
 
 #![warn(missing_docs)]
@@ -472,8 +471,9 @@ impl<'a> FrameState<'a> {
         let orbit = read_orbit_camera(self.render_world.engine())
             .expect("browser render world installs orbit camera");
         let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
-        let view = Mat4::look_at_rh(cam_pos, cam_target, cam_up);
-        let proj = Mat4::perspective_rh(fov.to_radians(), aspect, near, far);
+        let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
+        let proj =
+            glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
         let view_proj = proj * view;
         self.renderer.set_camera(
             &self.queue,
