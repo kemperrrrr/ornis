@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rayon = "1.10"
+rayon = "1.12"
 fixedbitset = "0.5"
 crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
@@ -30,7 +30,7 @@ gpu = ["dep:wgpu"]  # GpuExecutor STUB in dispatcher — CPU-fallback; real GPU 
 lock-free = []  # experimental lock-free lanes
 
 [dependencies.wgpu]
-version = "29"
+version = "30"
 optional = true
 
 [dev-dependencies]
