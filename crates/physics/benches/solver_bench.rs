@@ -97,30 +97,21 @@ fn bench_step(c: &mut Criterion) {
         for _ in 0..60 {
             physics.step(1.0 / 60.0);
         }
-        b.iter(|| {
-            std::hint::std::hint::black_box(&mut physics)
-                .step(std::hint::std::hint::black_box(1.0 / 60.0))
-        });
+        b.iter(|| std::hint::black_box(&mut physics).step(std::hint::black_box(1.0 / 60.0)));
     });
     group.bench_function("big_stack_32", |b| {
         let mut physics = setup_big_stack(32);
         for _ in 0..60 {
             physics.step(1.0 / 60.0);
         }
-        b.iter(|| {
-            std::hint::std::hint::black_box(&mut physics)
-                .step(std::hint::std::hint::black_box(1.0 / 60.0))
-        });
+        b.iter(|| std::hint::black_box(&mut physics).step(std::hint::black_box(1.0 / 60.0)));
     });
     group.bench_function("deep_stack_128", |b| {
         let mut physics = setup_big_stack(128);
         for _ in 0..60 {
             physics.step(1.0 / 60.0);
         }
-        b.iter(|| {
-            std::hint::std::hint::black_box(&mut physics)
-                .step(std::hint::std::hint::black_box(1.0 / 60.0))
-        });
+        b.iter(|| std::hint::black_box(&mut physics).step(std::hint::black_box(1.0 / 60.0)));
     });
     group.finish();
 }
@@ -211,8 +202,7 @@ fn bench_body_scaling(c: &mut Criterion) {
             group.bench_function(BenchmarkId::new(backend_name, n), |b| {
                 let mut physics = settled_body_grid(n, backend, cell_size);
                 b.iter(|| {
-                    std::hint::std::hint::black_box(&mut physics)
-                        .step(std::hint::std::hint::black_box(1.0 / 60.0))
+                    std::hint::black_box(&mut physics).step(std::hint::black_box(1.0 / 60.0))
                 });
             });
         }

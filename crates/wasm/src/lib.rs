@@ -13,7 +13,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use glam::Mat4;
 use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
@@ -313,6 +312,7 @@ async fn init_webgpu(
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
+        color_space: wgpu::SurfaceColorSpace::Auto,
     };
     surface.configure(&device, &config);
 
@@ -731,7 +731,7 @@ fn spawn_render_loop(
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
                 frame.draw(&view);
-                presentable.present();
+                frame.queue.present(presentable);
 
                 frame_count += 1;
                 log_frame_milestone(frame_count, &frame.config, frame.instance_count);

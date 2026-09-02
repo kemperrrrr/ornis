@@ -33,7 +33,7 @@ fn bench_layout_compute(c: &mut Criterion) {
                 // A mutation-driven recompute: the cost the cache removes
                 // from steady-state frames.
                 g3.plan_mut().invalidate();
-                std::hint::std::hint::black_box(g3.plan_mut().layout());
+                std::hint::black_box(g3.plan_mut().layout());
             });
         });
     }
@@ -52,7 +52,7 @@ fn bench_layout_cache_hit(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 // Steady-state frame: no mutations → cache hit.
-                std::hint::std::hint::black_box(g3.plan_mut().layout());
+                std::hint::black_box(g3.plan_mut().layout());
             });
         });
     }
@@ -67,9 +67,7 @@ fn bench_levels(c: &mut Criterion) {
     ] {
         let mut g3 = make(technique);
         let layout = g3.plan_mut().layout().clone();
-        group.bench_function(name, |b| {
-            b.iter(|| std::hint::std::hint::black_box(layout.levels()))
-        });
+        group.bench_function(name, |b| b.iter(|| std::hint::black_box(layout.levels())));
     }
     group.finish();
 }

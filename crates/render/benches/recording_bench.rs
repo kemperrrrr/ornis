@@ -140,7 +140,7 @@ fn bench_recording(c: &mut Criterion) {
         b.iter(|| {
             let desc = wgpu::CommandEncoderDescriptor { label: None };
             let mut encoder = device.create_command_encoder(&desc);
-            std::hint::std::hint::black_box(&mut seq).render(
+            std::hint::black_box(&mut seq).render(
                 RenderContext {
                     device: &device,
                     queue: &queue,
@@ -158,7 +158,7 @@ fn bench_recording(c: &mut Criterion) {
         b.iter(|| {
             let desc = wgpu::CommandEncoderDescriptor { label: None };
             let mut encoder = device.create_command_encoder(&desc);
-            std::hint::std::hint::black_box(&mut par).render(
+            std::hint::black_box(&mut par).render(
                 RenderContext {
                     device: &device,
                     queue: &queue,

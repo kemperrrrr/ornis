@@ -46,6 +46,7 @@ impl WgpuContext {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: None,
+                apply_limit_buckets: false,
             })
             .await
             .expect("no compatible GPU adapter found");
