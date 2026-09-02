@@ -1180,6 +1180,7 @@ fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option
 /// speculative contact margin = base + approach speed · sub_dt, so contacts
 /// exist BEFORE overlap; the velocity solver then caps the approach speed
 /// to the remaining gap instead of letting the bodies interpenetrate.
+#[allow(dead_code)]
 fn detect_collisions(
     bodies: &[RigidBody],
     active: &[(usize, usize)],
@@ -1191,6 +1192,9 @@ fn detect_collisions(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::collapsible_if)]
 fn detect_collisions_into(
     bodies: &[RigidBody],
     active: &[(usize, usize)],
@@ -1225,10 +1229,10 @@ fn detect_collisions_into(
                 }
                 // B: per-body substeps — slow pairs only needed for first
                 // MIN substeps; fast pairs need all. Skip extra substeps.
-                if let Some(req) = body_required {
-                    if req[i].max(req[j]) <= cur_substep {
-                        return None;
-                    }
+                if let Some(req) = body_required
+                    && req[i].max(req[j]) <= cur_substep
+                {
+                    return None;
                 }
                 let rel_speed = (a.velocity - b.velocity).length();
                 let margin = SPEC_BASE + rel_speed * sub_dt;
@@ -1242,27 +1246,50 @@ fn detect_collisions_into(
                             .map(|c| Manifold::single(i, j, c))
                     }
                     (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
-                        sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(|c| {
-                            Manifold::single(
-                                i,
-                                j,
-                                Contact {
-                                    normal: -c.normal,
-                                    penetration: c.penetration,
-                                    contact_point: c.contact_point,
-                                },
-                            )
-                        })
+                        sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(
+                            |c| {
+                                Manifold::single(
+                                    i,
+                                    j,
+                                    Contact {
+                                        normal: -c.normal,
+                                        penetration: c.penetration,
+                                        contact_point: c.contact_point,
+                                    },
+                                )
+                            },
+                        )
                     }
-                    (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => box_manifold(
-                        a.position,
-                        ha,
-                        a.orientation,
-                        b.position,
-                        hb,
-                        b.orientation,
-                        margin,
-                    ),
+                    (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
+                        let slow = (a.velocity - b.velocity).length() <= 0.5
+                            && a.angular_velocity.length_squared() <= 0.25
+                            && b.angular_velocity.length_squared() <= 0.25
+                            && cur_substep == 0;
+                        if slow && sat_cache.is_some() {
+                            box_manifold_cached(
+                                a.position,
+                                ha,
+                                a.orientation,
+                                b.position,
+                                hb,
+                                b.orientation,
+                                margin,
+                                Some((i, j)),
+                                sat_cache,
+                                true,
+                            )
+                        } else {
+                            box_manifold(
+                                a.position,
+                                ha,
+                                a.orientation,
+                                b.position,
+                                hb,
+                                b.orientation,
+                                margin,
+                            )
+                        }
+                    }
                     (
                         &Shape::Capsule {
                             radius: ra,
@@ -1294,44 +1321,74 @@ fn detect_collisions_into(
                             radius: cr,
                             half_height: hh,
                         },
-                    ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
-                        .map(|c| Manifold::single(i, j, c)),
+                    ) => {
+                        sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
+                            .map(|c| Manifold::single(i, j, c))
+                    }
                     (
                         &Shape::Capsule {
                             radius: cr,
                             half_height: hh,
                         },
                         &Shape::Sphere { radius: r },
-                    ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(
-                        |c| {
-                            Manifold::single(
-                                i,
-                                j,
-                                Contact {
-                                    normal: -c.normal,
-                                    penetration: c.penetration,
-                                    contact_point: c.contact_point,
-                                },
-                            )
+                    ) => {
+                        sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin)
+                            .map(|c| {
+                                Manifold::single(
+                                    i,
+                                    j,
+                                    Contact {
+                                        normal: -c.normal,
+                                        penetration: c.penetration,
+                                        contact_point: c.contact_point,
+                                    },
+                                )
+                            })
+                    }
+                    (
+                        &Shape::Box { half_extents: ha },
+                        &Shape::Capsule {
+                            radius: cr,
+                            half_height: hh,
                         },
-                    ),
-                    (&Shape::Box { half_extents: ha }, &Shape::Capsule { radius: cr, half_height: hh }) => {
-                        box_vs_capsule(a.position, ha, a.orientation, b.position, cr, hh, b.orientation, margin)
-                            .map(|c| Manifold::single(i, j, c))
-                    }
-                    (&Shape::Capsule { radius: cr, half_height: hh }, &Shape::Box { half_extents: ha }) => {
-                        box_vs_capsule(b.position, ha, b.orientation, a.position, cr, hh, a.orientation, margin).map(|c| {
-                            Manifold::single(
-                                i,
-                                j,
-                                Contact {
-                                    normal: -c.normal,
-                                    penetration: c.penetration,
-                                    contact_point: c.contact_point,
-                                },
-                            )
-                        })
-                    }
+                    ) => box_vs_capsule(
+                        a.position,
+                        ha,
+                        a.orientation,
+                        b.position,
+                        cr,
+                        hh,
+                        b.orientation,
+                        margin,
+                    )
+                    .map(|c| Manifold::single(i, j, c)),
+                    (
+                        &Shape::Capsule {
+                            radius: cr,
+                            half_height: hh,
+                        },
+                        &Shape::Box { half_extents: ha },
+                    ) => box_vs_capsule(
+                        b.position,
+                        ha,
+                        b.orientation,
+                        a.position,
+                        cr,
+                        hh,
+                        a.orientation,
+                        margin,
+                    )
+                    .map(|c| {
+                        Manifold::single(
+                            i,
+                            j,
+                            Contact {
+                                normal: -c.normal,
+                                penetration: c.penetration,
+                                contact_point: c.contact_point,
+                            },
+                        )
+                    }),
                 };
                 manifold.map(|mut m| {
                     m.body_a = i;
@@ -1341,10 +1398,8 @@ fn detect_collisions_into(
             })
             .collect();
         out.reserve(results.len());
-        for opt in results {
-            if let Some(m) = opt {
-                out.push(m);
-            }
+        for m in results.into_iter().flatten() {
+            out.push(m);
         }
         return;
     }
@@ -1364,10 +1419,10 @@ fn detect_collisions_into(
         if asleep[i] && asleep[j] {
             continue;
         }
-        if let Some(req) = body_required {
-            if req[i].max(req[j]) <= cur_substep {
-                continue;
-            }
+        if let Some(req) = body_required
+            && req[i].max(req[j]) <= cur_substep
+        {
+            continue;
         }
         let rel_speed = (a.velocity - b.velocity).length();
         let margin = SPEC_BASE + rel_speed * sub_dt;
@@ -1479,23 +1534,50 @@ fn detect_collisions_into(
                     )
                 },
             ),
-            (&Shape::Box { half_extents: ha }, &Shape::Capsule { radius: cr, half_height: hh }) => {
-                box_vs_capsule(a.position, ha, a.orientation, b.position, cr, hh, b.orientation, margin)
-                    .map(|c| Manifold::single(i, j, c))
-            }
-            (&Shape::Capsule { radius: cr, half_height: hh }, &Shape::Box { half_extents: ha }) => {
-                box_vs_capsule(b.position, ha, b.orientation, a.position, cr, hh, a.orientation, margin).map(|c| {
-                    Manifold::single(
-                        i,
-                        j,
-                        Contact {
-                            normal: -c.normal,
-                            penetration: c.penetration,
-                            contact_point: c.contact_point,
-                        },
-                    )
-                })
-            }
+            (
+                &Shape::Box { half_extents: ha },
+                &Shape::Capsule {
+                    radius: cr,
+                    half_height: hh,
+                },
+            ) => box_vs_capsule(
+                a.position,
+                ha,
+                a.orientation,
+                b.position,
+                cr,
+                hh,
+                b.orientation,
+                margin,
+            )
+            .map(|c| Manifold::single(i, j, c)),
+            (
+                &Shape::Capsule {
+                    radius: cr,
+                    half_height: hh,
+                },
+                &Shape::Box { half_extents: ha },
+            ) => box_vs_capsule(
+                b.position,
+                ha,
+                b.orientation,
+                a.position,
+                cr,
+                hh,
+                a.orientation,
+                margin,
+            )
+            .map(|c| {
+                Manifold::single(
+                    i,
+                    j,
+                    Contact {
+                        normal: -c.normal,
+                        penetration: c.penetration,
+                        contact_point: c.contact_point,
+                    },
+                )
+            }),
         };
 
         if let Some(mut m) = manifold {
@@ -1547,6 +1629,7 @@ fn narrow_cache_hit(entry: &NarrowCacheEntry, a: &RigidBody, b: &RigidBody, marg
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn sat_cache_hit(
     entry: &SatCacheEntry,
@@ -1594,6 +1677,9 @@ fn sat_shard(key: (usize, usize), shards: usize) -> usize {
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::collapsible_if)]
 fn obb_sat_cached(
     pos_a: Vec3,
     half_a: Vec3,
@@ -1643,6 +1729,9 @@ fn obb_sat_cached(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::collapsible_if)]
 fn box_manifold_cached(
     pos_a: Vec3,
     half_a: Vec3,
@@ -1655,7 +1744,9 @@ fn box_manifold_cached(
     sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
     slow_only: bool,
 ) -> Option<Manifold> {
-    let (n, _pen) = obb_sat_cached(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin, key, sat_cache, slow_only)?;
+    let (n, _pen) = obb_sat_cached(
+        pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin, key, sat_cache, slow_only,
+    )?;
     // Reuse normal from SAT — remainder is face-corner collection (cheap vs 15-axis SAT).
     let aa = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
     let ba = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
@@ -1720,6 +1811,9 @@ fn box_manifold_cached(
 }
 
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::collapsible_if)]
 fn detect_collisions_into_with_cache(
     bodies: &[RigidBody],
     active: &[(usize, usize)],
@@ -1734,7 +1828,16 @@ fn detect_collisions_into_with_cache(
     // Only cache the first substep: later substeps are filtered to fast bodies,
     // hit rate is near zero and the HashMap overhead dominates.
     if cur_substep != 0 {
-        detect_collisions_into(bodies, active, asleep, sub_dt, out, body_required, cur_substep, sat_cache);
+        detect_collisions_into(
+            bodies,
+            active,
+            asleep,
+            sub_dt,
+            out,
+            body_required,
+            cur_substep,
+            sat_cache,
+        );
         return;
     }
     out.clear();
@@ -1767,10 +1870,10 @@ fn detect_collisions_into_with_cache(
         if asleep[i] && asleep[j] {
             continue;
         }
-        if let Some(req) = body_required {
-            if req[i].max(req[j]) <= cur_substep {
-                continue;
-            }
+        if let Some(req) = body_required
+            && req[i].max(req[j]) <= cur_substep
+        {
+            continue;
         }
         let rel_speed = (a.velocity - b.velocity).length();
         // Fast-moving pairs have near-zero cache hit rate — bypass HashMap lookup and don't cache.
@@ -1816,7 +1919,16 @@ fn detect_collisions_into_with_cache(
     }
     // Compute misses with the original (potentially parallel) routine into a temp vec.
     let mut tmp: Vec<Manifold> = Vec::new();
-    detect_collisions_into(bodies, &misses, asleep, sub_dt, &mut tmp, body_required, cur_substep, sat_cache);
+    detect_collisions_into(
+        bodies,
+        &misses,
+        asleep,
+        sub_dt,
+        &mut tmp,
+        body_required,
+        cur_substep,
+        sat_cache,
+    );
     // Populate cache for misses.
     let mut tmp_map: HashMap<(usize, usize), Option<Manifold>> = HashMap::new();
     for m in &tmp {
@@ -1958,6 +2070,7 @@ struct SatCacheEntry {
     result: Option<(Vec3, f32)>,
 }
 
+#[allow(missing_docs)]
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
     broadphase: BroadPhaseBackend,
@@ -2391,7 +2504,10 @@ fn shape_max_radius(shape: &Shape) -> f32 {
     match shape {
         Shape::Sphere { radius } => *radius,
         Shape::Box { half_extents } => half_extents.length(),
-        Shape::Capsule { radius, half_height } => half_height + radius,
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => half_height + radius,
     }
 }
 
@@ -2919,7 +3035,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         let body_needed_opt: Option<&[u32]> = {
             let min_needed = body_needed.iter().copied().min().unwrap_or(0);
             let max_needed = body_needed.iter().copied().max().unwrap_or(0);
-            if max_needed - min_needed < 4 { None } else { Some(&body_needed) }
+            if max_needed - min_needed < 4 {
+                None
+            } else {
+                Some(&body_needed)
+            }
         };
         for s in 0..eff_substeps {
             // Box3D stage order: solve velocities BEFORE moving positions, so
@@ -2947,10 +3067,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     if self.joint_pairs.contains(&(a, b)) {
                         continue;
                     }
-                    if let Some(req) = body_needed_opt {
-                        if req[a].max(req[b]) <= s {
-                            continue;
-                        }
+                    if let Some(req) = body_needed_opt
+                        && req[a].max(req[b]) <= s
+                    {
+                        continue;
                     }
                     filtered.push((a, b));
                 }

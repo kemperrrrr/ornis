@@ -391,9 +391,9 @@ fn parse_stage_entry(kind: &str, item: &[TokenTree]) -> syn::Result<String> {
     let usage = format!("{kind}(entry)");
     let group = option_group(&usage, item)?;
     let toks: Vec<TokenTree> = group.into_iter().collect();
-    let ident = toks.first().ok_or_else(|| {
-        syn::Error::new(item[0].span(), format!("expected `{usage}`"))
-    })?;
+    let ident = toks
+        .first()
+        .ok_or_else(|| syn::Error::new(item[0].span(), format!("expected `{usage}`")))?;
     match ident {
         TokenTree::Ident(i) => Ok(i.to_string()),
         other => Err(syn::Error::new(other.span(), format!("expected `{usage}`"))),
@@ -452,7 +452,11 @@ fn parse_texture_sampler_group(
         }
     }
     // Normalise: remove accidental spaces around `<` `>`
-    ty = ty.replace(" <", "<").replace("< ", "<").replace(" >", ">").replace("> ", ">");
+    ty = ty
+        .replace(" <", "<")
+        .replace("< ", "<")
+        .replace(" >", ">")
+        .replace("> ", ">");
     if ty.is_empty() {
         ty = if kind == "sampler" {
             "sampler".to_string()
@@ -501,9 +505,9 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     let bindings_wgsl = config.bindings.join("\n");
     let builtins_wgsl = config.builtins.join(", ");
     // Render-pipeline mode: vertex/fragment entry points replace the compute entry.
-    // Generates @vertex/@fragment shims; full staged DSL (varyings, separate
-    // vertex/fragment bodies) is the next increment — this already validates
-    // that `texture`/`sampler`/`vertex`/`fragment` parse and produce WGSL.
+    // Generates @vertex/@fragment shims with full-screen quad boilerplate
+    // (QUAD/UVS + VertexOutput) so `texture`/`sampler`/`uniform`/`vertex`/`fragment`
+    // уже валидируются и дают пригодный для bloom/PBR пост-процесc.
     let wgsl_source = if config.vertex_entry.is_some() || config.fragment_entry.is_some() {
         let v_entry = config
             .vertex_entry
@@ -513,16 +517,30 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
             .fragment_entry
             .clone()
             .unwrap_or_else(|| "fs".to_string());
-        // Vertex gets builtins (e.g. `builtin(idx: vertex_index)`), fragment
-        // gets the kernel DSL body. Vertex body is a stub quad passthrough;
-        // the fragment body is the Rust function body.
         let vertex_params = if builtins_wgsl.is_empty() {
             "@builtin(vertex_index) idx: u32".to_string()
         } else {
             builtins_wgsl.clone()
         };
+        // Full-screen quad constants shared by bloom/composite passes.
+        let quad_boilerplate = r#"const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
+    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
+    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
+    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
+    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
+);
+const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 0.0),
+);
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};"#;
         format!(
-            "{bindings_wgsl}\n@vertex\nfn {v_entry}({vertex_params}) -> @builtin(position) vec4<f32> {{\n    return vec4<f32>(0.0, 0.0, 0.0, 1.0);\n}}\n@fragment\nfn {f_entry}() -> @location(0) vec4<f32> {{\n{body_wgsl}\n}}\n"
+            "{bindings_wgsl}\n{quad_boilerplate}\n@vertex\nfn {v_entry}({vertex_params}) -> VertexOutput {{\n    var out: VertexOutput;\n    out.position = QUAD[idx];\n    out.uv = UVS[idx];\n    return out;\n}}\n@fragment\nfn {f_entry}(in_: VertexOutput) -> @location(0) vec4<f32> {{\n{body_wgsl}\n}}\n"
         )
     } else {
         format!(

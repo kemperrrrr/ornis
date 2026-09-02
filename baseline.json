@@ -1,64 +1,69 @@
 {
   "version": 2,
-  "quality_score": 0.13154206884603015,
-  "iosp_score": 0.9157381615598886,
-  "violations": 121,
-  "total": 2283,
-  "complexity_warnings": 3,
-  "magic_number_warnings": 728,
-  "nesting_depth_warnings": 1,
-  "function_length_warnings": 25,
+  "quality_score": 0.12116867886054372,
+  "iosp_score": 0.918774966711052,
+  "violations": 122,
+  "total": 2390,
+  "complexity_warnings": 9,
+  "magic_number_warnings": 771,
+  "nesting_depth_warnings": 3,
+  "function_length_warnings": 29,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 81,
-  "duplicate_groups": 40,
-  "dead_code_warnings": 154,
-  "dead_type_warnings": 1,
-  "fragment_groups": 108,
-  "boilerplate_warnings": 100,
+  "error_handling_warnings": 86,
+  "duplicate_groups": 42,
+  "dead_code_warnings": 164,
+  "dead_type_warnings": 2,
+  "fragment_groups": 120,
+  "boilerplate_warnings": 103,
   "srp_struct_warnings": 5,
-  "srp_module_warnings": 30,
+  "srp_module_warnings": 32,
   "wildcard_import_warnings": 11,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 124,
+  "tq_untested_warnings": 126,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
   "structural_coupling_warnings": 19,
-  "total_findings": 1634,
+  "total_findings": 1735,
   "violation_details": [
     {
       "name": "serve_websocket",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 279
+      "line": 283
     },
     {
       "name": "poll_client_frames",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 346
+      "line": 350
     },
     {
       "name": "poll_one_frame",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 362
+      "line": 366
     },
     {
       "name": "ws_decode_len",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 405
+      "line": 419
     },
     {
       "name": "sha1_digest",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 559
+      "line": 574
     },
     {
       "name": "setup",
       "file": "crates/core/benches/store_bench.rs",
       "line": 8
+    },
+    {
+      "name": "player_input",
+      "file": "crates/core/src/gameplay.rs",
+      "line": 210
     },
     {
       "name": "build_scene_data",
@@ -83,12 +88,12 @@
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 1293
+      "line": 1297
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 1429
+      "line": 1438
     },
     {
       "name": "RenderFrame3D::new_with",
@@ -128,12 +133,12 @@
     {
       "name": "parse_binding_type",
       "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 71
+      "line": 73
     },
     {
       "name": "parse_binding_group",
       "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 126
+      "line": 128
     },
     {
       "name": "WgslGen::expr",
@@ -283,12 +288,12 @@
     {
       "name": "Shape::aabb",
       "file": "crates/physics/src/shape.rs",
-      "line": 41
+      "line": 46
     },
     {
       "name": "Shape::inertia",
       "file": "crates/physics/src/shape.rs",
-      "line": 79
+      "line": 84
     },
     {
       "name": "Tree::insert_leaf",
@@ -418,17 +423,17 @@
     {
       "name": "BuiltinPhysicsEngine::update_sleep",
       "file": "crates/physics/src/engine/islands.rs",
-      "line": 39
+      "line": 43
     },
     {
       "name": "BuiltinPhysicsEngine::wake_island",
       "file": "crates/physics/src/engine/islands.rs",
-      "line": 78
+      "line": 82
     },
     {
       "name": "BuiltinPhysicsEngine::collect_quiet_islands",
       "file": "crates/physics/src/engine/islands.rs",
-      "line": 104
+      "line": 108
     },
     {
       "name": "BuiltinPhysicsEngine::solve_joints_velocity",
@@ -468,137 +473,137 @@
     {
       "name": "WideBatch::world_inertia",
       "file": "crates/physics/src/wide.rs",
-      "line": 149
+      "line": 155
     },
     {
       "name": "WideBatch::build",
       "file": "crates/physics/src/wide.rs",
-      "line": 187
+      "line": 193
     },
     {
       "name": "WideBatch::fill_lane",
       "file": "crates/physics/src/wide.rs",
-      "line": 245
+      "line": 251
     },
     {
       "name": "WideBatch::solve_iteration",
       "file": "crates/physics/src/wide.rs",
-      "line": 352
+      "line": 358
     },
     {
       "name": "mul_inv_inertia",
       "file": "crates/physics/src/engine.rs",
-      "line": 155
+      "line": 156
     },
     {
       "name": "effective_mass",
       "file": "crates/physics/src/engine.rs",
-      "line": 176
+      "line": 177
     },
     {
       "name": "k_entry",
       "file": "crates/physics/src/engine.rs",
-      "line": 213
+      "line": 214
     },
     {
       "name": "apply_impulse",
       "file": "crates/physics/src/engine.rs",
-      "line": 297
+      "line": 298
     },
     {
       "name": "apply_angular_impulse",
       "file": "crates/physics/src/engine.rs",
-      "line": 352
+      "line": 353
     },
     {
       "name": "apply_positional_rotation",
       "file": "crates/physics/src/engine.rs",
-      "line": 368
+      "line": 369
     },
     {
       "name": "apply_positional_impulse",
       "file": "crates/physics/src/engine.rs",
-      "line": 397
+      "line": 398
     },
     {
       "name": "solve_normal_block",
       "file": "crates/physics/src/engine.rs",
-      "line": 429
+      "line": 430
     },
     {
       "name": "commit_active_set",
       "file": "crates/physics/src/engine.rs",
-      "line": 604
+      "line": 605
     },
     {
       "name": "BuiltinPhysicsEngine::integrate_velocities",
       "file": "crates/physics/src/engine.rs",
-      "line": 1611
+      "line": 2357
     },
     {
       "name": "BuiltinPhysicsEngine::integrate_positions",
       "file": "crates/physics/src/engine.rs",
-      "line": 1641
+      "line": 2387
     },
     {
       "name": "BuiltinPhysicsEngine::solve_continuous",
       "file": "crates/physics/src/engine.rs",
-      "line": 1670
+      "line": 2416
     },
     {
       "name": "BuiltinPhysicsEngine::raycast_body",
       "file": "crates/physics/src/engine.rs",
-      "line": 1711
+      "line": 2457
     },
     {
       "name": "swept_orientation",
       "file": "crates/physics/src/engine.rs",
-      "line": 1762
+      "line": 2519
     },
     {
       "name": "swept_distance",
       "file": "crates/physics/src/engine.rs",
-      "line": 1768
+      "line": 2525
     },
     {
       "name": "swept_shape_overlaps",
       "file": "crates/physics/src/engine.rs",
-      "line": 1788
+      "line": 2545
     },
     {
       "name": "first_angular_overlap_fraction",
       "file": "crates/physics/src/engine.rs",
-      "line": 1879
+      "line": 2638
     },
     {
       "name": "find_angular_continuous_hit",
       "file": "crates/physics/src/engine.rs",
-      "line": 1915
+      "line": 2708
     },
     {
       "name": "ray_capsule_cylinder_hit",
       "file": "crates/physics/src/engine.rs",
-      "line": 2144
+      "line": 2936
     },
     {
       "name": "ray_capsule_hit",
       "file": "crates/physics/src/engine.rs",
-      "line": 2184
+      "line": 2976
     },
     {
       "name": "BuiltinPhysicsEngine::step",
       "file": "crates/physics/src/engine.rs",
-      "line": 2205
+      "line": 2997
     },
     {
       "name": "BuiltinPhysicsEngine::add_joint",
       "file": "crates/physics/src/engine.rs",
-      "line": 2356
+      "line": 3215
     },
     {
       "name": "BuiltinPhysicsEngine::raycast",
       "file": "crates/physics/src/engine.rs",
-      "line": 2420
+      "line": 3279
     },
     {
       "name": "quality",
@@ -608,27 +613,27 @@
     {
       "name": "GameApp::showcase_engine",
       "file": "src/main.rs",
-      "line": 236
+      "line": 238
     },
     {
       "name": "GameApp::process_remote_commands",
       "file": "src/main.rs",
-      "line": 292
+      "line": 295
     },
     {
       "name": "GameApp::window_event",
       "file": "src/main.rs",
-      "line": 474
+      "line": 517
     },
     {
       "name": "GameApp::about_to_wait",
       "file": "src/main.rs",
-      "line": 541
+      "line": 584
     },
     {
       "name": "physics_body_for",
       "file": "src/editor_world.rs",
-      "line": 795
+      "line": 848
     },
     {
       "name": "normalized_rotation",

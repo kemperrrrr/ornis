@@ -10,6 +10,7 @@ members = [
     "crates/schedule",
     "crates/materialx",
     "crates/wasm",
+    "crates/app",
     "crates/editor-backend",
     "xtask",
 ]

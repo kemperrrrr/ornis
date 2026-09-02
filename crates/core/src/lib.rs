@@ -17,6 +17,7 @@ mod component_store;
 mod dispatcher;
 mod engine;
 mod entity;
+mod gameplay;
 mod input;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
@@ -40,6 +41,10 @@ pub use engine::{
     DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, FixedTime, Time,
 };
 pub use entity::{Entity, EntityAllocator};
+pub use gameplay::{
+    GameplayPlugin, Player, Position, RenderSnapshot, RenderWorldView, Velocity, install_gameplay,
+    physics_push, player_input, transform_update,
+};
 pub use input::InputState;
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 pub use page_table::{PAGE_SIZE, PageTable};

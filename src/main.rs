@@ -10,6 +10,8 @@ use editor_backend::RemoteEditor;
 use editor_backend::{GameEvent, UiCommand};
 #[cfg(not(feature = "editor-only"))]
 use engine_runtime::install_physics;
+#[cfg(not(feature = "editor-only"))]
+use ornis_core::install_gameplay;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // native mode also installs the physics systems into the showcase Engine.
@@ -243,6 +245,7 @@ impl GameApp {
             OrbitCamera::from_desc(&scene.camera),
         );
         install_physics(render_world.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
+        install_gameplay(render_world.engine_mut());
         {
             let entities = render_world.entities().to_vec();
             let store = render_world
@@ -291,6 +294,23 @@ impl GameApp {
 
     fn process_remote_commands(ctx: &mut GameContext) {
         while let Ok(command) = ctx.remote_cmd_rx.try_recv() {
+            // Browser input channel (WS bidirectionally + POST /api/input):
+            // replace authoritative InputState in the unified World (single
+            // World/Engine/Schedule, no polling / scene.ron fallback). The
+            // unwrap path handles WithRequestId(Input) for completeness even
+            // though the transport never wraps input.
+            let input = match &command {
+                UiCommand::Input { input } => Some(input.clone()),
+                UiCommand::WithRequestId { command, .. } => match &**command {
+                    UiCommand::Input { input } => Some(input.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(input) = input {
+                Self::apply_browser_input(ctx, &input);
+                continue;
+            }
             let (request_id, command) = match command {
                 UiCommand::WithRequestId {
                     request_id,
@@ -351,8 +371,31 @@ impl GameApp {
             UiCommand::DestroyEntity { .. } => "destroy_entity".into(),
             UiCommand::SetComponent { .. } => "set_component".into(),
             UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
+            UiCommand::Input { .. } => "input".into(),
             UiCommand::WithRequestId { command, .. } => Self::command_name(command),
         }
+    }
+
+    fn apply_browser_input(ctx: &mut GameContext, input: &editor_backend::BrowserInput) {
+        let world = ctx.render_world.engine_mut().world_mut();
+        let state = world.resources_mut().get_mut::<InputState>();
+        // Always ensure the resource exists even if never initialized elsewhere.
+        let state = if let Some(s) = state {
+            s
+        } else {
+            world.resources_mut().insert(InputState::default());
+            world
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("just inserted")
+        };
+        state.apply_snapshot(
+            &input.pressed_keys,
+            &input.pressed_mouse_buttons,
+            input.pointer_position,
+            input.pointer_delta,
+            input.wheel_delta,
+        );
     }
 
     fn render_frame(ctx: &mut GameContext) {

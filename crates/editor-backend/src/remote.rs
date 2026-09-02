@@ -230,9 +230,12 @@ fn serve(
             let cursor = event_cursor(request.url());
             let event_log = Arc::clone(&event_log);
             let stop = Arc::clone(&stop);
+            let game_tx_ws = game_tx.clone();
             if let Ok(handle) = thread::Builder::new()
                 .name("remote-editor-websocket".into())
-                .spawn(move || serve_websocket(request, event_log, stop, cursor, server_port))
+                .spawn(move || {
+                    serve_websocket(request, event_log, stop, cursor, server_port, game_tx_ws)
+                })
             {
                 websocket_handles
                     .lock()
@@ -271,10 +274,11 @@ fn websocket_bad_request(request: Request) {
         request.respond(Response::from_string("WebSocket upgrade required").with_status_code(400));
 }
 
-/// Serve a WebSocket `/api/events` connection. The endpoint is server-push
-/// only: clients receive replay records after their initial cursor and then
-/// newly appended records; browser-to-server commands continue to use HTTP.
-/// Idle connections receive periodic ping frames, and server shutdown sends a
+/// Serve a WebSocket `/api/events` connection. The endpoint is bidirectional:
+/// server pushes replay records after the initial cursor and then newly
+/// appended records; the browser may also push `InputState` snapshots as text
+/// frames that are forwarded to the game thread via `game_tx`. Idle
+/// connections receive periodic ping frames, and server shutdown sends a
 /// normal close frame.
 fn serve_websocket(
     request: Request,
@@ -282,6 +286,7 @@ fn serve_websocket(
     stop: Arc<AtomicBool>,
     mut cursor: u64,
     server_port: u16,
+    game_tx: Sender<UiCommand>,
 ) {
     let Some(key) = header_value(&request, "Sec-WebSocket-Key") else {
         websocket_bad_request(request);
@@ -302,10 +307,10 @@ fn serve_websocket(
     let mut last_heartbeat = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        // Poll for client frames (close, ping, etc.) without blocking the
-        // push loop. A close frame (opcode 0x8) is echoed and breaks
-        // cleanly; EOF also breaks.
-        match poll_client_frames(&mut *stream) {
+        // Poll for client frames without blocking the push loop. Data frames
+        // (opcode 0x1/0x2) carry browser `InputState` snapshots that are
+        // forwarded to the game thread.
+        match poll_client_frames(&mut *stream, &game_tx) {
             Ok(true) => return,
             Ok(false) => {}
             Err(e)
@@ -340,12 +345,11 @@ fn serve_websocket(
 /// Poll the upgraded stream for any available client frames. Returns
 /// `Ok(true)` if the connection should be closed (client sent close or
 /// EOF), `Ok(false)` if no close was seen, or `Err` on I/O error.
-/// Handles only what the server needs: opcode 0x8 (close) is echoed,
-/// 0x9 (ping) gets a pong, 0xA (pong) and data frames are consumed.
-/// All client frames are masked per RFC 6455.
-fn poll_client_frames(stream: &mut dyn ReadWrite) -> io::Result<bool> {
+/// Handles control frames and forwards text/binary data frames as
+/// `BrowserInput` snapshots to `game_tx` (WS input channel, no polling).
+fn poll_client_frames(stream: &mut dyn ReadWrite, game_tx: &Sender<UiCommand>) -> io::Result<bool> {
     loop {
-        match poll_one_frame(stream) {
+        match poll_one_frame(stream, game_tx) {
             Ok(Some(true)) => return Ok(true),
             Ok(Some(false)) => continue,
             Ok(None) => return Ok(false),
@@ -359,7 +363,10 @@ fn poll_client_frames(stream: &mut dyn ReadWrite) -> io::Result<bool> {
     }
 }
 
-fn poll_one_frame(stream: &mut dyn ReadWrite) -> io::Result<Option<bool>> {
+fn poll_one_frame(
+    stream: &mut dyn ReadWrite,
+    game_tx: &Sender<UiCommand>,
+) -> io::Result<Option<bool>> {
     let Some((opcode, masked, len_byte)) = ws_read_header(stream)? else {
         return Ok(None);
     };
@@ -370,6 +377,13 @@ fn poll_one_frame(stream: &mut dyn ReadWrite) -> io::Result<Option<bool>> {
     }
     let mask = ws_read_mask(stream, masked)?;
     let payload = ws_read_payload(stream, payload_len, mask)?;
+    // Browser input channel: text/binary frames carry BrowserInput JSON.
+    if matches!(opcode, 0x1 | 0x2) {
+        if let Some(input) = parse_browser_input(&payload) {
+            let _ = game_tx.send(UiCommand::Input { input });
+        }
+        return Ok(Some(false));
+    }
     Ok(Some(ws_dispatch_frame(stream, opcode, &payload)?))
 }
 
@@ -470,6 +484,7 @@ fn ws_dispatch_frame(stream: &mut dyn ReadWrite, opcode: u8, payload: &[u8]) -> 
             Ok(false)
         }
         0xA => Ok(false),
+        // 0x1/0x2 handled in poll_one_frame as BrowserInput
         _ => Ok(false),
     }
 }
@@ -777,6 +792,18 @@ fn route_request(
             let ack_body = command_ack_json(&ack);
             json_response(&ack_body)
         }
+        ("POST", "/api/input") => {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            if let Some(input) = parse_browser_input(body.as_bytes()) {
+                let _ = game_tx.send(UiCommand::Input { input });
+                json_response(r#"{"accepted":true}"#)
+            } else {
+                Response::from_string(r#"{"accepted":false,"error":"invalid input"}"#)
+                    .with_status_code(400)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+            }
+        }
         ("GET", _) => serve_static(root, &url),
         _ => not_found(),
     }
@@ -909,6 +936,60 @@ fn parse_set_component(data: Option<&serde_json::Value>) -> Option<UiCommand> {
         generation,
         type_name,
         json_data,
+    })
+}
+
+fn parse_browser_input(bytes: &[u8]) -> Option<crate::ipc::BrowserInput> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let obj = if let Some(s) = v.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).ok()?
+    } else {
+        v
+    };
+    let o = obj.as_object()?;
+    let pressed_keys = o
+        .get("pressed_keys")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pressed_mouse_buttons = o
+        .get("pressed_mouse_buttons")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u8))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pointer_position = o
+        .get("pointer_position")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            let x = a.first().and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
+            let y = a.get(1).and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
+            [x, y]
+        })
+        .unwrap_or([0.0, 0.0]);
+    let pointer_delta = o
+        .get("pointer_delta")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            let x = a.first().and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
+            let y = a.get(1).and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
+            [x, y]
+        })
+        .unwrap_or([0.0, 0.0]);
+    let wheel_delta = o.get("wheel_delta").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    Some(crate::ipc::BrowserInput {
+        pressed_keys,
+        pressed_mouse_buttons,
+        pointer_position,
+        pointer_delta,
+        wheel_delta,
     })
 }
 

@@ -1,0 +1,16 @@
+[package]
+name = "ornis-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ornis-core = { path = "../core" }
+ornis-physics = { path = "../physics" }
+ornis-render = { path = "../render" }
+glam = "0.30"
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

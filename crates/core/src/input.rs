@@ -100,6 +100,32 @@ impl InputState {
         self.wheel_delta = 0.0;
     }
 
+    /// Replace the entire snapshot from a browser input frame.
+    ///
+    /// The browser is the authoritative source for this frame: held keys and
+    /// buttons are replaced wholesale, and pointer/wheel deltas are set
+    /// exactly to the values delivered over the WS / `POST /api/input`
+    /// channel (no accumulation). This is the unified runtime's input side
+    /// of `World/Engine/Schedule` without polling.
+    pub fn apply_snapshot(
+        &mut self,
+        pressed_keys: &[u32],
+        pressed_mouse_buttons: &[u8],
+        pointer_position: [f32; 2],
+        pointer_delta: [f32; 2],
+        wheel_delta: f32,
+    ) {
+        self.pressed_keys = pressed_keys.iter().copied().collect();
+        self.pressed_mouse_buttons = pressed_mouse_buttons.iter().copied().collect();
+        self.pointer_position = pointer_position;
+        self.pointer_delta = pointer_delta;
+        self.wheel_delta = if wheel_delta.is_finite() {
+            wheel_delta
+        } else {
+            0.0
+        };
+    }
+
     /// Releases all held keys/buttons and resets pointer/wheel state.
     ///
     /// Platform adapters should call this on focus loss or window teardown

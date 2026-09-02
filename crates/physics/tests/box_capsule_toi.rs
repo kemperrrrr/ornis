@@ -17,6 +17,7 @@ fn is_asleep_pair(physics: &BuiltinPhysicsEngine, a: usize, b: usize) -> bool {
     physics.debug_contact_count(a) > 0 && physics.debug_contact_count(b) > 0
 }
 
+#[allow(dead_code)]
 fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
     (a - b).abs() <= eps
 }
@@ -100,9 +101,8 @@ fn rotated_box_vs_capsule_contact() {
     // дистанция считается через точную `shape_distance`, контакт обязан появиться.
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
-    let bx = physics.add_body(
-        RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0).with_orientation(rot),
-    );
+    let bx = physics
+        .add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0).with_orientation(rot));
     // капсула справа, слегка выше чтобы зацепить угол
     let cp = physics.add_body(RigidBody::new_capsule(
         Vec3::new(0.9, 0.2, 0.0),
@@ -145,12 +145,7 @@ fn box_capsule_touching_at_speculative_margin_generates_contact() {
 fn capsule_capsule_still_works_after_box_capsule_patch() {
     // Регрессия: добавление веток Box↔Capsule не должно сломать Capsule↔Capsule
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
-    let a = physics.add_body(RigidBody::new_capsule(
-        Vec3::ZERO,
-        0.5,
-        1.0,
-        1.0,
-    ));
+    let a = physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 1.0));
     let b = physics.add_body(RigidBody::new_capsule(
         Vec3::new(0.9, 0.0, 0.0),
         0.5,
@@ -387,10 +382,7 @@ fn multiple_capsules_and_boxes_interact_without_panic() {
                 "body {h} position must stay finite: {:?}",
                 b.position
             );
-            assert!(
-                b.velocity.is_finite(),
-                "body {h} velocity must stay finite"
-            );
+            assert!(b.velocity.is_finite(), "body {h} velocity must stay finite");
         }
     }
 }

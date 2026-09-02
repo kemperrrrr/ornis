@@ -175,7 +175,6 @@ impl BuiltinPhysicsEngine {
         // Return parent buffer before heavy island building so group loop can reuse it later if needed.
         self.scratch_parent = parent;
 
-
         let mut islands: Vec<IslandWork> = Vec::with_capacity(groups.len());
         for group in groups {
             let mut body_idx: Vec<usize> = Vec::new();

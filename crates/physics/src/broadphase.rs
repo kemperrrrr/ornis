@@ -428,7 +428,12 @@ impl UniformGrid {
         }
         self.prev_meta.resize(n, (false, 0, 0, BodyType::Static));
         for (i, b) in bodies.iter().enumerate() {
-            self.prev_meta[i] = (b.is_trigger, b.collision_layer, b.collision_mask, b.body_type);
+            self.prev_meta[i] = (
+                b.is_trigger,
+                b.collision_layer,
+                b.collision_mask,
+                b.body_type,
+            );
         }
         self.stats = BroadPhaseStats {
             body_count: bodies.len(),

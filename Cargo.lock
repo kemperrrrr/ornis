@@ -1795,6 +1795,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-app"
+version = "0.1.0"
+dependencies = [
+ "glam 0.30.10",
+ "ornis-core",
+ "ornis-physics",
+ "ornis-render",
+ "serde",
+]
+
+[[package]]
 name = "ornis-audio"
 version = "0.1.0"
 dependencies = [

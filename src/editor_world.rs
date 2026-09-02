@@ -70,7 +70,10 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ornis_core::{ComponentMeta, ComponentRegistry, Engine, Entity, SmartStore, World};
+use ornis_core::{
+    ComponentMeta, ComponentRegistry, Engine, Entity, InputState, SmartStore, World,
+    install_gameplay,
+};
 use ornis_physics::RigidBody;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
@@ -142,6 +145,7 @@ impl Default for EditorWorld {
         let mut engine = Engine::new();
         let _ = engine.world_mut().insert(SceneEnvironment::default());
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
+        install_gameplay(&mut engine);
         Self {
             engine,
             alive: Vec::new(),
@@ -469,6 +473,20 @@ impl CommandOutcome {
 /// `ComponentUpdated`, `status`/`scene` snapshots or `error`). A transport
 /// wrapped command additionally receives a correlated completion event.
 fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
+    // Browser input channel (WS + POST /api/input): replace authoritative
+    // InputState in the unified World. No polling / scene.ron fallback.
+    // Handles both bare Input and wrapped WithRequestId(Input).
+    if let Some(input) = match cmd {
+        UiCommand::Input { input } => Some(input),
+        UiCommand::WithRequestId { command, .. } => match &**command {
+            UiCommand::Input { input } => Some(input),
+            _ => None,
+        },
+        _ => None,
+    } {
+        apply_browser_input(world, input);
+        return;
+    }
     if let UiCommand::WithRequestId {
         request_id,
         command,
@@ -479,6 +497,36 @@ fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameE
     } else {
         let _ = execute_command(world, cmd, ev_tx);
     }
+}
+
+fn apply_browser_input(world: &mut EditorWorld, input: &editor_backend::ipc::BrowserInput) {
+    let state = world
+        .engine
+        .world_mut()
+        .resources_mut()
+        .get_mut::<InputState>();
+    let state = if let Some(s) = state {
+        s
+    } else {
+        world
+            .engine
+            .world_mut()
+            .resources_mut()
+            .insert(InputState::default());
+        world
+            .engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<InputState>()
+            .expect("just inserted")
+    };
+    state.apply_snapshot(
+        &input.pressed_keys,
+        &input.pressed_mouse_buttons,
+        input.pointer_position,
+        input.pointer_delta,
+        input.wheel_delta,
+    );
 }
 
 fn execute_command(
@@ -516,6 +564,10 @@ fn execute_command(
         UiCommand::WithRequestId { .. } => {
             CommandOutcome::failure("nested request-id command is not supported")
         }
+        UiCommand::Input { .. } => {
+            // Already handled in handle_command; direct calls are no-ops.
+            CommandOutcome::success()
+        }
     }
 }
 
@@ -525,6 +577,7 @@ fn command_name(cmd: &UiCommand) -> String {
         UiCommand::DestroyEntity { .. } => "destroy_entity".into(),
         UiCommand::SetComponent { .. } => "set_component".into(),
         UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
+        UiCommand::Input { .. } => "input".into(),
         UiCommand::WithRequestId { command, .. } => command_name(command),
     }
 }

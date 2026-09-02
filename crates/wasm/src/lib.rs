@@ -34,6 +34,9 @@ type FrameCallback = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 /// Compiled-in fallback for the scene when fetch('scene.ron') is unavailable
 /// (e.g. opened without the ornis remote server).
+/// Legacy static fallback — deprecated, unified runtime requires `/api/scene`.
+/// Kept as `allow(dead_code)` for reference; `load_initial_scene` no longer uses it.
+#[allow(dead_code)]
 const FALLBACK_SCENE_RON: &str = include_str!("../../../assets/scene.ron");
 
 /// Poll `/api/scene` about once per second (~60 animation frames).
@@ -65,6 +68,8 @@ impl raw_window_handle::HasWindowHandle for CanvasWindow {
 }
 
 /// Fetch scene.ron from the server; fall back to the compiled-in copy.
+/// Deprecated: use `fetch_live_scene` — static `scene.ron` fetch is no longer the initial scene source.
+#[allow(dead_code)]
 async fn load_scene_ron() -> String {
     if let Some(window) = web_sys::window() {
         let resp_value =
@@ -346,8 +351,11 @@ fn pick_surface_format(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureFormat 
         })
 }
 
-/// Load the initial scene: live `/api/scene` first, `scene.ron` as fallback.
-/// Returns the scene, its version, and whether live polling should run.
+/// Load the initial scene: live `/api/scene` is the authoritative source (unified runtime).
+/// No `scene.ron` fallback is used — the browser is a view over the editor's live world.
+/// When the remote server is unavailable the renderer returns an error instead of
+/// falling back to a static scene, ensuring the single `Engine/Schedule/World` host
+/// is the sole source of truth.
 async fn load_initial_scene() -> Result<(Scene, u64, bool), JsValue> {
     if let Some(live) = fetch_live_scene().await {
         console::log_1(
@@ -365,20 +373,11 @@ async fn load_initial_scene() -> Result<(Scene, u64, bool), JsValue> {
     }
 
     console::log_1(
-        &"[ornis-wasm] /api/scene unavailable or reduced, falling back to scene.ron".into(),
+        &"[ornis-wasm] /api/scene unavailable — no fallback scene (unified runtime)".into(),
     );
-    let ron_text = load_scene_ron().await;
-    let scene = Scene::from_ron(&ron_text).map_err(|e| format!("scene parse: {:?}", e))?;
-    console::log_1(
-        &format!(
-            "[ornis-wasm] scene '{}' loaded: {} entities, {} lights",
-            scene.name,
-            scene.entities.len(),
-            scene.lights.len()
-        )
-        .into(),
-    );
-    Ok((scene, 0, false))
+    Err(JsValue::from_str(
+        "/api/scene unavailable: start the editor server (cargo run --features editor-only) or use native showcase",
+    ))
 }
 
 /// Mutable state carried across animation frames by the render loop.

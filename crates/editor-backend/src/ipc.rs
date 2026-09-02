@@ -17,6 +17,38 @@
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
+/// Browser input snapshot forwarded over WebSocket / `POST /api/input`.
+///
+/// This is the server-side mirror of [`ornis_core::InputState`]: the browser
+/// sends pressed keys/buttons and pointer/wheel deltas, the engine replaces
+/// its authoritative [`ornis_core::InputState`] resource with the snapshot.
+/// Transient deltas are consumed once per frame and cleared by the engine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrowserInput {
+    /// Pressed key codes.
+    pub pressed_keys: Vec<u32>,
+    /// Pressed mouse button codes.
+    pub pressed_mouse_buttons: Vec<u8>,
+    /// Absolute pointer position `[x, y]`.
+    pub pointer_position: [f32; 2],
+    /// Pointer movement since the last snapshot.
+    pub pointer_delta: [f32; 2],
+    /// Wheel delta since the last snapshot.
+    pub wheel_delta: f32,
+}
+
+impl Default for BrowserInput {
+    fn default() -> Self {
+        Self {
+            pressed_keys: Vec::new(),
+            pressed_mouse_buttons: Vec::new(),
+            pointer_position: [0.0, 0.0],
+            pointer_delta: [0.0, 0.0],
+            wheel_delta: 0.0,
+        }
+    }
+}
+
 /// Commands sent from UI (JS) to the game thread
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // protocol surface for editor↔engine (roadmap)
@@ -47,6 +79,14 @@ pub enum UiCommand {
         cmd_type: String,
         /// JSON object payload for the command.
         json_data: String,
+    },
+    /// Browser input snapshot: replaces the engine's `InputState` resource.
+    ///
+    /// Sent via WebSocket (`/api/events` bidirectionally) or `POST /api/input`.
+    /// No polling / `scene.ron` fallback is required.
+    Input {
+        /// Input snapshot from the browser.
+        input: BrowserInput,
     },
     /// Transport wrapper carrying the request id through the engine queue.
     ///

@@ -5,7 +5,9 @@
 //! [`math`]) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
+pub mod bloom_generated;
 pub mod composite_generated;
+pub mod lighting_generated;
 pub mod math;
 
 /// ── COMPOSITE_VERTEX ────────────────────────────────────────────────
@@ -29,24 +31,13 @@ pub fn composite_fragment() -> String {
     )
 }
 
-/// ── BLOOM ───────────────────────────────────────────────────────────
-///
-/// A single quad shader used by the whole bloom chain. Each pass samples
-/// the previous (smaller or larger) level and applies a soft threshold on
-/// luminance: the first downsample keeps only the bright pixels
-/// (threshold ≈ 0.6-0.7), later levels pass everything (threshold = 0),
-/// and the upsample passes re-add the level's own content via additive
-/// blending (dst = src + previous), recreating the classic Frostbite
-/// "downsample chain, upsample with add" cascade.
-const BLOOM_FRAGMENT_BOILERPLATE: &str = include_str!("wgsl/bloom_fragment.wgsl");
-
-/// Assemble the bloom fragment shader (bright-pass/blend), splicing the luminance kernel.
+// ── BLOOM ───────────────────────────────────────────────────────────
+/// Единственный источник истины — `bloom_generated::wgsl_source()`
+/// (Rust → WGSL, путь 2). Легаси `wgsl/bloom_fragment.wgsl` остаётся как
+/// reference; `renderer::create_bloom_pass` и этот форвардер используют
+/// только generated.
 pub fn bloom_fragment() -> String {
-    format!(
-        "{}\n{}",
-        BLOOM_FRAGMENT_BOILERPLATE,
-        math::luminance::wgsl_source(),
-    )
+    bloom_generated::wgsl_source()
 }
 
 /// ── GBUFFER_VERTEX ──────────────────────────────────────────────────
@@ -69,45 +60,18 @@ pub fn gbuffer_fragment() -> String {
     )
 }
 
-/// ── LIGHTING_VERTEX ─────────────────────────────────────────────────
-const LIGHTING_VERTEX_BOILERPLATE: &str = include_str!("wgsl/lighting_vertex.wgsl");
-
-/// Assemble the full-screen lighting vertex shader.
+// ── LIGHTING_VERTEX ─────────────────────────────────────────────────
+/// Full-screen lighting vertex shader — единственный источник истины
+/// `lighting_generated::wgsl_vertex_source()` (путь 2).
 pub fn lighting_vertex() -> String {
-    LIGHTING_VERTEX_BOILERPLATE.to_string()
+    lighting_generated::wgsl_vertex_source()
 }
 
-/// ── LIGHTING_FRAGMENT ───────────────────────────────────────────────
-const LIGHTING_BOILERPLATE: &str = include_str!("wgsl/lighting.wgsl");
-
-/// Assemble the deferred lighting fragment shader: reconstructs surface data and evaluates OpenPBR by splicing all BRDF math kernels via `wgsl_source()`.
+// ── LIGHTING_FRAGMENT ───────────────────────────────────────────────
+/// Deferred lighting fragment — единственный источник истины
+/// `lighting_generated::wgsl_source()` (путь 2).
 pub fn lighting_fragment() -> String {
-    let kernels = [
-        math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
-        math::fresnel0_from_ior::wgsl_source(),
-        math::fresnel_schlick::wgsl_source(),
-        math::fresnel_schlick_vec::wgsl_source(),
-        math::fresnel_f82_tint::wgsl_source(),
-        math::ggx_ndf::wgsl_source(),
-        math::ggx_ndf_aniso::wgsl_source(),
-        math::openpbr_anisotropy::wgsl_source(),
-        math::smith_ggx_correlated::wgsl_source(),
-        math::smith_ggx_aniso::wgsl_source(),
-        math::oren_nayar_brdf::wgsl_source(),
-        math::coat_base_darkening::wgsl_source(),
-        math::coat_blend_darkened::wgsl_source(),
-        math::thin_film_modulation::wgsl_source(),
-        math::sheen_brdf::wgsl_source(),
-        math::transmission_color_to_extinction::wgsl_source(),
-        math::subsurface_brdf::wgsl_source(),
-    ];
-    let mut src = LIGHTING_BOILERPLATE.to_string();
-    for k in &kernels {
-        src.push('\n');
-        src.push_str(k);
-    }
-    src
+    lighting_generated::wgsl_source()
 }
 
 /// ── PBR_VERTEX ──────────────────────────────────────────────────────

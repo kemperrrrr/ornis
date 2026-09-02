@@ -944,13 +944,17 @@ impl Renderer3D {
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lighting vertex"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::lighting_vertex())),
+            label: Some("lighting vertex (generated)"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(
+                shaders::lighting_generated::wgsl_vertex_source(),
+            )),
         });
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lighting fragment"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::lighting_fragment())),
+            label: Some("lighting fragment (generated)"),
+            source: wgpu::ShaderSource::Wgsl(
+                Cow::Owned(shaders::lighting_generated::wgsl_source()),
+            ),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1291,14 +1295,19 @@ impl Renderer3D {
     }
 
     fn create_bloom_pass(device: &wgpu::Device) -> BloomPass {
-        let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bloom fragment"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::bloom_fragment())),
+        // Bloom WGSL теперь генерируется из Rust (путь 2) — единственный
+        // источник истины `shaders::bloom_generated::wgsl_source()`.
+        // Легаси `shaders/wgsl/bloom_fragment.wgsl` остаётся как reference.
+        let bloom_source = shaders::bloom_generated::wgsl_source();
+        let bloom_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bloom shader (generated)"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(bloom_source)),
         });
-        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bloom vertex"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::composite_vertex())),
-        });
+        // Vertex и fragment — один модуль с двумя entry points `vs_main`/`fs_main`.
+        // Две переменные указывают на тот же модуль, чтобы сохранить сигнатуру
+        // `bloom_pipeline(vertex, fragment, ...)`.
+        let fs_module = &bloom_module;
+        let vs_module = &bloom_module;
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bloom bind group layout"),
@@ -1349,13 +1358,13 @@ impl Renderer3D {
 
         // Downsample: replace-blend, target is cleared first.
         let down_pipeline =
-            Self::bloom_pipeline(device, &pipeline_layout, &fs_module, &vs_module, None);
+            Self::bloom_pipeline(device, &pipeline_layout, fs_module, vs_module, None);
         // Upsample: additive blend over the loaded previous level.
         let up_pipeline = Self::bloom_pipeline(
             device,
             &pipeline_layout,
-            &fs_module,
-            &vs_module,
+            fs_module,
+            vs_module,
             Some(wgpu::BlendState {
                 color: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::One,
