@@ -1,4 +1,4 @@
-//! Frame plan — pass orchestration layer (бывший «render graph», Phase 0).
+//! Frame plan — pass orchestration layer (formerly "render graph", Phase 0).
 //!
 //! An immediate-mode plan in the spirit of Frostbite FrameGraph and
 //! Ponies&Light: passes are declared in execution order, and each pass
@@ -241,10 +241,10 @@ impl FrameLayout {
     /// natively, so a layout drop pasted into a PR review becomes a
     /// picture of the frame pipeline.
     ///
-    /// Срез 1b (приближение к ликвидации графа): формируется общим
-    /// проектором [`MermaidDiagram`] — тот же байтовый формат, что
-    /// пинится тестом `mermaid_is_a_valid_projection`; та же картинка
-    /// доступна и верхнему планировщику (`Schedule::mermaid`).
+    /// Slice 1b (toward graph elimination): rendered by the shared
+    /// [`MermaidDiagram`] projector — same byte format pinned by the
+    /// `mermaid_is_a_valid_projection` test; the same diagram is
+    /// available from the top-level scheduler (`Schedule::mermaid`).
     pub fn mermaid(&self) -> String {
         let mut d = MermaidDiagram::new();
         for (li, level) in self.levels().iter().enumerate() {
@@ -330,15 +330,16 @@ impl FrameLayout {
     }
 }
 
-/// Debug-enforcement объявленных доступов пасса — граница
-/// `PassViews::view_of` (бэклог #6, аудит §4.1): пасс запрашивает view по
-/// `ResourceId` вне своих declared reads/writes → паника с именем пасса и
-/// ресурса. Такой доступ — шаг вне расписания: он может гоняться с пассом
-/// того же уровня параллельной записи (`FrameExecutor::execute_parallel`).
-/// Пасс-аналог `assert_access_declared` для систем `core::Schedule`;
-/// write-декларация покрывает и чтение собственной записи (см.
-/// `Forward<OwnsDepth>` — читает собственно очищенный depth), как и в
-/// core. Только debug: в release проверка скомпилирована в ноль.
+/// Debug enforcement of declared pass accesses — boundary of
+/// `PassViews::view_of` (backlog #6, audit §4.1): a pass requesting a view
+/// for a `ResourceId` outside its declared reads/writes panics with the
+/// pass and resource names. Such access is an out-of-schedule step: it
+/// may race with a pass at the same parallel level
+/// (`FrameExecutor::execute_parallel`). Pass-level analogue of
+/// `assert_access_declared` for `core::Schedule` systems; a write
+/// declaration also covers reading its own write (see
+/// `Forward<OwnsDepth>` — reads its own cleared depth), as in core.
+/// Debug-only: compiled out in release.
 #[cfg(debug_assertions)]
 pub(crate) fn assert_pass_access_declared(layout: &FrameLayout, pass_index: usize, id: ResourceId) {
     let pass = &layout.passes[pass_index];
@@ -456,9 +457,9 @@ pub struct FramePlan {
     /// recomputes. Every mutation resets this (S1: `compute_layout` must
     /// stay off the per-frame hot path).
     cached: Option<FrameLayout>,
-    /// S5c: явные рёбра порядка (PassId регистрации i < j) поверх
-    /// зависимостей из доступов — для скрытых зависимостей (общие
-    /// queue-буферы рендерера), невидимых в множествах доступа.
+    /// S5c: explicit ordering edges (registration PassId i < j) on top
+    /// of access-derived dependencies — for hidden dependencies (shared
+    /// renderer queue buffers) invisible in the access sets.
     ordering: Vec<(PassId, PassId)>,
     /// S4 memory budget; unbounded by default.
     budget: Budget,
@@ -723,24 +724,24 @@ impl FramePlan {
         PassBuilder { plan: self, id }
     }
 
-    /// S5c: объявляет, что пасс `before` обязан выполниться раньше пасса
-    /// `after`, даже если их доступы не конфликтуют (скрытая зависимость,
-    /// например общий queue-записанный uniform-буфер). Влияет только на
-    /// разбиение на уровни параллельности ([`FrameLayout::levels`]);
-    /// порядок исполнения — порядок регистрации.
+    /// S5c: declares that pass `before` must execute before pass
+    /// `after`, even when their accesses do not conflict (hidden
+    /// dependency, e.g. a shared queue-written uniform buffer). Affects
+    /// only parallel level partitioning ([`FrameLayout::levels`]);
+    /// execution order is registration order.
     ///
     /// # Panics
-    /// Паникует, если `after` зарегистрирован раньше `before` (порядок
-    /// исполнения неизменяем) или пасс неизвестен.
+    /// Panics if `after` was registered before `before` (execution
+    /// order is immutable) or if a pass is unknown.
     pub fn order_before(&mut self, before: PassId, after: PassId) {
         self.try_order_before(before, after)
             .unwrap_or_else(|error| panic!("order_before({before:?}, {after:?}): {error}"));
     }
 
-    /// Мягкая [`FramePlan::order_before`]: ошибка — возвращаемый
-    /// [`OrderError`], не паника. Заодно валидирует оба `PassId`
-    /// (раньше ребро с неизвестным id добавлялось молча и игнорировалось
-    /// при подсчёте уровней).
+    /// Fallible [`FramePlan::order_before`]: returns [`OrderError`] on
+    /// error instead of panicking. Also validates both `PassId`s
+    /// (previously an edge with an unknown id was added silently and
+    /// ignored during level computation).
     pub fn try_order_before(&mut self, before: PassId, after: PassId) -> Result<(), OrderError> {
         validate_indexed_edge(before.0 as usize, after.0 as usize, |i| {
             self.passes.get(i).map(|node| node.name.clone())
@@ -752,17 +753,17 @@ impl FramePlan {
         Ok(())
     }
 
-    /// S5c: name-based [`FramePlan::order_before`] (имя пасса из
+    /// S5c: name-based [`FramePlan::order_before`] (pass name from
     /// `add_pass`).
     ///
     /// # Panics
-    /// Паникует при неизвестном имени или обратном порядке регистрации.
+    /// Panics on unknown name or reverse registration order.
     pub fn order_before_named(&mut self, before: &str, after: &str) {
         self.try_order_before_named(before, after)
             .unwrap_or_else(|error| panic!("order_before_named('{before}', '{after}'): {error}"));
     }
 
-    /// Мягкая [`FramePlan::order_before_named`].
+    /// Fallible [`FramePlan::order_before_named`].
     pub fn try_order_before_named(&mut self, before: &str, after: &str) -> Result<(), OrderError> {
         let (b, a) = resolve_named_edge(before, after, |name| {
             self.passes.iter().position(|p| p.name == name)
@@ -1069,26 +1070,26 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "'sneaky' (index 1) accesses resource 'b'")]
     fn sneaky_pass_undeclared_access_panics() {
-        // Бэклог #6 (аудит §4.1, критерий выхода Фазы B «sneaky pass»):
-        // пасс запрашивает ресурс вне своих declared reads/writes →
-        // debug-паника с именем пасса и ресурса (симметрия со
-        // `sneaky`-системой `core::Schedule`).
+        // Backlog #6 (audit §4.1, Phase B exit criterion "sneaky pass"):
+        // pass requests a resource outside its declared reads/writes →
+        // debug panic with pass and resource names (mirrors the
+        // `sneaky` system in `core::Schedule`).
         let mut g = FramePlan::new((320, 240));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g.add_pass("writer").write(a).write(b);
         g.add_pass("sneaky").read(a);
         let layout = g.build();
-        // Пасс 1 декларировал только read(a); peek в `b` — вне набора.
+        // Pass 1 declared only read(a); peeking at `b` is out of set.
         assert_pass_access_declared(&layout, 1, b);
     }
 
     #[test]
     #[cfg(debug_assertions)]
     fn declared_pass_access_passes_enforcement() {
-        // Честный пасс: read-декларация покрывает view; write-декларация
-        // покрывает и чтение собственной записи (own-write read), как и в
-        // core `declared_access_passes_enforcement` — обе проверки молчат.
+        // Honest pass: read declaration covers the view; write declaration
+        // also covers reading its own write (own-write read), as in
+        // core `declared_access_passes_enforcement` — both checks stay silent.
         let mut g = FramePlan::new((320, 240));
         let x = g.create_resource("x", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         g.add_pass("writer").write(x);
@@ -1174,7 +1175,7 @@ mod tests {
 
     #[test]
     fn independent_branches_share_levels() {
-        // p0→p1 (a→b) и p2→p3 (c→d) не делят ресурсов: уровни [p0,p2], [p1,p3].
+        // p0→p1 (a→b) and p2→p3 (c→d) share no resources: levels [p0,p2], [p1,p3].
         let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
@@ -1190,8 +1191,8 @@ mod tests {
 
     #[test]
     fn explicit_ordering_splits_shared_level() {
-        // p0→p1 и p2→p3 независимы: [[0,2],[1,3]]; ребро p0→p2 разводит
-        // первый уровень (скрытая зависимость без конфликта доступов).
+        // p0→p1 and p2→p3 are independent: [[0,2],[1,3]]; edge p0→p2 splits
+        // the first level (hidden dependency without access conflict).
         let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
@@ -1247,7 +1248,7 @@ mod tests {
                 name: "ghost".to_owned(),
             })
         );
-        // Id вне реестра — ошибка, а не молчаливое мусорное ребро.
+        // Id outside the registry is an error, not a silent garbage edge.
         assert!(matches!(
             g.try_order_before(PassId(99), PassId(100)),
             Err(OrderError::UnknownNode { .. })
@@ -1259,8 +1260,8 @@ mod tests {
 
     #[test]
     fn mermaid_is_a_valid_projection() {
-        // S6: граф как отладочная проекция — уровни подграфами,
-        // ресурсы узлами, потоки рёбрами; GitHub рендерит нативно.
+        // S6: graph as debug projection — levels as subgraphs,
+        // resources as nodes, flows as edges; GitHub renders natively.
         let mut g = FramePlan::new((64, 64));
         let a = g.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let b = g.create_resource("b", spec(wgpu::TextureFormat::Rg16Float, 1));
@@ -1274,7 +1275,7 @@ mod tests {
         assert!(m.contains("R0[\"a Rgba8Unorm\"]"), "resource nodes: {m}");
         assert!(m.contains("P0 --> R0"), "write edges: {m}");
         assert!(m.contains("R0 --> P1"), "read edges: {m}");
-        // Мёртвые ресурсы в проекцию не входят.
+        // Dead resources are excluded from the projection.
         let mut g2 = FramePlan::new((64, 64));
         let dead = g2.create_resource("dead", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let live = g2.create_resource("live", spec(wgpu::TextureFormat::Rgba8Unorm, 1));

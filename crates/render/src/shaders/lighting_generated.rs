@@ -1,19 +1,19 @@
 //! Lighting shader generated from Rust (Render path 2).
 //!
-//! Канонический источник — Rust-код этого модуля; WGSL выводится сборкой
-//! строки из констант + ядер `math::*::wgsl_source()` (OpenPBR BRDF).
-//! Рукописный `shaders/wgsl/lighting.wgsl` остаётся как reference/legacy,
-//! но `lighting_fragment` уже собирается только отсюда. Подготавливает
-//! PBR lighting к полному Rust→WGSL переходу (путь 2).
+//! Canonical source is the Rust code in this module; WGSL is assembled
+//! from constants + `math::*::wgsl_source()` kernels (OpenPBR BRDF).
+//! The handwritten `shaders/wgsl/lighting.wgsl` remains as a reference/legacy,
+//! but `lighting_fragment` is now assembled only from here. Prepares
+//! PBR lighting for the full Rust→WGSL transition (path 2).
 
 use crate::shaders::math;
 
-/// WGSL boilerplate deferred lighting: structs, bindings, helpers, main.
-/// Идентичен `shaders/wgsl/lighting.wgsl`; имена entry points `fs_main`
-/// сохранены для совместимости.
+/// WGSL boilerplate for deferred lighting: structs, bindings, helpers, main.
+/// Identical to `shaders/wgsl/lighting.wgsl`; entry point names `fs_main`
+/// are kept for compatibility.
 fn lighting_wgsl_header() -> &'static str {
-    // Этот литерал — единственный `vec4<f32>` вне `*_generated.rs` должен
-    // отсутствовать; здесь он в generated, что разрешено правилом grep.
+    // This literal is the only `vec4<f32>` outside `*_generated.rs` that must
+    // be absent; here it is inside generated code, which is allowed by the grep rule.
     r#"
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -357,7 +357,7 @@ fn lighting_fragment_kernels() -> String {
     kernels.join("\n")
 }
 
-/// Полный WGSL источник deferred lighting, собранный из Rust.
+/// Full WGSL source for deferred lighting, assembled from Rust.
 pub fn wgsl_source() -> String {
     format!(
         "{}\n{}\n",
@@ -366,9 +366,9 @@ pub fn wgsl_source() -> String {
     )
 }
 
-/// Vertex WGSL: full-screen quad (triangle strip) — остаётся Rust-источником.
+/// Vertex WGSL: full-screen quad (triangle strip) — remains a Rust source.
 pub fn wgsl_vertex_source() -> String {
-    // Повторяем wgsl/lighting_vertex.wgsl как Rust-константу — тот же quad.
+    // Repeats wgsl/lighting_vertex.wgsl as a Rust constant — same quad.
     r#"
 const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
     vec4<f32>(-1.0, -1.0, 0.0, 1.0),
@@ -394,7 +394,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> QuadVertexOutput {
     .to_string()
 }
 
-/// Статический вид для naga-валидации и snapshot-тестов.
+/// Static view for naga validation and snapshot tests.
 pub fn wgsl_source_static() -> String {
     wgsl_source()
 }

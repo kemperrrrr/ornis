@@ -1,5 +1,5 @@
 //! Typed resources and static passes for the 3D frame plan — S2a
-//! (IDEAS §28.1, PLAN Приложение C).
+//! (IDEAS §28.1, PLAN Appendix C).
 //!
 //! Resource identity is a type ([`FrameResource`]); passes with static
 //! access sets are [`FramePass`] implementations whose wiring is derived
@@ -19,7 +19,7 @@ use std::marker::PhantomData;
 // fn_call_width (60) so they stay on one line.
 use wgpu::TextureFormat as F;
 
-// ── S2: typed resources (IDEAS §28.1, PLAN Приложение C) ─────────────
+// ── S2: typed resources (IDEAS §28.1, PLAN Appendix C) ─────────────
 // A resource's identity is its type; specs/names mirror the imperative
 // wiring exactly so layout dumps (and the parity test) stay identical.
 

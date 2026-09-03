@@ -1,5 +1,5 @@
-//! Бинарь `ornis`: нативный режим (winit + wgpu) и `editor-only`
-//! (HTTP-сервер редактора на порту 3420 без нативного окна).
+//! `ornis` binary: native mode (winit + wgpu) and `editor-only`
+//! (editor HTTP server on port 3420 without a native window).
 
 #![warn(missing_docs)]
 

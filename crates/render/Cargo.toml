@@ -11,7 +11,7 @@ bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 ornis-core = { path = "../core" }
 ornis-macros = { path = "../macros" }
-# Фаза A (аудит §7): общий engine уровней/рёбер/OrderError.
+# Phase A (audit §7): shared engine for levels/edges/OrderError.
 ornis-schedule = { path = "../schedule" }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"

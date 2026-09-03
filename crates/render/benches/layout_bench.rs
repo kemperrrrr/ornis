@@ -1,4 +1,4 @@
-//! S0 baseline (PLAN.md, Приложение C): how expensive is one
+//! S0 baseline (PLAN.md, Appendix C): how expensive is one
 //! `compute_layout` on the three technique graphs, and what does the S1
 //! cache cost on a hit.
 //!

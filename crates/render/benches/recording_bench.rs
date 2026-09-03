@@ -1,12 +1,12 @@
 //! S5b bench: sequential vs parallel command recording, CPU side.
 //!
-//! Параллельная запись оптимизирует CPU-сторону кадра (запись команд в
-//! encoder'ы) — именно её и меряем: оба варианта платят одинаковые
-//! submit; render() без poll. Headless-адаптер (в CI — lavapipe): числа
-//! показывают относительную разницу путей записи на одном железе, а не
-//! абсолютный кадр на дискретном GPU.
+//! Parallel recording optimizes the CPU side of the frame (command recording
+//! into encoders) — that is what we measure: both paths pay the same
+//! submit; render() without poll. Headless adapter (lavapipe on CI): numbers
+//! show the relative difference between recording paths on one machine, not
+//! the absolute frame cost on a discrete GPU.
 //!
-//! Compile-checked гейтом; ручной запуск:
+//! Compile-checked by the gate; manual run:
 //!   cargo bench -p ornis-render --bench recording_bench
 
 use criterion::{Criterion, criterion_group, criterion_main};

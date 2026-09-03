@@ -1,3 +1,3 @@
 # rustfmt configuration for Ornis
-# Edition 2024 подтягивается из Cargo.toml автоматически.
+# Edition 2024 is picked up from Cargo.toml automatically.
 max_width = 100

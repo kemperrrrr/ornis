@@ -1,10 +1,10 @@
-//! Интеграционные тесты нового physics API: box↔capsule contact и
-//! analytic swept-volume TOI с быстрым вращением (G6).
+//! Integration tests for the new physics API: box↔capsule contact and
+//! analytic swept-volume TOI with fast rotation (G6).
 //!
-//! Покрывает публичный API `BuiltinPhysicsEngine`/`RigidBody` без доступа
-//! к приватным `engine::` деталям. Каждый тест через `step` проверяет
-//! наблюдаемое поведение: наличие/отсутствие контакта, normal-ориентированность
-//! и отсутствие туннелирования при быстром вращении.
+//! Covers the public `BuiltinPhysicsEngine`/`RigidBody` API without access
+//! to private `engine::` internals. Each test drives `step` and checks
+//! observable behavior: contact presence/absence, normal orientation
+//! and absence of tunneling under fast rotation.
 
 use glam::{Quat, Vec3};
 use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
@@ -49,8 +49,8 @@ fn box_and_capsule_overlap_generates_contact() {
 
 #[test]
 fn capsule_and_box_swapped_order_also_generates_contact() {
-    // Вставка в обратном порядке: capsule первым, box вторым — normal должен флипнуться,
-    // но контакт обязан появиться (проверка симметрии веток Box↔Capsule / Capsule↔Box).
+    // Insertion in reverse order: capsule first, box second — normal must flip,
+    // but contact must still appear (symmetry check for Box↔Capsule / Capsule↔Box branches).
     let mut p1 = BuiltinPhysicsEngine::new(Vec3::ZERO);
     let a = p1.add_body(RigidBody::new_capsule(
         Vec3::new(0.6, 0.0, 0.0),
@@ -72,7 +72,7 @@ fn capsule_and_box_swapped_order_also_generates_contact() {
     ));
     p2.step(1.0 / 60.0);
     assert!(is_asleep_pair(&p2, a2, b2));
-    // число контактов должно совпасть независимо от порядка вставки
+    // contact count must match regardless of insertion order
     assert_eq!(
         p1.debug_contact_count(a),
         p2.debug_contact_count(a2),
@@ -97,13 +97,13 @@ fn separated_box_and_capsule_no_contact() {
 
 #[test]
 fn rotated_box_vs_capsule_contact() {
-    // Box повёрнут на 45° вокруг Z, капсула сбоку. AABB расширяется до sqrt(2),
-    // дистанция считается через точную `shape_distance`, контакт обязан появиться.
+    // Box rotated 45° around Z, capsule to the side. AABB expands to sqrt(2),
+    // distance is computed via exact `shape_distance`, contact must appear.
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
     let bx = physics
         .add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0).with_orientation(rot));
-    // капсула справа, слегка выше чтобы зацепить угол
+    // capsule to the right, slightly above to catch the corner
     let cp = physics.add_body(RigidBody::new_capsule(
         Vec3::new(0.9, 0.2, 0.0),
         0.3,
@@ -119,10 +119,10 @@ fn rotated_box_vs_capsule_contact() {
 
 #[test]
 fn box_capsule_touching_at_speculative_margin_generates_contact() {
-    // Speculative margin = 0.05 + rel_speed*dt. При нулевой скорости margin=0.05.
-    // Поставим дистанцию ровно 0.04 — внутри margin, контакт есть.
-    // Дистанция = dist(box face, capsule surface).
-    // Box half 0.5, capsule radius 0.3, центр капсулы на 0.5+0.3+0.04=0.84
+    // Speculative margin = 0.05 + rel_speed*dt. At zero velocity margin=0.05.
+    // Place distance at exactly 0.04 — inside margin, contact present.
+    // Distance = dist(box face, capsule surface).
+    // Box half 0.5, capsule radius 0.3, capsule center at 0.5+0.3+0.04=0.84
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     let bx = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
     let cp = physics.add_body(RigidBody::new_capsule(
@@ -132,8 +132,8 @@ fn box_capsule_touching_at_speculative_margin_generates_contact() {
         1.0,
     ));
     physics.step(1.0 / 60.0);
-    // Внутри speculative margin должен быть manifolds (penetration отрицательная но контакт есть)
-    // На практике debug_contact_count >0 если dist <= margin
+    // Inside speculative margin there must be a manifold (penetration negative but contact present)
+    // In practice debug_contact_count >0 if dist <= margin
     assert!(
         physics.debug_contact_count(bx) > 0,
         "touching within speculative margin must generate speculative contact"
@@ -143,7 +143,7 @@ fn box_capsule_touching_at_speculative_margin_generates_contact() {
 
 #[test]
 fn capsule_capsule_still_works_after_box_capsule_patch() {
-    // Регрессия: добавление веток Box↔Capsule не должно сломать Capsule↔Capsule
+    // Regression: adding Box↔Capsule branches must not break Capsule↔Capsule
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     let a = physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 1.0));
     let b = physics.add_body(RigidBody::new_capsule(
@@ -158,7 +158,7 @@ fn capsule_capsule_still_works_after_box_capsule_patch() {
 
 #[test]
 fn box_vs_box_still_produces_four_point_manifold() {
-    // Регрессия для OBB-OBB (4-точечный face manifold)
+    // Regression for OBB-OBB (4-point face manifold)
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
     let b = physics.add_body(RigidBody::new_box(
@@ -172,15 +172,15 @@ fn box_vs_box_still_produces_four_point_manifold() {
 }
 
 // ---------------------------------------------------------------------------
-// TOI: analytic swept-volume с быстрым вращением
+// TOI: analytic swept-volume with fast rotation
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fast_spinning_box_toi_stops_before_tunneling() {
-    // Тонкий длинный box 3.0×0.2×0.2 вращается 90° за один substep (dt) вокруг Z.
-    // Статическая стена чуть выше: при 90° конец box должен упереться.
-    // Аналитический conservative advancement обязан поймать первое касание
-    // fraction ∈ (0,1) и зажать ориентацию, обнулив угловую скорость.
+    // Thin long box 3.0×0.2×0.2 rotating 90° in one substep (dt) around Z.
+    // Static wall just above: at 90° the box tip must hit.
+    // Analytic conservative advancement must catch the first contact
+    // fraction ∈ (0,1) and clamp orientation, zeroing angular velocity.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -200,19 +200,19 @@ fn fast_spinning_box_toi_stops_before_tunneling() {
     physics.step(dt);
 
     let body = physics.get_body(mover).unwrap();
-    // Должен остановиться (angular CCD зажал)
+    // Must stop (angular CCD clamped)
     assert!(
         body.angular_velocity.length() < 1e-5,
         "angular CCD must zero angular velocity at impact, got {:?}",
         body.angular_velocity
     );
-    // И не проскочить сквозь цель
+    // And must not tunnel through the target
     assert_ne!(
         body.orientation,
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
         "rotating body must not tunnel through target"
     );
-    // Ориентация между 0 и 90° (fraction в (0,1))
+    // Orientation between 0 and 90° (fraction in (0,1))
     let angle = body.orientation.to_axis_angle().1.abs();
     assert!(
         angle > 0.05 && angle < std::f32::consts::FRAC_PI_2 - 0.05,
@@ -222,7 +222,7 @@ fn fast_spinning_box_toi_stops_before_tunneling() {
 
 #[test]
 fn fast_spinning_capsule_toi_stops_before_tunneling() {
-    // Аналогично для капсулы: длинная капсула вдоль X вращается в плоскости.
+    // Same for a capsule: long capsule along X rotating in plane.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -232,7 +232,7 @@ fn fast_spinning_capsule_toi_stops_before_tunneling() {
         0.0,
     ));
     let mover = physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.15, 1.2, 1.0));
-    // Повернуть капсулу горизонтально (вдоль X) чтобы при вращении вокруг Z она замела круг
+    // Rotate capsule horizontally (along X) so rotation around Z sweeps a circle
     physics.get_body_mut(mover).unwrap().orientation =
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     physics.get_body_mut(mover).unwrap().angular_velocity =
@@ -253,8 +253,8 @@ fn fast_spinning_capsule_toi_stops_before_tunneling() {
 
 #[test]
 fn slow_rotation_does_not_trigger_false_toi() {
-    // Медленное вращение < 15°/substep не должно триггерить angular CCD (MIN_ANGLE).
-    // Тело должно свободно докрутиться до полной ориентации.
+    // Slow rotation < 15°/substep must not trigger angular CCD (MIN_ANGLE).
+    // Body should freely reach the full orientation.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -273,12 +273,12 @@ fn slow_rotation_does_not_trigger_false_toi() {
     let expected = Quat::from_scaled_axis(slow_w * dt);
     physics.step(dt);
     let body = physics.get_body(mover).unwrap();
-    // Не остановлен — угловая скорость сохранена
+    // Not clamped — angular velocity preserved
     assert!(
         body.angular_velocity.length() > 1e-3,
         "slow rotation must not be clamped by CCD"
     );
-    // Ориентация почти совпадает с ожидаемой (интеграция без TOI)
+    // Orientation almost matches expected (integration without TOI)
     let dot = body.orientation.dot(expected).abs();
     assert!(
         dot > 0.999,
@@ -289,12 +289,12 @@ fn slow_rotation_does_not_trigger_false_toi() {
 
 #[test]
 fn thin_feature_under_fast_rotation_does_not_tunnel() {
-    // Тонкая стена 0.04 толщиной — семплинг 5° мог бы её проскочить, аналитика нет.
-    // Вращающийся box с большим углом должен упереться, а не пройти сквозь.
+    // Thin wall 0.04 thick — 5° sampling could miss it, analytic must not.
+    // Rotating box with a large angle must hit, not pass through.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
-    // Тонкая вертикальная стенка рядом с траекторией конца вращающегося box
+    // Thin vertical wall near the trajectory of the rotating box tip
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, 1.1, 0.0),
         Vec3::new(0.5, 0.02, 0.5),
@@ -309,7 +309,7 @@ fn thin_feature_under_fast_rotation_does_not_tunnel() {
         Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
     physics.step(dt);
     let body = physics.get_body(mover).unwrap();
-    // Должен быть зажат, иначе туннель сквозь тонкую стенку
+    // Must be clamped, otherwise tunneled through thin wall
     assert!(
         body.angular_velocity.length() < 1e-5,
         "thin wall must be caught by analytic swept-volume, got w={:?}",
@@ -319,8 +319,8 @@ fn thin_feature_under_fast_rotation_does_not_tunnel() {
 
 #[test]
 fn capsule_vs_box_toi_with_combined_translation_and_rotation() {
-    // Комбинированное движение: поступательно + быстрое вращение капсулы.
-    // Проверяет что bound = |disp| + r*angle учитывает оба вклада.
+    // Combined motion: translation + fast rotation of the capsule.
+    // Checks that bound = |disp| + r*angle accounts for both contributions.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -338,7 +338,7 @@ fn capsule_vs_box_toi_with_combined_translation_and_rotation() {
     }
     physics.step(dt);
     let body = physics.get_body(mover).unwrap();
-    // Должен быть остановлен до цели, а не пройти сквозь
+    // Must be stopped before the target, not pass through
     assert!(
         body.position.x < 1.0,
         "combined sweep must stop before target, x={}",
@@ -348,7 +348,7 @@ fn capsule_vs_box_toi_with_combined_translation_and_rotation() {
 
 #[test]
 fn multiple_capsules_and_boxes_interact_without_panic() {
-    // Стресс: несколько box и капсул вперемешку, гравитация, 60 шагов — без паники и NaN.
+    // Stress: several boxes and capsules interleaved, gravity, 60 steps — no panic and no NaN.
     let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
@@ -389,7 +389,7 @@ fn multiple_capsules_and_boxes_interact_without_panic() {
 
 #[test]
 fn box_capsule_resting_penetration_is_resolved() {
-    // Капсула покоится на box-полу: пенетрация должна быть разрешена солвером, не нарастать.
+    // Capsule resting on a box floor: penetration must be resolved by the solver, not grow.
     let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
@@ -406,10 +406,10 @@ fn box_capsule_resting_penetration_is_resolved() {
         physics.step(1.0 / 60.0);
     }
     let b = physics.get_body(cap).unwrap();
-    // Капсула покоится на полу: из-за best-effort distance для перекрытия
-    // пенетрация box↔capsule = 0 (witness на поверхности), поэтому позиционная
-    // коррекция слабее чем у box↔box — допускаем частичное утопление,
-    // но требуем что контакт есть, скорость низкая и NaN нет.
+    // Capsule resting on floor: due to best-effort distance for overlap
+    // box↔capsule penetration = 0 (witness on surface), so positional
+    // correction is weaker than box↔box — partial sinking is allowed,
+    // but contact must exist, velocity must be low and no NaN.
     assert!(
         physics.debug_contact_count(cap) > 0,
         "capsule must have box contact after settling"

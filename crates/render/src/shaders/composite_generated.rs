@@ -1,22 +1,22 @@
 //! Composite shader generated from Rust (Render path 2).
 //!
-//! Канонический источник — Rust-код этого модуля; WGSL выводится сборкой
-//! строки из констант + `srgb_to_linear::wgsl_source()` (ядро из
-//! `crates/render/src/shaders/math.rs` через `#[kernel]`). Рукописный
-//! `shaders/wgsl/composite.wgsl` остаётся как reference/legacy, но
-//! `composite.rs` (LegacyCompositePass) уже использует только этот модуль.
+//! Canonical source is the Rust code in this module; WGSL is assembled
+//! from constants + `srgb_to_linear::wgsl_source()` (kernel from
+//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The handwritten
+//! `shaders/wgsl/composite.wgsl` remains as a reference/legacy, but
+//! `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use crate::shaders::math::srgb_to_linear;
 
 /// WGSL bindings + quad constants + vertex/fragment entry points.
 ///
-/// Собирается в runtime как `String`, но источник — Rust: константы и
-/// `srgb_to_linear::wgsl_source()` — единственный `srgb_to_linear` в
-/// системе. Это убирает дублирование WGSL-литерала из `composite.rs`.
+/// Assembled at runtime as a `String`, but the source is Rust: constants and
+/// `srgb_to_linear::wgsl_source()` — the single `srgb_to_linear` in the
+/// system. This removes duplication of the WGSL literal from `composite.rs`.
 fn composite_wgsl_body() -> String {
     // Header: bindings, VertexOutput, QUAD/UVS, vertex entry.
-    // Формат идентичен `shaders/wgsl/composite.wgsl`; имена entry points `vs`/`fs`
-    // сохранены для совместимости с `CompositePass::new`.
+    // Format is identical to `shaders/wgsl/composite.wgsl`; entry point names `vs`/`fs`
+    // are kept for compatibility with `CompositePass::new`.
     let header = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -50,8 +50,8 @@ fn vs(@builtin(vertex_index) idx: u32) -> VertexOutput {
 }
 "#;
 
-    // Fragment entry: sampling + sRGB decode + mix. Использует `srgb_to_linear`
-    // из kernel (в WGSL имя совпадает).
+    // Fragment entry: sampling + sRGB decode + mix. Uses `srgb_to_linear`
+    // from the kernel (same name in WGSL).
     let fragment = r#"
 @fragment
 fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
@@ -62,18 +62,18 @@ fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-    // Kernel WGSL уже содержит `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
+    // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
     let kernel = srgb_to_linear::wgsl_source();
     format!("{header}\n{kernel}\n{fragment}\n")
 }
 
-/// Полный WGSL источник composite-пасса, собранный из Rust.
+/// Full WGSL source for the composite pass, assembled from Rust.
 pub fn wgsl_source() -> String {
     composite_wgsl_body()
 }
 
-/// Статический вид для naga-валидации в тестах (клонируется из `wgsl_source()`).
-/// Используется также для детерминированного snapshot-теста.
+/// Static view for naga validation in tests (cloned from `wgsl_source()`).
+/// Also used for deterministic snapshot testing.
 pub fn wgsl_source_static() -> String {
     wgsl_source()
 }

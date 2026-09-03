@@ -1,19 +1,19 @@
-//! Typed plan systems — S2 (PLAN.md, Приложение C; IDEAS §28.1).
+//! Typed plan systems — S2 (PLAN.md, Appendix C; IDEAS §28.1).
 //!
-//! Пасс объявляет доступы к ресурсам **в типах** через ZST-маркеры
-//! (`Read<R>` / `Write<R>` / `WriteClear<R, C>` в кортежах), а планировщик
-//! выводит из них проводку графа (reads/writes → lifetime → пул). Ресурс —
-//! это тип, реализующий [`FrameResource`]; соответствие «тип → ResourceId»
-//! держит [`SystemSet`]. Никаких строк и syn-разбора: идентичность ресурса —
-//! это тип (урок хрупкости `smart_pipeline`, см. анти-цели Приложения C).
+//! A pass declares resource accesses **in types** via ZST markers
+//! (`Read<R>` / `Write<R>` / `WriteClear<R, C>` in tuples), and the scheduler
+//! derives the graph wiring from them (reads/writes → lifetime → pool). A resource is
+//! a type implementing [`FrameResource`]; the `type → ResourceId` mapping is
+//! held by [`SystemSet`]. No strings and no syn parsing: resource identity is
+//! the type (lesson from `smart_pipeline` brittleness, see Appendix C anti-goals).
 //!
-//! Границы S2: множества доступа статичны. Пассы, чьи доступы зависят от
-//! конфигурации (владение depth у forward, выбор входа блума, смешивание в
-//! composite), остаются на императивном пути в `frame_exec.rs` до решения
-//! S2b (вариантные типы против регистрации-как-выбора).
+//! S2 boundaries: access sets are static. Passes whose accesses depend on
+//! configuration (depth ownership in forward, bloom input selection, blending in
+//! composite) remain on the imperative path in `frame_exec.rs` until the S2b
+//! decision (variant types vs. registration-as-selection).
 //!
-//! Порядок пассов остаётся порядком регистрации (insertion order);
-//! `.before()`/`.after()` и автопараллелизм — S5.
+//! Pass order remains registration order (insertion order);
+//! `.before()`/`.after()` and auto-parallelism are S5.
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -217,7 +217,7 @@ impl<'a> Resolver<'a> {
     /// resource is not alive on this pass (the declared access set makes
     /// the latter a wiring bug, not a runtime state). Debug builds also
     /// panic when `R` sits outside the pass's declared reads/writes —
-    /// ground-truth enforcement in `PassViews::view_of` (бэклог #6).
+    /// ground-truth enforcement in `PassViews::view_of` (backlog #6).
     pub fn view<R: FrameResource>(&self) -> &'a wgpu::TextureView {
         let id = self
             .ids

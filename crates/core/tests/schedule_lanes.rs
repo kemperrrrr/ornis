@@ -1,31 +1,31 @@
-//! Гранулярность лент `SmartStore` в `Schedule` (аудит §3.6, бэклог #5):
-//! системы объявляют доступы к лентам компонентов поверх общего
-//! store-ресурса; план выводит конфликты по лентам, принуждение стоит на
-//! границе `read_lane`/`write_lane`.
+//! `SmartStore` lane granularity in `Schedule` (audit §3.6, backlog #5):
+//! systems declare accesses to component lanes on top of the shared
+//! store resource; the plan derives conflicts by lanes, enforcement is
+//! at the `read_lane`/`write_lane` boundary.
 
 use std::any::TypeId;
 use std::sync::Mutex;
 
 use ornis_core::{Entity, Resources, Schedule, SmartStore, System, SystemAccess, compute_levels};
 
-/// Тестовые компоненты (ленты).
+/// Test components (lanes).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Position(f32);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Velocity(f32);
 
-/// Тестовые singleton-ресурсы.
+/// Test singleton resources.
 struct ResourceA;
 struct ResourceB;
 
-/// Ресурс с сущностью пробного прогона.
+/// Resource holding the probe entity.
 struct TestEntity(Entity);
 
-/// Коммутативный лог событий (контракт коммутативности `schedule.rs`).
+/// Commutative event log (commutativity contract of `schedule.rs`).
 type Log = Mutex<Vec<&'static str>>;
 
-/// Система-заглушка: имя, доступы и тело — данные теста.
+/// Stub system: name, accesses and body are test data.
 struct LaneSystem {
     name: &'static str,
     access: SystemAccess,
@@ -54,19 +54,19 @@ impl System for LaneSystem {
 
 fn noop(_: &Resources) {}
 
-/// Доступ «читаю store + читаю ленту `T`» — каноничная форма системы
-/// над лентами: store holdится как общий ресурс, гранулярность лентой.
+/// Access "read store + read lane `T`" — canonical lane-system form:
+/// the store is held as a shared resource, granularity comes from the lane.
 fn lane_reads<T: 'static + Send + Sync>() -> SystemAccess {
     SystemAccess::new().reads::<SmartStore>().reads_lane::<T>()
 }
 
-/// Доступ «читаю store + пишу ленту `T`».
+/// Access "read store + write lane `T`".
 fn lane_writes<T: 'static + Send + Sync>() -> SystemAccess {
     SystemAccess::new().reads::<SmartStore>().writes_lane::<T>()
 }
 
-/// Негатив аудита §3.6: общий store-ресурс сам по себе не сериализует
-/// системы — гранулярность дают дизъюнктные ленты.
+/// Negative case of audit §3.6: the shared store resource alone does not
+/// serialize systems — disjoint lanes provide the granularity.
 #[test]
 fn disjoint_lanes_share_one_level_over_common_store() {
     let mut sched = Schedule::new();
@@ -84,25 +84,25 @@ fn disjoint_lanes_share_one_level_over_common_store() {
     assert_eq!(sched.levels(), vec![vec![0, 1]]);
 }
 
-/// Conflict-классы по лентам: RaW и WaW разводят системы по уровням,
-/// WaR ставит читателя первым — тайбрейк остаётся порядком регистрации.
+/// Lane conflict classes: RaW and WaW split systems into separate levels,
+/// WaR puts the reader first — tie-break remains registration order.
 #[test]
 fn lane_conflicts_split_levels() {
-    // RaW: писатель ленты → читатель ленты.
+    // RaW: lane writer → lane reader.
     let mut sched = Schedule::new();
     sched
         .add_system(LaneSystem::new("w", lane_writes::<Position>(), noop))
         .add_system(LaneSystem::new("r", lane_reads::<Position>(), noop));
     assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
 
-    // WaR: читатель первым (анти-зависимость).
+    // WaR: reader first (anti-dependency).
     let mut sched = Schedule::new();
     sched
         .add_system(LaneSystem::new("r", lane_reads::<Position>(), noop))
         .add_system(LaneSystem::new("w", lane_writes::<Position>(), noop));
     assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
 
-    // WaW: два писателя одной ленты.
+    // WaW: two writers to the same lane.
     let mut sched = Schedule::new();
     sched
         .add_system(LaneSystem::new("w1", lane_writes::<Position>(), noop))
@@ -110,9 +110,9 @@ fn lane_conflicts_split_levels() {
     assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
 }
 
-/// Критерий Фазы B аудита: система над двумя лентами возвращается в
-/// общий план без ручных `order_before`; независимая ресурсная система
-/// делит с ней уровень корректно.
+/// Phase B audit criterion: a system over two lanes is included in the
+/// shared plan without manual `order_before`; an independent resource
+/// system correctly shares a level with it.
 #[test]
 fn two_lane_system_plans_without_manual_edges() {
     let mut sched = Schedule::new();
@@ -135,12 +135,12 @@ fn two_lane_system_plans_without_manual_edges() {
     assert_eq!(
         sched.levels(),
         vec![vec![0, 3], vec![1], vec![2]],
-        "<две ленты> в цепочке без ручных рёбер; ресурсная — параллельна источнику"
+        "<two lanes> in a chain without manual edges; resource system is parallel to the source"
     );
 }
 
-/// Пространства имён раздельны: один и тот же тип — singleton-ресурс у
-/// одной системы и лента у другой — конфликта нет.
+/// Namespaces are separate: the same type as a singleton resource in one
+/// system and a lane in another does not conflict.
 #[test]
 fn resource_and_lane_namespaces_do_not_conflict() {
     let mut sched = Schedule::new();
@@ -158,9 +158,8 @@ fn resource_and_lane_namespaces_do_not_conflict() {
     assert_eq!(sched.levels(), vec![vec![0, 1]]);
 }
 
-/// Типизированные и id-билдеры строят одинаковые декларации — id-путь,
-/// на который опирается динамический фронтенд через реестр F0
-/// (`ComponentMeta::type_id`).
+/// Typed and id-based builders produce identical declarations — the id path
+/// used by the dynamic frontend via registry F0 (`ComponentMeta::type_id`).
 #[test]
 fn id_builders_match_typed_builders() {
     let typed = SystemAccess::new()
@@ -172,9 +171,9 @@ fn id_builders_match_typed_builders() {
     assert_eq!(typed, by_id);
 }
 
-/// Дифференциальный тест: битсет-план с лентами совпадает с наивной
-/// моделью конфликтов (RaW/WaR/WaW по ресурсам и по лентам, раздельные
-/// пространства имён) на псевдослучайных смесях доступов.
+/// Differential test: the bitset plan with lanes matches the naive
+/// conflict model (RaW/WaR/WaW over resources and lanes, separate
+/// namespaces) on pseudo-random access mixtures.
 #[test]
 fn lane_plan_matches_naive_model() {
     fn naive_conflicts(a: &SystemAccess, b: &SystemAccess) -> bool {
@@ -213,8 +212,8 @@ fn lane_plan_matches_naive_model() {
         if next() % 3 == 0 {
             access = access.writes_lane::<Velocity>();
         }
-        // Один тип одновременно ресурсом и лентой у разных систем —
-        // пространства имён не пересекаются.
+        // One type is simultaneously a resource and a lane in different systems —
+        // namespaces do not overlap.
         if next() % 4 == 0 {
             access = access.writes::<Position>();
         }
@@ -230,11 +229,11 @@ fn lane_plan_matches_naive_model() {
     assert_eq!(
         sched.levels(),
         expected,
-        "bitset-план с лентами обязан совпадать с наивной моделью"
+        "bitset plan with lanes must match the naive model"
     );
 }
 
-/// Прогон одной системы-зонда с включённым принуждением доступов.
+/// Runs a single probe system with access enforcement enabled.
 fn run_probe(access: SystemAccess, run: fn(&Resources)) {
     let mut res = Resources::new();
     let mut store = SmartStore::new();
@@ -261,7 +260,7 @@ fn probe_write_position_lane(res: &Resources) {
 #[test]
 #[should_panic(expected = "reads lane")]
 fn undeclared_lane_read_panics_under_enforcement() {
-    // Store-ресурс декларирован честно, лента — нет: ловит read_lane.
+    // Store resource is declared honestly, lane is not: catches read_lane.
     run_probe(
         SystemAccess::new().reads::<SmartStore>(),
         probe_read_position_lane,
@@ -280,7 +279,7 @@ fn undeclared_lane_write_panics_under_enforcement() {
 #[test]
 #[should_panic(expected = "writes lane")]
 fn lane_read_declaration_does_not_cover_writes() {
-    // Строгость записи: reads_lane не покрывает write_lane.
+    // Write strictness: reads_lane does not cover write_lane.
     run_probe(
         SystemAccess::new()
             .reads::<SmartStore>()
@@ -306,9 +305,9 @@ fn disabled_enforcement_allows_undeclared_lanes() {
     sched.run(&res);
 }
 
-/// Сквозной сценарий: честные декларации проходят принуждение, данные
-/// текут через ленты в выведенном планировщиком порядке (RaW по
-/// Velocity: писатель обязан отработать раньше читателя).
+/// End-to-end scenario: honest declarations pass enforcement, data flows
+/// through lanes in scheduler-derived order (RaW on Velocity: writer
+/// must run before reader).
 #[test]
 fn declared_lanes_pass_enforcement_and_data_flows() {
     let mut res = Resources::new();
@@ -367,6 +366,6 @@ fn declared_lanes_pass_enforcement_and_data_flows() {
     assert_eq!(
         *log.lock().unwrap(),
         vec!["w", "r"],
-        "RaW по ленте Velocity обязал писателя к уровню раньше читателя"
+        "RaW on Velocity lane forced the writer to a level before the reader"
     );
 }

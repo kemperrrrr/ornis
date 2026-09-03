@@ -327,8 +327,8 @@ fn level1(stages: &mut StageList<'_>) {
     // --compare --fail-on-regression --no-fail equal→FAIL bug (↓0.0%).
     rustqual_stage(stages);
 
-    // Smoke: `cargo run --features editor-only` должен стартовать HTTP на 3420 и не падать.
-    // ponytail: без окна/GPU, 15s таймаут (сборка + старт), poll TcpStream — без curl/timeout deps.
+    // Smoke: `cargo run --features editor-only` must start HTTP on 3420 and stay up.
+    // ponytail: no window/GPU, 15s timeout (build + start), poll TcpStream — no curl/timeout deps.
     smoke_stage(stages);
 
     stages.run(

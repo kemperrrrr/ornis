@@ -281,13 +281,13 @@ mod tests {
     }
 
     /// Golden-frame: offscreen 1280×720 render of `assets/scene.ron` (5 entities)
-    /// через `RenderBackend` — пининг регрессов реального GPU пайплайна.
+    /// via `RenderBackend` — pinning regressions of the real GPU pipeline.
     ///
-    /// Сравнивает текущий кадр попиксельно с чекином
-    /// `crates/render/tests/data/golden_probe_1280x720.png` (снятым на Apple M1
-    /// via `cargo run -p ornis-render --example render_probe`), допускает
-    /// канальный дрейф ≤2 (округление sRGB/тоновая компрессия между драйверами).
-    /// Если адаптера нет (CI без GPU) — пропускается.
+    /// Compares the current frame pixel-by-pixel against the checked-in
+    /// `crates/render/tests/data/golden_probe_1280x720.png` (captured on Apple M1
+    /// via `cargo run -p ornis-render --example render_probe`), allowing
+    /// per-channel drift ≤2 (sRGB rounding / tone-compression across drivers).
+    /// Skipped when no adapter is available (CI without GPU).
     #[test]
     fn golden_full_scene_probe_matches_snapshot() {
         let Some((device, queue)) = try_device() else {
@@ -354,7 +354,7 @@ mod tests {
         };
         let mut backend = create_render_backend(&device, &backend_config);
 
-        // Build mesh/materials/instances как в render_probe::build_scene_data.
+        // Build mesh/materials/instances as in render_probe::build_scene_data.
         let first = scene.entities.first().expect("scene has entities");
         let mesh = match &first.mesh {
             crate::scene::MeshDesc::Sphere {
@@ -458,7 +458,7 @@ mod tests {
             instances.len() as u32,
         );
 
-        // Read-back (та же логика что в render_probe::read_back_pixels).
+        // Read-back (same logic as in render_probe::read_back_pixels).
         let bpp = 4u32;
         let unpadded = W * bpp;
         let padded = unpadded.div_ceil(256) * 256;
@@ -521,7 +521,7 @@ mod tests {
             bad_pct < 0.01,
             "golden frame drifted: {bad} bytes diff >2 ({bad_pct:.4}%); max_diff={max_diff} — update tests/data/golden_probe_1280x720.png via render_probe if change is intentional"
         );
-        // Санитарка: центр не чёрный, как в probe логе [52,52,186].
+        // Sanity check: center is not black, as in probe log [52,52,186].
         let center_off = ((H / 2 * W + W / 2) * bpp) as usize;
         let center = &pixels[center_off..center_off + 4];
         assert!(center[2] > 80, "center blue must dominate: {center:?}");

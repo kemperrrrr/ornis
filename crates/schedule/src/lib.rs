@@ -1,29 +1,29 @@
-//! Механика планирования уровней параллельности — engine-крейт
-//! (Фаза A плана унификации, аудит 2026-08-22 §7).
+//! Parallelism level scheduling mechanics — engine crate
+//! (Phase A of the unification plan, audit 2026-08-22 §7).
 //!
-//! Здесь живёт только доменно-нейтральная часть: узлы с наборами
-//! доступов (ключи `K` в `reads`/`writes`), явные рёбра порядка с
-//! валидацией и единый [`OrderError`], уровни параллельности
-//! ([`compute_levels`] и битсет-вариант [`bitset_level_plan`]), кеш
-//! плана с диагностикой ([`PlanCache`]), уровневый исполнитель
-//! ([`run_levels`]: sequential / rayon / wasm-последовательность) и
-//! mermaid-проектор отладочных диаграмм плана ([`MermaidDiagram`]).
+//! This crate contains only the domain-agnostic part: nodes with access sets
+//! (keys `K` in `reads`/`writes`), explicit ordering edges with validation
+//! and a unified [`OrderError`], parallelism levels ([`compute_levels`] and
+//! the bitset variant [`bitset_level_plan`]), a plan cache with diagnostics
+//! ([`PlanCache`]), a level executor ([`run_levels`]: sequential / rayon /
+//! wasm-sequential) and a mermaid projector for plan debug diagrams
+//! ([`MermaidDiagram`]).
 //!
-//! Потребители держат доменные данные у себя и собирают срезы ключей:
-//! `ornis-core::schedule::Schedule` планирует системы по singleton-
-//! ресурсам (ключ — `TypeId`), `ornis-render::FramePlan` — пассы по
-//! текстурным ресурсам (ключ — `ResourceId`). Пул текстур, лайфтаймы,
-//! бюджет S4, `Resources`/ECS остаются в доменных крейтах (анти-цели
-//! Фазы A: никаких wgpu и ECS в этом крейте).
+//! Consumers keep domain data on their side and assemble key slices:
+//! `ornis-core::schedule::Schedule` schedules systems by singleton
+//! resources (key — `TypeId`), `ornis-render::FramePlan` — passes by
+//! texture resources (key — `ResourceId`). Texture pools, lifetimes,
+//! S4 budget, `Resources`/ECS stay in domain crates (Phase A
+//! anti-goals: no wgpu or ECS in this crate).
 //!
-//! Семантика конфликтов: узлы `i < j` упорядочены, если `i` пишет то,
-//! что `j` читает или пишет (RaW/WaW), либо `j` пишет то, что читает
-//! `i` (анти-зависимость, WaR); порядок регистрации — тайбрейк, явные
-//! рёбра только разбивают уровни. Совпадение битсет-плана с наивной
-//! Vec-моделью пинится дифференциальным тестом
-//! `bitset_plan_matches_reference_model` ниже; фронтенды гоняют тот же
-//! контракт на своих типах (`core::schedule` — одноимённым тестом,
-//! `render` — золотыми разбиениями `levels` включая production-граф).
+//! Conflict semantics: nodes `i < j` are ordered if `i` writes what
+//! `j` reads or writes (RaW/WaW), or `j` writes what `i` reads
+//! (anti-dependency, WaR); registration order is the tie-break, explicit
+//! edges only split levels. Bitset plan equivalence with the naive
+//! Vec model is pinned by the differential test
+//! `bitset_plan_matches_reference_model` below; frontends exercise the same
+//! contract on their own types (`core::schedule` — with the eponymous test,
+//! `render` — with golden `levels` partitions including the production graph).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -35,11 +35,11 @@ use fixedbitset::FixedBitSet;
 #[cfg(not(target_family = "wasm"))]
 use rayon::prelude::*;
 
-/// Движок уровней параллельности — единый для всех шедулеров проекта
-/// (IDEAS §28.2: «один scheduler на всё»). `ordered(i, j)` = есть
-/// зависимость i→j (i < j, порядок регистрации — тайбрейк); уровень j =
-/// 1 + максимум уровней предшественников, группы идут по возрастанию,
-/// внутри группы порядок регистрации.
+/// Parallelism level engine — unified for all schedulers in the project
+/// (IDEAS §28.2: "one scheduler for everything"). `ordered(i, j)` = there is
+/// a dependency i→j (i < j, registration order is the tie-break); level j =
+/// 1 + max predecessor levels, groups are emitted in ascending order,
+/// and nodes within a group keep registration order.
 pub fn compute_levels(n: usize, ordered: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>> {
     let mut level = vec![0usize; n];
     for j in 1..n {
@@ -61,15 +61,15 @@ pub fn compute_levels(n: usize, ordered: impl Fn(usize, usize) -> bool) -> Vec<V
     groups
 }
 
-/// Уровневый план поверх битсетов: плотный индекс на distinct ключи
-/// доступа, пересечения `FixedBitSet` вместо линейных `Vec::contains` в
-/// O(n²)-цикле, явные рёбра — матрица смежности. Семантика конфликтов
-/// идентична наивной Vec-модели (RaW/WaW/WaR); совпадение пинится
-/// тестом `bitset_plan_matches_reference_model`.
+/// Bitset-backed level plan: dense index over distinct access keys,
+/// `FixedBitSet` intersections instead of linear `Vec::contains` in the
+/// O(n²) loop, explicit edges as an adjacency matrix. Conflict semantics
+/// are identical to the naive Vec model (RaW/WaW/WaR); equivalence is
+/// pinned by the `bitset_plan_matches_reference_model` test.
 ///
-/// `reads`/`writes` — параллельные срезы по узлам (индекс = узел
-/// регистрации). Рёбра вне диапазона узлов игнорируются (валидация
-/// рёбер — на уровне API, см. [`resolve_named_edge`]).
+/// `reads`/`writes` — parallel slices by node (index = registration node).
+/// Edges outside the node range are ignored (edge validation lives at the
+/// API layer, see [`resolve_named_edge`]).
 pub fn bitset_level_plan<K: Copy + Eq + Hash>(
     reads: &[Vec<K>],
     writes: &[Vec<K>],
@@ -105,16 +105,16 @@ pub fn bitset_level_plan<K: Copy + Eq + Hash>(
     })
 }
 
-/// Ошибка добавления явного ребра порядка — единый тип для всех
-/// фронтендов (раньше почти дословные копии: `OrderError` в core и
-/// `GraphOrderError` в render, аудит §4.2). Имена узлов — `String`:
-/// системы и пассы равнозначны на этом уровне.
+/// Error adding an explicit ordering edge — unified type for all
+/// frontends (previously near-verbatim duplicates: `OrderError` in core and
+/// `GraphOrderError` in render, audit §4.2). Node names are `String`:
+/// systems and passes are equivalent at this level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrderError {
-    /// Узла с таким именем нет (уникальность имён — на вызывающем).
+    /// No node with this name exists (name uniqueness is the caller's responsibility).
     UnknownNode { name: String },
-    /// `after` зарегистрирован раньше `before`: порядок исполнения —
-    /// порядок регистрации, явные рёбра только разбивают уровни.
+    /// `after` is registered before `before`: execution order is
+    /// registration order, explicit edges only split levels.
     BackwardEdge { before: String, after: String },
 }
 
@@ -133,10 +133,10 @@ impl fmt::Display for OrderError {
 
 impl std::error::Error for OrderError {}
 
-/// Name-based валидация ребра: имена → индексы регистрации через
-/// `index_of`; неизвестное имя → [`OrderError::UnknownNode`], обратное
-/// направление (b ≥ a) → [`OrderError::BackwardEdge`]. Общая часть
-/// name-API обоих фронтендов (аудит §4.2).
+/// Name-based edge validation: names → registration indices via
+/// `index_of`; unknown name → [`OrderError::UnknownNode`], backward
+/// direction (b ≥ a) → [`OrderError::BackwardEdge`]. Shared part of the
+/// name-API of both frontends (audit §4.2).
 pub fn resolve_named_edge(
     before: &str,
     after: &str,
@@ -161,10 +161,10 @@ pub fn resolve_named_edge(
     Ok((b, a))
 }
 
-/// Index-based валидация ребра: индексы регистрации уже на руках,
-/// `name_of` отдаёт имя узла для сообщений (`None` — узла нет, имя в
-/// ошибке синтезируется как `"#<index>"`). Общая часть id-API обоих
-/// фронтендов.
+/// Index-based edge validation: registration indices are already in hand,
+/// `name_of` returns the node name for diagnostics (`None` — no node, the
+/// name in the error is synthesized as `"#<index>"`). Shared part of the
+/// id-API of both frontends.
 pub fn validate_indexed_edge(
     before: usize,
     after: usize,
@@ -189,11 +189,11 @@ pub fn validate_indexed_edge(
     Ok(())
 }
 
-/// Кеш уровневого плана с диагностикой (стиль S1-кешей проекта):
-/// инвалидируется мутациями графа узлов, пересчитывается лениво;
-/// счётчик [`PlanCache::computations`] в steady state не растёт.
-/// Poisoned Mutex восстанавливается молча — план остаётся корректным
-/// (это чистая функция состояния графа).
+/// Level plan cache with diagnostics (project S1-cache style):
+/// invalidated by node-graph mutations, recomputed lazily;
+/// the [`PlanCache::computations`] counter does not grow in steady state.
+/// A poisoned Mutex is recovered silently — the plan stays correct
+/// (it is a pure function of graph state).
 #[derive(Default)]
 pub struct PlanCache {
     cached: Mutex<Option<Vec<Vec<usize>>>>,
@@ -201,12 +201,12 @@ pub struct PlanCache {
 }
 
 impl PlanCache {
-    /// Пустой (грязный) кеш.
+    /// Empty (dirty) cache.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Сбрасывает кеш (вызывается мутациями фронтенда).
+    /// Invalidates the cache (called by frontend mutations).
     pub fn invalidate(&mut self) {
         *self
             .cached
@@ -214,7 +214,7 @@ impl PlanCache {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
-    /// Кешированный план либо пересчёт `compute` с запоминанием.
+    /// Returns the cached plan or recomputes `compute` and remembers it.
     pub fn get_or_compute(&self, compute: impl FnOnce() -> Vec<Vec<usize>>) -> Vec<Vec<usize>> {
         let mut guard = self
             .cached
@@ -229,17 +229,17 @@ impl PlanCache {
         levels
     }
 
-    /// Сколько раз план пересчитывался — диагностика кеша.
+    /// How many times the plan was recomputed — cache diagnostics.
     pub fn computations(&self) -> usize {
         self.computations.load(Ordering::Relaxed)
     }
 }
 
-/// Уровневый исполнитель: уровни — строго последовательно, узлы внутри
-/// уровня — параллельно (rayon, поэтому `run` обязан быть `Sync`).
-/// `parallel = false` — строгий порядок регистрации 0..nodes (заметьте:
-/// он может отличаться от порядка обхода уровней, поэтому узлов
-/// посчитано отдельным параметром).
+/// Level executor: levels run strictly sequentially, nodes within a level
+/// run in parallel (rayon, so `run` must be `Sync`).
+/// `parallel = false` — strict registration order 0..nodes (note: it may
+/// differ from the level-traversal order, hence nodes are counted via a
+/// separate parameter).
 #[cfg(not(target_family = "wasm"))]
 pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl Fn(usize) + Sync) {
     if parallel {
@@ -253,10 +253,10 @@ pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl
     }
 }
 
-/// wasm-вариант [`run_levels`]: rayon-потоков нет — всегда строгий
-/// порядок регистрации 0..nodes, поэтому граница `Sync` с `run`
-/// снимается (GPU-типы web-бэкенда wgpu не `Sync`; потребитель —
-/// запись пассов `ormis-render::frame_exec`, бэклог #19).
+/// wasm variant of [`run_levels`]: no rayon threads — always strict
+/// registration order 0..nodes, so the `Sync` bound on `run` is lifted
+/// (web-backend wgpu GPU types are not `Sync`; consumer —
+/// `ormis-render::frame_exec` pass recording, backlog #19).
 #[cfg(target_family = "wasm")]
 pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl Fn(usize)) {
     let _ = (levels, parallel);
@@ -265,17 +265,16 @@ pub fn run_levels(levels: &[Vec<usize>], nodes: usize, parallel: bool, run: impl
     }
 }
 
-/// Отладочная mermaid-проекция уровневого плана — общий проектор
-/// (S6-проекция рендер-оболочки, обобщённая срезом 1b приближения к
-/// ликвидации графа, PLAN.md Прил. C). Доменно-нейтральная: узлы и
-/// рёбра — строковые идентификаторы/метки, которые собирает фронтенд
-/// (`ornis-render::FrameLayout` — `P{i}`/`R{j}` по индексам пассов и
-/// ресурсов, `ornis-core::schedule::Schedule` — `S{i}` по индексам
-/// систем). Уровни рисуются подграфами, потоки — рёбрами; GitHub
-/// рендерит ```mermaid блоки нативно, поэтому дамп плана в PR-ревью
-/// становится картинкой. Метки вставляются как есть — экранирование
-/// mermaid-синтаксиса (кавычки, скобки) остаётся на фронтенде, как и
-/// было у рендер-оболочки.
+/// Debug mermaid projection of the level plan — shared projector
+/// (S6 projection of the render shell, generalized in slice 1b of the
+/// graph-elimination approach, PLAN.md App. C). Domain-agnostic: nodes and
+/// edges are string identifiers/labels assembled by the frontend
+/// (`ornis-render::FrameLayout` — `P{i}`/`R{j}` by pass and resource
+/// indices, `ornis-core::schedule::Schedule` — `S{i}` by system indices).
+/// Levels are rendered as subgraphs, flows as edges; GitHub renders
+/// ```mermaid blocks natively, so a plan dump in PR review becomes an
+/// image. Labels are inserted verbatim — escaping mermaid syntax (quotes,
+/// brackets) stays with the frontend, as it was in the render shell.
 #[derive(Debug, Clone)]
 pub struct MermaidDiagram {
     out: String,
@@ -290,13 +289,13 @@ impl Default for MermaidDiagram {
 }
 
 impl MermaidDiagram {
-    /// Пустая диаграмма с заголовком `flowchart TD`.
+    /// Empty diagram with header `flowchart TD`.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Уровень подграфом `subgraph {id}["{title}"]` с узлами
-    /// `{node_id}["{label}"]` внутри.
+    /// Level as subgraph `subgraph {id}["{title}"]` containing nodes
+    /// `{node_id}["{label}"]`.
     pub fn level(&mut self, id: &str, title: &str, nodes: &[(String, String)]) -> &mut Self {
         self.out
             .push_str(&format!("  subgraph {id}[\"{title}\"]\n"));
@@ -307,21 +306,20 @@ impl MermaidDiagram {
         self
     }
 
-    /// Свободный узел верхнего уровня: `{id}["{label}"]`.
+    /// Free top-level node: `{id}["{label}"]`.
     pub fn node(&mut self, id: &str, label: &str) -> &mut Self {
         self.out.push_str(&format!("  {id}[\"{label}\"]\n"));
         self
     }
 
-    /// Ребро потока `{from} --> {to}` (семантику направления задаёт
-    /// фронтенд: чтение/запись ресурса, явное ребро порядка...).
+    /// Flow edge `{from} --> {to}` (direction semantics are defined by the
+    /// frontend: resource read/write, explicit ordering edge...).
     pub fn edge(&mut self, from: &str, to: &str) -> &mut Self {
         self.out.push_str(&format!("  {from} --> {to}\n"));
         self
     }
 
-    /// Текст диаграммы (без обрамляющих ```mermaid — их добавляет
-    /// место вставки).
+    /// Diagram text (without surrounding ```mermaid — added at the insertion site).
     pub fn render(&self) -> String {
         self.out.clone()
     }
@@ -331,9 +329,9 @@ impl MermaidDiagram {
 mod tests {
     use super::*;
 
-    /// Наивная Vec-модель конфликтов — эталон дифференциального теста:
-    /// i<j упорядочены при RaW/WaW (i пишет в чтения/записи j) или WaR
-    /// (j пишет в чтения i); явные рёбра накладываются сверху.
+    /// Naive Vec conflict model — differential test oracle:
+    /// i<j are ordered on RaW/WaW (i writes into reads/writes of j) or WaR
+    /// (j writes into reads of i); explicit edges are overlaid on top.
     fn naive_conflicts(a_reads: &[u8], a_writes: &[u8], b_reads: &[u8], b_writes: &[u8]) -> bool {
         a_writes
             .iter()
@@ -362,14 +360,14 @@ mod tests {
 
     #[test]
     fn chain_is_linear_and_anti_dependency_orders_reader_first() {
-        // 0 пишет k0; 1 читает k0 и пишет k1; 2 читает k1.
+        // 0 writes k0; 1 reads k0 and writes k1; 2 reads k1.
         let reads: Vec<Vec<u8>> = vec![vec![], vec![0], vec![1]];
         let writes = vec![vec![0], vec![1], vec![]];
         assert_eq!(
             bitset_level_plan(&reads, &writes, &[]),
             vec![vec![0], vec![1], vec![2]]
         );
-        // i читает k0, j пишет k0 → сначала читатель (анти-зависимость).
+        // i reads k0, j writes k0 → reader first (anti-dependency).
         let reads: Vec<Vec<u8>> = vec![vec![0], vec![]];
         let writes = vec![vec![], vec![0]];
         assert_eq!(
@@ -397,9 +395,9 @@ mod tests {
         assert_eq!(bitset_level_plan(&reads, &writes, &[(0, 0)]), vec![vec![0]]);
     }
 
-    /// Дифференциальный тест (критерий выхода Фазы A): псевдослучайные
-    /// наборы доступов (LCG) — битсет-план обязан совпадать с наивной
-    /// Vec-моделью, с явными рёбрами и без.
+    /// Differential test (Phase A exit criterion): pseudo-random access
+    /// sets (LCG) — the bitset plan must match the naive Vec model, with
+    /// and without explicit edges.
     #[test]
     fn bitset_plan_matches_reference_model() {
         let mut lcg = 0x5EED_600Du64;
@@ -506,8 +504,8 @@ mod tests {
 
     #[test]
     fn run_levels_sequential_is_registration_order() {
-        // Намеренно нехитрый случай, когда обход уровней ≠ порядок
-        // регистрации: sequential режим обязан держать последний.
+        // Deliberately non-trivial case where level traversal ≠ registration
+        // order: sequential mode must keep the latter.
         let trace = Mutex::new(Vec::new());
         run_levels(&[vec![0, 2], vec![1]], 3, false, |i| {
             trace.lock().unwrap().push(i);
@@ -529,9 +527,9 @@ mod tests {
 
     #[test]
     fn mermaid_diagram_renders_flowchart() {
-        // Байтовый golden общего проектора (срез 1b): уровень
-        // подграфом, свободный узел, ребро. Тот же формат пинит
-        // рендер-оболочка своим mermaid_is_a_valid_projection.
+        // Byte-level golden for the shared projector (slice 1b): level as
+        // subgraph, free node, edge. The render shell pins the same format
+        // with its own mermaid_is_a_valid_projection.
         let mut d = MermaidDiagram::new();
         d.level("L0", "level 0", &[("N0".into(), "alpha".into())])
             .node("R0", "shared")

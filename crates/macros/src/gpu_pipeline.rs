@@ -507,7 +507,7 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     // Render-pipeline mode: vertex/fragment entry points replace the compute entry.
     // Generates @vertex/@fragment shims with full-screen quad boilerplate
     // (QUAD/UVS + VertexOutput) so `texture`/`sampler`/`uniform`/`vertex`/`fragment`
-    // уже валидируются и дают пригодный для bloom/PBR пост-процесc.
+    // are already validated and produce a usable bloom/PBR post-process.
     let wgsl_source = if config.vertex_entry.is_some() || config.fragment_entry.is_some() {
         let v_entry = config
             .vertex_entry

@@ -19,22 +19,22 @@ permissions:
   pull-requests: write
 
 jobs:
-  # Единственная джоба: ровно та же команда, что гоняется локально
-  # (`cargo xtask quality --ci`). xtask — единственный источник правды о
-  # составе гейта; этот файл занимается только установкой окружения
-  # (системные пакеты, toolchain, wasm target, cargo-инструменты).
+  # Single job: exactly the same command that runs locally
+  # (`cargo xtask quality --ci`). xtask is the single source of truth for
+  # gate composition; this file only sets up the environment
+  # (system packages, toolchain, wasm target, cargo tools).
   quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Системные зависимости для Linux-сборки:
-      # libasound2-dev — cpal (аудио), libudev-dev — gilrs/winit input,
-      # pkg-config — общий build-time поиск библиотек.
-      # mesa-vulkan-drivers — software Vulkan (lavapipe) для wgpu-тестов:
-      # ubuntu runners не имеют GPU, без ICD адаптер не находится
-      # (no compatible GPU adapter found в ornis-wgpu-backend).
+      # System dependencies for the Linux build:
+      # libasound2-dev — cpal (audio), libudev-dev — gilrs/winit input,
+      # pkg-config — common build-time library discovery.
+      # mesa-vulkan-drivers — software Vulkan (lavapipe) for wgpu tests:
+      # Ubuntu runners have no GPU; without an ICD no adapter is found
+      # (no compatible GPU adapter found in ornis-wgpu-backend).
       - name: Install system dependencies
         timeout-minutes: 10
         run: |
@@ -162,7 +162,7 @@ jobs:
             fi
             echo '```'
             echo
-            echo 'Полные логи — в артефакте `quality-log` этого run.'
+            echo 'Full logs are in the `quality-log` artifact of this run.'
           } > target/comment-body.md
 
       - name: Post failure digest to PR
@@ -172,11 +172,11 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           body-path: target/comment-body.md
 
-      # Полный лог гейта — в серию PR-комментариев по ≤60k символов
-      # (лимит GitHub — 65536 на комментарий). Каждый прогон
-      # ПЕРЕЗАПИСЫВАЕТ прежние chunk-комментарии (PATCH), а не плодит
-      # новые: права те же, что уже выданы (pull-requests: write).
-      # Маркер <!--quality-log--> в начале тела — для поиска при чтении.
+      # Full gate log — split into a series of PR comments with ≤60k chars each
+      # (GitHub limit is 65536 per comment). Each run OVERWRITES prior
+      # chunk comments (PATCH) instead of creating new ones: same
+      # permissions already granted (pull-requests: write).
+      # Marker <!--quality-log--> at the body start — used for lookup on read.
       - name: Publish full log as chunked PR comments
         if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
         env:
@@ -213,7 +213,7 @@ jobs:
               log = ('(target/quality.log was not created — the gate step failed\n'
                      'before tee wrote anything. Read the raw "Quality gate" step\n'
                      'output in the Actions run referenced by the digest comment.)\n')
-          log = re.sub(r'\x1b\[[0-9;]*m', '', log)  # ANSI-коды xtask
+          log = re.sub(r'\x1b\[[0-9;]*m', '', log)  # ANSI codes from xtask
           chunks, buf = [], ''
           for line in log.splitlines(keepends=True):
               if buf and len(buf) + len(line) > 60000:
@@ -238,7 +238,7 @@ jobs:
                   call('PATCH', own[i - 1]['url'], {'body': body})
               else:
                   call('POST', f'{API}/issues/{PR}/comments', {'body': body})
-          for c in own[n:]:  # лог стал короче — лишние части затираем
-              call('PATCH', c['url'], {'body': f'{MARK} (часть устарела — лог стал короче)'})
+          for c in own[n:]:  # log got shorter — clear leftover parts
+              call('PATCH', c['url'], {'body': f'{MARK} (stale part — log got shorter)'})
           print('done')
           PY

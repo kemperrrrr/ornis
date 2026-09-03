@@ -486,10 +486,10 @@ impl LoopRewriter<'_> {
             [single] => {
                 let var = &single.var_name;
                 let method = par_iter_method(single.mutable);
-                // Аудит §3.3, бэклог #7: захват TLS-фрейма доступов до
-                // входа в параллельную секцию и установка в каждой задаче
-                // — принуждение действует и на rayon-потоках. Пустой
-                // снимок (вне Schedule::run) — no-op, стоимость ноль.
+                // Audit §3.3, backlog #7: capture TLS access frame before
+                // entering the parallel section and install it in each task
+                // — enforcement applies on rayon threads as well. Empty
+                // snapshot (outside Schedule::run) is a no-op, zero cost.
                 syn::parse_quote! {{
                     use ornis_core::rayon::prelude::*;
                     let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
@@ -504,7 +504,7 @@ impl LoopRewriter<'_> {
                 let var1 = &second.var_name;
                 let method0 = par_iter_method(first.mutable);
                 let method1 = par_iter_method(second.mutable);
-                // См. одноленточную ветвь: захват/установка фрейма (#7).
+                // See single-lane branch: capture/install frame (#7).
                 syn::parse_quote! {{
                     use ornis_core::rayon::prelude::*;
                     let __ornis_access_frame = ornis_core::schedule::capture_access_frame();

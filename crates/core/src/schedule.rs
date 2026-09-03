@@ -1,85 +1,85 @@
-//! Unified system scheduler — S5a foundation (PLAN Приложение C, IDEAS §28.2).
+//! Unified system scheduler — S5a foundation (PLAN App. C, IDEAS §28.2).
 //!
-//! Один планировщик на всё: системы объявляют доступы к одиночным
-//! ресурсам («миру» из [`Resources`]), планировщик выводит конфликты
-//! (read-after-write, write-after-read, write-after-write), раскладывает
-//! системы по уровням параллельности и исполняет уровни последовательно,
-//! а системы внутри уровня — параллельно (rayon).
+//! One scheduler for everything: systems declare accesses to singleton
+//! resources (the "world" in [`Resources`]), the scheduler derives conflicts
+//! (read-after-write, write-after-read, write-after-write), arranges
+//! systems into parallelism levels and executes levels sequentially,
+//! while systems within a level run in parallel (rayon).
 //!
-//! Детерминизм (Strong Confluence): уровни выведены из порядка
-//! регистрации; внутри уровня системы не конфликтуют по *объявленным*
-//! доступам (записи дизъюнктны с чужими чтениями/записями), а любые две
-//! конфликтующие системы исполняются в порядке регистрации. При честных
-//! декларациях это гарантирует отсутствие гонок данных, но **не**
-//! побитовую идентичность параллельного и последовательного прогонов —
-//! для неё нужен контракт коммутативности ниже.
+//! Determinism (Strong Confluence): levels are derived from registration
+//! order; within a level systems do not conflict on *declared* accesses
+//! (writes are disjoint from others' reads/writes), and any two conflicting
+//! systems run in registration order. With honest declarations this
+//! guarantees absence of data races, but **not** bit-identical parallel
+//! and sequential runs — that requires the commutativity contract below.
 //!
-//! # Контракт коммутативности
+//! # Commutativity contract
 //!
-//! `reads`-доступ разрешает совместное использование ресурса системами
-//! одного уровня, а внутренняя изменяемость (`Mutex`/атомики) делает его
-//! **безопасным для памяти — но не детерминированным**: порядок, в
-//! котором системы уровня захватывают общий `Mutex<Vec>`, зависит от
-//! планировки потоков и различается от прогона к прогону. Поэтому
-//! ресурс, объявленный `reads` и мутируемый изнутри, обязан быть
-//! **коммутативным аккумулятором**: наблюдаемый результат не должен
-//! зависеть от порядка операций (атомичные счётчики с коммутативными
-//! операциями; append-мультимножества, сравниваемые с точностью до
-//! перестановки). Некоммутативную мутацию («последний писатель
-//! выиграл», порядкозависимый `push`, стек) ресурс обязан отражать в
-//! `writes` — тогда конфликт виден планировщику и системы разводятся по
-//! уровням в порядке регистрации. Границу контракта иллюстрирует тест
-//! `parallel_matches_sequential`: события сравниваются отсортированными,
-//! то есть перестановка внутри уровня — допустимая часть семантики.
+//! A `reads` access allows shared use of a resource by systems on the
+//! same level, and interior mutability (`Mutex`/atomics) makes it
+//! **memory-safe but non-deterministic**: the order in which level
+//! systems acquire a shared `Mutex<Vec>` depends on thread scheduling
+//! and varies between runs. Therefore a resource declared as `reads`
+//! and mutated from within must be a **commutative accumulator**: the
+//! observable result must not depend on operation order (atomic counters
+//! with commutative ops; append multisets compared up to permutation).
+//! Non-commutative mutation ("last writer wins", order-dependent `push`,
+//! stack) must be reflected as `writes` — then the conflict is visible
+//! to the scheduler and systems are split across levels in registration
+//! order. The boundary is illustrated by the `parallel_matches_sequential`
+//! test: events are compared sorted, so permutation within a level is an
+//! allowed part of the semantics.
 //!
-//! Порядок регистрации — тайбрейк, как у пассов рендер-графа: любые два
-//! конфликтующих процесса идут в порядке добавления.
+//! Registration order is the tie-break, as with render-graph passes:
+//! any two conflicting processes run in insertion order.
 //!
-//! # Принуждение объявленных доступов
+//! # Enforcement of declared accesses
 //!
-//! Условие «не трогать чужие ресурсы» больше не только на честном слове:
-//! пока исполняется система, [`Resources::get`]/[`Resources::contains`]
-//! проверяют, что ресурс объявлен в `access()` этой системы (чтение или
-//! запись; собственная запись покрывает чтение). Нарушение паникует с
-//! именем системы и типом ресурса. Проверка — thread-local стек активных
-//! деклараций (RAII, корректно откатывается при паниках и вложенных
-//! шедулерах); вне [`Schedule::run`] доступ свободен. По умолчанию
-//! включена в debug-сборках и выключена в release
-//! ([`Schedule::set_enforce_accesses`] переопределяет).
+//! The "do not touch others' resources" condition is no longer just
+//! an honor system: while a system runs, [`Resources::get`]/
+//! [`Resources::contains`] verify that the resource is declared in that
+//! system's `access()` (read or write; own write covers read). A
+//! violation panics with the system name and resource type. The check
+//! is a thread-local stack of active declarations (RAII, correctly
+//! unwound on panics and nested schedulers); outside [`Schedule::run`]
+//! access is unrestricted. Enabled by default in debug builds and
+//! disabled in release ([`Schedule::set_enforce_accesses`] overrides).
 //!
-//! # Гранулярность лент `SmartStore` (аудит §3.6, бэклог #5)
+//! # `SmartStore` lane granularity (audit §3.6, backlog #5)
 //!
-//! Хранилище компонентов — обычный singleton в [`Resources`]; декларация
-//! `reads::<SmartStore>()` выдаёт системам сам store (общее чтение,
-//! конфликта нет). Гранулярность компонентов декларируется отдельно:
-//! [`SystemAccess::reads_lane`]/[`SystemAccess::writes_lane`] по `TypeId`
-//! компонента — конфликты выводятся по лентам, системы над дизъюнктными
-//! лентами идут параллельно, ручные `order_before` не нужны. Ресурсы и
-//! ленты — раздельные пространства имён ключей планировщика (один тип
-//! может быть и ресурсом, и компонентом без ложного конфликта).
-//! Принуждение — на границе `SmartStore::read_lane/write_lane`: чтение
-//! покрывается `reads_lane` или `writes_lane`, запись — строго
-//! `writes_lane` (write-гард доказывает намерение писать — в отличие от
-//! ресурсов с их незримой внутренней изменяемостью). Cold- и lock-free
-//! ленты — отдельные пространства имён, протоколом не покрыты.
+//! The component store is a plain singleton in [`Resources`]; the
+//! `reads::<SmartStore>()` declaration gives systems the store itself
+//! (shared read, no conflict). Component granularity is declared
+//! separately: [`SystemAccess::reads_lane`]/[`SystemAccess::writes_lane`]
+//! by component `TypeId` — conflicts are derived per lane, systems over
+//! disjoint lanes run in parallel, manual `order_before` is unnecessary.
+//! Resources and lanes are separate scheduler key namespaces (the same
+//! type can be a resource in one system and a component in another
+//! without a false conflict). Enforcement is at the
+//! `SmartStore::read_lane/write_lane` boundary: reads are covered by
+//! `reads_lane` or `writes_lane`, writes strictly by `writes_lane`
+//! (the write guard proves intent to write — unlike resources with
+//! their invisible interior mutability). Cold and lock-free lanes are
+//! separate namespaces and not covered by this protocol.
 //!
-//! # Параллелизм внутри систем (аудит §3.3, бэклог #7)
+//! # Parallelism inside systems (audit §3.3, backlog #7)
 //!
-//! TLS-стек действует в потоке, исполняющем `System::run`; дочерние задачи
-//! системы начинаются с пустого стека. Закрытие бреши — перенос кадра:
-//! [`capture_access_frame`] до входа в параллельную секцию и
-//! [`AccessFrameCapture::install`] в каждой дочерней задаче. Макрос
-//! `#[smart_pipeline]` генерирует эту пару вокруг `par_iter`-тел
-//! автоматически (главный паттерн движка покрыт). Документированный
-//! лимит: ручной параллелизм (`rayon::scope`/`spawn`) внутри системы
-//! **без** захвата по-прежнему вне проверки, и проверка по умолчанию
-//! debug-only (оба ограничения — требование «задокументировать» из §3.3).
+//! The TLS stack is active in the thread executing `System::run`; child
+//! tasks of the system start with an empty stack. The gap is closed by
+//! frame capture: [`capture_access_frame`] before entering the parallel
+//! section and [`AccessFrameCapture::install`] in each child task. The
+//! `#[smart_pipeline]` macro generates this pair around `par_iter` bodies
+//! automatically (the engine's main pattern is covered). Documented
+//! limitation: manual parallelism (`rayon::scope`/`spawn`) inside a
+//! system **without** capture is still unchecked, and enforcement is
+//! debug-only by default (both limits are the "document it"
+//! requirement from §3.3).
 //!
-//! Механика уровней и конфликтов (включая битсет-план и кеш плана с
-//! диагностикой), единый [`OrderError`] и уровневый исполнитель живут в
-//! крейте `ornis-schedule` (Фаза A, аудит §7); здесь остаётся
-//! ECS-фронтенд: [`Resources`], [`SystemAccess`], [`System`] и
-//! TLS-enforcement объявленных доступов.
+//! Level and conflict mechanics (including the bitset plan and plan
+//! cache with diagnostics), the unified [`OrderError`] and the level
+//! executor live in the `ornis-schedule` crate (Phase A, audit §7);
+//! what remains here is the ECS frontend: [`Resources`],
+//! [`SystemAccess`], [`System`] and TLS enforcement of declared accesses.
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
@@ -90,9 +90,9 @@ use ornis_schedule::{
 };
 pub use ornis_schedule::{OrderError, compute_levels};
 
-/// Singleton resource container («мир»): одно значение на тип.
-/// Мутация через внутреннюю изменяемость (`Mutex<T>`, атомики) —
-/// параллельные системы получают `&Resources`.
+/// Singleton resource container ("world"): one value per type.
+/// Mutation via interior mutability (`Mutex<T>`, atomics) —
+/// parallel systems receive `&Resources`.
 #[derive(Default)]
 pub struct Resources {
     map: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
@@ -104,7 +104,7 @@ impl Resources {
         Self::default()
     }
 
-    /// Вставляет/заменяет singleton типа `R`; возвращает прежний, если был.
+    /// Inserts/replaces the singleton of type `R`; returns the previous one if any.
     pub fn insert<R: Any + Send + Sync>(&mut self, resource: R) -> Option<R> {
         self.map
             .insert(TypeId::of::<R>(), Box::new(resource))
@@ -112,21 +112,21 @@ impl Resources {
             .map(|boxed| *boxed)
     }
 
-    /// Есть ли singleton типа `R`.
+    /// Whether a singleton of type `R` exists.
     ///
     /// # Panics
-    /// Паникует, если вызвана из системы, не декларировавшей `R`
-    /// (включённое принуждение доступов; см. модульную документацию).
+    /// Panics if called from a system that did not declare `R`
+    /// (access enforcement enabled; see module docs).
     pub fn contains<R: Any + Send + Sync>(&self) -> bool {
         assert_access_declared::<R>();
         self.map.contains_key(&TypeId::of::<R>())
     }
 
-    /// Общий доступ к singleton типа `R`.
+    /// Shared access to the singleton of type `R`.
     ///
     /// # Panics
-    /// Паникует, если вызвана из системы, не декларировавшей `R`
-    /// (чтение или запись; включённое принуждение доступов).
+    /// Panics if called from a system that did not declare `R`
+    /// (read or write; access enforcement enabled).
     pub fn get<R: Any + Send + Sync>(&self) -> Option<&R> {
         assert_access_declared::<R>();
         self.map
@@ -134,15 +134,14 @@ impl Resources {
             .and_then(|boxed| boxed.downcast_ref::<R>())
     }
 
-    /// Мутабельный доступ (только между запусками шедулера, не из
-    /// параллельных систем).
+    /// Mutable access (only between scheduler runs, not from parallel systems).
     pub fn get_mut<R: Any + Send + Sync>(&mut self) -> Option<&mut R> {
         self.map
             .get_mut(&TypeId::of::<R>())
             .and_then(|boxed| boxed.downcast_mut::<R>())
     }
 
-    /// Удаляет singleton типа `R`.
+    /// Removes the singleton of type `R`.
     pub fn remove<R: Any + Send + Sync>(&mut self) -> Option<R> {
         self.map
             .remove(&TypeId::of::<R>())
@@ -150,31 +149,30 @@ impl Resources {
             .map(|boxed| *boxed)
     }
 
-    /// Число singleton-ресурсов.
+    /// Number of singleton resources.
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    /// Пуст ли мир.
+    /// Whether the world is empty.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 }
 
-/// Объявленные доступы системы: singleton-ресурсы (`reads`/`writes`) и
-/// горячие ленты компонентов `SmartStore` (`reads_lanes`/`writes_lanes`)
-/// по типам. Раньше назывался `Access` — переименован, чтобы не
-/// конфликтовать с типовым `ornis_render::Access` (ZST-маркеры
-/// `Read`/`Write` графа).
+/// Declared system accesses: singleton resources (`reads`/`writes`) and
+/// hot `SmartStore` component lanes (`reads_lanes`/`writes_lanes`) by
+/// type. Previously called `Access` — renamed to avoid clashing with
+/// the typed `ornis_render::Access` (graph ZST markers `Read`/`Write`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemAccess {
     /// Resource types the system reads (`&R`).
     pub reads: Vec<TypeId>,
     /// Resource types the system writes (`&mut R`).
     pub writes: Vec<TypeId>,
-    /// Ленты компонентов, читаемые системой (`TypeId` компонента).
+    /// Component lanes read by the system (`TypeId` of the component).
     pub reads_lanes: Vec<TypeId>,
-    /// Ленты компонентов, записываемые системой (`TypeId` компонента).
+    /// Component lanes written by the system (`TypeId` of the component).
     pub writes_lanes: Vec<TypeId>,
 }
 
@@ -184,32 +182,32 @@ impl SystemAccess {
         Self::default()
     }
 
-    /// Добавляет `R` в набор чтений.
+    /// Adds `R` to the read set.
     pub fn reads<R: Any + Send + Sync>(mut self) -> Self {
         self.reads.push(TypeId::of::<R>());
         self
     }
 
-    /// Добавляет `R` в набор записей.
+    /// Adds `R` to the write set.
     pub fn writes<R: Any + Send + Sync>(mut self) -> Self {
         self.writes.push(TypeId::of::<R>());
         self
     }
 
-    /// Добавляет ленту компонента `T` в набор чтений.
+    /// Adds the component lane `T` to the read set.
     pub fn reads_lane<T: 'static + Send + Sync>(mut self) -> Self {
         self.reads_lanes.push(TypeId::of::<T>());
         self
     }
 
-    /// Добавляет ленту компонента `T` в набор записей.
+    /// Adds the component lane `T` to the write set.
     pub fn writes_lane<T: 'static + Send + Sync>(mut self) -> Self {
         self.writes_lanes.push(TypeId::of::<T>());
         self
     }
 
-    /// [`SystemAccess::reads_lane`] по известному `TypeId` — для
-    /// динамических фронтендов через реестр ([`ComponentMeta::type_id`]).
+    /// [`SystemAccess::reads_lane`] by known `TypeId` — for dynamic
+    /// frontends via the registry ([`ComponentMeta::type_id`]).
     ///
     /// [`ComponentMeta::type_id`]: crate::ComponentMeta::type_id
     pub fn reads_lane_id(mut self, id: TypeId) -> Self {
@@ -217,13 +215,13 @@ impl SystemAccess {
         self
     }
 
-    /// [`SystemAccess::writes_lane`] по известному `TypeId`.
+    /// [`SystemAccess::writes_lane`] by known `TypeId`.
     pub fn writes_lane_id(mut self, id: TypeId) -> Self {
         self.writes_lanes.push(id);
         self
     }
 
-    /// Конфликтует ли запись с (чтение ∪ запись) другого доступа.
+    /// Whether a write conflicts with (read ∪ write) of another access.
     #[cfg(test)]
     fn writes_touch(&self, other: &SystemAccess) -> bool {
         self.writes
@@ -232,10 +230,10 @@ impl SystemAccess {
     }
 }
 
-/// Ключ планировщика уровней: singleton-ресурсы и ленты компонентов — два
-/// раздельных пространства имён. Один и тот же тип может быть ресурсом у
-/// одной системы и компонентом у другой; без разделения пространств это
-/// давало бы ложный конфликт (аудит §3.6).
+/// Level scheduler key: singleton resources and component lanes are two
+/// separate namespaces. The same type can be a resource in one system and
+/// a component in another; without separate namespaces this would cause
+/// a false conflict (audit §3.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AccessKey {
     Resource(TypeId),
@@ -243,7 +241,7 @@ enum AccessKey {
 }
 
 impl SystemAccess {
-    /// Проекция чтений в ключи планировщика (ресурсы + ленты).
+    /// Projects reads into scheduler keys (resources + lanes).
     fn read_keys(&self) -> Vec<AccessKey> {
         self.reads
             .iter()
@@ -252,7 +250,7 @@ impl SystemAccess {
             .collect()
     }
 
-    /// Проекция записей в ключи планировщика (ресурсы + ленты).
+    /// Projects writes into scheduler keys (resources + lanes).
     fn write_keys(&self) -> Vec<AccessKey> {
         self.writes
             .iter()
@@ -262,7 +260,7 @@ impl SystemAccess {
     }
 }
 
-/// Система единого шедулера: доступы — данные, исполнение — над миром.
+/// Unified scheduler system: accesses are data, execution is over the world.
 pub trait System: Send + Sync {
     /// Unique system name for diagnostics and ordering.
     fn name(&self) -> &'static str;
@@ -272,20 +270,20 @@ pub trait System: Send + Sync {
     fn run(&self, resources: &Resources);
 }
 
-/// Конфликт двух систем (в порядке регистрации i < j): упорядочены, если
-/// i пишет то, что j читает/пишет (RaW/WaW), или j пишет то, что читает
-/// i (анти-зависимость, WaR).
+/// Conflict of two systems (in registration order i < j): ordered if
+/// i writes what j reads/writes (RaW/WaW), or j writes what i reads
+/// (anti-dependency, WaR).
 #[cfg(test)]
 fn conflicts(a: &SystemAccess, b: &SystemAccess) -> bool {
     a.writes_touch(b) || b.writes_touch(a)
 }
 
-/// Уровни параллельности: системы без конфликтов внутри уровня;
-/// уровни упорядочены зависимостями. Детерминировано порядком регистрации.
+/// Parallelism levels: systems without conflicts share a level;
+/// levels are ordered by dependencies. Deterministic by registration order.
 ///
-/// Эталонная Vec-реализация: продакшн-путь [`Schedule`] использует
-/// битсет-проекцию тех же конфликтов; тест `bitset_plan_matches_reference_model`
-/// пинит совпадение.
+/// Reference Vec implementation: the production [`Schedule`] path uses a
+/// bitset projection of the same conflicts; the
+/// `bitset_plan_matches_reference_model` test pins equivalence.
 #[cfg(test)]
 fn reference_level_groups(
     accesses: &[SystemAccess],
@@ -296,10 +294,10 @@ fn reference_level_groups(
     })
 }
 
-/// Активная декларация доступов исполняемой системы (принуждение).
+/// Active access declaration of the executing system (enforcement).
 ///
-/// `Clone` — снимок верхнего кадра переносится в дочерние параллельные
-/// задачи системы ([`AccessFrameCapture`], аудит §3.3, бэклог #7).
+/// `Clone` — the top frame snapshot is carried into child parallel tasks
+/// of the system ([`AccessFrameCapture`], audit §3.3, backlog #7).
 #[derive(Clone)]
 struct AccessFrame {
     system: &'static str,
@@ -310,18 +308,18 @@ struct AccessFrame {
 }
 
 thread_local! {
-    /// Стек активных деклараций: пуст вне `Schedule::run` (или когда
-    /// принуждение выключено) — тогда `Resources` unrestricted.
+    /// Stack of active declarations: empty outside `Schedule::run` (or when
+    /// enforcement is off) — then `Resources` is unrestricted.
     static ACCESS_FRAMES: RefCell<Vec<AccessFrame>> = const { RefCell::new(Vec::new()) };
 }
 
-/// RAII-пуш декларации в thread-local стек `ACCESS_FRAMES`; снимается при
-/// выходе из области видимости, включая раскрутку паники (rayon
-/// переиспользует потоки — без RAII стек протухал бы).
+/// RAII push of the declaration onto the thread-local `ACCESS_FRAMES`
+/// stack; popped on scope exit, including panic unwinding (rayon reuses
+/// threads — without RAII the stack would go stale).
 ///
-/// Гард принадлежит принуждению планировщика: создаётся только парой
-/// push-точек (`Schedule::run_system`, [`AccessFrameCapture::install`]);
-/// ручная конструкция сломала бы парность push/pop стека.
+/// The guard belongs to scheduler enforcement: it is created only at the
+/// two push sites (`Schedule::run_system`, [`AccessFrameCapture::install`]);
+/// manual construction would break push/pop pairing.
 pub struct AccessFrameGuard;
 
 impl AccessFrameGuard {
@@ -347,32 +345,34 @@ impl Drop for AccessFrameGuard {
     }
 }
 
-/// Снимок верхней активной декларации доступов для переноса принуждения в
-/// параллельные дочерние задачи системы (аудит §3.3, бэклог #7).
+/// Snapshot of the top active access declaration for carrying enforcement
+/// into a system's parallel child tasks (audit §3.3, backlog #7).
 ///
-/// `#[smart_pipeline]` генерирует захват и установку вокруг тел
-/// `par_iter`-циклов автоматически. Для ручного параллелизма внутри
-/// `System::run` (`rayon::scope`/`spawn`, `std::thread::scope`): захват
-/// до входа в параллельную секцию, установка — в каждой дочерней задаче;
-/// тогда дочерний поток наследует декларацию системы, и недекларированный
-/// доступ паникует так же, как в потоке системы.
+/// `#[smart_pipeline]` generates the capture and install around
+/// `par_iter` loop bodies automatically. For manual parallelism inside
+/// `System::run` (`rayon::scope`/`spawn`, `std::thread::scope`): capture
+/// before entering the parallel section, install in each child task;
+/// then the child thread inherits the system declaration and an
+/// undeclared access panics just as in the system thread.
 ///
-/// `Send + Sync` (&'static str + TypeId): снимок разделяется по ссылке
-/// в `for_each`-замыканиях rayon. Пуст вне [`Schedule::run`] (или при
-/// выключенном принуждении доступов) — тогда [`install`](Self::install)
-/// возвращает `None` и поведение дочерних потоков не меняется.
+/// `Send + Sync` (&'static str + TypeId): the snapshot is shared by
+/// reference in rayon `for_each` closures. Empty outside
+/// [`Schedule::run`] (or with access enforcement off) — then
+/// [`install`](Self::install) returns `None` and child thread behavior
+/// is unchanged.
 pub struct AccessFrameCapture(Option<AccessFrame>);
 
-/// Захватывает верхнюю активную декларацию доступов — точка входа,
-/// описанная у [`AccessFrameCapture`].
+/// Captures the top active access declaration — the entry point
+/// described at [`AccessFrameCapture`].
 pub fn capture_access_frame() -> AccessFrameCapture {
     ACCESS_FRAMES.with(|frames| AccessFrameCapture(frames.borrow().last().cloned()))
 }
 
 impl AccessFrameCapture {
-    /// Перевешивает снятую декларацию в TLS текущего (рабочего) потока;
-    /// гард снимает её при выходе из области видимости, включая раскрутку
-    /// паники. Пустой снимок → `None`: одна TLS-загрузка, ноль аллокаций.
+    /// Installs the captured declaration into the TLS of the current
+    /// (worker) thread; the guard removes it on scope exit, including
+    /// panic unwinding. Empty snapshot → `None`: one TLS load, zero
+    /// allocations.
     pub fn install(&self) -> Option<AccessFrameGuard> {
         let frame = self.0.clone()?;
         ACCESS_FRAMES.with(|frames| frames.borrow_mut().push(frame));
@@ -380,10 +380,10 @@ impl AccessFrameCapture {
     }
 }
 
-/// Проверяет `R` против декларации текущей исполняемой системы; вне
-/// [`Schedule::run`] — no-op. Нарушение = нарушение контракта
-/// детерминизма: недекларированный доступ может гоняться с системами
-/// того же параллельного уровня.
+/// Checks `R` against the declaration of the currently executing system;
+/// outside [`Schedule::run`] — no-op. A violation is a breach of the
+/// determinism contract: an undeclared access can race with systems on
+/// the same parallel level.
 fn assert_access_declared<R: Any + Send + Sync>() {
     ACCESS_FRAMES.with(|frames| {
         let frames = frames.borrow();
@@ -404,14 +404,14 @@ fn assert_access_declared<R: Any + Send + Sync>() {
     });
 }
 
-/// Проверяет ленту компонента `T` против декларации текущей исполняемой
-/// системы — граница `SmartStore::read_lane`/`write_lane` (аудит §3.6).
-/// Вне [`Schedule::run`] (и при выключенном принуждении стек пуст) — no-op.
-/// Чтение покрывается `reads_lane` или `writes_lane`; запись — строго
-/// `writes_lane`: write-гард доказывает намерение писать, в отличие от
-/// ресурсов, где мутация происходит через незримую внутреннюю
-/// изменяемость. Cold- и lock-free ленты — отдельные пространства имён и
-/// этим протоколом не покрываются (экспериментальные механизмы).
+/// Checks the component lane `T` against the declaration of the
+/// currently executing system — the `SmartStore::read_lane`/`write_lane`
+/// boundary (audit §3.6). Outside [`Schedule::run`] (and with enforcement
+/// off the stack is empty) — no-op. Reads are covered by `reads_lane` or
+/// `writes_lane`; writes strictly by `writes_lane`: the write guard
+/// proves intent to write, unlike resources where mutation happens via
+/// invisible interior mutability. Cold and lock-free lanes are separate
+/// namespaces and not covered by this protocol (experimental mechanisms).
 pub(crate) fn assert_lane_access_declared<T: 'static>(for_write: bool) {
     ACCESS_FRAMES.with(|frames| {
         let frames = frames.borrow();
@@ -438,18 +438,18 @@ pub(crate) fn assert_lane_access_declared<T: 'static>(for_write: bool) {
     });
 }
 
-/// Расписание систем: порядок регистрации — тайбрейк конфликтов.
+/// System schedule: registration order is the conflict tie-break.
 pub struct Schedule {
     systems: Vec<Box<dyn System>>,
     accesses: Vec<SystemAccess>,
-    /// S5c: явные рёбра порядка (индексы регистрации i < j) поверх
-    /// выведенных из доступов — например, для скрытых зависимостей
-    /// (общие queue-буферы), которых не видно в множествах доступа.
+    /// S5c: explicit ordering edges (registration indices i < j) on top
+    /// of inferred access edges — e.g., for hidden dependencies (shared
+    /// queue buffers) invisible in access sets.
     ordering: Vec<(usize, usize)>,
     parallel: bool,
     enforce_accesses: bool,
-    /// Кеш уровневого плана с диагностикой (зеркалит S1-кеш
-    /// `FrameLayout` рендера): пересчитывается только после
+    /// Level plan cache with diagnostics (mirrors the render
+    /// `FrameLayout` S1 cache): recomputed only after
     /// `add_system`/`order_before`.
     plan: PlanCache,
 }
@@ -473,7 +473,7 @@ impl Schedule {
         }
     }
 
-    /// Добавляет систему (порядок = приоритет при конфликтах).
+    /// Adds a system (order = priority on conflicts).
     pub fn add_system<S: System + 'static>(&mut self, system: S) -> &mut Self {
         self.accesses.push(system.access());
         self.systems.push(Box::new(system));
@@ -481,12 +481,12 @@ impl Schedule {
         self
     }
 
-    /// Добавляет систему перед всеми уже зарегистрированными системами.
+    /// Inserts a system before all already registered systems.
     ///
-    /// Используется платформенными адаптерами, которым нужно поставить
-    /// domain systems перед уже установленным render/extract-пассом. Явные
-    /// рёбра автоматически сдвигаются на один индекс; порядок регистрации
-    /// остальных систем сохраняется.
+    /// Used by platform adapters that need to place domain systems before
+    /// an already installed render/extract pass. Explicit edges are
+    /// automatically shifted by one index; registration order of the
+    /// remaining systems is preserved.
     pub fn prepend_system<S: System + 'static>(&mut self, system: S) -> &mut Self {
         self.accesses.insert(0, system.access());
         self.systems.insert(0, Box::new(system));
@@ -503,21 +503,22 @@ impl Schedule {
         self.plan.invalidate();
     }
 
-    /// S5c: объявляет, что система `before` обязана выполниться раньше
-    /// системы `after`, даже если их доступы не конфликтуют (скрытая
-    /// зависимость). Обе ищутся по `name()`.
+    /// S5c: declares that system `before` must execute before system
+    /// `after`, even if their accesses do not conflict (hidden
+    /// dependency). Both are looked up by `name()`.
     ///
     /// # Panics
-    /// Паникует, если имя не найдено (уникальность имён — на вызывающем)
-    /// или `after` зарегистрирована раньше `before`: порядок исполнения —
-    /// порядок регистрации (S3), явные рёбра только разбивают уровни.
+    /// Panics if a name is not found (name uniqueness is the caller's
+    /// responsibility) or `after` is registered before `before`:
+    /// execution order is registration order (S3), explicit edges only
+    /// split levels.
     pub fn order_before(&mut self, before: &str, after: &str) -> &mut Self {
         self.try_order_before(before, after)
             .unwrap_or_else(|error| panic!("order_before('{before}', '{after}'): {error}"))
     }
 
-    /// Мягкая [`Schedule::order_before`]: ошибка — возвращаемое
-    /// [`OrderError`], не паника (для динамических фронтендов фазы 6).
+    /// Fallible [`Schedule::order_before`]: returns [`OrderError`] on
+    /// failure instead of panicking (for phase-6 dynamic frontends).
     pub fn try_order_before(&mut self, before: &str, after: &str) -> Result<&mut Self, OrderError> {
         let (b, a) = resolve_named_edge(before, after, |name| self.try_system_index(name))?;
         if !self.ordering.contains(&(b, a)) {
@@ -527,12 +528,12 @@ impl Schedule {
         Ok(self)
     }
 
-    /// S5c: зеркальный [`Schedule::order_before`].
+    /// S5c: mirror of [`Schedule::order_before`].
     pub fn order_after(&mut self, after: &str, before: &str) -> &mut Self {
         self.order_before(before, after)
     }
 
-    /// Мягкая [`Schedule::order_after`].
+    /// Fallible [`Schedule::order_after`].
     pub fn try_order_after(&mut self, after: &str, before: &str) -> Result<&mut Self, OrderError> {
         self.try_order_before(before, after)
     }
@@ -541,50 +542,50 @@ impl Schedule {
         self.systems.iter().position(|sys| sys.name() == name)
     }
 
-    /// Параллельное (true, по умолчанию) или строго последовательное
-    /// (bit-identical порядок регистрации) исполнение.
+    /// Parallel (true, default) or strictly sequential (bit-identical
+    /// registration order) execution.
     pub fn set_parallel(&mut self, parallel: bool) -> &mut Self {
         self.parallel = parallel;
         self
     }
 
-    /// Принуждение объявленных доступов (см. модульную документацию):
-    /// по умолчанию включено в debug-сборках, выключено в release.
+    /// Enforcement of declared accesses (see module docs): enabled by
+    /// default in debug builds, disabled in release.
     pub fn set_enforce_accesses(&mut self, enforce: bool) -> &mut Self {
         self.enforce_accesses = enforce;
         self
     }
 
-    /// Число систем.
+    /// Number of systems.
     pub fn len(&self) -> usize {
         self.systems.len()
     }
 
-    /// Пусто ли расписание.
+    /// Whether the schedule is empty.
     pub fn is_empty(&self) -> bool {
         self.systems.is_empty()
     }
 
-    /// Уровни параллельности (индексы систем в порядке регистрации).
-    /// Одно понятие под одним именем на обоих фронтендах движка
-    /// (зеркалит `FrameLayout::levels` рендера; канон, бэклог #19).
+    /// Parallelism levels (system indices in registration order).
+    /// One concept under one name on both engine frontends (mirrors
+    /// render's `FrameLayout::levels`; canonical, backlog #19).
     pub fn levels(&self) -> Vec<Vec<usize>> {
         self.cached_levels()
     }
 
-    /// Сколько раз уровневый план пересчитан — диагностика кеша
-    /// (в steady state не растёт).
+    /// How many times the level plan was recomputed — cache diagnostics
+    /// (does not grow in steady state).
     pub fn level_computations(&self) -> usize {
         self.plan.computations()
     }
 
-    /// Mermaid-проекция уровневого плана — отладочная диаграмма поверх
-    /// общего проектора [`MermaidDiagram`] (срез 1b приближения к
-    /// ликвидации графа, PLAN.md Прил. C): системы — узлами `S{i}`
-    /// подграфами уровней, явные рёбра `order_before` — стрелками
-    /// потока. Та же картинка, что `FrameLayout::mermaid` рисует для
-    /// пассов рендера; GitHub рендерит ```mermaid нативно, поэтому
-    /// дамп расписания в ревью становится картинкой конвейера систем.
+    /// Mermaid projection of the level plan — debug diagram over the
+    /// shared [`MermaidDiagram`] projector (slice 1b of the graph-
+    /// elimination approach, PLAN.md App. C): systems as `S{i}` nodes in
+    /// level subgraphs, explicit `order_before` edges as flow arrows.
+    /// The same picture `FrameLayout::mermaid` draws for render passes;
+    /// GitHub renders ```mermaid natively, so a schedule dump in review
+    /// becomes an image of the system pipeline.
     pub fn mermaid(&self) -> String {
         let mut d = MermaidDiagram::new();
         for (li, level) in self.levels().iter().enumerate() {
@@ -609,9 +610,9 @@ impl Schedule {
             .get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
     }
 
-    /// Исполняет расписание над миром.
+    /// Executes the schedule over the world.
     pub fn run(&self, resources: &Resources) {
-        // Sequential режим не считает план вовсе (как и раньше).
+        // Sequential mode does not compute the plan at all (as before).
         let levels = if self.parallel {
             self.cached_levels()
         } else {
@@ -654,7 +655,7 @@ mod tests {
         a
     }
 
-    /// Тестовая система-заглушка с фиксированным именем и доступами.
+    /// Test stub system with a fixed name and accesses.
     struct NamedNoop(&'static str, SystemAccess);
 
     impl System for NamedNoop {
@@ -681,13 +682,13 @@ mod tests {
 
     #[test]
     fn diamond_yields_parallel_level() {
-        // A пишет X; B и C читают X (пишут Y/Z); D читает Y и Z.
+        // A writes X; B and C read X (write Y/Z); D reads Y and Z.
         let accesses = vec![
             reads_writes::<A>(false, true),
             reads_writes::<B>(false, true),
             reads_writes::<C>(false, true),
         ];
-        // независимые писатели → один уровень
+        // independent writers → one level
         assert_eq!(reference_level_groups(&accesses, &[]), vec![vec![0, 1, 2]]);
 
         let chain = vec![
@@ -703,7 +704,7 @@ mod tests {
 
     #[test]
     fn anti_dependency_orders_reader_first() {
-        // i читает X, j пишет X → i раньше j (анти-зависимость).
+        // i reads X, j writes X → i before j (anti-dependency).
         let accesses = vec![
             SystemAccess::new().reads::<A>(),
             SystemAccess::new().writes::<A>(),
@@ -736,7 +737,7 @@ mod tests {
         }
     }
 
-    /// Тип лог-ресурса тестов ниже (декларируется как чтение).
+    /// Log resource type for tests below (declared as a read).
     type Log = Mutex<Vec<&'static str>>;
 
     #[test]
@@ -764,8 +765,8 @@ mod tests {
         assert_eq!(*log.lock().unwrap(), vec!["w", "r"]);
     }
 
-    /// Strong Confluence: параллельный прогон даёт тот же результат, что
-    /// последовательный, при любом числе потоков.
+    /// Strong Confluence: a parallel run produces the same result as a
+    /// sequential one, regardless of thread count.
     #[test]
     fn parallel_matches_sequential() {
         #[derive(Default)]
@@ -795,7 +796,7 @@ mod tests {
             let mut res = Resources::new();
             res.insert(Counters::default());
             let mut sched = Schedule::new();
-            // ромб: источник → два независимых узла → сборщик
+            // diamond: source → two independent nodes → sink
             sched
                 .add_system(Add {
                     access: SystemAccess::new().writes::<A>().reads::<Counters>(),
@@ -835,8 +836,8 @@ mod tests {
         let (par_sum, par_events) = build(true);
         assert_eq!(seq_sum, 4);
         assert_eq!(par_sum, 4);
-        // Мультимножество событий совпадает; порядок внутри уровня
-        // недетерминирован — потому сравниваем отсортированными.
+        // Event multisets coincide; order within a level is
+        // non-deterministic — hence we compare sorted.
         assert_eq!(seq_events, par_events);
     }
 
@@ -856,7 +857,7 @@ mod tests {
 
     #[test]
     fn explicit_ordering_splits_a_level() {
-        // Два независимых писателя делят уровень; явное ребро разводит их.
+        // Two independent writers share a level; an explicit edge separates them.
         let mut sched = Schedule::new();
         sched
             .add_system(NamedNoop("first", SystemAccess::new().writes::<A>()))
@@ -900,7 +901,7 @@ mod tests {
                 name: "ghost".to_owned(),
             })
         );
-        // План не тронут ошибками; успешное ребро разбивает уровень.
+        // The plan is untouched by errors; a successful edge splits the level.
         assert_eq!(sched.levels(), vec![vec![0, 1]]);
         assert!(sched.try_order_before("a", "b").is_ok());
         assert_eq!(sched.levels(), vec![vec![0], vec![1]]);
@@ -928,16 +929,16 @@ mod tests {
 
     #[test]
     fn mermaid_projects_levels_and_order_edges() {
-        // Срез 1b: проекция поверх общего ornis_schedule::MermaidDiagram —
-        // системы узлами подграфами уровней, рёбра order_before стрелками.
+        // Slice 1b: projection over the shared ornis_schedule::MermaidDiagram —
+        // systems as nodes in level subgraphs, order_before edges as arrows.
         let mut sched = Schedule::new();
         sched
             .add_system(NamedNoop("writer", SystemAccess::new().writes::<A>()))
             .add_system(NamedNoop("free", SystemAccess::new().writes::<B>()))
             .add_system(NamedNoop("reader", SystemAccess::new().reads::<A>()));
         assert!(sched.try_order_before("free", "reader").is_ok());
-        // writer ∥ free на нулевом уровне, reader на первом — по конфликту
-        // (RaW от writer) и по явному ребру (от free).
+        // writer ∥ free on level zero, reader on level one — by conflict
+        // (RaW from writer) and by explicit edge (from free).
         assert_eq!(sched.levels(), vec![vec![0, 1], vec![2]]);
         let m = sched.mermaid();
         assert!(m.starts_with("flowchart TD\n"), "head: {m}");
@@ -976,8 +977,8 @@ mod tests {
 
     #[test]
     fn bitset_plan_matches_reference_model() {
-        // Псевдослучайные наборы доступов (LCG): битсет-план обязан
-        // совпадать с эталонной Vec-реализацией (конфликты → уровни).
+        // Pseudo-random access sets (LCG): the bitset plan must match the
+        // reference Vec implementation (conflicts → levels).
         let mut lcg = 0x5EED_600Du64;
         let mut next = move || {
             lcg = lcg
@@ -1032,7 +1033,7 @@ mod tests {
                 SystemAccess::new().writes::<A>()
             }
             fn run(&self, resources: &Resources) {
-                // Читает B, не декларировав его, — нарушение контракта.
+                // Reads B without declaring it — contract violation.
                 let _ = resources.get::<B>();
             }
         }
@@ -1046,12 +1047,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "not declared")]
     fn undeclared_access_in_child_thread_panics_with_captured_frame() {
-        // Бэклог #7 (аудит §3.3): дочерний поток системы стартует с
-        // пустым TLS-стеком — историческая брешь принуждения; захват с
-        // установкой кадра закрывают её. `std::thread::scope` гарантирует
-        // чужой поток (rayon-задача могла бы исполниться на вызывающем,
-        // где TLS и так заполнен); join ловит панику ребёнка, а
-        // `resume_unwind` поднимает её payload с исходным сообщением.
+        // Backlog #7 (audit §3.3): a system child thread starts with an
+        // empty TLS stack — a historic enforcement gap; capture plus
+        // frame install close it. `std::thread::scope` guarantees a
+        // foreign thread (a rayon task could run on the caller where
+        // TLS is already populated); join catches the child panic and
+        // `resume_unwind` re-raises its payload with the original message.
         struct SneakySpawn;
         impl System for SneakySpawn {
             fn name(&self) -> &'static str {
@@ -1065,12 +1066,12 @@ mod tests {
                 std::thread::scope(|scope| {
                     let handle = scope.spawn(|| {
                         let _guard = frame.install();
-                        // Читает B, не декларировав его, — с дочернего потока.
+                        // Reads B without declaring it — from the child thread.
                         let _ = resources.get::<B>();
                     });
-                    // Авто-join scope перепаникует с обёрткой «a scoped
-                    // thread panicked» — поднимаем исходный payload,
-                    // чтобы should_panic видел причину, а не обёртку.
+                    // Auto-join scope would re-panic with the wrapper "a scoped
+                    // thread panicked" — we re-raise the original payload so
+                    // should_panic sees the cause, not the wrapper.
                     if let Err(payload) = handle.join() {
                         std::panic::resume_unwind(payload);
                     }
@@ -1086,9 +1087,9 @@ mod tests {
 
     #[test]
     fn declared_access_in_child_thread_passes_with_captured_frame() {
-        // Перенос кадра — не нарушение: own-write read декларирован,
-        // дочерний поток проверку проходит (перенос не создаёт ложных
-        // срабатываний).
+        // Frame carry is not a violation: own-write read is declared,
+        // the child thread passes the check (carry does not create false
+        // positives).
         struct HonestSpawn;
         impl System for HonestSpawn {
             fn name(&self) -> &'static str {
@@ -1116,9 +1117,9 @@ mod tests {
 
     #[test]
     fn capture_outside_schedule_run_is_noop() {
-        // Вне `Schedule::run` (и при выключенном принуждении) стек пуст:
-        // снимок пуст, install → None, поведение дочерних потоков не
-        // меняется — документированный «выключенный» путь.
+        // Outside `Schedule::run` (and with enforcement off) the stack is empty:
+        // snapshot is empty, install → None, child thread behavior is
+        // unchanged — the documented "off" path.
         let frame = capture_access_frame();
         assert!(frame.install().is_none());
     }
@@ -1134,7 +1135,7 @@ mod tests {
                 SystemAccess::new().reads::<A>().writes::<B>()
             }
             fn run(&self, resources: &Resources) {
-                // B декларирован на запись — собственное чтение разрешено.
+                // B is declared as a write — own read is allowed.
                 assert!(resources.get::<A>().is_some());
                 assert!(resources.get::<B>().is_some());
             }
@@ -1151,7 +1152,7 @@ mod tests {
     fn resources_are_unrestricted_outside_schedule() {
         let mut res = Resources::new();
         res.insert(B);
-        // Вне Schedule::run активных деклараций нет — доступ свободен.
+        // Outside Schedule::run there are no active declarations — access is unrestricted.
         assert!(res.contains::<B>());
         assert!(res.get::<B>().is_some());
     }

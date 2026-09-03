@@ -599,9 +599,9 @@ mod tests {
         }
 
         let total: i32 = store.iter().sum();
-        // Аннотация обязательна: serde_json (зависимость ornis-core) добавляет
-        // `impl PartialEq<serde_json::Value> for i32` — без явного типа сумма
-        // в assert_eq! неоднозначна (E0283).
+        // Type annotation is required: serde_json (an ornis-core dependency) adds
+        // `impl PartialEq<serde_json::Value> for i32` — without an explicit type the sum
+        // in assert_eq! is ambiguous (E0283).
         assert_eq!(total, (0..12).map(|x| x + 1).sum::<i32>());
     }
 

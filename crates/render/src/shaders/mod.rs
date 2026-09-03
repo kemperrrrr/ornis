@@ -32,10 +32,10 @@ pub fn composite_fragment() -> String {
 }
 
 // ── BLOOM ───────────────────────────────────────────────────────────
-/// Единственный источник истины — `bloom_generated::wgsl_source()`
-/// (Rust → WGSL, путь 2). Легаси `wgsl/bloom_fragment.wgsl` остаётся как
-/// reference; `renderer::create_bloom_pass` и этот форвардер используют
-/// только generated.
+/// Single source of truth — `bloom_generated::wgsl_source()`
+/// (Rust → WGSL, path 2). Legacy `wgsl/bloom_fragment.wgsl` remains as a
+/// reference; `renderer::create_bloom_pass` and this forwarder use only the
+/// generated version.
 pub fn bloom_fragment() -> String {
     bloom_generated::wgsl_source()
 }
@@ -61,15 +61,15 @@ pub fn gbuffer_fragment() -> String {
 }
 
 // ── LIGHTING_VERTEX ─────────────────────────────────────────────────
-/// Full-screen lighting vertex shader — единственный источник истины
-/// `lighting_generated::wgsl_vertex_source()` (путь 2).
+/// Full-screen lighting vertex shader — single source of truth
+/// `lighting_generated::wgsl_vertex_source()` (path 2).
 pub fn lighting_vertex() -> String {
     lighting_generated::wgsl_vertex_source()
 }
 
 // ── LIGHTING_FRAGMENT ───────────────────────────────────────────────
-/// Deferred lighting fragment — единственный источник истины
-/// `lighting_generated::wgsl_source()` (путь 2).
+/// Deferred lighting fragment — single source of truth
+/// `lighting_generated::wgsl_source()` (path 2).
 pub fn lighting_fragment() -> String {
     lighting_generated::wgsl_source()
 }

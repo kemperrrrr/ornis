@@ -1,4 +1,4 @@
-//! S4 property (PLAN Приложение C): the scheduler either fits the pool
+//! S4 property (PLAN Appendix C): the scheduler either fits the pool
 //! into the budget or refuses with an actionable error — never silently
 //! exceeds it. Runs against random (technique x bloom x tail-culling x
 //! surface size) configurations.

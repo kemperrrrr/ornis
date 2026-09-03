@@ -1,7 +1,7 @@
 # cargo-audit configuration
-# Обоснование ignore — см. deny.toml [advisories].
-# quick-xml 0.39.4 ← wayland-scanner (build-time proc-macro, только Linux,
-# доверенный XML протоколов Wayland); 0.41 недоступен до апгрейда winit 0.30.
+# Rationale for ignores — see deny.toml [advisories].
+# quick-xml 0.39.4 ← wayland-scanner (build-time proc-macro, Linux only,
+# trusted Wayland protocol XML); 0.41 unavailable until winit 0.30 upgrade.
 [advisories]
 ignore = [
     "RUSTSEC-2026-0194",

@@ -1,17 +1,17 @@
 //! Bloom shader generated from Rust (Render path 2).
 //!
-//! Канонический источник — Rust-код этого модуля; WGSL выводится сборкой
-//! строки из констант + `luminance::wgsl_source()` (ядро из
-//! `crates/render/src/shaders/math.rs` через `#[kernel]`). Рукописный
-//! `shaders/wgsl/bloom_fragment.wgsl` остаётся как reference/legacy, но
-//! `renderer::create_bloom_pass` уже использует только этот модуль.
+//! Canonical source is the Rust code in this module; WGSL is assembled
+//! from constants + `luminance::wgsl_source()` (kernel from
+//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The handwritten
+//! `shaders/wgsl/bloom_fragment.wgsl` remains as a reference/legacy, but
+//! `renderer::create_bloom_pass` now uses only this module.
 
 use crate::shaders::math::luminance;
 
 /// WGSL bindings + quad constants + vertex/fragment entry points.
 ///
-/// Собирается в runtime как `String`, но источник — Rust: константы и
-/// `luminance::wgsl_source()` — единственный `luminance` в системе.
+/// Assembled at runtime as a `String`, but the source is Rust: constants and
+/// `luminance::wgsl_source()` — the single `luminance` in the system.
 fn bloom_wgsl_body() -> String {
     let header = r#"
 struct BloomParams {
@@ -64,12 +64,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     format!("{header}\n{kernel}\n{fragment}\n")
 }
 
-/// Полный WGSL источник bloom-пасса, собранный из Rust.
+/// Full WGSL source for the bloom pass, assembled from Rust.
 pub fn wgsl_source() -> String {
     bloom_wgsl_body()
 }
 
-/// Статический вид для naga-валидации в тестах.
+/// Static view for naga validation in tests.
 pub fn wgsl_source_static() -> String {
     wgsl_source()
 }

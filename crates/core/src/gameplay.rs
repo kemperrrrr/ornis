@@ -1,4 +1,4 @@
-//! Gameplay consumers + единый runtime без extract.
+//! Gameplay consumers + unified runtime without extract.
 //!
 //! Provides the canonical gameplay building blocks over the shared
 //! [`crate::World`]/[`crate::Engine`] host. The three reference systems

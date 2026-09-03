@@ -1,29 +1,28 @@
-//! Паритет фронтендов планировщика (бэклог #19, антидрейф-канон): одна и
-//! та же топология доступов на `ornis_core::Schedule` (системы, ключи
-//! TypeId — ресурсы и ленты) и на `ornis_render::FramePlan` (пассы,
-//! ключи ResourceId) обязана давать побитово одинаковые уровни: оба
-//! потребителя считаются одним движком `ornis-schedule`. Семантический
-//! дрейф любой стороны = красный CI.
+//! Scheduler frontend parity (backlog #19, anti-drift canon): the same
+//! access topology on `ornis_core::Schedule` (systems, TypeId keys — resources
+//! and lanes) and on `ornis_render::FramePlan` (passes, ResourceId keys) must
+//! produce bitwise identical levels: both consumers are considered a single
+//! `ornis-schedule` engine. Semantic drift on either side = red CI.
 
 use ornis_core::{Resources, Schedule, System, SystemAccess};
 use ornis_render::{FramePlan, ResourceId, SizePolicy, TextureSpec};
 
-/// Ключи ресурсного пространства имён core (в этом файле — типы-маркеры,
-/// реальные singleton-ресурсы плану не нужны).
+/// Core resource namespace keys (marker types in this file,
+/// real singleton resources are not needed for the plan).
 struct K0;
 struct K1;
 struct K2;
 struct K3;
 
-/// Ключи лент `SmartStore` — второе пространство имён core; у рендера ему
-/// аналог не нужен: рендер-пространство (ResourceId) одно, ключи
-/// 4..8 просто отображаются на его элементы.
+/// `SmartStore` lane keys — second core namespace; render has no
+/// analogue: the render namespace (ResourceId) is single, keys
+/// 4..8 simply map to its elements.
 struct L0;
 struct L1;
 struct L2;
 struct L3;
 
-/// Система-заглушка: для паритета нужны только имя и доступы.
+/// Stub system: parity only needs name and accesses.
 struct Stub(&'static str, SystemAccess);
 
 impl System for Stub {
@@ -49,8 +48,8 @@ fn spec() -> TextureSpec {
     }
 }
 
-/// Ключ 0..8 → декларация core: 0..4 — ресурсное пространство имён,
-/// 4..8 — ленты (зеркально элементам r0..r7 на стороне рендера).
+/// Key 0..8 → core declaration: 0..4 — resource namespace,
+/// 4..8 — lanes (mirrors r0..r7 elements on the render side).
 fn push_access(access: SystemAccess, key: usize, write: bool) -> SystemAccess {
     match (key, write) {
         (0, false) => access.reads::<K0>(),
@@ -73,9 +72,9 @@ fn push_access(access: SystemAccess, key: usize, write: bool) -> SystemAccess {
     }
 }
 
-/// Строит зеркальные планы одной топологии `reads`/`writes` (ключи 0..8)
-/// на обоих фронтендах и применяет явные именные рёбра; возвращает
-/// уровни (core, render).
+/// Builds mirrored plans for one `reads`/`writes` topology (keys 0..8)
+/// on both frontends and applies explicit named edges; returns
+/// levels (core, render).
 fn mirrored_levels(
     reads: &[Vec<usize>],
     writes: &[Vec<usize>],
@@ -85,11 +84,11 @@ fn mirrored_levels(
         "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
     ];
     assert_eq!(reads.len(), writes.len(), "parallel access slices");
-    // Доменное правило рендера «first touch must be a write»
-    // (`FramePlan::build`): ресурс, чьё первое касание — чтение без
-    // более ранней (включая собственную) записи, обязан быть импортом.
-    // На уровни import не влияет (внепуловость, не семантика доступов),
-    // core-сторона такого правила не знает — зеркалим честно.
+    // Render domain rule "first touch must be a write"
+    // (`FramePlan::build`): a resource whose first touch is a read without
+    // an earlier (including own) write must be an import.
+    // Imports do not affect levels (out-of-pool, not access semantics),
+    // core side has no such rule — mirror honestly.
     let mut import = [false; 8];
     for (key, slot) in import.iter_mut().enumerate() {
         let first_use =
@@ -137,16 +136,16 @@ fn mirrored_levels(
     (sched.levels(), plan.build().levels())
 }
 
-/// Базовые конфликт-классы и явные рёбра: уровни фронтендов идентичны.
+/// Basic conflict classes and explicit edges: frontend levels identical.
 #[test]
 fn fixed_topologies_match_across_frontends() {
-    // Независимые писатели → один уровень.
+    // Independent writers → one level.
     let (core, render) =
         mirrored_levels(&[vec![], vec![], vec![]], &[vec![0], vec![1], vec![2]], &[]);
     assert_eq!(core, vec![vec![0, 1, 2]]);
     assert_eq!(core, render);
 
-    // Цепочка RaW.
+    // RaW chain.
     let (core, render) = mirrored_levels(
         &[vec![], vec![0], vec![1]],
         &[vec![0], vec![1], vec![]],
@@ -155,27 +154,27 @@ fn fixed_topologies_match_across_frontends() {
     assert_eq!(core, vec![vec![0], vec![1], vec![2]]);
     assert_eq!(core, render);
 
-    // WaR (анти-зависимость): читатель первым; ключ из лентового
-    // пространства core (7 → r7 у рендера).
+    // WaR (anti-dependency): reader first; key from core lane
+    // namespace (7 → r7 on render side).
     let (core, render) = mirrored_levels(&[vec![7], vec![]], &[vec![], vec![7]], &[]);
     assert_eq!(core, vec![vec![0], vec![1]]);
     assert_eq!(core, render);
 
-    // Ленты (4..8) и ресурсы (0..4) — раздельные пространства имён:
-    // ресурсный писатель и лентовый читатель не конфликтуют.
+    // Lanes (4..8) and resources (0..4) — separate namespaces:
+    // resource writer and lane reader do not conflict.
     let (core, render) = mirrored_levels(&[vec![], vec![4]], &[vec![0], vec![]], &[]);
     assert_eq!(core, vec![vec![0, 1]]);
     assert_eq!(core, render);
 
-    // Явное ребро разбивает общий уровень на обоих фронтендах.
+    // Explicit edge splits a shared level on both frontends.
     let (core, render) = mirrored_levels(&[vec![], vec![]], &[vec![0], vec![1]], &[("s0", "s1")]);
     assert_eq!(core, vec![vec![0], vec![1]]);
     assert_eq!(core, render);
 }
 
-/// Дифференциальный паритет: псевдослучайные срезы доступов по 8 ключам
-/// (оба пространства имён core) с явными рёбрами и без — уровни
-/// фронтендов обязаны совпадать побитово.
+/// Differential parity: pseudo-random access slices over 8 keys
+/// (both core namespaces) with and without explicit edges — frontend
+/// levels must match bitwise.
 #[test]
 fn lcg_scenarios_match_across_frontends() {
     let mut lcg = 0x9E37_79B9u64;
@@ -202,7 +201,7 @@ fn lcg_scenarios_match_across_frontends() {
         writes.push(w);
     }
     let (core, render) = mirrored_levels(&reads, &writes, &[]);
-    assert_eq!(core, render, "паритет без явных рёбер");
+    assert_eq!(core, render, "parity without explicit edges");
     let (core, render) = mirrored_levels(&reads, &writes, &[("s2", "s8"), ("s0", "s11")]);
-    assert_eq!(core, render, "паритет с явными рёбрами");
+    assert_eq!(core, render, "parity with explicit edges");
 }

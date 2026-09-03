@@ -5,18 +5,18 @@
 //! to CPU or GPU executors, falling back to CPU whenever no GPU executor is
 //! wired up or the `gpu` feature is off.
 //!
-//! # Граница: рабочий GPU-путь vs незавершённый auto-GPU
+//! # Boundary: working GPU path vs unfinished auto-GPU
 //!
-//! * **Рабочий GPU-путь (стабилен):** `ornis-wgpu-backend::CommandSync`
-//!   — записывает `wgpu::ComputePipeline` диспетчи и CPU-замыкания, затем
-//!   `flush()` сабмитит их на `Device`/`Queue`. Покрыт тестом
-//!   `gpu_dispatch_records_and_flushes` и используется в `crates/wgpu_backend`.
-//!   CPU шлёт команды туда, где живут данные — без eager PCIe-копий.
-//! * **Незавершённый auto-GPU (STUB):** `GpuExecutor` и GPU-ветка
-//!   `SmartDispatcher` в этом крейта — зарезервированная точка расширения.
-//!   `GpuExecutor::execute` всегда возвращает `None` и не выполняет GPU-работу;
-//!   `SmartDispatcher` при `ExecutionTarget::Gpu` молча откатывается на
-//!   `CpuExecutor`. Не используйте как рабочий GPU-исполнитель.
+//! * **Working GPU path (stable):** `ornis-wgpu-backend::CommandSync`
+//!   — records `wgpu::ComputePipeline` dispatches and CPU closures, then
+//!   `flush()` submits them to the `Device`/`Queue`. Covered by the
+//!   `gpu_dispatch_records_and_flushes` test and used in `crates/wgpu_backend`.
+//!   The CPU sends commands to where the data lives — no eager PCIe copies.
+//! * **Unfinished auto-GPU (STUB):** `GpuExecutor` and the GPU branch of
+//!   `SmartDispatcher` in this crate — a reserved extension point.
+//!   `GpuExecutor::execute` always returns `None` and performs no GPU work;
+//!   `SmartDispatcher` silently falls back to `CpuExecutor` on
+//!   `ExecutionTarget::Gpu`. Do not use as a working GPU executor.
 //!
 //! **Status:** the GPU route is a reserved extension point — `GpuExecutor`
 //! is an experimental stub that performs no GPU work, so every dispatch

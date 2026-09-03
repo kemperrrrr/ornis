@@ -97,8 +97,8 @@
             width: 100%;
             position: relative;
             box-sizing: border-box;
-            /* отступ от нижнего края, чтобы текст не срезался
-               скруглёнными углами окна */
+            /* bottom padding so text is not clipped
+               by the window's rounded corners */
             padding: 0.6rem 1.2rem;
         }
 

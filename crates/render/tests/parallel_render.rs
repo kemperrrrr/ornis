@@ -1,4 +1,4 @@
-//! S5b gate (PLAN Приложение C): parallel command recording must be
+//! S5b gate (PLAN Appendix C): parallel command recording must be
 //! pixel-identical to the sequential path. Runs headless — on CI via
 //! lavapipe, locally on any adapter; skipped when no adapter is found.
 //! The scene is one lit sphere (minimal setup from frame_plan_probe).

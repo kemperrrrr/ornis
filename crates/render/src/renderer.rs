@@ -1295,16 +1295,16 @@ impl Renderer3D {
     }
 
     fn create_bloom_pass(device: &wgpu::Device) -> BloomPass {
-        // Bloom WGSL теперь генерируется из Rust (путь 2) — единственный
-        // источник истины `shaders::bloom_generated::wgsl_source()`.
-        // Легаси `shaders/wgsl/bloom_fragment.wgsl` остаётся как reference.
+        // Bloom WGSL is now generated from Rust (path 2) — single
+        // source of truth `shaders::bloom_generated::wgsl_source()`.
+        // Legacy `shaders/wgsl/bloom_fragment.wgsl` remains as a reference.
         let bloom_source = shaders::bloom_generated::wgsl_source();
         let bloom_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bloom shader (generated)"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(bloom_source)),
         });
-        // Vertex и fragment — один модуль с двумя entry points `vs_main`/`fs_main`.
-        // Две переменные указывают на тот же модуль, чтобы сохранить сигнатуру
+        // Vertex and fragment are one module with two entry points `vs_main`/`fs_main`.
+        // Two variables point to the same module to preserve the signature
         // `bloom_pipeline(vertex, fragment, ...)`.
         let fs_module = &bloom_module;
         let vs_module = &bloom_module;

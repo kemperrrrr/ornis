@@ -6,9 +6,9 @@
 //! — so the inner solver loop walks 4 contacts with cache-friendly stride-1
 //! loads, and LLVM can vectorize the lane-wise arithmetic into SSE/AVX/NEON.
 //!
-//! The module is the target of the **п2 narrow-cache follow-up**: after the
-//! incremental broadphase (п1), the per-pair SAT work it consumes is the
-//! remaining ~8 мс bottleneck. A persistent `NarrowCacheEntry`/`SatCacheEntry`
+//! The module is the target of the **P2 narrow-cache follow-up**: after the
+//! incremental broadphase (P1), the per-pair SAT work it consumes is the
+//! remaining ~8 ms bottleneck. A persistent `NarrowCacheEntry`/`SatCacheEntry`
 //! cache is in progress; the wide path itself stays opt-in via
 //! `set_wide_solver` and the GPU variant via `gpu` feature.
 //!

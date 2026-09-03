@@ -5,9 +5,9 @@
 //! UI bytes to linear light first (see the WGSL comment) so the hardware's
 //! single OETF re-encode lands on the correct value.
 
-//! Legacy composite дан теперь через Rust→WGSL: см. `crate::shaders::composite_generated`.
+//! Legacy composite is now served via Rust→WGSL: see `crate::shaders::composite_generated`.
 
-/// WGSL источник composite-пасса, сгенерированный из Rust (единственный источник истины).
+/// WGSL source for the composite pass, generated from Rust (single source of truth).
 fn composite_shader_source() -> String {
     crate::shaders::composite_generated::wgsl_source()
 }

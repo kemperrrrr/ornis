@@ -1,19 +1,19 @@
-//! Реестр компонентов — фундамент F0 аудита 2026-08-22
-//! (документ `docs/quality/audit-2026-08-22.md`, §10): имя ↔ [`TypeId`] ↔
-//! type-erased операции над лентами [`SmartStore`].
+//! Component registry — foundation of audit 2026-08-22 F0
+//! (document `docs/quality/audit-2026-08-22.md`, §10): name ↔ [`TypeId`] ↔
+//! type-erased operations over [`SmartStore`] lanes.
 //!
-//! Обслуживает tooling-пути: generic `SetComponent` редактора (D2),
-//! batch-API скриптинга (D1), сериализацию сцен (фаза 7), гранулярность
-//! лент шедулера (`lane_id` — плотный индекс для будущих битсетов
-//! доступов). Горячие кадровые циклы реестр **не трогают** — они
-//! остаются типизированными (SoA-ленты, `#[smart_pipeline]`); граница
-//! та же, что у Bevy между `bevy_reflect` и типизированными квери.
+//! Serves tooling paths: the editor's generic `SetComponent` (D2),
+//! the scripting batch API (D1), scene serialization (phase 7), scheduler
+//! lane granularity (`lane_id` — dense index for future access bitsets).
+//! Hot per-frame loops **do not touch** the registry — they stay typed
+//! (SoA lanes, `#[smart_pipeline]`); the boundary is the same as Bevy's
+//! `bevy_reflect` vs typed queries.
 //!
-//! Thunk'и мономорфизируются обычной generic-регистрацией — без
-//! процедурного макроса; derive-сахар (`#[derive(RegisterComponent)]`)
-//! — опциональный следующий шаг, API реестра от него не меняется.
+//! Thunks are monomorphized via plain generic registration — no procedural
+//! macro required; derive sugar (`#[derive(RegisterComponent)]`) is an
+//! optional next step that does not change the registry API.
 //!
-//! # Пример
+//! # Example
 //!
 //! ```rust
 //! use ornis_core::{ComponentRegistry, SmartStore};
@@ -42,16 +42,16 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::entity::Entity;
 use crate::smart_store::SmartStore;
 
-/// Плотный индекс ленты в реестре (0..len). Зарезервирован под битсеты
-/// доступов шедулера (аудит §3.6) — стабилен в пределах одного реестра.
+/// Dense lane index in the registry (0..len). Reserved for scheduler access
+/// bitsets (audit §3.6) — stable within a single registry.
 pub type LaneId = u32;
 
-/// Ошибка type-erased операции реестра.
+/// Error of a type-erased registry operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
-    /// JSON не соответствует схеме компонента (`set_json`) либо
-    /// компонент не сериализуется (`get_json`; для обычных struct-ов
-    /// практически недостижимо).
+    /// JSON does not match the component schema (`set_json`) or the
+    /// component is not serializable (`get_json`; practically unreachable
+    /// for ordinary structs).
     Json(String),
 }
 
@@ -159,11 +159,11 @@ where
 type GetJsonResult = Result<Option<serde_json::Value>, RegistryError>;
 type SetResult = Result<(), RegistryError>;
 
-/// Type-erased запись о компоненте: имя ↔ тип ↔ операции над его лентой.
+/// Type-erased component record: name ↔ type ↔ operations over its lane.
 ///
-/// Все операции делегируются мономорфным thunk'ам, созданным при
-/// [`ComponentRegistry::register`]; структура `Send + Sync` (fn-pointer'ы
-/// и `&'static str`), реестр можно разделять между потоками (`Arc`).
+/// All operations delegate to monomorphic thunks created at
+/// [`ComponentRegistry::register`]; the struct is `Send + Sync` (fn pointers
+/// and `&'static str`), so the registry can be shared across threads (`Arc`).
 pub struct ComponentMeta {
     name: &'static str,
     type_name: &'static str,
@@ -180,53 +180,53 @@ pub struct ComponentMeta {
 }
 
 impl ComponentMeta {
-    /// Короткое имя из регистрации (ключ протоколов: JSON/FFI/сцены).
+    /// Short name from registration (protocol key: JSON/FFI/scenes).
     pub fn name(&self) -> &'static str {
         self.name
     }
 
-    /// Полный Rust-путь типа (диагностика, не ключ протокола).
+    /// Full Rust type path (diagnostics, not a protocol key).
     pub fn type_name(&self) -> &'static str {
         self.type_name
     }
 
-    /// [`TypeId`] компонента — ключ ленты в [`SmartStore`].
+    /// [`TypeId`] of the component — lane key in [`SmartStore`].
     pub fn type_id(&self) -> TypeId {
         self.type_id
     }
 
-    /// Плотный индекс ленты в реестре (см. [`LaneId`]).
+    /// Dense lane index in the registry (see [`LaneId`]).
     pub fn lane_id(&self) -> LaneId {
         self.lane_id
     }
 
-    /// Создаёт пустую ленту в мире, если её ещё нет.
+    /// Creates an empty lane in the world if it does not exist yet.
     pub fn register_lane(&self, store: &mut SmartStore) {
         (self.register_lane)(store)
     }
 
-    /// Вставляет boxed-компонент. `false`, если тип бокса не `T`
-    /// (нарушение вызывающего — реестр сам такой вызов не создаёт).
+    /// Inserts a boxed component. `false` if the boxed type is not `T`
+    /// (caller contract violation — the registry itself never creates such a call).
     pub fn insert_any(&self, store: &mut SmartStore, entity: Entity, boxed: Box<dyn Any>) -> bool {
         (self.insert_any)(store, entity, boxed)
     }
 
-    /// Есть ли у сущности компонент (с учётом generation хендла).
+    /// Whether the entity has the component (taking the handle generation into account).
     pub fn contains(&self, store: &SmartStore, entity: Entity) -> bool {
         (self.contains)(store, entity)
     }
 
-    /// Число живых компонентов в ленте (0, если ленты ещё нет).
+    /// Number of live components in the lane (0 if the lane does not exist yet).
     pub fn lane_len(&self, store: &SmartStore) -> usize {
         (self.lane_len)(store)
     }
 
-    /// Удаляет и возвращает компонент как `Box<dyn Any>` (None — его нет).
+    /// Removes and returns the component as `Box<dyn Any>` (None — not present).
     pub fn remove(&self, store: &mut SmartStore, entity: Entity) -> Option<Box<dyn Any>> {
         (self.remove)(store, entity)
     }
 
-    /// Снапшот компонента в JSON (None — у сущности его нет).
+    /// Snapshot of the component as JSON (None — the entity has none).
     pub fn get_json(
         &self,
         store: &SmartStore,
@@ -235,8 +235,8 @@ impl ComponentMeta {
         (self.get_json)(store, entity)
     }
 
-    /// Upsert компонента из JSON: десериализует и вставляет (семантика
-    /// `SmartStore::insert` — существующий компонент перезаписывается).
+    /// Upserts the component from JSON: deserializes and inserts (semantics
+    /// of `SmartStore::insert` — an existing component is overwritten).
     pub fn set_json(
         &self,
         store: &mut SmartStore,
@@ -246,21 +246,21 @@ impl ComponentMeta {
         (self.set_json)(store, entity, value)
     }
 
-    /// Десериализует компонент из JSON в `Box<dyn Any>` — без доступа к
-    /// миру. Пара с [`ComponentMeta::insert_any`] даёт семантику
-    /// «сначала разобрать, потом мутировать»: вызывающий валидирует все
-    /// payload'ы команды до единой записи в мир (инвариант «ошибка
-    /// команды не трогает мир» редакторского протокола).
+    /// Deserializes the component from JSON into `Box<dyn Any>` — without
+    /// touching the world. Paired with [`ComponentMeta::insert_any`] it
+    /// provides "parse first, then mutate" semantics: the caller validates
+    /// all command payloads before any single world write (the editor
+    /// protocol invariant "command error does not touch the world").
     pub fn parse_json(&self, value: &serde_json::Value) -> Result<Box<dyn Any>, RegistryError> {
         (self.parse_json)(value)
     }
 }
 
-/// Реестр компонентов: строится один раз на старте (`register::<T>(name)`
-/// для каждого типа), дальше — read-only и разделяемый (`Arc`).
+/// Component registry: built once at startup (`register::<T>(name)`
+/// for each type), then read-only and shareable (`Arc`).
 ///
-/// Порядок регистрации определяет [`LaneId`] — для воспроизводимых
-/// протоколов регистрируйте в фиксированном порядке.
+/// Registration order determines [`LaneId`] — for reproducible protocols
+/// register in a fixed order.
 #[derive(Default)]
 pub struct ComponentRegistry {
     by_id: HashMap<TypeId, LaneId>,
@@ -274,16 +274,16 @@ impl ComponentRegistry {
         Self::default()
     }
 
-    /// Регистрирует тип компонента под протокольным именем `name`.
+    /// Registers a component type under the protocol name `name`.
     ///
-    /// Базовые операции (лента, contains, remove) не требуют serde;
-    /// `get_json`/`set_json` мономорфизируются под `Serialize`/
-    /// `DeserializeOwned` того же типа — граница «reflection только для
-    /// tooling» соблюдается требованием bound'ов у вызывающего.
+    /// Core operations (lane, contains, remove) do not require serde;
+    /// `get_json`/`set_json` are monomorphized over `Serialize`/
+    /// `DeserializeOwned` of the same type — the "reflection only for
+    /// tooling" boundary is enforced by the caller's bounds.
     ///
     /// # Panics
-    /// Паникует при повторной регистрации того же типа или занятом
-    /// имени — это ошибка конфигурации, а не рантайм-ситуация.
+    /// Panics on duplicate registration of the same type or an occupied
+    /// name — this is a configuration error, not a runtime condition.
     pub fn register<T>(&mut self, name: &'static str) -> &mut Self
     where
         T: 'static + Clone + Send + Sync + Serialize + DeserializeOwned,
@@ -319,34 +319,34 @@ impl ComponentRegistry {
         self
     }
 
-    /// Запись по типу.
+    /// Entry by type.
     pub fn by_id(&self, type_id: TypeId) -> Option<&ComponentMeta> {
         self.by_id
             .get(&type_id)
             .map(|&id| &self.entries[id as usize])
     }
 
-    /// Запись по протокольному имени.
+    /// Entry by protocol name.
     pub fn by_name(&self, name: &str) -> Option<&ComponentMeta> {
         self.by_name.get(name).map(|&id| &self.entries[id as usize])
     }
 
-    /// Запись по плотному индексу ленты.
+    /// Entry by dense lane index.
     pub fn by_lane_id(&self, lane_id: LaneId) -> Option<&ComponentMeta> {
         self.entries.get(lane_id as usize)
     }
 
-    /// Все записи в порядке регистрации.
+    /// All entries in registration order.
     pub fn iter(&self) -> std::slice::Iter<'_, ComponentMeta> {
         self.entries.iter()
     }
 
-    /// Число зарегистрированных типов.
+    /// Number of registered types.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Пуст ли реестр.
+    /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(health.lane_id(), 1);
         assert!(registry.by_lane_id(1).is_some());
 
-        // LaneId — плотная проекция: by_lane_id и поиск совпадают.
+        // LaneId is a dense projection: by_lane_id and lookup coincide.
         assert!(std::ptr::eq(registry.by_lane_id(0).unwrap(), pos));
         assert!(registry.by_name("ghost").is_none());
         assert!(registry.by_id(TypeId::of::<u8>()).is_none());
@@ -426,7 +426,7 @@ mod tests {
 
         meta.register_lane(&mut store);
         assert_eq!(meta.lane_len(&store), 0);
-        // Лента реально создана: типизированный доступ уже возможен.
+        // The lane was actually created: typed access is already possible.
         assert!(store.read_lane::<Position>().is_some());
     }
 
@@ -445,7 +445,7 @@ mod tests {
         assert!(meta.contains(&store, entity));
         assert_eq!(meta.lane_len(&store), 1);
 
-        // Типизированный путь видит то же значение.
+        // The typed path sees the same value.
         let lane = store.read_lane::<Position>().unwrap();
         assert_eq!(lane.get(entity), Some(&Position { x: 1.0, y: 2.0 }));
     }
@@ -457,12 +457,12 @@ mod tests {
         let entity = store.create_entity();
         let meta = registry.by_name("position").unwrap();
 
-        // Бокс другого типа: insert не должен случиться.
+        // Box of a different type: insert must not happen.
         let inserted = meta.insert_any(&mut store, entity, Box::new(Health { hp: 5 }));
         assert!(!inserted);
         assert!(!meta.contains(&store, entity));
         assert_eq!(meta.lane_len(&store), 0);
-        // А лента Health не была тронута чужим insert.
+        // And the Health lane was not touched by the foreign insert.
         let health = registry.by_name("health").unwrap();
         assert_eq!(health.lane_len(&store), 0);
     }
@@ -482,7 +482,7 @@ mod tests {
         );
         assert_eq!(meta.lane_len(&store), 1);
 
-        // Повторный set_json — перезапись без роста ленты.
+        // Repeated set_json — overwrite without growing the lane.
         meta.set_json(&mut store, entity, &json!({"x": 0.0, "y": 7.25}))
             .unwrap();
         assert_eq!(
@@ -499,13 +499,13 @@ mod tests {
         let entity = store.create_entity();
         let meta = registry.by_name("health").unwrap();
 
-        // Нет поля `hp`.
+        // Missing field `hp`.
         let missing = meta.set_json(&mut store, entity, &json!({"mana": 5}));
         assert!(matches!(missing, Err(RegistryError::Json(_))));
-        // Тип поля не сходится.
+        // Field type mismatch.
         let wrong_type = meta.set_json(&mut store, entity, &json!({"hp": "full"}));
         assert!(matches!(wrong_type, Err(RegistryError::Json(_))));
-        // i32 в u32 не лезет.
+        // i32 does not fit into u32.
         let negative = meta.set_json(&mut store, entity, &json!({"hp": -1}));
         assert!(matches!(negative, Err(RegistryError::Json(_))));
 
@@ -519,13 +519,13 @@ mod tests {
         let mut store = SmartStore::new();
         let entity = store.create_entity();
 
-        // Разобранный бокс вставляется и читается обратно.
+        // The parsed box is inserted and read back.
         let boxed = position.parse_json(&json!({"x": 1.0, "y": 2.0})).unwrap();
         assert!(position.insert_any(&mut store, entity, boxed));
         let lane = store.read_lane::<Position>().unwrap();
         assert_eq!(lane.get(entity), Some(&Position { x: 1.0, y: 2.0 }));
 
-        // Схема не сошлась — ошибка до всякой мутации мира.
+        // Schema mismatch — error before any world mutation.
         let bad = position.parse_json(&json!({"x": "left", "y": 0.0}));
         assert!(matches!(bad, Err(RegistryError::Json(_))));
         assert_eq!(position.lane_len(&store), 1);
@@ -568,7 +568,7 @@ mod tests {
         store.destroy_entity(entity);
         assert!(!meta.contains(&store, entity));
 
-        // Свежая сущность с переиспользованным id — пустая.
+        // Fresh entity with a recycled id — empty.
         let recycled = store.create_entity();
         assert_ne!(recycled.generation(), entity.generation());
         assert!(!meta.contains(&store, recycled));
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(pos.lane_len(&store), 1);
         assert_eq!(health.lane_len(&store), 1);
 
-        // Удаление одного типа не трогает другой.
+        // Removing one type does not touch the other.
         health.remove(&mut store, entity);
         assert!(!health.contains(&store, entity));
         assert!(pos.contains(&store, entity));

@@ -16,11 +16,11 @@ bytemuck = { version = "1", features = ["derive"] }
 # runtime (see https://mutants.rs/attrs.html). Must be a regular
 # dependency, not dev, because the annotation sits on non-test code.
 mutants = "0.0.4"
-# F0 (audit 2026-08-22, §10): JSON-операции реестра компонентов —
-# без derive в основном коде (derive подключается тестами ниже).
+# F0 (audit 2026-08-22, §10): component registry JSON operations —
+# without derive in main code (derive is pulled in by tests below).
 serde = "1.0"
 serde_json = "1"
-# Фаза A (аудит §7): механика уровней/рёбер/кеша планировщика.
+# Phase A (audit §7): scheduler level/edge/cache mechanics.
 ornis-schedule = { path = "../schedule" }
 
 [features]

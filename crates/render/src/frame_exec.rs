@@ -1,4 +1,4 @@
-//! Phase 1: wgpu executor for the frame plan (бывший «render graph»).
+//! Phase 1: wgpu executor for the frame plan (formerly "render graph").
 //!
 //! Maps pool slots to real `wgpu::Texture` objects (created lazily, reused
 //! every frame) and resolves every resource's view during pass execution —
@@ -96,7 +96,7 @@ impl FrameExecutor {
     }
 
     /// S5b: parallel command recording. The shared level executor
-    /// (`ornis_schedule::run_levels`, бэклог #19 — исполнитель один с
+    /// (`ornis_schedule::run_levels`, backlog #19 — single executor with
     /// `core::Schedule`) runs levels sequentially and passes inside a
     /// level concurrently (rayon); every pass records into its own
     /// encoder; all buffers are submitted to `queue` in registration
@@ -110,7 +110,7 @@ impl FrameExecutor {
     /// texture accesses) must land in different levels. The texture side
     /// of the contract is now enforced — `PassViews::view_of` panics in
     /// debug on a `ResourceId` outside the pass's declared reads/writes
-    /// (бэклог #6); `queue.write_buffer` calls never flow through
+    /// (backlog #6); `queue.write_buffer` calls never flow through
     /// `view_of`, so this buffer-side invariant stays an author contract,
     /// like the rayon limitation of system enforcement (audit §3.3).
     #[cfg(not(target_arch = "wasm32"))]
@@ -153,7 +153,7 @@ impl FrameExecutor {
     /// threads — the shared level executor (`run_levels`) runs the same
     /// per-pass encoders sequentially in registration order (the layout
     /// holds enabled passes only, so 0..nodes is correct and matches the
-    /// native submission order, бэклог #19), submitting as they go.
+    /// native submission order, backlog #19), submitting as they go.
     /// Signature drops the `Sync` bound so the shared `render()` call
     /// site compiles for both targets.
     #[cfg(target_arch = "wasm32")]
@@ -277,7 +277,7 @@ impl<'a> PassViews<'a> {
     /// Panics if the resource is not alive on this pass, if its external
     /// view is not set, or if its slot texture was never created. Debug
     /// builds additionally panic when `id` sits outside the pass's declared
-    /// reads/writes (бэклог #6, `assert_pass_access_declared`) — the
+    /// reads/writes (backlog #6, `assert_pass_access_declared`) — the
     /// pass-level counterpart of the system TLS enforcement in
     /// `core::Schedule`, covering both the typed and the imperative
     /// frontends at the ground-truth `ResourceId` layer.
@@ -1073,11 +1073,11 @@ mod tests {
 
     #[test]
     fn production_graph_levels() {
-        // Уровни hybrid+bloom (индексы пассов в порядке регистрации):
-        // gbuffer → {lighting, forward} — deferred-слои и forward-путь
-        // НЕ делят ресурсов, первый реальный параллелизм конвейера —
-        // затем цепочка блума и composite. Изначальное ожидание «строгая
-        // цепочка» опровергнуто самим тестом: lighting ∥ forward.
+        // Hybrid+bloom levels (pass indices in registration order):
+        // gbuffer → {lighting, forward} — deferred layers and the forward path
+        // share NO resources, the first real pipeline parallelism —
+        // then the bloom chain and composite. The initial "strict
+        // chain" expectation is refuted by the test itself: lighting ∥ forward.
         let mut g3 = RenderFrame3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
@@ -1107,10 +1107,10 @@ mod tests {
             true,
         );
         let planned = g3.plan_mut().layout().planned_pool_bytes();
-        // Точный бюджет — укладывается.
+        // Exact budget — fits.
         g3.set_budget(Budget::gpu_textures(planned));
         assert!(g3.plan_mut().try_layout().is_ok());
-        // На байт меньше — внятный отказ с конкретикой.
+        // One byte less — clear rejection with details.
         g3.set_budget(Budget::gpu_textures(planned - 1));
         let err = g3.plan_mut().try_layout().unwrap_err();
         assert_eq!(err.required, planned);
@@ -1121,7 +1121,7 @@ mod tests {
             msg.contains("bloom") || msg.contains("hdr"),
             "offenders named: {msg}"
         );
-        // Снятие бюджета возвращает поведение S3.
+        // Removing the budget restores S3 behavior.
         g3.set_budget(Budget::unbounded());
         assert!(g3.plan_mut().try_layout().is_ok());
     }
@@ -1144,10 +1144,10 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "'sneaky' (index 1) accesses resource 'b'")]
     fn pass_views_undeclared_view_panics_in_debug() {
-        // Бэклог #6 / аудит §4.1 — «sneaky pass» по реальному пути выдачи
-        // view: `PassViews::view_of` по ResourceId вне declared
-        // reads/writes паникует с именем пасса и ресурса ещё до обращения
-        // к пулу (пустой пул — device-free ground truth).
+        // Backlog #6 / audit §4.1 — "sneaky pass" on the real view
+        // dispatch path: `PassViews::view_of` for a ResourceId outside declared
+        // reads/writes panics with pass and resource names before touching
+        // the pool (empty pool — device-free ground truth).
         let mut plan = FramePlan::new((64, 64));
         let tex = TextureSpec {
             format: wgpu::TextureFormat::Rgba8Unorm,
@@ -1167,7 +1167,7 @@ mod tests {
             externals: &externals,
             index: 1,
         };
-        // «sneaky» декларировал только read(a); view(b) — вне набора.
+        // "sneaky" declared only read(a); view(b) is out of set.
         let _ = views.view_of(b);
     }
 }
