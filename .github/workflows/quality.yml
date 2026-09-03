@@ -65,13 +65,12 @@ jobs:
       # Supply-chain-tools: same set `cargo xtask quality` expects locally.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-audit,cargo-outdated
+          tool: cargo-deny,cargo-audit,cargo-outdated,rustqual@1.8.2
 
-      # rustqual — structural quality gate (MIT).
-      # Optional-install contract: if this step fails, xtask quality SKIPs the rustqual stage.
-      - name: Install rustqual (optional, structural gate)
-        continue-on-error: true
-        run: cargo install rustqual --locked
+      # Fallback if install-action misses (version bump): keep old path as backup,
+      # but pinned version above is the source of truth — do not use unpinned `cargo install`.
+      - name: Verify rustqual version (pinned)
+        run: rustqual --version
 
       - uses: Swatinem/rust-cache@v2
 

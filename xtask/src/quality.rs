@@ -116,23 +116,185 @@ impl<'a> StageList<'a> {
     fn cargo(&self, args: &[&str]) -> Command {
         cmd(self.root, "cargo", args)
     }
+}
 
-    fn rustqual(&self) -> Command {
+fn rustqual_stage(stages: &mut StageList<'_>) {
+    if !binary_exists("rustqual") {
+        stages.skip(
+            "rustqual",
+            "rustqual not installed — structural gate skipped (cargo install rustqual --locked --version 1.8.2)",
+        );
+        return;
+    }
+    let baseline_path = stages.root.join("baseline.json");
+    if !baseline_path.exists() {
+        // No baseline — run plain rustqual (findings are informational until baseline is created).
         let mut c = Command::new("rustqual");
-        // ponytail: rustqual.toml — единственный source of truth, не дублировать пороги здесь.
-        // Ratchet: --compare baseline.json --fail-on-regression --no-fail — падает только при регрессе,
-        // иначе baseline содержит 14% Score / 1633 findings и обычный check всегда красный.
-        let baseline = self.root.join("baseline.json");
-        if baseline.exists() {
-            c.args([
-                "--compare",
-                "baseline.json",
-                "--fail-on-regression",
-                "--no-fail",
-            ]);
+        c.current_dir(stages.root);
+        stages.run(
+            "rustqual",
+            "rustqual (no baseline.json — run: rustqual --save-baseline baseline.json)",
+            c,
+            false,
+        );
+        return;
+    }
+    // Ratchet mode with own comparator — fixes rustqual 1.8.2 equal→FAIL bug (↓0.0% treated as regression).
+    // We run `rustqual --save-baseline <tmp>` once, print its text output, and compare the JSON ourselves
+    // with epsilon 1e-9. Equal is PASS, only true regression FAILs.
+    stages.n += 1;
+    let (idx, total) = (stages.n, stages.total);
+    let name = "rustqual";
+    let desc = "rustqual (ratchet: baseline.json — own comparator, equal=PASS)";
+    eprintln!();
+    eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
+    let tmp_path = stages.root.join("target/rustqual_cur.json");
+    if let Some(parent) = tmp_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let output = Command::new("rustqual")
+        .args(["--save-baseline", &tmp_path.to_string_lossy()])
+        .current_dir(stages.root)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // rustqual prints findings to stdout; "Baseline saved" to stderr.
+            if ci_annotations() {
+                print!("{}", stdout.replace("::error", "::·error"));
+                eprint!("{}", stderr.replace("::error", "::·error"));
+            } else {
+                print!("{}", stdout);
+                eprint!("{}", stderr);
+            }
+            let cur_str = std::fs::read_to_string(&tmp_path);
+            let base_str = std::fs::read_to_string(&baseline_path);
+            match (cur_str, base_str) {
+                (Ok(cur_s), Ok(base_s)) => {
+                    let cur_v: serde_json::Value =
+                        serde_json::from_str(&cur_s).unwrap_or(serde_json::Value::Null);
+                    let base_v: serde_json::Value =
+                        serde_json::from_str(&base_s).unwrap_or(serde_json::Value::Null);
+                    let cur_q = cur_v
+                        .get("quality_score")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let base_q = base_v
+                        .get("quality_score")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let cur_f = cur_v
+                        .get("total_findings")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let base_f = base_v
+                        .get("total_findings")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let cur_vio = cur_v
+                        .get("violations")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let base_vio = base_v
+                        .get("violations")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let cur_iosp = cur_v
+                        .get("iosp_score")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let base_iosp = base_v
+                        .get("iosp_score")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    const EPS: f64 = 1e-9;
+                    let quality_regressed = cur_q + EPS < base_q;
+                    let findings_regressed = cur_f > base_f;
+                    let violations_regressed = cur_vio > base_vio;
+                    let iosp_regressed = cur_iosp + EPS < base_iosp;
+                    eprintln!();
+                    eprintln!("═══ Baseline Comparison (xtask ratchet) ═══");
+                    eprintln!(
+                        "  Quality: {:.1}% → {:.1}% {}",
+                        base_q * 100.0,
+                        cur_q * 100.0,
+                        if quality_regressed {
+                            format!("(↓ {:.1}%)", (base_q - cur_q) * 100.0)
+                        } else if cur_q > base_q + EPS {
+                            format!("(↑ {:.1}%)", (cur_q - base_q) * 100.0)
+                        } else {
+                            "(unchanged)".to_string()
+                        }
+                    );
+                    eprintln!(
+                        "  Findings:   {base_f} → {cur_f} ({:+})",
+                        cur_f as i64 - base_f as i64
+                    );
+                    eprintln!(
+                        "  Violations: {base_vio} → {cur_vio} ({:+})",
+                        cur_vio as i64 - base_vio as i64
+                    );
+                    eprintln!(
+                        "  IOSP: {:.1}% → {:.1}% {}",
+                        base_iosp * 100.0,
+                        cur_iosp * 100.0,
+                        if iosp_regressed { "↓" } else { "" }
+                    );
+                    let regressed = quality_regressed || findings_regressed || violations_regressed;
+                    if regressed {
+                        let mut reasons = Vec::new();
+                        if quality_regressed {
+                            reasons.push(format!("quality {base_q:.4}→{cur_q:.4}"));
+                        }
+                        if violations_regressed {
+                            reasons.push(format!("violations {base_vio}→{cur_vio}"));
+                        }
+                        if findings_regressed {
+                            reasons.push(format!("findings {base_f}→{cur_f}"));
+                        }
+                        let note = reasons.join(", ");
+                        eprintln!("── {name}: FAIL (ratchet regression: {note}) ──");
+                        if ci_annotations() {
+                            annotate(
+                                format!("quality-{name}"),
+                                &format!("ratchet regression: {note}"),
+                            );
+                        }
+                        stages.results.push(StageResult {
+                            name: name.into(),
+                            status: Status::Fail,
+                            note,
+                        });
+                    } else {
+                        eprintln!("── {name}: PASS (ratchet: equal or improved) ──");
+                        stages.results.push(StageResult {
+                            name: name.into(),
+                            status: Status::Pass,
+                            note: String::new(),
+                        });
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    let note = format!("read baseline/cur json: {e}");
+                    eprintln!("── {name}: FAIL ({note}) ──");
+                    stages.results.push(StageResult {
+                        name: name.into(),
+                        status: Status::Fail,
+                        note,
+                    });
+                }
+            }
         }
-        c.current_dir(self.root);
-        c
+        Err(e) => {
+            let note = format!("spawn: {e}");
+            eprintln!("── {name}: FAIL ({note}) ──");
+            stages.results.push(StageResult {
+                name: name.into(),
+                status: Status::Fail,
+                note,
+            });
+        }
     }
 }
 
@@ -161,21 +323,9 @@ fn level1(stages: &mut StageList<'_>) {
 
     // Structural quality gate — MIT (rustqual).
     // Single source of truth: rustqual.toml (no thresholds duplicated here).
-    // Ratchet mode: --compare baseline.json --fail-on-regression --no-fail — fails only on regression,
-    // new violations are ratcheted via baseline update, not immediate break.
-    if binary_exists("rustqual") {
-        let desc = if stages.root.join("baseline.json").exists() {
-            "rustqual --compare baseline.json --fail-on-regression --no-fail"
-        } else {
-            "rustqual (no baseline.json — run: rustqual --save-baseline baseline.json)"
-        };
-        stages.run("rustqual", desc, stages.rustqual(), false);
-    } else {
-        stages.skip(
-            "rustqual",
-            "rustqual not installed — structural gate skipped (cargo install rustqual --locked)",
-        );
-    }
+    // Ratchet: own comparator (equal=PASS, regression=FAIL) — fixes upstream
+    // --compare --fail-on-regression --no-fail equal→FAIL bug (↓0.0%).
+    rustqual_stage(stages);
 
     // Smoke: `cargo run --features editor-only` должен стартовать HTTP на 3420 и не падать.
     // ponytail: без окна/GPU, 15s таймаут (сборка + старт), poll TcpStream — без curl/timeout deps.

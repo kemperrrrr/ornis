@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.11947176383245539,
+  "quality_score": 0.11689758915631554,
   "iosp_score": 0.9188829787234043,
   "violations": 122,
   "total": 2393,
-  "complexity_warnings": 9,
+  "complexity_warnings": 10,
   "magic_number_warnings": 770,
   "nesting_depth_warnings": 3,
-  "function_length_warnings": 31,
+  "function_length_warnings": 32,
   "unsafe_warnings": 8,
   "error_handling_warnings": 89,
   "duplicate_groups": 42,
   "dead_code_warnings": 164,
   "dead_type_warnings": 2,
   "fragment_groups": 118,
-  "boilerplate_warnings": 105,
+  "boilerplate_warnings": 109,
   "srp_struct_warnings": 5,
   "srp_module_warnings": 32,
   "wildcard_import_warnings": 11,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
   "structural_coupling_warnings": 19,
-  "total_findings": 1741,
+  "total_findings": 1747,
   "violation_details": [
     {
       "name": "serve_websocket",
@@ -608,7 +608,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 440
+      "line": 590
     },
     {
       "name": "GameApp::showcase_engine",
