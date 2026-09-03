@@ -803,7 +803,7 @@ impl WgpuContactSolver {
                 timeout: None,
             })
             .ok();
-        let mapped = readback.slice(..).get_mapped_range();
+        let mapped = readback.slice(..).get_mapped_range().unwrap();
         let raw: &[u8] = &mapped;
         let gpu_entries: &[GpuBatch] = bytemuck::cast_slice(raw);
         for (i, b) in batches.iter_mut().enumerate().take(n) {
@@ -1090,6 +1090,7 @@ mod tests {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: None,
+            apply_limit_buckets: false,
         }))
         .ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.12116867886054372,
-  "iosp_score": 0.918774966711052,
+  "quality_score": 0.11947176383245539,
+  "iosp_score": 0.9188829787234043,
   "violations": 122,
-  "total": 2390,
+  "total": 2393,
   "complexity_warnings": 9,
-  "magic_number_warnings": 771,
+  "magic_number_warnings": 770,
   "nesting_depth_warnings": 3,
-  "function_length_warnings": 29,
+  "function_length_warnings": 31,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 86,
+  "error_handling_warnings": 89,
   "duplicate_groups": 42,
   "dead_code_warnings": 164,
   "dead_type_warnings": 2,
-  "fragment_groups": 120,
-  "boilerplate_warnings": 103,
+  "fragment_groups": 118,
+  "boilerplate_warnings": 105,
   "srp_struct_warnings": 5,
   "srp_module_warnings": 32,
   "wildcard_import_warnings": 11,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 126,
+  "tq_untested_warnings": 128,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
   "structural_coupling_warnings": 19,
-  "total_findings": 1735,
+  "total_findings": 1741,
   "violation_details": [
     {
       "name": "serve_websocket",
@@ -68,12 +68,12 @@
     {
       "name": "build_scene_data",
       "file": "crates/render/examples/frame_plan_probe.rs",
-      "line": 138
+      "line": 139
     },
     {
       "name": "run",
       "file": "crates/render/examples/frame_plan_probe.rs",
-      "line": 403
+      "line": 409
     },
     {
       "name": "build_scene_data",
@@ -608,27 +608,27 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 357
+      "line": 440
     },
     {
       "name": "GameApp::showcase_engine",
       "file": "src/main.rs",
-      "line": 238
+      "line": 240
     },
     {
       "name": "GameApp::process_remote_commands",
       "file": "src/main.rs",
-      "line": 295
+      "line": 297
     },
     {
       "name": "GameApp::window_event",
       "file": "src/main.rs",
-      "line": 517
+      "line": 520
     },
     {
       "name": "GameApp::about_to_wait",
       "file": "src/main.rs",
-      "line": 584
+      "line": 587
     },
     {
       "name": "physics_body_for",
