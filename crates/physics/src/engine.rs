@@ -3096,7 +3096,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // Restitution is one-shot per step, evaluated on the first substep.
             let t0 = Instant::now();
             let mut islands = self.solve_contacts_velocity(&manifolds_buf, s == 0, sub_dt, dt);
-            self.solve_joints_velocity();
+            self.solve_joints_velocity(sub_dt);
             // Continuous pass on the solver-adjusted velocities: clamp fast
             // movers to their first impact and keep them there this substep.
             // Reuse a local clamped buffer (capacity kept across substeps via scratch).
@@ -3221,11 +3221,15 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 local_anchor_b,
                 local_axis_a,
                 local_axis_b,
+                limit,
+                motor,
             } => JointKind::Revolute {
                 local_anchor_a,
                 local_anchor_b,
                 local_axis_a: local_axis_a.normalize_or(Vec3::Z),
                 local_axis_b: local_axis_b.normalize_or(Vec3::Z),
+                limit,
+                motor,
             },
             other => other,
         };
@@ -3240,7 +3244,19 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         }
         self.joint_pairs
             .insert((body_a.min(body_b), body_a.max(body_b)));
-        self.joints.push(Joint::new(body_a, body_b, kind));
+        // Limits/motors measure travel from the assembly pose (Box2D
+        // `m_referenceAngle`): capture the hinge twist before the first step.
+        let reference_angle = match &kind {
+            JointKind::Revolute { local_axis_a, .. } => crate::engine::joints::hinge_twist(
+                self.bodies[body_a].orientation,
+                self.bodies[body_b].orientation,
+                *local_axis_a,
+            ),
+            JointKind::Ball { .. } => 0.0,
+        };
+        let mut joint = Joint::new(body_a, body_b, kind);
+        joint.reference_angle = reference_angle;
+        self.joints.push(joint);
         Some(self.joints.len() - 1)
     }
 
@@ -4365,6 +4381,8 @@ mod tests {
                     local_anchor_b: Vec3::new(0.0, 1.0, 0.0), // arm top at origin
                     local_axis_a: Vec3::Z,
                     local_axis_b: Vec3::Z,
+                    limit: None,
+                    motor: None,
                 },
             )
             .expect("valid joint");
@@ -4387,6 +4405,113 @@ mod tests {
         // Anchor stays coincident.
         let err = joint_anchor_error(&physics, anchor, arm, Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
         assert!(err < 0.05, "hinge anchor drifted: {err}");
+    }
+
+    #[test]
+    fn revolute_limit_blocks_travel_past_bounds() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let arm = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.1, 1.0, 0.1),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                arm,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                    limit: Some(crate::joint::RevoluteLimit {
+                        min: -0.2,
+                        max: 0.2,
+                    }),
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        // Hard kick: a free hinge would swing to ~1.4 rad.
+        physics.get_body_mut(arm).unwrap().velocity = Vec3::new(4.0, 0.0, 0.0);
+        let mut max_travel = 0.0f32;
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+            let a = physics.get_body(anchor).unwrap();
+            let b = physics.get_body(arm).unwrap();
+            let travel = super::joints::hinge_twist(a.orientation, b.orientation, Vec3::Z).abs();
+            max_travel = max_travel.max(travel);
+        }
+        assert!(max_travel > 0.05, "arm never moved: {max_travel}");
+        assert!(max_travel < 0.45, "limit failed to hold: {max_travel}");
+    }
+
+    #[test]
+    fn revolute_motor_spins_up_to_target_speed() {
+        // Zero gravity: only the motor drives the hinge.
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let arm = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.1, 1.0, 0.1),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                arm,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                    limit: None,
+                    motor: Some(crate::joint::RevoluteMotor {
+                        target_speed: 3.0,
+                        max_torque: 50.0,
+                    }),
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let a = physics.get_body(anchor).unwrap();
+        let b = physics.get_body(arm).unwrap();
+        let w = (b.angular_velocity - a.angular_velocity).dot(Vec3::Z);
+        assert!((w - 3.0).abs() < 0.3, "motor missed target speed: {w}");
+        // A starved torque budget must NOT reach the target (clamp binds).
+        let mut weak = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let anchor = weak.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let arm = weak.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.1, 1.0, 0.1),
+            1.0,
+        ));
+        weak.add_joint(
+            anchor,
+            arm,
+            JointKind::Revolute {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+                local_axis_a: Vec3::Z,
+                local_axis_b: Vec3::Z,
+                limit: None,
+                motor: Some(crate::joint::RevoluteMotor {
+                    target_speed: 3.0,
+                    max_torque: 0.05,
+                }),
+            },
+        )
+        .expect("valid joint");
+        for _ in 0..120 {
+            weak.step(1.0 / 60.0);
+        }
+        let a = weak.get_body(anchor).unwrap();
+        let b = weak.get_body(arm).unwrap();
+        let w = (b.angular_velocity - a.angular_velocity).dot(Vec3::Z);
+        assert!(w < 1.5, "torque clamp did not bind: {w}");
     }
 
     // ---- T13 regression: intermediate-value soundness of the 5 solver ----

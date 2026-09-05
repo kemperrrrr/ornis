@@ -2,10 +2,22 @@
 //! stages of the ball/revolute joint constraints. Split out of `engine.rs`
 //! to keep each type's method count within the structural gate's thresholds.
 
+use std::f32::consts::{PI, TAU};
+
 use glam::Quat;
 use glam::Vec3;
 
 use super::*;
+use crate::joint::{RevoluteLimit, RevoluteMotor};
+
+/// Twist of B relative to A about A's hinge axis (rad, wrapped to
+/// [-PI, PI]). Decomposes `qa^-1 * qb` into twist about the axis plus
+/// swing; limits, motors and their tests measure travel with this.
+pub(super) fn hinge_twist(qa: Quat, qb: Quat, axis_a: Vec3) -> f32 {
+    let q = qa.conjugate() * qb;
+    let t = 2.0 * q.xyz().dot(axis_a).atan2(q.w);
+    (t + PI).rem_euclid(TAU) - PI
+}
 
 /// World hinge frame for a revolute joint: normalized world axis plus its
 /// fixed tangent pair (the plane the angular correction lives in).
@@ -27,7 +39,8 @@ impl BuiltinPhysicsEngine {
     /// chains; true per-iteration interleaving is left for a later refactor.
     /// Velocity stage of the joint solver: warm start from the accumulated
     /// impulses, then velocity iterations. Runs before positions move.
-    pub(super) fn solve_joints_velocity(&mut self) {
+    /// `sub_dt` bounds the motor impulse (`max_torque * sub_dt`).
+    pub(super) fn solve_joints_velocity(&mut self, sub_dt: f32) {
         if self.joints.is_empty() {
             return;
         }
@@ -62,6 +75,17 @@ impl BuiltinPhysicsEngine {
                 joint_linear_velocity_iteration(bodies, joint, a, b, ra, rb);
                 if let Some((axis_a, _)) = revolute_axes {
                     joint_angular_velocity_iteration(bodies, joint, a, b, axis_a);
+                }
+            }
+            // --- Limit/motor drive on the free hinge axis (revolute only).
+            // Motor first, then the limit wins past the bounds (Box2D order);
+            // the motor pauses while a limit is violated.
+            if let Some((axis_a, _)) = revolute_axes {
+                let (limit, motor) = joint.drive();
+                if limit.is_some() || motor.is_some() {
+                    joint_drive_velocity_iteration(
+                        bodies, joint, a, b, axis_a, limit, motor, sub_dt,
+                    );
                 }
             }
         }
@@ -195,6 +219,70 @@ fn joint_angular_velocity_iteration(
         let dl = -wrel / k_eff;
         joint.acc_ang[k] += dl;
         apply_angular_impulse(bodies, a, b, t * dl);
+    }
+}
+
+/// Hinge-axis drive: velocity motor toward its target speed, then the
+/// one-sided travel limit (Box2D order — the limit wins past the bounds).
+/// The motor pauses while a limit is violated and resumes inside the window.
+///
+/// Limits are velocity-only (Box2D parity): no position correction, the
+/// accumulated one-sided impulse plus a small slop holds the bound. Motor
+/// needs no accumulator: the torque-clamped target solve converges in one
+/// iteration.
+#[allow(clippy::too_many_arguments)]
+fn joint_drive_velocity_iteration(
+    bodies: &mut [RigidBody],
+    joint: &mut Joint,
+    a: usize,
+    b: usize,
+    axis_a: Vec3,
+    limit: Option<RevoluteLimit>,
+    motor: Option<RevoluteMotor>,
+    sub_dt: f32,
+) {
+    const ANGULAR_SLOP: f32 = 0.005; // ~0.3 deg of bound penetration
+    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
+    let angle =
+        hinge_twist(bodies[a].orientation, bodies[b].orientation, axis_a) - joint.reference_angle;
+    let angle = (angle + PI).rem_euclid(TAU) - PI;
+    let (ba, bb) = (&bodies[a], &bodies[b]);
+    let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, wa).dot(wa)
+        + mul_inv_inertia(bb.inertia, bb.orientation, wa).dot(wa);
+    if k_eff < 1e-9 {
+        return;
+    }
+    let w = (bb.angular_velocity - ba.angular_velocity).dot(wa);
+    let violated = match limit {
+        Some(lim) if angle <= lim.min + ANGULAR_SLOP => Some(true),
+        Some(lim) if angle >= lim.max - ANGULAR_SLOP => Some(false),
+        _ => None,
+    };
+    if violated.is_none() {
+        joint.acc_limit = 0.0;
+        if let Some(m) = motor
+            && sub_dt > 0.0
+            && m.max_torque > 0.0
+        {
+            let dl =
+                ((m.target_speed - w) / k_eff).clamp(-m.max_torque * sub_dt, m.max_torque * sub_dt);
+            apply_angular_impulse(bodies, a, b, wa * dl);
+        }
+        return;
+    }
+    // One-sided block: lower forbids w < 0 (accumulator >= 0), upper
+    // forbids w > 0 (accumulator <= 0). The clamp self-corrects on side
+    // flips by dumping the stale impulse in one step.
+    let lower = violated.unwrap_or(true);
+    let dl = -w / k_eff;
+    if lower {
+        let next = (joint.acc_limit + dl).max(0.0);
+        apply_angular_impulse(bodies, a, b, wa * (next - joint.acc_limit));
+        joint.acc_limit = next;
+    } else {
+        let next = (joint.acc_limit + dl).min(0.0);
+        apply_angular_impulse(bodies, a, b, wa * (next - joint.acc_limit));
+        joint.acc_limit = next;
     }
 }
 
