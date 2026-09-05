@@ -97,8 +97,12 @@
   через polling (~1/с), без fallback на `scene.ron` (единый `Engine/World/Schedule` — `InputState::apply_snapshot` + `POST /api/input`/WS), имеет orbit-камеру; каждый
   snapshot восстанавливается в общий для native/WASM library-level
   `RenderWorld`, проходит `Engine::run_frame`/`RenderExtract` и записывается
-  через `RenderFrame3D`/`FramePlan`. Ввода из браузера обратно в движок и
-  WebSocket-синхронизации пока нет.
+  через `RenderFrame3D`/`FramePlan`. Браузер отправляет WASD/стрелки и
+  pointer/wheel-снапшоты идут по WebSocket `/api/events` (`InputSocket`,
+  тот же сокет, что серверный event-push), с fallback на `POST /api/input`
+  (throttled ~15 Hz + flush релиза, `InputPoster`); сервер применяет их
+  в authoritative `InputState` и двигает gameplay (`player_input` →
+  `physics_push`, тест `browser_wasd_input_drives_player_through_gameplay`).
 - **Component Packing**: `#[derive(Pack)]` генерирует wrapper-ленты и
   `Pack::for_each_packed`; wrapper-ленты совместимы с `for_each_entity!`,
   интеграция покрыта `crates/core/tests/pack_integration.rs` — ✅.
@@ -178,9 +182,13 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
 
 ### d. Фаза 7 — Asset Pipeline (браузерная интерпретация)
 
-Hot reload сцен/мешей/`.mtlx`: сервер следит за `assets/` и `editor/`
-(`notify`), фронтенд перезагружает сцену через REST/WebSocket.
-Build-time генерация бинарных слепков для Sparse Sets — позже.
+Hot reload сцены ✅: editor-world следит за mtime файла сцены
+(`editor/scene.ron`, fallback `assets/scene.ron`, без `notify`-зависимости —
+цикл и так просыпается каждые 16 мс) и перезагружает мир на внешнее
+изменение (`SceneFileWatch` + `reload_watched_scene`, битый файл мир не
+трогает); фронтенд подхватывает новую версию через обычные версионные
+снапшоты `/api/scene`. Остаток: hot reload мешей/`.mtlx` и build-time
+бинарные слепки Sparse Sets — позже.
 
 ### e. Качество (продолжение)
 

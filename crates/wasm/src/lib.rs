@@ -207,6 +207,195 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
     on_wheel.forget();
 }
 
+/// Maps a browser `KeyboardEvent.code` to the platform-neutral key codes
+/// read by the server gameplay consumer ([`ornis_core::gameplay`]).
+/// Each key sets its winit-physical alias and its ASCII alias so both the
+/// native and the browser fallback paths in `player_input` fire.
+pub fn game_key_codes(code: &str) -> Option<&'static [u32]> {
+    match code {
+        // W/A/S/D: winit physical + ASCII.
+        "KeyW" => Some(&[17, 87]),
+        "KeyA" => Some(&[30, 65]),
+        "KeyS" => Some(&[31, 83]),
+        "KeyD" => Some(&[32, 68]),
+        // Arrows: legacy DOM key codes shared by both paths.
+        "ArrowUp" => Some(&[38]),
+        "ArrowDown" => Some(&[40]),
+        "ArrowLeft" => Some(&[37]),
+        "ArrowRight" => Some(&[39]),
+        _ => None,
+    }
+}
+
+/// Builds the shared backend-neutral input and attaches all DOM listeners:
+/// orbit pointer/wheel on the canvas, gameplay keys on the window. DOM
+/// events first enter [`InputState`]; the camera and future browser systems
+/// share one input path.
+fn setup_input(canvas: &web_sys::HtmlCanvasElement) -> Rc<RefCell<InputState>> {
+    let input = Rc::new(RefCell::new(InputState::new()));
+    attach_orbit_controls(canvas, &input);
+    if let Some(window) = web_sys::window() {
+        attach_gameplay_keys(&window, &input);
+    }
+    input
+}
+
+/// Attaches WASD/arrow key listeners to the window. Pressed keys land in
+/// the same backend-neutral [`InputState`] as the orbit pointer input, so
+/// the per-frame `/api/input` snapshot carries gameplay intent to the
+/// authoritative server world. The closures are leaked intentionally —
+/// they live as long as the page.
+fn attach_gameplay_keys(window: &web_sys::Window, input: &Rc<RefCell<InputState>>) {
+    let on_keydown: Closure<dyn FnMut(web_sys::KeyboardEvent)> = {
+        let input = input.clone();
+        Closure::new(move |e: web_sys::KeyboardEvent| {
+            if let Some(codes) = game_key_codes(e.code().as_str()) {
+                e.prevent_default();
+                let mut input = input.borrow_mut();
+                for &code in codes {
+                    input.set_key(code, true);
+                }
+            }
+        })
+    };
+    let on_keyup: Closure<dyn FnMut(web_sys::KeyboardEvent)> = {
+        let input = input.clone();
+        Closure::new(move |e: web_sys::KeyboardEvent| {
+            if let Some(codes) = game_key_codes(e.code().as_str()) {
+                let mut input = input.borrow_mut();
+                for &code in codes {
+                    input.set_key(code, false);
+                }
+            }
+        })
+    };
+
+    for (kind, cb) in [("keydown", &on_keydown), ("keyup", &on_keyup)] {
+        if let Err(e) = window.add_event_listener_with_callback(kind, cb.as_ref().unchecked_ref()) {
+            console::warn_1(&format!("[ornis-wasm] failed to attach {kind}: {e:?}").into());
+        }
+    }
+
+    on_keydown.forget();
+    on_keyup.forget();
+}
+
+/// Serializes an [`InputState`] into the `POST /api/input` JSON shape
+/// accepted by `parse_browser_input` (server replaces its authoritative
+/// snapshot wholesale, deltas included).
+pub fn input_snapshot_json(input: &InputState) -> String {
+    serde_json::json!({
+        "pressed_keys": input.pressed_keys(),
+        "pressed_mouse_buttons": input.pressed_mouse_buttons(),
+        "pointer_position": input.pointer_position(),
+        "pointer_delta": input.pointer_delta(),
+        "wheel_delta": input.wheel_delta(),
+    })
+    .to_string()
+}
+
+/// Builds the `/api/events` WebSocket URL from the page location, mirroring
+/// the editor's event-stream client (`editor/editor.js`): same origin,
+/// `ws:`/`wss:` by page scheme.
+pub fn ws_events_url(page_protocol: &str, host: &str) -> String {
+    let scheme = if page_protocol == "https:" {
+        "wss:"
+    } else {
+        "ws:"
+    };
+    format!("{scheme}//{host}/api/events")
+}
+
+/// Send-only `/api/events` socket for gameplay input snapshots.
+///
+/// The server already forwards client WS text frames as `BrowserInput`
+/// (`poll_one_frame`); this is the browser half. When the socket is
+/// missing or not open the poster falls back to `POST /api/input`, so
+/// older proxies keep working.
+pub struct InputSocket {
+    socket: Option<web_sys::WebSocket>,
+}
+
+impl InputSocket {
+    /// Opens the socket; stays empty without a window or when the
+    /// connection fails — the caller then uses the POST fallback.
+    pub fn connect() -> Self {
+        let socket = web_sys::window().and_then(|window| {
+            let location = window.location();
+            let host = location.host().ok()?;
+            let protocol = location.protocol().unwrap_or_else(|_| "http:".into());
+            web_sys::WebSocket::new(&ws_events_url(&protocol, &host)).ok()
+        });
+        Self { socket }
+    }
+
+    /// Sends one snapshot; returns `false` when the socket is missing or
+    /// not open so the caller can fall back to POST.
+    pub fn send(&self, body: &str) -> bool {
+        match &self.socket {
+            Some(ws) if ws.ready_state() == web_sys::WebSocket::OPEN => {
+                ws.send_with_str(body).is_ok()
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Fire-and-forget POST of one input snapshot; failures (server down,
+/// static file open) are ignored — the next dirty frame retries.
+fn post_input_snapshot(body: String) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_body(&JsValue::from_str(&body));
+    let Ok(request) = web_sys::Request::new_with_str_and_init("/api/input", &init) else {
+        return;
+    };
+    let promise = window.fetch_with_request(&request);
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    });
+}
+
+/// Throttled dirty-driven `/api/input` poster state.
+///
+/// The server replaces its snapshot wholesale, so a dropped frame is
+/// harmless — but a key *release* must still arrive, hence the poster
+/// sends once more after the last held key/button clears.
+#[derive(Debug, Default)]
+pub struct InputPoster {
+    last_send_frame: u64,
+    last_had_held: bool,
+}
+
+/// Minimum frames between input posts (~15 Hz at 60 fps).
+pub const INPUT_POST_INTERVAL_FRAMES: u64 = 4;
+
+impl InputPoster {
+    /// Creates an idle poster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the current frame should POST. Pure decision for tests;
+    /// call [`InputPoster::mark_sent`] after posting.
+    pub fn should_post(&self, input: &InputState, frame: u64) -> bool {
+        let held = !input.pressed_keys().is_empty() || !input.pressed_mouse_buttons().is_empty();
+        let transient = input.pointer_delta() != [0.0, 0.0] || input.wheel_delta() != 0.0;
+        (held || transient || self.last_had_held)
+            && frame.saturating_sub(self.last_send_frame) >= INPUT_POST_INTERVAL_FRAMES
+    }
+
+    /// Records a post at `frame` with the held state that was sent.
+    pub fn mark_sent(&mut self, input: &InputState, frame: u64) {
+        self.last_send_frame = frame;
+        self.last_had_held =
+            !input.pressed_keys().is_empty() || !input.pressed_mouse_buttons().is_empty();
+    }
+}
+
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
 fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
     let window = web_sys::window().ok_or("no window")?;
@@ -393,6 +582,8 @@ struct FrameState<'a> {
     mesh_params: (u32, u32),
     instance_count: u32,
     input: Rc<RefCell<InputState>>,
+    poster: InputPoster,
+    socket: InputSocket,
 }
 
 impl<'a> FrameState<'a> {
@@ -446,6 +637,21 @@ impl<'a> FrameState<'a> {
             )
             .into(),
         );
+    }
+
+    /// Forwards dirty gameplay input to the authoritative server world.
+    ///
+    /// Snapshots are taken *before* [`FrameState::sync_input`] clears the
+    /// frame transients, so pointer/wheel deltas arrive intact.
+    fn maybe_post_input(&mut self, frame_count: u64) {
+        let should = self.poster.should_post(&self.input.borrow(), frame_count);
+        if should {
+            let body = input_snapshot_json(&self.input.borrow());
+            if !self.socket.send(&body) {
+                post_input_snapshot(body);
+            }
+            self.poster.mark_sent(&self.input.borrow(), frame_count);
+        }
     }
 
     /// Move platform input into the browser-side Engine resource. The
@@ -575,6 +781,7 @@ struct LoopHandles {
     fetch_in_flight: Rc<Cell<bool>>,
     live_mode: bool,
     input: Rc<RefCell<InputState>>,
+    socket: InputSocket,
 }
 
 /// Browser entry point: initializes WebGPU on the canvas with `canvas_id`,
@@ -615,12 +822,10 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         false,
     );
 
-    // Client-side orbit camera, initialized from the scene camera and
-    // registered as a once-per-frame Engine system. DOM events first enter
-    // the backend-neutral InputState; the camera and future browser systems
-    // share one input path.
-    let input = Rc::new(RefCell::new(InputState::new()));
-    attach_orbit_controls(&canvas, &input);
+    // Client-side input: orbit pointer/wheel plus gameplay keys share one
+    // backend-neutral InputState; the camera and future browser systems
+    // read it through the Engine schedule.
+    let input = setup_input(&canvas);
 
     // Live-update plumbing (single-threaded): the render loop spawns a
     // fetch every LIVE_POLL_INTERVAL_FRAMES; the fetch task deposits the
@@ -633,6 +838,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         fetch_in_flight: Rc::new(Cell::new(false)),
         live_mode,
         input,
+        socket: InputSocket::connect(),
     };
 
     spawn_render_loop(
@@ -672,6 +878,7 @@ fn spawn_render_loop(
         fetch_in_flight,
         live_mode,
         input,
+        socket,
     } = handles;
 
     let mut frame = FrameState {
@@ -686,6 +893,8 @@ fn spawn_render_loop(
         mesh_params: gpu_scene.mesh_params,
         instance_count: gpu_scene.extracted.instances.len() as u32,
         input,
+        poster: InputPoster::new(),
+        socket,
     };
 
     let f: FrameCallback = Rc::new(RefCell::new(None));
@@ -697,6 +906,7 @@ fn spawn_render_loop(
 
     *f_clone.borrow_mut() = Some(Closure::new(move || {
         frame.handle_resize(&canvas);
+        frame.maybe_post_input(frame_count);
         frame.sync_input();
         frame.render_world.run_frame(1.0 / 60.0);
 
@@ -802,5 +1012,63 @@ mod integration_tests {
         assert!(!accept_live_scene_version(5, Some(7), 7));
         assert!(accept_live_scene_version(5, Some(7), 8));
         assert!(accept_live_scene_version(0, None, 1));
+    }
+
+    #[test]
+    fn ws_events_url_mirrors_editor_scheme() {
+        assert_eq!(
+            ws_events_url("http:", "127.0.0.1:3420"),
+            "ws://127.0.0.1:3420/api/events"
+        );
+        assert_eq!(
+            ws_events_url("https:", "example.com"),
+            "wss://example.com/api/events"
+        );
+    }
+
+    #[test]
+    fn game_keys_map_to_server_gameplay_codes() {
+        // Aliases match `player_input` (winit physical + ASCII + arrows).
+        assert_eq!(game_key_codes("KeyW"), Some(&[17, 87][..]));
+        assert_eq!(game_key_codes("KeyA"), Some(&[30, 65][..]));
+        assert_eq!(game_key_codes("KeyS"), Some(&[31, 83][..]));
+        assert_eq!(game_key_codes("KeyD"), Some(&[32, 68][..]));
+        assert_eq!(game_key_codes("ArrowUp"), Some(&[38][..]));
+        assert_eq!(game_key_codes("KeyQ"), None);
+    }
+
+    #[test]
+    fn input_snapshot_matches_server_parser_shape() {
+        let mut input = InputState::new();
+        input.set_key(87, true);
+        input.set_pointer_position([10.0, 20.0]);
+        input.add_wheel_delta(1.5);
+        let v: serde_json::Value =
+            serde_json::from_str(&input_snapshot_json(&input)).expect("snapshot is JSON");
+        assert_eq!(v["pressed_keys"], serde_json::json!([87]));
+        assert_eq!(v["pressed_mouse_buttons"], serde_json::json!([]));
+        assert_eq!(v["pointer_position"], serde_json::json!([10.0, 20.0]));
+        assert_eq!(v["pointer_delta"], serde_json::json!([10.0, 20.0]));
+        assert_eq!(v["wheel_delta"], serde_json::json!(1.5));
+    }
+
+    #[test]
+    fn input_poster_throttles_but_flushes_releases() {
+        let mut poster = InputPoster::new();
+        let idle = InputState::new();
+        assert!(!poster.should_post(&idle, 100));
+
+        let mut held = InputState::new();
+        held.set_key(87, true);
+        assert!(!poster.should_post(&held, 2));
+        assert!(poster.should_post(&held, INPUT_POST_INTERVAL_FRAMES));
+        poster.mark_sent(&held, INPUT_POST_INTERVAL_FRAMES);
+        assert!(!poster.should_post(&held, INPUT_POST_INTERVAL_FRAMES + 1));
+
+        // Release must still arrive once even though nothing is dirty.
+        let released = InputState::new();
+        assert!(poster.should_post(&released, INPUT_POST_INTERVAL_FRAMES * 2));
+        poster.mark_sent(&released, INPUT_POST_INTERVAL_FRAMES * 2);
+        assert!(!poster.should_post(&released, INPUT_POST_INTERVAL_FRAMES * 3 - 1));
     }
 }

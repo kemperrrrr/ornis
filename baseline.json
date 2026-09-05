@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.12652696952816622,
-  "iosp_score": 0.9195552648790059,
+  "quality_score": 0.13406433337723012,
+  "iosp_score": 0.9201817001946788,
   "violations": 123,
-  "total": 2428,
+  "total": 2454,
   "complexity_warnings": 9,
   "magic_number_warnings": 769,
   "nesting_depth_warnings": 2,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 128,
+  "tq_untested_warnings": 132,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
   "structural_coupling_warnings": 19,
-  "total_findings": 1755,
+  "total_findings": 1759,
   "violation_details": [
     {
       "name": "serve_websocket",

@@ -63,7 +63,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use glam::Vec3;
@@ -958,6 +958,63 @@ fn startup_scene_ron() -> Option<String> {
         .find_map(|rel| fs::read_to_string(manifest.join(rel)).ok())
 }
 
+/// Watches the scene file the world was loaded from for external edits
+/// (phase 7, minimal): the editor-world loop already wakes every 16 ms,
+/// so a cheap mtime poll needs no `notify` dependency. Frontend clients
+/// pick the reload up through the normal versioned `/api/scene` snapshots.
+struct SceneFileWatch {
+    path: PathBuf,
+    last_mtime: Option<SystemTime>,
+}
+
+impl SceneFileWatch {
+    /// Starts watching `path`, baselining the current mtime so the
+    /// already-loaded content does not trigger an instant reload.
+    fn new(path: PathBuf) -> Self {
+        Self {
+            last_mtime: fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            path,
+        }
+    }
+
+    /// Returns `true` once when the file changed since the last poll: a
+    /// newer mtime, or a file that appeared after being missing.
+    fn poll(&mut self) -> bool {
+        let current = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        if current != self.last_mtime {
+            self.last_mtime = current;
+            return current.is_some();
+        }
+        false
+    }
+}
+
+/// Resolves the scene file the world loads from: `editor/scene.ron`
+/// preferred, `assets/scene.ron` fallback — mirrors `startup_scene_ron`.
+fn watched_scene_path() -> Option<PathBuf> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    ["editor/scene.ron", "assets/scene.ron"]
+        .iter()
+        .map(|rel| manifest.join(rel))
+        .find(|path| path.is_file())
+}
+
+/// Reloads the watched file into the world and publishes fresh snapshots.
+/// A missing or malformed file keeps the live world untouched.
+fn reload_watched_scene(world: &mut EditorWorld, path: &Path, ev_tx: &Sender<GameEvent>) {
+    match world.load_scene_file(path) {
+        Ok(count) => {
+            publish_state(world, ev_tx);
+            eprintln!(
+                "ornis: hot-reloaded {} ({} entities)",
+                path.display(),
+                count
+            );
+        }
+        Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
+    }
+}
+
 /// Spawn the `editor-world` thread: owns the world, loads the startup scene,
 /// executes commands from `cmd_rx`, and advances the fixed-rate domain frame
 /// host between commands until the HTTP server side drops its sender.
@@ -977,10 +1034,16 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
             // Publish the initial state so the HTTP caches are live
             // before the first command arrives.
             publish_state(&world, &ev_tx);
+            let mut scene_watch = watched_scene_path().map(SceneFileWatch::new);
             loop {
                 match cmd_rx.recv_timeout(Duration::from_millis(16)) {
                     Ok(cmd) => world.handle_command(&cmd, &ev_tx),
                     Err(RecvTimeoutError::Timeout) => {
+                        if let Some(watch) = scene_watch.as_mut()
+                            && watch.poll()
+                        {
+                            reload_watched_scene(&mut world, &watch.path.clone(), &ev_tx);
+                        }
                         if world.tick(1.0 / 60.0) {
                             publish_state(&world, &ev_tx);
                         }
@@ -1113,6 +1176,95 @@ mod tests {
         assert!(world.tick(1.0 / 60.0));
 
         assert!(world.to_scene().entities[0].transform.translation[1] < 0.0);
+    }
+
+    #[test]
+    fn browser_wasd_input_drives_player_through_gameplay() {
+        use editor_backend::ipc::BrowserInput;
+        use ornis_core::{Player, Position};
+
+        let (ev_tx, _ev_rx) = unbounded();
+        let mut world = EditorWorld::new();
+        let entity = world.spawn(None);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, Player);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, Position(Vec3::ZERO));
+
+        // Same channel as `POST /api/input` and the WS input frames.
+        handle_command(
+            &mut world,
+            &UiCommand::Input {
+                input: BrowserInput {
+                    pressed_keys: vec![87],
+                    ..BrowserInput::default()
+                },
+            },
+            &ev_tx,
+        );
+        world.tick(1.0 / 60.0);
+        // The fixed schedule runs before the variable one: tick 1 writes
+        // gameplay intent (`player_input`), tick 2 integrates it
+        // (`physics_push`).
+        world.tick(1.0 / 60.0);
+
+        let z = world
+            .world()
+            .store()
+            .expect("world store")
+            .read_lane::<Position>()
+            .expect("Position lane")
+            .get(entity)
+            .expect("player position")
+            .0
+            .z;
+        assert!(z < 0.0, "W must move the player forward (-z)");
+    }
+
+    fn temp_scene_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ornis-watch-{}-{}", std::process::id(), tag));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("scene.ron")
+    }
+
+    #[test]
+    fn scene_watch_fires_once_on_external_change() {
+        let path = temp_scene_path("once");
+        // Missing file: no fire, but appearance fires exactly once.
+        let mut watch = SceneFileWatch::new(path.clone());
+        assert!(!watch.poll());
+        fs::write(&path, "v: 1").expect("write temp scene");
+        assert!(watch.poll());
+        assert!(!watch.poll());
+        // A watch created over existing content is baselined: no fire.
+        let mut watch = SceneFileWatch::new(path.clone());
+        assert!(!watch.poll());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hot_reload_replaces_world_and_survives_garbage() {
+        let (ev_tx, _ev_rx) = unbounded();
+        let mut world = EditorWorld::new();
+        let ron =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
+                .expect("editor/scene.ron readable");
+        let path = temp_scene_path("reload");
+        fs::write(&path, &ron).expect("write temp scene");
+
+        reload_watched_scene(&mut world, &path, &ev_tx);
+        assert_eq!(world.entity_count(), 5);
+
+        fs::write(&path, "not ron {{{").expect("write garbage");
+        reload_watched_scene(&mut world, &path, &ev_tx);
+        assert_eq!(world.entity_count(), 5);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

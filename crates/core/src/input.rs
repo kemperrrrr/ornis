@@ -93,6 +93,20 @@ impl InputState {
         self.wheel_delta
     }
 
+    /// Currently held key codes, sorted ascending.
+    ///
+    /// Snapshots for the browser→server input channel (`POST /api/input`,
+    /// WebSocket) are built from this; hot ECS loops keep using
+    /// [`InputState::key_down`].
+    pub fn pressed_keys(&self) -> Vec<u32> {
+        self.pressed_keys.iter().copied().collect()
+    }
+
+    /// Currently held mouse button codes, sorted ascending.
+    pub fn pressed_mouse_buttons(&self) -> Vec<u8> {
+        self.pressed_mouse_buttons.iter().copied().collect()
+    }
+
     /// Clears pointer and wheel deltas after a frame has consumed them.
     /// Held keys/buttons and the last absolute pointer position persist.
     pub fn clear_frame_transients(&mut self) {
@@ -190,6 +204,8 @@ mod tests {
         assert_eq!(input.pointer_position(), [13.0, 18.0]);
         assert_eq!(input.pointer_delta(), [3.0, -2.0]);
         assert_eq!(input.wheel_delta(), 2.5);
+        assert_eq!(input.pressed_keys(), vec![17]);
+        assert_eq!(input.pressed_mouse_buttons(), vec![1]);
 
         input.clear_frame_transients();
         assert_eq!(input.pointer_delta(), [0.0, 0.0]);

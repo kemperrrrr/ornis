@@ -182,7 +182,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 - **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅; `ScriptEngine`-трейт ✅ (`crates/core/src/script.rs`, `2026-09-05`: `load/call/batch_call/hot_reload/unload` + `NoopScriptEngine`); Batch API по хендлам и hot reload — ✅ как методы трейта; первый адаптер Rhai ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine`, JSON-кодек args/return, 6 тестов; deny/advisories/outdated чисто), прочие языки — ❌; **Mojo — один из официально поддерживаемых адаптеров (решение 2026-09-05, до появления `wasm32`/`WASI` в Mojo — `modular#19`/`#5367` открыты — единственным не становится)** (рамка 2026-08-22: плагинный
   шов + адаптеры вместо лесенки языков — см. PLAN.md и
   [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
-- **Asset Pipeline (фаза 7)**: build-time сканирование ассетов, hot reload — ❌
+- **Asset Pipeline (фаза 7)**: build-time сканирование ассетов — ❌; hot reload сцены ✅ (`SceneFileWatch`, mtime `editor/scene.ron`, без `notify`)
 - **NUMA-aware allocation** — ❌
 - **HVM2/Bend как compute-бэкенд** — ❌ (идея на будущее)
 - **Мультиплатформенные тесты/miri (фаза 11)** — ❓ не верифицировано
@@ -248,8 +248,10 @@ consumers и расширить orchestration на остальные домен
 ### Фаза 7 — Asset Pipeline
 
 Build-time сканирование `/assets` (парсинг CSS/SVG/HTML/MTLX, генерация
-Rust-структур и бинарных слепков для Sparse Sets) + runtime hot reload
-через `notify`.
+Rust-структур и бинарных слепков для Sparse Sets) — позже. Runtime hot
+reload сцены уже есть: editor-world следит за mtime `editor/scene.ron`
+(`SceneFileWatch`, без `notify`) и перезагружает мир; фронтенд подхватывает
+новую версию через `/api/scene`.
 
 ## Ключевые архитектурные идеи
 
