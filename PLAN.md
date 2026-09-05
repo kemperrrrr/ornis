@@ -165,7 +165,7 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
    Set — указатели совместимы только с in-process FFI и ломают
    WASM-сценарий (sandbox).
    ✅ **2026-09-05**: реализован как `ScriptEngine::batch_call` с `BatchHandle` (см. `script.rs`).
-4. **Первый адаптер — Rhai** → hot reload → прочие языки (Rune,
+4. **Первый адаптер — Rhai** ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine` + JSON-кодек, AST на модуль, hot reload держит старый AST при ошибке; rhai 1.26 + `sync`-фича для `Send+Sync`) → hot reload → прочие языки (Rune,
    Python/rustpython, WASM-компоненты) отдельными адаптерами после
    проверки шва минимум двумя реализациями (правило трёх); WASM —
    исследовательский трек (языко-нейтральность + sandbox).

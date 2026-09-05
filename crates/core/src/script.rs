@@ -70,10 +70,7 @@ pub trait ScriptEngine: Send + Sync {
     ///
     /// Handles are preferred over raw pointers into `SparseSet` cells —
     /// pointers are only valid in-process and break the WASM sandbox.
-    fn batch_call(
-        &mut self,
-        calls: &[(ScriptHandle, String, Vec<u8>)],
-    ) -> BatchResult;
+    fn batch_call(&mut self, calls: &[(ScriptHandle, String, Vec<u8>)]) -> BatchResult;
 
     /// Hot-reload a previously loaded module in place.
     ///
@@ -115,10 +112,7 @@ impl ScriptEngine for NoopScriptEngine {
         }
     }
 
-    fn batch_call(
-        &mut self,
-        calls: &[(ScriptHandle, String, Vec<u8>)],
-    ) -> BatchResult {
+    fn batch_call(&mut self, calls: &[(ScriptHandle, String, Vec<u8>)]) -> BatchResult {
         let outcomes = calls
             .iter()
             .enumerate()

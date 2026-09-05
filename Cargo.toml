@@ -12,6 +12,7 @@ members = [
     "crates/wasm",
     "crates/app",
     "crates/editor-backend",
+    "crates/rhai",
     "xtask",
 ]
 

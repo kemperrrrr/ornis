@@ -179,7 +179,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 
 ### Не начато
 
-- **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅; `ScriptEngine`-трейт ✅ (`crates/core/src/script.rs`, `2026-09-05`: `load/call/batch_call/hot_reload/unload` + `NoopScriptEngine`); Batch API по хендлам и hot reload — ✅ как методы трейта; первый адаптер Rhai и прочие языки — ❌; **Mojo — один из официально поддерживаемых адаптеров (решение 2026-09-05, до появления `wasm32`/`WASI` в Mojo — `modular#19`/`#5367` открыты — единственным не становится)** (рамка 2026-08-22: плагинный
+- **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅; `ScriptEngine`-трейт ✅ (`crates/core/src/script.rs`, `2026-09-05`: `load/call/batch_call/hot_reload/unload` + `NoopScriptEngine`); Batch API по хендлам и hot reload — ✅ как методы трейта; первый адаптер Rhai ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine`, JSON-кодек args/return, 6 тестов; deny/advisories/outdated чисто), прочие языки — ❌; **Mojo — один из официально поддерживаемых адаптеров (решение 2026-09-05, до появления `wasm32`/`WASI` в Mojo — `modular#19`/`#5367` открыты — единственным не становится)** (рамка 2026-08-22: плагинный
   шов + адаптеры вместо лесенки языков — см. PLAN.md и
   [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов, hot reload — ❌
@@ -240,7 +240,7 @@ consumers и расширить orchestration на остальные домен
 
 Реестр компонентов (F0) → `ScriptEngine`-трейт (плагинный, как
 `PhysicsEngine`/`RenderBackend`) → Batch API по хендлам → первый
-адаптер Rhai → hot reload → прочие языки отдельными адаптерами
+адаптер Rhai ✅ → hot reload → прочие языки отдельными адаптерами
 (Rune/Python/WASM-компоненты) по правилу трёх. Подробно: фаза 6 в
 [`PLAN.md`](PLAN.md), решения F0/D1/D2 в
 [audit-2026-08-22](docs/quality/audit-2026-08-22.md).
