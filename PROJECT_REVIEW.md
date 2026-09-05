@@ -46,7 +46,7 @@
    swept-volume TOI — ✅ (conservative advancement, 2026-09-01). **2026-09-02:**
    **п1 incremental broadphase ✅** (`body_cells`/`prev_meta`, dirty-set, heuristic >50% → full rebuild),
    **п2 narrow cache ✅** (`NarrowCacheEntry`, первый substep, fast-path >0.5 м/с, HashMap) + **SAT cache ✅ (отдельный PR, sequential-only, 16-шард `Vec<Mutex>` без регресса на parallel)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`, `try_lock`-only, large parallel bypass),
-   **box↔capsule ✅** как честный discrete контакт (оба narrowphase-пути через `distance::shape_distance`/`box_vs_capsule`, speculative `margin`, analytic TOI `cast_shape` conservative advancement). **Полный 8→2 на больших parallel сценах** (`physics_bodies 10k` 14k пар, `par_iter>256`) — **следующий шаг**: lock-free/DashMap + расширенный EPS, сейчас SAT выключен для parallel чтобы не регрессить 9→15→89 мс.
+   **box↔capsule ✅** как честный discrete контакт (оба narrowphase-пути через `distance::shape_distance`/`box_vs_capsule`, speculative `margin`, analytic TOI `cast_shape` conservative advancement). **Полный 8→2 на больших parallel сценах** (`physics_bodies 10k` 14k пар, `par_iter>256`) — ✅ **закрыт 2026-09-05**: lock-free `DashMap`-кэш общий для parallel+sequential, переиспользуется только ось SAT + расширенный EPS (~1 мм/~0.26°); замер `perf_probe`: narrow many_islands 1.98→1.62 мс, hetero 1.87→1.63 мс, islands_grid 0.77→0.68 мс, tiled 10k steady-state ~14–15 мс/кадр, регрессий нет.
 
 3. **Укрепить GPU-путь**
 

@@ -8,8 +8,9 @@
 //! contact solving behind the `gpu` feature.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 use std::time::Instant;
+
+use dashmap::DashMap;
 
 use glam::{Quat, Vec3};
 use rayon::prelude::*;
@@ -1203,7 +1204,7 @@ fn detect_collisions_into(
     out: &mut Vec<Manifold>,
     body_required: Option<&[u32]>,
     cur_substep: u32,
-    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+    sat_cache: Option<&SatCache>,
 ) {
     /// Base speculative margin (m): also the AABB inflation used by the
     /// broadphase, so pairs within it are guaranteed to reach narrow phase.
@@ -1450,8 +1451,8 @@ fn detect_collisions_into(
                 })
             }
             (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
-                // SAT cache: only sequential path (active <=256) to avoid rayon contention;
-                // parallel large batches skip SAT cache entirely (narrow_cache already handles them).
+                // SAT cache is lock-free (DashMap): shared by both paths; hits
+                // reuse the axis only, contacts rebuild from live geometry.
                 let use_sat = sat_cache.is_some()
                     && cur_substep == 0
                     && (a.velocity - b.velocity).length() <= 0.5
@@ -1641,10 +1642,13 @@ fn sat_cache_hit(
     rot_b: Quat,
     margin: f32,
 ) -> bool {
-    const POS_EPS_SQ: f32 = 1e-8;
-    const HALF_EPS_SQ: f32 = 1e-8;
-    const ROT_DOT_MIN: f32 = 0.999_999;
-    const MARGIN_EPS: f32 = 1e-4;
+    // Widened tolerances: a hit reuses only the separating axis, while
+    // `box_manifold_cached` rebuilds contact points from live geometry, so
+    // ~1 mm / ~0.26 deg of pose drift cannot inject stale positions.
+    const POS_EPS_SQ: f32 = 1e-6;
+    const HALF_EPS_SQ: f32 = 1e-6;
+    const ROT_DOT_MIN: f32 = 0.999_99;
+    const MARGIN_EPS: f32 = 5e-4;
     if (entry.margin - margin).abs() > MARGIN_EPS {
         return false;
     }
@@ -1670,13 +1674,6 @@ fn sat_cache_hit(
 }
 
 #[inline]
-fn sat_shard(key: (usize, usize), shards: usize) -> usize {
-    // Cheap hash: splitmix-like, shards is power of two (16).
-    let h = key.0.wrapping_mul(0x9e3779b9) ^ key.1.wrapping_mul(0x85ebca6b);
-    h % shards
-}
-
-#[inline]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 #[allow(clippy::collapsible_if)]
@@ -1689,17 +1686,14 @@ fn obb_sat_cached(
     rot_b: Quat,
     margin: f32,
     key: Option<(usize, usize)>,
-    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+    sat_cache: Option<&SatCache>,
     slow_only: bool,
 ) -> Option<(Vec3, f32)> {
     if slow_only {
         if let (Some(k), Some(cache)) = (key, sat_cache) {
-            let shard = sat_shard(k, cache.len());
-            if let Ok(guard) = cache[shard].try_lock() {
-                if let Some(entry) = guard.get(&k) {
-                    if sat_cache_hit(entry, pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin) {
-                        return entry.result;
-                    }
+            if let Some(entry) = cache.get(&k) {
+                if sat_cache_hit(&entry, pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin) {
+                    return entry.result;
                 }
             }
         }
@@ -1707,22 +1701,19 @@ fn obb_sat_cached(
     let res = obb_sat(pos_a, half_a, rot_a, pos_b, half_b, rot_b, margin);
     if slow_only {
         if let (Some(k), Some(cache)) = (key, sat_cache) {
-            let shard = sat_shard(k, cache.len());
-            if let Ok(mut guard) = cache[shard].try_lock() {
-                guard.insert(
-                    k,
-                    SatCacheEntry {
-                        pos_a,
-                        half_a,
-                        rot_a,
-                        pos_b,
-                        half_b,
-                        rot_b,
-                        margin,
-                        result: res,
-                    },
-                );
-            }
+            cache.insert(
+                k,
+                SatCacheEntry {
+                    pos_a,
+                    half_a,
+                    rot_a,
+                    pos_b,
+                    half_b,
+                    rot_b,
+                    margin,
+                    result: res,
+                },
+            );
         }
     }
     res
@@ -1741,7 +1732,7 @@ fn box_manifold_cached(
     rot_b: Quat,
     margin: f32,
     key: Option<(usize, usize)>,
-    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+    sat_cache: Option<&SatCache>,
     slow_only: bool,
 ) -> Option<Manifold> {
     let (n, _pen) = obb_sat_cached(
@@ -1823,7 +1814,7 @@ fn detect_collisions_into_with_cache(
     body_required: Option<&[u32]>,
     cur_substep: u32,
     cache: &mut HashMap<(usize, usize), NarrowCacheEntry>,
-    sat_cache: Option<&[Mutex<HashMap<(usize, usize), SatCacheEntry>>]>,
+    sat_cache: Option<&SatCache>,
 ) {
     // Only cache the first substep: later substeps are filtered to fast bodies,
     // hit rate is near zero and the HashMap overhead dominates.
@@ -1844,11 +1835,7 @@ fn detect_collisions_into_with_cache(
     // Evict stale entries where bodies were removed.
     cache.retain(|(a, b), _| *a < bodies.len() && *b < bodies.len());
     if let Some(sc) = sat_cache {
-        for shard in sc {
-            if let Ok(mut guard) = shard.try_lock() {
-                guard.retain(|(a, b), _| *a < bodies.len() && *b < bodies.len());
-            }
-        }
+        sc.retain(|(a, b), _| *a < bodies.len() && *b < bodies.len());
     }
     if active.is_empty() {
         return;
@@ -2070,6 +2057,12 @@ struct SatCacheEntry {
     result: Option<(Vec3, f32)>,
 }
 
+/// Lock-free SAT axis cache: sorted body pair -> last separating axis.
+/// `DashMap` shards internally, so the rayon narrowphase shares it without
+/// `try_lock` misses or a parallel bypass. Hits reuse the axis only;
+/// `box_manifold_cached` rebuilds contacts from current geometry.
+type SatCache = DashMap<(usize, usize), SatCacheEntry>;
+
 #[allow(missing_docs)]
 pub struct BuiltinPhysicsEngine {
     bodies: Vec<RigidBody>,
@@ -2122,7 +2115,7 @@ pub struct BuiltinPhysicsEngine {
     #[cfg(feature = "gpu")]
     gpu_solver: Option<WgpuContactSolver>,
     narrow_cache: HashMap<(usize, usize), NarrowCacheEntry>,
-    sat_cache: Vec<Mutex<HashMap<(usize, usize), SatCacheEntry>>>,
+    sat_cache: SatCache,
 }
 
 impl BuiltinPhysicsEngine {
@@ -2155,7 +2148,7 @@ impl BuiltinPhysicsEngine {
             scratch_clamped: Vec::new(),
             scratch_parent: Vec::new(),
             narrow_cache: HashMap::new(),
-            sat_cache: (0..16).map(|_| Mutex::new(HashMap::new())).collect(),
+            sat_cache: DashMap::new(),
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
@@ -3423,6 +3416,58 @@ mod tests {
         // respects substeps cap — still returns scaled within base
         physics.set_substeps(1);
         assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 8), 8);
+    }
+
+    #[test]
+    fn sat_cache_is_shared_by_parallel_narrowphase() {
+        // 299 overlapping slow box pairs force the rayon path (>256) and the
+        // SAT-eligible branch (near-zero speeds, substep 0). The lock-free
+        // cache must fill on the first pass and replay identically.
+        let mut bodies = Vec::new();
+        for i in 0..300 {
+            bodies.push(RigidBody::new_box(
+                Vec3::new(i as f32 * 0.9, 0.0, 0.0),
+                Vec3::splat(0.5),
+                1.0,
+            ));
+        }
+        let pairs: Vec<(usize, usize)> = (0..299).map(|i| (i, i + 1)).collect();
+        let asleep = vec![false; bodies.len()];
+        let cache = SatCache::new();
+        let mut first: Vec<Manifold> = Vec::new();
+        detect_collisions_into(
+            &bodies,
+            &pairs,
+            &asleep,
+            1.0 / 240.0,
+            &mut first,
+            None,
+            0,
+            Some(&cache),
+        );
+        assert_eq!(
+            cache.len(),
+            pairs.len(),
+            "every slow pair seeds the SAT cache"
+        );
+        assert!(!first.is_empty());
+        let mut second: Vec<Manifold> = Vec::new();
+        detect_collisions_into(
+            &bodies,
+            &pairs,
+            &asleep,
+            1.0 / 240.0,
+            &mut second,
+            None,
+            0,
+            Some(&cache),
+        );
+        assert_eq!(second.len(), first.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!((a.body_a, a.body_b), (b.body_a, b.body_b));
+            assert!((a.normal - b.normal).length() < 1e-6);
+            assert_eq!(a.point_count, b.point_count);
+        }
     }
 
     #[test]

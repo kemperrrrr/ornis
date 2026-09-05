@@ -319,7 +319,7 @@ runtime без отдельной extract-фазы — будущая цель, 
 
 ### B2. Физика (`crates/physics`) — план работ
 
-> **Статус п1/п2/контакты на 2026-09-03:** п1 incremental broadphase **✅ готов** (`UniformGrid::body_cells`/`prev_meta`, dirty-set, retained clean-clean, honest `BroadPhaseStats`, heuristic >50% → full rebuild); п2 narrow cache **✅ готов** (`NarrowCacheEntry`, `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с, HashMap) + SAT cache **✅ готов (16-шард `Vec<Mutex>` try_lock-only, parallel+sequential, 8→2 без регресса 9→89 мс избежан)** (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`); **box↔capsule ✅** + fully analytic TOI ✅ (conservative advancement). **Полный 8→2 на больших parallel (14k пар) — закрыт try_lock-only; DashMap — опционально;**
+> **Статус п1/п2/контакты на 2026-09-03:** п1 incremental broadphase **✅ готов** (`UniformGrid::body_cells`/`prev_meta`, dirty-set, retained clean-clean, honest `BroadPhaseStats`, heuristic >50% → full rebuild); п2 narrow cache **✅ готов** (`NarrowCacheEntry`, `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с, HashMap) + SAT cache **✅ готов, lock-free ✅ 2026-09-05** (общий `DashMap` для parallel+sequential, axis-only reuse + расширенный EPS ~1 мм/~0.26°; `perf_probe`: narrow −12…−18% на parallel-сценах, без регресса) (`SatCacheEntry`, `obb_sat_cached`/`box_manifold_cached`); **box↔capsule ✅** + fully analytic TOI ✅ (conservative advancement).
 
 > Архитектура сверена с реальными исходниками **Box3D** (`github.com/erincatto/box3d`,
 > soltimeer 3D-преемник Box2D, Catto, июнь 2026) и **Jolt** (`github.com/jrouwe/JoltPhysics`):
