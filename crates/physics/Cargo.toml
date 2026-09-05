@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 glam = "0.33"
 rayon = "1.12"
+dashmap = "6"
 ornis-macros = { path = "../macros" }
 wgpu = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }

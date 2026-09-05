@@ -28,6 +28,8 @@ pub mod pipeline;
 mod prefetch;
 mod registry;
 pub mod schedule;
+/// Scripting plugin seam (Phase 6).
+pub mod script;
 mod smart_store;
 mod world;
 
