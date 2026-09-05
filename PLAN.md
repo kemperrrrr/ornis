@@ -157,10 +157,14 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
 2. **`ScriptEngine`-трейт** — третий плагинный трейт рядом с
    `PhysicsEngine` и `RenderBackend`: ядро знает только трейт
    (load/call/batch/hot reload), языки — адаптеры.
+   ✅ **2026-09-05**: реализован в `crates/core/src/script.rs`
+   (`ScriptEngine` + `ScriptHandle`/`BatchHandle`/`NoopScriptEngine`;
+   `load`/`call`/`batch_call`/`hot_reload`/`unload`, тест `noop_load_call_reload`).
 3. **Batch API по хендлам** (`engine.batch_add(...)` — один вызов
    вместо 100k): хендлы вместо прямых указателей на ячейки Sparse
    Set — указатели совместимы только с in-process FFI и ломают
    WASM-сценарий (sandbox).
+   ✅ **2026-09-05**: реализован как `ScriptEngine::batch_call` с `BatchHandle` (см. `script.rs`).
 4. **Первый адаптер — Rhai** → hot reload → прочие языки (Rune,
    Python/rustpython, WASM-компоненты) отдельными адаптерами после
    проверки шва минимум двумя реализациями (правило трёх); WASM —

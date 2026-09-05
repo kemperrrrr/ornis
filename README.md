@@ -179,8 +179,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 
 ### Не начато
 
-- **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅; `ScriptEngine`-трейт,
-  Rhai-адаптер, Batch API и hot reload — ❌ (рамка 2026-08-22: плагинный
+- **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅; `ScriptEngine`-трейт ✅ (`crates/core/src/script.rs`, `2026-09-05`: `load/call/batch_call/hot_reload/unload` + `NoopScriptEngine`); Batch API по хендлам и hot reload — ✅ как методы трейта, Rhai-адаптер и прочие языки — ❌ (рамка 2026-08-22: плагинный
   шов + адаптеры вместо лесенки языков — см. PLAN.md и
   [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов, hot reload — ❌
