@@ -13,6 +13,7 @@ members = [
     "crates/app",
     "crates/editor-backend",
     "crates/rhai",
+    "crates/rune",
     "xtask",
 ]
 
