@@ -14,6 +14,8 @@ pub mod frame_exec;
 pub mod frame_passes;
 /// Pure immediate-mode render graph layout (lifetimes, pooling, budgets).
 pub mod frame_plan;
+/// GPU resources as ECS singletons for the unified scheduler (S7 design).
+pub mod gpu_resources;
 /// GPU mesh representation and primitive generation.
 pub mod mesh;
 /// Backend-neutral rendering trait plus its factory.
