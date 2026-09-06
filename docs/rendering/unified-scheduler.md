@@ -618,17 +618,12 @@ debug-only по умолчанию). Тесты:
 `capture_outside_schedule_run_is_noop`. Фаза B аудита с этим закрыта
 целиком: ленты (#5) ✅, пассы (#6) ✅, rayon (#7) ✅.
 
-## S7 — GPU upload как система (2026-09-06, native)
+## S7 — GPU как системы (2026-09-06, native, шаг 1+2)
 
-`GpuDevice`/`GpuQueue`/`GpuSurfaceState` + `GpuFrameState{Renderer3D, RenderFrame3D, Mesh}` как ECS-ресурсы
-(`crates/render/src/gpu_resources.rs`): `install_gpu_resources` вставляет их в `World` и добавляет `RenderSubmit`
-(`reads Mutex<RenderExtracted>/Mutex<OrbitCamera>/GpuDevice/GpuQueue/GpuSurfaceState, writes Mutex<GpuFrameState>`).
-Тело системы: пересоздаёт `Mesh` по `mesh_params`, считает `view_proj` из `OrbitCamera + GpuSurfaceState.size`,
-`set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
+`GpuDevice`/`GpuQueue`/`GpuSurface`/`GpuSurfaceState` + `GpuFrameState{Renderer3D, RenderFrame3D, Mesh}` как ECS-ресурсы
+(`crates/render/src/gpu_resources.rs`): `install_gpu_resources(device, queue, surface, surface_state, frame_state)` вставляет их в `World` и добавляет `RenderSubmit` + `RenderPresent`.
 
-Интеграция native: `GameApp::initialize` клонирует `Device/Queue` в ресурсы, `GameContext` больше не хранит
-`Renderer3D/FramePlan/Mesh` отдельно; `GameApp::render_frame` → `render_world.run_frame` (в `Engine::schedule` уже
-`RenderExtract → OrbitCamera → RenderSubmit` на едином `bitset_level_plan`, уровень после extraction — RaW по
-`Mutex<RenderExtracted>`) + `surface.get_current_texture → frame_plan.render → queue.submit/present` вне системы
-(шаг 1). `Resized` синхронит `GpuSurfaceState.size` и `GpuFrameState{renderer.resize, frame_plan.set_surface_size}`.
-Шаг 2 перенесёт `Surface` acquire в `System` (`Mutex<Surface>`). `cargo check/clippy/test 99/142` чисто.
+- `RenderSubmit` (`reads Mutex<RenderExtracted>/Mutex<OrbitCamera>/GpuDevice/GpuQueue/GpuSurfaceState, writes Mutex<GpuFrameState>`): пересоздаёт `Mesh` по `mesh_params`, считает `view_proj` из `OrbitCamera + GpuSurfaceState.size`, `set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
+- `RenderPresent` (`reads GpuDevice/GpuQueue/GpuSurface/GpuSurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`): `surface.get_current_texture → create_view → frame_plan.render → queue.submit/present` (основание — `RenderContext` из `render_backend.rs`). `Outdated`/`Lost` — реконфигурирует `Surface` на месте; `Occluded`/`Timeout`/`Validation` — пропускает кадр; `Suboptimal` как `Success`.
+
+Интеграция native: `GameApp::initialize` клонирует `Device/Queue` и отдаёт `Surface` в ресурсы, `GameContext` больше не хранит `Renderer3D/FramePlan/Mesh/Surface/SurfaceConfig` отдельно; `GameApp::render_frame` → только `render_world.run_frame` (в `Engine::schedule` уже `RenderExtract → OrbitCamera → RenderSubmit → RenderPresent` на едином `bitset_level_plan`, уровни `Extract → Submit → Present`: RaW по `Mutex<RenderExtracted>` + WaW по `Mutex<GpuFrameState>`). `Resized` реконфигурирует `GpuSurface` (`Mutex<Surface>.configure`) по `GpuDevice` + обновлённому `GpuSurfaceState` и синхронит `GpuFrameState{renderer.resize, frame_plan.set_surface_size}`. `cargo check/clippy` чисто, `cargo test -p ornis-render --lib` 99 + `ornis-core` 142 зелёные.

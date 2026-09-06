@@ -85,8 +85,8 @@ mod native {
 
     pub use ornis_render::scene::Scene;
     pub use ornis_render::{
-        OrbitCamera, RenderContext, RenderFrame3D, RenderWorld, Renderer3D, Technique,
-        create_sphere, install_orbit_camera,
+        OrbitCamera, RenderFrame3D, RenderWorld, Renderer3D, Technique, create_sphere,
+        install_orbit_camera,
     };
 }
 
@@ -102,10 +102,6 @@ struct GameApp {
 #[cfg(not(feature = "editor-only"))]
 struct GameContext {
     window: winit::window::Window,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
     render_world: RenderWorld,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
@@ -217,7 +213,7 @@ impl GameApp {
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let (mut render_world, entity_count) = Self::showcase_engine();
-        // S7: GPU состояние — ресурс Engine, RenderSubmit делает upload в schedule.
+        // S7: GPU состояние — ресурс Engine, RenderSubmit/RenderPresent в schedule.
         {
             use ornis_render::gpu_resources::{
                 GpuFrameState, GpuSurfaceState, install_gpu_resources,
@@ -226,6 +222,7 @@ impl GameApp {
                 render_world.engine_mut(),
                 device.clone(),
                 queue.clone(),
+                surface,
                 GpuSurfaceState {
                     size: (surface_config.width, surface_config.height),
                     format: surface_format,
@@ -241,10 +238,6 @@ impl GameApp {
 
         Ok(GameContext {
             window,
-            device,
-            queue,
-            surface,
-            surface_config,
             render_world,
             remote_cmd_rx,
             remote_ev_tx,
@@ -416,71 +409,11 @@ impl GameApp {
     }
 
     fn render_frame(ctx: &mut GameContext) {
-        // S7: upload (camera/materials/instances/mesh) — в Engine::schedule как
-        // RenderSubmit система, после RenderExtract и OrbitCamera. Зависимость
-        // выводится по Mutex<RenderExtracted> (RaW), порядок — уровень после них.
+        // S7-шаг 2: весь GPU-кадр (upload + acquire → record → submit → present)
+        // — в Engine::schedule как RenderSubmit/RenderPresent. Здесь только
+        // run_frame (fixed + variable schedules); Present система сама делает
+        // surface.get_current_texture и frame_plan.render.
         ctx.render_world.run_frame(1.0 / 60.0);
-        let extracted = ctx.render_world.extracted();
-
-        // Поверхностный acquire + FramePlan dispatch остаются императивом на шаге 1
-        // (Surface вне ECS), но используют Renderer/FramePlan/Mesh из GpuFrameState
-        // ресурса, куда их уже записал RenderSubmit.
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ornis frame"),
-            });
-
-        let frame = match ctx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                ctx.surface.configure(&ctx.device, &ctx.surface_config);
-                return;
-            }
-            err => {
-                if !matches!(err, wgpu::CurrentSurfaceTexture::Occluded) {
-                    eprintln!("surface error: {err:?}");
-                }
-                return;
-            }
-        };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Блокируем GpuFrameState только на время записи команд — upload уже
-        // сделан в schedule.
-        let instance_count = extracted.instances.len() as u32;
-        let context = RenderContext {
-            device: &ctx.device,
-            queue: &ctx.queue,
-            encoder: &mut encoder,
-            target: &frame_view,
-        };
-
-        {
-            let mut fs = ctx
-                .render_world
-                .engine()
-                .world()
-                .resources()
-                .get::<std::sync::Mutex<ornis_render::gpu_resources::GpuFrameState>>()
-                .expect("gpu frame state installed")
-                .lock()
-                .expect("gpu frame state lock");
-            // renderer/mesh + frame_plan заимствуются одновременно: &mut frame_plan
-            // + &renderer/&mesh из одного &mut fs — borrow checker не пропускает
-            // напрямую, поэтому через raw pointers (безопасно: разные поля).
-            let renderer = &fs.renderer as *const Renderer3D;
-            let mesh = &fs.mesh as *const ornis_render::Mesh;
-            let frame_plan = &mut fs.frame_plan as *mut RenderFrame3D;
-            unsafe {
-                (*frame_plan).render(context, &*renderer, &*mesh, instance_count);
-            }
-        }
-
-        ctx.queue.submit(Some(encoder.finish()));
-        ctx.queue.present(frame);
     }
 }
 
@@ -533,33 +466,73 @@ impl ApplicationHandler for GameApp {
                 Self::render_frame(ctx);
             }
             WindowEvent::Resized(size) => {
-                ctx.surface_config.width = size.width.max(1);
-                ctx.surface_config.height = size.height.max(1);
-                ctx.surface.configure(&ctx.device, &ctx.surface_config);
+                let (w, h) = (size.width.max(1), size.height.max(1));
+                // Синхронизируем ECS ресурсы с новым размером — реконфигурируем
+                // Surface (в ресурсе) и обновляем GpuFrameState.
+                let device = ctx
+                    .render_world
+                    .engine()
+                    .world()
+                    .resources()
+                    .get::<ornis_render::gpu_resources::GpuDevice>()
+                    .map(|d| d.0.clone());
+                if let Some(state) = ctx
+                    .render_world
+                    .engine_mut()
+                    .world_mut()
+                    .resources_mut()
+                    .get_mut::<ornis_render::gpu_resources::GpuSurfaceState>()
                 {
-                    // Синхронизируем ECS ресурсы с новым размером (источник правды — surface_config).
-                    if let Some(state) = ctx
-                        .render_world
-                        .engine_mut()
-                        .world_mut()
-                        .resources_mut()
-                        .get_mut::<ornis_render::gpu_resources::GpuSurfaceState>()
-                    {
-                        state.size = (size.width.max(1), size.height.max(1));
-                    }
-                    if let Some(fs) = ctx
+                    state.size = (w, h);
+                }
+                if let (Some(device), Some(surface)) = (
+                    device,
+                    ctx.render_world
+                        .engine()
+                        .world()
+                        .resources()
+                        .get::<ornis_render::gpu_resources::GpuSurface>(),
+                ) {
+                    let guard = surface.0.lock().expect("gpu surface lock");
+                    // Формат берём из обновлённого GpuSurfaceState.
+                    let format = ctx
                         .render_world
                         .engine()
                         .world()
                         .resources()
-                        .get::<std::sync::Mutex<ornis_render::gpu_resources::GpuFrameState>>()
-                    {
-                        let mut fs = fs.lock().expect("gpu frame state lock");
-                        fs.renderer
-                            .resize(&ctx.device, size.width.max(1), size.height.max(1));
-                        fs.frame_plan
-                            .set_surface_size(size.width.max(1), size.height.max(1));
-                    }
+                        .get::<ornis_render::gpu_resources::GpuSurfaceState>()
+                        .map(|s| s.format)
+                        .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
+                    guard.configure(
+                        &device,
+                        &wgpu::SurfaceConfiguration {
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            format,
+                            width: w,
+                            height: h,
+                            present_mode: wgpu::PresentMode::AutoNoVsync,
+                            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                            view_formats: vec![],
+                            desired_maximum_frame_latency: 2,
+                            color_space: wgpu::SurfaceColorSpace::Auto,
+                        },
+                    );
+                }
+                if let (Some(fs), Some(dev)) = (
+                    ctx.render_world
+                        .engine()
+                        .world()
+                        .resources()
+                        .get::<std::sync::Mutex<ornis_render::gpu_resources::GpuFrameState>>(),
+                    ctx.render_world
+                        .engine()
+                        .world()
+                        .resources()
+                        .get::<ornis_render::gpu_resources::GpuDevice>(),
+                ) {
+                    let mut fs = fs.lock().expect("gpu frame state lock");
+                    fs.renderer.resize(&dev.0, w, h);
+                    fs.frame_plan.set_surface_size(w, h);
                 }
                 ctx.window.request_redraw();
             }
