@@ -5,13 +5,17 @@
 //! Hot-path ECS loops stay typed; this trait is for tooling, FFI and
 //! editor integration, mirroring `PhysicsEngine` and `RenderBackend`.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::{Engine, Resources, System, SystemAccess, Time};
+use crate::{
+    ComponentMeta, ComponentRegistry, Engine, Entity, Resources, SmartStore, System, SystemAccess,
+    Time,
+};
 
 /// Opaque handle to a script instance (one script file / module).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -337,6 +341,186 @@ impl ScriptPlugin {
     }
 }
 
+/// Application report of one [`ScriptHost::apply_outcomes`] pass.
+#[derive(Debug, Clone, Default)]
+pub struct ApplyReport {
+    /// Per-entry results for entries that had a stored outcome, in
+    /// entry-index order. Entries that did not tick since the previous
+    /// apply are absent.
+    pub entries: Vec<AppliedEntry>,
+}
+
+impl ApplyReport {
+    /// Total patches written across all entries.
+    pub fn applied(&self) -> usize {
+        self.entries.iter().map(|entry| entry.applied).sum()
+    }
+
+    /// Total patch errors across all entries.
+    pub fn error_count(&self) -> usize {
+        self.entries.iter().map(|entry| entry.errors.len()).sum()
+    }
+}
+
+/// Per-entry slice of an [`ApplyReport`].
+#[derive(Debug, Clone)]
+pub struct AppliedEntry {
+    /// Tick entry index (see [`ScriptHost::add_tick`]).
+    pub index: usize,
+    /// Patches written. Zero with empty `errors` means "nothing to do"
+    /// (no `"set"` key); zero with errors means "rejected".
+    pub applied: usize,
+    /// One message per rejected patch (or a tick/outcome failure).
+    pub errors: Vec<String>,
+}
+
+impl ScriptHost {
+    /// Applies drained tick outcomes to the world through `registry`.
+    ///
+    /// Each outcome must be a JSON object; its optional `"set"` array
+    /// holds patches of shape `{"entity": {"id": N, "generation": M},
+    /// "component": "<name>", "value": {...}}`. Outcomes without a
+    /// `"set"` key are skipped — not every tick function writes the
+    /// world. Validation is two-phase per entry: every patch parses and
+    /// every entity proves alive before the first write, so one bad
+    /// patch rejects its whole entry while other entries still apply.
+    /// Outcomes apply at most once: they are drained, and
+    /// [`ScriptHost::outcome`] no longer reports them afterwards.
+    ///
+    /// Call between frames with exclusive store access (for example
+    /// right after [`Engine::run_frame`]); never from inside a system.
+    pub fn apply_outcomes(
+        &self,
+        store: &mut SmartStore,
+        registry: &ComponentRegistry,
+    ) -> ApplyReport {
+        let drained = self
+            .outcomes
+            .lock()
+            .map(|mut outcomes| std::mem::take(&mut *outcomes));
+        let Ok(drained) = drained else {
+            return ApplyReport::default();
+        };
+        let mut entries: Vec<_> = drained
+            .into_iter()
+            .map(|(index, outcome)| apply_one(store, registry, index, outcome))
+            .collect();
+        entries.sort_by_key(|entry| entry.index);
+        ApplyReport { entries }
+    }
+}
+
+/// Applies one entry's outcome: parses the `"set"` array, validates
+/// every patch, then writes all patches or nothing.
+fn apply_one(
+    store: &mut SmartStore,
+    registry: &ComponentRegistry,
+    index: usize,
+    outcome: Result<Vec<u8>, String>,
+) -> AppliedEntry {
+    let bytes = match outcome {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return AppliedEntry {
+                index,
+                applied: 0,
+                errors: vec![format!("tick failed: {message}")],
+            };
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return AppliedEntry {
+                index,
+                applied: 0,
+                errors: vec![format!("outcome is not JSON: {error}")],
+            };
+        }
+    };
+    let patches = match value.get("set") {
+        None => {
+            return AppliedEntry {
+                index,
+                applied: 0,
+                errors: Vec::new(),
+            };
+        }
+        Some(serde_json::Value::Array(items)) => items,
+        Some(_) => {
+            return AppliedEntry {
+                index,
+                applied: 0,
+                errors: vec!["`set` must be an array".to_owned()],
+            };
+        }
+    };
+    // Phase 1: validate everything, writing nothing.
+    let mut errors = Vec::new();
+    let mut pending = Vec::new();
+    for (n, patch) in patches.iter().enumerate() {
+        match parse_patch(store, registry, patch) {
+            Ok(valid) => pending.push(valid),
+            Err(message) => errors.push(format!("patch {n}: {message}")),
+        }
+    }
+    if !errors.is_empty() {
+        return AppliedEntry {
+            index,
+            applied: 0,
+            errors,
+        };
+    }
+    // Phase 2: all valid — write.
+    let mut applied = 0;
+    for (entity, meta, boxed) in pending {
+        if meta.insert_any(store, entity, boxed) {
+            applied += 1;
+        } else {
+            errors.push(format!(
+                "patch for `{}` failed to insert (internal type mismatch)",
+                meta.name()
+            ));
+        }
+    }
+    AppliedEntry {
+        index,
+        applied,
+        errors,
+    }
+}
+
+/// Validates one patch object without touching the world: entity shape,
+/// known component, liveness, and JSON schema (parsed into an untyped
+/// box ready for [`ComponentMeta::insert_any`]).
+fn parse_patch<'meta>(
+    store: &SmartStore,
+    registry: &'meta ComponentRegistry,
+    patch: &serde_json::Value,
+) -> Result<(Entity, &'meta ComponentMeta, Box<dyn Any>), String> {
+    let id = patch["entity"]["id"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or("bad `entity.id` (need a u32)")?;
+    let generation = patch["entity"]["generation"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or("bad `entity.generation` (need a u32)")?;
+    let entity = Entity::new_with_gen(id, generation);
+    let component = patch["component"]
+        .as_str()
+        .ok_or("bad `component` (need a name)")?;
+    let meta = registry
+        .by_name(component)
+        .ok_or_else(|| format!("unknown component `{component}`"))?;
+    if !store.is_alive(entity) {
+        return Err(format!("entity {id}g{generation} is not alive"));
+    }
+    let value = patch.get("value").ok_or("missing `value`")?;
+    let boxed = meta.parse_json(value).map_err(|error| error.to_string())?;
+    Ok((entity, meta, boxed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +701,132 @@ mod tests {
     fn script_tick_without_host_is_noop() {
         let resources = Resources::new();
         ScriptTickSystem.run(&resources);
+    }
+
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct Mana {
+        mana: u32,
+    }
+
+    fn apply_setup() -> (SmartStore, ComponentRegistry, ScriptHost, Entity) {
+        let mut store = SmartStore::new();
+        store.register::<Mana>();
+        let mut registry = ComponentRegistry::new();
+        registry.register::<Mana>("mana");
+        let entity = store.create_entity();
+        let host = ScriptHost::new(Box::new(NoopScriptEngine::default()));
+        (store, registry, host, entity)
+    }
+
+    fn store_outcome(host: &ScriptHost, index: usize, payload: Vec<u8>) {
+        host.outcomes
+            .lock()
+            .expect("test lock")
+            .insert(index, Ok(payload));
+    }
+
+    fn set_patch(entity: Entity, component: &str, value: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"set": [{
+            "entity": {"id": entity.id(), "generation": entity.generation()},
+            "component": component,
+            "value": value,
+        }]})
+    }
+
+    fn mana_of(store: &SmartStore, registry: &ComponentRegistry, entity: Entity) -> Option<u32> {
+        let meta = registry.by_name("mana").expect("mana registered");
+        let value = meta
+            .get_json(store, entity)
+            .expect("get_json")
+            .expect("present");
+        value["mana"].as_u64().and_then(|n| u32::try_from(n).ok())
+    }
+
+    #[test]
+    fn apply_outcomes_sets_components_and_drains() {
+        let (mut store, registry, host, entity) = apply_setup();
+        store_outcome(
+            &host,
+            0,
+            set_patch(entity, "mana", serde_json::json!({"mana": 7}))
+                .to_string()
+                .into_bytes(),
+        );
+        let report = host.apply_outcomes(&mut store, &registry);
+        assert_eq!(report.applied(), 1);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(mana_of(&store, &registry, entity), Some(7));
+        // Second apply finds nothing: outcomes drain on use.
+        let again = host.apply_outcomes(&mut store, &registry);
+        assert_eq!(again.applied(), 0);
+        assert!(again.entries.is_empty());
+        assert!(host.outcome(0).is_none());
+    }
+
+    #[test]
+    fn apply_outcomes_rejects_entry_atomically() {
+        let (mut store, registry, host, entity) = apply_setup();
+        let payload = serde_json::json!({"set": [
+            set_patch(entity, "mana", serde_json::json!({"mana": 7}))["set"][0],
+            {"entity": {"id": entity.id(), "generation": entity.generation()},
+             "component": "nope", "value": {}},
+        ]});
+        store_outcome(&host, 0, payload.to_string().into_bytes());
+        let report = host.apply_outcomes(&mut store, &registry);
+        assert_eq!(report.applied(), 0);
+        assert_eq!(report.error_count(), 1);
+        // The valid patch was not written either.
+        let meta = registry.by_name("mana").expect("mana registered");
+        assert!(meta.get_json(&store, entity).expect("get_json").is_none());
+    }
+
+    #[test]
+    fn apply_outcomes_rejects_dead_entities_bad_shapes_and_tick_failures() {
+        let (mut store, registry, host, entity) = apply_setup();
+        // Unknown entity id.
+        store_outcome(
+            &host,
+            0,
+            set_patch(
+                Entity::new_with_gen(999, 0),
+                "mana",
+                serde_json::json!({"mana": 1}),
+            )
+            .to_string()
+            .into_bytes(),
+        );
+        // Destroyed entity: id recycled, old handle dead.
+        let doomed = store.create_entity();
+        store.destroy_entity(doomed);
+        store_outcome(
+            &host,
+            1,
+            set_patch(doomed, "mana", serde_json::json!({"mana": 1}))
+                .to_string()
+                .into_bytes(),
+        );
+        // Schema violation: mana is a u32, not a string.
+        store_outcome(
+            &host,
+            2,
+            set_patch(entity, "mana", serde_json::json!({"mana": "lots"}))
+                .to_string()
+                .into_bytes(),
+        );
+        // Not JSON at all.
+        store_outcome(&host, 3, b"not json".to_vec());
+        // Tick itself failed.
+        host.outcomes
+            .lock()
+            .expect("test lock")
+            .insert(4, Err("kaboom".into()));
+        // No "set" key: skipped silently.
+        store_outcome(&host, 5, br#"{"call": 1}"#.to_vec());
+
+        let report = host.apply_outcomes(&mut store, &registry);
+        assert_eq!(report.applied(), 0);
+        assert_eq!(report.entries.len(), 6);
+        assert_eq!(report.error_count(), 5);
+        assert!(report.entries[5].errors.is_empty());
     }
 }
