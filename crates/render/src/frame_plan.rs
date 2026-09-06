@@ -10,9 +10,8 @@
 //! Model:
 //! - `FramePlan::layout()` → cached `&FrameLayout` — pure logic, no GPU
 //!   needed; recomputed only after a mutation (`build()` is the owned
-//!   snapshot of the same cache);
-//! - `FramePlan::execute()` yields one [`PassContext`] per pass
-//!   (insertion order; disabled passes are skipped);
+//!   snapshot of the same cache, `FrameExecutor::ensure_layout` the shared
+//!   one for the frame hot path);
 //! - creating real `wgpu::Texture` objects per slot is the executor's job
 //!   (Phase 1). On wgpu, barriers and layout transitions are handled by
 //!   wgpu itself, so the plan owns lifetimes and pooling, not
@@ -448,6 +447,12 @@ fn layout_levels(passes: &[PassLayout], ordering: &[(PassId, PassId)]) -> Vec<Ve
 }
 
 /// The pass plan being assembled.
+///
+/// Declarations (resources/passes) live here; the computed [`FrameLayout`]
+/// is shared with the executor as an `Arc` (see
+/// `FrameExecutor::ensure_layout`) so steady-state frames avoid cloning the
+/// layout vectors. Every mutation bumps [`FramePlan::generation`], which the
+/// executor uses to invalidate its shared snapshot.
 #[derive(Debug)]
 pub struct FramePlan {
     resources: Vec<ResourceNode>,
@@ -457,6 +462,10 @@ pub struct FramePlan {
     /// recomputes. Every mutation resets this (S1: `compute_layout` must
     /// stay off the per-frame hot path).
     cached: Option<FrameLayout>,
+    /// Monotonic declaration generation; bumped by every mutation (including
+    /// [`FramePlan::invalidate`]). The executor memoizes its `Arc` snapshot
+    /// against this instead of re-cloning per frame.
+    generation: u64,
     /// S5c: explicit ordering edges (registration PassId i < j) on top
     /// of access-derived dependencies — for hidden dependencies (shared
     /// renderer queue buffers) invisible in the access sets.
@@ -637,22 +646,36 @@ impl FramePlan {
             passes: Vec::new(),
             surface_size,
             cached: None,
+            generation: 0,
             ordering: Vec::new(),
             budget: Budget::unbounded(),
             layout_computations: 0,
         }
     }
 
+    /// Marks the plan dirty: drops the cached layout and bumps the
+    /// declaration generation so executor-held `Arc` snapshots refresh.
+    fn touch(&mut self) {
+        self.cached = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Declaration generation for executor snapshot memoization (see
+    /// `FrameExecutor::ensure_layout`).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Updates the surface size (window resize) before the next `build()`.
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
         self.surface_size = (width, height);
-        self.cached = None;
+        self.touch();
     }
 
     /// Sets the S4 memory budget; invalidates the cached layout.
     pub fn set_budget(&mut self, budget: Budget) {
         self.budget = budget;
-        self.cached = None;
+        self.touch();
     }
 
     /// The configured budget.
@@ -669,7 +692,7 @@ impl FramePlan {
             imported: false,
             external: false,
         });
-        self.cached = None;
+        self.touch();
         id
     }
 
@@ -684,7 +707,7 @@ impl FramePlan {
             imported: true,
             external: false,
         });
-        self.cached = None;
+        self.touch();
         id
     }
 
@@ -703,7 +726,7 @@ impl FramePlan {
             imported: true,
             external: true,
         });
-        self.cached = None;
+        self.touch();
         id
     }
 
@@ -720,7 +743,7 @@ impl FramePlan {
             writes: Vec::new(),
             enabled: true,
         });
-        self.cached = None;
+        self.touch();
         PassBuilder { plan: self, id }
     }
 
@@ -749,7 +772,7 @@ impl FramePlan {
         if !self.ordering.contains(&(before, after)) {
             self.ordering.push((before, after));
         }
-        self.cached = None;
+        self.touch();
         Ok(())
     }
 
@@ -782,7 +805,7 @@ impl FramePlan {
             .get_mut(id.0 as usize)
             .unwrap_or_else(|| panic!("unknown pass {id:?}"));
         node.enabled = enabled;
-        self.cached = None;
+        self.touch();
     }
 
     fn resolve_resource(&self, id: ResourceId, pass_name: &str) -> &ResourceNode {
@@ -841,7 +864,7 @@ impl FramePlan {
     /// methods do this automatically; this is for benchmarks and tests
     /// that drive recomputation explicitly.
     pub fn invalidate(&mut self) {
-        self.cached = None;
+        self.touch();
     }
 
     /// How many times the layout has been computed over this plan's
@@ -871,59 +894,14 @@ impl FramePlan {
             levels,
         }
     }
-
-    /// Walk the layout's passes in order, invoking `run` with each pass's context.
-    pub fn execute(&self, layout: &FrameLayout, mut run: impl FnMut(PassContext<'_>)) {
-        for index in 0..layout.passes.len() {
-            run(PassContext { layout, index });
-        }
-    }
-}
-
-/// Context of the pass being executed: live resources and their pool slots.
-#[derive(Debug)]
-pub struct PassContext<'a> {
-    layout: &'a FrameLayout,
-    index: usize,
-}
-
-impl<'a> PassContext<'a> {
-    /// The pass in execution order.
-    pub fn pass(&self) -> &'a PassLayout {
-        &self.layout.passes[self.index]
-    }
-
-    /// Index of the pass within the layout.
-    pub fn pass_index(&self) -> usize {
-        self.index
-    }
-
-    /// Resources alive on this pass.
-    pub fn alive(&self) -> &'a [ResourceId] {
-        &self.layout.pass_alive[self.index]
-    }
-
-    /// Resource metadata.
-    pub fn resource(&self, id: ResourceId) -> &'a ResourceLayout {
-        &self.layout.resources[id.0 as usize]
-    }
-
-    /// Pool slot for the resource, if it is alive on this pass.
-    pub fn slot_of(&self, id: ResourceId) -> Option<usize> {
-        let rl = self.resource(id);
-        if rl.alive_at(self.index) {
-            rl.slot
-        } else {
-            None
-        }
-    }
 }
 
 /// Builder for declaring a pass.
 ///
-/// Compatibility shim (S3): prefer declaring passes as typed systems
-/// (`impl FramePass` + `SystemSet::add_system`); the builder stays for
-/// tests, tools and the migration period.
+/// Test/parity funnel (S3, dissolution stage 3): production passes declare
+/// accesses as types (`impl FramePass` + `SystemSet::add_system`, the sole
+/// prod wiring path); the builder stays for unit/integration tests and the
+/// `scheduler_parity` oracle.
 #[derive(Debug)]
 pub struct PassBuilder<'a> {
     plan: &'a mut FramePlan,
@@ -945,7 +923,7 @@ impl PassBuilder<'_> {
         self.plan
             .resolve_resource(id, &self.plan.passes[self.id.0 as usize].name);
         self.plan.passes[self.id.0 as usize].reads.push(id);
-        self.plan.cached = None;
+        self.plan.touch();
         self
     }
 
@@ -954,7 +932,7 @@ impl PassBuilder<'_> {
         self.plan
             .resolve_resource(id, &self.plan.passes[self.id.0 as usize].name);
         self.plan.passes[self.id.0 as usize].writes.push((id, None));
-        self.plan.cached = None;
+        self.plan.touch();
         self
     }
 
@@ -966,7 +944,7 @@ impl PassBuilder<'_> {
         self.plan.passes[self.id.0 as usize]
             .writes
             .push((id, Some(clear)));
-        self.plan.cached = None;
+        self.plan.touch();
         self
     }
 }
@@ -1150,11 +1128,20 @@ mod tests {
         g.add_pass("composite").read(b);
 
         let layout = g.build();
-        let mut visits: Vec<(usize, Vec<ResourceId>, Option<usize>)> = Vec::new();
-        g.execute(&layout, |ctx| {
-            let slot_a = ctx.slot_of(a);
-            visits.push((ctx.pass_index(), ctx.alive().to_vec(), slot_a));
-        });
+        // Per-pass walk over the layout tables (insertion order; disabled
+        // passes are already dropped from `passes`).
+        let visits: Vec<(usize, Vec<ResourceId>, Option<usize>)> = layout
+            .passes
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let slot_a = layout.resources[a.0 as usize]
+                    .alive_at(index)
+                    .then(|| layout.resources[a.0 as usize].slot)
+                    .flatten();
+                (index, layout.pass_alive[index].clone(), slot_a)
+            })
+            .collect();
 
         assert_eq!(visits[0], (0, vec![a], Some(0)), "gbuffer: a alive");
         assert_eq!(

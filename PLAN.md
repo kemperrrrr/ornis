@@ -245,6 +245,13 @@ runtime без отдельной extract-фазы — будущая цель, 
 > gameplay consumers, расширение orchestration на остальные домены и единый
 > cross-domain runtime; serialization boundary между сервером и браузером
 > сохраняется намеренно.
+>
+> **Прогресс 2026-09-06 (роспуск оболочки FramePlan, стадия 1):** hot-path
+> снапшот layout переехал в `FrameExecutor::ensure_layout` (`Arc<FrameLayout>`
+> по `FramePlan::generation`); мёртвые `FramePlan::execute`/`PassContext`
+> удалены, `PassBuilder` — тест/паритет-воронка (`SystemSet` — единственный
+> prod-путь). Пул/бюджет/лайфтаймы и `FramePlan` как реестр деклараций пока
+> сохраняются; детали — `docs/rendering/unified-scheduler.md`.
 
 ## ❌ Не делать / отложено (решения владельца)
 

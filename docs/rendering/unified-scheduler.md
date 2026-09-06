@@ -627,3 +627,22 @@ debug-only по умолчанию). Тесты:
 - `RenderPresent` (`reads GpuDevice/GpuQueue/GpuSurface/GpuSurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`): `surface.get_current_texture → create_view → frame_plan.render → queue.submit/present` (основание — `RenderContext` из `render_backend.rs`). `Outdated`/`Lost` — реконфигурирует `Surface` на месте; `Occluded`/`Timeout`/`Validation` — пропускает кадр; `Suboptimal` как `Success`.
 
 Интеграция native: `GameApp::initialize` клонирует `Device/Queue` и отдаёт `Surface` в ресурсы, `GameContext` больше не хранит `Renderer3D/FramePlan/Mesh/Surface/SurfaceConfig` отдельно; `GameApp::render_frame` → только `render_world.run_frame` (в `Engine::schedule` уже `RenderExtract → OrbitCamera → RenderSubmit → RenderPresent` на едином `bitset_level_plan`, уровни `Extract → Submit → Present`: RaW по `Mutex<RenderExtracted>` + WaW по `Mutex<GpuFrameState>`). `Resized` реконфигурирует `GpuSurface` (`Mutex<Surface>.configure`) по `GpuDevice` + обновлённому `GpuSurfaceState` и синхронит `GpuFrameState{renderer.resize, frame_plan.set_surface_size}`. `cargo check/clippy` чисто, `cargo test -p ornis-render --lib` 99 + `ornis-core` 142 зелёные.
+
+## Роспуск оболочки FramePlan — стадия 1 (2026-09-06)
+
+Первый шаг роспуска по рецепту `references/frameplan-dissolution.md` (перемещение, не удаление): hot-path handle layout переехал из плана в исполнитель.
+
+- `FramePlan::generation: u64` — монотонный счётчик деклараций; каждая мутация (`create/import/external/add_pass/order/set_enabled/set_surface_size/set_budget/invalidate`, включая `PassBuilder::read/write/write_clear` — раньше сбрасывали только кеш в обход счётчика) идёт через `touch()` (сброс кеша + бамп).
+- `FrameExecutor::ensure_layout(plan) -> Arc<FrameLayout>` — мемоизированный shared-снапшот по generation; steady-state — `Arc`-клон без рекомпута и без поколоночного клона векторов; `invalidate_layout()` — точечный сброс без трогания пула. `RenderFrame3D::render` идёт через него (паника при превышении бюджета — как у `layout()`).
+- Удалены мёртвые `FramePlan::execute`/`PassContext` (нулевые потребители; тест `execute_delivers_live_resources_and_slots` переписан на прямой обход таблиц layout). `PassBuilder` задокументирован как тест/паритет-воронка; единственный prod-путь проводки — `SystemSet::{register_resource, add_system}`.
+- Полное `cfg(test)`-гейтирование builder'а отклонено: его требует интеграционный `scheduler_parity.rs` (паритет-оракул `Schedule` vs `FramePlan`), внешнему крейту `cfg(test)`-API недоступен без новой фичи — цена без выигрыша (нарушает S6-причину #4).
+
+Гейты стадии: `cargo check --workspace --all-targets` чисто, `cargo test -p ornis-render` зелено (lib 100: +1 `executor_memoizes_layout_across_frames`, golden/probe/proptest/parity без изменений — пул 7/10 слотов и бюджет-пины нетронуты). Производительность: steady-state кадр — одно сравнение `u64` + `Arc`-клон вместо `layout().clone()`; пул/алиасинг и кеш S1 сохранены — регресса нет по построению.
+
+## WASD-мост: фикс шва sync + порядок (2026-09-06)
+
+Тест `browser_wasd_input_drives_player_through_gameplay` падал на чистом master (предсуществующее, не регресс роспуска). Две наложенные причины:
+
+- **Шов `sync_external_pose` (`src/engine_runtime.rs`)** не пробрасывал скорость связанным dynamic-телам (solver-авторитетность): intent из `velocity_to_body` умирал в ECS-лейне, `sync_out` прикалывал позу обратно каждый тик. Фикс: dynamic-телам форвардятся `velocity` + `angular_velocity` из ECS-источника (для тел без intent ECS-копия совпадает с solver-состоянием с прошлого `sync_out` — тождественно, безопасно).
+- **Порядок в fixed-расписании**: мост регистрировался после физики, а явные рёбра действуют только вперёд по порядку регистрации (S3-контракт) — backward-ребро молча игнорируется, intent опаздывал на тик. Фикс: `VelocityToBodySystem` ставится через `prepend_system` + best-effort `try_order_before("velocity_to_body", "physics_sync_in")`. Порядок стал `velocity_to_body → sync_in → step → sync_out`, задокументированная 2-тиковая латентность `Input→Position` восстановлена.
+- Тест обновлён под новый DAG: игроку нужно dynamic-тело (`spawn` даёт static с массой 0 — мост его осознанно пропускает, `body_to_transform` прикалывает позу).

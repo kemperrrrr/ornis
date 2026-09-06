@@ -110,7 +110,14 @@ impl PhysicsRuntime {
             return;
         };
         // Static and kinematic bodies are editor-controlled. Dynamic bodies
-        // are authoritative in the solver after their initial registration.
+        // are authoritative in the solver after their initial registration,
+        // except for velocity: gameplay intent (`velocity_to_body`) writes
+        // it into the ECS lane, so it must be forwarded here or the bridge
+        // dead-ends and `sync_out` pins the pose back every tick.
+        if matches!(body.body_type, BodyType::Dynamic) {
+            body.velocity = source.velocity;
+            body.angular_velocity = source.angular_velocity;
+        }
         if matches!(body.body_type, BodyType::Static | BodyType::Kinematic)
             && let Some(transform) = transform
         {

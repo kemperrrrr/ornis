@@ -36,8 +36,8 @@ pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use frame_plan::{
-    Budget, BudgetExceeded, FrameLayout, FramePlan, PassContext, PassId, PassLayout, PoolSlot,
-    ResourceId, ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
+    Budget, BudgetExceeded, FrameLayout, FramePlan, PassId, PassLayout, PoolSlot, ResourceId,
+    ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
 };
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};

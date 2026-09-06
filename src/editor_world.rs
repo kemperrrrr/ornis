@@ -1198,6 +1198,14 @@ mod tests {
             .store_mut()
             .expect("world store")
             .insert(entity, Position(Vec3::ZERO));
+        // `spawn` attaches a static body (mass 0): the bridge skips static
+        // bodies and `body_to_transform` would pin `Position` back. Gameplay
+        // intent needs a dynamic body to reach the solver.
+        world
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
 
         // Same channel as `POST /api/input` and the WS input frames.
         handle_command(
@@ -1212,8 +1220,8 @@ mod tests {
         );
         world.tick(1.0 / 60.0);
         // The fixed schedule runs before the variable one: tick 1 writes
-        // gameplay intent (`player_input`), tick 2 integrates it
-        // (`physics_push`).
+        // gameplay intent (`player_input` → `Velocity`), tick 2 carries it
+        // through the bridge (`velocity_to_body` → physics → `body_to_transform`).
         world.tick(1.0 / 60.0);
 
         let z = world

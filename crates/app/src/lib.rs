@@ -117,8 +117,19 @@ pub fn install_gameplay_physics_bridge(engine: &mut Engine) {
     {
         return;
     }
-    engine.fixed_schedule_mut().add_system(VelocityToBodySystem);
+    engine
+        .fixed_schedule_mut()
+        .prepend_system(VelocityToBodySystem);
     engine.schedule_mut().add_system(BodyToTransformSystem);
+    // Intent must reach the solver in the same fixed update. Explicit edges
+    // only split levels forward along registration order (S3 contract), so a
+    // backward `order_before` would be silently ignored — registration must
+    // put the writer first: `prepend` lands intent ahead of `sync_in`, and
+    // the RaW on the `RigidBody` lane keeps it there across recomputes.
+    // Best-effort: hosts without physics simply have no `physics_sync_in`.
+    let _ = engine
+        .fixed_schedule_mut()
+        .try_order_before("velocity_to_body", "physics_sync_in");
 }
 
 pub fn install_unified_runtime(engine: &mut Engine) {

@@ -25,6 +25,7 @@ use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
 use ornis_schedule::run_levels;
 use std::collections::HashMap;
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
@@ -38,17 +39,48 @@ struct PooledTexture {
 
 /// Executes a [`FrameLayout`] on wgpu: lazily creates one texture per pool
 /// slot and hands every pass a [`PassViews`] resolver.
+///
+/// Besides the GPU object pool, the executor memoizes the plan's computed
+/// layout as a shared snapshot (see [`FrameExecutor::ensure_layout`]): the
+/// declaration registry stays in [`FramePlan`], but the hot-path handle to
+/// the layout lives here, keyed by the plan's declaration generation.
 #[derive(Debug, Default)]
 pub struct FrameExecutor {
     pool: Vec<Option<PooledTexture>>,
     external_views: HashMap<ResourceId, wgpu::TextureView>,
     surface_size: Option<(u32, u32)>,
+    /// Shared layout snapshot + the plan generation it was built from.
+    cached_layout: Option<(u64, Arc<FrameLayout>)>,
 }
 
 impl FrameExecutor {
     /// Create an executor with an empty texture pool.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Shared snapshot of the plan's computed layout for the frame hot path.
+    ///
+    /// In steady state (no declaration mutations since the last call) this
+    /// is a cache hit: no recomputation and no vector clone, just an `Arc`
+    /// clone. Any plan mutation bumps [`FramePlan::generation`], which drops
+    /// the memoized snapshot and rebuilds it from [`FramePlan::layout`] on
+    /// the next call. Budget violations panic exactly as `layout()` does.
+    pub fn ensure_layout(&mut self, plan: &mut FramePlan) -> Arc<FrameLayout> {
+        let generation = plan.generation();
+        if let Some((cached_generation, layout)) = &self.cached_layout
+            && *cached_generation == generation
+        {
+            return Arc::clone(layout);
+        }
+        let layout = Arc::new(plan.layout().clone());
+        self.cached_layout = Some((generation, Arc::clone(&layout)));
+        layout
+    }
+
+    /// Drops the memoized layout snapshot without touching the GPU pool.
+    pub fn invalidate_layout(&mut self) {
+        self.cached_layout = None;
     }
 
     /// Provides the view backing an external resource (see
@@ -605,8 +637,10 @@ impl RenderFrame3D {
             target,
         } = context;
         // S1: the layout is cached — a steady-state frame (no resize/toggle)
-        // is a cache hit, `compute_layout` stays off the hot path.
-        let layout = plan.layout();
+        // is a cache hit, `compute_layout` stays off the hot path. The
+        // snapshot is memoized in the executor (`Arc`, keyed by the plan's
+        // declaration generation), so frames share it without cloning.
+        let layout = executor.ensure_layout(plan);
         executor.set_external_view(ids.target, target.clone());
         let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
             // S2b: every pass is a typed system (conditional passes
@@ -627,9 +661,9 @@ impl RenderFrame3D {
             }
         };
         if *parallel_recording {
-            executor.execute_parallel(device, queue, layout, dispatch);
+            executor.execute_parallel(device, queue, &layout, dispatch);
         } else {
-            executor.execute(device, encoder, layout, |encoder, pass| {
+            executor.execute(device, encoder, &layout, |encoder, pass| {
                 dispatch(0, &pass, encoder);
             });
         }
@@ -855,6 +889,40 @@ mod tests {
         assert_eq!(g3.plan().layout_computations(), 2);
         let _ = g3.layout_dump();
         assert_eq!(g3.plan().layout_computations(), 2, "cached after resize");
+    }
+
+    // ── Dissolution: executor-memoized shared layout snapshot ──────────
+
+    #[test]
+    fn executor_memoizes_layout_across_frames() {
+        let spec = TextureSpec {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            samples: 1,
+            size: SizePolicy::Fixed {
+                width: 64,
+                height: 64,
+            },
+        };
+        let mut plan = FramePlan::new((64, 64));
+        let a = plan.create_resource("a", spec);
+        plan.add_pass("p0").write(a);
+        plan.add_pass("p1").read(a);
+        let generation = plan.generation();
+
+        let mut executor = FrameExecutor::new();
+        let first = executor.ensure_layout(&mut plan);
+        let second = executor.ensure_layout(&mut plan);
+        assert!(Arc::ptr_eq(&first, &second), "steady state shares one Arc");
+        assert_eq!(plan.layout_computations(), 1);
+        assert_eq!(first.slots.len(), 1);
+
+        // Mutation bumps the generation and refreshes the snapshot.
+        plan.add_pass("p2").read(a);
+        assert_ne!(plan.generation(), generation);
+        let third = executor.ensure_layout(&mut plan);
+        assert!(!Arc::ptr_eq(&second, &third), "mutation refreshes snapshot");
+        assert_eq!(plan.layout_computations(), 2);
+        assert_eq!(third.passes.len(), 3);
     }
 
     // ── S2: typed systems must reproduce the imperative wiring ─────────
