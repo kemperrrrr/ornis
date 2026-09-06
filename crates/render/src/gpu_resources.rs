@@ -14,16 +14,11 @@
 //!   изменяемость как у `RenderExtracted`/`OrbitCamera`). Хранит пул слотов
 //!   `FrameExecutor` между кадрами.
 //! - `RenderSubmit` — `System` читает `RenderExtracted` + `OrbitCamera`, пишет
-//!   `GpuFrameState` (через `Mutex`), внутри делает `set_camera`/`upload_*`/
-//!   `FrameExecutor::execute` и `queue.submit`. Зависимость от `RenderExtract`
-//!   выводится автоматически (RaW на `Mutex<RenderExtracted>`), порядок —
-//!   уровень после extraction.
-//! - `Surface`/`get_current_texture` остаётся вне `System` на S7-шаге 1
-//!   (acquire/present — imperative в `GameApp`), на шаге 2 — `Mutex<Surface>`
-//!   ресурс внутри `GpuFrameState` с обработкой `Outdated`/`Lost` внутри системы.
-//!
-//! Пока модуль — дизайн + типы без интеграции в `GameApp` (чтобы не ломать
-//! `render_frame`). Интеграция — следующий шаг `integrate`.
+//!   `GpuFrameState` (через `Mutex`), внутри делает `set_camera`/`upload_*`.
+//!   Зависимость от `RenderExtract` выводится автоматически (RaW на
+//!   `Mutex<RenderExtracted>`), порядок — уровень после extraction. Поверхностный
+//!   `frame_plan.render` + `queue.submit`/`present` остаётся в `GameApp` на
+//!   S7-шаге 1 (acquire вне системы); шаг 2 перенесёт `Surface` в ресурс.
 
 use std::sync::Mutex;
 
@@ -60,6 +55,8 @@ pub struct GpuFrameState {
     pub frame_plan: RenderFrame3D,
     /// Сфера-меш кадра.
     pub mesh: Mesh,
+    /// Кешированные параметры меша для пересоздания.
+    pub mesh_params: (u32, u32),
 }
 
 /// Регистрирует GPU-ресурсы в `engine`.
@@ -83,9 +80,10 @@ pub fn install_gpu_resources(
 
 /// Система сабмита кадра: читает extraction + камеру, пишет GPU-состояние.
 ///
-/// Сейчас — stub (только контракт доступов и уровней). Тело, делающее
-/// `set_camera`/`upload_*`/`frame_plan.render` + `queue.submit`, подключается
-/// на шаге `integrate` (требует `Surface`/`Target` + `queue.present`).
+/// S7-шаг 1: делает `set_camera`/`upload_*` и пересоздаёт меш при смене
+/// `mesh_params`. `frame_plan.render` + `queue.submit`/`present` остаётся в
+/// `GameApp::render_frame` после `engine.run_frame`, чтобы `Surface` acquire
+/// не требовал `Mutex<Surface>` в `System`.
 struct RenderSubmit;
 
 impl System for RenderSubmit {
@@ -104,14 +102,62 @@ impl System for RenderSubmit {
     }
 
     fn run(&self, resources: &Resources) {
-        // Stub: проверяет, что все ресурсы объявлены и доступны, но пока не
-        // трогает GPU (surface acquire остаётся в GameApp). Реальное тело —
-        // следующий коммит `integrate`.
-        let _ = resources.get::<Mutex<RenderExtracted>>();
-        let _ = resources.get::<Mutex<crate::camera::OrbitCamera>>();
-        let _ = resources.get::<Mutex<GpuFrameState>>();
-        let _ = resources.get::<GpuDevice>();
-        let _ = resources.get::<GpuQueue>();
-        let _ = resources.get::<GpuSurfaceState>();
+        let Some(extracted) = resources
+            .get::<Mutex<RenderExtracted>>()
+            .map(|m| m.lock().expect("render extraction lock").clone())
+        else {
+            return;
+        };
+        let Some(orbit) = resources
+            .get::<Mutex<crate::camera::OrbitCamera>>()
+            .map(|m| m.lock().expect("orbit camera lock").clone())
+        else {
+            return;
+        };
+        let Some(device) = resources.get::<GpuDevice>() else {
+            return;
+        };
+        let Some(queue) = resources.get::<GpuQueue>() else {
+            return;
+        };
+        let Some(surface_state) = resources.get::<GpuSurfaceState>() else {
+            return;
+        };
+        let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
+            return;
+        };
+        let mut fs = frame_state.lock().expect("gpu frame state lock");
+
+        // Пересоздать меш если extraction требует другую тесселяцию.
+        if extracted.mesh_params != fs.mesh_params {
+            fs.mesh = crate::mesh::create_sphere(
+                &device.0,
+                1.0,
+                extracted.mesh_params.0,
+                extracted.mesh_params.1,
+            );
+            fs.mesh_params = extracted.mesh_params;
+        }
+
+        let (w, h) = (surface_state.size.0 as f64, surface_state.size.1 as f64);
+        let aspect = if h > 0.0 { w as f32 / h as f32 } else { 1.0 };
+        let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
+        let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
+        let proj =
+            glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
+        let view_proj = proj * view;
+
+        fs.renderer
+            .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
+        fs.renderer.set_lights(
+            &queue.0,
+            [0.10, 0.10, 0.15],
+            &[
+                ([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]),
+                ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
+            ],
+        );
+        fs.renderer.upload_materials(&queue.0, &extracted.materials);
+        fs.renderer.upload_instances(&queue.0, &extracted.instances);
     }
 }
