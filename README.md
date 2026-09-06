@@ -153,7 +153,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
 | Frame Plan (бывш. Render Graph; модули `frame_plan.rs`/`frame_exec.rs`, rename от 2026-08-23): `RenderFrame3D` + `Technique` (forward/deferred/hybrid как конфигурация плана) + блум-каскад | ✅ |
-| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d), backend-neutral fixed schedule/accumulator (`FixedTime`) для domain orchestration; GPU как системы (S7) — `GpuDevice/Queue/Surface/SurfaceState/GpuFrameState` как `Resources` (`crates/render/src/gpu_resources.rs`), `RenderSubmit` (`reads Mutex<RenderExtracted>/OrbitCamera/GpuDevice/Queue/SurfaceState, writes Mutex<GpuFrameState>`) делает `set_camera/upload_*`, `RenderPresent` (`reads GpuSurface/GpuDevice/Queue/SurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`) делает `acquire → frame_plan.render → queue.submit/present` в том же `Engine::schedule` (`RenderExtract → OrbitCamera → RenderSubmit → RenderPresent` на едином `bitset_level_plan` с физикой, WaW по `Mutex<GpuFrameState>` + RaW по `Mutex<RenderExtracted>`), `GameApp::render_frame` — только `run_frame` | 🟡 | `Engine` разделяет fixed/once-per-frame; native render теперь полностью в `Engine::schedule` (upload + acquire/present — системы), `Resized` реконфигурирует `GpuSurface` из ресурса; WASM и editor-world уже на том же `Engine`/`RenderExtract`/`FramePlan`, cross-domain runtime ещё не полный; `crates/render/src/{extraction.rs,frame_plan.rs,frame_exec.rs,gpu_resources.rs}`; `docs/rendering/unified-scheduler.md` |
+| Unified Scheduler (IDEAS §28, PLAN Прил. C): кеш layout (S1), пассы-системы с типизированными доступами и режимами (S2), golden-тесты пула (S3), бюджет памяти (S4), уровни параллельности + параллельная запись команд opt-in (S5), `order_before`, общий `mermaid()`-проектор отладки обоих планировщиков (`ornis-schedule::MermaidDiagram`; S6-проекция + срез 1b: `Schedule::mermaid`); `ornis-core::Schedule` + контракт шедулера, hardening: debug-принуждение объявленных доступов систем и пассов (пассы — на выдаче view по `ResourceId`, бэклог #6; кадр систем переносится в дочерние параллельные задачи, `#[smart_pipeline]` — автоматически, бэклог #7), кеш уровневого плана (битсеты), `try_order_before`, гранулярность лент `SmartStore` в декларациях систем (S5d), backend-neutral fixed schedule/accumulator (`FixedTime`) для domain orchestration; GPU как системы (S7) — `GpuDevice/Queue/Surface/SurfaceState/GpuFrameState` как `Resources` (`crates/render/src/gpu_resources.rs`), `RenderSubmit` (`reads Mutex<RenderExtracted>/OrbitCamera/GpuDevice/Queue/SurfaceState, writes Mutex<GpuFrameState>`) делает `set_camera/upload_*`, `RenderPresent` (`reads GpuSurface/GpuDevice/Queue/SurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`) делает `acquire → frame_plan.render → queue.submit/present` в том же `Engine::schedule` (`RenderExtract → OrbitCamera → RenderSubmit → RenderPresent` на едином `bitset_level_plan` с физикой, WaW по `Mutex<GpuFrameState>` + RaW по `Mutex<RenderExtracted>`), `GameApp::render_frame` — только `run_frame`; cross-domain bridge `Velocity→RigidBody` (fixed `velocity_to_body`) + `RigidBody→Position/TransformDesc` (frame `body_to_transform`) в `ornis-app::install_gameplay_physics_bridge` (идемпотентен, добавлен в `EditorWorld` и `GameApp::showcase_engine`) — browser `WASD`/`InputState` теперь ведёт `Player` через `player_input → physics_push/physics_step → render extract` в одном DAG | ✅ | `Engine` разделяет fixed/once-per-frame; native render теперь полностью в `Engine::schedule` (upload + acquire/present — системы), `Resized` реконфигурирует `GpuSurface` из ресурса; WASM и editor-world уже на том же `Engine`/`RenderExtract`/`FramePlan` + gameplay/physics bridge; serialization boundary между сервером и браузером сохраняется намеренно; `crates/render/src/{extraction.rs,frame_plan.rs,frame_exec.rs,gpu_resources.rs}`, `crates/app/src/lib.rs`; `docs/rendering/unified-scheduler.md` |
 
 ### Платформы и редактор
 
@@ -199,12 +199,14 @@ render loops уже используют общий `RenderWorld`/`RenderExtract
 контракт после serialization boundary. `InputState` теперь является
 backend-neutral resource; native winit и WASM orbit adapters записывают
 keyboard, mouse, pointer and wheel input, а browser render frame публикует
-его через `Engine`. Следующий шаг — подключить полноценные gameplay
-consumers и расширить orchestration на остальные домены, а затем собрать
-полный cross-domain runtime. Native showcase и editor-only physics уже
-подключены к общему fixed host; server/browser physics остаётся отдельным
-вопросом из-за serialization boundary. Это не означает немедленно удалять
-`FramePlan`: он остаётся переходным render/backend-планом.
+его через `Engine`. Gameplay consumers подключены через
+`ornis-app::install_gameplay_physics_bridge` (`Velocity→RigidBody` fixed +
+`RigidBody→Position/TransformDesc` frame) в `EditorWorld` и native showcase:
+browser `WASD`/`InputState` (WS `POST /api/input` → `apply_browser_input`)
+ведёт `Player` в том же DAG, что физика и render extraction. Остаётся
+расширить orchestration на прочие домены (audio/script) — полный
+единый runtime без `FramePlan` как отдельной extract-фазы остаётся будущей
+целью.
 
 Полный план (сделано / частично / приоритеты / анти-цели) — в [`PLAN.md`](PLAN.md).
 
@@ -227,13 +229,17 @@ consumers и расширить orchestration на остальные домен
    ~~Сохранение/загрузка сцены~~ — ✅ сделано: меню File → Save/Reload шлёт
    `save_scene`/`load_scene` (атомарная запись `editor/scene.ron`, события
    `scene_saved`/`scene_loaded`/`error`, результат показан в футере).
-4. **WASM-canvas ↔ живой ECS** — 🟡 частично: после serialization boundary
+4. **WASM-canvas ↔ живой ECS** — ✅: после serialization boundary
    viewport восстанавливает snapshot в общем library-level `RenderWorld`,
    запускает `Engine`/`RenderExtract` и рисует через `FramePlan`; источник —
    `/api/scene` (polling ~1/с, без fallback) через единый runtime, есть orbit-камера.
-   Browser pointer/wheel input уже проходит через `InputState`, а
-   `RenderWorld` получает общий `Engine`/`FixedTime` host; впереди —
-   gameplay consumers и physics.
+   Browser `WASD`/`InputState` теперь проходит через cross-domain bridge
+   `ornis-app::install_gameplay_physics_bridge` (`player_input` → `Velocity` →
+   `velocity_to_body` → physics solver → `body_to_transform` → `Position`/
+   `TransformDesc`) в том же `Engine::run_frame` DAG, что и editor/native;
+   `browser_wasd_input_drives_player_through_gameplay` верифицирует 2-тактный
+   `Input→Velocity→RigidBody→Position` путь. Остаётся расширить bridge на
+   audio/script домены.
 5. ~~WebSocket server-push для `/api/events`~~ — ✅ реализован: upgrade на `/api/events`, heartbeat ping, reconnect; polling остаётся fallback.
 
 ### Фаза 6 — Скриптинг (рамка пересмотрена 2026-08-22)

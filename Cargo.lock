@@ -1750,6 +1750,7 @@ dependencies = [
  "crossbeam-channel",
  "editor-backend",
  "glam",
+ "ornis-app",
  "ornis-core",
  "ornis-physics",
  "ornis-render",

@@ -101,14 +101,33 @@ impl<'a> UnifiedView<'a> {
 /// fixed:  gameplay physics_push + physics sync/step + bridge
 /// frame:  player_input + transform_update + render extract
 /// ```
+/// Installs the cross-domain bridges `Velocity → RigidBody` (fixed) and
+/// `RigidBody → Position/TransformDesc` (frame) so that browser `InputState`
+/// intent reaches the authoritative physics solver in the same [`Engine`]
+/// DAG. This is the cross-domain runtime seam: gameplay writes `Velocity`,
+/// physics consumes it, and render extracts the final pose.
+///
+/// Idempotent with respect to [`install_unified_runtime`]: calling either
+/// helper installs the same bridge systems exactly once per `Engine`.
+pub fn install_gameplay_physics_bridge(engine: &mut Engine) {
+    if engine
+        .fixed_schedule()
+        .mermaid()
+        .contains("velocity_to_body")
+    {
+        return;
+    }
+    engine.fixed_schedule_mut().add_system(VelocityToBodySystem);
+    engine.schedule_mut().add_system(BodyToTransformSystem);
+}
+
 pub fn install_unified_runtime(engine: &mut Engine) {
     // Core gameplay (player_input @ frame, physics_push @ fixed, transform_update @ frame)
     install_gameplay(engine);
 
     // Bridge gameplay velocity/position with physics bodies so that
     // the single schedule plans them together.
-    engine.fixed_schedule_mut().add_system(VelocityToBodySystem);
-    engine.schedule_mut().add_system(BodyToTransformSystem);
+    install_gameplay_physics_bridge(engine);
 
     // Render extraction as a schedule system on the same world — not a
     // second RenderWorld copy. The extracted snapshot lives as a resource.
@@ -413,5 +432,106 @@ mod tests {
         let stored = engine.world().resources().get::<InputState>().unwrap();
         assert!(stored.key_down(87));
         assert_eq!(stored.pointer_position(), [100.0, 200.0]);
+    }
+
+    #[test]
+    fn browser_wasd_input_drives_player_through_gameplay_to_physics() {
+        use ornis_core::{InputState, Position};
+        let mut engine = Engine::new();
+        ornis_core::install_gameplay(&mut engine);
+        install_gameplay_physics_bridge(&mut engine);
+        struct MiniPhysics;
+        impl ornis_core::System for MiniPhysics {
+            fn name(&self) -> &'static str {
+                "mini_physics_integrate"
+            }
+            fn access(&self) -> ornis_core::SystemAccess {
+                ornis_core::SystemAccess::new()
+                    .reads::<ornis_core::FixedTime>()
+                    .reads::<ornis_core::SmartStore>()
+                    .reads_lane::<RigidBody>()
+                    .writes_lane::<RigidBody>()
+            }
+            fn run(&self, resources: &ornis_core::Resources) {
+                let dt = resources
+                    .get::<ornis_core::FixedTime>()
+                    .unwrap()
+                    .delta_seconds();
+                let store = resources.get::<ornis_core::SmartStore>().unwrap();
+                let snap: Vec<(ornis_core::Entity, Vec3)> = store
+                    .read_lane::<RigidBody>()
+                    .map(|lane| {
+                        lane.entities
+                            .iter()
+                            .zip(&lane.data)
+                            .map(|(&e, b)| (e, b.velocity))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(mut lane) = store.write_lane::<RigidBody>() {
+                    for (e, vel) in snap {
+                        if let Some(b) = lane.get_mut(e) {
+                            b.position += vel * dt;
+                        }
+                    }
+                }
+            }
+        }
+        engine.fixed_schedule_mut().add_system(MiniPhysics);
+        let e = engine.world().store().unwrap().create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(e, ornis_core::Player);
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(e, Position(Vec3::ZERO));
+        engine.world_mut().store_mut().unwrap().insert(
+            e,
+            TransformDesc {
+                translation: Vec3::ZERO.to_array(),
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+        );
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(e, RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
+        let mut input = InputState::new();
+        input.set_key(87, true);
+        apply_browser_input(engine.world_mut(), input);
+        engine.run_frame(1.0 / 60.0);
+        engine.run_frame(1.0 / 60.0);
+        let store = engine.world().store().unwrap();
+        let body = store
+            .read_lane::<RigidBody>()
+            .unwrap()
+            .get(e)
+            .unwrap()
+            .clone();
+        let pos = store.read_lane::<Position>().unwrap().get(e).unwrap().0;
+        let t = store
+            .read_lane::<TransformDesc>()
+            .unwrap()
+            .get(e)
+            .unwrap()
+            .clone();
+        assert!(
+            body.velocity.z < -1.0,
+            "velocity not propagated: {:?}",
+            body.velocity
+        );
+        assert!(pos.z < -0.01, "Position not moved: {:?}", pos);
+        assert!(
+            t.translation[2] < -0.01,
+            "TransformDesc not moved: {:?}",
+            t.translation
+        );
+        assert!(body.position.z < -0.01);
     }
 }

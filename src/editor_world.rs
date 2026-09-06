@@ -77,6 +77,7 @@ use ornis_core::{
 use ornis_physics::RigidBody;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
+use ornis_app::install_gameplay_physics_bridge;
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
@@ -146,6 +147,7 @@ impl Default for EditorWorld {
         let _ = engine.world_mut().insert(SceneEnvironment::default());
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
         install_gameplay(&mut engine);
+        install_gameplay_physics_bridge(&mut engine);
         Self {
             engine,
             alive: Vec::new(),
