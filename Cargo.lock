@@ -2412,6 +2412,7 @@ dependencies = [
  "ornis-core",
  "ornis-physics",
  "ornis-render",
+ "ornis-rhai",
  "pollster",
  "serde",
  "serde_json",

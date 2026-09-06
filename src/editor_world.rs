@@ -70,11 +70,13 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ornis_core::script::{ScriptHandle, ScriptHost, ScriptPlugin};
 use ornis_core::{
     ComponentMeta, ComponentRegistry, Engine, Entity, InputState, SmartStore, World,
     install_gameplay,
 };
 use ornis_physics::RigidBody;
+use ornis_rhai::RhaiScriptEngine;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
 use ornis_app::install_gameplay_physics_bridge;
@@ -139,6 +141,15 @@ pub struct EditorWorld {
     /// Scene label round-tripped through `Scene::name` on save/load.
     scene_name: String,
     version: u64,
+    /// Script modules loaded through `script_load` (module ids for
+    /// `script_call` / `script_hot_reload` / `script_unload`).
+    script_modules: Vec<u64>,
+    /// File-backed script modules: external edits hot-reload on next tick.
+    script_watches: Vec<ScriptWatch>,
+    /// Last per-entry apply status for `script_list` (entry index,
+    /// patches written, errors). Replaced only by ticks that drained
+    /// outcomes, so it stays put between quiet frames.
+    script_last_apply: Vec<ScriptEntryStatus>,
 }
 
 impl Default for EditorWorld {
@@ -148,11 +159,19 @@ impl Default for EditorWorld {
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
         install_gameplay(&mut engine);
         install_gameplay_physics_bridge(&mut engine);
+        // Rhai is the default editor scripting engine (PLAN phase 6: the
+        // primary adapter and the WASM fallback). Scripts stay idle until
+        // `script_load` registers tick entries — an empty host is one
+        // atomic counter plus an empty loop per frame.
+        ScriptPlugin::new(Box::new(RhaiScriptEngine::default())).install(&mut engine);
         Self {
             engine,
             alive: Vec::new(),
             scene_name: "scene".into(),
             version: 0,
+            script_modules: Vec::new(),
+            script_watches: Vec::new(),
+            script_last_apply: Vec::new(),
         }
     }
 }
@@ -184,6 +203,7 @@ impl EditorWorld {
     /// `RigidBody` lane entry participate. Returns `true` when physics changed
     /// an ECS pose and the caller should publish a fresh scene snapshot.
     pub fn tick(&mut self, delta_seconds: f32) -> bool {
+        self.poll_script_watches();
         self.engine.run_frame(delta_seconds);
         let changed = self
             .engine
@@ -197,10 +217,81 @@ impl EditorWorld {
                     .take_changed()
             })
             .unwrap_or(false);
-        if changed {
+        let script_applied = self.apply_script_outcomes();
+        if changed || script_applied > 0 {
             self.version += 1;
         }
-        changed
+        changed || script_applied > 0
+    }
+
+    /// Hot-reloads file-backed script modules whose source changed on
+    /// disk. Read/compile failures keep the old module live (and print to
+    /// stderr); the watch is already re-baselined, so the next edit
+    /// retries. Never touches the world — safe before `run_frame`.
+    fn poll_script_watches(&mut self) {
+        let mut changed = Vec::new();
+        for entry in &mut self.script_watches {
+            if entry.watch.poll() {
+                match fs::read_to_string(&entry.watch.path) {
+                    Ok(source) => changed.push((entry.module, source)),
+                    Err(error) => eprintln!(
+                        "ornis: script watch read failed for {}: {error}",
+                        entry.watch.path.display()
+                    ),
+                }
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        let Some(host) = self.script_host_mut() else {
+            return;
+        };
+        for (module, source) in changed {
+            if let Err(error) = host.hot_reload(&ScriptHandle(module), &source) {
+                eprintln!("ornis: script hot-reload failed for module {module}: {error}");
+            }
+        }
+    }
+
+    /// Drains pending tick outcomes and writes them into the store through
+    /// [`REGISTRY`]; returns patches written. Sequential borrows (drain,
+    /// then write) keep the engine lock clear of the store borrow.
+    /// Remembers the per-entry status for `script_list`.
+    fn apply_script_outcomes(&mut self) -> usize {
+        let drained = self
+            .script_host()
+            .map(|host| host.take_outcomes())
+            .unwrap_or_default();
+        if drained.is_empty() {
+            return 0;
+        }
+        let Some(store) = self.engine.world_mut().store_mut() else {
+            return 0;
+        };
+        let report = ScriptHost::apply_drained(store, &REGISTRY, drained);
+        let applied = report.applied();
+        self.script_last_apply = report
+            .entries
+            .into_iter()
+            .map(|entry| ScriptEntryStatus {
+                index: entry.index,
+                applied: entry.applied,
+                errors: entry.errors,
+            })
+            .collect();
+        applied
+    }
+
+    fn script_host(&self) -> Option<&ScriptHost> {
+        self.engine.world().resources().get::<ScriptHost>()
+    }
+
+    fn script_host_mut(&mut self) -> Option<&mut ScriptHost> {
+        self.engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<ScriptHost>()
     }
 
     fn store(&self) -> &SmartStore {
@@ -736,6 +827,56 @@ fn handle_custom(
                 }
             }
         }
+        "script_load" => match cmd_script_load(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "script_loaded", payload);
+                CommandOutcome::success()
+            }
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
+        },
+        "script_call" => match cmd_script_call(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "script_result", payload);
+                CommandOutcome::success()
+            }
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
+        },
+        "script_hot_reload" => match cmd_script_hot_reload(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "script_reloaded", payload);
+                CommandOutcome::success()
+            }
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
+        },
+        "script_unload" => match cmd_script_unload(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "script_unloaded", payload);
+                CommandOutcome::success()
+            }
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
+        },
+        "script_list" => match cmd_script_list(world, &data) {
+            Ok(payload) => {
+                emit(ev_tx, "script_list", payload);
+                CommandOutcome::success()
+            }
+            Err(e) => {
+                emit_error(ev_tx, cmd_type, &e);
+                CommandOutcome::failure(e)
+            }
+        },
         other => {
             emit_error(ev_tx, other, "unknown command");
             CommandOutcome::failure("unknown command")
@@ -901,6 +1042,192 @@ fn parse_data(json_data: &str) -> Result<Value, String> {
     Ok(v)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Script commands (phase 6): `script_load` / `script_call` /
+// `script_hot_reload` / `script_unload` / `script_list`
+// ═══════════════════════════════════════════════════════════════════════════
+// The editor world's script host runs Rhai (the primary adapter and WASM
+// fallback). Tick outcomes flow into the world automatically on every
+// `tick` through `apply_script_outcomes`; these commands are the manual
+// side: load sources, call functions, and inspect entries.
+
+/// One file-backed script module: external edits hot-reload on the next
+/// tick (see [`EditorWorld::poll_script_watches`]).
+struct ScriptWatch {
+    /// Module id from `script_load` (see [`ScriptHandle`]).
+    module: u64,
+    /// Mtime poll for the source file.
+    watch: FileWatch,
+}
+
+/// Last known per-entry apply status, surfaced by `script_list`.
+struct ScriptEntryStatus {
+    /// Tick entry index (see `ScriptHost::add_tick`).
+    index: usize,
+    /// Patches written by the last apply that drained this entry.
+    applied: usize,
+    /// Rejections from that apply (empty means clean).
+    errors: Vec<String>,
+}
+
+/// `script_load {"name"?, "source"? | "path"?, "tick"?}`: loads a module
+/// into the script host and answers its module id. With `"tick"` the
+/// module is also registered for per-frame calls with that function.
+/// `"path"` reads the file now (fail fast on unreadable files) and
+/// watches it for external edits. Exactly one of `"source"`/`"path"`
+/// is required.
+fn cmd_script_load(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+    let name = opt_string(data, "name")?.unwrap_or_else(|| "editor_script".into());
+    let source = opt_string(data, "source")?;
+    let path = opt_string(data, "path")?;
+    let tick = opt_string(data, "tick")?;
+    let (source, watch) = match (source, path) {
+        (Some(_), Some(_)) => return Err("provide either 'source' or 'path', not both".into()),
+        (None, None) => return Err("missing 'source' or 'path'".into()),
+        (Some(source), None) => (source, None),
+        (None, Some(path)) => {
+            let path = PathBuf::from(path);
+            let source = fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+            (source, Some(path))
+        }
+    };
+    let host = world
+        .script_host_mut()
+        .ok_or("script host is not installed")?;
+    let handle = host.load(&name, &source).map_err(|e| e.to_string())?;
+    let module = handle.0;
+    let entry = tick.map(|func| host.add_tick(handle, func));
+    world.script_modules.push(module);
+    if let Some(path) = watch {
+        world.script_watches.retain(|w| w.module != module);
+        world.script_watches.push(ScriptWatch {
+            module,
+            watch: FileWatch::new(path),
+        });
+    }
+    Ok(serde_json::json!({ "module": module, "tick_entry": entry }).to_string())
+}
+
+/// `script_call {"module", "func", "args"?}`: calls one loaded module
+/// directly; `"args"` is a JSON array string (default `[]`). The raw
+/// JSON reply rides in `"result"`.
+fn cmd_script_call(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+    let module = data
+        .get("module")
+        .and_then(Value::as_u64)
+        .ok_or("missing or invalid 'module'")?;
+    let func = data
+        .get("func")
+        .and_then(Value::as_str)
+        .ok_or("missing or invalid 'func'")?;
+    let args = opt_string(data, "args")?.unwrap_or_else(|| "[]".into());
+    if !world.script_modules.contains(&module) {
+        return Err(format!("unknown script module {module}"));
+    }
+    let host = world.script_host().ok_or("script host is not installed")?;
+    let reply = host
+        .call(&ScriptHandle(module), func, args.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let result: Value = serde_json::from_slice(&reply)
+        .unwrap_or_else(|_| Value::from(String::from_utf8_lossy(&reply).into_owned()));
+    Ok(serde_json::json!({ "module": module, "func": func, "result": result }).to_string())
+}
+
+/// `script_hot_reload {"module", "source"?}`: replaces the module source
+/// under its handle — tick entries keep pointing at it and globals
+/// survive; a bad source keeps the old module live. Without `"source"`
+/// the watched file is re-read; unwatched modules require `"source"`.
+fn cmd_script_hot_reload(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+    let module = data
+        .get("module")
+        .and_then(Value::as_u64)
+        .ok_or("missing or invalid 'module'")?;
+    if !world.script_modules.contains(&module) {
+        return Err(format!("unknown script module {module}"));
+    }
+    let source = match opt_string(data, "source")? {
+        Some(source) => source,
+        None => {
+            let path = world
+                .script_watches
+                .iter()
+                .find(|watch| watch.module == module)
+                .map(|watch| watch.watch.path.clone())
+                .ok_or("module has no watched file: provide 'source'")?;
+            fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read '{}': {e}", path.display()))?
+        }
+    };
+    world
+        .script_host_mut()
+        .ok_or("script host is not installed")?
+        .hot_reload(&ScriptHandle(module), &source)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "module": module }).to_string())
+}
+
+/// `script_unload {"module"}`: drops the module and its file watch. Tick
+/// entries stay registered and record `unknown handle` errors until the
+/// module id is loaded again — unload ticking modules deliberately.
+fn cmd_script_unload(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+    let module = data
+        .get("module")
+        .and_then(Value::as_u64)
+        .ok_or("missing or invalid 'module'")?;
+    if !world.script_modules.contains(&module) {
+        return Err(format!("unknown script module {module}"));
+    }
+    if let Some(host) = world.script_host_mut() {
+        host.unload(&ScriptHandle(module));
+    }
+    world.script_modules.retain(|id| *id != module);
+    world.script_watches.retain(|watch| watch.module != module);
+    Ok(serde_json::json!({ "module": module }).to_string())
+}
+
+/// `script_list {}`: every loaded module with its tick entry (if any),
+/// watched path, last apply status, plus the pending outcome count.
+/// Non-tick modules are callable but never tick.
+fn cmd_script_list(world: &mut EditorWorld, _data: &Value) -> Result<String, String> {
+    let host = world.script_host().ok_or("script host is not installed")?;
+    let modules: Vec<Value> = world
+        .script_modules
+        .iter()
+        .map(|module| {
+            let tick = host
+                .entries()
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| entry.handle.0 == *module);
+            let (index, func): (Value, Value) = match tick {
+                Some((index, entry)) => (Value::from(index as u64), entry.func.clone().into()),
+                None => (Value::Null, Value::Null),
+            };
+            let path = world
+                .script_watches
+                .iter()
+                .find(|watch| watch.module == *module)
+                .map(|watch| watch.watch.path.display().to_string());
+            let status = tick
+                .and_then(|(index, _)| world.script_last_apply.iter().find(|s| s.index == index));
+            serde_json::json!({
+                "module": module,
+                "tick_entry": index,
+                "func": func,
+                "path": path,
+                "applied": status.map(|s| s.applied),
+                "errors": status.map(|s| &s.errors),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "modules": modules,
+        "pending": host.pending_outcome_count(),
+    })
+    .to_string())
+}
+
 fn opt_string(data: &Value, key: &str) -> Result<Option<String>, String> {
     match data.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -960,16 +1287,19 @@ fn startup_scene_ron() -> Option<String> {
         .find_map(|rel| fs::read_to_string(manifest.join(rel)).ok())
 }
 
-/// Watches the scene file the world was loaded from for external edits
-/// (phase 7, minimal): the editor-world loop already wakes every 16 ms,
-/// so a cheap mtime poll needs no `notify` dependency. Frontend clients
-/// pick the reload up through the normal versioned `/api/scene` snapshots.
-struct SceneFileWatch {
+/// Watches one file for external edits (phase 7, minimal): the
+/// editor-world loop already wakes every 16 ms, so a cheap mtime poll
+/// needs no `notify` dependency. Serves the scene file (frontend clients
+/// pick the reload up through the normal versioned `/api/scene`
+/// snapshots) and file-backed script modules (reloaded into the script
+/// host on the next tick, keeping the old module on read/compile
+/// failure until the file changes again).
+struct FileWatch {
     path: PathBuf,
     last_mtime: Option<SystemTime>,
 }
 
-impl SceneFileWatch {
+impl FileWatch {
     /// Starts watching `path`, baselining the current mtime so the
     /// already-loaded content does not trigger an instant reload.
     fn new(path: PathBuf) -> Self {
@@ -1036,7 +1366,7 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
             // Publish the initial state so the HTTP caches are live
             // before the first command arrives.
             publish_state(&world, &ev_tx);
-            let mut scene_watch = watched_scene_path().map(SceneFileWatch::new);
+            let mut scene_watch = watched_scene_path().map(FileWatch::new);
             loop {
                 match cmd_rx.recv_timeout(Duration::from_millis(16)) {
                     Ok(cmd) => world.handle_command(&cmd, &ev_tx),
@@ -1247,14 +1577,145 @@ mod tests {
     fn scene_watch_fires_once_on_external_change() {
         let path = temp_scene_path("once");
         // Missing file: no fire, but appearance fires exactly once.
-        let mut watch = SceneFileWatch::new(path.clone());
+        let mut watch = FileWatch::new(path.clone());
         assert!(!watch.poll());
         fs::write(&path, "v: 1").expect("write temp scene");
         assert!(watch.poll());
         assert!(!watch.poll());
         // A watch created over existing content is baselined: no fire.
-        let mut watch = SceneFileWatch::new(path.clone());
+        let mut watch = FileWatch::new(path.clone());
         assert!(!watch.poll());
+        let _ = fs::remove_file(&path);
+    }
+
+    /// End-to-end phase 6: a Rhai tick function returns a `{"set": [...]}`
+    /// patch, `tick` runs it and writes the world, bumping the version;
+    /// the apply status is visible to `script_list`.
+    #[test]
+    fn script_tick_applies_patches_to_world() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let entity = world.spawn(Some("ticked".into()));
+        let version_before = world.version;
+        let source = format!(
+            "fn tick(args) {{ #{{\"set\": [#{{\"entity\": #{{\"id\": {}, \"generation\": {}}}, \"component\": \"Name\", \"value\": \"renamed\"}}]}}; }}",
+            entity.id(),
+            entity.generation()
+        );
+        world.handle_command(
+            &custom(
+                "script_load",
+                &serde_json::json!({"name": "ticker", "source": source, "tick": "tick"})
+                    .to_string(),
+            ),
+            &ev_tx,
+        );
+        let loaded = custom_events(&drain_all(&ev_rx), "script_loaded");
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            world.tick(1.0 / 60.0),
+            "script patch must mark the world changed"
+        );
+        assert!(
+            world.version > version_before,
+            "apply must bump the version"
+        );
+        let name: Option<Name> = read_component(world.store(), entity);
+        assert_eq!(name.expect("Name lane").0, "renamed");
+        world.handle_command(&custom("script_list", "{}"), &ev_tx);
+        let lists = custom_events(&drain_all(&ev_rx), "script_list");
+        assert_eq!(lists.len(), 1);
+        let list: Value = serde_json::from_str(&lists[0]).expect("list is JSON");
+        assert_eq!(list["modules"][0]["applied"].as_u64(), Some(1));
+        assert_eq!(list["modules"][0]["func"].as_str(), Some("tick"));
+    }
+
+    /// `script_call` round-trips a function result; `script_list` shows a
+    /// loaded-but-unticked module with a null tick entry.
+    #[test]
+    fn script_call_round_trips_and_list_shows_module() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        world.handle_command(
+            &custom(
+                "script_load",
+                r#"{"name": "adder", "source": "fn add(a, b) { a + b; }"}"#,
+            ),
+            &ev_tx,
+        );
+        let loaded = custom_events(&drain_all(&ev_rx), "script_loaded");
+        assert_eq!(loaded.len(), 1);
+        let module: u64 =
+            serde_json::from_str::<Value>(&loaded[0]).expect("loaded is JSON")["module"]
+                .as_u64()
+                .expect("module id");
+        world.handle_command(
+            &custom(
+                "script_call",
+                &format!(r#"{{"module": {module}, "func": "add", "args": "[40, 2]"}}"#),
+            ),
+            &ev_tx,
+        );
+        let results = custom_events(&drain_all(&ev_rx), "script_result");
+        assert_eq!(results.len(), 1);
+        let result: Value = serde_json::from_str(&results[0]).expect("result is JSON");
+        assert_eq!(result["result"].as_i64(), Some(42));
+        world.handle_command(&custom("script_list", "{}"), &ev_tx);
+        let lists = custom_events(&drain_all(&ev_rx), "script_list");
+        assert_eq!(lists.len(), 1);
+        let list: Value = serde_json::from_str(&lists[0]).expect("list is JSON");
+        assert_eq!(list["modules"][0]["module"].as_u64(), Some(module));
+        assert!(list["modules"][0]["tick_entry"].is_null());
+        assert_eq!(list["pending"].as_u64(), Some(0));
+        // Unknown modules fail cleanly without touching the host.
+        world.handle_command(
+            &custom("script_call", r#"{"module": 9999, "func": "add"}"#),
+            &ev_tx,
+        );
+        assert!(custom_events(&drain_all(&ev_rx), "script_result").is_empty());
+    }
+
+    /// File-backed scripts: `script_load` with `"path"` watches the file,
+    /// and one `tick` both hot-reloads the edited source and applies the
+    /// new tick outcome.
+    #[test]
+    fn script_file_watch_hot_reloads_changed_source() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let entity = world.spawn(Some("watchy".into()));
+        let dir = std::env::temp_dir().join(format!("ornis-script-watch-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("watched.rhai");
+        fs::write(&path, "fn tick(args) { #{}; }").expect("write v1");
+        world.handle_command(
+            &custom(
+                "script_load",
+                &serde_json::json!({"name": "watched", "path": path.to_str().expect("temp path is UTF-8"), "tick": "tick"})
+                    .to_string(),
+            ),
+            &ev_tx,
+        );
+        let loaded = custom_events(&drain_all(&ev_rx), "script_loaded");
+        assert_eq!(loaded.len(), 1);
+        let module: u64 =
+            serde_json::from_str::<Value>(&loaded[0]).expect("loaded is JSON")["module"]
+                .as_u64()
+                .expect("module id");
+        assert!(world.script_watches.iter().any(|w| w.module == module));
+        world.tick(1.0 / 60.0); // v1 ticks clean (no patches, no errors)
+        let name: Option<Name> = read_component(world.store(), entity);
+        assert_eq!(name.expect("Name lane").0, "watchy");
+        let version_before_v2 = world.version;
+        fs::write(
+            &path,
+            format!(
+                "fn tick(args) {{ #{{\"set\": [#{{\"entity\": #{{\"id\": {}, \"generation\": {}}}, \"component\": \"Name\", \"value\": \"watched\"}}]}}; }}",
+                entity.id(),
+                entity.generation()
+            ),
+        )
+        .expect("write v2");
+        assert!(world.tick(1.0 / 60.0), "reloaded tick must apply");
+        assert!(world.version > version_before_v2);
+        let name: Option<Name> = read_component(world.store(), entity);
+        assert_eq!(name.expect("Name lane").0, "watched");
         let _ = fs::remove_file(&path);
     }
 

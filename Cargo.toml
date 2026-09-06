@@ -43,6 +43,7 @@ ornis-core = { path = "crates/core" }
 ornis-physics = { path = "crates/physics" }
 ornis-render = { path = "crates/render" }
 ornis-app = { path = "crates/app" }
+ornis-rhai = { path = "crates/rhai" }
 editor-backend = { path = "crates/editor-backend" }
 wgpu = "30"
 winit = "0.30"

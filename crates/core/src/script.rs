@@ -219,6 +219,85 @@ impl ScriptHost {
         Ok(self.add_tick(handle, func))
     }
 
+    /// Loads a module without registering a tick entry.
+    ///
+    /// Use this for editor tooling and on-demand calls; per-frame scripts
+    /// go through [`ScriptHost::load_and_tick`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScriptError`] if the source fails to parse/compile.
+    pub fn load(&mut self, name: &str, source: &str) -> Result<ScriptHandle, ScriptError> {
+        self.engine
+            .lock()
+            .map_err(|_| ScriptError("script host lock poisoned".into()))?
+            .load(name, source)
+    }
+
+    /// Calls one loaded module directly (editor tooling path, not per-frame).
+    ///
+    /// `args` is the engine-level encoding (JSON array for Rhai/Rune/Python);
+    /// the raw JSON reply is returned for the caller to surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScriptError`] on lock failure, unknown handle, or when the
+    /// call itself fails.
+    pub fn call(
+        &self,
+        handle: &ScriptHandle,
+        func: &str,
+        args: &[u8],
+    ) -> Result<Vec<u8>, ScriptError> {
+        self.engine
+            .lock()
+            .map_err(|_| ScriptError("script host lock poisoned".into()))?
+            .call(handle, func, args)
+    }
+
+    /// Replaces a loaded module's source under its current handle: tick
+    /// entries keep pointing at it and globals survive (see
+    /// [`ScriptEngine::hot_reload`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScriptError`] if the new source fails to compile — the old
+    /// module stays live — or when the handle is unknown.
+    pub fn hot_reload(&mut self, handle: &ScriptHandle, source: &str) -> Result<(), ScriptError> {
+        self.engine
+            .lock()
+            .map_err(|_| ScriptError("script host lock poisoned".into()))?
+            .hot_reload(handle, source)
+    }
+
+    /// Drops a loaded module. Tick entries pointing at it stay registered
+    /// and record `unknown handle` errors on every tick until the module is
+    /// loaded again under the same handle id — check
+    /// [`ScriptHost::entries`] before unloading a ticking module.
+    pub fn unload(&mut self, handle: &ScriptHandle) {
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.unload(handle);
+        }
+    }
+
+    /// Removes all stored tick outcomes and returns them keyed by entry
+    /// index, for hosts that drain on one side of a borrow boundary and
+    /// apply on the other (see [`ScriptHost::apply_drained`]).
+    pub fn take_outcomes(&self) -> HashMap<usize, Result<Vec<u8>, String>> {
+        self.outcomes
+            .lock()
+            .map(|mut outcomes| std::mem::take(&mut *outcomes))
+            .unwrap_or_default()
+    }
+
+    /// Stored (not yet applied) tick outcomes.
+    pub fn pending_outcome_count(&self) -> usize {
+        self.outcomes
+            .lock()
+            .map(|outcomes| outcomes.len())
+            .unwrap_or(0)
+    }
+
     /// Tick entries in registration order.
     pub fn entries(&self) -> &[ScriptTickEntry] {
         &self.entries
@@ -234,12 +313,13 @@ impl ScriptHost {
         self.ticks.load(Ordering::SeqCst)
     }
 
-    /// Calls every entry with `{"dt": dt, "tick": n}` and stores outcomes.
+    /// Calls every entry with one argument — `[{"dt": dt, "tick": n}]` —
+    /// and stores outcomes.
     ///
     /// A failing entry records its error and never blocks the rest.
     fn tick_all(&self, dt: f32) {
         let n = self.ticks.fetch_add(1, Ordering::SeqCst);
-        let args = serde_json::json!({"dt": dt, "tick": n})
+        let args = serde_json::json!([{"dt": dt, "tick": n}])
             .to_string()
             .into_bytes();
         let Ok(mut engine) = self.engine.lock() else {
@@ -394,13 +474,17 @@ impl ScriptHost {
         store: &mut SmartStore,
         registry: &ComponentRegistry,
     ) -> ApplyReport {
-        let drained = self
-            .outcomes
-            .lock()
-            .map(|mut outcomes| std::mem::take(&mut *outcomes));
-        let Ok(drained) = drained else {
-            return ApplyReport::default();
-        };
+        Self::apply_drained(store, registry, self.take_outcomes())
+    }
+
+    /// Applies already-drained outcomes (see [`ScriptHost::take_outcomes`])
+    /// without touching the engine lock, so external drivers can drain next
+    /// to the tick system and write next to the entity store.
+    pub fn apply_drained(
+        store: &mut SmartStore,
+        registry: &ComponentRegistry,
+        drained: HashMap<usize, Result<Vec<u8>, String>>,
+    ) -> ApplyReport {
         let mut entries: Vec<_> = drained
             .into_iter()
             .map(|(index, outcome)| apply_one(store, registry, index, outcome))
@@ -631,7 +715,8 @@ mod tests {
     }
 
     fn tick_args(payload: &[u8]) -> serde_json::Value {
-        serde_json::from_slice(payload).expect("tick args are JSON")
+        let v: serde_json::Value = serde_json::from_slice(payload).expect("tick args are JSON");
+        v[0].clone()
     }
 
     #[test]
