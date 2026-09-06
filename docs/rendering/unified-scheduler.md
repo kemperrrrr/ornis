@@ -617,3 +617,18 @@ debug-only по умолчанию). Тесты:
 `declared_access_in_child_thread_passes_with_captured_frame`,
 `capture_outside_schedule_run_is_noop`. Фаза B аудита с этим закрыта
 целиком: ленты (#5) ✅, пассы (#6) ✅, rayon (#7) ✅.
+
+## S7 — GPU upload как система (2026-09-06, native)
+
+`GpuDevice`/`GpuQueue`/`GpuSurfaceState` + `GpuFrameState{Renderer3D, RenderFrame3D, Mesh}` как ECS-ресурсы
+(`crates/render/src/gpu_resources.rs`): `install_gpu_resources` вставляет их в `World` и добавляет `RenderSubmit`
+(`reads Mutex<RenderExtracted>/Mutex<OrbitCamera>/GpuDevice/GpuQueue/GpuSurfaceState, writes Mutex<GpuFrameState>`).
+Тело системы: пересоздаёт `Mesh` по `mesh_params`, считает `view_proj` из `OrbitCamera + GpuSurfaceState.size`,
+`set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
+
+Интеграция native: `GameApp::initialize` клонирует `Device/Queue` в ресурсы, `GameContext` больше не хранит
+`Renderer3D/FramePlan/Mesh` отдельно; `GameApp::render_frame` → `render_world.run_frame` (в `Engine::schedule` уже
+`RenderExtract → OrbitCamera → RenderSubmit` на едином `bitset_level_plan`, уровень после extraction — RaW по
+`Mutex<RenderExtracted>`) + `surface.get_current_texture → frame_plan.render → queue.submit/present` вне системы
+(шаг 1). `Resized` синхронит `GpuSurfaceState.size` и `GpuFrameState{renderer.resize, frame_plan.set_surface_size}`.
+Шаг 2 перенесёт `Surface` acquire в `System` (`Mutex<Surface>`). `cargo check/clippy/test 99/142` чисто.
