@@ -152,12 +152,15 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
    type-erased операции (insert/get/remove в `SmartStore`, serde JSON
    в/из компонента); только tooling-пути (FFI/редактор/сериализация),
    горячие циклы остаются типизированными.
-   🟡 **2026-08-22**: реализовано в `crates/core/src/registry.rs`
+   ✅ **2026-08-22**: реализовано в `crates/core/src/registry.rs`
    (`ComponentRegistry`/`ComponentMeta`; thunk'и мономорфизирует
-   generic-регистрация — процедурный макрос не понадобился,
-   derive-сахар опционально позже); юнит-тесты + doc-пример.
+   generic-регистрация); юнит-тесты + doc-пример.
    Верифицировано последующим CI quality-прогоном; generic-регистрация
    остаётся tooling-путём, горячие циклы не затрагивает.
+   ✅ **2026-09-06**: derive-сахар `#[derive(RegisterComponent)]`
+   (`crates/macros/src/register_component.rs`, `RegisterComponent::COMPONENT_NAME`
+   + `ComponentRegistry::register_component::<T>()`, `#[component(name=\"...\")]`
+   опционально; `crates/core/tests/register_component.rs`).
 2. **`ScriptEngine`-трейт** — третий плагинный трейт рядом с
    `PhysicsEngine` и `RenderBackend`: ядро знает только трейт
    (load/call/batch/hot reload), языки — адаптеры.

@@ -23,6 +23,7 @@ mod gpu_pipeline;
 mod kernel;
 mod pack;
 mod pipeline_config;
+mod register_component;
 mod smart_pipeline;
 mod static_profile;
 mod wgsl;
@@ -106,4 +107,15 @@ pub fn gpu_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
     kernel::kernel(attr, item)
+}
+
+/// Derive the canonical component name for the F0 registry.
+///
+/// Implements `ornis_core::registry::RegisterComponent` with
+/// `COMPONENT_NAME` coming from `#[component(name = \"...\")]` or, when
+/// absent, from the type ident itself. Use with
+/// `ComponentRegistry::register_component::<T>()`.
+#[proc_macro_derive(RegisterComponent, attributes(component))]
+pub fn derive_register_component(input: TokenStream) -> TokenStream {
+    register_component::derive(input)
 }
