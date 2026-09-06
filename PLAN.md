@@ -173,9 +173,8 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
    WASM-сценарий (sandbox).
    ✅ **2026-09-05**: реализован как `ScriptEngine::batch_call` с `BatchHandle` (см. `script.rs`).
 4. **Первый адаптер — Rhai** ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine` + JSON-кодек, AST на модуль, hot reload держит старый AST при ошибке; rhai 1.26 + `sync`-фича для `Send+Sync`).
-   ✅ **2026-09-06 — второй адаптер Rune** (`crates/rune`: `RuneScriptEngine`, rune 0.14, per-call свежий `Vm` из хранимого `Unit` + shared `RuntimeContext`, тот же JSON-кодек null→`()`, 7 тестов зеркально Rhai incl. object round-trip; шов правилом трёх проверен — обе реализации проходят идентичное поведение `load/call/batch/hot_reload/unload`) → прочие языки (Python/rustpython,
-   WASM-компоненты) отдельными адаптерами; WASM —
-   исследовательский трек (языко-нейтральность + sandbox).
+   ✅ **2026-09-06 — второй адаптер Rune** (`crates/rune`: `RuneScriptEngine`, rune 0.14, per-call свежий `Vm` из хранимого `Unit` + shared `RuntimeContext`, тот же JSON-кодек null→`()`, 7 тестов зеркально Rhai incl. object round-trip; шов правилом трёх проверен — обе реализации проходят идентичное поведение `load/call/batch/hot_reload/unload`).
+   ✅ **2026-09-06 — третий адаптер Python** (`crates/python`: `PythonScriptEngine`, rustpython-vm 0.5; интерпретатор `!Send/!Sync` по дизайну → живёт на выделенном worker-thread, через границу только owned-данные и JSON-байты; `without_stdlib` (гостю хватает builtins для JSON-кодека); тот же JSON-кодек, 8 тестов зеркально Rhai + `None↔null`/`unload`; deny/advisories чисто — leaf-адаптеры вне графа deny 0.20.2, как Rhai/Rune) → остался исследовательский трек WASM-компоненты (языко-нейтральность + sandbox).
    **Mojo — один из официальных адаптеров (решение 2026-09-05):**
    после появления `wasm32`/`WASI` таргета в Mojo (`modular/modular#19`, `#5367`
    — по состоянию на `2026-09-05` открыты, `no current plans` на форуме
