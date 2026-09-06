@@ -22,6 +22,15 @@
 //! by shape) and the return value is serialized back to JSON bytes.
 //! Scripts stay side-effect free with respect to the host: the only
 //! shared state is the argument/return payload.
+//!
+//! ## License note
+//!
+//! This adapter pulls `malachite-bigint`/`malachite-q` (transitively via
+//! `rustpython-vm`) licensed `LGPL-3.0-only`. LGPL obligations (user
+//! relinking, §4) trigger only when a binary containing this crate is
+//! distributed; source-only presence in the tree creates none. If Ornis
+//! ever ships binaries, either satisfy §4 or drop this adapter —
+//! Rhai/Rune keep the seam covered under permissive licenses.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
