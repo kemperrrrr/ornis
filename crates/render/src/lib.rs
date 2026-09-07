@@ -23,13 +23,13 @@ pub mod gpu_resources;
 pub mod mesh;
 /// Backend-neutral rendering trait plus its factory.
 pub mod render_backend;
-/// E1 (S5e) bridge: frame passes projected as ordinary core `Schedule`
-/// systems (declaration twins; level parity pinned by `scheduler_parity`).
-pub mod schedule_bridge;
 /// The deferred [`renderer::Renderer3D`] and its passes.
 pub mod renderer;
 /// RON-serializable scene description types.
 pub mod scene;
+/// E1 (S5e) bridge: frame passes projected as ordinary core `Schedule`
+/// systems (declaration twins; level parity pinned by `scheduler_parity`).
+pub mod schedule_bridge;
 /// WGSL shader assembly and Rust-side BRDF math kernels.
 pub mod shaders;
 /// Typed plan systems + single declaration registry (d3).
@@ -46,7 +46,6 @@ pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
-pub use schedule_bridge::{ProjectionError, try_project_schedule};
 /// Unified explicit-ordering edge error (Phase A, audit §4.2); the same type
 /// `ornis_core` re-exports for systems.
 pub use ornis_schedule::OrderError;
@@ -57,6 +56,7 @@ pub use renderer::{
     CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,
     InstanceData, LightingPass, PerObjectGpu, Renderer3D,
 };
+pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use system::{
     Access, AccessSet, ClearBlack, ClearTransparent, ClearValue, ClearWhite, Frame, FramePass,
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,

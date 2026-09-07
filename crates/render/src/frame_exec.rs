@@ -19,6 +19,7 @@ use crate::frame_passes::{
 };
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
+use crate::schedule_bridge::ProjectionError;
 use crate::system::{Frame, SystemSet};
 use crate::transient_pool::{
     Budget, FrameLayout, PassLayout, ResourceId, ResourceLayout, TransientPool,
@@ -701,24 +702,24 @@ impl RenderFrame3D {
     /// The projection is built per call in E1; E2 hoists schedule
     /// ownership into the runtime once recording moves into the systems.
     ///
-    /// # Panics
-    /// Panics when a pass touches a resource without a typed registry
-    /// identity (`schedule_bridge::ProjectionError`).
+    /// # Errors
+    /// Returns the [`ProjectionError`] of
+    /// [`schedule_bridge::try_project_schedule`](crate::schedule_bridge::try_project_schedule)
+    /// when a pass touches a resource without a typed registry identity.
     pub fn render_schedule(
         &mut self,
         context: crate::render_backend::RenderContext<'_>,
         renderer: &Renderer3D,
         mesh: &Mesh,
         instance_count: u32,
-    ) {
+    ) -> Result<(), ProjectionError> {
         let Self {
             executor,
             ids,
             systems,
             ..
         } = self;
-        let schedule = crate::schedule_bridge::try_project_schedule(systems)
-            .unwrap_or_else(|e| panic!("render_schedule: projection failed: {e}"));
+        let schedule = crate::schedule_bridge::try_project_schedule(systems)?;
         let layout = executor.ensure_layout(systems);
         let levels = schedule.levels();
         debug_assert_eq!(
@@ -743,6 +744,7 @@ impl RenderFrame3D {
             &order,
             |encoder, pass| dispatch_pass(&dispatch, encoder, &pass),
         );
+        Ok(())
     }
 }
 

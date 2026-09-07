@@ -163,8 +163,8 @@ mod tests {
                     technique,
                     bloom,
                 );
-                let schedule = try_project_schedule(plan.systems())
-                    .expect("production resources are typed");
+                let schedule =
+                    try_project_schedule(plan.systems()).expect("production resources are typed");
                 assert_eq!(
                     schedule.levels(),
                     plan.systems_mut().build().levels(),

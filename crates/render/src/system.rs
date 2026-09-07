@@ -601,7 +601,7 @@ impl SystemSet {
     pub(crate) fn resource_type(&self, id: ResourceId) -> Option<TypeId> {
         self.ids
             .iter()
-            .find(|(_, &rid)| rid == id)
+            .find(|(_, rid)| **rid == id)
             .map(|(&tid, _)| tid)
     }
 

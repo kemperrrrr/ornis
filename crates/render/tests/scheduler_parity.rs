@@ -285,21 +285,33 @@ fn projected_levels(
 #[test]
 fn projected_pass_system_levels_match_layout_levels() {
     // Chain: RaW/WaW dependencies serialize level by level.
-    let (projected, layout) =
-        projected_levels(&[vec![], vec![0], vec![1]], &[vec![0], vec![1], vec![2]], &[]);
+    let (projected, layout) = projected_levels(
+        &[vec![], vec![0], vec![1]],
+        &[vec![0], vec![1], vec![2]],
+        &[],
+    );
     assert_eq!(projected, layout, "chain: adapter levels != layout levels");
     assert_eq!(projected, vec![vec![0], vec![1], vec![2]]);
 
     // Independent writers share a level; the reader closes the frame.
-    let (projected, layout) =
-        projected_levels(&[vec![], vec![], vec![0, 1]], &[vec![0], vec![1], vec![2]], &[]);
-    assert_eq!(projected, layout, "shared level: adapter levels != layout levels");
+    let (projected, layout) = projected_levels(
+        &[vec![], vec![], vec![0, 1]],
+        &[vec![0], vec![1], vec![2]],
+        &[],
+    );
+    assert_eq!(
+        projected, layout,
+        "shared level: adapter levels != layout levels"
+    );
     assert_eq!(projected, vec![vec![0, 1], vec![2]]);
 
     // An explicit edge splits a shared level on both sides.
     let (projected, layout) =
         projected_levels(&[vec![], vec![]], &[vec![0], vec![1]], &[("s0", "s1")]);
-    assert_eq!(projected, layout, "edge split: adapter levels != layout levels");
+    assert_eq!(
+        projected, layout,
+        "edge split: adapter levels != layout levels"
+    );
     assert_eq!(projected, vec![vec![0], vec![1]]);
 }
 

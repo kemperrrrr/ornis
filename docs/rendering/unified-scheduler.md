@@ -839,15 +839,18 @@ X1–X3 независимы между собой после E2.
   уровнями спроецированного `Schedule` (flatten уровней →
   `FrameExecutor::execute_in_order`, тот же `dispatch_pass`, что у
   sequential/parallel путей); debug-assert на каждый кадр проверяет
-  уровни == `FrameLayout::levels()`. Проекция строится на вызов — E2
-  поднимет владение schedule в рантайм.
+  уровни == `FrameLayout::levels()`. Fallible: возвращает
+  `ProjectionError` при нетипизированном ресурсе. Проекция строится на
+  вызов — E2 поднимет владение schedule в рантайм.
 
 Гейты: `scheduler_parity.rs` расширен каноном E1 (проекция ==
 `FrameLayout::levels()` на цепочках/shared-levels/edge-splits,
 disabled-culling, untyped-error; плюс production-матрица Technique×bloom
 в юнит-тестах моста) и `tests/schedule_render.rs` — пиксельный паритет
-schedule-driven vs sequential на lavapipe (0 отличий, harness как у
-S5b `parallel_render.rs`).
+schedule-driven vs sequential на lavapipe (0 отличий). GPU-harness двух
+гейтов (S5b и E1) дедуплицирован в `tests/common/mod.rs` — один
+headless-сценарий, мишени и readback вместо копий в каждом гейте
+(ratchet-clean по findings).
 
 ## WASD-мост: фикс шва sync + порядок (2026-09-06)
 
