@@ -611,10 +611,7 @@ impl SystemSet {
             budget: self.budget,
         };
         self.pool.ensure(generation, &input)?;
-        Ok(self
-            .pool
-            .cached()
-            .expect("pool ensured a layout above"))
+        Ok(self.pool.cached().expect("pool ensured a layout above"))
     }
 
     /// Compute the layout snapshot (parity oracle, debug tools). Shares
@@ -713,8 +710,7 @@ impl SystemSet {
     }
 
     fn resolve_in(ids: &HashMap<TypeId, ResourceId>, d: &AccessDesc) -> ResourceId {
-        *ids
-            .get(&d.resource)
+        *ids.get(&d.resource)
             .unwrap_or_else(|| panic!("system resource '{}' is not registered", d.name))
     }
 
@@ -1044,7 +1040,10 @@ mod tests {
         );
         // Ids outside the registry are an error, not a silent garbage edge.
         assert!(matches!(
-            set.try_order_before(crate::transient_pool::PassId(99), crate::transient_pool::PassId(100)),
+            set.try_order_before(
+                crate::transient_pool::PassId(99),
+                crate::transient_pool::PassId(100)
+            ),
             Err(OrderError::UnknownNode { .. })
         ));
         assert_eq!(set.build().levels(), vec![vec![0, 1]]);

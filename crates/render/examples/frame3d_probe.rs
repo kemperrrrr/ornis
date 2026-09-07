@@ -480,11 +480,7 @@ async fn run(scene: &Scene) {
 
     // ── Compare legacy vs graph ───────────────────────────────────────
     let verdict = compare_legacy_graph(&legacy_pixels, &graph_pixels);
-    save_png(
-        "target/frame3d_probe_legacy.png",
-        &legacy_pixels,
-        unpadded,
-    );
+    save_png("target/frame3d_probe_legacy.png", &legacy_pixels, unpadded);
     save_png("target/frame3d_probe_graph.png", &graph_pixels, unpadded);
     println!("--- graph layout ---");
     println!("{}", graph3d.layout_dump());

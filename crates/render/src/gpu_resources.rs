@@ -111,6 +111,7 @@ pub fn install_gpu_resources(
     surface_state: GpuSurfaceState,
     frame_state: GpuFrameState,
 ) {
+    install_frame_buffers(engine);
     let _ = engine.world_mut().insert(GpuDevice(device));
     let _ = engine.world_mut().insert(GpuQueue(queue));
     let _ = engine.world_mut().insert(GpuSurface(Mutex::new(surface)));

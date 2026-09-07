@@ -775,7 +775,10 @@ mod tests {
         PassNode {
             name: name.to_owned(),
             reads: reads.iter().map(|&i| ResourceId(i as u32)).collect(),
-            writes: writes.iter().map(|&i| (ResourceId(i as u32), None)).collect(),
+            writes: writes
+                .iter()
+                .map(|&i| (ResourceId(i as u32), None))
+                .collect(),
             enabled: true,
         }
     }
@@ -816,7 +819,10 @@ mod tests {
             surface_size,
             budget: Budget::unbounded(),
         };
-        (*TransientPool::new().ensure(0, &input).expect("unbounded budget")).clone()
+        (*TransientPool::new()
+            .ensure(0, &input)
+            .expect("unbounded budget"))
+        .clone()
     }
 
     fn compile_with_ordering(
@@ -832,7 +838,10 @@ mod tests {
             surface_size,
             budget: Budget::unbounded(),
         };
-        (*TransientPool::new().ensure(0, &input).expect("unbounded budget")).clone()
+        (*TransientPool::new()
+            .ensure(0, &input)
+            .expect("unbounded budget"))
+        .clone()
     }
 
     // ── lifetime windows (resource_layout.first_use / last_use) ──────
@@ -851,9 +860,17 @@ mod tests {
         let layout = compile(resources, passes, (1920, 1080));
         assert_eq!(layout.passes.len(), 2);
         let a = &layout.resources[0];
-        assert_eq!((a.first_use, a.last_use), (0, 1), "albedo: gbuffer → lighting");
+        assert_eq!(
+            (a.first_use, a.last_use),
+            (0, 1),
+            "albedo: gbuffer → lighting"
+        );
         let h = &layout.resources[1];
-        assert_eq!((h.first_use, h.last_use), (1, 1), "hdr lives only on lighting");
+        assert_eq!(
+            (h.first_use, h.last_use),
+            (1, 1),
+            "hdr lives only on lighting"
+        );
         let d = &layout.resources[2];
         assert_eq!((d.first_use, d.last_use), (0, 1));
         // Different formats → different slots.
@@ -877,8 +894,15 @@ mod tests {
             pass("p3", &[1], &[]),
         ];
         let layout = compile(resources, passes, (320, 240));
-        assert_eq!(layout.slots.len(), 1, "non-overlapping windows share a slot");
-        assert_eq!(layout.slots[0].resources, vec![ResourceId(0), ResourceId(1)]);
+        assert_eq!(
+            layout.slots.len(),
+            1,
+            "non-overlapping windows share a slot"
+        );
+        assert_eq!(
+            layout.slots[0].resources,
+            vec![ResourceId(0), ResourceId(1)]
+        );
         assert_eq!(layout.resources[0].slot, Some(0));
         assert_eq!(layout.resources[1].slot, Some(0));
     }
@@ -906,10 +930,7 @@ mod tests {
     #[should_panic(expected = "before any write")]
     fn read_before_write_panics() {
         let resources = vec![res("x", spec(wgpu::TextureFormat::Rgba8Unorm, 1))];
-        let passes = vec![
-            pass("p0", &[0], &[]),
-            pass("p1", &[], &[0]),
-        ];
+        let passes = vec![pass("p0", &[0], &[]), pass("p1", &[], &[0])];
         let _ = compile(resources, passes, (320, 240));
     }
 
@@ -917,7 +938,10 @@ mod tests {
 
     #[test]
     fn imported_resource_may_be_read_first() {
-        let resources = vec![res_imported("shadow", spec(wgpu::TextureFormat::R32Float, 1))];
+        let resources = vec![res_imported(
+            "shadow",
+            spec(wgpu::TextureFormat::R32Float, 1),
+        )];
         let passes = vec![pass("p0", &[0], &[]), pass("p1", &[0], &[])];
         let layout = compile(resources, passes, (320, 240)); // must not panic
         let rl = &layout.resources[0];
@@ -943,7 +967,11 @@ mod tests {
         assert_eq!(layout.passes.len(), 1);
         assert_eq!(layout.passes[0].name, "p2");
         let ra = &layout.resources[a.0 as usize];
-        assert_eq!(ra.first_use, usize::MAX, "a is not used by any enabled pass");
+        assert_eq!(
+            ra.first_use,
+            usize::MAX,
+            "a is not used by any enabled pass"
+        );
         assert_eq!(ra.slot, None);
         assert_eq!(layout.slots.len(), 1, "only b gets a slot");
 
@@ -953,10 +981,7 @@ mod tests {
             res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
             res("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
         ];
-        let passes = vec![
-            pass_disabled("p1", &[], &[0]),
-            pass("p2", &[], &[1]),
-        ];
+        let passes = vec![pass_disabled("p1", &[], &[0]), pass("p2", &[], &[1])];
         let layout = compile(resources, passes, (320, 240));
         assert_eq!(layout.passes.len(), 1);
         assert_eq!(layout.passes[0].name, "p2");
@@ -1041,10 +1066,18 @@ mod tests {
             })
             .collect();
         assert_eq!(visits[0], (0, vec![a], Some(0)), "gbuffer: a alive");
-        assert_eq!(visits[1], (1, vec![a, b], Some(0)), "lighting: a and b alive");
+        assert_eq!(
+            visits[1],
+            (1, vec![a, b], Some(0)),
+            "lighting: a and b alive"
+        );
         assert_eq!(visits[2], (2, vec![b], None), "composite: a is dead");
         assert_eq!(
-            layout.passes.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+            layout
+                .passes
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>(),
             vec!["gbuffer", "lighting", "composite"]
         );
     }
@@ -1097,7 +1130,11 @@ mod tests {
     #[test]
     fn clear_value_is_carried_to_layout() {
         let resources = vec![res("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1))];
-        let passes = vec![pass_write_clear("lighting", &[], &[(0, Some(wgpu::Color::BLACK))])];
+        let passes = vec![pass_write_clear(
+            "lighting",
+            &[],
+            &[(0, Some(wgpu::Color::BLACK))],
+        )];
         let layout = compile(resources, passes, (640, 480));
         assert_eq!(
             layout.passes[0].writes,
