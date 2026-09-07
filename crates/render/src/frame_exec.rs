@@ -29,6 +29,8 @@ use ornis_schedule::run_levels;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::gpu_resources::FrameCommandBuffers;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
 /// One pooled texture per render-plan slot.
@@ -155,6 +157,40 @@ impl FrameExecutor {
                     index,
                 },
             );
+        }
+    }
+
+    /// E2 (S5e): per-pass encoders in an explicitly given pass order —
+    /// no caller encoder and no submit: every pass records into its own
+    /// encoder and the finished buffers are pushed into `sink` in that
+    /// order, ready for one ordered submit by the caller's flush step
+    /// (the encoder-as-frame-resource handover; the mechanics are the
+    /// sequential form of [`execute_parallel`](Self::execute_parallel)).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn record_in_order<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        layout: &'a FrameLayout,
+        order: &[usize],
+        sink: &Mutex<Vec<wgpu::CommandBuffer>>,
+        mut run: impl FnMut(usize, &PassViews<'a>, &mut wgpu::CommandEncoder),
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        for &index in order {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let views = PassViews {
+                layout,
+                pool,
+                externals,
+                index,
+            };
+            run(index, &views, &mut encoder);
+            sink.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(encoder.finish());
         }
     }
 
@@ -699,8 +735,10 @@ impl RenderFrame3D {
     /// pinned equal to `FrameLayout::levels()` (parity canon,
     /// `scheduler_parity`), and a debug assertion re-checks it per frame.
     ///
-    /// The projection is built per call in E1; E2 hoists schedule
-    /// ownership into the runtime once recording moves into the systems.
+    /// The projection is built per call in E1; E2's
+    /// [`render_to_buffers`](Self::render_to_buffers) supersedes this on
+    /// the native runtime path — this method stays the borrowed-encoder
+    /// contract for callers that own the submit themselves.
     ///
     /// # Errors
     /// Returns the [`ProjectionError`] of
@@ -719,16 +757,8 @@ impl RenderFrame3D {
             systems,
             ..
         } = self;
-        let schedule = crate::schedule_bridge::try_project_schedule(systems)?;
-        let layout = executor.ensure_layout(systems);
-        let levels = schedule.levels();
-        debug_assert_eq!(
-            levels,
-            layout.levels(),
-            "E1: projected Schedule levels != FrameLayout::levels()"
-        );
+        let (layout, order) = Self::projected_order(executor, systems)?;
         executor.set_external_view(ids.target, context.target.clone());
-        let order: Vec<usize> = levels.iter().flatten().copied().collect();
         let dispatch = PassDispatch {
             systems,
             device: context.device,
@@ -745,6 +775,77 @@ impl RenderFrame3D {
             |encoder, pass| dispatch_pass(&dispatch, encoder, &pass),
         );
         Ok(())
+    }
+
+    /// E2 (S5e): renders one frame with the encoder context as frame
+    /// data instead of a borrowed parameter: the passes, ordered by the
+    /// projected `Schedule` levels, each record into their own encoder
+    /// and the finished buffers land in `buffers` in registration order.
+    /// No submit happens here — a separate flush step
+    /// (`FrameCommandBuffers::flush`, the runtime's `RenderFlush` system)
+    /// owns the ordered queue handover, so recording and submit compose
+    /// inside one schedule.
+    ///
+    /// Pixel-identical to [`render`](Self::render): per-pass encoders +
+    /// one ordered submit is the proven `execute_parallel` mechanics
+    /// (pinned by the E2 gate in `tests/schedule_render.rs`).
+    /// Native-only: the handover resource requires wgpu
+    /// `CommandBuffer: Send` (the web backend's is not).
+    ///
+    /// # Errors
+    /// Returns the [`ProjectionError`] of the schedule projection when a
+    /// pass touches a resource without a typed registry identity.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_to_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        renderer: &Renderer3D,
+        mesh: &Mesh,
+        instance_count: u32,
+        buffers: &FrameCommandBuffers,
+    ) -> Result<(), ProjectionError> {
+        let Self {
+            executor,
+            ids,
+            systems,
+            ..
+        } = self;
+        let (layout, order) = Self::projected_order(executor, systems)?;
+        executor.set_external_view(ids.target, target.clone());
+        let dispatch = PassDispatch {
+            systems,
+            device,
+            queue,
+            renderer,
+            mesh,
+            instance_count,
+        };
+        executor.record_in_order(device, &layout, &order, &buffers.0, |_index, pass, encoder| {
+            dispatch_pass(&dispatch, encoder, pass);
+        });
+        Ok(())
+    }
+
+    /// E1/E2 shared: the projected schedule order for the current
+    /// declarations plus the memoized frame layout, with the parity
+    /// invariant (projected levels == `FrameLayout::levels()`) re-checked
+    /// per frame in debug builds.
+    fn projected_order(
+        executor: &mut FrameExecutor,
+        systems: &SystemSet,
+    ) -> Result<(Arc<FrameLayout>, Vec<usize>), ProjectionError> {
+        let schedule = crate::schedule_bridge::try_project_schedule(systems)?;
+        let layout = executor.ensure_layout(systems);
+        let levels = schedule.levels();
+        debug_assert_eq!(
+            levels,
+            layout.levels(),
+            "projected Schedule levels != FrameLayout::levels()"
+        );
+        let order: Vec<usize> = levels.iter().flatten().copied().collect();
+        Ok((layout, order))
     }
 }
 

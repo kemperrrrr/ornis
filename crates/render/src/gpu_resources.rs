@@ -1,9 +1,10 @@
 //! GPU resources as ECS singletons — дизайн единого scheduler'а (S6→S7).
 //!
 //! Цель: `Device`/`Queue`/`Surface`/`SurfaceConfiguration`/`Renderer3D`/`RenderFrame3D`
-//! как ресурсы `World`, чтобы `RenderSubmit` (upload) и `RenderPresent`
-//! (acquire → record → submit → present) стали обычными `System` в
-//! `Engine::schedule` вместо императива `GameContext::render_frame`.
+//! как ресурсы `World`, чтобы `RenderSubmit` (upload), `RenderPresent`
+//! (acquire → record) и `RenderFlush` (ordered submit → present) стали
+//! обычными `System` в `Engine::schedule` вместо императива
+//! `GameContext::render_frame`.
 //! Пассы уже типизированы (`FramePass` с `Reads`/`Writes`),
 //! их уровни — `bitset_level_plan` из `ornis-schedule` (единый движок с
 //! `Schedule`). Здесь фиксируется контракт, как GPU-объекты входят в мир.
@@ -22,11 +23,16 @@
 //!   `Mutex<RenderExtracted>`), порядок — уровень после extraction.
 //! - `RenderPresent` — `System` читает `GpuSurface`/`GpuSurfaceState`/
 //!   `GpuDevice`/`GpuQueue` + `Mutex<RenderExtracted>` (instance count) и пишет
-//!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд). Делает
-//!   `surface.get_current_texture → create_view → frame3d.render →
-//!   queue.submit → queue.present`. Ошибки `Outdated`/`Lost` —
+//!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд) + оба
+//!   E2-handover-ресурса. Делает `surface.get_current_texture → create_view →
+//!   frame3d.render_to_buffers` (per-pass encoders → `FrameCommandBuffers`,
+//!   acquired frame → `FramePresentTarget`). Ошибки `Outdated`/`Lost` —
 //!   реконфигурируют `Surface` на месте; `Occluded`/`Timeout`/`Validation` —
 //!   пропускают кадр. `Suboptimal` трактуется как `Success`.
+//! - `RenderFlush` — `System` (E2) сливает `FrameCommandBuffers` одним
+//!   ordered submit (`FrameCommandBuffers::flush`) и презентует acquired
+//!   frame из `FramePresentTarget`. Порядок после `RenderPresent`
+//!   гарантирован WaW по обоим handover-ресурсам (регистрация следом).
 //!   После этого `GameApp::render_frame` сводится к `run_frame`.
 
 use std::sync::Mutex;
@@ -74,6 +80,29 @@ pub struct GpuSurface(pub Mutex<wgpu::Surface<'static>>);
 #[derive(Debug, Default)]
 pub struct FrameCommandBuffers(pub Mutex<Vec<wgpu::CommandBuffer>>);
 
+impl FrameCommandBuffers {
+    /// E2 (S5e): drains the recorded buffers in registration order and
+    /// submits them with a single ordered submit — the flush half of the
+    /// encoder-as-frame-resource handover (the runtime's `RenderFlush`
+    /// system). Empty handover is a no-op submit.
+    pub fn flush(&self, queue: &wgpu::Queue) {
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        queue.submit(guard.drain(..));
+    }
+}
+
+/// Acquired swapchain texture of the current frame, handed from the
+/// acquiring system ([`RenderPresent`]) to the submitting one
+/// ([`RenderFlush`]) — the present half of the E2 handover.
+///
+/// `Mutex<Option<…>>` interior mutability, as with the other GPU
+/// resources: systems run against `&Resources`.
+#[derive(Debug, Default)]
+pub struct FramePresentTarget(pub Mutex<Option<wgpu::SurfaceTexture>>);
+
 /// Регистрирует [`FrameCommandBuffers`] в мире движка (стадия 1 handover).
 ///
 /// Вызывать один раз до первого `run_frame`; повторный вызов заменяет
@@ -117,8 +146,10 @@ pub fn install_gpu_resources(
     let _ = engine.world_mut().insert(GpuSurface(Mutex::new(surface)));
     let _ = engine.world_mut().insert(surface_state);
     let _ = engine.world_mut().insert(Mutex::new(frame_state));
+    let _ = engine.world_mut().insert(FramePresentTarget::default());
     engine.schedule_mut().add_system(RenderSubmit);
     engine.schedule_mut().add_system(RenderPresent);
+    engine.schedule_mut().add_system(RenderFlush);
 }
 
 /// Система сабмита кадра: читает extraction + камеру, пишет GPU-состояние.
@@ -204,10 +235,14 @@ impl System for RenderSubmit {
     }
 }
 
-/// Система презента кадра: acquire → record → submit → present.
+/// Система презента кадра: acquire → record (E2: encoder как frame-ресурс).
 ///
-/// S7-шаг 2: переносит `Surface` acquire/present из `GameApp::render_frame`
-/// в `Engine::schedule`. Зависимость от `RenderSubmit` выводится как WaW по
+/// S7-шаг 2: переносит `Surface` acquire из `GameApp::render_frame`
+/// в `Engine::schedule`. E2 (S5e): запись идёт через per-pass encoders в
+/// `FrameCommandBuffers` (`RenderFrame3D::render_to_buffers`), acquired
+/// frame уходит в `FramePresentTarget`; submit + present выполняет
+/// отдельная система `RenderFlush` (регистрация следом — WaW по обоим
+/// handover-ресурсам). Зависимость от `RenderSubmit` выводится как WaW по
 /// `Mutex<GpuFrameState>`; порядок — регистрация после `RenderSubmit`.
 struct RenderPresent;
 
@@ -224,6 +259,8 @@ impl System for RenderPresent {
             .reads::<GpuSurfaceState>()
             .reads::<Mutex<RenderExtracted>>()
             .writes::<Mutex<GpuFrameState>>()
+            .writes::<FrameCommandBuffers>()
+            .writes::<FramePresentTarget>()
     }
 
     fn run(&self, resources: &Resources) {
@@ -246,6 +283,12 @@ impl System for RenderPresent {
             return;
         };
         let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
+            return;
+        };
+        let Some(buffers) = resources.get::<FrameCommandBuffers>() else {
+            return;
+        };
+        let Some(present_target) = resources.get::<FramePresentTarget>() else {
             return;
         };
 
@@ -289,22 +332,11 @@ impl System for RenderPresent {
             return;
         };
 
-        let mut encoder = device
-            .0
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ornis frame"),
-            });
         let frame_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let instance_count = extracted.instances.len() as u32;
-        let context = crate::RenderContext {
-            device: &device.0,
-            queue: &queue.0,
-            encoder: &mut encoder,
-            target: &frame_view,
-        };
 
         {
             let mut fs = frame_state.lock().expect("gpu frame state lock");
@@ -315,12 +347,72 @@ impl System for RenderPresent {
             let mesh = &fs.mesh as *const Mesh;
             let frame3d = &mut fs.frame3d as *mut RenderFrame3D;
             unsafe {
-                (*frame3d).render(context, &*renderer, &*mesh, instance_count);
+                // E2: encoder context as frame data — per-pass encoders
+                // land in FrameCommandBuffers; submit + present live in
+                // RenderFlush now.
+                (*frame3d)
+                    .render_to_buffers(
+                        &device.0,
+                        &queue.0,
+                        &frame_view,
+                        &*renderer,
+                        &*mesh,
+                        instance_count,
+                        buffers,
+                    )
+                    .expect("E2 render_to_buffers: projection failed");
             }
         }
 
-        queue.0.submit(Some(encoder.finish()));
-        queue.0.present(frame);
+        // Hand the acquired frame over: recording and the ordered
+        // submit + present now compose inside one schedule.
+        let mut slot = present_target
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(frame);
+    }
+}
+
+/// Система слива кадра: ordered submit + present (E2).
+///
+/// Отдельная система после `RenderPresent`: сливает `FrameCommandBuffers`
+/// в порядке регистрации (один submit) и презентует acquired frame из
+/// `FramePresentTarget`. Порядок гарантирован WaW по обоим
+/// handover-ресурсам при регистрации следом за `RenderPresent`.
+struct RenderFlush;
+
+impl System for RenderFlush {
+    fn name(&self) -> &'static str {
+        "render_flush"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .reads::<GpuQueue>()
+            .writes::<FrameCommandBuffers>()
+            .writes::<FramePresentTarget>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let Some(queue) = resources.get::<GpuQueue>() else {
+            return;
+        };
+        let Some(buffers) = resources.get::<FrameCommandBuffers>() else {
+            return;
+        };
+        let Some(present_target) = resources.get::<FramePresentTarget>() else {
+            return;
+        };
+        let frame = present_target
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        buffers.flush(&queue.0);
+        if let Some(frame) = frame {
+            queue.0.present(frame);
+        }
     }
 }
 
@@ -333,11 +425,13 @@ mod tests {
 
     #[test]
     fn frame_command_buffers_are_world_resources() {
-        // Compile-time proof of the handover design: finished buffers are
-        // `Send + Sync` (hence `Resources`-compatible), unlike the live
-        // encoder which stays frame-local in `RenderPresent`.
+        // Compile-time proof of the handover design: finished buffers and
+        // the acquired frame are `Send + Sync` (hence `Resources`-
+        // compatible), unlike the live encoder which stays frame-local.
         assert_send_sync::<FrameCommandBuffers>();
         assert_send_sync::<wgpu::CommandBuffer>();
+        assert_send_sync::<FramePresentTarget>();
+        assert_send_sync::<wgpu::SurfaceTexture>();
 
         let mut engine = Engine::new();
         install_frame_buffers(&mut engine);

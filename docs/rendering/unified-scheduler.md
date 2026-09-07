@@ -773,7 +773,7 @@ debug-only по умолчанию). Тесты:
 `Schedule`. Пересмотр — только со вторым живым потребителем
 data-фронтенда (фаза 6) или сменой ключа пула.
 
-## S5e + Extract-free — декомпозиция (2026-09-07, открыто; E1 ✅)
+## S5e + Extract-free — декомпозиция (2026-09-07, открыто; E1–E2 ✅)
 
 Честная оценка: это месяцы, не один коммит. Ниже — фазы с собственными
 гейтами; каждая фаза — самостоятельный выигрыш и откатываема. База:
@@ -784,14 +784,14 @@ submit в порядке регистрации.
 
 ### S5e: пассы как обычные `Schedule`-системы
 
-- **E1 — пасс как `System`-адаптер**: каждая `FramePass`-реализация
+- **E1 ✅ — пасс как `System`-адаптер**: каждая `FramePass`-реализация
   получает тонкий `System`-близнец с тем же `AccessDesc` (проекция
   `ResourceId`-доступов в `SystemAccess` через реестр `SystemSet`).
   Исполнение — уровни `Schedule`, запись — через borrowed encoder
   (как сегодня `Frame { encoder }`). Гейт: уровни адаптеров ==
   `FrameLayout::levels()` (расширение `scheduler_parity.rs`), probe
   0 отличий.
-- **E2 — encoder-контекст как frame-ресурс**: `RenderPresent` пишет
+- **E2 ✅ — encoder-контекст как frame-ресурс**: `RenderPresent` пишет
   per-pass/per-level encoders, завершённые буферы складывает в
   `FrameCommandBuffers`, отдельная система сливает их в порядке
   регистрации (механика уже проверена `execute_parallel`).
@@ -821,6 +821,26 @@ submit в порядке регистрации.
 
 Порядок: E1 → E2 → X1 → X2 → X3 → E3/X4. E1 разблокирует всё остальное;
 X1–X3 независимы между собой после E2.
+
+### E2 — encoder-контекст как frame-ресурс ✅ (2026-09-07)
+
+Закрыт вторым шагом декомпозиции.
+
+- `FrameExecutor::record_in_order` — последовательная запись механики,
+  уже доказанной `execute_parallel`: по энкодеру на pass/level,
+  завершённые `CommandBuffer` уходят в общий sink в порядке регистрации.
+- `RenderFrame3D::render_to_buffers` — вторая форма записи поверх
+  общего `projected_order`: без заимствованного `RenderContext` и без
+  submit. Заимствованный `render()` остаётся для wasm/examples/benches.
+- Нативный `RenderPresent` больше не субмитит сам: acquired frame
+  уходит в `FramePresentTarget`, записи — в `FrameCommandBuffers`
+  (оба — `Mutex`-handover, `Send + Sync`, чтобы жить в `Resources`).
+- `RenderFlush` (регистрация следом → WaW по обоим handover-ресурсам)
+  делает один ordered submit (`FrameCommandBuffers::flush` = drain +
+  submit; система не видит internals) и present.
+- Гейт — третий тест на общем GPU-харнессе (`schedule_render.rs`):
+  sequential reference vs `render_to_buffers` + ordered flush —
+  пиксельно идентичны.
 
 ### E1 — пасс как `System`-адаптер ✅ (2026-09-07)
 
