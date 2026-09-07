@@ -347,7 +347,9 @@ fn projection_rejects_untyped_resources() {
     let untyped = plan.create_resource("untyped", spec());
     plan.add_pass("user").read(untyped);
 
-    let error = try_project_schedule(&plan).unwrap_err();
+    let error = try_project_schedule(&plan)
+        .err()
+        .expect("projection must reject untyped resources");
     assert_eq!(
         error,
         ProjectionError::UntypedResource {
