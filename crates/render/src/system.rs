@@ -1,5 +1,6 @@
-//! Typed plan systems + declaration registry — S2 (PLAN.md, Appendix C;
-//! IDEAS §28.1) and the d3 consolidation of the `FramePlan` dissolution.
+//! Typed plan systems + single declaration registry — S2 (PLAN.md,
+//! Appendix C; IDEAS §28.1) and the d3 consolidation (formerly shared
+//! with `FramePlan`, which is now folded into this module after d4).
 //!
 //! A pass declares resource accesses **in types** via ZST markers
 //! (`Read<R>` / `Write<R>` / `WriteClear<R, C>` in tuples), and the scheduler
@@ -58,7 +59,7 @@ pub enum ResourceKind {
 pub trait FrameResource: 'static {
     /// Unique debug name (layout dumps, panics). Must be unique per plan.
     const NAME: &'static str;
-    /// How the resource is registered in [`FramePlan`].
+    /// How the resource is registered in [`SystemSet`].
     fn kind() -> ResourceKind;
     /// Texture spec; `surface_format` feeds resources that mirror the
     /// surface format (e.g. the HDR layer).
@@ -979,5 +980,117 @@ mod tests {
             }
         }
         systems.add_system(P);
+    }
+
+    // ── d4: builder-level invariants lifted from the dissolved FramePlan ─
+
+    /// `add_pass().read(unknown)` panics with a clear message at the
+    /// declaration site (no silent garbage in the layout tables).
+    #[test]
+    #[should_panic(expected = "unknown resource")]
+    fn unknown_resource_panics() {
+        let mut set = SystemSet::new();
+        set.set_surface_size((320, 240));
+        set.add_pass("p0").read(ResourceId(99));
+    }
+
+    /// Explicit ordering edges must respect registration order —
+    /// a backward edge is a programmer error and panics.
+    #[test]
+    #[should_panic(expected = "registered")]
+    fn explicit_ordering_rejects_backward() {
+        let mut set = SystemSet::new();
+        set.set_surface_size((64, 64));
+        let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
+        let b = set.create_resource("b", ResB::spec(wgpu::TextureFormat::Rgba8Unorm));
+        let first = set.add_pass("first").write(a).id();
+        let second = set.add_pass("second").write(b).id();
+        set.order_before(second, first);
+    }
+
+    /// Named ordering panics on an unknown target.
+    #[test]
+    #[should_panic(expected = "no node named")]
+    fn explicit_ordering_unknown_name() {
+        let mut set = SystemSet::new();
+        set.set_surface_size((64, 64));
+        let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
+        set.add_pass("real").write(a);
+        set.order_before_named("real", "ghost");
+    }
+
+    /// `try_order_before` is the fallible variant: backward / unknown
+    /// errors are returned, not panicked. After a successful forward
+    /// edge the levels reflect the constraint.
+    #[test]
+    fn try_order_before_reports_errors_without_panicking() {
+        use ornis_schedule::OrderError;
+
+        let mut set = SystemSet::new();
+        set.set_surface_size((64, 64));
+        let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
+        let b = set.create_resource("b", ResB::spec(wgpu::TextureFormat::Rgba8Unorm));
+        let first = set.add_pass("first").write(a).id();
+        let second = set.add_pass("second").write(b).id();
+        assert!(matches!(
+            set.try_order_before(second, first),
+            Err(OrderError::BackwardEdge { .. })
+        ));
+        assert_eq!(
+            set.try_order_before_named("first", "ghost").map(|_| ()),
+            Err(OrderError::UnknownNode {
+                name: "ghost".to_owned(),
+            })
+        );
+        // Ids outside the registry are an error, not a silent garbage edge.
+        assert!(matches!(
+            set.try_order_before(crate::transient_pool::PassId(99), crate::transient_pool::PassId(100)),
+            Err(OrderError::UnknownNode { .. })
+        ));
+        assert_eq!(set.build().levels(), vec![vec![0, 1]]);
+        assert!(set.try_order_before(first, second).is_ok());
+        assert_eq!(set.build().levels(), vec![vec![0], vec![1]]);
+    }
+
+    // ── d4: debug-only access enforcement (was on FramePlan) ──────────
+
+    /// Backlog #6 (audit §4.1, Phase B exit criterion "sneaky pass"):
+    /// a pass requesting a resource outside its declared reads/writes
+    /// panics in debug builds with pass and resource names — mirrors
+    /// the `sneaky` system test in `core::Schedule`.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "'sneaky' (index 1) accesses resource 'b'")]
+    fn sneaky_pass_undeclared_access_panics() {
+        use crate::transient_pool::assert_pass_access_declared;
+
+        let mut set = SystemSet::new();
+        set.set_surface_size((320, 240));
+        let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
+        let b = set.create_resource("b", ResB::spec(wgpu::TextureFormat::Rgba8Unorm));
+        set.add_pass("writer").write(a).write(b);
+        set.add_pass("sneaky").read(a);
+        let layout = set.build();
+        // Pass 1 declared only read(a); peeking at `b` is out of set.
+        assert_pass_access_declared(&layout, 1, b);
+    }
+
+    /// Honest pass: read declaration covers the view; write declaration
+    /// also covers reading its own write (own-write read), as in
+    /// `core::Schedule::declared_access_passes_enforcement` — both
+    /// checks stay silent.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn declared_pass_access_passes_enforcement() {
+        use crate::transient_pool::assert_pass_access_declared;
+
+        let mut set = SystemSet::new();
+        set.set_surface_size((320, 240));
+        let x = set.create_resource("x", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
+        set.add_pass("writer").write(x);
+        set.add_pass("reader").read(x);
+        let layout = set.build();
+        assert_pass_access_declared(&layout, 0, x);
+        assert_pass_access_declared(&layout, 1, x);
     }
 }

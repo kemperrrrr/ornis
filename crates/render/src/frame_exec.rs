@@ -6,7 +6,7 @@
 //! Also wires the four existing `Renderer3D` passes (gbuffer → lighting →
 //! forward → composite) as plan nodes ([`RenderFrame3D`]).
 //!
-//! Lifetimes are computed by the pure [`FramePlan`] layout; this module
+//! Lifetimes are computed by the pure [`transient_pool`] layout; this module
 //! only owns GPU objects. On wgpu, barriers are handled by wgpu itself, so
 //! the executor is small by design.
 
@@ -673,7 +673,6 @@ impl RenderFrame3D {
 mod tests {
     use super::*;
     use crate::transient_pool::{SizePolicy, TextureSpec};
-    use crate::FramePlan;
 
     #[test]
     fn bytes_per_pixel_table() {
@@ -847,7 +846,8 @@ mod tests {
                 height: 720,
             },
         };
-        let mut plan = FramePlan::new((1280, 720));
+        let mut plan = SystemSet::new();
+        plan.set_surface_size((1280, 720));
         let a = plan.create_resource("a", spec);
         let b = plan.create_resource("b", spec);
         plan.add_pass("p0").write(a);
@@ -898,9 +898,8 @@ mod tests {
         // d3: the production registry is `SystemSet`; the executor's
         // `ensure_layout` borrows it immutably, so the registry-owned
         // pool (cold path: `SystemSet::layout()`) is untouched by the
-        // frame hot path. The imperative `FramePlan` builder is still
-        // exercised by the parity oracle below — this test pins the
-        // memoization contract on the typed registry.
+        // frame hot path. The `scheduler_parity` integration test pins
+        // the same memoization contract on the parity frontends.
         let spec = TextureSpec {
             format: wgpu::TextureFormat::Rgba8Unorm,
             samples: 1,
@@ -944,7 +943,7 @@ mod tests {
 
     /// Verbatim pre-S2 resource registration — the reference the typed
     /// registration (`register_resource`) has to match bit-for-bit.
-    fn imperative_resources(plan: &mut FramePlan, surface_format: wgpu::TextureFormat) -> FrameIds {
+    fn imperative_resources(plan: &mut SystemSet, surface_format: wgpu::TextureFormat) -> FrameIds {
         let spec = |format| TextureSpec {
             format,
             samples: 1,
@@ -975,7 +974,7 @@ mod tests {
 
     /// Verbatim pre-S2 pass wiring — the reference the typed systems
     /// (`add_system`) and the conditional passes have to match.
-    fn imperative_passes(plan: &mut FramePlan, ids: &FrameIds, technique: Technique, bloom: bool) {
+    fn imperative_passes(plan: &mut SystemSet, ids: &FrameIds, technique: Technique, bloom: bool) {
         if technique.has_deferred() {
             plan.add_pass("gbuffer")
                 .write(ids.albedo)
@@ -1042,8 +1041,9 @@ mod tests {
         surface_size: (u32, u32),
         technique: Technique,
         bloom: bool,
-    ) -> FramePlan {
-        let mut plan = FramePlan::new(surface_size);
+    ) -> SystemSet {
+        let mut plan = SystemSet::new();
+        plan.set_surface_size(surface_size);
         let ids = imperative_resources(&mut plan, surface_format);
         imperative_passes(&mut plan, &ids, technique, bloom);
         plan
@@ -1231,7 +1231,8 @@ mod tests {
         // dispatch path: `PassViews::view_of` for a ResourceId outside declared
         // reads/writes panics with pass and resource names before touching
         // the pool (empty pool — device-free ground truth).
-        let mut plan = FramePlan::new((64, 64));
+        let mut plan = SystemSet::new();
+        plan.set_surface_size((64, 64));
         let tex = TextureSpec {
             format: wgpu::TextureFormat::Rgba8Unorm,
             samples: 1,

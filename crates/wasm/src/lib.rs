@@ -576,7 +576,7 @@ struct FrameState<'a> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer3D,
-    frame_plan: RenderFrame3D,
+    frame3d: RenderFrame3D,
     render_world: RenderWorld,
     mesh: ornis_render::Mesh,
     mesh_params: (u32, u32),
@@ -606,7 +606,7 @@ impl<'a> FrameState<'a> {
             self.config.height = ph;
             self.surface.configure(&self.device, &self.config);
             self.renderer.resize(&self.device, pw, ph);
-            self.frame_plan.set_surface_size(pw, ph);
+            self.frame3d.set_surface_size(pw, ph);
             console::log_1(&format!("[ornis-wasm] resized surface to {}x{}", pw, ph).into());
         }
     }
@@ -632,7 +632,7 @@ impl<'a> FrameState<'a> {
         applied_version.set(live.version);
         console::log_1(
             &format!(
-                "[ornis-wasm] live scene v{} applied through Engine/FramePlan ({} instances)",
+                "[ornis-wasm] live scene v{} applied through Engine/RenderFrame3D ({} instances)",
                 live.version, self.instance_count
             )
             .into(),
@@ -696,7 +696,7 @@ impl<'a> FrameState<'a> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("render_encoder"),
             });
-        self.frame_plan.render(
+        self.frame3d.render(
             RenderContext {
                 device: &self.device,
                 queue: &self.queue,
@@ -815,7 +815,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
     let renderer = Renderer3D::new(&ctx.device, &ctx.config, 1);
-    let frame_plan = RenderFrame3D::new_with(
+    let frame3d = RenderFrame3D::new_with(
         ctx.config.format,
         (ctx.config.width, ctx.config.height),
         Technique::Hybrid,
@@ -845,7 +845,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         handles,
         ctx,
         renderer,
-        frame_plan,
+        frame3d,
         render_world,
         gpu_scene,
         initial_version,
@@ -860,7 +860,7 @@ fn spawn_render_loop(
     handles: LoopHandles,
     ctx: GpuContext,
     renderer: Renderer3D,
-    frame_plan: RenderFrame3D,
+    frame3d: RenderFrame3D,
     render_world: RenderWorld,
     gpu_scene: GpuScene,
     initial_version: u64,
@@ -887,7 +887,7 @@ fn spawn_render_loop(
         queue: ctx.queue,
         config: ctx.config,
         renderer,
-        frame_plan,
+        frame3d,
         render_world,
         mesh: gpu_scene.mesh,
         mesh_params: gpu_scene.mesh_params,

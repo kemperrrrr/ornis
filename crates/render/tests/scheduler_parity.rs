@@ -1,11 +1,11 @@
 //! Scheduler frontend parity (backlog #19, anti-drift canon): the same
 //! access topology on `ornis_core::Schedule` (systems, TypeId keys — resources
-//! and lanes) and on `ornis_render::FramePlan` (passes, ResourceId keys) must
+//! and lanes) and on `ornis_render::SystemSet` (passes, ResourceId keys) must
 //! produce bitwise identical levels: both consumers are considered a single
 //! `ornis-schedule` engine. Semantic drift on either side = red CI.
 
 use ornis_core::{Resources, Schedule, System, SystemAccess};
-use ornis_render::{FramePlan, ResourceId, SizePolicy, TextureSpec};
+use ornis_render::{ResourceId, SizePolicy, SystemSet, TextureSpec};
 
 /// Core resource namespace keys (marker types in this file,
 /// real singleton resources are not needed for the plan).
@@ -85,10 +85,11 @@ fn mirrored_levels(
     ];
     assert_eq!(reads.len(), writes.len(), "parallel access slices");
     // Render domain rule "first touch must be a write"
-    // (`FramePlan::build`): a resource whose first touch is a read without
+    // (`SystemSet::build`): a resource whose first touch is a read without
     // an earlier (including own) write must be an import.
     // Imports do not affect levels (out-of-pool, not access semantics),
     // core side has no such rule — mirror honestly.
+    const RES_NAMES: [&str; 8] = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
     let mut import = [false; 8];
     for (key, slot) in import.iter_mut().enumerate() {
         let first_use =
@@ -102,13 +103,14 @@ fn mirrored_levels(
     }
     let spec = spec();
     let mut sched = Schedule::new();
-    let mut plan = FramePlan::new((640, 480));
+    let mut plan = SystemSet::new();
+    plan.set_surface_size((640, 480));
     let ids: Vec<ResourceId> = (0..8)
         .map(|i| {
             if import[i] {
-                plan.import_resource(format!("r{i}"), spec)
+                plan.import_resource(RES_NAMES[i], spec)
             } else {
-                plan.create_resource(format!("r{i}"), spec)
+                plan.create_resource(RES_NAMES[i], spec)
             }
         })
         .collect();

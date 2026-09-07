@@ -4,7 +4,7 @@
 //! как ресурсы `World`, чтобы `RenderSubmit` (upload) и `RenderPresent`
 //! (acquire → record → submit → present) стали обычными `System` в
 //! `Engine::schedule` вместо императива `GameContext::render_frame`.
-//! Пассы `FramePlan` уже типизированы (`FramePass` с `Reads`/`Writes`),
+//! Пассы уже типизированы (`FramePass` с `Reads`/`Writes`),
 //! их уровни — `bitset_level_plan` из `ornis-schedule` (единый движок с
 //! `Schedule`). Здесь фиксируется контракт, как GPU-объекты входят в мир.
 //!
@@ -23,7 +23,7 @@
 //! - `RenderPresent` — `System` читает `GpuSurface`/`GpuSurfaceState`/
 //!   `GpuDevice`/`GpuQueue` + `Mutex<RenderExtracted>` (instance count) и пишет
 //!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд). Делает
-//!   `surface.get_current_texture → create_view → frame_plan.render →
+//!   `surface.get_current_texture → create_view → frame3d.render →
 //!   queue.submit → queue.present`. Ошибки `Outdated`/`Lost` —
 //!   реконфигурируют `Surface` на месте; `Occluded`/`Timeout`/`Validation` —
 //!   пропускают кадр. `Suboptimal` трактуется как `Success`.
@@ -67,7 +67,7 @@ pub struct GpuFrameState {
     /// Deferred renderer (pipelines + buffers).
     pub renderer: Renderer3D,
     /// Frame plan с пулом текстур (`FrameExecutor` внутри).
-    pub frame_plan: RenderFrame3D,
+    pub frame3d: RenderFrame3D,
     /// Сфера-меш кадра.
     pub mesh: Mesh,
     /// Кешированные параметры меша для пересоздания.
@@ -100,7 +100,7 @@ pub fn install_gpu_resources(
 /// Система сабмита кадра: читает extraction + камеру, пишет GPU-состояние.
 ///
 /// S7-шаг 1: делает `set_camera`/`upload_*` и пересоздаёт меш при смене
-/// `mesh_params`. `frame_plan.render` + `queue.submit`/`present` — в
+/// `mesh_params`. `frame3d.render` + `queue.submit`/`present` — в
 /// `RenderPresent` (S7-шаг 2).
 struct RenderSubmit;
 
@@ -284,14 +284,14 @@ impl System for RenderPresent {
 
         {
             let mut fs = frame_state.lock().expect("gpu frame state lock");
-            // renderer/mesh + frame_plan from the same Mutex< GpuFrameState>.
+            // renderer/mesh + frame3d from the same Mutex< GpuFrameState>.
             // Raw pointers avoid double &mut borrow of disjoint fields through
             // a single MutexGuard (safe: different fields).
             let renderer = &fs.renderer as *const Renderer3D;
             let mesh = &fs.mesh as *const Mesh;
-            let frame_plan = &mut fs.frame_plan as *mut RenderFrame3D;
+            let frame3d = &mut fs.frame3d as *mut RenderFrame3D;
             unsafe {
-                (*frame_plan).render(context, &*renderer, &*mesh, instance_count);
+                (*frame3d).render(context, &*renderer, &*mesh, instance_count);
             }
         }
 

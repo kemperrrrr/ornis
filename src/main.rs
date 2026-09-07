@@ -206,7 +206,7 @@ impl GameApp {
         surface.configure(&device, &surface_config);
 
         let renderer3d = Renderer3D::new(&device, &surface_config, 1);
-        let frame_plan = RenderFrame3D::new_with(
+        let frame3d = RenderFrame3D::new_with(
             surface_format,
             (surface_config.width, surface_config.height),
             Technique::Hybrid,
@@ -231,7 +231,7 @@ impl GameApp {
                 },
                 GpuFrameState {
                     renderer: renderer3d,
-                    frame_plan,
+                    frame3d,
                     mesh: sphere_mesh,
                     mesh_params: (32, 24),
                 },
@@ -415,7 +415,7 @@ impl GameApp {
         // S7-шаг 2: весь GPU-кадр (upload + acquire → record → submit → present)
         // — в Engine::schedule как RenderSubmit/RenderPresent. Здесь только
         // run_frame (fixed + variable schedules); Present система сама делает
-        // surface.get_current_texture и frame_plan.render.
+        // surface.get_current_texture и frame3d.render.
         ctx.render_world.run_frame(1.0 / 60.0);
     }
 }
@@ -535,7 +535,7 @@ impl ApplicationHandler for GameApp {
                 ) {
                     let mut fs = fs.lock().expect("gpu frame state lock");
                     fs.renderer.resize(&dev.0, w, h);
-                    fs.frame_plan.set_surface_size(w, h);
+                    fs.frame3d.set_surface_size(w, h);
                 }
                 ctx.window.request_redraw();
             }

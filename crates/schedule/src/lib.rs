@@ -11,7 +11,7 @@
 //!
 //! Consumers keep domain data on their side and assemble key slices:
 //! `ornis-core::schedule::Schedule` schedules systems by singleton
-//! resources (key — `TypeId`), `ornis-render::FramePlan` — passes by
+//! resources (key — `TypeId`), `ornis-render::SystemSet` — passes by
 //! texture resources (key — `ResourceId`). Texture pools, lifetimes,
 //! S4 budget, `Resources`/ECS stay in domain crates (Phase A
 //! anti-goals: no wgpu or ECS in this crate).

@@ -1,5 +1,5 @@
 //! Ornis render library: deferred [`renderer::Renderer3D`], the
-//! frame-plan layer ([`frame_plan`]/[`frame_exec`]/[`frame_passes`]),
+//! frame-plan layer ([`transient_pool`]/[`system`]/[`frame_exec`]/[`frame_passes`]),
 //! procedural meshes, scene descriptions and the WGSL shader assembly.
 #![warn(missing_docs)]
 /// Client-side orbit camera and backend-neutral input consumer.
@@ -12,8 +12,6 @@ pub mod extraction;
 pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
 pub mod frame_passes;
-/// Pure immediate-mode render graph layout (lifetimes, pooling, budgets).
-pub mod frame_plan;
 /// GPU resources as ECS singletons for the unified scheduler (S7 design).
 pub mod gpu_resources;
 /// GPU mesh representation and primitive generation.
@@ -26,19 +24,18 @@ pub mod renderer;
 pub mod scene;
 /// WGSL shader assembly and Rust-side BRDF math kernels.
 pub mod shaders;
-/// Typed plan systems: resources, access sets and pass traits.
+/// Typed plan systems + single declaration registry (d3).
 pub mod system;
 /// Local-to-world transform component.
 pub mod transform;
-/// Transient pool — the dynamic half of the dissolved `FramePlan` (d2):
-/// declaration snapshots compile into shared layouts here.
+/// Transient pool — the dynamic half of the dissolved frame-plan shell
+/// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
-pub use frame_plan::FramePlan;
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Unified explicit-ordering edge error (Phase A, audit §4.2); the same type

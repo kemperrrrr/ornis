@@ -277,6 +277,53 @@ runtime без отдельной extract-фазы — будущая цель, 
 > `cargo test -p ornis-render` 104/104; `cargo clippy --workspace
 > --all-targets -- -D warnings` чисто. Следующий шаг (стадия 4) —
 > удаление `FramePlan` или свёртывание в алиас (решение владельца).
+>
+> **Прогресс 2026-09-07 (роспуск оболочки FramePlan, стадия 4 — d4):**
+> `FramePlan` удалён полностью. `SystemSet` — единственный реестр
+> деклараций и единственный prod-потребитель `TransientPool`. Что
+> мигрировало:
+> - `crates/render/src/frame_exec.rs` тесты: `imperative_resources`/
+>   `imperative_passes`/`imperative_wiring` теперь принимают/возвращают
+>   `&mut SystemSet` / `SystemSet` (вместо `&mut FramePlan`/`FramePlan`),
+>   `FramePlan::new(size)` → `SystemSet::new()` + `set_surface_size(size)`.
+> - `crates/render/tests/scheduler_parity.rs`: паритет-оракул
+>   `Schedule` vs `SystemSet` (вместо `Schedule` vs `FramePlan`);
+>   литералы имён ресурсов (`"r0".."r7"`) вместо `format!("r{i}")`,
+>   потому что `SystemSet::create_resource` принимает `&'static str`
+>   (контракт типизированного реестра).
+> - `crates/render/src/system.rs::tests`: добавлены 6 тестов уровня
+>   реестра, переехавших из `frame_plan.rs::tests`: `unknown_resource_panics`,
+>   `explicit_ordering_rejects_backward`, `explicit_ordering_unknown_name`,
+>   `try_order_before_reports_errors_without_panicking`, и debug-only
+>   `sneaky_pass_undeclared_access_panics` / `declared_pass_access_passes_enforcement`.
+>   `read_before_write_panics` живёт в `transient_pool::tests` (прямой
+>   `PoolInput`) — там, где инвариант и сидит.
+> - `crates/render/src/transient_pool.rs::tests`: добавлены 14 тестов
+>   уровня пула с прямым `PoolInput`: `lifetime_window_basic`,
+>   `transient_slot_reuse_same_spec`, `overlapping_resources_need_distinct_slots`,
+>   `read_before_write_panics`, `imported_resource_may_be_read_first`,
+>   `disabled_pass_culls_its_resources` (двойная проверка — через
+>   реестр и через прямой `PassNode { enabled: false }`),
+>   `independent_branches_share_levels`, `explicit_ordering_splits_shared_level`,
+>   `layout_tables_walk_for_each_pass` (бывший `execute_delivers_live_…`),
+>   `mermaid_is_a_valid_projection`, `debug_dump_lists_structure`,
+>   `clear_value_is_carried_to_layout`, `layout_is_cached_until_mutation`,
+>   `generation_bump_invalidates_cache`, `build_snapshot_matches_cached_layout`.
+>   `ResourceNode`/`PassNode` получили `#[derive(Clone)]` для повторного
+>   использования в тестах (внутренний тип, без API-воздействия).
+> - `crates/render/src/lib.rs`: `pub mod frame_plan` снят;
+>   `pub use frame_plan::FramePlan` снят. Реэкспорты типов пула через
+>   `transient_pool` сохранены (публичный API рендера стабилен).
+> - `crates/render/src/frame_plan.rs` (806 строк) удалён.
+> - Комментарии в `gpu_resources.rs`, `wasm/src/lib.rs`,
+>   `schedule/src/lib.rs`, `frame_exec.rs`, `system.rs`,
+>   `transient_pool.rs` обновлены на актуальные имена.
+> Гейты: `cargo check --workspace --all-targets` чисто;
+> `cargo test -p ornis-render` 104/104 (lib 100 + integration 4);
+> `cargo clippy --workspace --all-targets -- -D warnings` чисто.
+> Минус 806 строк; единственный реестр деклараций; паритет-оракул
+> усилен (та же `SystemSet`, типизированный и императивный пути
+> проверяются на одном типе).
 
 ## ❌ Не делать / отложено (решения владельца)
 

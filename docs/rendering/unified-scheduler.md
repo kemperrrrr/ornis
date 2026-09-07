@@ -678,6 +678,66 @@ debug-only по умолчанию). Тесты:
 не затронута: hot-path контракт (одно `u64`-сравнение + `Arc`-клон) сохранён;
 пул/алиасинг/кеш S1 — без изменений.
 
+## Роспуск оболочки FramePlan — стадия 4 (d4, 2026-09-07)
+
+`FramePlan` удалён полностью. `SystemSet` — единственный реестр деклараций
+и единственный prod-потребитель `TransientPool`; паритет-оракул в
+`scheduler_parity.rs` теперь сверяет `ornis_core::Schedule` против
+`ornis_render::SystemSet` (а не против удалённого `FramePlan`).
+
+- `crates/render/src/frame_plan.rs` (806 строк) удалён целиком вместе с
+  его `#[cfg(test)] mod tests` (19 тестов).
+- `crates/render/src/lib.rs`: `pub mod frame_plan` и `pub use frame_plan::
+  FramePlan` сняты; реэкспорты типов пула через `transient_pool`
+  сохранены (публичный API рендера стабилен для downstream).
+- `crates/render/src/frame_exec.rs` тесты: `imperative_resources`/
+  `imperative_passes` принимают `&mut SystemSet`; `imperative_wiring`
+  возвращает `SystemSet`; `FramePlan::new(size)` →
+  `SystemSet::new()` + `set_surface_size(size)`; тест
+  `pass_views_undeclared_view_panics_in_debug` (sneaky-pass) переведён
+  на `SystemSet`.
+- `crates/render/tests/scheduler_parity.rs`: импорт `SystemSet` вместо
+  `FramePlan`; `FramePlan::new((w,h))` → `SystemSet::new()` +
+  `set_surface_size((w,h))`; имена ресурсов `"r0".."r7"` литералами
+  (контракт `create_resource(&'static str, _)`).
+- `crates/render/src/system.rs::tests`: добавлены 6 реестровых тестов,
+  переехавших из удалённого `frame_plan.rs::tests`:
+  `unknown_resource_panics`, `explicit_ordering_rejects_backward`,
+  `explicit_ordering_unknown_name`, `try_order_before_reports_errors_without_panicking`,
+  debug-only `sneaky_pass_undeclared_access_panics` и
+  `declared_pass_access_passes_enforcement`.
+- `crates/render/src/transient_pool.rs::tests`: добавлены 14 тестов
+  уровня пула с прямым `PoolInput` (без реестра): `lifetime_window_basic`,
+  `transient_slot_reuse_same_spec`, `overlapping_resources_need_distinct_slots`,
+  `read_before_write_panics`, `imported_resource_may_be_read_first`,
+  `disabled_pass_culls_its_resources` (двойная проверка — через
+  `SystemSet::set_pass_enabled` и через прямой `PassNode { enabled: false }`),
+  `independent_branches_share_levels`, `explicit_ordering_splits_shared_level`,
+  `layout_tables_walk_for_each_pass` (бывший `execute_delivers_live_…`),
+  `mermaid_is_a_valid_projection`, `debug_dump_lists_structure`,
+  `clear_value_is_carried_to_layout`, `layout_is_cached_until_mutation`,
+  `generation_bump_invalidates_cache`, `build_snapshot_matches_cached_layout`.
+  `ResourceNode`/`PassNode` получили `#[derive(Clone)]` (внутренние типы,
+  API не затронут).
+- Комментарии в `gpu_resources.rs`, `wasm/src/lib.rs`,
+  `schedule/src/lib.rs`, `frame_exec.rs`, `system.rs`,
+  `transient_pool.rs` обновлены на актуальные имена.
+
+Гейты: `cargo check --workspace --all-targets` чисто;
+`cargo test -p ornis-render` зелено (lib 100 + integration 4 = 104,
+без регрессий против стадий 2+3 — каждое assertion из удалённых
+19 тестов `frame_plan::tests` либо переехало в `system::tests`/
+`transient_pool::tests`, либо покрыто существующим тестом в
+`frame_exec::tests`); `cargo clippy --workspace --all-targets
+-- -D warnings` чисто.
+
+Следствие для канона: паритет-оракул теперь подтверждает **один
+фронтенд** (`SystemSet`) в двух формах декларации — типизированной
+(`add_system<P: FramePass>`) и императивной (`add_pass().read/write`).
+Это сильнее прежнего «два разных фронтенда» (`FramePlan` vs
+`Schedule`): и `Schedule`, и `SystemSet` остаются двумя движками, но
+внутри рендера поверхность декларации едина.
+
 ## WASD-мост: фикс шва sync + порядок (2026-09-06)
 
 Тест `browser_wasd_input_drives_player_through_gameplay` падал на чистом master (предсуществующее, не регресс роспуска). Две наложенные причины:

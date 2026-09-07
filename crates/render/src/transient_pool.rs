@@ -1,4 +1,5 @@
-//! Transient pool — the dynamic half of the dissolved `FramePlan` (d2).
+//! Transient pool — the dynamic half of the dissolved frame-plan shell
+//! (d2): declaration snapshots compile into shared layouts here.
 //!
 //! [`Schedule`] (and its render-side declaration registry) answers "what
 //! runs in which order" with static keys; the pool answers "where in
@@ -430,7 +431,7 @@ impl std::fmt::Display for BudgetExceeded {
 
 /// A declared resource, as seen by the pool compiler: name, spec, and
 /// the import/external flags that shape validation and slot assignment.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResourceNode {
     pub name: String,
     pub spec: TextureSpec,
@@ -443,7 +444,7 @@ pub(crate) struct ResourceNode {
 }
 
 /// A declared pass, as seen by the pool compiler.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PassNode {
     pub name: String,
     pub reads: Vec<ResourceId>,
@@ -452,9 +453,9 @@ pub(crate) struct PassNode {
 }
 
 /// Borrowed declaration snapshot for one [`TransientPool::ensure`]
-/// compilation. The registry owns the declarations (`FramePlan` today,
-/// `SystemSet` after the d3 consolidation); the pool only borrows them
-/// for the duration of the compile.
+/// compilation. The registry owns the declarations (`SystemSet` after
+/// the d3 consolidation); the pool only borrows them for the duration
+/// of the compile.
 #[derive(Debug)]
 pub(crate) struct PoolInput<'a> {
     pub resources: &'a [ResourceNode],
@@ -731,5 +732,448 @@ impl TransientPool {
             pass_alive,
             levels,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pool-only tests: build `PoolInput` directly (no registry) and
+    //! drive `TransientPool::ensure` — the unit-level tests that the
+    //! `FramePlan` module used to host before the d2/d3 split.
+    use super::*;
+    use crate::system::SystemSet;
+
+    // ── helpers ───────────────────────────────────────────────────────
+
+    fn spec(format: wgpu::TextureFormat, samples: u32) -> TextureSpec {
+        TextureSpec {
+            format,
+            samples,
+            size: SizePolicy::MatchSurface,
+        }
+    }
+
+    fn res(name: &str, spec: TextureSpec) -> ResourceNode {
+        ResourceNode {
+            name: name.to_owned(),
+            spec,
+            imported: false,
+            external: false,
+        }
+    }
+
+    fn res_imported(name: &str, spec: TextureSpec) -> ResourceNode {
+        ResourceNode {
+            name: name.to_owned(),
+            spec,
+            imported: true,
+            external: false,
+        }
+    }
+
+    fn pass(name: &str, reads: &[usize], writes: &[usize]) -> PassNode {
+        PassNode {
+            name: name.to_owned(),
+            reads: reads.iter().map(|&i| ResourceId(i as u32)).collect(),
+            writes: writes.iter().map(|&i| (ResourceId(i as u32), None)).collect(),
+            enabled: true,
+        }
+    }
+
+    fn pass_disabled(name: &str, reads: &[usize], writes: &[usize]) -> PassNode {
+        let mut p = pass(name, reads, writes);
+        p.enabled = false;
+        p
+    }
+
+    fn pass_write_clear(
+        name: &str,
+        reads: &[usize],
+        writes: &[(usize, Option<wgpu::Color>)],
+    ) -> PassNode {
+        PassNode {
+            name: name.to_owned(),
+            reads: reads.iter().map(|&i| ResourceId(i as u32)).collect(),
+            writes: writes
+                .iter()
+                .map(|&(i, c)| (ResourceId(i as u32), c))
+                .collect(),
+            enabled: true,
+        }
+    }
+
+    /// Compile a layout from raw declarations; panics on read-before-write
+    /// or other invariants (those have their own `#[should_panic]` tests).
+    fn compile(
+        resources: Vec<ResourceNode>,
+        passes: Vec<PassNode>,
+        surface_size: (u32, u32),
+    ) -> FrameLayout {
+        let input = PoolInput {
+            resources: &resources,
+            passes: &passes,
+            ordering: &[],
+            surface_size,
+            budget: Budget::unbounded(),
+        };
+        (*TransientPool::new().ensure(0, &input).expect("unbounded budget")).clone()
+    }
+
+    fn compile_with_ordering(
+        resources: Vec<ResourceNode>,
+        passes: Vec<PassNode>,
+        ordering: Vec<(PassId, PassId)>,
+        surface_size: (u32, u32),
+    ) -> FrameLayout {
+        let input = PoolInput {
+            resources: &resources,
+            passes: &passes,
+            ordering: &ordering,
+            surface_size,
+            budget: Budget::unbounded(),
+        };
+        (*TransientPool::new().ensure(0, &input).expect("unbounded budget")).clone()
+    }
+
+    // ── lifetime windows (resource_layout.first_use / last_use) ──────
+
+    #[test]
+    fn lifetime_window_basic() {
+        let resources = vec![
+            res("albedo", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1)),
+            res("depth", spec(wgpu::TextureFormat::Depth32Float, 1)),
+        ];
+        let passes = vec![
+            pass("gbuffer", &[], &[0, 2]),
+            pass("lighting", &[0, 2], &[1]),
+        ];
+        let layout = compile(resources, passes, (1920, 1080));
+        assert_eq!(layout.passes.len(), 2);
+        let a = &layout.resources[0];
+        assert_eq!((a.first_use, a.last_use), (0, 1), "albedo: gbuffer → lighting");
+        let h = &layout.resources[1];
+        assert_eq!((h.first_use, h.last_use), (1, 1), "hdr lives only on lighting");
+        let d = &layout.resources[2];
+        assert_eq!((d.first_use, d.last_use), (0, 1));
+        // Different formats → different slots.
+        assert_ne!(a.slot, h.slot);
+        assert_eq!(layout.slots.len(), 3);
+    }
+
+    // ── slot aliasing (non-overlapping lifetimes, same spec) ──────────
+
+    #[test]
+    fn transient_slot_reuse_same_spec() {
+        // a lives [0,1], b lives [2,3], same spec → one slot (aliasing).
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+        ];
+        let passes = vec![
+            pass("p0", &[], &[0]),
+            pass("p1", &[0], &[]),
+            pass("p2", &[], &[1]),
+            pass("p3", &[1], &[]),
+        ];
+        let layout = compile(resources, passes, (320, 240));
+        assert_eq!(layout.slots.len(), 1, "non-overlapping windows share a slot");
+        assert_eq!(layout.slots[0].resources, vec![ResourceId(0), ResourceId(1)]);
+        assert_eq!(layout.resources[0].slot, Some(0));
+        assert_eq!(layout.resources[1].slot, Some(0));
+    }
+
+    #[test]
+    fn overlapping_resources_need_distinct_slots() {
+        // a [0,1], b [1,2] — overlap on pass 1 → two slots.
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+        ];
+        let passes = vec![
+            pass("p0", &[], &[0]),
+            pass("p1", &[0], &[1]),
+            pass("p2", &[1], &[]),
+        ];
+        let layout = compile(resources, passes, (320, 240));
+        assert_eq!(layout.slots.len(), 2);
+        assert_ne!(layout.resources[0].slot, layout.resources[1].slot);
+    }
+
+    // ── first-touch invariant: read-before-write on a frame-owned resource
+
+    #[test]
+    #[should_panic(expected = "before any write")]
+    fn read_before_write_panics() {
+        let resources = vec![res("x", spec(wgpu::TextureFormat::Rgba8Unorm, 1))];
+        let passes = vec![
+            pass("p0", &[0], &[]),
+            pass("p1", &[], &[0]),
+        ];
+        let _ = compile(resources, passes, (320, 240));
+    }
+
+    // ── imported resources: read-first is allowed ─────────────────────
+
+    #[test]
+    fn imported_resource_may_be_read_first() {
+        let resources = vec![res_imported("shadow", spec(wgpu::TextureFormat::R32Float, 1))];
+        let passes = vec![pass("p0", &[0], &[]), pass("p1", &[0], &[])];
+        let layout = compile(resources, passes, (320, 240)); // must not panic
+        let rl = &layout.resources[0];
+        assert_eq!((rl.first_use, rl.last_use), (0, 1));
+        assert_eq!(rl.slot, Some(0));
+    }
+
+    // ── disabled pass culling ─────────────────────────────────────────
+
+    #[test]
+    fn disabled_pass_culls_its_resources() {
+        // p1 is disabled — its resource 'a' must drop out of the layout
+        // even though 'a' is declared. Use the registry path so the
+        // disabled flag is set after the pass is created.
+        let mut set = SystemSet::new();
+        set.set_surface_size((320, 240));
+        let a = set.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = set.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let p1 = set.add_pass("p1").write(a).id();
+        set.add_pass("p2").write(b);
+        set.set_pass_enabled(p1, false);
+        let layout = set.build();
+        assert_eq!(layout.passes.len(), 1);
+        assert_eq!(layout.passes[0].name, "p2");
+        let ra = &layout.resources[a.0 as usize];
+        assert_eq!(ra.first_use, usize::MAX, "a is not used by any enabled pass");
+        assert_eq!(ra.slot, None);
+        assert_eq!(layout.slots.len(), 1, "only b gets a slot");
+
+        // Also exercise the direct (non-registry) path: a disabled
+        // pass declaration must be skipped by the pool itself.
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+        ];
+        let passes = vec![
+            pass_disabled("p1", &[], &[0]),
+            pass("p2", &[], &[1]),
+        ];
+        let layout = compile(resources, passes, (320, 240));
+        assert_eq!(layout.passes.len(), 1);
+        assert_eq!(layout.passes[0].name, "p2");
+    }
+
+    // ── levels (parallel passes with no shared resources) ─────────────
+
+    #[test]
+    fn independent_branches_share_levels() {
+        // p0→p1 (a→b) and p2→p3 (c→d) share no resources: levels [p0,p2], [p1,p3].
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("c", spec(wgpu::TextureFormat::Rg16Float, 1)),
+            res("d", spec(wgpu::TextureFormat::Rg16Float, 1)),
+        ];
+        let passes = vec![
+            pass("p0", &[], &[0]),
+            pass("p1", &[0], &[1]),
+            pass("p2", &[], &[2]),
+            pass("p3", &[2], &[3]),
+        ];
+        let layout = compile(resources, passes, (64, 64));
+        assert_eq!(layout.levels(), vec![vec![0, 2], vec![1, 3]]);
+    }
+
+    #[test]
+    fn explicit_ordering_splits_shared_level() {
+        // p0→p1 and p2→p3 are independent: [[0,2],[1,3]]; edge p0→p2 splits
+        // the first level (hidden dependency without access conflict).
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("c", spec(wgpu::TextureFormat::Rg16Float, 1)),
+            res("d", spec(wgpu::TextureFormat::Rg16Float, 1)),
+        ];
+        let passes = vec![
+            pass("p0", &[], &[0]),
+            pass("p1", &[0], &[1]),
+            pass("p2", &[], &[2]),
+            pass("p3", &[2], &[3]),
+        ];
+        let ordering = vec![];
+        let layout = compile_with_ordering(resources.clone(), passes.clone(), ordering, (64, 64));
+        assert_eq!(layout.levels(), vec![vec![0, 2], vec![1, 3]]);
+        // Adding p0→p2 lifts p2 onto a later level.
+        let ordering = vec![(PassId(0), PassId(2))];
+        let layout = compile_with_ordering(resources, passes, ordering, (64, 64));
+        assert_eq!(
+            layout.levels(),
+            vec![vec![0], vec![1, 2], vec![3]],
+            "explicit edge lifts p2 without touching p1's level"
+        );
+    }
+
+    // ── layout table walk (was the post-stage-1 `execute_delivers_…`) ──
+
+    #[test]
+    fn layout_tables_walk_for_each_pass() {
+        // gbuffer writes 'a'; lighting reads 'a' writes 'b'; composite reads 'b'.
+        // Per-pass `pass_alive` and per-resource `slot` must line up with the
+        // pass index — the contract the executor's view dispatch relies on.
+        let mut set = SystemSet::new();
+        set.set_surface_size((640, 480));
+        let a = set.create_resource("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
+        let b = set.create_resource("b", spec(wgpu::TextureFormat::Rgba16Float, 1));
+        set.add_pass("gbuffer").write(a);
+        set.add_pass("lighting").read(a).write(b);
+        set.add_pass("composite").read(b);
+
+        let layout = set.build();
+        let visits: Vec<(usize, Vec<ResourceId>, Option<usize>)> = layout
+            .passes
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let slot_a = layout.resources[a.0 as usize]
+                    .alive_at(index)
+                    .then(|| layout.resources[a.0 as usize].slot)
+                    .flatten();
+                (index, layout.pass_alive[index].clone(), slot_a)
+            })
+            .collect();
+        assert_eq!(visits[0], (0, vec![a], Some(0)), "gbuffer: a alive");
+        assert_eq!(visits[1], (1, vec![a, b], Some(0)), "lighting: a and b alive");
+        assert_eq!(visits[2], (2, vec![b], None), "composite: a is dead");
+        assert_eq!(
+            layout.passes.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+            vec!["gbuffer", "lighting", "composite"]
+        );
+    }
+
+    // ── Mermaid / debug projections ───────────────────────────────────
+
+    #[test]
+    fn mermaid_is_a_valid_projection() {
+        // S6: graph as debug projection — levels as subgraphs,
+        // resources as nodes, flows as edges; GitHub renders natively.
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rg16Float, 1)),
+        ];
+        let passes = vec![pass("p0", &[], &[0]), pass("p1", &[0], &[1])];
+        let m = compile(resources, passes, (64, 64)).mermaid();
+        assert!(m.starts_with("flowchart TD\n"), "head: {m}");
+        assert!(m.contains("subgraph L0[\"level 0\"]"), "levels: {m}");
+        assert!(m.contains("P0[\"p0\"]"), "pass nodes: {m}");
+        assert!(m.contains("R0[\"a Rgba8Unorm\"]"), "resource nodes: {m}");
+        assert!(m.contains("P0 --> R0"), "write edges: {m}");
+        assert!(m.contains("R0 --> P1"), "read edges: {m}");
+
+        // Dead resources are excluded from the projection.
+        let resources = vec![
+            res("dead", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("live", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+        ];
+        let passes = vec![pass("only", &[], &[1])];
+        let m2 = compile(resources, passes, (64, 64)).mermaid();
+        assert!(!m2.contains("dead"), "dead resource hidden: {m2}");
+        assert!(!m2.contains("R0"), "dead index hidden: {m2}");
+    }
+
+    #[test]
+    fn debug_dump_lists_structure() {
+        let resources = vec![
+            res("albedo", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1)),
+        ];
+        let passes = vec![pass("gbuffer", &[], &[0]), pass("lighting", &[0], &[1])];
+        let dump = compile(resources, passes, (1280, 720)).debug_dump();
+        assert!(dump.contains("2 passes"), "dump: {dump}");
+        assert!(dump.contains("'gbuffer'"), "dump: {dump}");
+        assert!(dump.contains("'hdr'"), "dump: {dump}");
+        assert!(dump.contains("pool slots"), "dump: {dump}");
+        assert!(dump.contains("albedo"), "dump: {dump}");
+    }
+
+    #[test]
+    fn clear_value_is_carried_to_layout() {
+        let resources = vec![res("hdr", spec(wgpu::TextureFormat::Rgba16Float, 1))];
+        let passes = vec![pass_write_clear("lighting", &[], &[(0, Some(wgpu::Color::BLACK))])];
+        let layout = compile(resources, passes, (640, 480));
+        assert_eq!(
+            layout.passes[0].writes,
+            vec![(ResourceId(0), Some(wgpu::Color::BLACK))]
+        );
+    }
+
+    // ── pool memoization (S1 cache) ───────────────────────────────────
+
+    fn two_pass_layout() -> (Vec<ResourceNode>, Vec<PassNode>) {
+        let resources = vec![
+            res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1)),
+            res("b", spec(wgpu::TextureFormat::Rgba16Float, 1)),
+        ];
+        let passes = vec![pass("p0", &[], &[0]), pass("p1", &[0], &[1])];
+        (resources, passes)
+    }
+
+    #[test]
+    fn layout_is_cached_until_mutation() {
+        let (resources, passes) = two_pass_layout();
+        let mut pool = TransientPool::new();
+        assert_eq!(pool.layout_computations(), 0, "nothing computed yet");
+        let input = PoolInput {
+            resources: &resources,
+            passes: &passes,
+            ordering: &[],
+            surface_size: (320, 240),
+            budget: Budget::unbounded(),
+        };
+        let _ = pool.ensure(0, &input).unwrap();
+        let _ = pool.ensure(0, &input).unwrap();
+        let _ = pool.ensure(0, &input).unwrap();
+        assert_eq!(
+            pool.layout_computations(),
+            1,
+            "repeated access at the same generation must be a cache hit"
+        );
+    }
+
+    #[test]
+    fn generation_bump_invalidates_cache() {
+        let (resources, passes) = two_pass_layout();
+        let mut pool = TransientPool::new();
+        let input = PoolInput {
+            resources: &resources,
+            passes: &passes,
+            ordering: &[],
+            surface_size: (320, 240),
+            budget: Budget::unbounded(),
+        };
+        let _ = pool.ensure(0, &input).unwrap();
+        assert_eq!(pool.layout_computations(), 1);
+        // Bumping the generation key refreshes the snapshot.
+        let _ = pool.ensure(1, &input).unwrap();
+        assert_eq!(pool.layout_computations(), 2, "generation bump invalidates");
+    }
+
+    #[test]
+    fn build_snapshot_matches_cached_layout() {
+        let (resources, passes) = two_pass_layout();
+        let mut pool = TransientPool::new();
+        let input = PoolInput {
+            resources: &resources,
+            passes: &passes,
+            ordering: &[],
+            surface_size: (320, 240),
+            budget: Budget::unbounded(),
+        };
+        let cached = pool.ensure(0, &input).unwrap();
+        // Same input → same memoized snapshot via Arc.
+        let snapshot = pool.ensure(0, &input).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&cached, &snapshot),
+            "steady-state snapshots share one Arc"
+        );
+        assert_eq!(pool.layout_computations(), 1);
     }
 }
