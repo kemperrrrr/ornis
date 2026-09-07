@@ -279,12 +279,12 @@ pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
         .entities
         .iter()
         // Complete entities only: all three render components present.
-        .filter(|&&entity| {
-            meshes.get(entity).is_some() && materials.get(entity).is_some()
-        })
+        .filter(|&&entity| meshes.get(entity).is_some() && materials.get(entity).is_some())
         .filter_map(|&entity| meshes.get(entity))
         .fold(DEFAULT_MESH_PARAMS, |params, mesh| {
-            let MeshDesc::Sphere { segments, rings, .. } = mesh;
+            let MeshDesc::Sphere {
+                segments, rings, ..
+            } = mesh;
             (params.0.max(*segments), params.1.max(*rings))
         })
 }
@@ -641,7 +641,7 @@ mod tests {
     fn replace_scene_publishes_scene_lighting_as_resource() {
         // X3: the scene loader owns lights/ambient — replacing a scene
         // must publish them as the `RenderLights` resource.
-        let mut world = RenderWorld::from_scene(&Scene {
+        let world = RenderWorld::from_scene(&Scene {
             lights: vec![LightDesc::Directional {
                 direction: [0.0, -1.0, 0.0],
                 intensity: 2.0,

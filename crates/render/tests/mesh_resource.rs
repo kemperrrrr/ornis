@@ -9,12 +9,10 @@ mod common;
 
 use std::sync::Mutex;
 
+use ornis_render::RenderWorld;
 use ornis_render::gpu_resources::{GpuDevice, GpuMesh, install_render_mesh};
 use ornis_render::mesh::create_sphere;
-use ornis_render::scene::{
-    CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
-};
-use ornis_render::RenderWorld;
+use ornis_render::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
 /// A probe scene with one dielectric sphere per requested tessellation.
 fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
@@ -63,7 +61,12 @@ fn mesh_state(world: &RenderWorld) -> (u32, u32, u32, u32) {
         .expect("gpu mesh resource")
         .lock()
         .expect("gpu mesh lock");
-    (mesh.params.0, mesh.params.1, mesh.mesh.vertex_count, mesh.mesh.num_indices)
+    (
+        mesh.params.0,
+        mesh.params.1,
+        mesh.mesh.vertex_count,
+        mesh.mesh.num_indices,
+    )
 }
 
 #[test]

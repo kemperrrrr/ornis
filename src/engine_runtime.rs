@@ -17,11 +17,11 @@ use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
 use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+#[cfg(test)]
+use ornis_render::extract_render_data;
 use ornis_render::scene::TransformDesc;
 #[cfg(test)]
 use ornis_render::scene::{MaterialDesc, MeshDesc};
-#[cfg(test)]
-use ornis_render::{RenderExtracted, install_render_extract};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///
@@ -559,18 +559,11 @@ mod tests {
                 roughness: 0.2,
             },
         );
-        install_render_extract(&mut engine);
 
         engine.run_frame(0.0);
 
-        let extracted = engine
-            .world()
-            .resources()
-            .get::<Mutex<RenderExtracted>>()
-            .expect("render extraction resource")
-            .lock()
-            .expect("render extraction lock")
-            .clone();
+        // X4: direct lane read — no scheduled snapshot anymore.
+        let extracted = extract_render_data(engine.world().store().expect("world store"));
         assert_eq!(extracted.mesh_params, (48, 32));
         assert_eq!(extracted.materials.len(), 1);
         assert_eq!(extracted.instances.len(), 1);
@@ -582,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn physics_sync_out_precedes_render_extraction_in_shared_schedule() {
+    fn physics_sync_output_is_visible_to_render_lane_reads() {
         let mut engine = Engine::new();
         let entity = engine
             .world_mut()
@@ -614,7 +607,6 @@ mod tests {
                 roughness: 0.5,
             },
         );
-        install_render_extract(&mut engine);
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
 
         engine.run_frame(1.0 / 60.0);
@@ -627,13 +619,9 @@ mod tests {
             .expect("transform lane");
         let transform = transform_lane.get(entity).expect("entity transform");
         assert!(transform.translation[1] < 0.0);
-        let extracted = engine
-            .world()
-            .resources()
-            .get::<Mutex<RenderExtracted>>()
-            .expect("render extraction resource")
-            .lock()
-            .expect("render extraction lock");
+        // X4: the render side reads the same lanes directly — the physics
+        // sync output must be visible to that read after the frame.
+        let extracted = extract_render_data(engine.world().store().expect("world store"));
         assert_eq!(
             extracted.instances[0].model_matrix.w_axis.truncate().y,
             transform.translation[1]
@@ -653,17 +641,10 @@ mod tests {
             .store_mut()
             .expect("world store")
             .insert(entity, transform(Vec3::ZERO));
-        install_render_extract(&mut engine);
 
         engine.run_frame(0.0);
 
-        let extracted = engine
-            .world()
-            .resources()
-            .get::<Mutex<RenderExtracted>>()
-            .expect("render extraction resource")
-            .lock()
-            .expect("render extraction lock");
+        let extracted = extract_render_data(engine.world().store().expect("world store"));
         assert!(extracted.instances.is_empty());
         assert!(extracted.materials.is_empty());
     }

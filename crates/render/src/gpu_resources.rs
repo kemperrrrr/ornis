@@ -49,8 +49,9 @@ use std::sync::Mutex;
 
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
+use crate::camera::camera_view_projection;
 use crate::extraction::{RenderLights, extract_render_data, max_mesh_params};
-use crate::frame_exec::RenderFrame3D;
+use crate::frame_exec::{BufferRenderContext, RenderFrame3D};
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 use crate::scene::{MaterialDesc, MeshDesc, TransformDesc};
@@ -284,23 +285,19 @@ impl System for RenderSubmit {
         let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
             return;
         };
-        let mut fs = frame_state.lock().expect("gpu frame state lock");
+        let fs = frame_state.lock().expect("gpu frame state lock");
 
-        // X1: direct lane read — the same canon the scheduled oracle
-        // (`RenderExtract`) publishes, minus the snapshot round-trip.
+        // X1/X4: direct lane read through the shared canon — no snapshot.
         let extracted = extract_render_data(store);
-
-        let (w, h) = (surface_state.size.0 as f64, surface_state.size.1 as f64);
-        let aspect = if h > 0.0 { w as f32 / h as f32 } else { 1.0 };
-        let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
-        let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
-        let proj =
-            glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
-        let view_proj = proj * view;
+        // S7: the camera math lives in `camera_view_projection` — `run`
+        // stays pure orchestration (IOSP).
+        let (view_proj, cam_pos) =
+            camera_view_projection(orbit.view_parameters(), surface_state.size);
 
         fs.renderer
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
-        fs.renderer.set_lights(&queue.0, lights.ambient, &lights.set_lights_args());
+        fs.renderer
+            .set_lights(&queue.0, lights.ambient, &lights.set_lights_args());
         fs.renderer.upload_materials(&queue.0, &extracted.materials);
         fs.renderer.upload_instances(&queue.0, &extracted.instances);
     }
@@ -433,16 +430,17 @@ impl System for RenderPresent {
                 // E2: encoder context as frame data — per-pass encoders
                 // land in FrameCommandBuffers; submit + present live in
                 // RenderFlush now.
+                let context = BufferRenderContext {
+                    device: &device.0,
+                    queue: &queue.0,
+                    target: &frame_view,
+                    renderer: &*renderer,
+                    mesh: &mesh_state.mesh,
+                    instance_count,
+                    buffers,
+                };
                 (*frame3d)
-                    .render_to_buffers(
-                        &device.0,
-                        &queue.0,
-                        &frame_view,
-                        &*renderer,
-                        &mesh_state.mesh,
-                        instance_count,
-                        buffers,
-                    )
+                    .render_to_buffers(context)
                     .expect("E2 render_to_buffers: projection failed");
             }
         }

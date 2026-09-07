@@ -17,6 +17,8 @@ use crate::frame_passes::{
     FromForward, GbufferPass, Hdr, HdrFwd, LightingPass, MaterialId, MaterialParams, Normal,
     OwnsDepth, SharedDepth, Target, WorldPosition,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::gpu_resources::FrameCommandBuffers;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 use crate::schedule_bridge::ProjectionError;
@@ -28,8 +30,6 @@ use crate::transient_pool::{
 use ornis_schedule::run_levels;
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::gpu_resources::FrameCommandBuffers;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
@@ -801,13 +801,7 @@ impl RenderFrame3D {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_to_buffers(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        target: &wgpu::TextureView,
-        renderer: &Renderer3D,
-        mesh: &Mesh,
-        instance_count: u32,
-        buffers: &FrameCommandBuffers,
+        context: BufferRenderContext<'_>,
     ) -> Result<(), ProjectionError> {
         let Self {
             executor,
@@ -816,18 +810,24 @@ impl RenderFrame3D {
             ..
         } = self;
         let (layout, order) = Self::projected_order(executor, systems)?;
-        executor.set_external_view(ids.target, target.clone());
+        executor.set_external_view(ids.target, context.target.clone());
         let dispatch = PassDispatch {
             systems,
-            device,
-            queue,
-            renderer,
-            mesh,
-            instance_count,
+            device: context.device,
+            queue: context.queue,
+            renderer: context.renderer,
+            mesh: context.mesh,
+            instance_count: context.instance_count,
         };
-        executor.record_in_order(device, &layout, &order, &buffers.0, |_index, pass, encoder| {
-            dispatch_pass(&dispatch, encoder, pass);
-        });
+        executor.record_in_order(
+            context.device,
+            &layout,
+            &order,
+            &context.buffers.0,
+            |_index, pass, encoder| {
+                dispatch_pass(&dispatch, encoder, pass);
+            },
+        );
         Ok(())
     }
 
@@ -863,6 +863,27 @@ struct PassDispatch<'a> {
     renderer: &'a Renderer3D,
     mesh: &'a Mesh,
     instance_count: u32,
+}
+
+/// Frame inputs for [`RenderFrame3D::render_to_buffers`] (E2): GPU
+/// handles, draw state and the handover sink, grouped to stay within the
+/// argument budget. Native-only, like the call itself.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct BufferRenderContext<'a> {
+    /// Device used for the per-pass encoders.
+    pub device: &'a wgpu::Device,
+    /// Upload/submit queue.
+    pub queue: &'a wgpu::Queue,
+    /// Swapchain view of the frame.
+    pub target: &'a wgpu::TextureView,
+    /// Deferred renderer (pipelines + buffers).
+    pub renderer: &'a Renderer3D,
+    /// Instanced mesh drawn by the frame.
+    pub mesh: &'a Mesh,
+    /// Instances to draw.
+    pub instance_count: u32,
+    /// E2 handover sink for the per-pass command buffers.
+    pub buffers: &'a FrameCommandBuffers,
 }
 
 /// Runs one pass through the registry dispatch: builds the

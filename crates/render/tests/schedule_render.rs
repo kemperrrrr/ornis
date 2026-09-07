@@ -8,6 +8,8 @@
 
 mod common;
 
+use ornis_render::frame_exec::BufferRenderContext;
+
 #[test]
 fn schedule_ordered_render_matches_sequential_pixels() {
     common::with_headless_scene(|scene| {
@@ -34,15 +36,15 @@ fn buffers_path_matches_sequential_pixels() {
         // flush submits them. Same pixels as the borrowed-encoder path.
         let e2_pixels = common::render_frame_pixels(scene, |plan, context| {
             let buffers = ornis_render::gpu_resources::FrameCommandBuffers::default();
-            plan.render_to_buffers(
-                context.device,
-                context.queue,
-                context.target,
-                &scene.renderer,
-                &scene.mesh,
-                1,
-                &buffers,
-            )
+            plan.render_to_buffers(BufferRenderContext {
+                device: context.device,
+                queue: context.queue,
+                target: context.target,
+                renderer: &scene.renderer,
+                mesh: &scene.mesh,
+                instance_count: 1,
+                buffers: &buffers,
+            })
             .expect("E2 projection: production plans are typed");
             buffers.flush(context.queue);
         });

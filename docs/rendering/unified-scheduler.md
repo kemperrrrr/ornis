@@ -894,12 +894,20 @@ X1–X3 независимы между собой после E2. Все пун�
   `extract_render_data`, что и у оракула. Зависимость от пишущих лейны
   систем — RaW по лейнам (тоньше RaW по всему снапшоту): upload стоит
   после реальных писателей, но в одном уровне с другими читателями.
-- `RenderExtract`/`Mutex<RenderExtracted>` остаются оракулом: гейт —
-  прямой `extract_render_data(store)` после `run_frame` побайтово равен
+- `RenderExtract`/`Mutex<RenderExtracted>` были оракулом X1–X3: прямой
+  `extract_render_data(store)` после `run_frame` побайтово равен
   снапшоту, опубликованному системой (материалы — по байтам `bytemuck`,
   инстансы — по полям; сцена с тремя видами материалов и разной
   тесселяцией). Последний читатель снапшота — `RenderPresent`
-  (instance count) — мигрировал в X4.
+  (instance count) — мигрировал в X4, после чего оракул удалён вместе
+  с системой.
+- Корневой showcase (`src/main.rs`) мигрировал тем же шагом:
+  `GpuMesh` — отдельный ресурс (7-й аргумент `install_gpu_resources`),
+  `GpuFrameState` — только `renderer` + `frame3d`; тесты
+  `engine_runtime.rs` читают лейны напрямую (`extract_render_data`
+  на сторе после `run_frame`), имя
+  `physics_sync_output_is_visible_to_render_lane_reads` отражает новый
+  контракт (видимость выхода физики прямому читателю лейна).
 
 ### E2 — encoder-контекст как frame-ресурс ✅ (2026-09-07)
 
