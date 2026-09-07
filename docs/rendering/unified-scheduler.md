@@ -623,6 +623,8 @@ debug-only по умолчанию). Тесты:
 `GpuDevice`/`GpuQueue`/`GpuSurface`/`GpuSurfaceState` + `GpuFrameState{Renderer3D, RenderFrame3D, Mesh}` как ECS-ресурсы
 (`crates/render/src/gpu_resources.rs`): `install_gpu_resources(device, queue, surface, surface_state, frame_state)` вставляет их в `World` и добавляет `RenderSubmit` + `RenderPresent`.
 
+Модуль `gpu_resources` — native-only: `#[cfg(not(target_arch = "wasm32"))]` в `render/src/lib.rs` (2026-09-07) — wgpu web-типы `!Send`/`!Sync` (`Rc`/JS-колбэки), а `World::insert`/`Resources::get` требуют `Send + Sync`; wasm-путь рендерит через `RenderWorld` extraction + `ornis-wasm`, как и раньше.
+
 - `RenderSubmit` (`reads Mutex<RenderExtracted>/Mutex<OrbitCamera>/GpuDevice/GpuQueue/GpuSurfaceState, writes Mutex<GpuFrameState>`): пересоздаёт `Mesh` по `mesh_params`, считает `view_proj` из `OrbitCamera + GpuSurfaceState.size`, `set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
 - `RenderPresent` (`reads GpuDevice/GpuQueue/GpuSurface/GpuSurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`): `surface.get_current_texture → create_view → frame_plan.render → queue.submit/present` (основание — `RenderContext` из `render_backend.rs`). `Outdated`/`Lost` — реконфигурирует `Surface` на месте; `Occluded`/`Timeout`/`Validation` — пропускает кадр; `Suboptimal` как `Success`.
 

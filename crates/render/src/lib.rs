@@ -13,6 +13,11 @@ pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
 pub mod frame_passes;
 /// GPU resources as ECS singletons for the unified scheduler (S7 design).
+/// Native-only: stores wgpu `Device`/`Queue`/`Surface`/`CommandBuffer` as
+/// `World` resources (`Send + Sync` bound), but wgpu's web backend types
+/// are `!Send`/`!Sync` (Rc, JS callbacks). The wasm path renders through
+/// `RenderWorld` extraction + `ornis-wasm`, not through this module.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_resources;
 /// GPU mesh representation and primitive generation.
 pub mod mesh;
