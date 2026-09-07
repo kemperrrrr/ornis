@@ -504,9 +504,10 @@ pub struct ComponentStore<T> {
 
 **Что меняется в Ornis**: текущая связка `RenderGraph3D` (отдельный контейнер поверх `RenderGraph` + `GraphExecutor`) и `RenderContext` (отдельный контейнер для `device`/`queue`/`encoder`) сворачивается в **ECS-системы, которые берут `Res<Device>`, `Res<SurfaceConfig>`, etc., и пишут в те же ленты, что и физика**. Никаких копирований. Граница между «CPU-стороной» и «GPU-стороной» остаётся только как соглашение о типах, не как физический разрыв.
 
-> **Переходный статус 2026-08-27:** native и WASM уже используют общий
+> **Переходный статус 2026-08-27 / 2026-09-07:** native и WASM уже используют общий
 > library-level `RenderWorld`/`Engine`/`RenderExtract` data-flow и один
-> `RenderFrame3D`/`FramePlan` pass path. Серверный `EditorWorld` и браузерный
+> `RenderFrame3D` pass path (поверх `SystemSet` + `TransientPool` после d2/d3/d4 —
+> `FramePlan` свёрнут 2026-09-07). Серверный `EditorWorld` и браузерный
 > `RenderWorld` находятся в разных контекстах, поэтому versioned JSON
 > serialization boundary сохраняется намеренно; это не считается нарушением
 > идеи единого *логического* World. Полное слияние render/physics/input в
