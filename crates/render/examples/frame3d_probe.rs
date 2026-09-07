@@ -3,9 +3,9 @@
 //! (`RenderFrame3D`), reads both back and asserts byte-identical pixels.
 //!
 //! Run from the workspace root:
-//!   cargo run -p ornis-render --example frame_plan_probe -- [scene.ron]
+//!   cargo run -p ornis-render --example frame3d_probe -- [scene.ron]
 //!
-//! Writes target/frame_plan_probe_{legacy,graph}.png and the graph
+//! Writes target/frame3d_probe_{legacy,graph}.png and the graph
 //! layout dump (transient windows + pool slots) to stdout. Prints PASS and
 //! exits 0 when the two paths match pixel-for-pixel.
 
@@ -408,7 +408,7 @@ impl TechniqueStats {
 
 async fn run(scene: &Scene) {
     // ── Headless device ───────────────────────────────────────────────
-    let (device, queue) = create_headless_device("frame_plan_probe").await;
+    let (device, queue) = create_headless_device("frame3d_probe").await;
 
     // ── Two identical offscreen targets ───────────────────────────────
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -481,11 +481,11 @@ async fn run(scene: &Scene) {
     // ── Compare legacy vs graph ───────────────────────────────────────
     let verdict = compare_legacy_graph(&legacy_pixels, &graph_pixels);
     save_png(
-        "target/frame_plan_probe_legacy.png",
+        "target/frame3d_probe_legacy.png",
         &legacy_pixels,
         unpadded,
     );
-    save_png("target/frame_plan_probe_graph.png", &graph_pixels, unpadded);
+    save_png("target/frame3d_probe_graph.png", &graph_pixels, unpadded);
     println!("--- graph layout ---");
     println!("{}", graph3d.layout_dump());
     println!(
@@ -533,7 +533,7 @@ async fn bloom_phase(
     // change *something*: the bright specular highlights should glow.
     let bloom_diff = diff_count(graph_pixels, &bloom_pixels);
     save_png(
-        "target/frame_plan_probe_bloom.png",
+        "target/frame3d_probe_bloom.png",
         &bloom_pixels,
         WIDTH * BYTES_PER_PIXEL,
     );
@@ -609,7 +609,7 @@ fn report_pass_or_fail(
             bloom.diff
         );
         println!("frames identical: {all_frames_stable}, pool stable: {pool_stable}");
-        println!("PNGs: target/frame_plan_probe_{{legacy,graph,bloom}}.png");
+        println!("PNGs: target/frame3d_probe_{{legacy,graph,bloom}}.png");
         std::process::exit(1);
     }
 
@@ -628,7 +628,7 @@ fn report_pass_or_fail(
     );
     check_technique_budgets(forward, deferred, fwd_lookup_active, graph_bytes);
     println!(
-        "PNGs: target/frame_plan_probe_{{legacy,graph,bloom,forward,deferred}}.png ({WIDTH}x{HEIGHT})"
+        "PNGs: target/frame3d_probe_{{legacy,graph,bloom,forward,deferred}}.png ({WIDTH}x{HEIGHT})"
     );
 }
 

@@ -12,7 +12,7 @@
 - В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
   авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
   `Engine` с ресурсами `Time`/`FixedTime`/`InputState`; editor-only physics и
-  native/WASM render extraction + `FramePlan` уже подключены. Editor protocol
+  native/WASM render extraction + `RenderFrame3D` уже подключены. Editor protocol
   теперь имеет queue ACK и correlated completion events, native showcase
   physics также подключена к общему bounded fixed host; полный cross-domain
   runtime с gameplay consumers и browser physics во всех режимах ещё не
@@ -464,7 +464,8 @@ broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 - `crates/physics/src/engine.rs` — около 2900 строк;
 - `crates/render/src/renderer.rs` — около 2000 строк;
 - `crates/materialx/src/graph.rs` — около 1600 строк;
-- `crates/render/src/frame_plan.rs`;
+- `crates/render/src/transient_pool.rs` (сменил `frame_plan.rs` после d2, 2026-09-07);
+- `crates/render/src/system.rs` (получил реестр деклараций после d3, 2026-09-07);
 - `crates/render/src/frame_exec.rs`;
 - `crates/core/src/schedule.rs`.
 
@@ -786,22 +787,25 @@ crates/schedule/src/lib.rs
 
 То есть `ornis-core::Schedule` уже является frame executor для подключённых
 runtime-доменов, но пока не единым главным планировщиком всего движка:
-`FramePlan` сохраняет специализированное управление render resources/pass'ами.
+render-сторона использует `RenderFrame3D` поверх `SystemSet` (d3) +
+`TransientPool` (d2); роспуск оболочки `FramePlan` (d4) закрыт 2026-09-07.
 
-#### Render Scheduler / FramePlan
+#### Render Scheduler (SystemSet + TransientPool)
 
-У рендера есть отдельный механизм:
+У рендера есть специализированный механизм:
 
 ```text
-FramePlan
-FrameLayout
-RenderFrame3D
-FrameExecutor
+SystemSet          (реестр деклараций: resources/passes/ordering/budget)
+TransientPool      (компилятор лайфтаймов/пула по PoolInput)
+FrameLayout        (выход компиляции)
+RenderFrame3D      (типизированная обёртка + блум-каскад)
+FrameExecutor      (исполнитель wgpu + own TransientPool для hot-path)
 ```
 
-Он используется в:
+Используется в:
 
-- `crates/render/src/frame_plan.rs`;
+- `crates/render/src/transient_pool.rs`;
+- `crates/render/src/system.rs`;
 - `crates/render/src/frame_exec.rs`;
 - render-тестах;
 - render benchmarks;
@@ -831,7 +835,7 @@ GameApp::render_frame
 RenderWorld::run_frame
 → RenderExtract
 → Renderer3D uploads
-→ RenderFrame3D::render / FramePlan
+→ RenderFrame3D::render (SystemSet + TransientPool)
 ```
 
 WASM:
@@ -842,7 +846,7 @@ requestAnimationFrame
 RenderWorld::run_frame
 → RenderExtract
 → Renderer3D uploads
-→ RenderFrame3D::render / FramePlan
+→ RenderFrame3D::render (SystemSet + TransientPool)
 ```
 
 `RenderBackend::render_scene` остаётся compatibility/plugin и reference API;
@@ -961,7 +965,7 @@ struct GameContext {
     queue,
     surface,
     renderer3d: Renderer3D,
-    frame_plan: RenderFrame3D,
+    frame3d: RenderFrame3D,
     sphere_mesh,
     render_world: ornis_render::RenderWorld,
     orbit: ornis_render::OrbitCamera,
@@ -977,7 +981,7 @@ struct GameContext {
   ECS-компонентами сцены;
 - запускает общий `RenderExtract` через `RenderWorld::run_frame`;
 - хранит wgpu surface/renderer/mesh отдельно как backend-ресурсы;
-- использует общий `RenderFrame3D`/`FramePlan` для native frame recording;
+- использует общий `RenderFrame3D` (поверх `SystemSet` + `TransientPool`) для native frame recording;
 - содержит shared `OrbitCamera`, зарегистрированный как once-per-frame
   `InputState` consumer в Engine schedule;
 - содержит `PhysicsRuntime` и скрытый static floor с одним dynamic showcase body;
@@ -1006,7 +1010,7 @@ EditorWorld
 Внутренний `GpuScene` WASM теперь содержит только mesh, extracted snapshot
 и light tuples — он не повторяет ECS-to-material/instance conversion.
 `RenderWorld::run_frame` запускает тот же `Engine`/`RenderExtract` контракт,
-а `RenderFrame3D` записывает тот же typed `FramePlan`, что и native.
+а `RenderFrame3D` записывает тот же typed реестр `SystemSet`, что и native.
 
 Это не общий in-process world между сервером и браузером:
 
@@ -1032,7 +1036,7 @@ backend-neutral `RenderExtracted`, после чего native renderer загр�
 полученные материалы и instances в GPU.
 
 `Renderer3D` и `sphere_mesh` пока остаются native-owned ресурсами, поэтому
-это уже ECS-backed extraction, но ещё не полный FramePlan/runtime pipeline.
+это уже ECS-backed extraction, но ещё не полный render-runtime pipeline.
 
 #### Editor/WASM runtime
 
@@ -1058,12 +1062,12 @@ Scene / LiveScene
 Это сохраняет scene serialization boundary, но conversion logic живёт в
 `crates/render/src/extraction.rs`, а не в WASM adapter.
 
-#### FramePlan rendering
+#### RenderFrame3D rendering (SystemSet + TransientPool)
 
 `RenderFrame3D` получает render-specific pass data и GPU resources. Native и
 WASM runtime вызывают его после `RenderWorld::run_frame`/`RenderExtract`:
 ECS-компоненты превращаются в общий `RenderExtracted`, затем загружаются в
-`Renderer3D` и записываются через один и тот же typed `FramePlan`.
+`Renderer3D` и записываются через один и тот же typed реестр `SystemSet` (с `TransientPool`).
 
 `RenderBackend::render_scene` остаётся legacy compatibility path для
 плагинов, тестов и reference probes; production native/WASM loops его не
@@ -1197,13 +1201,13 @@ RedrawRequested
 → acquire surface texture
 → set camera/lights
 → upload extracted materials/instances
-→ FramePlan / RenderFrame3D
+→ RenderFrame3D
 → submit
 → present
 ```
 
 В этом цикле уже есть ECS systems execution, общий render extraction,
-shared input consumer, native showcase physics и native/WASM `FramePlan`.
+shared input consumer, native showcase physics и native/WASM `RenderFrame3D`.
 `Engine` теперь предоставляет отдельный bounded `FixedTime` host: fixed
 systems выполняются перед once-per-frame schedule, а `RenderExtract` не
 повторяется для каждого substep. Полноценные именованные gameplay stages
@@ -1247,7 +1251,7 @@ load editor/scene.ron
 ```
 
 Это пока не полный игровой цикл: editor-only runtime имеет physics tick,
-но не рендерит кадр и не подключает `FramePlan`; WASM получает состояние
+но не рендерит кадр и не подключает `RenderFrame3D`; WASM получает состояние
 через HTTP snapshot'ы.
 
 #### WASM mode
@@ -1275,7 +1279,7 @@ resize
 → upload extracted data
 → update camera
 → acquire surface texture
-→ RenderFrame3D::render / FramePlan
+→ RenderFrame3D::render (SystemSet + TransientPool)
 → present
 → requestAnimationFrame
 ```
@@ -1316,7 +1320,7 @@ resize
              └──────────────┬───────────────────────────┘
                             ▼
                  ┌──────────────────────────┐
-                 │ Renderer3D + FramePlan    │
+                 │ Renderer3D + RenderFrame3D│
                  │ shared typed pass path    │
                  └──────────────────────────┘
 ```
@@ -1325,10 +1329,14 @@ resize
 
 - **Core `Engine`/`Schedule` уже исполняется** для подключённых render- и
   editor-only/native showcase physics-систем;
-- **Render `FramePlan` остаётся отдельным render scheduler** для lifetime,
-  aliasing и typed pass execution;
+- **Render `FramePlan` свёрнут в `SystemSet` + `TransientPool`** (d4, 2026-09-07):
+  реестр деклараций (resources/passes/ordering) и пул/лайфтаймы живут на одном
+  `SystemSet`, исполнитель — на отдельном `TransientPool` (мемоизация по
+  `SystemSet::generation`). Паритет-оракул `Schedule` vs `SystemSet`
+  подтверждает две формы декларации (типизированная + императивная) на одном
+  типе;
 - **Physics подключена как systems в editor-only и native showcase runtime**;
-- **RenderExtract, shared OrbitCamera и `FramePlan` подключены к native и WASM render loops**;
+- **RenderExtract, shared OrbitCamera и `RenderFrame3D` подключены к native и WASM render loops**;
 - **EditorWorld использует core `World`, но остаётся server-side facade**;
 - **Native loop всё ещё showcase loop**, несмотря на ECS-backed extraction;
 - **WASM loop — browser-side snapshot client** с собственным `RenderWorld`;
@@ -1834,7 +1842,7 @@ Engine World (server authoritative)
               │ versioned serialization boundary
               ▼
 Browser RenderWorld (Engine + SmartStore + RenderExtract)
-→ Renderer3D + FramePlan
+→ Renderer3D + RenderFrame3D
 ```
 
 Для браузера serialization boundary остаётся обязательной, если WASM и
@@ -1914,19 +1922,12 @@ pub struct GameRuntime {
 - stage/phase support;
 - unified diagnostics.
 
-#### `FramePlan`
+#### `FramePlan` — растворён
 
-Не выбрасывать сразу. Использовать как промежуточную реализацию:
-
-```text
-FramePlan
-→ адаптировать под общий Scheduler
-→ сделать pass системой
-→ перенести resource lifetime в общую модель
-→ оставить FrameExecutor backend-specific
-```
-
-Текущий `FramePlan` — не неправильное решение, а **первый специализированный прототип будущего unified scheduler**.
+`FramePlan` был первым специализированным прототипом; его роль
+закрыта реестром `SystemSet` + компилятором `TransientPool`
+(d2/d3/d4, 2026-09-07). Дальше — перенос render-side лайфтаймов
+и command recording в общий `ornis-core::Schedule` (§28.2).
 
 #### Physics
 

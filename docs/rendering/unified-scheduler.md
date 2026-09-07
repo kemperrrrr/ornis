@@ -11,7 +11,7 @@
 > `FrameExecutor`, `RenderGraph3D` → `RenderFrame3D`, `GraphIds` →
 > `FrameIds`), `graph_passes.rs` → `frame_passes.rs` (`GraphPass` →
 > `FramePass`, `GraphResource` → `FrameResource`, `ResourceKind::GraphOwned`
-> → `FrameOwned`), пример → `frame_plan_probe`. Датированные секции
+> → `FrameOwned`), пример → `frame3d_probe`. Датированные секции
 > хронологии ниже (S0–S5, Hardening 2026-08-21…) используют имена своего
 > дня; канон имён — карта и глоссарий под этим указателем.
 
@@ -333,7 +333,7 @@ HRTB-грани `for<'a> ViewsFor<'a>` в трейте `GraphPass` + `where Self
 CI-телеметрия xtask (аннотации со strip_ansi) — попутный вклад: гейт
 теперь сам печатает таблицу стадий и ошибки как аннотации GitHub.
 
-Осталось вне CI: пиксельные probe-диффы (`frame_plan_probe`/
+Осталось вне CI: пиксельные probe-диффы (`frame3d_probe`/
 `render_probe` — нужен GPU-адаптер) и полная матрица texture budget.
 Основные benchmark-числа S0/S1 уже зафиксированы выше и в
 `docs/quality/perf-baseline-2026-08-27.md`.

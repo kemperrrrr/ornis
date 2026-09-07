@@ -878,7 +878,7 @@ GPU-бит-идентичность не обещается (урок G7 — д�
 `RenderGraph3D` → `RenderFrame3D`, `GraphIds` → `FrameIds`),
 `graph_passes.rs` → `frame_passes.rs` (`GraphPass` → `FramePass`,
 `GraphResource` → `FrameResource`, `ResourceKind::GraphOwned` →
-`FrameOwned`); пример — `frame_plan_probe`. Карта имён —
+`FrameOwned`); пример — `frame3d_probe`. Карта имён —
 `docs/rendering/unified-scheduler.md` (блок «Переименование» в шапке).
 Датированные разделы этого документа (S1–S6) пишут именами своего дня.
 

@@ -3,22 +3,29 @@
 > **Статус (2026-08-27):** это зафиксированная design/implementation
 > note, а не незакоммиченный черновик. Фазы 0–4 реализованы и
 > верифицированы; будущие изменения должны синхронизироваться с
-> `PLAN.md`, `README.md` и актуальными именами `FramePlan`/`FrameExecutor`.
-> Дата исходного дизайна: 2026-08-10.
+> `PLAN.md`, `README.md` и актуальными именами (`RenderFrame3D` /
+> `SystemSet` / `TransientPool` / `FrameExecutor`).
+> Дата исходного дизайна: 2026-08-10; обновлено 2026-09-07 после d4.
 > Источник: исследование Hermes (дисциплина web-research), первоисточники в разделе «Источники».
 >
-> **Интеграция 2026-08-27:** native и WASM render loops используют
+> **Интеграция 2026-08-27 / 2026-09-07:** native и WASM render loops используют
 > `ornis_render::RenderWorld`/`RenderExtracted` для ECS-backed extraction и
-> `RenderFrame3D`/`FramePlan` для записи кадра. `RenderBackend::render_scene`
-> остаётся compatibility/reference API; server↔browser serialization boundary
-> сохраняется.
+> `RenderFrame3D` (поверх `SystemSet` + `TransientPool` после d2/d3/d4) для
+> записи кадра. `RenderBackend::render_scene` остаётся compatibility/reference
+> API; server↔browser serialization boundary сохраняется.
 >
 > **Переименование 2026-08-23**: модули/типы — `render_graph.rs` → `frame_plan.rs`
 > (`RenderGraph` → `FramePlan`, `GraphLayout` → `FrameLayout`), `graph_frame.rs` →
 > `frame_exec.rs` (`GraphExecutor` → `FrameExecutor`, `RenderGraph3D` → `RenderFrame3D`),
 > `graph_passes.rs` → `frame_passes.rs` (`GraphPass` → `FramePass`, `GraphResource` →
-> `FrameResource`); пример — `frame_plan_probe`. Датированные фаза-логи ниже используют
+> `FrameResource`); пример — `frame3d_probe`. Датированные фаза-логи ниже используют
 > имена своего дня; живой рецепт §10 переведён на новые.
+>
+> **Растворение 2026-09-07 (d2/d3/d4)**: модуль `frame_plan.rs` удалён
+> (d4); реестр деклараций — `SystemSet` (d3), компилятор лайфтаймов
+> и пула — `transient_pool.rs` (d2), исполнитель — `FrameExecutor`
+> с собственным `TransientPool` для hot-path. Пример
+> `frame3d_probe` переименован в `frame3d_probe`.
 
 ---
 
@@ -229,8 +236,9 @@ systems.add_system(&mut plan, BloomMid);
 в исполнителе больше нет. Виды можно получать и по типу ресурса:
 `views.get::<Bloom0>()` (debug-проверка членства в объявленном наборе).
 
-`FramePlan::add_pass`/`PassBuilder` — шим совместимости для тестов и
-инструментов; production-код объявляет пассы типами.
+`SystemSet::add_pass`/`PassBuilder` — шим совместимости для тестов
+и инструментов; production-код объявляет пассы типами через
+`SystemSet::add_system<P: FramePass>` (S2).
 
 Защита от тихих изменений пула — golden-тесты (`golden_pool_slots_per_
 technique`, `golden_bloom_adds_exactly_three_slots`,

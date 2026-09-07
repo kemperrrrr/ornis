@@ -1,7 +1,7 @@
 //! S5b gate (PLAN Appendix C): parallel command recording must be
 //! pixel-identical to the sequential path. Runs headless — on CI via
 //! lavapipe, locally on any adapter; skipped when no adapter is found.
-//! The scene is one lit sphere (minimal setup from frame_plan_probe).
+//! The scene is one lit sphere (minimal setup from frame3d_probe).
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_render::render_backend::RenderContext;

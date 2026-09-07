@@ -1,34 +1,34 @@
 {
   "version": 2,
-  "quality_score": 0.13406433337723012,
-  "iosp_score": 0.9201817001946788,
-  "violations": 123,
-  "total": 2454,
+  "quality_score": 0.1588669020398743,
+  "iosp_score": 0.9222357229647631,
+  "violations": 128,
+  "total": 2587,
   "complexity_warnings": 9,
   "magic_number_warnings": 769,
   "nesting_depth_warnings": 2,
-  "function_length_warnings": 32,
-  "unsafe_warnings": 8,
-  "error_handling_warnings": 89,
-  "duplicate_groups": 42,
+  "function_length_warnings": 33,
+  "unsafe_warnings": 11,
+  "error_handling_warnings": 92,
+  "duplicate_groups": 55,
   "dead_code_warnings": 164,
-  "dead_type_warnings": 7,
-  "fragment_groups": 120,
-  "boilerplate_warnings": 111,
-  "srp_struct_warnings": 5,
-  "srp_module_warnings": 32,
+  "dead_type_warnings": 8,
+  "fragment_groups": 130,
+  "boilerplate_warnings": 114,
+  "srp_struct_warnings": 4,
+  "srp_module_warnings": 35,
   "wildcard_import_warnings": 11,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 132,
+  "tq_untested_warnings": 135,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 18,
-  "structural_coupling_warnings": 19,
-  "total_findings": 1759,
+  "structural_coupling_warnings": 28,
+  "total_findings": 1813,
   "violation_details": [
     {
       "name": "serve_websocket",
@@ -66,13 +66,38 @@
       "line": 210
     },
     {
+      "name": "json_to_py",
+      "file": "crates/python/src/lib.rs",
+      "line": 274
+    },
+    {
+      "name": "py_to_json",
+      "file": "crates/python/src/lib.rs",
+      "line": 312
+    },
+    {
+      "name": "json_to_value",
+      "file": "crates/rune/src/lib.rs",
+      "line": 151
+    },
+    {
+      "name": "value_to_json",
+      "file": "crates/rune/src/lib.rs",
+      "line": 198
+    },
+    {
+      "name": "RuneScriptEngine::hot_reload",
+      "file": "crates/rune/src/lib.rs",
+      "line": 270
+    },
+    {
       "name": "build_scene_data",
-      "file": "crates/render/examples/frame_plan_probe.rs",
+      "file": "crates/render/examples/frame3d_probe.rs",
       "line": 139
     },
     {
       "name": "run",
-      "file": "crates/render/examples/frame_plan_probe.rs",
+      "file": "crates/render/examples/frame3d_probe.rs",
       "line": 409
     },
     {
@@ -98,7 +123,7 @@
     {
       "name": "RenderFrame3D::new_with",
       "file": "crates/render/src/frame_exec.rs",
-      "line": 429
+      "line": 462
     },
     {
       "name": "extract_render_data",
@@ -618,32 +643,32 @@
     {
       "name": "GameApp::showcase_engine",
       "file": "src/main.rs",
-      "line": 240
+      "line": 250
     },
     {
       "name": "GameApp::process_remote_commands",
       "file": "src/main.rs",
-      "line": 297
+      "line": 308
     },
     {
       "name": "GameApp::window_event",
       "file": "src/main.rs",
-      "line": 520
+      "line": 456
     },
     {
       "name": "GameApp::about_to_wait",
       "file": "src/main.rs",
-      "line": 587
+      "line": 584
     },
     {
       "name": "physics_body_for",
       "file": "src/editor_world.rs",
-      "line": 848
+      "line": 991
     },
     {
       "name": "normalized_rotation",
       "file": "src/engine_runtime.rs",
-      "line": 304
+      "line": 311
     }
   ]
 }
