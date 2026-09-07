@@ -773,7 +773,7 @@ debug-only по умолчанию). Тесты:
 `Schedule`. Пересмотр — только со вторым живым потребителем
 data-фронтенда (фаза 6) или сменой ключа пула.
 
-## S5e + Extract-free — декомпозиция (2026-09-07, открыто)
+## S5e + Extract-free — декомпозиция (2026-09-07, открыто; E1 ✅)
 
 Честная оценка: это месяцы, не один коммит. Ниже — фазы с собственными
 гейтами; каждая фаза — самостоятельный выигрыш и откатываема. База:
@@ -821,6 +821,33 @@ submit в порядке регистрации.
 
 Порядок: E1 → E2 → X1 → X2 → X3 → E3/X4. E1 разблокирует всё остальное;
 X1–X3 независимы между собой после E2.
+
+### E1 — пасс как `System`-адаптер ✅ (2026-09-07)
+
+Закрыт первым шагом декомпозиции. Мост `crates/render/src/schedule_bridge.rs`:
+
+- `try_project_schedule(&SystemSet) -> Schedule` — каждый включённый пасс
+  становится `PassSystem`-близнецом: то же имя, доступы спроецированы из
+  `ResourceId` в `TypeId` через реестр (`register_resource::<R>`).
+  Disabled-пассы и их рёбра выпадают ровно как в `layout_levels`.
+  Нетипизированный ресурс (`create_resource` без типа) — честный
+  `ProjectionError::UntypedResource`: ядру нечего зеркалить.
+- `run` у близнеца — no-op по дизайну: E1 исполняет пассы через
+  borrowed-encoder dispatch, близнец управляет levelling'ом. Запись внутрь
+  систем через frame-ресурс — это E2 (`FrameCommandBuffers`), не этот шаг.
+- `RenderFrame3D::render_schedule` — рендер кадра, ordenированный
+  уровнями спроецированного `Schedule` (flatten уровней →
+  `FrameExecutor::execute_in_order`, тот же `dispatch_pass`, что у
+  sequential/parallel путей); debug-assert на каждый кадр проверяет
+  уровни == `FrameLayout::levels()`. Проекция строится на вызов — E2
+  поднимет владение schedule в рантайм.
+
+Гейты: `scheduler_parity.rs` расширен каноном E1 (проекция ==
+`FrameLayout::levels()` на цепочках/shared-levels/edge-splits,
+disabled-culling, untyped-error; плюс production-матрица Technique×bloom
+в юнит-тестах моста) и `tests/schedule_render.rs` — пиксельный паритет
+schedule-driven vs sequential на lavapipe (0 отличий, harness как у
+S5b `parallel_render.rs`).
 
 ## WASD-мост: фикс шва sync + порядок (2026-09-06)
 

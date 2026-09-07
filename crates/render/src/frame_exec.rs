@@ -128,6 +128,35 @@ impl FrameExecutor {
         }
     }
 
+    /// E1 (S5e): sequential execution in an explicitly given pass order —
+    /// the flattened levels of a projected `core::Schedule`
+    /// ([`crate::schedule_bridge`]) — recording onto the caller's encoder.
+    /// The ordered sibling of [`execute`](Self::execute).
+    pub fn execute_in_order<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        layout: &'a FrameLayout,
+        order: &[usize],
+        run: impl FnMut(&mut wgpu::CommandEncoder, PassViews<'a>),
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        let mut run = run;
+        for &index in order {
+            run(
+                encoder,
+                PassViews {
+                    layout,
+                    pool,
+                    externals,
+                    index,
+                },
+            );
+        }
+    }
+
     /// S5b: parallel command recording. The shared level executor
     /// (`ornis_schedule::run_levels`, backlog #19 — single executor with
     /// `core::Schedule`) runs levels sequentially and passes inside a
@@ -641,31 +670,115 @@ impl RenderFrame3D {
         // declaration generation), so frames share it without cloning.
         let layout = executor.ensure_layout(systems);
         executor.set_external_view(ids.target, target.clone());
-        let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
-            // S2b: every pass is a typed system (conditional passes
-            // are mode families); dispatch by original PassId.
-            let mut frame = Frame {
-                device,
-                queue,
-                encoder: enc,
-                renderer,
-                mesh,
-                instance_count,
-            };
-            if !systems.run_pass(pass.pass().id, pass, &mut frame) {
-                unreachable!(
-                    "render frame 3d: pass '{}' is not a typed system",
-                    pass.pass().name
-                );
-            }
+        let dispatch = PassDispatch {
+            systems,
+            device,
+            queue,
+            renderer,
+            mesh,
+            instance_count,
         };
         if *parallel_recording {
-            executor.execute_parallel(device, queue, &layout, dispatch);
+            executor.execute_parallel(device, queue, &layout, |_index, pass, enc| {
+                dispatch_pass(&dispatch, enc, pass);
+            });
         } else {
             executor.execute(device, encoder, &layout, |encoder, pass| {
-                dispatch(0, &pass, encoder);
+                dispatch_pass(&dispatch, encoder, &pass);
             });
         }
+    }
+
+    /// E1 (S5e): renders one frame driven by the projected core
+    /// `Schedule` — every pass is a `PassSystem` declaration twin
+    /// ([`crate::schedule_bridge`]), levels come from the unified
+    /// scheduler engine, and the dispatch records through the caller's
+    /// borrowed encoder exactly like the sequential path. Pixel-identical
+    /// to [`render`](Self::render) by construction: projected levels are
+    /// pinned equal to `FrameLayout::levels()` (parity canon,
+    /// `scheduler_parity`), and a debug assertion re-checks it per frame.
+    ///
+    /// The projection is built per call in E1; E2 hoists schedule
+    /// ownership into the runtime once recording moves into the systems.
+    ///
+    /// # Panics
+    /// Panics when a pass touches a resource without a typed registry
+    /// identity (`schedule_bridge::ProjectionError`).
+    pub fn render_schedule(
+        &mut self,
+        context: crate::render_backend::RenderContext<'_>,
+        renderer: &Renderer3D,
+        mesh: &Mesh,
+        instance_count: u32,
+    ) {
+        let Self {
+            executor,
+            ids,
+            systems,
+            ..
+        } = self;
+        let schedule = crate::schedule_bridge::try_project_schedule(systems)
+            .unwrap_or_else(|e| panic!("render_schedule: projection failed: {e}"));
+        let layout = executor.ensure_layout(systems);
+        let levels = schedule.levels();
+        debug_assert_eq!(
+            levels,
+            layout.levels(),
+            "E1: projected Schedule levels != FrameLayout::levels()"
+        );
+        executor.set_external_view(ids.target, context.target.clone());
+        let order: Vec<usize> = levels.iter().flatten().copied().collect();
+        let dispatch = PassDispatch {
+            systems,
+            device: context.device,
+            queue: context.queue,
+            renderer,
+            mesh,
+            instance_count,
+        };
+        executor.execute_in_order(
+            context.device,
+            context.encoder,
+            &layout,
+            &order,
+            |encoder, pass| dispatch_pass(&dispatch, encoder, &pass),
+        );
+    }
+}
+
+/// Borrowed per-frame pass dispatch context shared by all
+/// `RenderFrame3D` execution paths (sequential, parallel,
+/// schedule-ordered): the registry plus the frame inputs a
+/// borrowed-encoder [`Frame`] is built from.
+struct PassDispatch<'a> {
+    systems: &'a SystemSet,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    renderer: &'a Renderer3D,
+    mesh: &'a Mesh,
+    instance_count: u32,
+}
+
+/// Runs one pass through the registry dispatch: builds the
+/// borrowed-encoder [`Frame`] and invokes the typed runner (S2b).
+fn dispatch_pass(
+    dispatch: &PassDispatch<'_>,
+    encoder: &mut wgpu::CommandEncoder,
+    pass: &PassViews<'_>,
+) {
+    let mut frame = Frame {
+        device: dispatch.device,
+        queue: dispatch.queue,
+        encoder,
+        renderer: dispatch.renderer,
+        mesh: dispatch.mesh,
+        instance_count: dispatch.instance_count,
+    };
+    if !dispatch.systems.run_pass(pass.pass().id, pass, &mut frame) {
+        unreachable!(
+            "render frame 3d: pass '{}' is not a typed system",
+            pass.pass().name
+        );
     }
 }
 

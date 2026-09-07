@@ -347,6 +347,11 @@ pub struct SystemSet {
     /// Pass declarations in `PassId` order (typed systems and imperative
     /// builder passes share one id space).
     passes: Vec<PassNode>,
+    /// Original `&'static` pass names in `PassId` order — `PassNode::name`
+    /// owns a `String` for layout dumps, but the E1 schedule projection
+    /// (`schedule_bridge`) must hand `'static` names to
+    /// `core::System::name`.
+    pass_names: Vec<&'static str>,
     /// Surface size feeding `SizePolicy::MatchSurface`.
     surface_size: (u32, u32),
     /// Registry-owned transient allocator serving `layout()`/`build()`.
@@ -481,6 +486,7 @@ impl SystemSet {
             writes: Vec::new(),
             enabled: true,
         });
+        self.pass_names.push(name);
         self.touch();
         PassBuilder { set: self, id }
     }
@@ -576,6 +582,32 @@ impl SystemSet {
             surface_size: self.surface_size,
             budget: self.budget,
         }
+    }
+
+    /// Pass declarations in `PassId` order (E1 projection input).
+    pub(crate) fn pass_nodes(&self) -> &[PassNode] {
+        &self.passes
+    }
+
+    /// The original `&'static` name of a declared pass.
+    pub(crate) fn pass_name(&self, id: PassId) -> &'static str {
+        self.pass_names[id.0 as usize]
+    }
+
+    /// Reverse registry lookup: the `FrameResource` type backing a
+    /// `ResourceId`, if the resource was registered with a type
+    /// (`register_resource::<R>`). `None` for resources declared only
+    /// through the imperative `create_resource`/`import_resource` API.
+    pub(crate) fn resource_type(&self, id: ResourceId) -> Option<TypeId> {
+        self.ids
+            .iter()
+            .find(|(_, &rid)| rid == id)
+            .map(|(&tid, _)| tid)
+    }
+
+    /// Explicit ordering edges in `PassId` pairs (E1 projection input).
+    pub(crate) fn ordering_edges(&self) -> &[(PassId, PassId)] {
+        &self.ordering
     }
 
     /// Returns the frame layout (lifetimes + pool slots), recomputing it
