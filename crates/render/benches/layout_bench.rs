@@ -32,8 +32,8 @@ fn bench_layout_compute(c: &mut Criterion) {
             b.iter(|| {
                 // A mutation-driven recompute: the cost the cache removes
                 // from steady-state frames.
-                g3.plan_mut().invalidate();
-                std::hint::black_box(g3.plan_mut().layout());
+                g3.systems_mut().invalidate();
+                std::hint::black_box(g3.systems_mut().layout());
             });
         });
     }
@@ -48,11 +48,11 @@ fn bench_layout_cache_hit(c: &mut Criterion) {
         ("hybrid_9_passes", Technique::Hybrid),
     ] {
         let mut g3 = make(technique);
-        let _ = g3.plan_mut().layout(); // warm the cache
+        let _ = g3.systems_mut().layout(); // warm the cache
         group.bench_function(name, |b| {
             b.iter(|| {
                 // Steady-state frame: no mutations → cache hit.
-                std::hint::black_box(g3.plan_mut().layout());
+                std::hint::black_box(g3.systems_mut().layout());
             });
         });
     }
@@ -66,7 +66,7 @@ fn bench_levels(c: &mut Criterion) {
         ("forward_7_passes", Technique::Forward),
     ] {
         let mut g3 = make(technique);
-        let layout = g3.plan_mut().layout().clone();
+        let layout = g3.systems_mut().layout().clone();
         group.bench_function(name, |b| b.iter(|| std::hint::black_box(layout.levels())));
     }
     group.finish();

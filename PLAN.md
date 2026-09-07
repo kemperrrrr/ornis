@@ -256,6 +256,27 @@ runtime без отдельной extract-фазы — будущая цель, 
 > удалены, `PassBuilder` — тест/паритет-воронка (`SystemSet` — единственный
 > prod-путь). Пул/бюджет/лайфтаймы и `FramePlan` как реестр деклараций пока
 > сохраняются; детали — `docs/rendering/unified-scheduler.md`.
+>
+> **Прогресс 2026-09-07 (роспуск оболочки FramePlan, стадии 2+3 — d2/d3):**
+> динамическая половина (`PoolInput`/`TransientPool`/`FrameLayout`/
+> `PoolSlot`/`ResourceLayout`/`PassLayout`/`format_bytes_per_pixel`/
+> `budget_exceeded`/`assert_pass_access_declared`/`Budget`/`BudgetExceeded`/
+> `TextureSpec::external` + `SizePolicy`/`FrameIds`-cовместимые импорты)
+> вынесена в `crates/render/src/transient_pool.rs` и реэкспортирована
+> из `lib.rs`. `SystemSet` становится единым реестром деклараций
+> (resources/passes/ordering/budget/pool/generation) и единственным
+> prod-источником `PoolInput` для исполнителя (`FrameExecutor::ensure_layout`
+> теперь принимает `&SystemSet`, а не `&mut FramePlan`). `FramePlan`
+> остаётся как имperative/parity-фронтенд с собственным `TransientPool`
+> (cold-path `FramePlan::layout()` для инструментов и тестов);
+> `FramePlan::pool_input` помечен `#[allow(dead_code)]` — параллельный
+> API к `SystemSet::pool_input` для будущих cold-path потребителей.
+> Декоратор `Debug` для `SystemSet` — ручной impl: `TypeId` и
+> `Box<dyn FnMut>` не `Debug`, поля `ids`/`systems` скипаются с подсчётом
+> длины. `cargo check --workspace --all-targets` чисто;
+> `cargo test -p ornis-render` 104/104; `cargo clippy --workspace
+> --all-targets -- -D warnings` чисто. Следующий шаг (стадия 4) —
+> удаление `FramePlan` или свёртывание в алиас (решение владельца).
 
 ## ❌ Не делать / отложено (решения владельца)
 

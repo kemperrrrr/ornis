@@ -8,12 +8,12 @@
 //! stay identical. The conditional passes (forward, bloom_down0,
 //! composite) remain imperative until S2b.
 
-use crate::frame_plan::{SizePolicy, TextureSpec};
 use crate::renderer::{CompositeInputs, GbufferTargets};
 use crate::system::{
     AccessSet, ClearBlack, ClearTransparent, ClearWhite, Frame, FramePass, FrameResource, Read,
     ResourceKind, SystemViews, ViewsFor, Write, WriteClear,
 };
+use crate::transient_pool::{SizePolicy, TextureSpec};
 use std::marker::PhantomData;
 // Short alias keeps `typed_resource!` invocations under rustfmt's
 // fn_call_width (60) so they stay on one line.

@@ -1,21 +1,24 @@
-//! Frame plan — pass orchestration layer (formerly "render graph", Phase 0).
+//! Frame plan — pass declaration registry (formerly "render graph", Phase 0).
 //!
-//! An immediate-mode plan in the spirit of Frostbite FrameGraph and
+//! An immediate-mode registry in the spirit of Frostbite FrameGraph and
 //! Ponies&Light: passes are declared in execution order, and each pass
-//! declares which resources it reads and writes. The plan computes
-//! resource lifetimes (transient windows `[first_use, last_use]`) and
-//! assigns them to pool slots so that non-overlapping resources with the
-//! same specification share one slot (object-level aliasing).
+//! declares which resources it reads and writes. The registry owns
+//! declarations plus the declaration generation; compiling them into an
+//! executable layout (lifetimes, pool slots, budget) is the
+//! [`TransientPool`](crate::transient_pool::TransientPool)'s job, and the
+//! computed [`FrameLayout`](crate::transient_pool::FrameLayout) lives
+//! there — this is the d2 split of the `FramePlan` dissolution.
 //!
 //! Model:
-//! - `FramePlan::layout()` → cached `&FrameLayout` — pure logic, no GPU
-//!   needed; recomputed only after a mutation (`build()` is the owned
-//!   snapshot of the same cache, `FrameExecutor::ensure_layout` the shared
-//!   one for the frame hot path);
+//! - declaring resources/passes (plus `generation`, explicit `ordering`
+//!   edges and the [`Budget`](crate::transient_pool::Budget) value) stays
+//!   here; `FramePlan::layout()` is the cold-path accessor over the
+//!   registry-owned pool instance (tests, tools, dumps), while the frame
+//!   hot path uses the executor-owned pool via
+//!   `FrameExecutor::ensure_layout`;
 //! - creating real `wgpu::Texture` objects per slot is the executor's job
 //!   (Phase 1). On wgpu, barriers and layout transitions are handled by
-//!   wgpu itself, so the plan owns lifetimes and pooling, not
-//!   synchronization.
+//!   wgpu itself, so the plan owns declarations, not synchronization.
 //!
 //! Invariants (panic with a clear message when violated):
 //! - a resource must not be read before it is written (imported resources
@@ -24,444 +27,30 @@
 //! - within a single pass, no two live resources may share a pool slot
 //!   (guaranteed by construction).
 
-use std::collections::HashMap;
+use ornis_schedule::{OrderError, resolve_named_edge, validate_indexed_edge};
 
-use ornis_schedule::{
-    MermaidDiagram, OrderError, bitset_level_plan, resolve_named_edge, validate_indexed_edge,
+use crate::transient_pool::{
+    Budget, BudgetExceeded, FrameLayout, PassId, PassNode, PoolInput, ResourceId, ResourceNode,
+    SizePolicy, TextureSpec, TransientPool,
 };
-
-/// Bytes per pixel for the texture formats used by the engine's renderer.
-pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
-    match format {
-        wgpu::TextureFormat::Rgba8Unorm
-        | wgpu::TextureFormat::Rgba8UnormSrgb
-        | wgpu::TextureFormat::Bgra8UnormSrgb
-        | wgpu::TextureFormat::R32Uint
-        | wgpu::TextureFormat::Rg16Float
-        | wgpu::TextureFormat::Depth32Float
-        | wgpu::TextureFormat::Depth24Plus => 4,
-        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
-        wgpu::TextureFormat::Rgba32Float => 16,
-        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
-    }
-}
-
-/// Builds the actionable budget error: top slots by bytes.
-fn budget_exceeded(budget: u64, required: u64, layout: &FrameLayout) -> BudgetExceeded {
-    let mut slots: Vec<&PoolSlot> = layout.slots.iter().collect();
-    slots.sort_by_key(|s| std::cmp::Reverse(slot_bytes(s, layout.surface_size)));
-    let offenders = slots
-        .iter()
-        .take(3)
-        .map(|s| {
-            let (w, h) = s.spec.size.resolve(layout.surface_size);
-            let names: Vec<&str> = s
-                .resources
-                .iter()
-                .map(|&id| layout.resources[id.0 as usize].name.as_str())
-                .collect();
-            format!(
-                "{} ({:?} {}x{}, {} B)",
-                names.join("/"),
-                s.spec.format,
-                w,
-                h,
-                slot_bytes(s, layout.surface_size)
-            )
-        })
-        .collect();
-    BudgetExceeded {
-        budget,
-        required,
-        offenders,
-    }
-}
-
-fn slot_bytes(slot: &PoolSlot, surface: (u32, u32)) -> u64 {
-    let (w, h) = slot.spec.size.resolve(surface);
-    format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
-}
-
-/// Texture size policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SizePolicy {
-    /// Size matches the surface (swapchain) size.
-    MatchSurface,
-    /// Surface size divided by a power-of-two divisor (mip chains, e.g.
-    /// bloom at 1/2, 1/4, 1/8). The result is floored and clamped to 1.
-    Fraction(u32),
-    /// Fixed size.
-    Fixed {
-        /// Absolute width in texels.
-        width: u32,
-        /// Absolute height in texels.
-        height: u32,
-    },
-}
-
-impl SizePolicy {
-    /// Resolves the policy to a concrete (width, height) for a surface size.
-    pub fn resolve(&self, surface: (u32, u32)) -> (u32, u32) {
-        match *self {
-            SizePolicy::MatchSurface => surface,
-            SizePolicy::Fraction(divisor) => {
-                let divisor = divisor.max(1);
-                ((surface.0 / divisor).max(1), (surface.1 / divisor).max(1))
-            }
-            SizePolicy::Fixed { width, height } => (width, height),
-        }
-    }
-}
-
-/// Texture specification — the pool reuse key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TextureSpec {
-    /// Texture format; resources of different formats never share slots.
-    pub format: wgpu::TextureFormat,
-    /// MSAA sample count.
-    pub samples: u32,
-    /// Size policy (resolved against the surface at allocation time).
-    pub size: SizePolicy,
-}
-
-/// Logical resource handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ResourceId(pub u32);
-
-/// Logical pass handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PassId(pub u32);
-
-/// Per-resource information in a layout.
-#[derive(Debug, Clone)]
-pub struct ResourceLayout {
-    /// Unique resource identifier.
-    pub id: ResourceId,
-    /// Human-readable name for debugging and plan dumps.
-    pub name: String,
-    /// Texture format/size/usage specification.
-    pub spec: TextureSpec,
-    /// Index of the first pass that uses the resource; `usize::MAX` if unused.
-    pub first_use: usize,
-    /// Index of the last pass that uses the resource; `0` if unused.
-    pub last_use: usize,
-    /// Pool slot (`None` — the resource is not used by any enabled pass,
-    /// or it is external).
-    pub slot: Option<usize>,
-    /// Backed by an externally provided view (swapchain or similar);
-    /// never pooled.
-    pub external: bool,
-}
-
-impl ResourceLayout {
-    /// Whether the resource is alive at the pass with `pass_index`.
-    pub fn alive_at(&self, pass_index: usize) -> bool {
-        self.first_use != usize::MAX && self.first_use <= pass_index && pass_index <= self.last_use
-    }
-}
-
-/// Pool slot: a group of resources with the same [`TextureSpec`] whose
-/// lifetime windows do not overlap.
-#[derive(Debug, Clone)]
-pub struct PoolSlot {
-    /// Slot index used by the executor to key its texture pool.
-    pub index: usize,
-    /// Shared spec — the pool reuse key.
-    pub spec: TextureSpec,
-    /// Resources sharing the slot (non-overlapping windows).
-    pub resources: Vec<ResourceId>,
-    /// Index of the first pass using the slot.
-    pub first_pass: usize,
-    /// Index of the last pass using the slot.
-    pub last_pass: usize,
-}
-
-/// A pass in the executable layout.
-#[derive(Debug, Clone)]
-pub struct PassLayout {
-    /// Identifier of the pass.
-    pub id: PassId,
-    /// Human-readable pass name for debugging and plan dumps.
-    pub name: String,
-    /// Resources read by the pass.
-    pub reads: Vec<ResourceId>,
-    /// Resources written by the pass; `Some(Color)` carries a clear value.
-    pub writes: Vec<(ResourceId, Option<wgpu::Color>)>,
-}
-
-/// Result of `FramePlan::build()` — the computed frame layout.
-#[derive(Debug, Clone)]
-pub struct FrameLayout {
-    pub(crate) surface_size: (u32, u32),
-    /// Passes in execution order (insertion order, disabled passes dropped).
-    pub(crate) passes: Vec<PassLayout>,
-    /// Resources (parallel to `FramePlan::resources`).
-    pub(crate) resources: Vec<ResourceLayout>,
-    /// Pool slots.
-    pub(crate) slots: Vec<PoolSlot>,
-    /// Live resources per pass (by index into `passes`).
-    pub(crate) pass_alive: Vec<Vec<ResourceId>>,
-    /// Parallel execution levels (bitset plan via `ornis-schedule`),
-    /// computed once per build and cached in the layout (audit §4.3 —
-    /// no recomputation per `levels()` call).
-    pub(crate) levels: Vec<Vec<usize>>,
-}
-
-impl FrameLayout {
-    /// Total bytes the pool will allocate at this layout's surface size —
-    /// the device-free counterpart of `FrameExecutor::texture_budget`
-    /// (golden tests, S0 metrics, the S4 budget check).
-    pub fn planned_pool_bytes(&self) -> u64 {
-        self.slots
-            .iter()
-            .map(|slot| {
-                let (w, h) = slot.spec.size.resolve(self.surface_size);
-                format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
-            })
-            .sum()
-    }
-
-    /// Parallel execution levels (S5b planning data): passes whose
-    /// declared accesses do not conflict share a level; levels are
-    /// ordered by dependencies (read-after-write, write-after-read,
-    /// write-after-write), passes within a level are independent and
-    /// safe to record in parallel. Deterministic — derived from the
-    /// registration order and the declared accesses, exactly like the
-    /// core `ornis_core::schedule::Schedule`. Computed once per build
-    /// (bitset plan from `ornis-schedule`, audit §4.3) and cached in
-    /// this layout; the accessor clones the vec, as before.
-    pub fn levels(&self) -> Vec<Vec<usize>> {
-        self.levels.clone()
-    }
-
-    /// Mermaid diagram of this layout — the debug projection (S6):
-    /// passes grouped into parallel-level subgraphs, resources as nodes,
-    /// write/read flows as edges. GitHub renders ```mermaid blocks
-    /// natively, so a layout drop pasted into a PR review becomes a
-    /// picture of the frame pipeline.
-    ///
-    /// Slice 1b (toward graph elimination): rendered by the shared
-    /// [`MermaidDiagram`] projector — same byte format pinned by the
-    /// `mermaid_is_a_valid_projection` test; the same diagram is
-    /// available from the top-level scheduler (`Schedule::mermaid`).
-    pub fn mermaid(&self) -> String {
-        let mut d = MermaidDiagram::new();
-        for (li, level) in self.levels().iter().enumerate() {
-            let nodes: Vec<(String, String)> = level
-                .iter()
-                .map(|&pi| (format!("P{pi}"), self.passes[pi].name.clone()))
-                .collect();
-            d.level(&format!("L{li}"), &format!("level {li}"), &nodes);
-        }
-        for rl in &self.resources {
-            if rl.first_use == usize::MAX {
-                continue;
-            }
-            d.node(
-                &format!("R{}", rl.id.0),
-                &format!("{} {:?}", rl.name, rl.spec.format),
-            );
-        }
-        for (pi, pass) in self.passes.iter().enumerate() {
-            for rid in &pass.reads {
-                d.edge(&format!("R{}", rid.0), &format!("P{pi}"));
-            }
-            for (rid, _) in &pass.writes {
-                d.edge(&format!("P{pi}"), &format!("R{}", rid.0));
-            }
-        }
-        d.render()
-    }
-
-    /// Textual layout dump for debugging/reporting.
-    pub fn debug_dump(&self) -> String {
-        let mut s = format!(
-            "frame plan: {} passes, {} resources, {} pool slots (surface {:?})\n",
-            self.passes.len(),
-            self.resources.len(),
-            self.slots.len(),
-            self.surface_size
-        );
-        for (i, pass) in self.passes.iter().enumerate() {
-            let reads: Vec<&str> = pass
-                .reads
-                .iter()
-                .map(|&r| self.resources[r.0 as usize].name.as_str())
-                .collect();
-            let writes: Vec<&str> = pass
-                .writes
-                .iter()
-                .map(|&(r, _)| self.resources[r.0 as usize].name.as_str())
-                .collect();
-            s += &format!(
-                "  pass {i} '{}' read[{}] write[{}]\n",
-                pass.name,
-                reads.join(", "),
-                writes.join(", ")
-            );
-        }
-        for rl in &self.resources {
-            if rl.first_use == usize::MAX {
-                s += &format!("  resource '{}' UNUSED\n", rl.name);
-            } else {
-                s += &format!(
-                    "  resource '{}' ({:?}) passes {}..={} slot {:?}\n",
-                    rl.name, rl.spec, rl.first_use, rl.last_use, rl.slot
-                );
-            }
-        }
-        for slot in &self.slots {
-            let names: Vec<&str> = slot
-                .resources
-                .iter()
-                .map(|&r| self.resources[r.0 as usize].name.as_str())
-                .collect();
-            s += &format!(
-                "  slot #{} {:?} passes {}..={}: {}\n",
-                slot.index,
-                slot.spec,
-                slot.first_pass,
-                slot.last_pass,
-                names.join(", ")
-            );
-        }
-        s
-    }
-}
-
-/// Debug enforcement of declared pass accesses — boundary of
-/// `PassViews::view_of` (backlog #6, audit §4.1): a pass requesting a view
-/// for a `ResourceId` outside its declared reads/writes panics with the
-/// pass and resource names. Such access is an out-of-schedule step: it
-/// may race with a pass at the same parallel level
-/// (`FrameExecutor::execute_parallel`). Pass-level analogue of
-/// `assert_access_declared` for `core::Schedule` systems; a write
-/// declaration also covers reading its own write (see
-/// `Forward<OwnsDepth>` — reads its own cleared depth), as in core.
-/// Debug-only: compiled out in release.
-#[cfg(debug_assertions)]
-pub(crate) fn assert_pass_access_declared(layout: &FrameLayout, pass_index: usize, id: ResourceId) {
-    let pass = &layout.passes[pass_index];
-    let declared =
-        pass.reads.contains(&id) || pass.writes.iter().any(|(written, _)| *written == id);
-    if !declared {
-        let resource = &layout.resources[id.0 as usize];
-        panic!(
-            "pass '{}' (index {pass_index}) accesses resource '{}' ({id:?}) that is not \
-             declared in its access set (PassBuilder::read/write) — undeclared access breaks \
-             the frame-plan scheduling contract",
-            pass.name, resource.name
-        );
-    }
-}
-
-#[derive(Debug)]
-struct ResourceNode {
-    name: String,
-    spec: TextureSpec,
-    /// Imported (external) resource: the "first touch must be a write"
-    /// rule does not apply.
-    imported: bool,
-    /// Resource backed by an externally provided view (e.g. the swapchain):
-    /// never pooled, `slot` is always `None`.
-    external: bool,
-}
-
-#[derive(Debug)]
-struct PassNode {
-    name: String,
-    reads: Vec<ResourceId>,
-    writes: Vec<(ResourceId, Option<wgpu::Color>)>,
-    enabled: bool,
-}
-
-/// GPU memory budget for the transient pool (S4, IDEAS §28.3).
-///
-/// The scheduler either fits the pool into the budget or refuses with an
-/// actionable [`BudgetExceeded`]; `unbounded()` restores the S3 behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Budget {
-    /// Byte cap for the pooled transient textures; `None` = unbounded.
-    pub gpu_textures: Option<u64>,
-}
-
-impl Budget {
-    /// No cap: the S3 behavior (any pool size passes).
-    pub fn unbounded() -> Self {
-        Self { gpu_textures: None }
-    }
-
-    /// Cap the transient texture pool at `bytes`.
-    pub fn gpu_textures(bytes: u64) -> Self {
-        Self {
-            gpu_textures: Some(bytes),
-        }
-    }
-}
-
-/// The transient pool does not fit the configured [`Budget`] (S4).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BudgetExceeded {
-    /// The configured cap.
-    pub budget: u64,
-    /// What the pool needs at this plan configuration.
-    pub required: u64,
-    /// Largest slots (bytes desc): what to shrink or disable first.
-    pub offenders: Vec<String>,
-}
-
-impl std::fmt::Display for BudgetExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "transient pool needs {} ({:.1} MiB), budget {} ({:.1} MiB); largest slots: {}",
-            self.required,
-            self.required as f64 / (1024.0 * 1024.0),
-            self.budget,
-            self.budget as f64 / (1024.0 * 1024.0),
-            self.offenders.join("; ")
-        )?;
-        if !self.offenders.is_empty() {
-            write!(f, " — reduce resource sizes or disable passes (e.g. bloom)")?;
-        }
-        Ok(())
-    }
-}
-
-/// Parallel levels of a built layout: bitset plan (`ornis-schedule`)
-/// over per-pass access slices plus translated explicit edges
-/// (registration PassId → layout index; disabled passes are not in the
-/// layout, so their edges drop out).
-fn layout_levels(passes: &[PassLayout], ordering: &[(PassId, PassId)]) -> Vec<Vec<usize>> {
-    let reads: Vec<Vec<ResourceId>> = passes.iter().map(|p| p.reads.clone()).collect();
-    let writes: Vec<Vec<ResourceId>> = passes
-        .iter()
-        .map(|p| p.writes.iter().map(|(id, _)| *id).collect())
-        .collect();
-    let index_of = |id: PassId| passes.iter().position(|p| p.id == id);
-    let edges: Vec<(usize, usize)> = ordering
-        .iter()
-        .filter_map(|(b, a)| Some((index_of(*b)?, index_of(*a)?)))
-        .collect();
-    bitset_level_plan(&reads, &writes, &edges)
-}
 
 /// The pass plan being assembled.
 ///
-/// Declarations (resources/passes) live here; the computed [`FrameLayout`]
-/// is shared with the executor as an `Arc` (see
-/// `FrameExecutor::ensure_layout`) so steady-state frames avoid cloning the
-/// layout vectors. Every mutation bumps [`FramePlan::generation`], which the
-/// executor uses to invalidate its shared snapshot.
+/// Declarations (resources/passes) live here; compiling them into an
+/// executable layout is the registry-owned [`TransientPool`]'s job (cold
+/// paths: `layout()`/`build()`), while the frame hot path compiles
+/// through the executor-owned pool (`FrameExecutor::ensure_layout`).
+/// Every mutation bumps [`FramePlan::generation`], which both pools use
+/// to invalidate their shared snapshots.
 #[derive(Debug)]
 pub struct FramePlan {
     resources: Vec<ResourceNode>,
     passes: Vec<PassNode>,
     surface_size: (u32, u32),
-    /// Cached layout; `None` means dirty — the next [`FramePlan::layout`]
-    /// recomputes. Every mutation resets this (S1: `compute_layout` must
-    /// stay off the per-frame hot path).
-    cached: Option<FrameLayout>,
+    /// Registry-owned transient allocator serving `layout()`/`build()`.
+    /// The executor keeps a separate instance for the hot path; both
+    /// memoize against [`FramePlan::generation`].
+    pool: TransientPool,
     /// Monotonic declaration generation; bumped by every mutation (including
     /// [`FramePlan::invalidate`]). The executor memoizes its `Arc` snapshot
     /// against this instead of re-cloning per frame.
@@ -472,172 +61,11 @@ pub struct FramePlan {
     ordering: Vec<(PassId, PassId)>,
     /// S4 memory budget; unbounded by default.
     budget: Budget,
-    /// How many times the layout has been computed over this plan's
-    /// lifetime. Diagnostics for the S1 cache (tests, benches, probes).
-    layout_computations: u32,
-}
-
-/// Layout projections of the enabled passes.
-fn collect_enabled_passes(plan: &FramePlan) -> Vec<PassLayout> {
-    let enabled: Vec<usize> = plan
-        .passes
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.enabled)
-        .map(|(i, _)| i)
-        .collect();
-    enabled
-        .iter()
-        .map(|&i| {
-            let node = &plan.passes[i];
-            PassLayout {
-                id: PassId(i as u32),
-                name: node.name.clone(),
-                reads: node.reads.clone(),
-                writes: node.writes.clone(),
-            }
-        })
-        .collect()
-}
-
-fn init_resource_layout(plan: &FramePlan) -> Vec<ResourceLayout> {
-    plan.resources
-        .iter()
-        .enumerate()
-        .map(|(i, node)| ResourceLayout {
-            id: ResourceId(i as u32),
-            name: node.name.clone(),
-            spec: node.spec,
-            first_use: usize::MAX,
-            last_use: 0,
-            slot: None,
-            external: node.external,
-        })
-        .collect()
-}
-
-/// Lifetimes over enabled passes.
-fn compute_resource_lifetimes(passes: &[PassLayout], resources: &mut [ResourceLayout]) {
-    for (pi, pass) in passes.iter().enumerate() {
-        for rid in pass.reads.iter().chain(pass.writes.iter().map(|(r, _)| r)) {
-            let rl = &mut resources[rid.0 as usize];
-            rl.first_use = rl.first_use.min(pi);
-            rl.last_use = rl.last_use.max(pi);
-        }
-    }
-}
-
-/// "First touch must be a write" rule (imported resources exempt).
-fn validate_first_touch_is_write(
-    passes: &[PassLayout],
-    nodes: &[ResourceNode],
-    resources: &[ResourceLayout],
-) {
-    for (pi, pass) in passes.iter().enumerate() {
-        for &rid in &pass.reads {
-            let node = &nodes[rid.0 as usize];
-            let rl = &resources[rid.0 as usize];
-            if !node.imported && rl.first_use == pi {
-                let written_earlier = pass.writes.iter().any(|(w, _)| *w == rid);
-                let first_write = passes[..pi]
-                    .iter()
-                    .any(|p| p.writes.iter().any(|(w, _)| *w == rid));
-                if !written_earlier && !first_write {
-                    panic!(
-                        "resource '{}' is read in pass '{}' (index {pi}) before any write; \
-                         use import_resource() for external inputs, or write it in an earlier pass",
-                        node.name, pass.name
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Interval partitioning: greedy first-fit over slots with a free window
-/// and a matching spec. External resources are never pooled.
-fn assign_pool_slots(resources: &mut [ResourceLayout]) -> Vec<PoolSlot> {
-    let mut used: Vec<ResourceId> = resources
-        .iter()
-        .filter(|rl| rl.first_use != usize::MAX && !rl.external)
-        .map(|rl| rl.id)
-        .collect();
-    used.sort_by_key(|&id| {
-        (
-            resources[id.0 as usize].first_use,
-            resources[id.0 as usize].last_use,
-        )
-    });
-
-    let mut slots: Vec<PoolSlot> = Vec::new();
-    for id in used {
-        let (spec, first_use, last_use) = {
-            let rl = &resources[id.0 as usize];
-            (rl.spec, rl.first_use, rl.last_use)
-        };
-        match slots
-            .iter()
-            .position(|s| s.spec == spec && s.last_pass < first_use)
-        {
-            Some(i) => {
-                slots[i].resources.push(id);
-                slots[i].last_pass = last_use;
-                resources[id.0 as usize].slot = Some(i);
-            }
-            None => {
-                let i = slots.len();
-                slots.push(PoolSlot {
-                    index: i,
-                    spec,
-                    resources: vec![id],
-                    first_pass: first_use,
-                    last_pass: last_use,
-                });
-                resources[id.0 as usize].slot = Some(i);
-            }
-        }
-    }
-    slots
-}
-
-fn live_resources_per_pass(
-    passes: &[PassLayout],
-    resources: &[ResourceLayout],
-) -> Vec<Vec<ResourceId>> {
-    (0..passes.len())
-        .map(|pi| {
-            resources
-                .iter()
-                .filter(|rl| rl.alive_at(pi))
-                .map(|rl| rl.id)
-                .collect()
-        })
-        .collect()
-}
-
-/// Internal invariant check: a slot must not be shared within one pass.
-fn validate_no_slot_aliasing(pass_alive: &[Vec<ResourceId>], resources: &[ResourceLayout]) {
-    for (pi, alive) in pass_alive.iter().enumerate() {
-        let mut seen: HashMap<usize, ResourceId> = HashMap::new();
-        for &rid in alive {
-            let rl = &resources[rid.0 as usize];
-            let Some(slot) = rl.slot else {
-                continue;
-            };
-            if let Some(prev) = seen.insert(slot, rid) {
-                panic!(
-                    "layout bug: pass {pi} aliases slot #{slot} for resources {prev:?} and {rid:?}"
-                );
-            }
-        }
-    }
 }
 
 /// Executes the plan: for each pass in layout order, `run` is invoked
-/// with a [`PassContext`] (live resources and their slots).
-///
-/// # Panics
-/// Panics if the layout has not been computed yet (call `build()` first).
+/// with a [`PassViews`] resolver over the compiled layout (see
+/// `FrameExecutor`).
 impl FramePlan {
     /// Creates an empty plan; `surface_size` feeds `SizePolicy::MatchSurface`.
     pub fn new(surface_size: (u32, u32)) -> Self {
@@ -645,18 +73,18 @@ impl FramePlan {
             resources: Vec::new(),
             passes: Vec::new(),
             surface_size,
-            cached: None,
+            pool: TransientPool::new(),
             generation: 0,
             ordering: Vec::new(),
             budget: Budget::unbounded(),
-            layout_computations: 0,
         }
     }
 
-    /// Marks the plan dirty: drops the cached layout and bumps the
-    /// declaration generation so executor-held `Arc` snapshots refresh.
+    /// Marks the plan dirty: drops the registry-owned pool snapshot and
+    /// bumps the declaration generation so executor-held `Arc` snapshots
+    /// refresh.
     fn touch(&mut self) {
-        self.cached = None;
+        self.pool.invalidate();
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -814,14 +242,39 @@ impl FramePlan {
             .unwrap_or_else(|| panic!("unknown resource {id:?} in pass '{pass_name}'"))
     }
 
-    /// Returns the frame layout (lifetimes + pool slots), recomputing it
-    /// only when the plan changed since the last call. This is the hot-path
-    /// accessor: `RenderFrame3D::render` calls it every frame, and in
-    /// steady state (no resizes, no pass toggles) it is a cache hit.
+    /// Borrowed declaration snapshot for the pool compiler (see
+    /// [`TransientPool::ensure`]). Field borrows only, so the caller can
+    /// hold the input while mutably driving either pool instance.
+    ///
+    /// Parallel to [`SystemSet::pool_input`](crate::system::SystemSet::pool_input)
+    /// by design: `FramePlan` and `SystemSet` are the two registry fronts
+    /// (imperative parity vs. typed S2), and both feed `TransientPool`.
+    /// Currently unused because the executor's hot path goes through
+    /// `SystemSet`; left in place so a future cold-path caller
+    /// (parity-frontend tool, dump) can drive a `TransientPool` directly
+    /// without round-tripping through `SystemSet`. Keep the docstring
+    /// in sync if a real consumer appears — or remove together with
+    /// `FramePlan` if the d3 consolidation is finalized.
+    #[allow(dead_code)]
+    pub(crate) fn pool_input(&self) -> PoolInput<'_> {
+        PoolInput {
+            resources: &self.resources,
+            passes: &self.passes,
+            ordering: &self.ordering,
+            surface_size: self.surface_size,
+            budget: self.budget,
+        }
+    }
+
+    /// Returns the frame layout (lifetimes + pool slots), compiling it
+    /// through the registry-owned pool only when the declarations changed
+    /// since the last call. This is the cold-path accessor (tests, tools,
+    /// dumps); `RenderFrame3D::render` compiles through the
+    /// executor-owned pool instead.
     ///
     /// # Panics
     /// Panics if invariants are violated (read-before-write, etc.) — the
-    /// panic fires on the first recomputation after the offending mutation,
+    /// panic fires on the first compilation after the offending mutation,
     /// not at the mutation site.
     pub fn layout(&mut self) -> &FrameLayout {
         self.try_layout()
@@ -835,24 +288,28 @@ impl FramePlan {
     /// Returns [`BudgetExceeded`] when the pool does not fit the
     /// configured [`Budget`]; nothing is cached in that case.
     pub fn try_layout(&mut self) -> Result<&FrameLayout, BudgetExceeded> {
-        if self.cached.is_none() {
-            let layout = self.compute_layout();
-            if let Some(cap) = self.budget.gpu_textures {
-                let planned = layout.planned_pool_bytes();
-                if planned > cap {
-                    return Err(budget_exceeded(cap, planned, &layout));
-                }
-            }
-            self.cached = Some(layout);
-            self.layout_computations += 1;
-        }
-        // Filled by the branch above (or by an earlier call).
-        Ok(self.cached.as_ref().expect("layout cache is filled above"))
+        // Field borrows (not `self.pool_input()`): `input` must not hold
+        // the whole `&self` while `self.pool` is driven mutably.
+        let generation = self.generation;
+        let input = PoolInput {
+            resources: &self.resources,
+            passes: &self.passes,
+            ordering: &self.ordering,
+            surface_size: self.surface_size,
+            budget: self.budget,
+        };
+        self.pool.ensure(generation, &input)?;
+        // Filled by the successful `ensure` above (or by an earlier call
+        // at the same generation).
+        Ok(self
+            .pool
+            .cached()
+            .expect("pool cache is filled by successful ensure"))
     }
 
-    /// Snapshot of the cached layout as an owned value. Equivalent to
-    /// cloning [`FramePlan::layout`]; prefer `layout()` on hot paths —
-    /// this clones the pass/resource/slot vectors.
+    /// Snapshot of the layout as an owned value. Equivalent to cloning
+    /// [`FramePlan::layout`]; prefer `layout()` on cold paths — this
+    /// clones the pass/resource/slot vectors.
     ///
     /// # Panics
     /// Same as [`FramePlan::layout`].
@@ -860,39 +317,19 @@ impl FramePlan {
         self.layout().clone()
     }
 
-    /// Forces the next [`FramePlan::layout`] to recompute. Mutating
+    /// Forces the next [`FramePlan::layout`] to recompile. Mutating
     /// methods do this automatically; this is for benchmarks and tests
-    /// that drive recomputation explicitly.
+    /// that drive recompilation explicitly.
     pub fn invalidate(&mut self) {
         self.touch();
     }
 
-    /// How many times the layout has been computed over this plan's
+    /// How many times the layout has been compiled over this plan's
     /// lifetime (S1 cache diagnostics: stays flat while the cache holds).
+    /// Counts registry-owned pool compilations only — the executor-owned
+    /// pool tracks its own (see `FrameExecutor::ensure_layout`).
     pub fn layout_computations(&self) -> u32 {
-        self.layout_computations
-    }
-
-    fn compute_layout(&self) -> FrameLayout {
-        let passes = collect_enabled_passes(self);
-        let mut resources = init_resource_layout(self);
-
-        compute_resource_lifetimes(&passes, &mut resources);
-        validate_first_touch_is_write(&passes, &self.resources, &resources);
-
-        let slots = assign_pool_slots(&mut resources);
-        let pass_alive = live_resources_per_pass(&passes, &resources);
-        validate_no_slot_aliasing(&pass_alive, &resources);
-
-        let levels = layout_levels(&passes, &self.ordering);
-        FrameLayout {
-            surface_size: self.surface_size,
-            passes,
-            resources,
-            slots,
-            pass_alive,
-            levels,
-        }
+        self.pool.layout_computations()
     }
 }
 
@@ -952,6 +389,7 @@ impl PassBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transient_pool::assert_pass_access_declared;
 
     fn spec(format: wgpu::TextureFormat, samples: u32) -> TextureSpec {
         TextureSpec {

@@ -639,6 +639,45 @@ debug-only по умолчанию). Тесты:
 
 Гейты стадии: `cargo check --workspace --all-targets` чисто, `cargo test -p ornis-render` зелено (lib 100: +1 `executor_memoizes_layout_across_frames`, golden/probe/proptest/parity без изменений — пул 7/10 слотов и бюджет-пины нетронуты). Производительность: steady-state кадр — одно сравнение `u64` + `Arc`-клон вместо `layout().clone()`; пул/алиасинг и кеш S1 сохранены — регресса нет по построению.
 
+## Роспуск оболочки FramePlan — стадии 2+3 (d2/d3, 2026-09-07)
+
+Динамическая половина `FramePlan` (то, что осталось от S1) вынесена в
+`crates/render/src/transient_pool.rs`, а `SystemSet` стал единым prod-реестром
+деклараций (d3-консолидация).
+
+- **`transient_pool.rs` (d2)** — компилятор деклараций: `PoolInput` /
+  `ResourceNode` / `PassNode` (pub(crate) input-снимки реестра),
+  `TransientPool` с `ensure(generation, &input)` (мемоизация по
+  `Arc<FrameLayout>`), `FrameLayout` / `ResourceLayout` / `PassLayout` /
+  `PoolSlot` (выход компиляции), `Budget` / `BudgetExceeded` / `SizePolicy` /
+  `TextureSpec` (+ `TextureSpec::external()` для external-output'ов),
+  `format_bytes_per_pixel` / `budget_exceeded` / `assert_pass_access_declared`.
+  Реэкспорт через `lib.rs` сохраняет обратную совместимость со всеми
+  downstream-потребителями типов.
+- **`SystemSet` (d3)** — теперь сам реестр: `resources` / `passes` / `ordering`
+  / `budget` / `pool` / `generation` живут здесь. `FrameExecutor::ensure_layout`
+  принимает `&SystemSet` (а не `&mut FramePlan`) и идёт через `pool_input()`
+  + `TransientPool::ensure`. `pool_input` помечен `#[allow(dead_code)]` (mirror
+  на `FramePlan::pool_input`) — на случай будущих cold-path потребителей.
+  `Debug` impl ручной: `TypeId` и `Box<dyn FnMut>` не `Debug`, поля `ids` /
+  `systems` скипаются с подсчётом длины (диспатч-интернал намеренно opaque в
+  тестах).
+- **`FramePlan` остаётся** как имperative/parity-фронтенд с собственным
+  `TransientPool` — cold-path `FramePlan::layout()` для инструментов и тестов;
+  продакт идёт через `SystemSet`. Полное удаление `FramePlan` — решение
+  владельца (стадия 4).
+- **Тесты** — `frame_exec.rs` (lib) + `tests/{budget_proptest,parallel_render,
+  scheduler_parity}.rs` обновлены под `(&mut .systems)` / `systems_mut()` /
+  `(&g3.systems)` / `.plan → .systems` (поле `RenderFrame3D` переименовано);
+  `executor_memoizes_layout_across_frames` переписан на `SystemSet` (d3 —
+  продакт-путь). `layout_bench.rs` (bench) переведён на `systems_mut()`.
+
+Гейты стадий 2+3: `cargo check --workspace --all-targets` чисто; `cargo test
+-p ornis-render` зелено (lib 100 + integration 4 = 104, без регрессий);
+`cargo clippy --workspace --all-targets -- -D warnings` чисто. Производительность
+не затронута: hot-path контракт (одно `u64`-сравнение + `Arc`-клон) сохранён;
+пул/алиасинг/кеш S1 — без изменений.
+
 ## WASD-мост: фикс шва sync + порядок (2026-09-06)
 
 Тест `browser_wasd_input_drives_player_through_gameplay` падал на чистом master (предсуществующее, не регресс роспуска). Две наложенные причины:

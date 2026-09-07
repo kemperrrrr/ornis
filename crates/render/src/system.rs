@@ -1,4 +1,5 @@
-//! Typed plan systems — S2 (PLAN.md, Appendix C; IDEAS §28.1).
+//! Typed plan systems + declaration registry — S2 (PLAN.md, Appendix C;
+//! IDEAS §28.1) and the d3 consolidation of the `FramePlan` dissolution.
 //!
 //! A pass declares resource accesses **in types** via ZST markers
 //! (`Read<R>` / `Write<R>` / `WriteClear<R, C>` in tuples), and the scheduler
@@ -6,6 +7,16 @@
 //! a type implementing [`FrameResource`]; the `type → ResourceId` mapping is
 //! held by [`SystemSet`]. No strings and no syn parsing: resource identity is
 //! the type (lesson from `smart_pipeline` brittleness, see Appendix C anti-goals).
+//!
+//! [`SystemSet`] is also the single declaration registry (d3): resource
+//! and pass declarations live here together with the declaration
+//! generation, explicit ordering edges and the [`Budget`] value.
+//! Compiling declarations into an executable layout is the
+//! registry-owned [`TransientPool`](crate::transient_pool::TransientPool)'s
+//! job (cold paths), while the frame hot path compiles through the
+//! executor-owned pool (`FrameExecutor::ensure_layout`). The imperative
+//! builder (`add_pass().read/write`) remains for tests, tools and the
+//! `scheduler_parity` oracle; production declares via types.
 //!
 //! S2 boundaries: access sets are static. Passes whose accesses depend on
 //! configuration (depth ownership in forward, bloom input selection, blending in
@@ -20,13 +31,18 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
+use ornis_schedule::{OrderError, resolve_named_edge, validate_indexed_edge};
+
 use crate::frame_exec::PassViews;
-use crate::frame_plan::{FramePlan, PassId, ResourceId, TextureSpec};
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
+use crate::transient_pool::{
+    Budget, BudgetExceeded, FrameLayout, PassId, PassNode, PoolInput, ResourceId, ResourceNode,
+    TextureSpec, TransientPool,
+};
 
-/// How a resource enters the plan (see `FramePlan::{create_resource,
-/// import_resource, external_output}`).
+/// How a resource enters the registry (see
+/// [`SystemSet::{create_resource, import_resource, external_output}`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     /// Created and owned by the plan (transient, pooled).
@@ -315,7 +331,9 @@ fn declared<A: AccessSet, R: FrameResource>() -> bool {
 }
 
 /// Registered typed resources and systems: the `types → ResourceId` map
-/// plus the type-erased system runners, parallel to the plan's passes.
+/// plus the type-erased system runners — and (d3) the single declaration
+/// registry: resource/pass declarations, the declaration generation,
+/// explicit ordering edges and the budget value.
 #[derive(Default)]
 pub struct SystemSet {
     ids: HashMap<TypeId, ResourceId>,
@@ -323,6 +341,27 @@ pub struct SystemSet {
     /// callable from several recording threads at once (S5b) — different
     /// passes lock different mutexes, so there is no contention.
     systems: Vec<(PassId, Mutex<SystemEntry>)>,
+    /// Resource declarations in `ResourceId` order.
+    resources: Vec<ResourceNode>,
+    /// Pass declarations in `PassId` order (typed systems and imperative
+    /// builder passes share one id space).
+    passes: Vec<PassNode>,
+    /// Surface size feeding `SizePolicy::MatchSurface`.
+    surface_size: (u32, u32),
+    /// Registry-owned transient allocator serving `layout()`/`build()`.
+    /// The executor keeps a separate instance for the hot path; both
+    /// memoize against [`SystemSet::generation`].
+    pool: TransientPool,
+    /// Monotonic declaration generation; bumped by every mutation
+    /// (including [`SystemSet::invalidate`]). Both pool instances memoize
+    /// their `Arc` snapshots against this instead of re-cloning per frame.
+    generation: u64,
+    /// S5c: explicit ordering edges (registration PassId i < j) on top
+    /// of access-derived dependencies — for hidden dependencies (shared
+    /// renderer queue buffers) invisible in the access sets.
+    ordering: Vec<(PassId, PassId)>,
+    /// S4 memory budget; unbounded by default.
+    budget: Budget,
 }
 
 /// Type-erased system runner: resolves the typed views for the access
@@ -336,22 +375,276 @@ struct SystemEntry {
     run: RunFn,
 }
 
+impl std::fmt::Debug for SystemSet {
+    /// Manual `Debug` for [`SystemSet`]: the `TypeId` keys in `ids`/`ids_rev`
+    /// and the `Box<dyn FnMut>` runners in `systems` do not implement
+    /// `Debug`, so we surface the registry shape and skip the dispatch
+    /// internals (the latter are intentionally opaque in tests).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemSet")
+            .field("typed_resources", &self.ids.len())
+            .field("systems", &self.systems.len())
+            .field("resources", &self.resources)
+            .field("passes", &self.passes)
+            .field("surface_size", &self.surface_size)
+            .field("pool", &self.pool)
+            .field("generation", &self.generation)
+            .field("ordering", &self.ordering)
+            .field("budget", &self.budget)
+            .finish()
+    }
+}
+
 impl SystemSet {
-    /// Create an empty set.
+    /// Create an empty registry.
+    ///
+    /// The surface size defaults to `(0, 0)`: call
+    /// [`set_surface_size`](Self::set_surface_size) before compiling a
+    /// layout that resolves `SizePolicy::MatchSurface` resources.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Registers resource `R` in the plan and remembers its `ResourceId`.
+    /// Bump the declaration generation and drop the memoized layout (the
+    /// pool recompiles on the next [`layout`](Self::layout)).
+    fn touch(&mut self) {
+        self.pool.invalidate();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Current declaration generation (the pool memoization key).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Declares a frame-owned resource; returns its `ResourceId`.
+    pub fn create_resource(&mut self, name: &'static str, spec: TextureSpec) -> ResourceId {
+        let id = ResourceId(self.resources.len() as u32);
+        self.resources.push(ResourceNode {
+            name: name.to_owned(),
+            spec,
+            imported: false,
+            external: false,
+        });
+        self.touch();
+        id
+    }
+
+    /// Declares an imported (read-only, externally backed) resource.
+    pub fn import_resource(&mut self, name: &'static str, spec: TextureSpec) -> ResourceId {
+        let id = ResourceId(self.resources.len() as u32);
+        self.resources.push(ResourceNode {
+            name: name.to_owned(),
+            spec,
+            imported: true,
+            external: false,
+        });
+        self.touch();
+        id
+    }
+
+    /// Declares an externally backed output (e.g. the swapchain view);
+    /// never pooled.
+    pub fn external_output(&mut self, name: &'static str) -> ResourceId {
+        let id = ResourceId(self.resources.len() as u32);
+        self.resources.push(ResourceNode {
+            name: name.to_owned(),
+            spec: TextureSpec::external(),
+            imported: false,
+            external: true,
+        });
+        self.touch();
+        id
+    }
+
+    /// Resolves an imperative resource name to its `ResourceId`.
+    ///
+    /// # Panics
+    /// Panics if no resource was declared under `name`.
+    pub fn resolve_resource(&self, name: &'static str) -> ResourceId {
+        self.resources
+            .iter()
+            .position(|r| r.name == name)
+            .map(|i| ResourceId(i as u32))
+            .unwrap_or_else(|| panic!("unknown resource '{name}'"))
+    }
+
+    /// Starts declaring an imperative pass (tests, tools,
+    /// `scheduler_parity` oracle); production declares via types
+    /// ([`add_system`](Self::add_system)).
+    pub fn add_pass(&mut self, name: &'static str) -> PassBuilder<'_> {
+        let id = PassId(self.passes.len() as u32);
+        self.passes.push(PassNode {
+            name: name.to_owned(),
+            reads: Vec::new(),
+            writes: Vec::new(),
+            enabled: true,
+        });
+        self.touch();
+        PassBuilder { set: self, id }
+    }
+
+    /// Update the surface size (window resize).
+    pub fn set_surface_size(&mut self, size: (u32, u32)) {
+        self.surface_size = size;
+        self.touch();
+    }
+
+    /// Declare that pass `a` must run before pass `b` (S5c; hidden
+    /// dependencies invisible in the access sets).
+    ///
+    /// # Panics
+    /// Panics if either endpoint is out of range.
+    pub fn order_before(&mut self, before: PassId, after: PassId) {
+        self.try_order_before(before, after)
+            .unwrap_or_else(|error| panic!("order_before({before:?}, {after:?}): {error}"));
+    }
+
+    /// Fallible [`order_before`](Self::order_before): returns
+    /// [`OrderError`] on error instead of panicking. Also validates both
+    /// `PassId`s (an edge with an unknown id is an error, not a silent
+    /// no-op).
+    ///
+    /// # Errors
+    /// Returns [`OrderError`] if either endpoint is out of range.
+    pub fn try_order_before(&mut self, before: PassId, after: PassId) -> Result<(), OrderError> {
+        validate_indexed_edge(before.0 as usize, after.0 as usize, |i| {
+            self.passes.get(i).map(|node| node.name.clone())
+        })?;
+        if !self.ordering.contains(&(before, after)) {
+            self.ordering.push((before, after));
+        }
+        self.touch();
+        Ok(())
+    }
+
+    /// S5c: name-based [`order_before`](Self::order_before) (pass name from
+    /// `add_pass`).
+    ///
+    /// # Panics
+    /// Panics on unknown name or reverse registration order.
+    pub fn order_before_named(&mut self, before: &str, after: &str) {
+        self.try_order_before_named(before, after)
+            .unwrap_or_else(|error| panic!("order_before_named('{before}', '{after}'): {error}"));
+    }
+
+    /// Fallible [`order_before_named`](Self::order_before_named).
+    ///
+    /// # Errors
+    /// Returns [`OrderError`] on unknown name or reverse registration order.
+    pub fn try_order_before_named(&mut self, before: &str, after: &str) -> Result<(), OrderError> {
+        let (b, a) = resolve_named_edge(before, after, |name| {
+            self.passes.iter().position(|p| p.name == name)
+        })?;
+        self.try_order_before(PassId(b as u32), PassId(a as u32))
+    }
+
+    /// Enables/disables a pass (culling): a disabled pass is dropped from
+    /// the layout, and its resources get no slots unless used elsewhere.
+    ///
+    /// # Panics
+    /// Panics if the pass is unknown.
+    pub fn set_pass_enabled(&mut self, id: PassId, enabled: bool) {
+        let node = self
+            .passes
+            .get_mut(id.0 as usize)
+            .unwrap_or_else(|| panic!("unknown pass {id:?}"));
+        node.enabled = enabled;
+        self.touch();
+    }
+
+    /// Set the transient-pool memory budget (S4).
+    pub fn set_budget(&mut self, budget: Budget) {
+        self.budget = budget;
+        self.touch();
+    }
+
+    /// Current transient-pool memory budget.
+    pub fn budget(&self) -> Budget {
+        self.budget
+    }
+
+    /// Borrowed declaration snapshot for the pool compiler (see
+    /// `TransientPool::ensure`). Field borrows only, so the caller can
+    /// hold the input while mutably driving either pool instance.
+    pub(crate) fn pool_input(&self) -> PoolInput<'_> {
+        PoolInput {
+            resources: &self.resources,
+            passes: &self.passes,
+            ordering: &self.ordering,
+            surface_size: self.surface_size,
+            budget: self.budget,
+        }
+    }
+
+    /// Returns the frame layout (lifetimes + pool slots), recomputing it
+    /// only when the declarations changed since the last call.
+    ///
+    /// # Panics
+    /// Panics on first-touch or read-before-write invariant violations, and
+    /// when the transient pool exceeds [`budget`](Self::budget) (see
+    /// [`try_layout`](Self::try_layout) for the fallible path).
+    pub fn layout(&mut self) -> &FrameLayout {
+        self.try_layout()
+            .unwrap_or_else(|e| panic!("SystemSet transient pool budget exceeded ({e})"))
+    }
+
+    /// Fallible [`layout`](Self::layout).
+    ///
+    /// # Errors
+    /// Returns [`BudgetExceeded`] when the planned pool exceeds
+    /// [`budget`](Self::budget); the pool stays unmodified.
+    ///
+    /// # Panics
+    /// Panics on first-touch or read-before-write invariant violations
+    /// (programmer errors, not fallible conditions).
+    pub fn try_layout(&mut self) -> Result<&FrameLayout, BudgetExceeded> {
+        // Field borrows (not `self.pool_input()`): `input` must not hold
+        // the whole `&self` while `self.pool` is driven mutably.
+        let generation = self.generation;
+        let input = PoolInput {
+            resources: &self.resources,
+            passes: &self.passes,
+            ordering: &self.ordering,
+            surface_size: self.surface_size,
+            budget: self.budget,
+        };
+        self.pool.ensure(generation, &input)?;
+        Ok(self
+            .pool
+            .cached()
+            .expect("pool ensured a layout above"))
+    }
+
+    /// Compute the layout snapshot (parity oracle, debug tools). Shares
+    /// the memoized computation with [`layout`](Self::layout).
+    pub fn build(&mut self) -> FrameLayout {
+        self.layout().clone()
+    }
+
+    /// Force recomputation on the next [`layout`](Self::layout), keeping
+    /// the generation (debug invalidation only — every mutation already
+    /// invalidates).
+    pub fn invalidate(&mut self) {
+        self.pool.invalidate();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// How many times the layout has been computed over this registry's
+    /// lifetime.
+    pub fn layout_computations(&self) -> u32 {
+        self.pool.layout_computations()
+    }
+
+    /// Registers resource `R` and remembers its `ResourceId`.
     pub fn register_resource<R: FrameResource>(
         &mut self,
-        plan: &mut FramePlan,
         surface_format: wgpu::TextureFormat,
     ) -> ResourceId {
         let id = match R::kind() {
-            ResourceKind::FrameOwned => plan.create_resource(R::NAME, R::spec(surface_format)),
-            ResourceKind::Imported => plan.import_resource(R::NAME, R::spec(surface_format)),
-            ResourceKind::ExternalOutput => plan.external_output(R::NAME),
+            ResourceKind::FrameOwned => self.create_resource(R::NAME, R::spec(surface_format)),
+            ResourceKind::Imported => self.import_resource(R::NAME, R::spec(surface_format)),
+            ResourceKind::ExternalOutput => self.external_output(R::NAME),
         };
         self.ids.insert(TypeId::of::<R>(), id);
         id
@@ -368,25 +661,36 @@ impl SystemSet {
             .unwrap_or_else(|| panic!("typed resource '{}' is not registered", R::NAME))
     }
 
-    /// Adds a pass to `plan`, wiring reads/writes from `P::Reads`/`P::Writes`.
+    /// Adds a pass, wiring reads/writes from `P::Reads`/`P::Writes`.
     ///
     /// # Panics
     /// Panics if a declared resource was not registered (with the resource
-    /// name in the message), or on plan invariants (read-before-write).
-    pub fn add_system<P: FramePass>(&mut self, plan: &mut FramePlan, pass: P) -> PassId {
+    /// name in the message), or on registry invariants (read-before-write).
+    pub fn add_system<P: FramePass>(&mut self, pass: P) -> PassId {
         let mut reads = Vec::new();
         P::Reads::collect_accesses(&mut reads);
         let mut writes = Vec::new();
         P::Writes::collect_accesses(&mut writes);
 
-        let mut builder = plan.add_pass(pass.name());
-        for d in &reads {
-            builder = builder.read(self.resolve(d));
+        // Resolve `ResourceId`s against `self.ids` while we only hold an
+        // immutable borrow; `add_pass` below takes `&mut self`, so borrowing
+        // through the builder after that point would be a use-after-move.
+        let read_ids: Vec<ResourceId> = reads
+            .iter()
+            .map(|d| Self::resolve_in(&self.ids, d))
+            .collect();
+        let write_ids: Vec<(ResourceId, Option<wgpu::Color>)> = writes
+            .iter()
+            .map(|d| (Self::resolve_in(&self.ids, d), d.clear))
+            .collect();
+
+        let mut builder = self.add_pass(pass.name());
+        for id in read_ids {
+            builder = builder.read(id);
         }
-        for d in &writes {
-            let id = self.resolve(d);
-            builder = match d.clear {
-                Some(clear) => builder.write_clear(id, clear),
+        for (id, clear) in write_ids {
+            builder = match clear {
+                Some(c) => builder.write_clear(id, c),
                 None => builder.write(id),
             };
         }
@@ -407,6 +711,12 @@ impl SystemSet {
         pass_id
     }
 
+    fn resolve_in(ids: &HashMap<TypeId, ResourceId>, d: &AccessDesc) -> ResourceId {
+        *ids
+            .get(&d.resource)
+            .unwrap_or_else(|| panic!("system resource '{}' is not registered", d.name))
+    }
+
     /// Runs the system registered for `pass_id`, if any. Returns `false`
     /// when the pass is not a typed system (imperative fallback).
     pub fn run_pass(&self, pass_id: PassId, views: &PassViews<'_>, frame: &mut Frame<'_>) -> bool {
@@ -419,19 +729,76 @@ impl SystemSet {
         (entry.run)(&resolver, frame);
         true
     }
+}
 
-    fn resolve(&self, d: &AccessDesc) -> ResourceId {
-        *self
-            .ids
-            .get(&d.resource)
-            .unwrap_or_else(|| panic!("system resource '{}' is not registered", d.name))
+/// Incremental pass declaration: `.read()`/`.write()` calls accumulate
+/// accesses (each bumps [`SystemSet::generation`] via `touch()`).
+/// Returned by [`SystemSet::add_pass`]; for tests, tools and the
+/// `scheduler_parity` oracle.
+#[derive(Debug)]
+pub struct PassBuilder<'a> {
+    set: &'a mut SystemSet,
+    id: PassId,
+}
+
+impl PassBuilder<'_> {
+    /// Id of the pass being declared.
+    pub fn id(&self) -> PassId {
+        self.id
+    }
+
+    /// Declares a resource as read by the pass.
+    ///
+    /// # Panics
+    /// Panics on an unknown resource or a read-before-write violation
+    /// (detected at `layout()`/`build()`).
+    pub fn read(self, id: ResourceId) -> Self {
+        let index = self.id.0 as usize;
+        if self.set.resources.get(id.0 as usize).is_none() {
+            panic!(
+                "unknown resource {id:?} in pass '{}'",
+                self.set.passes[index].name
+            );
+        }
+        self.set.passes[index].reads.push(id);
+        self.set.touch();
+        self
+    }
+
+    /// Declares a resource as written by the pass (no clear).
+    pub fn write(self, id: ResourceId) -> Self {
+        let index = self.id.0 as usize;
+        if self.set.resources.get(id.0 as usize).is_none() {
+            panic!(
+                "unknown resource {id:?} in pass '{}'",
+                self.set.passes[index].name
+            );
+        }
+        self.set.passes[index].writes.push((id, None));
+        self.set.touch();
+        self
+    }
+
+    /// Declares a resource as written by the pass with a clear value
+    /// (typically the frame background).
+    pub fn write_clear(self, id: ResourceId, clear: wgpu::Color) -> Self {
+        let index = self.id.0 as usize;
+        if self.set.resources.get(id.0 as usize).is_none() {
+            panic!(
+                "unknown resource {id:?} in pass '{}'",
+                self.set.passes[index].name
+            );
+        }
+        self.set.passes[index].writes.push((id, Some(clear)));
+        self.set.touch();
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame_plan::SizePolicy;
+    use crate::transient_pool::SizePolicy;
 
     struct ResA;
     impl FrameResource for ResA {
@@ -517,7 +884,8 @@ mod tests {
         // layouts (lifetimes, slots) must be identical.
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
 
-        let mut imperative = FramePlan::new((320, 240));
+        let mut imperative = SystemSet::new();
+        imperative.set_surface_size((320, 240));
         let a = imperative.create_resource("a", ResA::spec(fmt));
         let b = imperative.create_resource("b", ResB::spec(fmt));
         imperative.add_pass("p0").write(a);
@@ -548,14 +916,14 @@ mod tests {
         }
 
         let mut systems = SystemSet::new();
-        let mut typed = FramePlan::new((320, 240));
-        systems.register_resource::<ResA>(&mut typed, fmt);
-        systems.register_resource::<ResB>(&mut typed, fmt);
-        systems.add_system(&mut typed, P0);
-        systems.add_system(&mut typed, P1);
+        systems.set_surface_size((320, 240));
+        systems.register_resource::<ResA>(fmt);
+        systems.register_resource::<ResB>(fmt);
+        systems.add_system(P0);
+        systems.add_system(P1);
 
         assert_eq!(
-            typed.build().debug_dump(),
+            systems.build().debug_dump(),
             imperative.build().debug_dump(),
             "typed wiring must produce the same layout as the builder"
         );
@@ -565,13 +933,13 @@ mod tests {
     fn external_output_kind_uses_external_wiring() {
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
         let mut systems = SystemSet::new();
-        let mut plan = FramePlan::new((320, 240));
-        let a = systems.register_resource::<ResA>(&mut plan, fmt);
-        let c = systems.register_resource::<ExtC>(&mut plan, fmt);
+        systems.set_surface_size((320, 240));
+        let a = systems.register_resource::<ResA>(fmt);
+        let c = systems.register_resource::<ExtC>(fmt);
         // Layout: external output is never pooled.
-        plan.add_pass("p0").write(a);
-        plan.add_pass("p1").read(a).write(c);
-        let layout = plan.build();
+        systems.add_pass("p0").write(a);
+        systems.add_pass("p1").read(a).write(c);
+        let layout = systems.build();
         assert!(layout.resources[c.0 as usize].external);
         assert_eq!(layout.resources[c.0 as usize].slot, None);
         assert_eq!(layout.slots.len(), 1, "only 'a' gets a pool slot");
@@ -596,8 +964,8 @@ mod tests {
     #[should_panic(expected = "is not registered")]
     fn unregistered_resource_panics_with_name() {
         let mut systems = SystemSet::new();
-        let mut plan = FramePlan::new((320, 240));
-        systems.register_resource::<ResA>(&mut plan, wgpu::TextureFormat::Rgba8Unorm);
+        systems.set_surface_size((320, 240));
+        systems.register_resource::<ResA>(wgpu::TextureFormat::Rgba8Unorm);
 
         struct P;
         impl FramePass for P {
@@ -610,6 +978,6 @@ mod tests {
                 unreachable!();
             }
         }
-        systems.add_system(&mut plan, P);
+        systems.add_system(P);
     }
 }

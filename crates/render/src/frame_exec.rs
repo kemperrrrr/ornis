@@ -17,12 +17,13 @@ use crate::frame_passes::{
     FromForward, GbufferPass, Hdr, HdrFwd, LightingPass, MaterialId, MaterialParams, Normal,
     OwnsDepth, SharedDepth, Target, WorldPosition,
 };
-use crate::frame_plan::{
-    Budget, FrameLayout, FramePlan, PassLayout, ResourceId, ResourceLayout, format_bytes_per_pixel,
-};
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 use crate::system::{Frame, SystemSet};
+use crate::transient_pool::{
+    Budget, FrameLayout, PassLayout, ResourceId, ResourceLayout, TransientPool,
+    format_bytes_per_pixel,
+};
 use ornis_schedule::run_levels;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,17 +41,21 @@ struct PooledTexture {
 /// Executes a [`FrameLayout`] on wgpu: lazily creates one texture per pool
 /// slot and hands every pass a [`PassViews`] resolver.
 ///
-/// Besides the GPU object pool, the executor memoizes the plan's computed
-/// layout as a shared snapshot (see [`FrameExecutor::ensure_layout`]): the
-/// declaration registry stays in [`FramePlan`], but the hot-path handle to
-/// the layout lives here, keyed by the plan's declaration generation.
+/// Besides the GPU object pool, the executor owns a [`TransientPool`]
+/// compiling the registry's declarations into a shared layout snapshot (see
+/// [`FrameExecutor::ensure_layout`]): declarations stay in [`SystemSet`],
+/// but the hot-path compiler instance lives here, keyed by the registry's
+/// declaration generation.
 #[derive(Debug, Default)]
 pub struct FrameExecutor {
     pool: Vec<Option<PooledTexture>>,
     external_views: HashMap<ResourceId, wgpu::TextureView>,
     surface_size: Option<(u32, u32)>,
-    /// Shared layout snapshot + the plan generation it was built from.
-    cached_layout: Option<(u64, Arc<FrameLayout>)>,
+    /// Executor-owned transient allocator: compiles declaration snapshots
+    /// into shared layouts for the frame hot path. Separate from the
+    /// registry-owned instance serving `SystemSet::layout()` cold paths;
+    /// both memoize against the same declaration generation.
+    layout_pool: TransientPool,
 }
 
 impl FrameExecutor {
@@ -59,32 +64,28 @@ impl FrameExecutor {
         Self::default()
     }
 
-    /// Shared snapshot of the plan's computed layout for the frame hot path.
+    /// Shared snapshot of the registry's compiled layout for the frame hot path.
     ///
     /// In steady state (no declaration mutations since the last call) this
-    /// is a cache hit: no recomputation and no vector clone, just an `Arc`
-    /// clone. Any plan mutation bumps [`FramePlan::generation`], which drops
-    /// the memoized snapshot and rebuilds it from [`FramePlan::layout`] on
-    /// the next call. Budget violations panic exactly as `layout()` does.
-    pub fn ensure_layout(&mut self, plan: &mut FramePlan) -> Arc<FrameLayout> {
-        let generation = plan.generation();
-        if let Some((cached_generation, layout)) = &self.cached_layout
-            && *cached_generation == generation
-        {
-            return Arc::clone(layout);
-        }
-        let layout = Arc::new(plan.layout().clone());
-        self.cached_layout = Some((generation, Arc::clone(&layout)));
-        layout
+    /// is a cache hit: no compilation and no vector clone, just an `Arc`
+    /// clone. Any registry mutation bumps [`SystemSet::generation`], which
+    /// refreshes the memoized snapshot on the next call. Budget violations
+    /// panic exactly as `layout()` does.
+    pub fn ensure_layout(&mut self, set: &SystemSet) -> Arc<FrameLayout> {
+        let generation = set.generation();
+        let input = set.pool_input();
+        self.layout_pool
+            .ensure(generation, &input)
+            .unwrap_or_else(|e| panic!("frame plan budget exceeded: {e}"))
     }
 
     /// Drops the memoized layout snapshot without touching the GPU pool.
     pub fn invalidate_layout(&mut self) {
-        self.cached_layout = None;
+        self.layout_pool.invalidate();
     }
 
     /// Provides the view backing an external resource (see
-    /// `FramePlan::external_output`). Call before `execute`.
+    /// `SystemSet::external_output`). Call before `execute`.
     pub fn set_external_view(&mut self, id: ResourceId, view: wgpu::TextureView) {
         self.external_views.insert(id, view);
     }
@@ -231,7 +232,7 @@ impl FrameExecutor {
 
 fn create_pooled_texture(
     device: &wgpu::Device,
-    slot: &crate::frame_plan::PoolSlot,
+    slot: &crate::transient_pool::PoolSlot,
     surface_size: (u32, u32),
     index: usize,
 ) -> PooledTexture {
@@ -315,7 +316,7 @@ impl<'a> PassViews<'a> {
     /// frontends at the ground-truth `ResourceId` layer.
     pub fn view_of(&self, id: ResourceId) -> &'a wgpu::TextureView {
         #[cfg(debug_assertions)]
-        crate::frame_plan::assert_pass_access_declared(self.layout, self.index, id);
+        crate::transient_pool::assert_pass_access_declared(self.layout, self.index, id);
         let rl = self.resource(id);
         assert!(
             rl.alive_at(self.index),
@@ -350,14 +351,14 @@ impl PooledTexture {
 /// gbuffer..forward, and both HDR targets are pooled after gbuffer, so
 /// non-overlapping resources with the same spec share one GPU texture.
 pub struct RenderFrame3D {
-    plan: FramePlan,
     executor: FrameExecutor,
     /// S5b: record independent passes in parallel (a level at a time,
     /// e.g. lighting ∥ forward); sequential single-encoder path by default.
     parallel_recording: bool,
     ids: FrameIds,
-    /// Typed S2 systems: `type → ResourceId` registry + type-erased runners
-    /// for the passes declared as `FramePass` implementations
+    /// Typed S2 systems (d3: also the single declaration registry):
+    /// `type → ResourceId` map + type-erased runners for the passes
+    /// declared as `FramePass` implementations
     /// (see [`crate::frame_passes`] and [`crate::system`]).
     systems: SystemSet,
     bloom: bool,
@@ -464,74 +465,73 @@ impl RenderFrame3D {
         technique: Technique,
         bloom: bool,
     ) -> Self {
-        let mut plan = FramePlan::new(surface_size);
         // S2: resources are registered by type; specs/names (and the
         // ResourceId order) mirror the imperative wiring exactly.
         let mut systems = SystemSet::new();
+        systems.set_surface_size(surface_size);
         let ids = FrameIds {
-            albedo: systems.register_resource::<Albedo>(&mut plan, surface_format),
-            normal: systems.register_resource::<Normal>(&mut plan, surface_format),
-            material_id: systems.register_resource::<MaterialId>(&mut plan, surface_format),
-            world_position: systems.register_resource::<WorldPosition>(&mut plan, surface_format),
-            material_params: systems.register_resource::<MaterialParams>(&mut plan, surface_format),
-            depth: systems.register_resource::<Depth>(&mut plan, surface_format),
-            hdr: systems.register_resource::<Hdr>(&mut plan, surface_format),
-            hdr_fwd: systems.register_resource::<HdrFwd>(&mut plan, surface_format),
-            target: systems.register_resource::<Target>(&mut plan, surface_format),
-            bloom0: systems.register_resource::<Bloom0>(&mut plan, surface_format),
-            bloom1: systems.register_resource::<Bloom1>(&mut plan, surface_format),
-            bloom2: systems.register_resource::<Bloom2>(&mut plan, surface_format),
+            albedo: systems.register_resource::<Albedo>(surface_format),
+            normal: systems.register_resource::<Normal>(surface_format),
+            material_id: systems.register_resource::<MaterialId>(surface_format),
+            world_position: systems.register_resource::<WorldPosition>(surface_format),
+            material_params: systems.register_resource::<MaterialParams>(surface_format),
+            depth: systems.register_resource::<Depth>(surface_format),
+            hdr: systems.register_resource::<Hdr>(surface_format),
+            hdr_fwd: systems.register_resource::<HdrFwd>(surface_format),
+            target: systems.register_resource::<Target>(surface_format),
+            bloom0: systems.register_resource::<Bloom0>(surface_format),
+            bloom1: systems.register_resource::<Bloom1>(surface_format),
+            bloom2: systems.register_resource::<Bloom2>(surface_format),
         };
         if technique.has_deferred() {
-            systems.add_system(&mut plan, GbufferPass);
-            systems.add_system(&mut plan, LightingPass);
+            systems.add_system(GbufferPass);
+            systems.add_system(LightingPass);
         }
         if technique.has_forward() {
             // In forward-only mode the pass owns the depth buffer; in
             // hybrid it was already filled by the gbuffer pass.
             if technique == Technique::Forward {
-                systems.add_system(&mut plan, Forward::<OwnsDepth>::new());
+                systems.add_system(Forward::<OwnsDepth>::new());
             } else {
-                systems.add_system(&mut plan, Forward::<SharedDepth>::new());
+                systems.add_system(Forward::<SharedDepth>::new());
             }
         }
         if bloom {
             // The bright-pass input is the HDR layer the active technique
             // produced: `hdr` (deferred/hybrid) or `hdr_fwd` (forward-only).
             if technique.has_deferred() {
-                systems.add_system(&mut plan, BloomBright::<FromDeferred>::new());
+                systems.add_system(BloomBright::<FromDeferred>::new());
             } else {
-                systems.add_system(&mut plan, BloomBright::<FromForward>::new());
+                systems.add_system(BloomBright::<FromForward>::new());
             }
-            systems.add_system(&mut plan, BloomDown1Pass);
-            systems.add_system(&mut plan, BloomDown2Pass);
-            systems.add_system(&mut plan, BloomUp1Pass);
-            systems.add_system(&mut plan, BloomUp0Pass);
+            systems.add_system(BloomDown1Pass);
+            systems.add_system(BloomDown2Pass);
+            systems.add_system(BloomUp1Pass);
+            systems.add_system(BloomUp0Pass);
         }
         // The composite mode is a pure function of (technique, bloom):
         // which HDR layers exist and whether the bloom chain feeds the mix.
         match (technique, bloom) {
             (Technique::Deferred, true) => {
-                systems.add_system(&mut plan, Composite::<CompositeDeferredBloom>::new());
+                systems.add_system(Composite::<CompositeDeferredBloom>::new());
             }
             (Technique::Deferred, false) => {
-                systems.add_system(&mut plan, Composite::<CompositeDeferred>::new());
+                systems.add_system(Composite::<CompositeDeferred>::new());
             }
             (Technique::Forward, true) => {
-                systems.add_system(&mut plan, Composite::<CompositeForwardBloom>::new());
+                systems.add_system(Composite::<CompositeForwardBloom>::new());
             }
             (Technique::Forward, false) => {
-                systems.add_system(&mut plan, Composite::<CompositeForward>::new());
+                systems.add_system(Composite::<CompositeForward>::new());
             }
             (Technique::Hybrid, true) => {
-                systems.add_system(&mut plan, Composite::<CompositeHybridBloom>::new());
+                systems.add_system(Composite::<CompositeHybridBloom>::new());
             }
             (Technique::Hybrid, false) => {
-                systems.add_system(&mut plan, Composite::<CompositeHybrid>::new());
+                systems.add_system(Composite::<CompositeHybrid>::new());
             }
         }
         Self {
-            plan,
             executor: FrameExecutor::new(),
             parallel_recording: false,
             ids,
@@ -556,21 +556,21 @@ impl RenderFrame3D {
         self.bloom
     }
 
-    /// Read access to the underlying plan (layout diagnostics, probes).
-    pub fn plan(&self) -> &FramePlan {
-        &self.plan
+    /// Read access to the declaration registry (layout diagnostics, probes).
+    pub fn systems(&self) -> &SystemSet {
+        &self.systems
     }
 
-    /// Mutable access to the underlying plan. Any mutation invalidates
-    /// the layout cache (see `FramePlan::layout`); intended for
+    /// Mutable access to the declaration registry. Any mutation invalidates
+    /// the layout cache (see `SystemSet::layout`); intended for
     /// benchmarks/tests that drive recomputation explicitly.
-    pub fn plan_mut(&mut self) -> &mut FramePlan {
-        &mut self.plan
+    pub fn systems_mut(&mut self) -> &mut SystemSet {
+        &mut self.systems
     }
 
     /// Updates the surface size before the next render (window resize).
     pub fn set_surface_size(&mut self, width: u32, height: u32) {
-        self.plan.set_surface_size(width, height);
+        self.systems.set_surface_size((width, height));
     }
 
     /// Enables/disables parallel command recording (S5b). Off by
@@ -589,14 +589,14 @@ impl RenderFrame3D {
 
     /// Sets the S4 GPU memory budget for the transient pool; the next
     /// layout computation refuses (panic via `render`/`layout`, or a
-    /// `BudgetExceeded` from `plan_mut().try_layout()`) if exceeded.
+    /// `BudgetExceeded` from `systems_mut().try_layout()`) if exceeded.
     pub fn set_budget(&mut self, budget: Budget) {
-        self.plan.set_budget(budget);
+        self.systems.set_budget(budget);
     }
 
     /// Textual layout dump for debugging/reporting (uses the layout cache).
     pub fn layout_dump(&mut self) -> String {
-        self.plan.layout().debug_dump()
+        self.systems.layout().debug_dump()
     }
 
     /// Number of pooled GPU textures (vs. declared resources — the
@@ -623,7 +623,6 @@ impl RenderFrame3D {
         instance_count: u32,
     ) {
         let Self {
-            plan,
             executor,
             parallel_recording,
             ids,
@@ -640,7 +639,7 @@ impl RenderFrame3D {
         // is a cache hit, `compute_layout` stays off the hot path. The
         // snapshot is memoized in the executor (`Arc`, keyed by the plan's
         // declaration generation), so frames share it without cloning.
-        let layout = executor.ensure_layout(plan);
+        let layout = executor.ensure_layout(systems);
         executor.set_external_view(ids.target, target.clone());
         let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
             // S2b: every pass is a typed system (conditional passes
@@ -673,7 +672,8 @@ impl RenderFrame3D {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame_plan::{SizePolicy, TextureSpec};
+    use crate::transient_pool::{SizePolicy, TextureSpec};
+    use crate::FramePlan;
 
     #[test]
     fn bytes_per_pixel_table() {
@@ -710,7 +710,7 @@ mod tests {
         let pass_names = |technique: Technique| {
             let mut plan =
                 RenderFrame3D::new_with(wgpu::TextureFormat::Rgba8Unorm, (32, 32), technique, true);
-            plan.plan
+            plan.systems
                 .build()
                 .passes
                 .iter()
@@ -767,7 +767,7 @@ mod tests {
             Technique::Forward,
             true,
         );
-        let layout = forward.plan.build();
+        let layout = forward.systems.build();
         let down0 = layout
             .passes
             .iter()
@@ -781,7 +781,7 @@ mod tests {
             Technique::Hybrid,
             true,
         );
-        let layout = hybrid.plan.build();
+        let layout = hybrid.systems.build();
         let down0 = layout
             .passes
             .iter()
@@ -798,7 +798,7 @@ mod tests {
             Technique::Forward,
             false,
         );
-        let layout = forward.plan.build();
+        let layout = forward.systems.build();
         let fwd = layout
             .passes
             .iter()
@@ -876,25 +876,31 @@ mod tests {
             true,
         );
         // Two "frames" without mutations → one computation.
-        let _ = g3.plan_mut().layout();
+        let _ = g3.systems.layout();
         let dump_a = g3.layout_dump();
-        let _ = g3.plan_mut().layout();
+        let _ = g3.systems.layout();
         let dump_b = g3.layout_dump();
-        assert_eq!(g3.plan().layout_computations(), 1);
+        assert_eq!(g3.systems.layout_computations(), 1);
         assert_eq!(dump_a, dump_b, "layout must not change between frames");
 
         // Window resize → recompute once, then cache again.
         g3.set_surface_size(1920, 1080);
         let _ = g3.layout_dump();
-        assert_eq!(g3.plan().layout_computations(), 2);
+        assert_eq!(g3.systems.layout_computations(), 2);
         let _ = g3.layout_dump();
-        assert_eq!(g3.plan().layout_computations(), 2, "cached after resize");
+        assert_eq!(g3.systems.layout_computations(), 2, "cached after resize");
     }
 
-    // ── Dissolution: executor-memoized shared layout snapshot ──────────
+    // ── Dissolution: executor-owned transient pool snapshot ──────────────
 
     #[test]
     fn executor_memoizes_layout_across_frames() {
+        // d3: the production registry is `SystemSet`; the executor's
+        // `ensure_layout` borrows it immutably, so the registry-owned
+        // pool (cold path: `SystemSet::layout()`) is untouched by the
+        // frame hot path. The imperative `FramePlan` builder is still
+        // exercised by the parity oracle below — this test pins the
+        // memoization contract on the typed registry.
         let spec = TextureSpec {
             format: wgpu::TextureFormat::Rgba8Unorm,
             samples: 1,
@@ -903,25 +909,34 @@ mod tests {
                 height: 64,
             },
         };
-        let mut plan = FramePlan::new((64, 64));
-        let a = plan.create_resource("a", spec);
-        plan.add_pass("p0").write(a);
-        plan.add_pass("p1").read(a);
-        let generation = plan.generation();
+        let mut set = SystemSet::new();
+        let a = set.create_resource("a", spec);
+        set.add_pass("p0").write(a);
+        set.add_pass("p1").read(a);
+        let generation = set.generation();
 
         let mut executor = FrameExecutor::new();
-        let first = executor.ensure_layout(&mut plan);
-        let second = executor.ensure_layout(&mut plan);
+        let first = executor.ensure_layout(&set);
+        let second = executor.ensure_layout(&set);
         assert!(Arc::ptr_eq(&first, &second), "steady state shares one Arc");
-        assert_eq!(plan.layout_computations(), 1);
+        assert_eq!(
+            executor.layout_pool.layout_computations(),
+            1,
+            "hot path compiles once"
+        );
+        assert_eq!(
+            set.layout_computations(),
+            0,
+            "cold-path registry pool untouched by the hot path"
+        );
         assert_eq!(first.slots.len(), 1);
 
         // Mutation bumps the generation and refreshes the snapshot.
-        plan.add_pass("p2").read(a);
-        assert_ne!(plan.generation(), generation);
-        let third = executor.ensure_layout(&mut plan);
+        set.add_pass("p2").read(a);
+        assert_ne!(set.generation(), generation);
+        let third = executor.ensure_layout(&set);
         assert!(!Arc::ptr_eq(&second, &third), "mutation refreshes snapshot");
-        assert_eq!(plan.layout_computations(), 2);
+        assert_eq!(executor.layout_pool.layout_computations(), 2);
         assert_eq!(third.passes.len(), 3);
     }
 
@@ -1042,7 +1057,7 @@ mod tests {
                 let mut typed = RenderFrame3D::new_with(fmt, (1280, 720), technique, bloom);
                 let mut reference = imperative_wiring(fmt, (1280, 720), technique, bloom);
                 assert_eq!(
-                    typed.plan.build().debug_dump(),
+                    typed.systems.build().debug_dump(),
                     reference.build().debug_dump(),
                     "typed wiring diverged: {technique:?} bloom={bloom}"
                 );
@@ -1059,7 +1074,7 @@ mod tests {
             technique,
             bloom,
         );
-        g3.plan_mut().layout().slots.len()
+        g3.systems.layout().slots.len()
     }
 
     #[test]
@@ -1098,7 +1113,7 @@ mod tests {
             true,
         );
         let ids = fwd.ids();
-        let layout = fwd.plan_mut().layout().clone();
+        let layout = fwd.systems.layout().clone();
         for id in [ids.hdr, ids.albedo, ids.normal] {
             let rl = &layout.resources[id.0 as usize];
             assert_eq!(rl.first_use, usize::MAX, "{} must be dead", rl.name);
@@ -1112,7 +1127,7 @@ mod tests {
             false,
         );
         let ids = plain.ids();
-        let layout = plain.plan_mut().layout();
+        let layout = plain.systems.layout();
         assert_eq!(layout.resources[ids.bloom0.0 as usize].slot, None);
         assert_eq!(layout.resources[ids.bloom1.0 as usize].slot, None);
         assert_eq!(layout.resources[ids.bloom2.0 as usize].slot, None);
@@ -1127,7 +1142,7 @@ mod tests {
             true,
         );
         let ids = g3.ids();
-        let layout = g3.plan_mut().layout();
+        let layout = g3.systems.layout();
         let window = |id: ResourceId| {
             let rl = &layout.resources[id.0 as usize];
             (rl.first_use, rl.last_use)
@@ -1152,7 +1167,7 @@ mod tests {
             Technique::Hybrid,
             true,
         );
-        let levels = g3.plan_mut().layout().levels();
+        let levels = g3.systems.layout().levels();
         let pass_count = levels.iter().map(|l| l.len()).sum::<usize>();
         assert_eq!(pass_count, 9, "hybrid + bloom: 9 passes");
         assert_eq!(levels[0], vec![0], "gbuffer first");
@@ -1174,13 +1189,13 @@ mod tests {
             Technique::Hybrid,
             true,
         );
-        let planned = g3.plan_mut().layout().planned_pool_bytes();
+        let planned = g3.systems.layout().planned_pool_bytes();
         // Exact budget — fits.
         g3.set_budget(Budget::gpu_textures(planned));
-        assert!(g3.plan_mut().try_layout().is_ok());
+        assert!(g3.systems.try_layout().is_ok());
         // One byte less — clear rejection with details.
         g3.set_budget(Budget::gpu_textures(planned - 1));
-        let err = g3.plan_mut().try_layout().unwrap_err();
+        let err = g3.systems.try_layout().unwrap_err();
         assert_eq!(err.required, planned);
         assert_eq!(err.budget, planned - 1);
         let msg = err.to_string();
@@ -1191,7 +1206,7 @@ mod tests {
         );
         // Removing the budget restores S3 behavior.
         g3.set_budget(Budget::unbounded());
-        assert!(g3.plan_mut().try_layout().is_ok());
+        assert!(g3.systems.try_layout().is_ok());
     }
 
     #[test]
@@ -1204,7 +1219,7 @@ mod tests {
             Technique::Forward,
             false,
         );
-        let layout = g3.plan_mut().layout();
+        let layout = g3.systems.layout();
         assert_eq!(layout.planned_pool_bytes(), 12 * 1280 * 720);
     }
 

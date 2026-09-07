@@ -30,15 +30,15 @@ pub mod shaders;
 pub mod system;
 /// Local-to-world transform component.
 pub mod transform;
+/// Transient pool — the dynamic half of the dissolved `FramePlan` (d2):
+/// declaration snapshots compile into shared layouts here.
+pub mod transient_pool;
 
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
-pub use frame_plan::{
-    Budget, BudgetExceeded, FrameLayout, FramePlan, PassId, PassLayout, PoolSlot, ResourceId,
-    ResourceLayout, SizePolicy, TextureSpec, format_bytes_per_pixel,
-};
+pub use frame_plan::FramePlan;
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Unified explicit-ordering edge error (Phase A, audit §4.2); the same type
@@ -56,3 +56,7 @@ pub use system::{
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,
 };
 pub use transform::Transform;
+pub use transient_pool::{
+    Budget, BudgetExceeded, FrameLayout, PassId, PassLayout, PoolSlot, ResourceId, ResourceLayout,
+    SizePolicy, TextureSpec, TransientPool, format_bytes_per_pixel,
+};
