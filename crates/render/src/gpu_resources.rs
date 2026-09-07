@@ -59,6 +59,29 @@ pub struct GpuSurfaceState {
 /// `get_current_texture` и `configure` через interior mutability.
 pub struct GpuSurface(pub Mutex<wgpu::Surface<'static>>);
 
+/// Готовые command-буферы кадра, ожидающие submit (стадия 1 handover
+/// encoder'а в `World`, No-encoder doubling).
+///
+/// Живой `wgpu::CommandEncoder` остаётся frame-локальным: его создаёт
+/// `RenderPresent` на каждый кадр (`device.create_command_encoder`), потому
+/// что encoder — короткоживущее незавершённое состояние записи, а не
+/// разделяемый синглтон. Через `World` передаётся только завершённый
+/// продукт — `Vec<wgpu::CommandBuffer>` за `Mutex` (interior mutability,
+/// как у `GpuSurface`/`GpuFrameState`).
+/// Стадия 2 (не входит сюда): `RenderPresent` пушит сюда вместо прямого
+/// `queue.submit`, а отдельная система сливает буферы в порядке
+/// регистрации — тогда ни одна система не владеет encoder'ом напрямую.
+#[derive(Debug, Default)]
+pub struct FrameCommandBuffers(pub Mutex<Vec<wgpu::CommandBuffer>>);
+
+/// Регистрирует [`FrameCommandBuffers`] в мире движка (стадия 1 handover).
+///
+/// Вызывать один раз до первого `run_frame`; повторный вызов заменяет
+/// ресурс пустым (потеря pending-буферов — только при неверном порядке
+/// инициализации, в steady state не вызывается).
+pub fn install_frame_buffers(engine: &mut ornis_core::Engine) {
+    let _ = engine.world_mut().insert(FrameCommandBuffers::default());
+}
 /// GPU-состояние кадра: renderer + frame plan + mesh, pooled между кадрами.
 ///
 /// Хранится как `Mutex<GpuFrameState>` ресурс, чтобы `System::run(&Resources)`
@@ -297,5 +320,34 @@ impl System for RenderPresent {
 
         queue.0.submit(Some(encoder.finish()));
         queue.0.present(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ornis_core::Engine;
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn frame_command_buffers_are_world_resources() {
+        // Compile-time proof of the handover design: finished buffers are
+        // `Send + Sync` (hence `Resources`-compatible), unlike the live
+        // encoder which stays frame-local in `RenderPresent`.
+        assert_send_sync::<FrameCommandBuffers>();
+        assert_send_sync::<wgpu::CommandBuffer>();
+
+        let mut engine = Engine::new();
+        install_frame_buffers(&mut engine);
+        let buffers = engine
+            .world()
+            .resources()
+            .get::<FrameCommandBuffers>()
+            .expect("frame buffers resource");
+        assert!(
+            buffers.0.lock().expect("frame buffers lock").is_empty(),
+            "fresh install holds no pending buffers"
+        );
     }
 }

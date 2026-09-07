@@ -432,7 +432,7 @@ S4-базис). «Конфликт писателей» сознательно �
   отложена (регистрация = порядок); потребность появится с динамическими
   пассами (data-фронтенд фазы 6).
 
-## S5d — гранулярность лент SmartStore в плане систем (2026-08-23, бэклог #5 аудита)
+## S5d — гранулярность лент SmartStore в плане систем (✅ закрыт; 2026-08-23, бэклог #5 аудита; верифицировано 2026-09-07: `SystemAccess::reads_lane/writes_lane`, `FrameResource::kind()`, typed `SystemSet` — тесты `schedule_lanes.rs` + реестровые тесты `system.rs` зелёные)
 
 - `SystemAccess::reads_lane/writes_lane::<T>()` — декларации доступа к
   горячим лентам `SmartStore` по `TypeId` компонента; `*_lane_id(TypeId)`
@@ -735,8 +735,90 @@ debug-only по умолчанию). Тесты:
 фронтенд** (`SystemSet`) в двух формах декларации — типизированной
 (`add_system<P: FramePass>`) и императивной (`add_pass().read/write`).
 Это сильнее прежнего «два разных фронтенда» (`FramePlan` vs
-`Schedule`): и `Schedule`, и `SystemSet` остаются двумя движками, но
-внутри рендера поверхность декларации едина.
+`Schedule`): движок уровней один (`ornis-schedule::bitset_level_plan`
+— его зовут и `core::Schedule`, и `TransientPool`), а `Schedule` и
+`SystemSet` остаются двумя фронтендами над ним; внутри рендера
+поверхность декларации едина.
+
+## S6 — пересмотр после d4 (✅ решение подтверждено, 2026-09-07)
+
+`FramePlan` удалён (d4, −806 строк), `SystemSet` — единственный
+реестр деклараций рендера. Вопрос S6 «распускать дальше или оставить
+как render-aware проекцию над `Schedule`» пересмотрен на новой картине;
+решение: **оставить `SystemSet`+`TransientPool` как render-aware
+проекцию**, не вливать в `core::Schedule`. Причины:
+
+1. **Доменное состояние не проецируется**: пул текстур, lifetime-окна
+   `[first_use, last_use]`, бюджет S4, external views, pooled GPU-объекты
+   `FrameExecutor` — рантайм-состояние кадра, а не декларации доступов.
+   При «роспуске» оно переезжает в `Schedule`, а не исчезает (причина #2
+   из 2026-08-19 действует и после d4).
+2. **Пространства ключей разные по делу**: `ResourceId` (текстуры пула,
+   sharing по `TextureSpec`) vs `TypeId` ресурса/ленты `Schedule`
+   (синглтоны + `SmartStore`-лейны). Склейка дала бы либо строки-ключи,
+   либо потерю sharing-проверок пула.
+3. **Исполнение разное**: пассы пишут в `wgpu::CommandEncoder`
+   (последовательно — один encoder, параллельно — per-pass encoders +
+   submit в порядке регистрации, `FrameExecutor::execute[_parallel]`);
+   системы `Schedule` исполняют `run(&Resources)` через rayon без
+   encoder-контекста. Общий знаменатель — только уровни
+   (`bitset_level_plan`), и он уже общий.
+
+Следствие для S5e: сближение идёт через валюту `AccessDesc` и общие
+уровни (паритет-оракул `scheduler_parity.rs`), а не через ликвидацию
+типа. Паритет подтверждает один фронтенд (`SystemSet`) в двух формах
+декларации (типизированная + императивная) поверх одного движка с
+`Schedule`. Пересмотр — только со вторым живым потребителем
+data-фронтенда (фаза 6) или сменой ключа пула.
+
+## S5e + Extract-free — декомпозиция (2026-09-07, открыто)
+
+Честная оценка: это месяцы, не один коммит. Ниже — фазы с собственными
+гейтами; каждая фаза — самостоятельный выигрыш и откатываема. База:
+движок уровней уже один (`bitset_level_plan`), `FrameCommandBuffers`
+(стадия 1 handover, `gpu_resources.rs`) доказывает `Send + Sync`
+завершённых буферов, `execute_parallel` доказывает per-pass encoders +
+submit в порядке регистрации.
+
+### S5e: пассы как обычные `Schedule`-системы
+
+- **E1 — пасс как `System`-адаптер**: каждая `FramePass`-реализация
+  получает тонкий `System`-близнец с тем же `AccessDesc` (проекция
+  `ResourceId`-доступов в `SystemAccess` через реестр `SystemSet`).
+  Исполнение — уровни `Schedule`, запись — через borrowed encoder
+  (как сегодня `Frame { encoder }`). Гейт: уровни адаптеров ==
+  `FrameLayout::levels()` (расширение `scheduler_parity.rs`), probe
+  0 отличий.
+- **E2 — encoder-контекст как frame-ресурс**: `RenderPresent` пишет
+  per-pass/per-level encoders, завершённые буферы складывает в
+  `FrameCommandBuffers`, отдельная система сливает их в порядке
+  регистрации (механика уже проверена `execute_parallel`).
+  Гейт: sequential vs schedule-driven пути пиксельно идентичны.
+- **E3 — пул/бюджет остаются render-side**: `TransientPool`-компиляция
+  (lifetime/слоты/бюджет) не переезжает в `Schedule` — `Schedule`
+  потребляет только уровни, пул остаётся проекцией (решение S6 выше).
+  Гейт: golden-тесты слотов/бюджета зелёные без изменений.
+
+### Extract-free: от `Mutex<RenderExtracted>` к прямым `Res`/лейнам
+
+- **X1 — upload-системы читают лейны**: `RenderSubmit` сегодня клонирует
+  `Mutex<RenderExtracted>`; перевести `upload_instances/upload_materials`
+  на прямое чтение `TransformDesc`/`MeshDesc`/`MaterialDesc`-лейн
+  (`reads_lane`, канон S5d). Гейт: `extract_render_data` остаётся
+  оракулом — прямое чтение побайтово равно снапшоту.
+- **X2 — меш как ресурс**: `mesh_params`/`Mesh` пересоздание — из лейн,
+  а не из клона снапшота. Гейт: probe сцен с разной тесселяцией.
+- **X3 — свет/камера как ресурсы**: `OrbitCamera` уже `Mutex`-ресурс;
+  захардкоженные `set_lights` в `RenderSubmit` перевести на `LightDesc`
+  из мира. Гейт: probe освещения 0 отличий.
+- **X4 — удаление `Mutex<RenderExtracted>`**: последний читатель
+  мигрирует, тип удаляется, `RenderWorld` остаётся только
+  сцено-загрузчиком (serialization boundary), не кадровым снапшотом.
+  Гейт: `grep RenderExtracted` пуст вне истории; весь `cargo test
+  -p ornis-render` зелен.
+
+Порядок: E1 → E2 → X1 → X2 → X3 → E3/X4. E1 разблокирует всё остальное;
+X1–X3 независимы между собой после E2.
 
 ## WASD-мост: фикс шва sync + порядок (2026-09-06)
 
