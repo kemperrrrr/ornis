@@ -15,17 +15,24 @@
 //! - `GpuSurface` — `wgpu::Surface` в `Mutex` (внутренняя изменяемость как у
 //!   `RenderExtracted`/`OrbitCamera`). Хранится отдельно от `GpuSurfaceState`,
 //!   чтобы `RenderSubmit` мог читать размер без блокировки `Surface`.
-//! - `GpuFrameState` — `Renderer3D` + `RenderFrame3D` + `Mesh` в `Mutex`.
+//! - `GpuFrameState` — `Renderer3D` + `RenderFrame3D` в `Mutex`.
 //!   Хранит пул слотов `FrameExecutor` между кадрами.
+//! - `GpuMesh` — `Mesh` + кеш тесселяции в `Mutex` (X2): отдельный от
+//!   `GpuFrameState` ресурс, пересоздание из лейна не держит лок
+//!   renderer'а. Порядок локов: `GpuMesh` раньше `GpuFrameState`.
 //! - `RenderSubmit` — `System` читает лейны `TransformDesc`/`MeshDesc`/
 //!   `MaterialDesc` напрямую (`reads_lane`, X1/Extract-free, канон S5d)
 //!   + `OrbitCamera`, пишет `GpuFrameState` (через `Mutex`), внутри делает
 //!   `set_camera`/`upload_*`. Зависимость от пишущих лейны систем — RaW по
 //!   лейнам; снапшот `Mutex<RenderExtracted>` не читает (оракул —
 //!   `extract_render_data`).
+//! - `RenderMesh` — `System` (X2) пишет только `Mutex<GpuMesh>`:
+//!   пересоздаёт сферу, когда `max_mesh_params` из лейна (тот же канон,
+//!   что у `extract_render_data`) отличается от кеша.
 //! - `RenderPresent` — `System` читает `GpuSurface`/`GpuSurfaceState`/
-//!   `GpuDevice`/`GpuQueue` + `Mutex<RenderExtracted>` (instance count) и пишет
-//!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд) + оба
+//!   `GpuDevice`/`GpuQueue` + `Mutex<RenderExtracted>` (instance count) +
+//!   `Mutex<GpuMesh>` (X2) и пишет `GpuFrameState`
+//!   (`&mut RenderFrame3D` для записи команд) + оба
 //!   E2-handover-ресурса. Делает `surface.get_current_texture → create_view →
 //!   frame3d.render_to_buffers` (per-pass encoders → `FrameCommandBuffers`,
 //!   acquired frame → `FramePresentTarget`). Ошибки `Outdated`/`Lost` —
@@ -41,7 +48,7 @@ use std::sync::Mutex;
 
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
-use crate::extraction::{RenderExtracted, extract_render_data};
+use crate::extraction::{RenderExtracted, extract_render_data, max_mesh_params};
 use crate::frame_exec::RenderFrame3D;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
@@ -114,27 +121,50 @@ pub struct FramePresentTarget(pub Mutex<Option<wgpu::SurfaceTexture>>);
 pub fn install_frame_buffers(engine: &mut ornis_core::Engine) {
     let _ = engine.world_mut().insert(FrameCommandBuffers::default());
 }
-/// GPU-состояние кадра: renderer + frame plan + mesh, pooled между кадрами.
+/// GPU-состояние кадра: renderer + frame plan, pooled между кадрами.
 ///
 /// Хранится как `Mutex<GpuFrameState>` ресурс, чтобы `System::run(&Resources)`
-/// мог мутировать его через interior mutability.
+/// мог мутировать его через interior mutability. Меш — отдельный ресурс
+/// [`GpuMesh`] (X2): пересоздание из лейна не держит лок renderer'а.
 pub struct GpuFrameState {
     /// Deferred renderer (pipelines + buffers).
     pub renderer: Renderer3D,
     /// Frame plan с пулом текстур (`FrameExecutor` внутри).
     pub frame3d: RenderFrame3D,
+}
+
+/// GPU-меш кадра как отдельный ресурс (X2, Extract-free).
+///
+/// `params` — тесселяция, из которой `mesh` создан; критерий пересоздания —
+/// `max_mesh_params` из `MeshDesc`-лейна (тот же канон, что у
+/// `extract_render_data`). Система `RenderMesh` пишет только этот
+/// ресурс; читатели (`RenderPresent`) упорядочены RaW. Хранится как
+/// `Mutex<GpuMesh>` — interior mutability, как у `GpuFrameState`.
+pub struct GpuMesh {
     /// Сфера-меш кадра.
     pub mesh: Mesh,
-    /// Кешированные параметры меша для пересоздания.
-    pub mesh_params: (u32, u32),
+    /// Тесселяция `mesh` — кеш критерия пересоздания.
+    pub params: (u32, u32),
+}
+
+/// Регистрирует [`GpuMesh`] в мире и систему его пересоздания (X2).
+///
+/// `RenderMesh` читает лейны (`reads_lane`, канон S5d) и пишет только
+/// `Mutex<GpuMesh>`; для `create_sphere` нужен `GpuDevice` в ресурсах —
+/// вставьте его до первого `run_frame` (`install_gpu_resources` делает
+/// это сам). Повторный вызов заменяет ресурс (steady state — не
+/// вызывается).
+pub fn install_render_mesh(engine: &mut ornis_core::Engine, mesh: GpuMesh) {
+    let _ = engine.world_mut().insert(Mutex::new(mesh));
+    engine.schedule_mut().add_system(RenderMesh);
 }
 
 /// Регистрирует GPU-ресурсы в `engine`.
 ///
 /// Вызывать после создания `Device`/`Queue`/`Surface`/`Renderer3D`/
 /// `RenderFrame3D`/`Mesh` в `GameApp::initialize` — до первого `run_frame`.
-/// После этого `RenderSubmit` и `RenderPresent` в `schedule` видят те же
-/// объекты без копирования.
+/// После этого `RenderMesh`/`RenderSubmit`/`RenderPresent`/`RenderFlush`
+/// в `schedule` видят те же объекты без копирования.
 pub fn install_gpu_resources(
     engine: &mut ornis_core::Engine,
     device: wgpu::Device,
@@ -142,6 +172,7 @@ pub fn install_gpu_resources(
     surface: wgpu::Surface<'static>,
     surface_state: GpuSurfaceState,
     frame_state: GpuFrameState,
+    mesh: GpuMesh,
 ) {
     install_frame_buffers(engine);
     let _ = engine.world_mut().insert(GpuDevice(device));
@@ -150,19 +181,65 @@ pub fn install_gpu_resources(
     let _ = engine.world_mut().insert(surface_state);
     let _ = engine.world_mut().insert(Mutex::new(frame_state));
     let _ = engine.world_mut().insert(FramePresentTarget::default());
+    install_render_mesh(engine, mesh);
     engine.schedule_mut().add_system(RenderSubmit);
     engine.schedule_mut().add_system(RenderPresent);
     engine.schedule_mut().add_system(RenderFlush);
 }
 
+/// Система пересоздания меша (X2): тесселяция — из лейна, не из снапшота.
+///
+/// `max_mesh_params` — тот же канон, что у `extract_render_data`
+/// (полные сущности, пол (32, 24)). Пишет только `Mutex<GpuMesh>`;
+/// читатели (`RenderPresent`) упорядочены RaW, с `RenderSubmit` общих
+/// ресурсов нет. Порядок локов: `GpuMesh` раньше `GpuFrameState`
+/// (иначе — только здесь, один лок на систему).
+struct RenderMesh;
+
+impl System for RenderMesh {
+    fn name(&self) -> &'static str {
+        "render_mesh"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .reads::<SmartStore>()
+            .reads_lane::<TransformDesc>()
+            .reads_lane::<MeshDesc>()
+            .reads_lane::<MaterialDesc>()
+            .reads::<GpuDevice>()
+            .writes::<Mutex<GpuMesh>>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let Some(store) = resources.get::<SmartStore>() else {
+            return;
+        };
+        let Some(device) = resources.get::<GpuDevice>() else {
+            return;
+        };
+        let Some(mesh_resource) = resources.get::<Mutex<GpuMesh>>() else {
+            return;
+        };
+        let params = max_mesh_params(store);
+        let mut mesh_state = mesh_resource
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if params != mesh_state.params {
+            mesh_state.mesh = crate::mesh::create_sphere(&device.0, 1.0, params.0, params.1);
+            mesh_state.params = params;
+        }
+    }
+}
+
 /// Система сабмита кадра: читает лейны + камеру, пишет GPU-состояние.
 ///
-/// S7-шаг 1: делает `set_camera`/`upload_*` и пересоздаёт меш при смене
-/// `mesh_params`. X1 (Extract-free): данные материалов/инстансов — прямое
-/// чтение `TransformDesc`/`MeshDesc`/`MaterialDesc`-лейн (канон S5d),
-/// тот же канон `extract_render_data`, что у оракула-снапшота;
-/// `Mutex<RenderExtracted>` больше не читается. `frame3d.render` — в
-/// `RenderPresent` (S7-шаг 2).
+/// S7-шаг 1: делает `set_camera`/`upload_*`. X1 (Extract-free): данные
+/// материалов/инстансов — прямое чтение `TransformDesc`/`MeshDesc`/
+/// `MaterialDesc`-лейн (канон S5d), тот же канон `extract_render_data`,
+/// что у оракула-снапшота; `Mutex<RenderExtracted>` больше не читается.
+/// X2: пересоздание меша ушло в `RenderMesh` (`GpuMesh`-ресурс).
+/// `frame3d.render` — в `RenderPresent` (S7-шаг 2).
 struct RenderSubmit;
 
 impl System for RenderSubmit {
@@ -178,7 +255,6 @@ impl System for RenderSubmit {
             .reads_lane::<MaterialDesc>()
             .reads::<Mutex<crate::camera::OrbitCamera>>()
             .writes::<Mutex<GpuFrameState>>()
-            .reads::<GpuDevice>()
             .reads::<GpuQueue>()
             .reads::<GpuSurfaceState>()
     }
@@ -191,9 +267,6 @@ impl System for RenderSubmit {
             .get::<Mutex<crate::camera::OrbitCamera>>()
             .map(|m| m.lock().expect("orbit camera lock").clone())
         else {
-            return;
-        };
-        let Some(device) = resources.get::<GpuDevice>() else {
             return;
         };
         let Some(queue) = resources.get::<GpuQueue>() else {
@@ -210,17 +283,6 @@ impl System for RenderSubmit {
         // X1: direct lane read — the same canon the scheduled oracle
         // (`RenderExtract`) publishes, minus the snapshot round-trip.
         let extracted = extract_render_data(store);
-
-        // Пересоздать меш если extraction требует другую тесселяцию.
-        if extracted.mesh_params != fs.mesh_params {
-            fs.mesh = crate::mesh::create_sphere(
-                &device.0,
-                1.0,
-                extracted.mesh_params.0,
-                extracted.mesh_params.1,
-            );
-            fs.mesh_params = extracted.mesh_params;
-        }
 
         let (w, h) = (surface_state.size.0 as f64, surface_state.size.1 as f64);
         let aspect = if h > 0.0 { w as f32 / h as f32 } else { 1.0 };
@@ -252,7 +314,8 @@ impl System for RenderSubmit {
 /// `FrameCommandBuffers` (`RenderFrame3D::render_to_buffers`), acquired
 /// frame уходит в `FramePresentTarget`; submit + present выполняет
 /// отдельная система `RenderFlush` (регистрация следом — WaW по обоим
-/// handover-ресурсам). Зависимость от `RenderSubmit` выводится как WaW по
+/// handover-ресурсам). X2: меш читается из `GpuMesh`-ресурса (RaW после
+/// `RenderMesh`). Зависимость от `RenderSubmit` выводится как WaW по
 /// `Mutex<GpuFrameState>`; порядок — регистрация после `RenderSubmit`.
 struct RenderPresent;
 
@@ -268,6 +331,7 @@ impl System for RenderPresent {
             .reads::<GpuSurface>()
             .reads::<GpuSurfaceState>()
             .reads::<Mutex<RenderExtracted>>()
+            .reads::<Mutex<GpuMesh>>()
             .writes::<Mutex<GpuFrameState>>()
             .writes::<FrameCommandBuffers>()
             .writes::<FramePresentTarget>()
@@ -293,6 +357,9 @@ impl System for RenderPresent {
             return;
         };
         let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
+            return;
+        };
+        let Some(mesh_resource) = resources.get::<Mutex<GpuMesh>>() else {
             return;
         };
         let Some(buffers) = resources.get::<FrameCommandBuffers>() else {
@@ -349,12 +416,16 @@ impl System for RenderPresent {
         let instance_count = extracted.instances.len() as u32;
 
         {
+            // X2: the mesh is its own resource — lock order mesh before
+            // frame state (RenderMesh holds only the mesh lock).
+            let mesh_state = mesh_resource
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut fs = frame_state.lock().expect("gpu frame state lock");
-            // renderer/mesh + frame3d from the same Mutex< GpuFrameState>.
+            // renderer + frame3d from the same Mutex<GpuFrameState>.
             // Raw pointers avoid double &mut borrow of disjoint fields through
             // a single MutexGuard (safe: different fields).
             let renderer = &fs.renderer as *const Renderer3D;
-            let mesh = &fs.mesh as *const Mesh;
             let frame3d = &mut fs.frame3d as *mut RenderFrame3D;
             unsafe {
                 // E2: encoder context as frame data — per-pass encoders
@@ -366,7 +437,7 @@ impl System for RenderPresent {
                         &queue.0,
                         &frame_view,
                         &*renderer,
-                        &*mesh,
+                        &mesh_state.mesh,
                         instance_count,
                         buffers,
                     )

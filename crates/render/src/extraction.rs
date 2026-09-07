@@ -30,10 +30,14 @@ pub struct RenderExtracted {
     pub instances: Vec<InstanceData>,
 }
 
+/// Tessellation floor when no complete renderable entity asks for more
+/// (the `RenderExtracted::default` `mesh_params`).
+const DEFAULT_MESH_PARAMS: (u32, u32) = (32, 24);
+
 impl Default for RenderExtracted {
     fn default() -> Self {
         Self {
-            mesh_params: (32, 24),
+            mesh_params: DEFAULT_MESH_PARAMS,
             materials: Vec::new(),
             instances: Vec::new(),
         }
@@ -200,6 +204,38 @@ pub fn extract_render_data(store: &SmartStore) -> RenderExtracted {
         });
     }
     extracted
+}
+
+/// Maximum sphere tessellation over complete renderable entities — the
+/// GPU mesh re-create criterion (X2, Extract-free).
+///
+/// The same canon as [`extract_render_data`]: entities missing any of
+/// the three render components are skipped (even for the maximum), and
+/// the result never falls below the `RenderExtracted::default` floor
+/// (32, 24). Iterator form: the lane walk lives in closures (the
+/// sanctioned lenient form, `rustqual.toml`).
+pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
+    let Some(transforms) = store.read_lane::<TransformDesc>() else {
+        return DEFAULT_MESH_PARAMS;
+    };
+    let Some(meshes) = store.read_lane::<MeshDesc>() else {
+        return DEFAULT_MESH_PARAMS;
+    };
+    let Some(materials) = store.read_lane::<MaterialDesc>() else {
+        return DEFAULT_MESH_PARAMS;
+    };
+    transforms
+        .entities
+        .iter()
+        // Complete entities only: all three render components present.
+        .filter(|&&entity| {
+            meshes.get(entity).is_some() && materials.get(entity).is_some()
+        })
+        .filter_map(|&entity| meshes.get(entity))
+        .fold(DEFAULT_MESH_PARAMS, |params, mesh| {
+            let MeshDesc::Sphere { segments, rings, .. } = mesh;
+            (params.0.max(*segments), params.1.max(*rings))
+        })
 }
 
 /// The schedule system that turns the three ECS render lanes into a snapshot.
@@ -475,5 +511,89 @@ mod tests {
                 .instances
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn max_mesh_params_is_the_extraction_mesh_canon() {
+        // X2 canon tie: the mesh re-create criterion must be exactly the
+        // oracle's `mesh_params` — max tessellation over COMPLETE entities
+        // only, floor (32, 24). The incomplete entity (mesh + material,
+        // no transform, 96/64) must not push the maximum.
+        let complete = Scene {
+            name: "canon".into(),
+            entities: vec![
+                crate::scene::EntityDesc {
+                    name: "fine".into(),
+                    transform: TransformDesc {
+                        translation: [0.0, 0.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 48,
+                        rings: 32,
+                    },
+                    material: MaterialDesc::Metal {
+                        base_color: [0.9, 0.8, 0.2],
+                        roughness: 0.2,
+                    },
+                },
+                crate::scene::EntityDesc {
+                    name: "coarse".into(),
+                    transform: TransformDesc {
+                        translation: [2.0, 0.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 16,
+                        rings: 12,
+                    },
+                    material: MaterialDesc::Dielectric {
+                        base_color: [0.2, 0.8, 0.2],
+                        roughness: 0.5,
+                    },
+                },
+            ],
+            lights: Vec::new(),
+            camera: crate::scene::CameraDesc {
+                position: [0.0, 2.5, 9.0],
+                target: [0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov: 60.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            ambient: [0.1, 0.1, 0.1],
+        };
+        let mut world = RenderWorld::from_scene(&complete);
+        // Incomplete entity: mesh + material without a transform lane
+        // entry — a high tessellation that must NOT move the maximum.
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let incomplete = store.create_entity();
+        store.insert(
+            incomplete,
+            MeshDesc::Sphere {
+                radius: 1.0,
+                segments: 96,
+                rings: 64,
+            },
+        );
+        store.insert(
+            incomplete,
+            MaterialDesc::Coat {
+                base_color: [0.2, 0.4, 0.9],
+                coat_weight: 0.7,
+                coat_roughness: 0.1,
+            },
+        );
+        world.run_frame(0.0);
+
+        let store = world.engine().world().store().expect("store");
+        let extracted = extract_render_data(store);
+        assert_eq!(extracted.mesh_params, (48, 32));
+        assert_eq!(max_mesh_params(store), extracted.mesh_params);
     }
 }

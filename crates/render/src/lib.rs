@@ -42,7 +42,9 @@ pub mod transient_pool;
 
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
-pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
+pub use extraction::{
+    RenderExtracted, RenderWorld, extract_render_data, install_render_extract, max_mesh_params,
+};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};

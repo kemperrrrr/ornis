@@ -181,13 +181,16 @@ impl FrameExecutor {
         for &index in order {
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            let views = PassViews {
-                layout,
-                pool,
-                externals,
+            run(
                 index,
-            };
-            run(index, &views, &mut encoder);
+                &PassViews {
+                    layout,
+                    pool,
+                    externals,
+                    index,
+                },
+                &mut encoder,
+            );
             sink.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(encoder.finish());
