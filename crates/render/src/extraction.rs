@@ -17,7 +17,7 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_core::{Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess};
 
 use crate::renderer::InstanceData;
-use crate::scene::{MaterialDesc, MeshDesc, Scene, TransformDesc};
+use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
 /// CPU-side render data extracted from ECS for one frame.
 #[derive(Clone, Debug)]
@@ -41,6 +41,70 @@ impl Default for RenderExtracted {
             materials: Vec::new(),
             instances: Vec::new(),
         }
+    }
+}
+
+/// Ambient plus directional lights of the frame as a world resource (X3,
+/// Extract-free).
+///
+/// Written by the scene loader between frames (`RenderWorld::replace_scene`
+/// or the platform's equivalent) and only read inside the schedule, so no
+/// `Mutex` is needed (same contract as `GpuSurfaceState`). `RenderSubmit`
+/// uploads it via [`Self::set_lights_args`] instead of a hardcoded rig.
+#[derive(Debug, Clone)]
+pub struct RenderLights {
+    /// Ambient RGB contribution.
+    pub ambient: [f32; 3],
+    /// Directional sources; the renderer uploads the first four.
+    pub lights: Vec<LightDesc>,
+}
+
+/// The lighting rig `RenderSubmit` hardcoded before X3 — the resource
+/// default, so a runtime that never loads a scene renders exactly as it
+/// did (gate: zero pixel differences).
+const LEGACY_AMBIENT: [f32; 3] = [0.10, 0.10, 0.15];
+const LEGACY_KEY_LIGHT: LightDesc = LightDesc::Directional {
+    direction: [1.0, 1.0, 1.0],
+    intensity: 0.6,
+    color: [1.0, 1.0, 1.0],
+};
+const LEGACY_FILL_LIGHT: LightDesc = LightDesc::Directional {
+    direction: [-0.5, 0.5, -0.5],
+    intensity: 0.3,
+    color: [0.8, 0.8, 1.0],
+};
+
+impl Default for RenderLights {
+    fn default() -> Self {
+        Self {
+            ambient: LEGACY_AMBIENT,
+            lights: vec![LEGACY_KEY_LIGHT, LEGACY_FILL_LIGHT],
+        }
+    }
+}
+
+impl RenderLights {
+    /// The lighting of a serialized scene as the resource (X3).
+    pub fn from_scene(scene: &Scene) -> Self {
+        Self {
+            ambient: scene.ambient,
+            lights: scene.lights.clone(),
+        }
+    }
+
+    /// Converts the lights into `Renderer3D::set_lights` arguments —
+    /// `(direction, intensity, color)` per directional source.
+    pub fn set_lights_args(&self) -> Vec<([f32; 3], f32, [f32; 3])> {
+        self.lights
+            .iter()
+            .map(|light| match light {
+                LightDesc::Directional {
+                    direction,
+                    intensity,
+                    color,
+                } => (*direction, *intensity, *color),
+            })
+            .collect()
     }
 }
 
@@ -108,11 +172,12 @@ impl RenderWorld {
         &self.entities
     }
 
-    /// Replaces the renderable ECS entities with `scene.entities`.
+    /// Replaces the renderable ECS entities with `scene.entities` and
+    /// publishes the scene lighting as the [`RenderLights`] resource (X3).
     ///
-    /// Camera, lights and ambient values are intentionally not copied here:
-    /// they are frame/view state owned by the caller, while this world owns
-    /// only renderable component lanes. The next [`Self::run_frame`] refreshes
+    /// The camera stays frame/view state owned by the caller; lights and
+    /// ambient are world state now — `RenderSubmit` reads the resource
+    /// instead of a hardcoded rig. The next [`Self::run_frame`] refreshes
     /// the extracted snapshot.
     pub fn replace_scene(&mut self, scene: &Scene) {
         let previous = std::mem::take(&mut self.entities);
@@ -124,6 +189,10 @@ impl RenderWorld {
             }
         }
         self.entities = insert_scene_entities(&mut self.engine, &scene.entities);
+        let _ = self
+            .engine
+            .world_mut()
+            .insert(RenderLights::from_scene(scene));
     }
 
     /// Publishes time and runs the shared extraction schedule for one frame.
@@ -595,5 +664,48 @@ mod tests {
         let extracted = extract_render_data(store);
         assert_eq!(extracted.mesh_params, (48, 32));
         assert_eq!(max_mesh_params(store), extracted.mesh_params);
+    }
+
+    #[test]
+    fn default_lights_reproduce_the_legacy_hardcoded_rig() {
+        // X3: `RenderSubmit` no longer inlines a lighting rig — the
+        // resource default must be exactly the old hardcoded arguments
+        // (gate: zero pixel differences).
+        let rig = RenderLights::default();
+        assert_eq!(rig.ambient, [0.10, 0.10, 0.15]);
+        assert_eq!(
+            rig.set_lights_args(),
+            vec![
+                ([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]),
+                ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_scene_publishes_scene_lighting_as_resource() {
+        // X3: the scene loader owns lights/ambient — replacing a scene
+        // must publish them as the `RenderLights` resource.
+        let mut world = RenderWorld::from_scene(&Scene {
+            lights: vec![LightDesc::Directional {
+                direction: [0.0, -1.0, 0.0],
+                intensity: 2.0,
+                color: [1.0, 0.9, 0.8],
+            }],
+            ambient: [0.2, 0.2, 0.2],
+            ..scene()
+        });
+        let lights = world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("scene loader publishes RenderLights");
+        assert_eq!(lights.ambient, [0.2, 0.2, 0.2]);
+        assert_eq!(lights.lights.len(), 1);
+        assert_eq!(
+            lights.set_lights_args(),
+            vec![([0.0, -1.0, 0.0], 2.0, [1.0, 0.9, 0.8])]
+        );
     }
 }

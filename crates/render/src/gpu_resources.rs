@@ -22,9 +22,10 @@
 //!   renderer'а. Порядок локов: `GpuMesh` раньше `GpuFrameState`.
 //! - `RenderSubmit` — `System` читает лейны `TransformDesc`/`MeshDesc`/
 //!   `MaterialDesc` напрямую (`reads_lane`, X1/Extract-free, канон S5d)
-//!   + `OrbitCamera`, пишет `GpuFrameState` (через `Mutex`), внутри делает
-//!   `set_camera`/`upload_*`. Зависимость от пишущих лейны систем — RaW по
-//!   лейнам; снапшот `Mutex<RenderExtracted>` не читает (оракул —
+//!   + `OrbitCamera` + `RenderLights` (X3: ambient/направленные источники
+//!   из мира, не хардкод), пишет `GpuFrameState` (через `Mutex`), внутри
+//!   делает `set_camera`/`upload_*`. Зависимость от пишущих лейны систем —
+//!   RaW по лейнам; снапшот `Mutex<RenderExtracted>` не читает (оракул —
 //!   `extract_render_data`).
 //! - `RenderMesh` — `System` (X2) пишет только `Mutex<GpuMesh>`:
 //!   пересоздаёт сферу, когда `max_mesh_params` из лейна (тот же канон,
@@ -48,7 +49,7 @@ use std::sync::Mutex;
 
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
-use crate::extraction::{RenderExtracted, extract_render_data, max_mesh_params};
+use crate::extraction::{RenderExtracted, RenderLights, extract_render_data, max_mesh_params};
 use crate::frame_exec::RenderFrame3D;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
@@ -181,6 +182,7 @@ pub fn install_gpu_resources(
     let _ = engine.world_mut().insert(surface_state);
     let _ = engine.world_mut().insert(Mutex::new(frame_state));
     let _ = engine.world_mut().insert(FramePresentTarget::default());
+    let _ = engine.world_mut().insert(RenderLights::default());
     install_render_mesh(engine, mesh);
     engine.schedule_mut().add_system(RenderSubmit);
     engine.schedule_mut().add_system(RenderPresent);
@@ -232,13 +234,14 @@ impl System for RenderMesh {
     }
 }
 
-/// Система сабмита кадра: читает лейны + камеру, пишет GPU-состояние.
+/// Система сабмита кадра: читает лейны + камеру + свет, пишет GPU-состояние.
 ///
 /// S7-шаг 1: делает `set_camera`/`upload_*`. X1 (Extract-free): данные
 /// материалов/инстансов — прямое чтение `TransformDesc`/`MeshDesc`/
 /// `MaterialDesc`-лейн (канон S5d), тот же канон `extract_render_data`,
 /// что у оракула-снапшота; `Mutex<RenderExtracted>` больше не читается.
 /// X2: пересоздание меша ушло в `RenderMesh` (`GpuMesh`-ресурс).
+/// X3: свет — из `RenderLights`-ресурса (сцено-загрузчик), не хардкод.
 /// `frame3d.render` — в `RenderPresent` (S7-шаг 2).
 struct RenderSubmit;
 
@@ -254,6 +257,7 @@ impl System for RenderSubmit {
             .reads_lane::<MeshDesc>()
             .reads_lane::<MaterialDesc>()
             .reads::<Mutex<crate::camera::OrbitCamera>>()
+            .reads::<RenderLights>()
             .writes::<Mutex<GpuFrameState>>()
             .reads::<GpuQueue>()
             .reads::<GpuSurfaceState>()
@@ -267,6 +271,9 @@ impl System for RenderSubmit {
             .get::<Mutex<crate::camera::OrbitCamera>>()
             .map(|m| m.lock().expect("orbit camera lock").clone())
         else {
+            return;
+        };
+        let Some(lights) = resources.get::<RenderLights>() else {
             return;
         };
         let Some(queue) = resources.get::<GpuQueue>() else {
@@ -294,14 +301,7 @@ impl System for RenderSubmit {
 
         fs.renderer
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
-        fs.renderer.set_lights(
-            &queue.0,
-            [0.10, 0.10, 0.15],
-            &[
-                ([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]),
-                ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
-            ],
-        );
+        fs.renderer.set_lights(&queue.0, lights.ambient, &lights.set_lights_args());
         fs.renderer.upload_materials(&queue.0, &extracted.materials);
         fs.renderer.upload_instances(&queue.0, &extracted.instances);
     }

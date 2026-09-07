@@ -17,10 +17,10 @@ use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use ornis_render::scene::{LightDesc, Scene};
+use ornis_render::scene::Scene;
 use ornis_render::{
-    OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
-    install_orbit_camera, read_orbit_camera,
+    OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderLights, RenderWorld,
+    Renderer3D, Technique, install_orbit_camera, read_orbit_camera,
 };
 
 mod scene_api;
@@ -128,24 +128,16 @@ fn build_gpu_scene(device: &wgpu::Device, render_world: &RenderWorld, scene: &Sc
     // tessellation is sufficient for every entity.
     let mesh_params = extracted.mesh_params;
     let mesh = ornis_render::create_sphere(device, 1.0, mesh_params.0, mesh_params.1);
-    let lights = scene
-        .lights
-        .iter()
-        .map(|light| match light {
-            LightDesc::Directional {
-                direction,
-                intensity,
-                color,
-            } => (*direction, *intensity, *color),
-        })
-        .collect();
+    // X3: scene lighting flows through the shared `RenderLights` canon
+    // (`set_lights_args`) — the same conversion the native runtime uses.
+    let lights = RenderLights::from_scene(scene);
 
     GpuScene {
         mesh,
         mesh_params,
         extracted,
-        lights,
-        ambient: scene.ambient,
+        lights: lights.set_lights_args(),
+        ambient: lights.ambient,
     }
 }
 
