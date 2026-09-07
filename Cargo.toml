@@ -17,6 +17,20 @@ members = [
     "crates/python",
     "xtask",
 ]
+# Vendored upstream crates (patched via [patch.crates-io] below) are NOT
+# workspace members: without this exclude cargo auto-members path deps
+# under the workspace root, and clippy --workspace -D warnings / fmt --all
+# / test --workspace would run over third-party code.
+exclude = ["third_party"]
+
+# rustpython-vm 0.5.0 does not compile against libc >= 0.2.187 (linux-gnu
+# POSIX_SPAWN_SETSID became c_short); no patched release exists yet. Vendored
+# copy = published 0.5.0 + the one-line upstream fix (RustPython#8343).
+# Path source, not git: cargo-deny sources allow-git = [] (supply-chain
+# policy) and cargo-outdated/audit ignore path deps. Details:
+# third_party/rustpython-vm/README.md.
+[patch.crates-io]
+rustpython-vm = { path = "third_party/rustpython-vm" }
 
 [workspace.lints.clippy]
 # Baseline: all standard lints as warnings.

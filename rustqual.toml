@@ -2,7 +2,9 @@
 # Run: cargo run --manifest-path /tmp/rustqual -- .  (no global install)
 # Docs: https://github.com/SaschaOnTour/rustqual
 
-exclude_files = ["editor/**", "target/**"]
+# third_party/** — vendored upstream code (rustpython-vm patch, see
+# third_party/rustpython-vm/README.md): not Ornis source, not ratchet-gated.
+exclude_files = ["editor/**", "target/**", "third_party/**"]
 
 # IOSP leniency: closures/iterator/match-as-dispatch — not logic (PROJECT_REVIEW § BCA→rustqual)
 strict_closures = false
