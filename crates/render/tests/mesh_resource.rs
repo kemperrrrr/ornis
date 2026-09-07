@@ -5,6 +5,9 @@
 //! lavapipe, locally on any adapter; skipped when no adapter is found.
 //! The scene and harness live in `common` (shared with the pixel gates).
 
+// The harness is shared across the gate binaries; this gate uses only
+// the device part of it.
+#[allow(dead_code)]
 mod common;
 
 use std::sync::Mutex;
@@ -74,7 +77,10 @@ fn mesh_resource_follows_tessellation_lane() {
     common::with_headless_scene(|scene| {
         let device = &scene.device;
         let mut world = RenderWorld::from_scene(&probe_scene(&[(48, 32)]));
-        let _ = world.engine_mut().world_mut().insert(GpuDevice(device.clone()));
+        let _ = world
+            .engine_mut()
+            .world_mut()
+            .insert(GpuDevice(device.clone()));
         // Start at the floor tessellation — the probe scenes must move it.
         let initial = GpuMesh {
             mesh: create_sphere(device, 1.0, 32, 24),

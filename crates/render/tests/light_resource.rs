@@ -7,6 +7,9 @@
 //! requires identical pixels. Headless — lavapipe on CI, any adapter
 //! locally; skipped when no adapter is found. Harness in `common`.
 
+// The harness is shared across the gate binaries; this gate uses only
+// the device and render path, not the sequential reference.
+#[allow(dead_code)]
 mod common;
 
 use ornis_render::RenderLights;
