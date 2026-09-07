@@ -17,10 +17,12 @@
 //!   чтобы `RenderSubmit` мог читать размер без блокировки `Surface`.
 //! - `GpuFrameState` — `Renderer3D` + `RenderFrame3D` + `Mesh` в `Mutex`.
 //!   Хранит пул слотов `FrameExecutor` между кадрами.
-//! - `RenderSubmit` — `System` читает `RenderExtracted` + `OrbitCamera`, пишет
-//!   `GpuFrameState` (через `Mutex`), внутри делает `set_camera`/`upload_*`.
-//!   Зависимость от `RenderExtract` выводится автоматически (RaW на
-//!   `Mutex<RenderExtracted>`), порядок — уровень после extraction.
+//! - `RenderSubmit` — `System` читает лейны `TransformDesc`/`MeshDesc`/
+//!   `MaterialDesc` напрямую (`reads_lane`, X1/Extract-free, канон S5d)
+//!   + `OrbitCamera`, пишет `GpuFrameState` (через `Mutex`), внутри делает
+//!   `set_camera`/`upload_*`. Зависимость от пишущих лейны систем — RaW по
+//!   лейнам; снапшот `Mutex<RenderExtracted>` не читает (оракул —
+//!   `extract_render_data`).
 //! - `RenderPresent` — `System` читает `GpuSurface`/`GpuSurfaceState`/
 //!   `GpuDevice`/`GpuQueue` + `Mutex<RenderExtracted>` (instance count) и пишет
 //!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд) + оба
@@ -37,12 +39,13 @@
 
 use std::sync::Mutex;
 
-use ornis_core::{Resources, System, SystemAccess};
+use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
-use crate::extraction::RenderExtracted;
+use crate::extraction::{RenderExtracted, extract_render_data};
 use crate::frame_exec::RenderFrame3D;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
+use crate::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
 /// Обёртка над `wgpu::Device` как ECS-ресурс.
 pub struct GpuDevice(pub wgpu::Device);
@@ -152,10 +155,13 @@ pub fn install_gpu_resources(
     engine.schedule_mut().add_system(RenderFlush);
 }
 
-/// Система сабмита кадра: читает extraction + камеру, пишет GPU-состояние.
+/// Система сабмита кадра: читает лейны + камеру, пишет GPU-состояние.
 ///
 /// S7-шаг 1: делает `set_camera`/`upload_*` и пересоздаёт меш при смене
-/// `mesh_params`. `frame3d.render` + `queue.submit`/`present` — в
+/// `mesh_params`. X1 (Extract-free): данные материалов/инстансов — прямое
+/// чтение `TransformDesc`/`MeshDesc`/`MaterialDesc`-лейн (канон S5d),
+/// тот же канон `extract_render_data`, что у оракула-снапшота;
+/// `Mutex<RenderExtracted>` больше не читается. `frame3d.render` — в
 /// `RenderPresent` (S7-шаг 2).
 struct RenderSubmit;
 
@@ -166,7 +172,10 @@ impl System for RenderSubmit {
 
     fn access(&self) -> SystemAccess {
         SystemAccess::new()
-            .reads::<Mutex<RenderExtracted>>()
+            .reads::<SmartStore>()
+            .reads_lane::<TransformDesc>()
+            .reads_lane::<MeshDesc>()
+            .reads_lane::<MaterialDesc>()
             .reads::<Mutex<crate::camera::OrbitCamera>>()
             .writes::<Mutex<GpuFrameState>>()
             .reads::<GpuDevice>()
@@ -175,10 +184,7 @@ impl System for RenderSubmit {
     }
 
     fn run(&self, resources: &Resources) {
-        let Some(extracted) = resources
-            .get::<Mutex<RenderExtracted>>()
-            .map(|m| m.lock().expect("render extraction lock").clone())
-        else {
+        let Some(store) = resources.get::<SmartStore>() else {
             return;
         };
         let Some(orbit) = resources
@@ -200,6 +206,10 @@ impl System for RenderSubmit {
             return;
         };
         let mut fs = frame_state.lock().expect("gpu frame state lock");
+
+        // X1: direct lane read — the same canon the scheduled oracle
+        // (`RenderExtract`) publishes, minus the snapshot round-trip.
+        let extracted = extract_render_data(store);
 
         // Пересоздать меш если extraction требует другую тесселяцию.
         if extracted.mesh_params != fs.mesh_params {

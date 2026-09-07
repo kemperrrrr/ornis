@@ -359,6 +359,100 @@ mod tests {
     }
 
     #[test]
+    fn direct_lane_read_is_byte_equal_to_scheduled_snapshot() {
+        // X1 (Extract-free) oracle gate: `extract_render_data` stays the
+        // single canon — a direct lane read at submit time must be
+        // byte-equal to the snapshot the scheduled `RenderExtract` system
+        // published for the same frame (materials compared as Pod bytes,
+        // instances field-wise over the glam matrices).
+        let varied = Scene {
+            name: "oracle".into(),
+            entities: vec![
+                crate::scene::EntityDesc {
+                    name: "dielectric".into(),
+                    transform: TransformDesc {
+                        translation: [1.0, 2.0, 3.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 2.0,
+                        segments: 24,
+                        rings: 16,
+                    },
+                    material: MaterialDesc::Dielectric {
+                        base_color: [0.8, 0.2, 0.2],
+                        roughness: 0.4,
+                    },
+                },
+                crate::scene::EntityDesc {
+                    name: "metal".into(),
+                    transform: TransformDesc {
+                        translation: [-1.0, 0.0, 2.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [2.0, 2.0, 2.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 0.5,
+                        segments: 48,
+                        rings: 32,
+                    },
+                    material: MaterialDesc::Metal {
+                        base_color: [0.9, 0.8, 0.2],
+                        roughness: 0.2,
+                    },
+                },
+                crate::scene::EntityDesc {
+                    name: "coat".into(),
+                    transform: TransformDesc {
+                        translation: [0.0, 5.0, -3.0],
+                        rotation: [0.3, 0.2, 0.1, 0.9],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 32,
+                        rings: 24,
+                    },
+                    material: MaterialDesc::Coat {
+                        base_color: [0.2, 0.4, 0.9],
+                        coat_weight: 0.7,
+                        coat_roughness: 0.1,
+                    },
+                },
+            ],
+            lights: Vec::new(),
+            camera: crate::scene::CameraDesc {
+                position: [0.0, 2.5, 9.0],
+                target: [0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov: 60.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            ambient: [0.1, 0.1, 0.1],
+        };
+        let mut world = RenderWorld::from_scene(&varied);
+        world.run_frame(0.0);
+
+        let snapshot = world.extracted();
+        let direct = extract_render_data(world.engine().world().store().expect("store"));
+        assert_eq!(snapshot.mesh_params, (48, 32));
+        assert_eq!(snapshot.instances.len(), 3);
+        assert_eq!(direct.mesh_params, snapshot.mesh_params);
+        assert_eq!(direct.instances.len(), snapshot.instances.len());
+        for (direct, snapshot) in direct.instances.iter().zip(&snapshot.instances) {
+            assert_eq!(direct.model_matrix, snapshot.model_matrix);
+            assert_eq!(direct.normal_matrix, snapshot.normal_matrix);
+            assert_eq!(direct.material_index, snapshot.material_index);
+        }
+        assert_eq!(direct.materials.len(), snapshot.materials.len());
+        for (direct, snapshot) in direct.materials.iter().zip(&snapshot.materials) {
+            assert_eq!(bytemuck::bytes_of(direct), bytemuck::bytes_of(snapshot));
+        }
+    }
+
+    #[test]
     fn incomplete_entities_are_skipped() {
         let mut engine = Engine::new();
         let entity = engine
