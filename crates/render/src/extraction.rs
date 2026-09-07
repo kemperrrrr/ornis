@@ -3,25 +3,27 @@
 //! A [`RenderWorld`] is a small render-domain view over the logical
 //! [`ornis_core::Engine`]. Scene descriptions are deserialized at the
 //! serialization boundary and inserted as `TransformDesc`, `MeshDesc` and
-//! `MaterialDesc` component lanes. The scheduled [`install_render_extract`]
-//! system then produces one backend-neutral [`RenderExtracted`] snapshot.
+//! `MaterialDesc` component lanes; the frame payload is read directly
+//! from the lanes on demand ([`extract_render_data`] → [`FrameUpload`],
+//! X4/Extract-free — no scheduled snapshot round-trip).
 //!
-//! GPU resources, cameras and lights remain owned by the platform renderer;
-//! this module deliberately stops at CPU-side instance/material data. That
-//! keeps the server/editor world authoritative while allowing a native or
-//! browser client to build its own physical GPU representation.
-
-use std::sync::Mutex;
+//! GPU resources and cameras remain owned by the platform renderer;
+//! lighting is the [`RenderLights`] resource (X3). This module
+//! deliberately stops at CPU-side instance/material data. That keeps the
+//! server/editor world authoritative while allowing a native or browser
+//! client to build its own physical GPU representation.
 
 use glam::{Mat4, Quat, Vec3};
-use ornis_core::{Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Engine, Entity, OpenPBRMaterial, SmartStore};
 
 use crate::renderer::InstanceData;
 use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
-/// CPU-side render data extracted from ECS for one frame.
+/// CPU-side render data read from the ECS lanes for one frame (X4:
+/// the former `RenderExtracted` snapshot, now a direct-read payload —
+/// no scheduled `Mutex` round-trip).
 #[derive(Clone, Debug)]
-pub struct RenderExtracted {
+pub struct FrameUpload {
     /// Maximum sphere tessellation required by the extracted entities.
     pub mesh_params: (u32, u32),
     /// GPU-ready materials in the same order as [`Self::instances`].
@@ -31,10 +33,10 @@ pub struct RenderExtracted {
 }
 
 /// Tessellation floor when no complete renderable entity asks for more
-/// (the `RenderExtracted::default` `mesh_params`).
+/// (the `FrameUpload::default` `mesh_params`).
 const DEFAULT_MESH_PARAMS: (u32, u32) = (32, 24);
 
-impl Default for RenderExtracted {
+impl Default for FrameUpload {
     fn default() -> Self {
         Self {
             mesh_params: DEFAULT_MESH_PARAMS,
@@ -127,12 +129,12 @@ impl Default for RenderWorld {
 }
 
 impl RenderWorld {
-    /// Creates an empty render world and installs the shared extraction pass.
+    /// Creates an empty render world — the scene-loader host (X4: no
+    /// scheduled extraction pass; the frame payload is read directly
+    /// via [`extract_render_data`]).
     pub fn new() -> Self {
-        let mut engine = Engine::new();
-        install_render_extract(&mut engine);
         Self {
-            engine,
+            engine: Engine::new(),
             entities: Vec::new(),
         }
     }
@@ -195,38 +197,18 @@ impl RenderWorld {
             .insert(RenderLights::from_scene(scene));
     }
 
-    /// Publishes time and runs the shared extraction schedule for one frame.
+    /// Publishes time and runs the world schedule for one frame.
     pub fn run_frame(&mut self, delta_seconds: f32) {
         self.engine.run_frame(delta_seconds);
     }
 
-    /// Returns the latest scheduled extraction snapshot.
+    /// Reads the frame payload directly from the component lanes.
     ///
-    /// Call [`Self::run_frame`] after mutating the ECS or replacing the scene
-    /// to publish a fresh value. A newly created world returns the default
-    /// empty snapshot until its first frame.
-    pub fn extracted(&self) -> RenderExtracted {
-        self.engine
-            .world()
-            .resources()
-            .get::<Mutex<RenderExtracted>>()
-            .expect("RenderWorld always installs RenderExtracted")
-            .lock()
-            .expect("render extraction lock")
-            .clone()
+    /// Equivalent to calling [`extract_render_data`] on this world's
+    /// store; provided for callers that own the [`RenderWorld`].
+    pub fn frame_upload(&self) -> FrameUpload {
+        extract_render_data(self.engine.world().store().expect("render world store"))
     }
-}
-
-/// Installs the extraction resource and system in `engine`.
-///
-/// The stage is backend-neutral: it converts ECS scene components into
-/// CPU-side [`InstanceData`] and [`OpenPBRMaterial`] tables. A native or WASM
-/// renderer can upload the snapshot to its own GPU resources afterwards.
-pub fn install_render_extract(engine: &mut Engine) {
-    let _ = engine
-        .world_mut()
-        .insert(Mutex::new(RenderExtracted::default()));
-    engine.schedule_mut().add_system(RenderExtract);
 }
 
 /// Extracts complete renderable entities from the ECS store.
@@ -234,8 +216,8 @@ pub fn install_render_extract(engine: &mut Engine) {
 /// Entities missing any of the three render components are skipped. Dense
 /// lane order is used as the deterministic extraction order; each instance's
 /// material index points at the material emitted in the same iteration.
-pub fn extract_render_data(store: &SmartStore) -> RenderExtracted {
-    let mut extracted = RenderExtracted::default();
+pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
+    let mut extracted = FrameUpload::default();
     let Some(transforms) = store.read_lane::<TransformDesc>() else {
         return extracted;
     };
@@ -280,7 +262,7 @@ pub fn extract_render_data(store: &SmartStore) -> RenderExtracted {
 ///
 /// The same canon as [`extract_render_data`]: entities missing any of
 /// the three render components are skipped (even for the maximum), and
-/// the result never falls below the `RenderExtracted::default` floor
+/// the result never falls below the `FrameUpload::default` floor
 /// (32, 24). Iterator form: the lane walk lives in closures (the
 /// sanctioned lenient form, `rustqual.toml`).
 pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
@@ -305,34 +287,6 @@ pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
             let MeshDesc::Sphere { segments, rings, .. } = mesh;
             (params.0.max(*segments), params.1.max(*rings))
         })
-}
-
-/// The schedule system that turns the three ECS render lanes into a snapshot.
-struct RenderExtract;
-
-impl System for RenderExtract {
-    fn name(&self) -> &'static str {
-        "render_extract"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<SmartStore>()
-            .reads_lane::<TransformDesc>()
-            .reads_lane::<MeshDesc>()
-            .reads_lane::<MaterialDesc>()
-            .writes::<Mutex<RenderExtracted>>()
-    }
-
-    fn run(&self, resources: &Resources) {
-        let Some(store) = resources.get::<SmartStore>() else {
-            return;
-        };
-        let Some(output) = resources.get::<Mutex<RenderExtracted>>() else {
-            return;
-        };
-        *output.lock().expect("render extraction lock") = extract_render_data(store);
-    }
 }
 
 fn insert_scene_entities(
@@ -433,12 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn render_world_runs_shared_engine_extraction() {
+    fn render_world_extracts_scene_entities_from_lanes() {
         let mut world = RenderWorld::from_scene(&scene());
         assert_eq!(world.entity_count(), 1);
         world.run_frame(0.0);
 
-        let extracted = world.extracted();
+        let extracted = world.frame_upload();
         assert_eq!(extracted.mesh_params, (48, 32));
         assert_eq!(extracted.materials.len(), 1);
         assert_eq!(extracted.instances.len(), 1);
@@ -460,16 +414,16 @@ mod tests {
         world.run_frame(0.0);
 
         assert_eq!(world.entity_count(), 0);
-        assert!(world.extracted().instances.is_empty());
+        assert!(world.frame_upload().instances.is_empty());
     }
 
     #[test]
-    fn direct_lane_read_is_byte_equal_to_scheduled_snapshot() {
-        // X1 (Extract-free) oracle gate: `extract_render_data` stays the
-        // single canon — a direct lane read at submit time must be
-        // byte-equal to the snapshot the scheduled `RenderExtract` system
-        // published for the same frame (materials compared as Pod bytes,
-        // instances field-wise over the glam matrices).
+    fn frame_upload_matches_the_direct_lane_canon() {
+        // X1/X4 (Extract-free) data gate: `extract_render_data` is the
+        // single canon — `RenderWorld::frame_upload` and a plain canon
+        // call on the same store must agree for a scene mixing all three
+        // material kinds and varied tessellation (materials compared as
+        // Pod bytes, instances field-wise over the glam matrices).
         let varied = Scene {
             name: "oracle".into(),
             entities: vec![
@@ -540,7 +494,10 @@ mod tests {
         let mut world = RenderWorld::from_scene(&varied);
         world.run_frame(0.0);
 
-        let snapshot = world.extracted();
+        // X1/X4 canon: one direct lane read covers all material kinds;
+        // `RenderWorld::frame_upload` must agree with the plain canon
+        // call on the same store (materials as Pod bytes).
+        let snapshot = world.frame_upload();
         let direct = extract_render_data(world.engine().world().store().expect("store"));
         assert_eq!(snapshot.mesh_params, (48, 32));
         assert_eq!(snapshot.instances.len(), 3);
@@ -573,8 +530,6 @@ mod tests {
                 scale: Vec3::ONE.to_array(),
             },
         );
-        install_render_extract(&mut engine);
-        engine.run_frame(0.0);
         assert!(
             extract_render_data(engine.world().store().expect("store"))
                 .instances

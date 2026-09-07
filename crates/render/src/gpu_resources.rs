@@ -13,7 +13,7 @@
 //! - `GpuDevice`/`GpuQueue` — тонкие обёртки над `wgpu` объектами, `Send+Sync`.
 //! - `GpuSurfaceState` — размер + формат + present mode, мутируется на resize.
 //! - `GpuSurface` — `wgpu::Surface` в `Mutex` (внутренняя изменяемость как у
-//!   `RenderExtracted`/`OrbitCamera`). Хранится отдельно от `GpuSurfaceState`,
+//!   `OrbitCamera`). Хранится отдельно от `GpuSurfaceState`,
 //!   чтобы `RenderSubmit` мог читать размер без блокировки `Surface`.
 //! - `GpuFrameState` — `Renderer3D` + `RenderFrame3D` в `Mutex`.
 //!   Хранит пул слотов `FrameExecutor` между кадрами.
@@ -25,15 +25,15 @@
 //!   + `OrbitCamera` + `RenderLights` (X3: ambient/направленные источники
 //!   из мира, не хардкод), пишет `GpuFrameState` (через `Mutex`), внутри
 //!   делает `set_camera`/`upload_*`. Зависимость от пишущих лейны систем —
-//!   RaW по лейнам; снапшот `Mutex<RenderExtracted>` не читает (оракул —
-//!   `extract_render_data`).
+//!   RaW по лейнам; снапшотов больше нет (X4) — канон `extract_render_data`
+//!   читает лейны напрямую.
 //! - `RenderMesh` — `System` (X2) пишет только `Mutex<GpuMesh>`:
 //!   пересоздаёт сферу, когда `max_mesh_params` из лейна (тот же канон,
 //!   что у `extract_render_data`) отличается от кеша.
 //! - `RenderPresent` — `System` читает `GpuSurface`/`GpuSurfaceState`/
-//!   `GpuDevice`/`GpuQueue` + `Mutex<RenderExtracted>` (instance count) +
-//!   `Mutex<GpuMesh>` (X2) и пишет `GpuFrameState`
-//!   (`&mut RenderFrame3D` для записи команд) + оба
+//!   `GpuDevice`/`GpuQueue` + лейны (X4: instance count — прямой
+//!   `extract_render_data`) + `Mutex<GpuMesh>` (X2) и пишет
+//!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд) + оба
 //!   E2-handover-ресурса. Делает `surface.get_current_texture → create_view →
 //!   frame3d.render_to_buffers` (per-pass encoders → `FrameCommandBuffers`,
 //!   acquired frame → `FramePresentTarget`). Ошибки `Outdated`/`Lost` —
@@ -49,7 +49,7 @@ use std::sync::Mutex;
 
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
-use crate::extraction::{RenderExtracted, RenderLights, extract_render_data, max_mesh_params};
+use crate::extraction::{RenderLights, extract_render_data, max_mesh_params};
 use crate::frame_exec::RenderFrame3D;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
@@ -238,8 +238,7 @@ impl System for RenderMesh {
 ///
 /// S7-шаг 1: делает `set_camera`/`upload_*`. X1 (Extract-free): данные
 /// материалов/инстансов — прямое чтение `TransformDesc`/`MeshDesc`/
-/// `MaterialDesc`-лейн (канон S5d), тот же канон `extract_render_data`,
-/// что у оракула-снапшота; `Mutex<RenderExtracted>` больше не читается.
+/// `MaterialDesc`-лейн (канон S5d) через `extract_render_data`.
 /// X2: пересоздание меша ушло в `RenderMesh` (`GpuMesh`-ресурс).
 /// X3: свет — из `RenderLights`-ресурса (сцено-загрузчик), не хардкод.
 /// `frame3d.render` — в `RenderPresent` (S7-шаг 2).
@@ -315,8 +314,10 @@ impl System for RenderSubmit {
 /// frame уходит в `FramePresentTarget`; submit + present выполняет
 /// отдельная система `RenderFlush` (регистрация следом — WaW по обоим
 /// handover-ресурсам). X2: меш читается из `GpuMesh`-ресурса (RaW после
-/// `RenderMesh`). Зависимость от `RenderSubmit` выводится как WaW по
-/// `Mutex<GpuFrameState>`; порядок — регистрация после `RenderSubmit`.
+/// `RenderMesh`). X4: instance count — прямое чтение лейнов
+/// (`extract_render_data`), не снапшот. Зависимость от `RenderSubmit`
+/// выводится как WaW по `Mutex<GpuFrameState>`; порядок — регистрация
+/// после `RenderSubmit`.
 struct RenderPresent;
 
 impl System for RenderPresent {
@@ -330,7 +331,10 @@ impl System for RenderPresent {
             .reads::<GpuQueue>()
             .reads::<GpuSurface>()
             .reads::<GpuSurfaceState>()
-            .reads::<Mutex<RenderExtracted>>()
+            .reads::<SmartStore>()
+            .reads_lane::<TransformDesc>()
+            .reads_lane::<MeshDesc>()
+            .reads_lane::<MaterialDesc>()
             .reads::<Mutex<GpuMesh>>()
             .writes::<Mutex<GpuFrameState>>()
             .writes::<FrameCommandBuffers>()
@@ -350,10 +354,7 @@ impl System for RenderPresent {
         let Some(surface) = resources.get::<GpuSurface>() else {
             return;
         };
-        let Some(extracted) = resources
-            .get::<Mutex<RenderExtracted>>()
-            .map(|m| m.lock().expect("render extraction lock").clone())
-        else {
+        let Some(store) = resources.get::<SmartStore>() else {
             return;
         };
         let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
@@ -413,7 +414,8 @@ impl System for RenderPresent {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let instance_count = extracted.instances.len() as u32;
+        // X4: instance count straight from the lane canon — no snapshot.
+        let instance_count = extract_render_data(store).instances.len() as u32;
 
         {
             // X2: the mesh is its own resource — lock order mesh before

@@ -773,7 +773,7 @@ debug-only по умолчанию). Тесты:
 `Schedule`. Пересмотр — только со вторым живым потребителем
 data-фронтенда (фаза 6) или сменой ключа пула.
 
-## S5e + Extract-free — декомпозиция (2026-09-07, открыто; E1–E2, X1–X3 ✅)
+## S5e + Extract-free — декомпозиция (2026-09-07, закрыто; E1–E2, X1–X4, E3 ✅)
 
 Честная оценка: это месяцы, не один коммит. Ниже — фазы с собственными
 гейтами; каждая фаза — самостоятельный выигрыш и откатываема. База:
@@ -796,10 +796,11 @@ submit в порядке регистрации.
   `FrameCommandBuffers`, отдельная система сливает их в порядке
   регистрации (механика уже проверена `execute_parallel`).
   Гейт: sequential vs schedule-driven пути пиксельно идентичны.
-- **E3 — пул/бюджет остаются render-side**: `TransientPool`-компиляция
+- **E3 ✅ — пул/бюджет остаются render-side**: `TransientPool`-компиляция
   (lifetime/слоты/бюджет) не переезжает в `Schedule` — `Schedule`
   потребляет только уровни, пул остаётся проекцией (решение S6 выше).
-  Гейт: golden-тесты слотов/бюджета зелёные без изменений.
+  No-op: `transient_pool.rs` не менялся, golden-тесты слотов/бюджета
+  зелёные без изменений.
 
 ### Extract-free: от `Mutex<RenderExtracted>` к прямым `Res`/лейнам
 
@@ -813,14 +814,33 @@ submit в порядке регистрации.
 - **X3 ✅ — свет/камера как ресурсы**: `OrbitCamera` уже `Mutex`-ресурс;
   захардкоженные `set_lights` в `RenderSubmit` перевести на `LightDesc`
   из мира. Гейт: probe освещения 0 отличий.
-- **X4 — удаление `Mutex<RenderExtracted>`**: последний читатель
+- **X4 ✅ — удаление `Mutex<RenderExtracted>`**: последний читатель
   мигрирует, тип удаляется, `RenderWorld` остаётся только
   сцено-загрузчиком (serialization boundary), не кадровым снапшотом.
   Гейт: `grep RenderExtracted` пуст вне истории; весь `cargo test
   -p ornis-render` зелен.
 
 Порядок: E1 → E2 → X1 → X2 → X3 → E3/X4. E1 разблокирует всё остальное;
-X1–X3 независимы между собой после E2.
+X1–X3 независимы между собой после E2. Все пункты закрыты (2026-09-07).
+
+### X4 — удаление `Mutex<RenderExtracted>` ✅ (2026-09-07)
+
+Закрыт шестым шагом декомпозиции — Extract-free завершён.
+
+- `RenderExtracted` переименован в `FrameUpload` (payload прямого
+  чтения, не снапшот): снапшот-система `RenderExtract`, ресурс
+  `Mutex<RenderExtracted>` и `install_render_extract` удалены;
+  `RenderWorld::extracted()` → `frame_upload()` (прямой
+  `extract_render_data` на сторе мира). `RenderWorld` — только
+  сцено-загрузчик (serialization boundary) + хост `Engine`-кадра.
+- `RenderPresent` (последний читатель) мигрировал: instance count —
+  прямой `extract_render_data(store)`, в access — `SmartStore` + три
+  `reads_lane` (как у `RenderSubmit`/`RenderMesh`).
+- wasm: `GpuScene.extracted: FrameUpload`, `build_gpu_scene` и тест
+  контракта — на `frame_upload()`; в расписании `RenderWorld` больше
+  нет систем (`schedule().len() == 0`).
+- Гейт: `grep RenderExtracted` — пуст (вне истории/доки); весь
+  `cargo test -p ornis-render` должен быть зелёным (CI).
 
 ### X3 — свет как ресурс ✅ (2026-09-07)
 
@@ -879,7 +899,7 @@ X1–X3 независимы между собой после E2.
   снапшоту, опубликованному системой (материалы — по байтам `bytemuck`,
   инстансы — по полям; сцена с тремя видами материалов и разной
   тесселяцией). Последний читатель снапшота — `RenderPresent`
-  (instance count), мигрирует в X4.
+  (instance count) — мигрировал в X4.
 
 ### E2 — encoder-контекст как frame-ресурс ✅ (2026-09-07)
 
