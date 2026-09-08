@@ -224,23 +224,63 @@ fn transmission_btdf(
     let extinction_factor = exp(-extinction * distance);
     return vec3<f32>(D * G * T / max(4.0 * NoV * NoL, EPS)) * extinction_factor;
 }
+"#
+}
 
-@fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let depth = textureLoad(depth_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(depth_tex))), 0);
+fn lighting_fragment_kernels() -> String {
+    let kernels = [
+        math::luminance::wgsl_source(),
+        math::aces_tonemap::wgsl_source(),
+        math::fresnel0_from_ior::wgsl_source(),
+        math::fresnel_schlick::wgsl_source(),
+        math::fresnel_schlick_vec::wgsl_source(),
+        math::fresnel_f82_tint::wgsl_source(),
+        math::ggx_ndf::wgsl_source(),
+        math::ggx_ndf_aniso::wgsl_source(),
+        math::openpbr_anisotropy::wgsl_source(),
+        math::smith_ggx_correlated::wgsl_source(),
+        math::smith_ggx_aniso::wgsl_source(),
+        math::oren_nayar_brdf::wgsl_source(),
+        math::coat_base_darkening::wgsl_source(),
+        math::coat_blend_darkened::wgsl_source(),
+        math::thin_film_modulation::wgsl_source(),
+        math::sheen_brdf::wgsl_source(),
+        math::transmission_color_to_extinction::wgsl_source(),
+        math::subsurface_brdf::wgsl_source(),
+    ];
+    kernels.join("\n")
+}
+
+/// Deferred-lighting fragment entry, translated by [`stage`](ornis_macros::stage):
+/// g-buffer decode + full OpenPBR evaluation. DSL-only — free texture /
+/// uniform / storage identifiers. `discard` is a bare path statement;
+/// `Vec2/3/4::new` spell WGSL constructors; `lo = lo + …` avoids `+=`,
+/// which the DSL does not cover.
+#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
+fn lighting_fragment_entry(#[wgsl(location = 0)] uv: glam::Vec2) -> glam::Vec4 {
+    let depth = textureLoad(
+        depth_tex,
+        UVec2::new(uv * Vec2::new(textureDimensions(depth_tex))),
+        0,
+    );
     let albedo = textureSampleLevel(albedo_tex, lighting_sampler, uv, 0.0);
     let normal_enc = textureSampleLevel(normal_tex, lighting_sampler, uv, 0.0);
-    let material_id = textureLoad(material_id_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(material_id_tex))), 0).r;
+    let material_id = textureLoad(
+        material_id_tex,
+        UVec2::new(uv * Vec2::new(textureDimensions(material_id_tex))),
+        0,
+    )
+    .r;
     let world_pos_enc = textureSampleLevel(world_pos_tex, lighting_sampler, uv, 0.0);
     let mat_params = textureSampleLevel(mat_params_tex, lighting_sampler, uv, 0.0);
     let mat = materials[material_id];
     if albedo.a < 0.001 {
         discard;
     }
-    let N = octahedral_decode(normal_enc.rg);
+    let n = octahedral_decode(normal_enc.rg);
     let world_pos = reconstruct_world_pos(uv, depth, camera);
-    let V = normalize(camera.camera_pos.xyz - world_pos);
-    let NoV = max(dot(N, V), EPS);
+    let v = normalize(camera.camera_pos.xyz - world_pos);
+    let nov = max(dot(n, v), EPS);
     let base_weight = mat.base_params.x;
     let base_color = mat.base_color.rgb;
     let metalness = mat.base_params.z;
@@ -280,91 +320,142 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let emission_color = mat.emission_color.rgb;
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
-    var Lo = vec3<f32>(0.0);
-    let thin_film_mod = thin_film_modulation(NoV, thin_film_ior, thin_film_thickness_um, 1.0);
-    let T = normalize(cross(N, vec3<f32>(0.0, 1.0, 0.0)));
-    let B = cross(N, T);
-    for (var i = 0u; i < lighting.light_count; i = i + 1u) {
-        let L = normalize(lighting.lights[i].direction.xyz);
-        let H = normalize(V + L);
+    let mut lo = Vec3::new(0.0, 0.0, 0.0);
+    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    let t = normalize(cross(n, Vec3::new(0.0, 1.0, 0.0)));
+    let b = cross(n, t);
+    for i in 0u..lighting.light_count {
+        let l = normalize(lighting.lights[i].direction.xyz);
+        let h = normalize(v + l);
         let light_color = lighting.lights[i].color.rgb;
         let intensity = lighting.lights[i].color.w;
         let radiance = light_color * intensity;
-        let NoL = max(dot(N, L), EPS);
-        let NoH = max(dot(N, H), EPS);
-        let VoH = max(dot(V, H), EPS);
-        if (NoL <= EPS) { continue; }
+        let nol = max(dot(n, l), EPS);
+        let noh = max(dot(n, h), EPS);
+        let voh = max(dot(v, h), EPS);
+        if nol <= EPS {
+            continue;
+        }
         let base_bsdf = evaluate_base_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH, mat,
-            base_weight, base_color, metalness, diffuse_roughness,
-            specular_weight, specular_roughness, specular_ior, specular_anisotropy, specular_edge_tint,
-            T, B, thin_film_mod
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            mat,
+            base_weight,
+            base_color,
+            metalness,
+            diffuse_roughness,
+            specular_weight,
+            specular_roughness,
+            specular_ior,
+            specular_anisotropy,
+            specular_edge_tint,
+            t,
+            b,
+            thin_film_mod,
         );
         let coat_bsdf = evaluate_coat_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH, mat,
-            coat_weight, coat_roughness, coat_anisotropy, coat_darkening, coat_ior, coat_color,
-            metalness, base_color, base_weight, specular_weight,
-            subsurface_weight, subsurface_color,
-            T, B
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            mat,
+            coat_weight,
+            coat_roughness,
+            coat_anisotropy,
+            coat_darkening,
+            coat_ior,
+            coat_color,
+            metalness,
+            base_color,
+            base_weight,
+            specular_weight,
+            subsurface_weight,
+            subsurface_color,
+            t,
+            b,
         );
         let fuzz_bsdf = evaluate_fuzz_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH,
-            fuzz_weight, fuzz_roughness, fuzz_color
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            fuzz_weight,
+            fuzz_roughness,
+            fuzz_color,
         );
         let trans_bsdf = evaluate_transmission_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH, mat,
-            transmission_weight, transmission_depth, transmission_dispersion_scale, transmission_dispersion_abbe,
-            transmission_color, transmission_scatter, transmission_scatter_anisotropy,
-            specular_ior, specular_roughness, specular_anisotropy,
-            thin_walled
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            mat,
+            transmission_weight,
+            transmission_depth,
+            transmission_dispersion_scale,
+            transmission_dispersion_abbe,
+            transmission_color,
+            transmission_scatter,
+            transmission_scatter_anisotropy,
+            specular_ior,
+            specular_roughness,
+            specular_anisotropy,
+            thin_walled,
         );
         let ss_bsdf = evaluate_subsurface_layer(
-            N, V, L, NoV, NoL,
-            subsurface_weight, subsurface_radius, subsurface_radius_scale_r,
-            subsurface_radius_scale_g, subsurface_radius_scale_b,
-            subsurface_scatter_anisotropy, subsurface_color
+            n,
+            v,
+            l,
+            nov,
+            nol,
+            subsurface_weight,
+            subsurface_radius,
+            subsurface_radius_scale_r,
+            subsurface_radius_scale_g,
+            subsurface_radius_scale_b,
+            subsurface_scatter_anisotropy,
+            subsurface_color,
         );
         let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;
-        Lo += layer_bsdf * radiance * NoL;
+        lo = lo + layer_bsdf * radiance * nol;
     }
-    let ambient = lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
-    let emission = evaluate_emission(emission_luminance, emission_color, coat_weight, coat_color, NoV);
-    let color = ambient + Lo + emission;
+    let ambient =
+        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
+    let emission = evaluate_emission(
+        emission_luminance,
+        emission_color,
+        coat_weight,
+        coat_color,
+        nov,
+    );
+    let color = ambient + lo + emission;
     let tone_mapped = aces_tonemap(color);
-    return vec4<f32>(tone_mapped, opacity);
-}
-"#
-}
-
-fn lighting_fragment_kernels() -> String {
-    let kernels = [
-        math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
-        math::fresnel0_from_ior::wgsl_source(),
-        math::fresnel_schlick::wgsl_source(),
-        math::fresnel_schlick_vec::wgsl_source(),
-        math::fresnel_f82_tint::wgsl_source(),
-        math::ggx_ndf::wgsl_source(),
-        math::ggx_ndf_aniso::wgsl_source(),
-        math::openpbr_anisotropy::wgsl_source(),
-        math::smith_ggx_correlated::wgsl_source(),
-        math::smith_ggx_aniso::wgsl_source(),
-        math::oren_nayar_brdf::wgsl_source(),
-        math::coat_base_darkening::wgsl_source(),
-        math::coat_blend_darkened::wgsl_source(),
-        math::thin_film_modulation::wgsl_source(),
-        math::sheen_brdf::wgsl_source(),
-        math::transmission_color_to_extinction::wgsl_source(),
-        math::subsurface_brdf::wgsl_source(),
-    ];
-    kernels.join("\n")
+    return glam::Vec4::new(tone_mapped, opacity);
 }
 
 /// Full WGSL source for deferred lighting, assembled from Rust.
 pub fn wgsl_source() -> String {
     format!(
-        "{}\n{}\n",
+        "{}\n{}\n{}\n",
         lighting_wgsl_header(),
+        lighting_fragment_entry::wgsl_source(),
         lighting_fragment_kernels()
     )
 }
@@ -466,5 +557,27 @@ mod tests {
             src.contains(OPENPBR_MATERIAL_DECL),
             "OpenPBR block drifted from the shared declaration"
         );
+    }
+
+    /// The translated fragment entry must keep the legacy shape: g-buffer
+    /// decode with `textureLoad` coords, alpha `discard`, the light loop
+    /// with the early-out, and the summed layer BSDF. (Byte-parity no
+    /// longer applies — the generated entry is single-line.)
+    #[test]
+    fn lighting_fragment_entry_matches_legacy_shape() {
+        let entry = lighting_fragment_entry::wgsl_source();
+        assert!(entry.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
+        assert!(entry.contains("-> @location(0) vec4<f32>"));
+        assert!(entry.contains(
+            "textureLoad(depth_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(depth_tex))), 0)"
+        ));
+        assert!(entry.contains("discard;"));
+        assert!(entry.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));
+        assert!(entry.contains("continue;"));
+        assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
+        assert!(entry.contains(
+            "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
+        ));
+        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
     }
 }
