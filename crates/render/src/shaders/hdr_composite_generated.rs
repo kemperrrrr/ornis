@@ -13,18 +13,33 @@ use super::interface::{HdrFragmentOut, HdrVertexOutput};
 use super::wgsl_decl;
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
+use ornis_macros::stage;
+
+/// HDR composite vertex entry, written in Rust and translated to WGSL by
+/// [`stage`](ornis_macros::stage): fullscreen-quad corner passthrough.
+/// DSL-only (free `QUAD`/`UVS` binding identifiers) — replaced by
+/// `composite_vertex_entry::wgsl_source()`, never compiled as Rust.
+#[stage(vertex, entry = "vs_main", returns = "CompositeVertexOutput")]
+fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> HdrVertexOutput {
+    return HdrVertexOutput {
+        clip_position: QUAD[idx],
+        uv: UVS[idx],
+    };
+}
 
 /// HDR composite vertex shader: fullscreen quad from `vertex_index`.
 ///
 /// Assembled from the quad constants, the derived [`HdrVertexOutput`]
-/// layout and the entry body. Byte-identical to
-/// `shaders/wgsl/composite_vertex.wgsl`.
+/// layout and the translated [`composite_vertex_entry`] body. Structurally
+/// identical to `shaders/wgsl/composite_vertex.wgsl` (same signature and
+/// constructor call; the generated entry is single-line) — pinned by
+/// `hdr_vertex_entry_matches_legacy_shape` plus naga and the pixel probes.
 pub fn wgsl_vertex_source() -> String {
     format!(
         "\n{quad}\n{vout}\n{body}",
         quad = WGSL_VERTEX_QUAD,
         vout = wgsl_decl(HdrVertexOutput::WGSL_SOURCE),
-        body = WGSL_VERTEX_BODY,
+        body = composite_vertex_entry::wgsl_source(),
     )
 }
 
@@ -65,12 +80,6 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(0.0, 0.0),
     vec2<f32>(1.0, 0.0),
 );
-"#;
-
-const WGSL_VERTEX_BODY: &str = r#"@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> CompositeVertexOutput {
-    return CompositeVertexOutput(QUAD[idx], UVS[idx]);
-}
 "#;
 
 const WGSL_FRAGMENT_HEAD: &str = r#"@group(0) @binding(0) var deferred_tex: texture_2d<f32>;
@@ -156,10 +165,21 @@ mod tests {
         assert!(src.contains("fn luminance"));
     }
 
+    /// The translated vertex entry must keep the legacy shape: same entry
+    /// name and signature, same constructor call on the same globals.
+    /// (Byte-parity no longer applies — the generated entry is single-line.)
+    #[test]
+    fn hdr_vertex_entry_matches_legacy_shape() {
+        let entry = composite_vertex_entry::wgsl_source();
+        assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
+        assert!(entry.contains("-> CompositeVertexOutput"));
+        assert!(entry.contains("return CompositeVertexOutput(QUAD[idx], UVS[idx]);"));
+    }
+
     #[test]
     fn hdr_generated_parity_with_legacy_assembly() {
-        let legacy_vertex: &str = include_str!("wgsl/composite_vertex.wgsl");
-        assert_eq!(wgsl_vertex_source(), legacy_vertex);
+        // Fragment only: the vertex entry is translated (see above), the
+        // fragment skeleton is still spliced.
         // The only admitted difference: the `_pad` line is gone — skipped
         // padding is not shader-visible (`#[wgsl(skip)]`).
         let legacy_fragment = format!(

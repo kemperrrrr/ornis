@@ -32,6 +32,7 @@ impl WgslGen {
             Block(b) => wgsl_flow::block_expr(b),
             Assign(a) => Self::assign(a),
             Index(ix) => format!("{}[{}]", Self::expr(&ix.expr), Self::expr(&ix.index)),
+            Struct(s) => Self::struct_lit(s),
             // Rust casts are type-coercion hints for the DSL; WGSL infers the
             // type from context, so the cast itself is dropped.
             Cast(c) => Self::expr(&c.expr),
@@ -52,6 +53,27 @@ impl WgslGen {
 
     fn assign(a: &syn::ExprAssign) -> String {
         format!("{} = {}", Self::expr(&a.left), Self::expr(&a.right))
+    }
+
+    /// Struct literal → positional WGSL constructor: field values in literal
+    /// order (`VertexOutput { a, b }` → `VertexOutput(a, b)`). Callers must
+    /// list fields in declaration order — the macro cannot see the struct
+    /// definition; stage parity tests and pixel probes pin mistakes.
+    fn struct_lit(s: &syn::ExprStruct) -> String {
+        let name = match s.path.segments.last() {
+            Some(seg) => seg.ident.to_string(),
+            None => String::new(),
+        };
+        if s.rest.is_some() {
+            return syn::Error::new_spanned(
+                &s.rest,
+                "struct update syntax (`..base`) is not supported in WGSL",
+            )
+            .to_compile_error()
+            .to_string();
+        }
+        let args: Vec<String> = s.fields.iter().map(|f| Self::expr(&f.expr)).collect();
+        format!("{}({})", name, args.join(", "))
     }
 
     fn ret(r: &syn::ExprReturn) -> String {
@@ -710,6 +732,15 @@ mod wgsl_flow {
 #[allow(dead_code)]
 pub fn rust_to_wgsl(expr: &syn::Expr) -> String {
     WgslGen::expr(expr)
+}
+
+/// Map a known scalar/glam type name to WGSL; `None` for anything else
+/// (interface/layout mirrors, whose Rust names match WGSL by convention).
+pub fn glam_type_to_wgsl(name: &str) -> Option<String> {
+    match name {
+        "f32" | "i32" | "u32" | "bool" => Some(name.to_string()),
+        _ => wgsl_calls::wgsl_type(name),
+    }
 }
 
 pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {

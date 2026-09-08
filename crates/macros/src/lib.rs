@@ -28,6 +28,7 @@ mod pack;
 mod pipeline_config;
 mod register_component;
 mod smart_pipeline;
+mod stages;
 mod static_profile;
 mod wgsl;
 mod wgsl_interface;
@@ -111,6 +112,16 @@ pub fn derive_pipeline_config(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn gpu_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
     gpu_pipeline::gpu_pipeline(attr, item)
+}
+
+/// Translate a stage-entry Rust function to a WGSL entry point.
+///
+/// The input function is DSL-only (free binding identifiers, mirror-typed
+/// locals) and is replaced by a module exposing `wgsl_source()`; see
+/// [`stages`](mod@stages) for the contract.
+#[proc_macro_attribute]
+pub fn stage(attr: TokenStream, item: TokenStream) -> TokenStream {
+    stages::stage(attr, item)
 }
 
 /// Translate a small Rust function into WGSL compute-shader code.
