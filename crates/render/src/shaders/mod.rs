@@ -35,6 +35,143 @@ pub(crate) fn binding(group: u32, binding: u32, decl: &str) -> String {
     format!("@group({group}) @binding({binding}) {decl};\n")
 }
 
+/// Address-space / resource class of one pass resource.
+///
+/// The WGSL type name for buffers comes from the Rust side
+/// ([`WgslStruct::WGSL_NAME`](ornis_macros::WgslStruct) for derived layouts,
+/// [`OPENPBR_WGSL_NAME`] for the shared material) — never a retyped string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    /// `var<uniform> name: Ty`.
+    Uniform(&'static str),
+    /// `var<storage, read> name: Ty`.
+    StorageRead(&'static str),
+    /// `var<storage, read> name: array<Ty>`.
+    StorageReadArray(&'static str),
+    /// `var<storage, read_write> name: Ty`.
+    StorageRw(&'static str),
+    /// `var name: texture_2d<f32>`.
+    TextureFloat,
+    /// `var name: texture_2d<u32>`.
+    TextureUint,
+    /// `var name: texture_depth_2d`.
+    TextureDepth,
+    /// `var name: sampler`.
+    Sampler,
+}
+
+impl ResourceKind {
+    /// Full WGSL type spelling for a `var` declaration. Array wrappers are
+    /// structural (a separate variant), so element type names always come
+    /// from the Rust side.
+    pub fn wgsl_ty_full(&self) -> String {
+        match self {
+            Self::Uniform(ty) | Self::StorageRead(ty) | Self::StorageRw(ty) => {
+                ty.to_string()
+            }
+            Self::StorageReadArray(elem) => format!("array<{elem}>"),
+            Self::TextureFloat => "texture_2d<f32>".to_string(),
+            Self::TextureUint => "texture_2d<u32>".to_string(),
+            Self::TextureDepth => "texture_depth_2d".to_string(),
+            Self::Sampler => "sampler".to_string(),
+        }
+    }
+
+    /// `var<…>` address-space prefix, or `var` for textures/samplers.
+    fn wgsl_var(&self) -> &'static str {
+        match self {
+            Self::Uniform(_) => "var<uniform>",
+            Self::StorageRead(_) | Self::StorageReadArray(_) => "var<storage, read>",
+            Self::StorageRw(_) => "var<storage, read_write>",
+            Self::TextureFloat | Self::TextureUint | Self::TextureDepth | Self::Sampler => {
+                "var"
+            }
+        }
+    }
+
+    /// The matching `wgpu` binding type; `multisampled` threads the runtime
+    /// MSAA flag through to texture resources.
+    pub fn bgl_ty(&self, multisampled: bool) -> wgpu::BindingType {
+        match self {
+            Self::Uniform(_) => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            Self::StorageRead(_) | Self::StorageReadArray(_) => {
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                }
+            }
+            Self::StorageRw(_) => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            Self::TextureFloat => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled,
+            },
+            Self::TextureUint => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled,
+            },
+            Self::TextureDepth => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled,
+            },
+            Self::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        }
+    }
+}
+
+/// One pass resource: where it binds, when it is visible, under what WGSL
+/// name. A pass's `*_RESOURCES` table is the single source of truth for
+/// both the WGSL declaration ([`resource_decl`]) and the `wgpu` layout
+/// entry ([`bgl_entry`]) — the numbers cannot drift between shader and
+/// pipeline layout.
+#[derive(Debug, Clone, Copy)]
+pub struct Resource {
+    /// `@group` index.
+    pub group: u32,
+    /// `@binding` index.
+    pub binding: u32,
+    /// Shader stages that can see this resource.
+    pub visibility: wgpu::ShaderStages,
+    /// WGSL variable name (`camera`, `materials`, …).
+    pub name: &'static str,
+    /// Address space / resource class.
+    pub kind: ResourceKind,
+}
+
+/// WGSL declaration line for one [`Resource`].
+pub fn resource_decl(r: &Resource) -> String {
+    format!(
+        "@group({}) @binding({}) {} {}: {};\n",
+        r.group,
+        r.binding,
+        r.kind.wgsl_var(),
+        r.name,
+        r.kind.wgsl_ty_full()
+    )
+}
+
+/// `wgpu` bind-group-layout entry for one [`Resource`]; `multisampled`
+/// threads the runtime MSAA flag through to texture resources.
+pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: r.binding,
+        visibility: r.visibility,
+        ty: r.kind.bgl_ty(multisampled),
+        count: None,
+    }
+}
+
 /// Spell one `f32` the way the former handwritten sources did (`-1.0`,
 /// not `-1`), so generated declaration blocks stay readable.
 fn fmt_f32(x: f32) -> String {
@@ -111,6 +248,10 @@ pub(crate) fn openpbr_material_decl() -> String {
     out.push_str("};\n");
     out
 }
+
+/// The WGSL type name of the shared material declaration (no derive:
+/// the CPU side is grouped, so the name lives next to the slot list).
+pub(crate) const OPENPBR_WGSL_NAME: &str = "OpenPBRMaterial";
 
 /// The 20 `vec4` slots of `OpenPBRMaterial`, in declaration order.
 pub(crate) const OPENPBR_SLOTS: [&str; 20] = [

@@ -10,8 +10,8 @@
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
-    STANDARD_QUAD, STANDARD_UVS, binding, const_vec2_array, const_vec4_array,
-    openpbr_material_decl, wgsl_decl,
+    OPENPBR_WGSL_NAME, STANDARD_QUAD, STANDARD_UVS, Resource, ResourceKind, bgl_entry,
+    const_vec2_array, const_vec4_array, openpbr_material_decl, resource_decl, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -24,25 +24,87 @@ fn lighting_wgsl_header() -> String {
     out.push_str(&wgsl_decl(CameraUniform::WGSL_SOURCE));
     out.push_str(&wgsl_decl(GpuLight::WGSL_SOURCE));
     out.push_str(&wgsl_decl(LightingUniform::WGSL_SOURCE));
-    out.push_str(&openpbr_material_decl());
-    for (group, bind, decl) in LIGHTING_BINDINGS {
-        out.push_str(&binding(group, bind, decl));
+    out.push_str(openpbr_material_decl().as_str());
+    for r in LIGHTING_RESOURCES {
+        out.push_str(&resource_decl(&r));
     }
     out
 }
 
-/// Resource layout of the deferred-lighting pass: (group, binding, WGSL decl).
-const LIGHTING_BINDINGS: [(u32, u32, &str); 10] = [
-    (0, 0, "var<uniform> camera: Camera"),
-    (0, 1, "var<uniform> lighting: Lighting"),
-    (0, 2, "var<storage, read> materials: array<OpenPBRMaterial>"),
-    (0, 3, "var albedo_tex: texture_2d<f32>"),
-    (0, 4, "var normal_tex: texture_2d<f32>"),
-    (0, 5, "var material_id_tex: texture_2d<u32>"),
-    (0, 6, "var world_pos_tex: texture_2d<f32>"),
-    (0, 7, "var mat_params_tex: texture_2d<f32>"),
-    (0, 8, "var depth_tex: texture_depth_2d"),
-    (0, 9, "var lighting_sampler: sampler"),
+/// Resource layout of the deferred-lighting pass: where each resource
+/// binds, when it is visible, under what name. Type names come from the
+/// Rust side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
+pub const LIGHTING_RESOURCES: [Resource; 10] = [
+    Resource {
+        group: 0,
+        binding: 0,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        name: "camera",
+        kind: ResourceKind::Uniform(CameraUniform::WGSL_NAME),
+    },
+    Resource {
+        group: 0,
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "lighting",
+        kind: ResourceKind::Uniform(LightingUniform::WGSL_NAME),
+    },
+    Resource {
+        group: 0,
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "materials",
+        kind: ResourceKind::StorageReadArray(OPENPBR_WGSL_NAME),
+    },
+    Resource {
+        group: 0,
+        binding: 3,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "albedo_tex",
+        kind: ResourceKind::TextureFloat,
+    },
+    Resource {
+        group: 0,
+        binding: 4,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "normal_tex",
+        kind: ResourceKind::TextureFloat,
+    },
+    Resource {
+        group: 0,
+        binding: 5,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "material_id_tex",
+        kind: ResourceKind::TextureUint,
+    },
+    Resource {
+        group: 0,
+        binding: 6,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "world_pos_tex",
+        kind: ResourceKind::TextureFloat,
+    },
+    Resource {
+        group: 0,
+        binding: 7,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "mat_params_tex",
+        kind: ResourceKind::TextureFloat,
+    },
+    Resource {
+        group: 0,
+        binding: 8,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "depth_tex",
+        kind: ResourceKind::TextureDepth,
+    },
+    Resource {
+        group: 0,
+        binding: 9,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "lighting_sampler",
+        kind: ResourceKind::Sampler,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
@@ -347,9 +409,35 @@ mod tests {
         assert!(src.contains("fn fs_main"));
     }
 
-    /// The header splices the derived layouts (drift is impossible by
-    /// construction); this test pins their order and the 10 resource
-    /// bindings that follow them.
+    /// The resource table drives both sides: WGSL declarations and `wgpu`
+    /// layout entries agree on numbers, visibility and kinds.
+    #[test]
+    fn lighting_resources_drive_bgl_and_wgsl() {
+        use super::super::{bgl_entry, resource_decl};
+        use super::LIGHTING_RESOURCES;
+        assert_eq!(LIGHTING_RESOURCES.len(), 10);
+        for r in LIGHTING_RESOURCES {
+            let decl = resource_decl(&r);
+            assert!(decl.starts_with(&format!(
+                "@group({}) @binding({}) ",
+                r.group, r.binding
+            )));
+            let plain = bgl_entry(&r, false);
+            let msaa = bgl_entry(&r, true);
+            assert_eq!(plain.binding, r.binding);
+            assert_eq!(plain.visibility, r.visibility);
+            // Only textures observe the MSAA flag.
+            let is_texture = matches!(plain.ty, wgpu::BindingType::Texture { .. });
+            assert_eq!(
+                format!("{:?}", plain.ty) != format!("{:?}", msaa.ty),
+                is_texture
+            );
+        }
+        // Binding 0 (camera) is visible to the vertex stage too.
+        assert!(LIGHTING_RESOURCES[0]
+            .visibility
+            .contains(wgpu::ShaderStages::VERTEX));
+    }
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
         use super::super::{openpbr_material_decl, wgsl_decl};

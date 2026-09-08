@@ -391,6 +391,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let decl_text = format!("struct {wgsl_name} {{\n{}\n}}\n", decl_lines.join("\n"));
     let decl_lit = proc_macro2::Literal::string(&decl_text);
+    let name_lit = proc_macro2::Literal::string(&wgsl_name);
 
     // Nested structs must be 16-aligned for the hardcoded WGSL alignment to
     // hold; any struct containing a vec4/mat4 member satisfies this.
@@ -407,6 +408,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// The field list is the single source of truth for the GPU
             /// buffer layout; see the `WgslStruct` derive documentation.
             pub const WGSL_SOURCE: &'static str = #decl_lit;
+
+            /// The WGSL type name of this struct (the `#[wgsl(name)]`
+            /// override when present, else the Rust type name).
+            pub const WGSL_NAME: &'static str = #name_lit;
         }
 
         // Compile-time verification that the Rust layout (repr(C)) matches
