@@ -15,10 +15,11 @@
 //! [`crate::shaders::gbuffer_generated::wgsl_vertex_source`] instead of
 //! duplicating it.
 
-use super::interface::GbufferFragmentInput;
+use super::interface::GbufferFragmentInput as FragmentInput;
 use super::{OPENPBR_MATERIAL_DECL, wgsl_decl};
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::{gbuffer_generated, math};
+use ornis_macros::stage;
 
 /// Forward-PBR vertex shader: instance transforms + world position.
 ///
@@ -56,20 +57,200 @@ pub fn wgsl_source() -> String {
         math::srgb_to_linear::wgsl_source(),
     ];
     let mut src = format!(
-        "\n{cam}\n{light}\n{lighting}{mat}\n{restA}\n{fin}\n{restB}",
+        "\n{cam}\n{light}\n{lighting}{mat}\n{restA}\n{fin}\n{helpers}\n{entry}",
         cam = CameraUniform::WGSL_SOURCE,
         light = wgsl_decl(GpuLight::WGSL_SOURCE),
         lighting = wgsl_decl(LightingUniform::WGSL_SOURCE),
         mat = OPENPBR_MATERIAL_DECL,
         restA = WGSL_FRAGMENT_HEAD,
-        fin = wgsl_decl(GbufferFragmentInput::WGSL_SOURCE),
-        restB = WGSL_FRAGMENT_TAIL,
+        fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
+        helpers = WGSL_FRAGMENT_HELPERS,
+        entry = pbr_fragment_entry::wgsl_source(),
     );
     for k in &kernels {
         src.push('\n');
         src.push_str(k);
     }
     src
+}
+
+/// Forward-PBR fragment entry, translated by [`stage`](ornis_macros::stage):
+/// full OpenPBR evaluation over the light array. DSL-only — free
+/// `camera`/`lighting`/`materials` binding identifiers. Layer evaluators
+/// stay handwritten below and are called by name.
+#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
+fn pbr_fragment_entry(input: FragmentInput) -> glam::Vec4 {
+    let mat = materials[input.material_index];
+    let n = normalize(input.world_normal);
+    let v = normalize(camera.camera_pos.xyz - input.world_position);
+    let nov = max(dot(n, v), EPS);
+    let t = normalize(input.world_tangent);
+    let b = cross(n, t);
+    let base_weight = mat.base_params.x;
+    let base_color = mat.base_color.rgb;
+    let metalness = mat.base_params.z;
+    let diffuse_roughness = mat.base_params.y;
+    let specular_weight = mat.specular_params.x;
+    let specular_roughness = mat.specular_params.y;
+    let specular_ior = mat.specular_params.z;
+    let specular_anisotropy = mat.specular_params.w;
+    let specular_edge_tint = mat.specular_color.rgb;
+    let transmission_weight = mat.transmission_params.x;
+    let transmission_depth = mat.transmission_params.y;
+    let transmission_dispersion_scale = mat.transmission_params.z;
+    let transmission_dispersion_abbe = mat.transmission_params.w;
+    let transmission_color = mat.transmission_color.rgb;
+    let transmission_scatter = mat.transmission_scatter.rgb;
+    let transmission_scatter_anisotropy = mat.transmission_scatter.a;
+    let subsurface_weight = mat.subsurface_params.x;
+    let subsurface_radius = mat.subsurface_params.y;
+    let subsurface_radius_scale_r = mat.subsurface_params.z;
+    let subsurface_scatter_anisotropy = mat.subsurface_params.w;
+    let subsurface_color = mat.subsurface_color.rgb;
+    let subsurface_radius_scale_g = mat.subsurface_radius_scale_gb.x;
+    let subsurface_radius_scale_b = mat.subsurface_radius_scale_gb.y;
+    let fuzz_weight = mat.fuzz_params.x;
+    let fuzz_roughness = mat.fuzz_params.y;
+    let fuzz_color = mat.fuzz_color.rgb;
+    let coat_weight = mat.coat_params.x;
+    let coat_roughness = mat.coat_params.y;
+    let coat_anisotropy = mat.coat_params.z;
+    let coat_darkening = mat.coat_params.w;
+    let coat_color = mat.coat_color.rgb;
+    let coat_ior = mat.coat_ior.x;
+    let thin_film_weight = mat.thin_film_params.x;
+    let thin_film_thickness_um = mat.thin_film_params.y;
+    let thin_film_ior = mat.thin_film_params.z;
+    let emission_luminance = mat.emission_params.x;
+    let emission_color = mat.emission_color.rgb;
+    let opacity = mat.geometry_params.x;
+    let thin_walled = mat.geometry_params.y;
+    let mut lo = Vec3::new(0.0, 0.0, 0.0);
+    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    for i in 0u..lighting.light_count {
+        let l = normalize(lighting.lights[i].direction.xyz);
+        let h = normalize(v + l);
+        let light_color = lighting.lights[i].color.rgb;
+        let intensity = lighting.lights[i].color.w;
+        let radiance = light_color * intensity;
+        let nol = max(dot(n, l), EPS);
+        let noh = max(dot(n, h), EPS);
+        let voh = max(dot(v, h), EPS);
+        if nol <= EPS {
+            continue;
+        }
+        let base_bsdf = evaluate_base_layer(
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            mat,
+            base_weight,
+            base_color,
+            metalness,
+            diffuse_roughness,
+            specular_weight,
+            specular_roughness,
+            specular_ior,
+            specular_anisotropy,
+            specular_edge_tint,
+            t,
+            b,
+            thin_film_mod,
+        );
+        let coat_bsdf = evaluate_coat_layer(
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            mat,
+            coat_weight,
+            coat_roughness,
+            coat_anisotropy,
+            coat_darkening,
+            coat_ior,
+            coat_color,
+            metalness,
+            base_color,
+            base_weight,
+            specular_weight,
+            subsurface_weight,
+            subsurface_color,
+            t,
+            b,
+        );
+        let fuzz_bsdf = evaluate_fuzz_layer(
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            fuzz_weight,
+            fuzz_roughness,
+            fuzz_color,
+        );
+        let trans_bsdf = evaluate_transmission_layer(
+            n,
+            v,
+            l,
+            h,
+            nov,
+            nol,
+            noh,
+            voh,
+            mat,
+            transmission_weight,
+            transmission_depth,
+            transmission_dispersion_scale,
+            transmission_dispersion_abbe,
+            transmission_color,
+            transmission_scatter,
+            transmission_scatter_anisotropy,
+            specular_ior,
+            specular_roughness,
+            specular_anisotropy,
+            thin_walled,
+        );
+        let ss_bsdf = evaluate_subsurface_layer(
+            n,
+            v,
+            l,
+            nov,
+            nol,
+            subsurface_weight,
+            subsurface_radius,
+            subsurface_radius_scale_r,
+            subsurface_radius_scale_g,
+            subsurface_radius_scale_b,
+            subsurface_scatter_anisotropy,
+            subsurface_color,
+        );
+        let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;
+        lo = lo + layer_bsdf * radiance * nol;
+    }
+    let ambient =
+        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
+    let emission = evaluate_emission(
+        emission_luminance,
+        emission_color,
+        coat_weight,
+        coat_color,
+        nov,
+    );
+    let color = ambient + lo + emission;
+    let tone_mapped = aces_tonemap(color);
+    return glam::Vec4::new(tone_mapped, opacity);
 }
 
 /// Static view for naga validation in tests.
@@ -82,7 +263,7 @@ const WGSL_FRAGMENT_HEAD: &str = r#"@group(0) @binding(0) var<uniform> camera: C
 @group(0) @binding(3) var<uniform> lighting: Lighting;
 "#;
 
-const WGSL_FRAGMENT_TAIL: &str = r#"const PI: f32 = 3.14159265359;
+const WGSL_FRAGMENT_HELPERS: &str = r#"const PI: f32 = 3.14159265359;
 const EPS: f32 = 1e-6;
 const INV_PI: f32 = 0.31830988618;
 
@@ -221,130 +402,7 @@ fn transmission_btdf(
     let extinction_factor = exp(-extinction * distance);
     return vec3<f32>(D * G * T / max(4.0 * NoV * NoL, EPS)) * extinction_factor;
 }
-
-@fragment
-fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
-    let mat = materials[input.material_index];
-    let N = normalize(input.world_normal);
-    let V = normalize(camera.camera_pos.xyz - input.world_position);
-    let NoV = max(dot(N, V), EPS);
-
-    let T = normalize(input.world_tangent);
-    let B = cross(N, T);
-
-    let base_weight = mat.base_params.x;
-    let base_color = mat.base_color.rgb;
-    let metalness = mat.base_params.z;
-    let diffuse_roughness = mat.base_params.y;
-
-    let specular_weight = mat.specular_params.x;
-    let specular_roughness = mat.specular_params.y;
-    let specular_ior = mat.specular_params.z;
-    let specular_anisotropy = mat.specular_params.w;
-    let specular_edge_tint = mat.specular_color.rgb;
-
-    let transmission_weight = mat.transmission_params.x;
-    let transmission_depth = mat.transmission_params.y;
-    let transmission_dispersion_scale = mat.transmission_params.z;
-    let transmission_dispersion_abbe = mat.transmission_params.w;
-    let transmission_color = mat.transmission_color.rgb;
-    let transmission_scatter = mat.transmission_scatter.rgb;
-    let transmission_scatter_anisotropy = mat.transmission_scatter.a;
-
-    let subsurface_weight = mat.subsurface_params.x;
-    let subsurface_radius = mat.subsurface_params.y;
-    let subsurface_radius_scale_r = mat.subsurface_params.z;
-    let subsurface_scatter_anisotropy = mat.subsurface_params.w;
-    let subsurface_color = mat.subsurface_color.rgb;
-    let subsurface_radius_scale_g = mat.subsurface_radius_scale_gb.x;
-    let subsurface_radius_scale_b = mat.subsurface_radius_scale_gb.y;
-
-    let fuzz_weight = mat.fuzz_params.x;
-    let fuzz_roughness = mat.fuzz_params.y;
-    let fuzz_color = mat.fuzz_color.rgb;
-
-    let coat_weight = mat.coat_params.x;
-    let coat_roughness = mat.coat_params.y;
-    let coat_anisotropy = mat.coat_params.z;
-    let coat_darkening = mat.coat_params.w;
-    let coat_color = mat.coat_color.rgb;
-    let coat_ior = mat.coat_ior.x;
-
-    let thin_film_weight = mat.thin_film_params.x;
-    let thin_film_thickness_um = mat.thin_film_params.y;
-    let thin_film_ior = mat.thin_film_params.z;
-
-    let emission_luminance = mat.emission_params.x;
-    let emission_color = mat.emission_color.rgb;
-
-    let opacity = mat.geometry_params.x;
-    let thin_walled = mat.geometry_params.y;
-
-    var Lo = vec3<f32>(0.0);
-
-    let thin_film_mod = thin_film_modulation(NoV, thin_film_ior, thin_film_thickness_um, 1.0);
-
-    for (var i = 0u; i < lighting.light_count; i = i + 1u) {
-        let L = normalize(lighting.lights[i].direction.xyz);
-        let H = normalize(V + L);
-        let light_color = lighting.lights[i].color.rgb;
-        let intensity = lighting.lights[i].color.w;
-        let radiance = light_color * intensity;
-
-        let NoL = max(dot(N, L), EPS);
-        let NoH = max(dot(N, H), EPS);
-        let VoH = max(dot(V, H), EPS);
-
-        if (NoL <= EPS) { continue; }
-
-        let base_bsdf = evaluate_base_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH, mat,
-            base_weight, base_color, metalness, diffuse_roughness,
-            specular_weight, specular_roughness, specular_ior, specular_anisotropy, specular_edge_tint,
-            T, B, thin_film_mod
-        );
-
-        let coat_bsdf = evaluate_coat_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH, mat,
-            coat_weight, coat_roughness, coat_anisotropy, coat_darkening, coat_ior, coat_color,
-            metalness, base_color, base_weight, specular_weight,
-            subsurface_weight, subsurface_color,
-            T, B
-        );
-
-        let fuzz_bsdf = evaluate_fuzz_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH,
-            fuzz_weight, fuzz_roughness, fuzz_color
-        );
-
-        let trans_bsdf = evaluate_transmission_layer(
-            N, V, L, H, NoV, NoL, NoH, VoH, mat,
-            transmission_weight, transmission_depth, transmission_dispersion_scale, transmission_dispersion_abbe,
-            transmission_color, transmission_scatter, transmission_scatter_anisotropy,
-            specular_ior, specular_roughness, specular_anisotropy,
-            thin_walled
-        );
-
-        let ss_bsdf = evaluate_subsurface_layer(
-            N, V, L, NoV, NoL,
-            subsurface_weight, subsurface_radius, subsurface_radius_scale_r,
-            subsurface_radius_scale_g, subsurface_radius_scale_b,
-            subsurface_scatter_anisotropy, subsurface_color
-        );
-
-        let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;
-        Lo += layer_bsdf * radiance * NoL;
-    }
-
-    let ambient = lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
-    let emission = evaluate_emission(emission_luminance, emission_color, coat_weight, coat_color, NoV);
-
-    let color = ambient + Lo + emission;
-    let tone_mapped = aces_tonemap(color);
-    return vec4<f32>(tone_mapped, opacity);
-}
 "#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +437,25 @@ mod tests {
         assert!(fs.contains("fn aces_tonemap"));
     }
 
+    /// The translated fragment entry must keep the legacy shape: same
+    /// signature, same layer-evaluator calls, same light loop with the
+    /// early-out. (Byte-parity no longer applies — the generated entry is
+    /// single-line with normalized int suffixes.)
+    #[test]
+    fn pbr_fragment_entry_matches_legacy_shape() {
+        let entry = pbr_fragment_entry::wgsl_source();
+        assert!(entry.starts_with("@fragment\nfn fs_main(input: FragmentInput)"));
+        assert!(entry.contains("-> @location(0) vec4<f32>"));
+        assert!(entry.contains("let mat = materials[input.material_index];"));
+        assert!(entry.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));
+        assert!(entry.contains("continue;"));
+        assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
+        assert!(entry.contains(
+            "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
+        ));
+        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+    }
+
     #[test]
     fn pbr_generated_parity_with_legacy_assembly() {
         // Vertex is shared with gbuffer (translated — see
@@ -387,32 +464,12 @@ mod tests {
             wgsl_vertex_source(),
             super::super::gbuffer_generated::wgsl_vertex_source()
         );
-        let kernels = [
-            math::luminance::wgsl_source(),
-            math::aces_tonemap::wgsl_source(),
-            math::fresnel0_from_ior::wgsl_source(),
-            math::fresnel_schlick::wgsl_source(),
-            math::fresnel_schlick_vec::wgsl_source(),
-            math::fresnel_f82_tint::wgsl_source(),
-            math::ggx_ndf::wgsl_source(),
-            math::ggx_ndf_aniso::wgsl_source(),
-            math::openpbr_anisotropy::wgsl_source(),
-            math::smith_ggx_correlated::wgsl_source(),
-            math::smith_ggx_aniso::wgsl_source(),
-            math::oren_nayar_brdf::wgsl_source(),
-            math::coat_base_darkening::wgsl_source(),
-            math::coat_blend_darkened::wgsl_source(),
-            math::thin_film_modulation::wgsl_source(),
-            math::sheen_brdf::wgsl_source(),
-            math::transmission_color_to_extinction::wgsl_source(),
-            math::subsurface_brdf::wgsl_source(),
-            math::srgb_to_linear::wgsl_source(),
-        ];
-        let mut legacy_fragment = include_str!("wgsl/pbr_fragment.wgsl").to_string();
-        for k in &kernels {
-            legacy_fragment.push('\n');
-            legacy_fragment.push_str(k);
-        }
-        assert_eq!(wgsl_source(), legacy_fragment);
+        // Fragment layouts still splice the derived declarations (Camera
+        // raw — that legacy file terminates it with bare `}`).
+        let src = wgsl_source();
+        assert!(src.contains(CameraUniform::WGSL_SOURCE));
+        assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)));
+        assert!(src.contains(OPENPBR_MATERIAL_DECL));
     }
 }
