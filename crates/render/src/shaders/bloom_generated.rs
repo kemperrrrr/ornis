@@ -7,7 +7,7 @@
 //! `#[stage]` translation; `renderer::create_bloom_pass` now uses only this module.
 
 use super::interface::BloomVertexOut as BloomVertexOutput;
-use super::wgsl_decl;
+use super::{STANDARD_QUAD, STANDARD_UVS, binding, const_vec2_array, const_vec4_array, wgsl_decl};
 use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
 use ornis_macros::stage;
@@ -46,29 +46,24 @@ fn bloom_wgsl_body() -> String {
     let header = format!(
         "\n{bloom}\n{head}\n{vout}\n{vs}",
         bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
-        head = BLOOM_HEADER_HEAD,
+        head = bloom_header_head(),
         vout = wgsl_decl(BloomVertexOutput::WGSL_SOURCE),
         vs = bloom_vertex_entry::wgsl_source(),
     );
 
-    const BLOOM_HEADER_HEAD: &str = r#"@group(0) @binding(0) var src_tex: texture_2d<f32>;
-@group(0) @binding(1) var src_sampler: sampler;
-@group(0) @binding(2) var<uniform> bloom_params: BloomParams;
-
-const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
-);
-
-const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(1.0, 0.0),
-);
-"#;
+    /// WGSL bindings + quad constants, all assembled from Rust: the binding
+    /// lines from [`binding`], QUAD/UVS from [`STANDARD_QUAD`]/[`STANDARD_UVS`].
+    fn bloom_header_head() -> String {
+        let mut out = String::new();
+        out.push_str(&binding(0, 0, "var src_tex: texture_2d<f32>"));
+        out.push_str(&binding(0, 1, "var src_sampler: sampler"));
+        out.push_str(&binding(0, 2, "var<uniform> bloom_params: BloomParams"));
+        out.push('\n');
+        out.push_str(&const_vec4_array("QUAD", &STANDARD_QUAD));
+        out.push('\n');
+        out.push_str(&const_vec2_array("UVS", &STANDARD_UVS));
+        out
+    }
 
     let fragment = bloom_fragment_entry::wgsl_source();
 

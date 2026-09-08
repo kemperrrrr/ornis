@@ -12,11 +12,12 @@
 //! transform. The PBR migration (`pbr_generated`) reuses
 //! [`wgsl_vertex_source`] rather than duplicating it.
 
-use super::OPENPBR_MATERIAL_DECL;
+use super::binding;
 use super::interface::{
     GbufferFragmentInput as FragmentInput, GbufferOutput as GBufferOutput,
     GbufferVertexInput as VertexInput, GbufferVertexOutput as VertexOutput,
 };
+use super::openpbr_material_decl;
 use super::wgsl_decl;
 use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::math::octahedral_encode;
@@ -60,7 +61,7 @@ pub fn wgsl_vertex_source() -> String {
         "\n{cam}\n{per}\n{bindings}\n{vin}\n{vout}\n{body}",
         cam = CameraUniform::WGSL_SOURCE,
         per = PerObjectGpu::WGSL_SOURCE,
-        bindings = WGSL_VERTEX_BINDINGS,
+        bindings = vertex_bindings(),
         vin = wgsl_decl(VertexInput::WGSL_SOURCE),
         vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
         body = gbuffer_vs_entry::wgsl_source(),
@@ -103,14 +104,14 @@ fn gbuffer_fs_entry(input: FragmentInput) -> GBufferOutput {
 /// G-buffer fragment shader: 5-MRT packing, splicing the octahedral
 /// normal-encoding kernel via `wgsl_source()`.
 ///
-/// Assembled from the shared [`OPENPBR_MATERIAL_DECL`], the shared varyings,
+/// Assembled from the shared [`openpbr_material_decl()`], the shared varyings,
 /// the translated [`gbuffer_fs_entry`] body and kernel; entry point `fs_main`
 /// is kept.
 pub fn wgsl_source() -> String {
     format!(
         "{mat}\n{bindings}\n{fin}\n{gout}\n{body}\n{kernel}",
-        mat = OPENPBR_MATERIAL_DECL,
-        bindings = WGSL_FRAGMENT_BINDINGS,
+        mat = openpbr_material_decl(),
+        bindings = fragment_bindings(),
         fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
         gout = wgsl_decl(GBufferOutput::WGSL_SOURCE),
         body = gbuffer_fs_entry::wgsl_source(),
@@ -123,12 +124,22 @@ pub fn wgsl_source_static() -> String {
     wgsl_source()
 }
 
-const WGSL_VERTEX_BINDINGS: &str = r#"@group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<storage, read> per_objects: array<PerObject>;
-"#;
+/// Vertex resource bindings, assembled from Rust.
+fn vertex_bindings() -> String {
+    let mut out = String::new();
+    out.push_str(&binding(0, 0, "var<uniform> camera: Camera"));
+    out.push_str(&binding(
+        0,
+        1,
+        "var<storage, read> per_objects: array<PerObject>",
+    ));
+    out
+}
 
-const WGSL_FRAGMENT_BINDINGS: &str = r#"@group(0) @binding(2) var<storage, read> materials: array<OpenPBRMaterial>;
-"#;
+/// Fragment resource binding, assembled from Rust.
+fn fragment_bindings() -> String {
+    binding(0, 2, "var<storage, read> materials: array<OpenPBRMaterial>")
+}
 
 #[cfg(test)]
 mod tests {
@@ -197,7 +208,7 @@ mod tests {
     fn gbuffer_generated_parity_with_legacy_assembly() {
         // Layouts still splice the derived declarations.
         let src = wgsl_source();
-        assert!(src.contains(OPENPBR_MATERIAL_DECL));
+        assert!(src.contains(openpbr_material_decl().as_str()));
         assert!(src.contains(&wgsl_decl(FragmentInput::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(GBufferOutput::WGSL_SOURCE)));
     }

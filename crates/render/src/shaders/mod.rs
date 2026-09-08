@@ -27,39 +27,114 @@ pub(crate) fn wgsl_decl(source: &'static str) -> String {
     format!("{};\n", source.trim_end())
 }
 
+/// Build one `@group/@binding` resource line from its parts, e.g.
+/// `binding(0, 2, "var<storage, read> materials: array<OpenPBRMaterial>")`.
+/// Group/binding numbers stay explicit at each call site so the layout is
+/// reviewable where it is used.
+pub(crate) fn binding(group: u32, binding: u32, decl: &str) -> String {
+    format!("@group({group}) @binding({binding}) {decl};\n")
+}
+
+/// Spell one `f32` the way the former handwritten sources did (`-1.0`,
+/// not `-1`), so generated declaration blocks stay readable.
+fn fmt_f32(x: f32) -> String {
+    if x.fract() == 0.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x}")
+    }
+}
+
+/// Build a `const NAME: array<vec4<f32>, N> = …` block from Rust data.
+pub(crate) fn const_vec4_array(name: &str, vals: &[[f32; 4]]) -> String {
+    let mut out = format!(
+        "const {name}: array<vec4<f32>, {n}> = array<vec4<f32>, {n}>(\n",
+        n = vals.len()
+    );
+    for v in vals {
+        out.push_str(&format!(
+            "    vec4<f32>({}, {}, {}, {}),\n",
+            fmt_f32(v[0]),
+            fmt_f32(v[1]),
+            fmt_f32(v[2]),
+            fmt_f32(v[3])
+        ));
+    }
+    out.push_str(");\n");
+    out
+}
+
+/// Build a `const NAME: array<vec2<f32>, N> = …` block from Rust data.
+pub(crate) fn const_vec2_array(name: &str, vals: &[[f32; 2]]) -> String {
+    let mut out = format!(
+        "const {name}: array<vec2<f32>, {n}> = array<vec2<f32>, {n}>(\n",
+        n = vals.len()
+    );
+    for v in vals {
+        out.push_str(&format!(
+            "    vec2<f32>({}, {}),\n",
+            fmt_f32(v[0]),
+            fmt_f32(v[1])
+        ));
+    }
+    out.push_str(");\n");
+    out
+}
+
+/// Fullscreen-quad corners shared by the bloom/hdr/lighting passes
+/// (triangle strip order), as Rust data.
+pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [
+    [-1.0, -1.0, 0.0, 1.0],
+    [1.0, -1.0, 0.0, 1.0],
+    [-1.0, 1.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0, 1.0],
+];
+
+/// Fullscreen-quad UVs shared by the bloom/hdr/lighting passes, as Rust data.
+pub(crate) const STANDARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
+
 /// Shared `OpenPBRMaterial` WGSL declaration (20 `vec4` slots), used by the
 /// g-buffer, lighting and forward-PBR skeletons.
 ///
-/// Still handwritten: the CPU-side
+/// Generated from [`OPENPBR_SLOTS`]: the CPU-side
 /// [`OpenPBRMaterial`](ornis_core::material::OpenPBRMaterial) is grouped
 /// (`BaseGroup`, `SpecularGroup`, …), not flat, so there is no 1:1 field
-/// mirror to derive from. The `openpbr_rust_layout_matches_wgsl_order` test
-/// below pins the group offsets against this declaration order instead.
+/// mirror to derive from — the slot-name list is the single source of truth
+/// for the WGSL side. The `openpbr_rust_layout_matches_wgsl_order` test
+/// below pins the group offsets against this slot order instead.
 /// Leading/trailing newlines are part of the legacy assembly contract.
-pub(crate) const OPENPBR_MATERIAL_DECL: &str = r#"
-struct OpenPBRMaterial {
-    base_params: vec4<f32>,
-    base_color: vec4<f32>,
-    specular_params: vec4<f32>,
-    specular_color: vec4<f32>,
-    transmission_params: vec4<f32>,
-    transmission_color: vec4<f32>,
-    transmission_scatter: vec4<f32>,
-    subsurface_params: vec4<f32>,
-    subsurface_color: vec4<f32>,
-    subsurface_radius_scale_gb: vec4<f32>,
-    fuzz_params: vec4<f32>,
-    fuzz_color: vec4<f32>,
-    coat_params: vec4<f32>,
-    coat_color: vec4<f32>,
-    coat_ior: vec4<f32>,
-    thin_film_params: vec4<f32>,
-    emission_params: vec4<f32>,
-    emission_color: vec4<f32>,
-    geometry_params: vec4<f32>,
-    geometry_params2: vec4<f32>,
-};
-"#;
+pub(crate) fn openpbr_material_decl() -> String {
+    let mut out = String::from("\nstruct OpenPBRMaterial {\n");
+    for slot in OPENPBR_SLOTS {
+        out.push_str(&format!("    {slot}: vec4<f32>,\n"));
+    }
+    out.push_str("};\n");
+    out
+}
+
+/// The 20 `vec4` slots of `OpenPBRMaterial`, in declaration order.
+pub(crate) const OPENPBR_SLOTS: [&str; 20] = [
+    "base_params",
+    "base_color",
+    "specular_params",
+    "specular_color",
+    "transmission_params",
+    "transmission_color",
+    "transmission_scatter",
+    "subsurface_params",
+    "subsurface_color",
+    "subsurface_radius_scale_gb",
+    "fuzz_params",
+    "fuzz_color",
+    "coat_params",
+    "coat_color",
+    "coat_ior",
+    "thin_film_params",
+    "emission_params",
+    "emission_color",
+    "geometry_params",
+    "geometry_params2",
+];
 
 // ── COMPOSITE_VERTEX ────────────────────────────────────────────────
 
@@ -213,6 +288,6 @@ mod tests {
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, emission), 256);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
         // Within-group slot order mirrors the WGSL field order.
-        assert_eq!(OPENPBR_MATERIAL_DECL.matches("vec4<f32>").count(), 20);
+        assert_eq!(openpbr_material_decl().matches("vec4<f32>").count(), 20);
     }
 }

@@ -14,7 +14,7 @@
 //! duplicating it.
 
 use super::interface::GbufferFragmentInput as FragmentInput;
-use super::{OPENPBR_MATERIAL_DECL, helpers, wgsl_decl};
+use super::{binding, helpers, openpbr_material_decl, wgsl_decl};
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::{gbuffer_generated, math};
 use ornis_macros::stage;
@@ -59,8 +59,8 @@ pub fn wgsl_source() -> String {
         cam = CameraUniform::WGSL_SOURCE,
         light = wgsl_decl(GpuLight::WGSL_SOURCE),
         lighting = wgsl_decl(LightingUniform::WGSL_SOURCE),
-        mat = OPENPBR_MATERIAL_DECL,
-        restA = WGSL_FRAGMENT_HEAD,
+        mat = openpbr_material_decl(),
+        restA = fragment_bindings(),
         fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
         consts = helpers::wgsl_consts(),
         helpers = helpers::wgsl_shared_helpers(),
@@ -257,10 +257,18 @@ pub fn wgsl_source_static() -> String {
     wgsl_source()
 }
 
-const WGSL_FRAGMENT_HEAD: &str = r#"@group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(2) var<storage, read> materials: array<OpenPBRMaterial>;
-@group(0) @binding(3) var<uniform> lighting: Lighting;
-"#;
+/// Fragment resource bindings, assembled from Rust.
+fn fragment_bindings() -> String {
+    let mut out = String::new();
+    out.push_str(&binding(0, 0, "var<uniform> camera: Camera"));
+    out.push_str(&binding(
+        0,
+        2,
+        "var<storage, read> materials: array<OpenPBRMaterial>",
+    ));
+    out.push_str(&binding(0, 3, "var<uniform> lighting: Lighting"));
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -329,6 +337,6 @@ mod tests {
         assert!(src.contains(CameraUniform::WGSL_SOURCE));
         assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)));
-        assert!(src.contains(OPENPBR_MATERIAL_DECL));
+        assert!(src.contains(openpbr_material_decl().as_str()));
     }
 }

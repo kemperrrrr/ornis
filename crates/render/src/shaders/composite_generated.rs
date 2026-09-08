@@ -7,7 +7,7 @@
 //! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use super::interface::UiCompositeOut as VertexOutput;
-use super::wgsl_decl;
+use super::{binding, const_vec2_array, const_vec4_array, wgsl_decl};
 use crate::shaders::math::srgb_to_linear;
 use ornis_macros::stage;
 
@@ -45,28 +45,34 @@ fn composite_wgsl_body() -> String {
     let header = format!(
         "\n{vout}\n{rest}\n{vs}",
         vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
-        rest = COMPOSITE_HEADER_REST,
+        rest = composite_header_rest(),
         vs = composite_vs_entry::wgsl_source(),
     );
 
-    const COMPOSITE_HEADER_REST: &str = r#"@group(0) @binding(0) var pbr_tex: texture_2d<f32>;
-@group(0) @binding(1) var pbr_sampler: sampler;
-@group(0) @binding(2) var ui_tex: texture_2d<f32>;
-@group(0) @binding(3) var ui_sampler: sampler;
+    /// Composite-specific quad corners/UVs (different winding from
+    /// [`STANDARD_QUAD`](super::STANDARD_QUAD)), as Rust data.
+    const COMPOSITE_QUAD: [[f32; 4]; 4] = [
+        [-1.0, -1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+    ];
 
-const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
-);
-const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(1.0, 0.0),
-);
-"#;
+    /// Composite-specific UVs, as Rust data.
+    const COMPOSITE_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [0.0, 0.0], [1.0, 1.0], [1.0, 0.0]];
+
+    /// Bindings + quad constants, all assembled from Rust.
+    fn composite_header_rest() -> String {
+        let mut out = String::new();
+        out.push_str(&binding(0, 0, "var pbr_tex: texture_2d<f32>"));
+        out.push_str(&binding(0, 1, "var pbr_sampler: sampler"));
+        out.push_str(&binding(0, 2, "var ui_tex: texture_2d<f32>"));
+        out.push_str(&binding(0, 3, "var ui_sampler: sampler"));
+        out.push('\n');
+        out.push_str(&const_vec4_array("QUAD", &COMPOSITE_QUAD));
+        out.push_str(&const_vec2_array("UVS", &COMPOSITE_UVS));
+        out
+    }
 
     // Fragment entry: sampling + sRGB decode + mix. Translated above; the
     // kernel (same `srgb_to_linear` name in WGSL) splices in below.

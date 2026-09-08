@@ -9,70 +9,41 @@
 
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
-use super::wgsl_decl;
+use super::{
+    STANDARD_QUAD, STANDARD_UVS, binding, const_vec2_array, const_vec4_array,
+    openpbr_material_decl, wgsl_decl,
+};
+use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
 use ornis_macros::stage;
 
-/// WGSL boilerplate for deferred lighting: structs, bindings, helpers, main.
-/// Self-contained since the `#[stage]` translation; entry point name `fs_main`
-/// is kept for compatibility.
-fn lighting_wgsl_header() -> &'static str {
-    // This literal is the only `vec4<f32>` outside `*_generated.rs` that must
-    // be absent; here it is inside generated code, which is allowed by the grep rule.
-    r#"
-struct Camera {
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-};
-
-struct Light {
-    direction: vec4<f32>,
-    color: vec4<f32>,
-};
-
-struct Lighting {
-    ambient_color: vec4<f32>,
-    lights: array<Light, 4>,
-    light_count: u32,
-};
-
-struct OpenPBRMaterial {
-    base_params: vec4<f32>,
-    base_color: vec4<f32>,
-    specular_params: vec4<f32>,
-    specular_color: vec4<f32>,
-    transmission_params: vec4<f32>,
-    transmission_color: vec4<f32>,
-    transmission_scatter: vec4<f32>,
-    subsurface_params: vec4<f32>,
-    subsurface_color: vec4<f32>,
-    subsurface_radius_scale_gb: vec4<f32>,
-    fuzz_params: vec4<f32>,
-    fuzz_color: vec4<f32>,
-    coat_params: vec4<f32>,
-    coat_color: vec4<f32>,
-    coat_ior: vec4<f32>,
-    thin_film_params: vec4<f32>,
-    emission_params: vec4<f32>,
-    emission_color: vec4<f32>,
-    geometry_params: vec4<f32>,
-    geometry_params2: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<uniform> lighting: Lighting;
-@group(0) @binding(2) var<storage, read> materials: array<OpenPBRMaterial>;
-@group(0) @binding(3) var albedo_tex: texture_2d<f32>;
-@group(0) @binding(4) var normal_tex: texture_2d<f32>;
-@group(0) @binding(5) var material_id_tex: texture_2d<u32>;
-@group(0) @binding(6) var world_pos_tex: texture_2d<f32>;
-@group(0) @binding(7) var mat_params_tex: texture_2d<f32>;
-@group(0) @binding(8) var depth_tex: texture_depth_2d;
-@group(0) @binding(9) var lighting_sampler: sampler;
-
-"#
+/// WGSL boilerplate for deferred lighting: derived layouts plus resource
+/// bindings, assembled from Rust (no handwritten WGSL remains).
+fn lighting_wgsl_header() -> String {
+    let mut out = String::new();
+    out.push_str(&wgsl_decl(CameraUniform::WGSL_SOURCE));
+    out.push_str(&wgsl_decl(GpuLight::WGSL_SOURCE));
+    out.push_str(&wgsl_decl(LightingUniform::WGSL_SOURCE));
+    out.push_str(&openpbr_material_decl());
+    for (group, bind, decl) in LIGHTING_BINDINGS {
+        out.push_str(&binding(group, bind, decl));
+    }
+    out
 }
+
+/// Resource layout of the deferred-lighting pass: (group, binding, WGSL decl).
+const LIGHTING_BINDINGS: [(u32, u32, &str); 10] = [
+    (0, 0, "var<uniform> camera: Camera"),
+    (0, 1, "var<uniform> lighting: Lighting"),
+    (0, 2, "var<storage, read> materials: array<OpenPBRMaterial>"),
+    (0, 3, "var albedo_tex: texture_2d<f32>"),
+    (0, 4, "var normal_tex: texture_2d<f32>"),
+    (0, 5, "var material_id_tex: texture_2d<u32>"),
+    (0, 6, "var world_pos_tex: texture_2d<f32>"),
+    (0, 7, "var mat_params_tex: texture_2d<f32>"),
+    (0, 8, "var depth_tex: texture_depth_2d"),
+    (0, 9, "var lighting_sampler: sampler"),
+];
 
 fn lighting_fragment_kernels() -> String {
     let kernels = [
@@ -320,31 +291,26 @@ fn lighting_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> QuadVert
     };
 }
 
-/// Vertex WGSL: full-screen quad (triangle strip) — quad constants stay
-/// handwritten; the varying splices the shared `QuadVertexOutput`
-/// declaration (`HdrFragmentOut`) and the entry is translated.
+/// Vertex WGSL: full-screen quad (triangle strip) — quad constants built
+/// from the shared [`STANDARD_QUAD`]/[`STANDARD_UVS`] Rust data; the varying
+/// splices the shared `QuadVertexOutput` declaration (`HdrFragmentOut`)
+/// and the entry is translated.
 pub fn wgsl_vertex_source() -> String {
     format!(
         "\n{quad}{qo}{body}",
-        quad = WGSL_VERTEX_QUAD_UV,
+        quad = vertex_quad_uv(),
         qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
         body = lighting_vertex_entry::wgsl_source(),
     )
 }
 
-const WGSL_VERTEX_QUAD_UV: &str = r#"const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
-);
-const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(1.0, 0.0),
-);
-"#;
+/// Shared quad constants for the lighting vertex stage.
+fn vertex_quad_uv() -> String {
+    let mut out = const_vec4_array("QUAD", &STANDARD_QUAD);
+    out.push('\n');
+    out.push_str(&const_vec2_array("UVS", &STANDARD_UVS));
+    out
+}
 
 /// Static view for naga validation and snapshot tests.
 pub fn wgsl_source_static() -> String {
@@ -381,32 +347,27 @@ mod tests {
         assert!(src.contains("fn fs_main"));
     }
 
-    /// The handwritten struct blocks in the lighting header must stay
-    /// identical to the derived layouts: the field lists on the Rust mirrors
-    /// are the authority, this test is the tripwire. (The header keeps its
-    /// monolithic shape instead of splices so the 200-line evaluator body is
-    /// never retyped.)
+    /// The header splices the derived layouts (drift is impossible by
+    /// construction); this test pins their order and the 10 resource
+    /// bindings that follow them.
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
-        use super::super::{OPENPBR_MATERIAL_DECL, wgsl_decl};
+        use super::super::{openpbr_material_decl, wgsl_decl};
         use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
         let src = wgsl_source();
-        assert!(
-            src.contains(&wgsl_decl(CameraUniform::WGSL_SOURCE)),
-            "Camera block drifted from CameraUniform layout"
-        );
-        assert!(
-            src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)),
-            "Light block drifted from GpuLight layout"
-        );
-        assert!(
-            src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)),
-            "Lighting block drifted from LightingUniform layout"
-        );
-        assert!(
-            src.contains(OPENPBR_MATERIAL_DECL),
-            "OpenPBR block drifted from the shared declaration"
-        );
+        let cam = src
+            .find(&wgsl_decl(CameraUniform::WGSL_SOURCE))
+            .expect("Camera");
+        let light = src.find(&wgsl_decl(GpuLight::WGSL_SOURCE)).expect("Light");
+        let lighting = src
+            .find(&wgsl_decl(LightingUniform::WGSL_SOURCE))
+            .expect("Lighting");
+        let mat = src.find(openpbr_material_decl().as_str()).expect("OpenPBR");
+        let b9 = src
+            .find("@group(0) @binding(9) var lighting_sampler: sampler;")
+            .expect("bindings");
+        assert!(cam < light && light < lighting && lighting < mat && mat < b9);
+        assert_eq!(src.matches("@group(0) @binding(").count(), 10);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer

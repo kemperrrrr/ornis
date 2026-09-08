@@ -12,6 +12,7 @@ use super::interface::{
     HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
 };
 use super::wgsl_decl;
+use super::{STANDARD_QUAD, STANDARD_UVS, binding, const_vec2_array, const_vec4_array};
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
 use ornis_macros::stage;
@@ -38,7 +39,7 @@ fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> Composi
 pub fn wgsl_vertex_source() -> String {
     format!(
         "\n{quad}\n{vout}\n{body}",
-        quad = WGSL_VERTEX_QUAD,
+        quad = vertex_quad(),
         vout = wgsl_decl(CompositeVertexOutput::WGSL_SOURCE),
         body = composite_vertex_entry::wgsl_source(),
     )
@@ -54,7 +55,7 @@ pub fn wgsl_source() -> String {
         "\n{cam}\n{bloom}\n{head}\n{qo}\n{vs}\n{fs}\n{aces}\n{lum}",
         cam = wgsl_decl(CameraUniform::WGSL_SOURCE),
         bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
-        head = WGSL_FRAGMENT_HEAD,
+        head = fragment_head(),
         qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
         vs = hdr_fragment_vs_entry::wgsl_source(),
         fs = hdr_fragment_entry::wgsl_source(),
@@ -68,41 +69,27 @@ pub fn wgsl_source_static() -> String {
     wgsl_source()
 }
 
-const WGSL_VERTEX_QUAD: &str = r#"const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
-);
+/// Quad constants shared by both HDR assemblies, built from the shared
+/// [`STANDARD_QUAD`]/[`STANDARD_UVS`] Rust data.
+fn vertex_quad() -> String {
+    let mut out = const_vec4_array("QUAD", &STANDARD_QUAD);
+    out.push('\n');
+    out.push_str(&const_vec2_array("UVS", &STANDARD_UVS));
+    out
+}
 
-const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(1.0, 0.0),
-);
-"#;
-
-const WGSL_FRAGMENT_HEAD: &str = r#"@group(0) @binding(0) var deferred_tex: texture_2d<f32>;
-@group(0) @binding(1) var forward_tex: texture_2d<f32>;
-@group(0) @binding(2) var composite_sampler: sampler;
-@group(0) @binding(3) var bloom_tex: texture_2d<f32>;
-@group(0) @binding(4) var<uniform> bloom_params: BloomParams;
-
-const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
-);
-
-const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(1.0, 0.0),
-);
-"#;
+/// Fragment resource bindings + quad constants, assembled from Rust.
+fn fragment_head() -> String {
+    let mut out = String::new();
+    out.push_str(&binding(0, 0, "var deferred_tex: texture_2d<f32>"));
+    out.push_str(&binding(0, 1, "var forward_tex: texture_2d<f32>"));
+    out.push_str(&binding(0, 2, "var composite_sampler: sampler"));
+    out.push_str(&binding(0, 3, "var bloom_tex: texture_2d<f32>"));
+    out.push_str(&binding(0, 4, "var<uniform> bloom_params: BloomParams"));
+    out.push('\n');
+    out.push_str(&vertex_quad());
+    out
+}
 
 /// Fragment-file vertex entry (dead in practice — `fs_main` is the selected
 /// entry — but part of the legacy text). Translated like the vertex module.
