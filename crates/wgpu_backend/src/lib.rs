@@ -5,13 +5,18 @@
 //! and CPU closures and flushes them together, [`PipelineRouter`] and
 //! [`choose_platform`] map component lanes onto a CPU/GPU [`Platform`], and
 //! [`SmartBuffer`] keeps data resident on both sides with dirty-flag tracking
-//! so transfers happen only when needed. Compute pipelines are memoized by
+//! so transfers happen only when needed. [`AutoLane`] closes the automation
+//! gap: it resolves the [`Platform`] from the element count and drives the
+//! residency transitions itself, so ECS lanes execute on GPU above threshold
+//! with a CPU fallback. Compute pipelines are memoized by
 //! [`PsoCache`], while [`AutoProfiler`] calibrates the GPU/CPU crossover
 //! threshold on the local hardware. [`leak`] provides self-contained shader
 //! generation and dispatch for LEAK-style kernels.
 
 #![warn(missing_docs)]
 
+/// Automatic lane execution with policy-driven CPU/GPU residency.
+pub mod auto_lane;
 /// Buffer creation helpers bridging [`ornis_core::ComponentStore`] and `wgpu`.
 pub mod buffer;
 /// Mixed CPU/GPU command recording with a single flush point.
@@ -33,6 +38,7 @@ pub mod router;
 /// Dual-resident buffer with dirty-flag synchronization.
 pub mod smart_buffer;
 
+pub use auto_lane::AutoLane;
 pub use buffer::{create_buffer_from_slice, create_buffer_from_store};
 pub use context::WgpuContext;
 pub use dispatcher::{DispatchConfig, ExecutionTarget, Platform, choose_platform};
