@@ -232,9 +232,12 @@
    > lib 125 + все пиксельные гейты зелёные, clippy 0, fmt чисто.
    > Рукописным WGSL остались только хелперы (lighting/pbr evaluator'ы,
    > ~200 строк каждый, вызываются из entries по имени) и math-ядра.
-   > Legacy `shaders/wgsl/` больше ничем не подключается (`include_str!`
-   > не найден) — кандидаты на удаление, решение за владельцем.
-   > Остаток трека: авто-GPU ECS-путь не тронут.
+   > Legacy `shaders/wgsl/` удалён 2026-09-08 (был не подключён).
+   > Остаток трека закрыт 2026-09-08: авто-GPU ECS-путь — `AutoLane` в
+   > `ornis-wgpu-backend` (`auto_lane.rs`): платформа из element count,
+   > residency едет сам (upload-if-dirty → dispatch → flush →
+   > download-if-dirty), CPU-фолбэк без pipeline; доказан `#[gpu_pipeline]`
+   > kernel'ом, backend lib 28/28, без адаптера тесты скипаются.
 
 9. **Документация Rust-кода: массовые пропуски, но мало лжи**
 
@@ -463,9 +466,12 @@ broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 То есть нужно чётко разделять:
 
 - **работающий GPU backend / command dispatch**;
-- **не завершённую автоматическую GPU-диспетчеризацию ECS-операций из core**.
+- **автоматическую GPU-диспетчеризацию ECS-лейнов из бэкенда** (`AutoLane`,
+  2026-09-08 — политика + residency + фолбэк);
+- **всё ещё stub в core** (`GpuExecutor`/`SmartDispatcher` — CPU-fallback;
+  слой правильный: core не зависит от бэкенда).
 
-Сейчас API легко создаёт впечатление, что `SmartDispatcher` уже способен автоматически исполнять generic ECS workload на GPU. На самом деле это пока fallback на CPU.
+Сейчас API легко создаёт впечатление, что `SmartDispatcher` уже способен автоматически исполнять generic ECS workload на GPU. На самом деле это пока fallback на CPU — рабочий авто-путь живёт в `ornis-wgpu-backend::AutoLane`.
 
 Это не обязательно плохое архитектурное решение, но документация и API должны явно маркировать эту границу.
 
@@ -776,6 +782,11 @@ browser reconnect test и полноценное чтение client close frame
 > Спекулятивных scripting-интерфейсов в коде нет (фаза 6 не начата) —
 > маркировать нечего. README-строки диспетчера и SmartBuffer уже несут
 > эти оговорки.
+>
+> ✅ 2026-09-08: автоматический слой появился — `AutoLane`
+> (`ornis-wgpu-backend`, политика + residency + CPU-фолбэк, доказан
+> `#[gpu_pipeline]` kernel'ом). `SmartBuffer` остаётся ручным примитивом
+> (это честно задокументировано), core-стаб остаётся стабом.
 
 ### Приоритет 5 — documentation lint
 
