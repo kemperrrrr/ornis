@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.1588669020398743,
-  "iosp_score": 0.9222357229647631,
+  "quality_score": 0.17868384215287147,
+  "iosp_score": 0.9235820895522389,
   "violations": 128,
-  "total": 2587,
+  "total": 2640,
   "complexity_warnings": 9,
-  "magic_number_warnings": 769,
+  "magic_number_warnings": 759,
   "nesting_depth_warnings": 2,
   "function_length_warnings": 33,
   "unsafe_warnings": 11,
-  "error_handling_warnings": 92,
+  "error_handling_warnings": 91,
   "duplicate_groups": 55,
   "dead_code_warnings": 164,
   "dead_type_warnings": 8,
   "fragment_groups": 130,
-  "boilerplate_warnings": 114,
+  "boilerplate_warnings": 117,
   "srp_struct_warnings": 4,
   "srp_module_warnings": 35,
   "wildcard_import_warnings": 11,
@@ -26,10 +26,20 @@
   "tq_untested_warnings": 135,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
-  "structural_srp_warnings": 18,
+  "structural_srp_warnings": 20,
   "structural_coupling_warnings": 28,
-  "total_findings": 1813,
+  "total_findings": 1807,
   "violation_details": [
+    {
+      "name": "setup",
+      "file": "crates/core/benches/store_bench.rs",
+      "line": 8
+    },
+    {
+      "name": "player_input",
+      "file": "crates/core/src/gameplay.rs",
+      "line": 210
+    },
     {
       "name": "serve_websocket",
       "file": "crates/editor-backend/src/remote.rs",
@@ -56,106 +66,6 @@
       "line": 574
     },
     {
-      "name": "setup",
-      "file": "crates/core/benches/store_bench.rs",
-      "line": 8
-    },
-    {
-      "name": "player_input",
-      "file": "crates/core/src/gameplay.rs",
-      "line": 210
-    },
-    {
-      "name": "json_to_py",
-      "file": "crates/python/src/lib.rs",
-      "line": 274
-    },
-    {
-      "name": "py_to_json",
-      "file": "crates/python/src/lib.rs",
-      "line": 312
-    },
-    {
-      "name": "json_to_value",
-      "file": "crates/rune/src/lib.rs",
-      "line": 151
-    },
-    {
-      "name": "value_to_json",
-      "file": "crates/rune/src/lib.rs",
-      "line": 198
-    },
-    {
-      "name": "RuneScriptEngine::hot_reload",
-      "file": "crates/rune/src/lib.rs",
-      "line": 270
-    },
-    {
-      "name": "build_scene_data",
-      "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 139
-    },
-    {
-      "name": "run",
-      "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 409
-    },
-    {
-      "name": "build_scene_data",
-      "file": "crates/render/examples/render_probe.rs",
-      "line": 128
-    },
-    {
-      "name": "bench_recording",
-      "file": "crates/render/benches/recording_bench.rs",
-      "line": 56
-    },
-    {
-      "name": "Renderer3D::create_bloom_pass",
-      "file": "crates/render/src/renderer.rs",
-      "line": 1297
-    },
-    {
-      "name": "Renderer3D::resize",
-      "file": "crates/render/src/renderer.rs",
-      "line": 1438
-    },
-    {
-      "name": "RenderFrame3D::new_with",
-      "file": "crates/render/src/frame_exec.rs",
-      "line": 462
-    },
-    {
-      "name": "extract_render_data",
-      "file": "crates/render/src/extraction.rs",
-      "line": 164
-    },
-    {
-      "name": "normalized_rotation",
-      "file": "crates/render/src/extraction.rs",
-      "line": 283
-    },
-    {
-      "name": "OrbitCamera::from_desc",
-      "file": "crates/render/src/camera.rs",
-      "line": 38
-    },
-    {
-      "name": "OrbitCamera::position",
-      "file": "crates/render/src/camera.rs",
-      "line": 58
-    },
-    {
-      "name": "collect_pat_idents",
-      "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 231
-    },
-    {
-      "name": "LoopRewriter<'_>::plan",
-      "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 444
-    },
-    {
       "name": "parse_binding_type",
       "file": "crates/macros/src/gpu_pipeline.rs",
       "line": 73
@@ -164,16 +74,6 @@
       "name": "parse_binding_group",
       "file": "crates/macros/src/gpu_pipeline.rs",
       "line": 128
-    },
-    {
-      "name": "WgslGen::expr",
-      "file": "crates/macros/src/wgsl.rs",
-      "line": 14
-    },
-    {
-      "name": "if_expr",
-      "file": "crates/macros/src/wgsl.rs",
-      "line": 545
     },
     {
       "name": "TypeAnalyzer::visit_type",
@@ -201,39 +101,49 @@
       "line": 644
     },
     {
-      "name": "AutoProfiler::load_or_calibrate",
-      "file": "crates/wgpu_backend/src/profiler.rs",
-      "line": 57
+      "name": "collect_pat_idents",
+      "file": "crates/macros/src/smart_pipeline.rs",
+      "line": 231
+    },
+    {
+      "name": "LoopRewriter<'_>::plan",
+      "file": "crates/macros/src/smart_pipeline.rs",
+      "line": 444
+    },
+    {
+      "name": "WgslGen::expr",
+      "file": "crates/macros/src/wgsl.rs",
+      "line": 14
+    },
+    {
+      "name": "if_expr",
+      "file": "crates/macros/src/wgsl.rs",
+      "line": 545
+    },
+    {
+      "name": "setup_islands_grid",
+      "file": "crates/physics/benches/solver_bench.rs",
+      "line": 12
+    },
+    {
+      "name": "setup_big_stack",
+      "file": "crates/physics/benches/solver_bench.rs",
+      "line": 39
     },
     {
       "name": "setup_body_grid",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 23
+      "file": "crates/physics/benches/solver_bench.rs",
+      "line": 61
     },
     {
-      "name": "setup_giant_floor",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 56
+      "name": "settled_body_grid",
+      "file": "crates/physics/benches/solver_bench.rs",
+      "line": 119
     },
     {
-      "name": "setup_sparse",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 80
-    },
-    {
-      "name": "setup_islands",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 100
-    },
-    {
-      "name": "setup_heterogeneous",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 126
-    },
-    {
-      "name": "run_probe",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 174
+      "name": "bench_body_scaling",
+      "file": "crates/physics/benches/solver_bench.rs",
+      "line": 162
     },
     {
       "name": "setup_islands_grid",
@@ -266,59 +176,39 @@
       "line": 281
     },
     {
-      "name": "setup_islands_grid",
-      "file": "crates/physics/benches/solver_bench.rs",
-      "line": 12
-    },
-    {
-      "name": "setup_big_stack",
-      "file": "crates/physics/benches/solver_bench.rs",
-      "line": 39
-    },
-    {
       "name": "setup_body_grid",
-      "file": "crates/physics/benches/solver_bench.rs",
-      "line": 61
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 23
     },
     {
-      "name": "settled_body_grid",
-      "file": "crates/physics/benches/solver_bench.rs",
-      "line": 119
+      "name": "setup_giant_floor",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 56
     },
     {
-      "name": "bench_body_scaling",
-      "file": "crates/physics/benches/solver_bench.rs",
-      "line": 162
+      "name": "setup_sparse",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 80
+    },
+    {
+      "name": "setup_islands",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 100
+    },
+    {
+      "name": "setup_heterogeneous",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 126
+    },
+    {
+      "name": "run_probe",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 174
     },
     {
       "name": "RigidBody::build",
       "file": "crates/physics/src/body.rs",
       "line": 88
-    },
-    {
-      "name": "GpuBatch::fill_lane",
-      "file": "crates/physics/src/gpu.rs",
-      "line": 216
-    },
-    {
-      "name": "world_inertia_matrix",
-      "file": "crates/physics/src/gpu.rs",
-      "line": 373
-    },
-    {
-      "name": "pack_single_point_batches",
-      "file": "crates/physics/src/gpu.rs",
-      "line": 857
-    },
-    {
-      "name": "Shape::aabb",
-      "file": "crates/physics/src/shape.rs",
-      "line": 46
-    },
-    {
-      "name": "Shape::inertia",
-      "file": "crates/physics/src/shape.rs",
-      "line": 84
     },
     {
       "name": "Tree::insert_leaf",
@@ -369,6 +259,121 @@
       "name": "DynamicAabbTree::query_dynamic",
       "file": "crates/physics/src/broadphase_tree.rs",
       "line": 356
+    },
+    {
+      "name": "mul_inv_inertia",
+      "file": "crates/physics/src/engine.rs",
+      "line": 157
+    },
+    {
+      "name": "effective_mass",
+      "file": "crates/physics/src/engine.rs",
+      "line": 178
+    },
+    {
+      "name": "k_entry",
+      "file": "crates/physics/src/engine.rs",
+      "line": 215
+    },
+    {
+      "name": "apply_impulse",
+      "file": "crates/physics/src/engine.rs",
+      "line": 299
+    },
+    {
+      "name": "apply_angular_impulse",
+      "file": "crates/physics/src/engine.rs",
+      "line": 354
+    },
+    {
+      "name": "apply_positional_rotation",
+      "file": "crates/physics/src/engine.rs",
+      "line": 370
+    },
+    {
+      "name": "apply_positional_impulse",
+      "file": "crates/physics/src/engine.rs",
+      "line": 399
+    },
+    {
+      "name": "solve_normal_block",
+      "file": "crates/physics/src/engine.rs",
+      "line": 431
+    },
+    {
+      "name": "commit_active_set",
+      "file": "crates/physics/src/engine.rs",
+      "line": 606
+    },
+    {
+      "name": "BuiltinPhysicsEngine::integrate_velocities",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2350
+    },
+    {
+      "name": "BuiltinPhysicsEngine::integrate_positions",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2380
+    },
+    {
+      "name": "BuiltinPhysicsEngine::solve_continuous",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2409
+    },
+    {
+      "name": "BuiltinPhysicsEngine::raycast_body",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2450
+    },
+    {
+      "name": "swept_orientation",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2512
+    },
+    {
+      "name": "swept_distance",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2518
+    },
+    {
+      "name": "swept_shape_overlaps",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2538
+    },
+    {
+      "name": "first_angular_overlap_fraction",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2631
+    },
+    {
+      "name": "find_angular_continuous_hit",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2701
+    },
+    {
+      "name": "ray_capsule_cylinder_hit",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2929
+    },
+    {
+      "name": "ray_capsule_hit",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2969
+    },
+    {
+      "name": "BuiltinPhysicsEngine::step",
+      "file": "crates/physics/src/engine.rs",
+      "line": 2990
+    },
+    {
+      "name": "BuiltinPhysicsEngine::add_joint",
+      "file": "crates/physics/src/engine.rs",
+      "line": 3208
+    },
+    {
+      "name": "BuiltinPhysicsEngine::raycast",
+      "file": "crates/physics/src/engine.rs",
+      "line": 3288
     },
     {
       "name": "apply_warm_start",
@@ -501,6 +506,31 @@
       "line": 324
     },
     {
+      "name": "GpuBatch::fill_lane",
+      "file": "crates/physics/src/gpu.rs",
+      "line": 216
+    },
+    {
+      "name": "world_inertia_matrix",
+      "file": "crates/physics/src/gpu.rs",
+      "line": 373
+    },
+    {
+      "name": "pack_single_point_batches",
+      "file": "crates/physics/src/gpu.rs",
+      "line": 857
+    },
+    {
+      "name": "Shape::aabb",
+      "file": "crates/physics/src/shape.rs",
+      "line": 46
+    },
+    {
+      "name": "Shape::inertia",
+      "file": "crates/physics/src/shape.rs",
+      "line": 84
+    },
+    {
       "name": "WideBatch::world_inertia",
       "file": "crates/physics/src/wide.rs",
       "line": 155
@@ -521,144 +551,89 @@
       "line": 358
     },
     {
-      "name": "mul_inv_inertia",
-      "file": "crates/physics/src/engine.rs",
-      "line": 157
+      "name": "json_to_py",
+      "file": "crates/python/src/lib.rs",
+      "line": 274
     },
     {
-      "name": "effective_mass",
-      "file": "crates/physics/src/engine.rs",
-      "line": 178
+      "name": "py_to_json",
+      "file": "crates/python/src/lib.rs",
+      "line": 312
     },
     {
-      "name": "k_entry",
-      "file": "crates/physics/src/engine.rs",
-      "line": 215
+      "name": "bench_recording",
+      "file": "crates/render/benches/recording_bench.rs",
+      "line": 56
     },
     {
-      "name": "apply_impulse",
-      "file": "crates/physics/src/engine.rs",
-      "line": 299
+      "name": "build_scene_data",
+      "file": "crates/render/examples/frame3d_probe.rs",
+      "line": 139
     },
     {
-      "name": "apply_angular_impulse",
-      "file": "crates/physics/src/engine.rs",
-      "line": 354
+      "name": "run",
+      "file": "crates/render/examples/frame3d_probe.rs",
+      "line": 409
     },
     {
-      "name": "apply_positional_rotation",
-      "file": "crates/physics/src/engine.rs",
-      "line": 370
+      "name": "build_scene_data",
+      "file": "crates/render/examples/render_probe.rs",
+      "line": 128
     },
     {
-      "name": "apply_positional_impulse",
-      "file": "crates/physics/src/engine.rs",
-      "line": 399
+      "name": "OrbitCamera::from_desc",
+      "file": "crates/render/src/camera.rs",
+      "line": 38
     },
     {
-      "name": "solve_normal_block",
-      "file": "crates/physics/src/engine.rs",
-      "line": 431
+      "name": "OrbitCamera::position",
+      "file": "crates/render/src/camera.rs",
+      "line": 58
     },
     {
-      "name": "commit_active_set",
-      "file": "crates/physics/src/engine.rs",
-      "line": 606
+      "name": "extract_render_data",
+      "file": "crates/render/src/extraction.rs",
+      "line": 219
     },
     {
-      "name": "BuiltinPhysicsEngine::integrate_velocities",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2350
+      "name": "normalized_rotation",
+      "file": "crates/render/src/extraction.rs",
+      "line": 342
     },
     {
-      "name": "BuiltinPhysicsEngine::integrate_positions",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2380
+      "name": "RenderFrame3D::new_with",
+      "file": "crates/render/src/frame_exec.rs",
+      "line": 531
     },
     {
-      "name": "BuiltinPhysicsEngine::solve_continuous",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2409
+      "name": "Renderer3D::create_bloom_pass",
+      "file": "crates/render/src/renderer.rs",
+      "line": 1297
     },
     {
-      "name": "BuiltinPhysicsEngine::raycast_body",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2450
+      "name": "Renderer3D::resize",
+      "file": "crates/render/src/renderer.rs",
+      "line": 1438
     },
     {
-      "name": "swept_orientation",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2512
+      "name": "json_to_value",
+      "file": "crates/rune/src/lib.rs",
+      "line": 151
     },
     {
-      "name": "swept_distance",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2518
+      "name": "value_to_json",
+      "file": "crates/rune/src/lib.rs",
+      "line": 198
     },
     {
-      "name": "swept_shape_overlaps",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2538
+      "name": "RuneScriptEngine::hot_reload",
+      "file": "crates/rune/src/lib.rs",
+      "line": 270
     },
     {
-      "name": "first_angular_overlap_fraction",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2631
-    },
-    {
-      "name": "find_angular_continuous_hit",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2701
-    },
-    {
-      "name": "ray_capsule_cylinder_hit",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2929
-    },
-    {
-      "name": "ray_capsule_hit",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2969
-    },
-    {
-      "name": "BuiltinPhysicsEngine::step",
-      "file": "crates/physics/src/engine.rs",
-      "line": 2990
-    },
-    {
-      "name": "BuiltinPhysicsEngine::add_joint",
-      "file": "crates/physics/src/engine.rs",
-      "line": 3208
-    },
-    {
-      "name": "BuiltinPhysicsEngine::raycast",
-      "file": "crates/physics/src/engine.rs",
-      "line": 3288
-    },
-    {
-      "name": "quality",
-      "file": "xtask/src/quality.rs",
-      "line": 590
-    },
-    {
-      "name": "GameApp::showcase_engine",
-      "file": "src/main.rs",
-      "line": 250
-    },
-    {
-      "name": "GameApp::process_remote_commands",
-      "file": "src/main.rs",
-      "line": 308
-    },
-    {
-      "name": "GameApp::window_event",
-      "file": "src/main.rs",
-      "line": 456
-    },
-    {
-      "name": "GameApp::about_to_wait",
-      "file": "src/main.rs",
-      "line": 584
+      "name": "AutoProfiler::load_or_calibrate",
+      "file": "crates/wgpu_backend/src/profiler.rs",
+      "line": 57
     },
     {
       "name": "physics_body_for",
@@ -669,6 +644,31 @@
       "name": "normalized_rotation",
       "file": "src/engine_runtime.rs",
       "line": 311
+    },
+    {
+      "name": "GameApp::showcase_engine",
+      "file": "src/main.rs",
+      "line": 252
+    },
+    {
+      "name": "GameApp::process_remote_commands",
+      "file": "src/main.rs",
+      "line": 310
+    },
+    {
+      "name": "GameApp::window_event",
+      "file": "src/main.rs",
+      "line": 458
+    },
+    {
+      "name": "GameApp::about_to_wait",
+      "file": "src/main.rs",
+      "line": 586
+    },
+    {
+      "name": "quality",
+      "file": "xtask/src/quality.rs",
+      "line": 590
     }
   ]
 }

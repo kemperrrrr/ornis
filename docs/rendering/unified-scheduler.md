@@ -623,6 +623,8 @@ debug-only по умолчанию). Тесты:
 `GpuDevice`/`GpuQueue`/`GpuSurface`/`GpuSurfaceState` + `GpuFrameState{Renderer3D, RenderFrame3D, Mesh}` как ECS-ресурсы
 (`crates/render/src/gpu_resources.rs`): `install_gpu_resources(device, queue, surface, surface_state, frame_state)` вставляет их в `World` и добавляет `RenderSubmit` + `RenderPresent`.
 
+Модуль `gpu_resources` — native-only: `#[cfg(not(target_arch = "wasm32"))]` в `render/src/lib.rs` (2026-09-07) — wgpu web-типы `!Send`/`!Sync` (`Rc`/JS-колбэки), а `World::insert`/`Resources::get` требуют `Send + Sync`; wasm-путь рендерит через `RenderWorld` extraction + `ornis-wasm`, как и раньше.
+
 - `RenderSubmit` (`reads Mutex<RenderExtracted>/Mutex<OrbitCamera>/GpuDevice/GpuQueue/GpuSurfaceState, writes Mutex<GpuFrameState>`): пересоздаёт `Mesh` по `mesh_params`, считает `view_proj` из `OrbitCamera + GpuSurfaceState.size`, `set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
 - `RenderPresent` (`reads GpuDevice/GpuQueue/GpuSurface/GpuSurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`): `surface.get_current_texture → create_view → frame_plan.render → queue.submit/present` (основание — `RenderContext` из `render_backend.rs`). `Outdated`/`Lost` — реконфигурирует `Surface` на месте; `Occluded`/`Timeout`/`Validation` — пропускает кадр; `Suboptimal` как `Success`.
 
@@ -771,7 +773,7 @@ debug-only по умолчанию). Тесты:
 `Schedule`. Пересмотр — только со вторым живым потребителем
 data-фронтенда (фаза 6) или сменой ключа пула.
 
-## S5e + Extract-free — декомпозиция (2026-09-07, открыто)
+## S5e + Extract-free — декомпозиция (2026-09-07, закрыто; E1–E2, X1–X4, E3 ✅; CI-гейт зелёный — `a67fa87`)
 
 Честная оценка: это месяцы, не один коммит. Ниже — фазы с собственными
 гейтами; каждая фаза — самостоятельный выигрыш и откатываема. База:
@@ -782,43 +784,180 @@ submit в порядке регистрации.
 
 ### S5e: пассы как обычные `Schedule`-системы
 
-- **E1 — пасс как `System`-адаптер**: каждая `FramePass`-реализация
+- **E1 ✅ — пасс как `System`-адаптер**: каждая `FramePass`-реализация
   получает тонкий `System`-близнец с тем же `AccessDesc` (проекция
   `ResourceId`-доступов в `SystemAccess` через реестр `SystemSet`).
   Исполнение — уровни `Schedule`, запись — через borrowed encoder
   (как сегодня `Frame { encoder }`). Гейт: уровни адаптеров ==
   `FrameLayout::levels()` (расширение `scheduler_parity.rs`), probe
   0 отличий.
-- **E2 — encoder-контекст как frame-ресурс**: `RenderPresent` пишет
+- **E2 ✅ — encoder-контекст как frame-ресурс**: `RenderPresent` пишет
   per-pass/per-level encoders, завершённые буферы складывает в
   `FrameCommandBuffers`, отдельная система сливает их в порядке
   регистрации (механика уже проверена `execute_parallel`).
   Гейт: sequential vs schedule-driven пути пиксельно идентичны.
-- **E3 — пул/бюджет остаются render-side**: `TransientPool`-компиляция
+- **E3 ✅ — пул/бюджет остаются render-side**: `TransientPool`-компиляция
   (lifetime/слоты/бюджет) не переезжает в `Schedule` — `Schedule`
   потребляет только уровни, пул остаётся проекцией (решение S6 выше).
-  Гейт: golden-тесты слотов/бюджета зелёные без изменений.
+  No-op: `transient_pool.rs` не менялся, golden-тесты слотов/бюджета
+  зелёные без изменений.
 
 ### Extract-free: от `Mutex<RenderExtracted>` к прямым `Res`/лейнам
 
-- **X1 — upload-системы читают лейны**: `RenderSubmit` сегодня клонирует
+- **X1 ✅ — upload-системы читают лейны**: `RenderSubmit` сегодня клонирует
   `Mutex<RenderExtracted>`; перевести `upload_instances/upload_materials`
   на прямое чтение `TransformDesc`/`MeshDesc`/`MaterialDesc`-лейн
   (`reads_lane`, канон S5d). Гейт: `extract_render_data` остаётся
   оракулом — прямое чтение побайтово равно снапшоту.
-- **X2 — меш как ресурс**: `mesh_params`/`Mesh` пересоздание — из лейн,
+- **X2 ✅ — меш как ресурс**: `mesh_params`/`Mesh` пересоздание — из лейн,
   а не из клона снапшота. Гейт: probe сцен с разной тесселяцией.
-- **X3 — свет/камера как ресурсы**: `OrbitCamera` уже `Mutex`-ресурс;
+- **X3 ✅ — свет/камера как ресурсы**: `OrbitCamera` уже `Mutex`-ресурс;
   захардкоженные `set_lights` в `RenderSubmit` перевести на `LightDesc`
   из мира. Гейт: probe освещения 0 отличий.
-- **X4 — удаление `Mutex<RenderExtracted>`**: последний читатель
+- **X4 ✅ — удаление `Mutex<RenderExtracted>`**: последний читатель
   мигрирует, тип удаляется, `RenderWorld` остаётся только
   сцено-загрузчиком (serialization boundary), не кадровым снапшотом.
   Гейт: `grep RenderExtracted` пуст вне истории; весь `cargo test
   -p ornis-render` зелен.
 
 Порядок: E1 → E2 → X1 → X2 → X3 → E3/X4. E1 разблокирует всё остальное;
-X1–X3 независимы между собой после E2.
+X1–X3 независимы между собой после E2. Все пункты закрыты (2026-09-07).
+
+### X4 — удаление `Mutex<RenderExtracted>` ✅ (2026-09-07)
+
+Закрыт шестым шагом декомпозиции — Extract-free завершён.
+
+- `RenderExtracted` переименован в `FrameUpload` (payload прямого
+  чтения, не снапшот): снапшот-система `RenderExtract`, ресурс
+  `Mutex<RenderExtracted>` и `install_render_extract` удалены;
+  `RenderWorld::extracted()` → `frame_upload()` (прямой
+  `extract_render_data` на сторе мира). `RenderWorld` — только
+  сцено-загрузчик (serialization boundary) + хост `Engine`-кадра.
+- `RenderPresent` (последний читатель) мигрировал: instance count —
+  прямой `extract_render_data(store)`, в access — `SmartStore` + три
+  `reads_lane` (как у `RenderSubmit`/`RenderMesh`).
+- wasm: `GpuScene.extracted: FrameUpload`, `build_gpu_scene` и тест
+  контракта — на `frame_upload()`; в расписании `RenderWorld` больше
+  нет систем (`schedule().len() == 0`).
+- Гейт: `grep RenderExtracted` — пуст (вне истории/доки); весь
+  `cargo test -p ornis-render` должен быть зелёным (CI).
+
+### X3 — свет как ресурс ✅ (2026-09-07)
+
+Закрыт пятым шагом декомпозиции. Камера уже ресурс (`Mutex<OrbitCamera>`
+с S7); мигрировал свет.
+
+- Новый ресурс `RenderLights` (`extraction.rs`): ambient + `Vec<LightDesc>`.
+  Пишется сцено-загрузчиком между кадрами (`RenderWorld::replace_scene`
+  публикует `scene.lights`/`scene.ambient`), в расписании только читается —
+  без `Mutex`, как `GpuSurfaceState`. Дефолт — legacy-риг через `const`
+  (тот самый, что был захардкожен в `RenderSubmit`), `install_gpu_resources`
+  вставляет его: рантайм без сцены рендерит ровно как раньше.
+- `RenderLights::set_lights_args()` — единственная конверсия
+  `LightDesc → (direction, intensity, color)` (канон для системы и тестов);
+  wasm (`build_gpu_scene`) мигрировал на неё — inline-`match` в
+  `ornis-wasm` удалён.
+- `RenderSubmit`: `reads RenderLights`, хардкод `set_lights` удалён.
+- Гейты: юнит (дефолт == legacy-аргументы побайтово; `replace_scene`
+  публикует свет сцены) + пиксельный probe `tests/light_resource.rs` на
+  общем GPU-харнессе: рендер с legacy-аргументами vs ресурс через
+  `set_lights_args` — 0 отличий.
+
+### X2 — меш как ресурс ✅ (2026-09-07)
+
+Закрыт четвёртым шагом декомпозиции.
+
+- `Mesh` + кеш тесселяции вынесены из `GpuFrameState` в отдельный
+  ресурс `Mutex<GpuMesh>`: пересоздание меша больше не держит лок
+  renderer'а/frame-plan'а. Порядок локов задокументирован: `GpuMesh`
+  раньше `GpuFrameState` (иначе его держит только `RenderPresent`).
+- Новая система `RenderMesh` (`install_render_mesh`, X2): читает те же
+  три лейна (`reads_lane`), пишет только `Mutex<GpuMesh>`; критерий —
+  `max_mesh_params` из `extraction.rs`: максимум тесселяции по ПОЛНЫМ
+  сущностям с полом (32, 24) — канон выделен из `extract_render_data`
+  (не клона снапшота). `RenderSubmit` больше не трогает меш (и не
+  читает `GpuDevice`); `RenderPresent` берёт меш из `GpuMesh`-ресурса
+  (RaW после `RenderMesh`), unsafe-блок сузился до renderer+frame3d.
+- Гейты: canon-tie в `extraction.rs` (`max_mesh_params` ==
+  `extract_render_data().mesh_params`; неполная сущность 96/64 не
+  двигает максимум) + probe-тест `tests/mesh_resource.rs` на общем
+  GPU-харнессе — три сцены (48/32 → +16/12 без изменений → +64/40 с
+  пересозданием), vertex/index counts сверяются с эталонной сферой.
+
+### X1 — upload-системы читают лейны напрямую ✅ (2026-09-07)
+
+Закрыт третьим шагом декомпозиции (первый Extract-free).
+
+- `RenderSubmit` больше не читает `Mutex<RenderExtracted>`: данные
+  материалов/инстансов — прямое чтение `TransformDesc`/`MeshDesc`/
+  `MaterialDesc`-лейн (`reads_lane`, канон S5d) через тот же канон
+  `extract_render_data`, что и у оракула. Зависимость от пишущих лейны
+  систем — RaW по лейнам (тоньше RaW по всему снапшоту): upload стоит
+  после реальных писателей, но в одном уровне с другими читателями.
+- `RenderExtract`/`Mutex<RenderExtracted>` были оракулом X1–X3: прямой
+  `extract_render_data(store)` после `run_frame` побайтово равен
+  снапшоту, опубликованному системой (материалы — по байтам `bytemuck`,
+  инстансы — по полям; сцена с тремя видами материалов и разной
+  тесселяцией). Последний читатель снапшота — `RenderPresent`
+  (instance count) — мигрировал в X4, после чего оракул удалён вместе
+  с системой.
+- Корневой showcase (`src/main.rs`) мигрировал тем же шагом:
+  `GpuMesh` — отдельный ресурс (7-й аргумент `install_gpu_resources`),
+  `GpuFrameState` — только `renderer` + `frame3d`; тесты
+  `engine_runtime.rs` читают лейны напрямую (`extract_render_data`
+  на сторе после `run_frame`), имя
+  `physics_sync_output_is_visible_to_render_lane_reads` отражает новый
+  контракт (видимость выхода физики прямому читателю лейна).
+
+### E2 — encoder-контекст как frame-ресурс ✅ (2026-09-07)
+
+Закрыт вторым шагом декомпозиции.
+
+- `FrameExecutor::record_in_order` — последовательная запись механики,
+  уже доказанной `execute_parallel`: по энкодеру на pass/level,
+  завершённые `CommandBuffer` уходят в общий sink в порядке регистрации.
+- `RenderFrame3D::render_to_buffers` — вторая форма записи поверх
+  общего `projected_order`: без заимствованного `RenderContext` и без
+  submit. Заимствованный `render()` остаётся для wasm/examples/benches.
+- Нативный `RenderPresent` больше не субмитит сам: acquired frame
+  уходит в `FramePresentTarget`, записи — в `FrameCommandBuffers`
+  (оба — `Mutex`-handover, `Send + Sync`, чтобы жить в `Resources`).
+- `RenderFlush` (регистрация следом → WaW по обоим handover-ресурсам)
+  делает один ordered submit (`FrameCommandBuffers::flush` = drain +
+  submit; система не видит internals) и present.
+- Гейт — третий тест на общем GPU-харнессе (`schedule_render.rs`):
+  sequential reference vs `render_to_buffers` + ordered flush —
+  пиксельно идентичны.
+
+### E1 — пасс как `System`-адаптер ✅ (2026-09-07)
+
+Закрыт первым шагом декомпозиции. Мост `crates/render/src/schedule_bridge.rs`:
+
+- `try_project_schedule(&SystemSet) -> Schedule` — каждый включённый пасс
+  становится `PassSystem`-близнецом: то же имя, доступы спроецированы из
+  `ResourceId` в `TypeId` через реестр (`register_resource::<R>`).
+  Disabled-пассы и их рёбра выпадают ровно как в `layout_levels`.
+  Нетипизированный ресурс (`create_resource` без типа) — честный
+  `ProjectionError::UntypedResource`: ядру нечего зеркалить.
+- `run` у близнеца — no-op по дизайну: E1 исполняет пассы через
+  borrowed-encoder dispatch, близнец управляет levelling'ом. Запись внутрь
+  систем через frame-ресурс — это E2 (`FrameCommandBuffers`), не этот шаг.
+- `RenderFrame3D::render_schedule` — рендер кадра, ordenированный
+  уровнями спроецированного `Schedule` (flatten уровней →
+  `FrameExecutor::execute_in_order`, тот же `dispatch_pass`, что у
+  sequential/parallel путей); debug-assert на каждый кадр проверяет
+  уровни == `FrameLayout::levels()`. Fallible: возвращает
+  `ProjectionError` при нетипизированном ресурсе. Проекция строится на
+  вызов — E2 поднимет владение schedule в рантайм.
+
+Гейты: `scheduler_parity.rs` расширен каноном E1 (проекция ==
+`FrameLayout::levels()` на цепочках/shared-levels/edge-splits,
+disabled-culling, untyped-error; плюс production-матрица Technique×bloom
+в юнит-тестах моста) и `tests/schedule_render.rs` — пиксельный паритет
+schedule-driven vs sequential на lavapipe (0 отличий). GPU-harness двух
+гейтов (S5b и E1) дедуплицирован в `tests/common/mod.rs` — один
+headless-сценарий, мишени и readback вместо копий в каждом гейте
+(ratchet-clean по findings).
 
 ## WASD-мост: фикс шва sync + порядок (2026-09-06)
 

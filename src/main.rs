@@ -218,7 +218,7 @@ impl GameApp {
         // S7: GPU состояние — ресурс Engine, RenderSubmit/RenderPresent в schedule.
         {
             use ornis_render::gpu_resources::{
-                GpuFrameState, GpuSurfaceState, install_gpu_resources,
+                GpuFrameState, GpuMesh, GpuSurfaceState, install_gpu_resources,
             };
             install_gpu_resources(
                 render_world.engine_mut(),
@@ -232,8 +232,10 @@ impl GameApp {
                 GpuFrameState {
                     renderer: renderer3d,
                     frame3d,
+                },
+                GpuMesh {
                     mesh: sphere_mesh,
-                    mesh_params: (32, 24),
+                    params: (32, 24),
                 },
             );
         }
@@ -282,7 +284,7 @@ impl GameApp {
                 );
             }
             // Hidden static floor: it has a physics component but no render
-            // components, so it does not enter RenderExtracted.
+            // components, so it does not enter the frame upload.
             let floor = store.create_entity();
             store.insert(
                 floor,

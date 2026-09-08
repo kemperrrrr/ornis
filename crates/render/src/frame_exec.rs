@@ -17,8 +17,11 @@ use crate::frame_passes::{
     FromForward, GbufferPass, Hdr, HdrFwd, LightingPass, MaterialId, MaterialParams, Normal,
     OwnsDepth, SharedDepth, Target, WorldPosition,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::gpu_resources::FrameCommandBuffers;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
+use crate::schedule_bridge::ProjectionError;
 use crate::system::{Frame, SystemSet};
 use crate::transient_pool::{
     Budget, FrameLayout, PassLayout, ResourceId, ResourceLayout, TransientPool,
@@ -125,6 +128,72 @@ impl FrameExecutor {
                     index,
                 },
             );
+        }
+    }
+
+    /// E1 (S5e): sequential execution in an explicitly given pass order —
+    /// the flattened levels of a projected `core::Schedule`
+    /// ([`crate::schedule_bridge`]) — recording onto the caller's encoder.
+    /// The ordered sibling of [`execute`](Self::execute).
+    pub fn execute_in_order<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        layout: &'a FrameLayout,
+        order: &[usize],
+        run: impl FnMut(&mut wgpu::CommandEncoder, PassViews<'a>),
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        let mut run = run;
+        for &index in order {
+            run(
+                encoder,
+                PassViews {
+                    layout,
+                    pool,
+                    externals,
+                    index,
+                },
+            );
+        }
+    }
+
+    /// E2 (S5e): per-pass encoders in an explicitly given pass order —
+    /// no caller encoder and no submit: every pass records into its own
+    /// encoder and the finished buffers are pushed into `sink` in that
+    /// order, ready for one ordered submit by the caller's flush step
+    /// (the encoder-as-frame-resource handover; the mechanics are the
+    /// sequential form of [`execute_parallel`](Self::execute_parallel)).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn record_in_order<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        layout: &'a FrameLayout,
+        order: &[usize],
+        sink: &Mutex<Vec<wgpu::CommandBuffer>>,
+        mut run: impl FnMut(usize, &PassViews<'a>, &mut wgpu::CommandEncoder),
+    ) {
+        self.ensure_pool(device, layout);
+        let pool = &self.pool;
+        let externals = &self.external_views;
+        for &index in order {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            run(
+                index,
+                &PassViews {
+                    layout,
+                    pool,
+                    externals,
+                    index,
+                },
+                &mut encoder,
+            );
+            sink.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(encoder.finish());
         }
     }
 
@@ -641,31 +710,202 @@ impl RenderFrame3D {
         // declaration generation), so frames share it without cloning.
         let layout = executor.ensure_layout(systems);
         executor.set_external_view(ids.target, target.clone());
-        let dispatch = |_index: usize, pass: &PassViews<'_>, enc: &mut wgpu::CommandEncoder| {
-            // S2b: every pass is a typed system (conditional passes
-            // are mode families); dispatch by original PassId.
-            let mut frame = Frame {
-                device,
-                queue,
-                encoder: enc,
-                renderer,
-                mesh,
-                instance_count,
-            };
-            if !systems.run_pass(pass.pass().id, pass, &mut frame) {
-                unreachable!(
-                    "render frame 3d: pass '{}' is not a typed system",
-                    pass.pass().name
-                );
-            }
+        let dispatch = PassDispatch {
+            systems,
+            device,
+            queue,
+            renderer,
+            mesh,
+            instance_count,
         };
         if *parallel_recording {
-            executor.execute_parallel(device, queue, &layout, dispatch);
+            executor.execute_parallel(device, queue, &layout, |_index, pass, enc| {
+                dispatch_pass(&dispatch, enc, pass);
+            });
         } else {
             executor.execute(device, encoder, &layout, |encoder, pass| {
-                dispatch(0, &pass, encoder);
+                dispatch_pass(&dispatch, encoder, &pass);
             });
         }
+    }
+
+    /// E1 (S5e): renders one frame driven by the projected core
+    /// `Schedule` — every pass is a `PassSystem` declaration twin
+    /// ([`crate::schedule_bridge`]), levels come from the unified
+    /// scheduler engine, and the dispatch records through the caller's
+    /// borrowed encoder exactly like the sequential path. Pixel-identical
+    /// to [`render`](Self::render) by construction: projected levels are
+    /// pinned equal to `FrameLayout::levels()` (parity canon,
+    /// `scheduler_parity`), and a debug assertion re-checks it per frame.
+    ///
+    /// The projection is built per call in E1; E2's
+    /// [`render_to_buffers`](Self::render_to_buffers) supersedes this on
+    /// the native runtime path — this method stays the borrowed-encoder
+    /// contract for callers that own the submit themselves.
+    ///
+    /// # Errors
+    /// Returns the [`ProjectionError`] of
+    /// [`schedule_bridge::try_project_schedule`](crate::schedule_bridge::try_project_schedule)
+    /// when a pass touches a resource without a typed registry identity.
+    pub fn render_schedule(
+        &mut self,
+        context: crate::render_backend::RenderContext<'_>,
+        renderer: &Renderer3D,
+        mesh: &Mesh,
+        instance_count: u32,
+    ) -> Result<(), ProjectionError> {
+        let Self {
+            executor,
+            ids,
+            systems,
+            ..
+        } = self;
+        let (layout, order) = Self::projected_order(executor, systems)?;
+        executor.set_external_view(ids.target, context.target.clone());
+        let dispatch = PassDispatch {
+            systems,
+            device: context.device,
+            queue: context.queue,
+            renderer,
+            mesh,
+            instance_count,
+        };
+        executor.execute_in_order(
+            context.device,
+            context.encoder,
+            &layout,
+            &order,
+            |encoder, pass| dispatch_pass(&dispatch, encoder, &pass),
+        );
+        Ok(())
+    }
+
+    /// E2 (S5e): renders one frame with the encoder context as frame
+    /// data instead of a borrowed parameter: the passes, ordered by the
+    /// projected `Schedule` levels, each record into their own encoder
+    /// and the finished buffers land in `buffers` in registration order.
+    /// No submit happens here — a separate flush step
+    /// (`FrameCommandBuffers::flush`, the runtime's `RenderFlush` system)
+    /// owns the ordered queue handover, so recording and submit compose
+    /// inside one schedule.
+    ///
+    /// Pixel-identical to [`render`](Self::render): per-pass encoders +
+    /// one ordered submit is the proven `execute_parallel` mechanics
+    /// (pinned by the E2 gate in `tests/schedule_render.rs`).
+    /// Native-only: the handover resource requires wgpu
+    /// `CommandBuffer: Send` (the web backend's is not).
+    ///
+    /// # Errors
+    /// Returns the [`ProjectionError`] of the schedule projection when a
+    /// pass touches a resource without a typed registry identity.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_to_buffers(
+        &mut self,
+        context: BufferRenderContext<'_>,
+    ) -> Result<(), ProjectionError> {
+        let Self {
+            executor,
+            ids,
+            systems,
+            ..
+        } = self;
+        let (layout, order) = Self::projected_order(executor, systems)?;
+        executor.set_external_view(ids.target, context.target.clone());
+        let dispatch = PassDispatch {
+            systems,
+            device: context.device,
+            queue: context.queue,
+            renderer: context.renderer,
+            mesh: context.mesh,
+            instance_count: context.instance_count,
+        };
+        executor.record_in_order(
+            context.device,
+            &layout,
+            &order,
+            &context.buffers.0,
+            |_index, pass, encoder| {
+                dispatch_pass(&dispatch, encoder, pass);
+            },
+        );
+        Ok(())
+    }
+
+    /// E1/E2 shared: the projected schedule order for the current
+    /// declarations plus the memoized frame layout, with the parity
+    /// invariant (projected levels == `FrameLayout::levels()`) re-checked
+    /// per frame in debug builds.
+    fn projected_order(
+        executor: &mut FrameExecutor,
+        systems: &SystemSet,
+    ) -> Result<(Arc<FrameLayout>, Vec<usize>), ProjectionError> {
+        let schedule = crate::schedule_bridge::try_project_schedule(systems)?;
+        let layout = executor.ensure_layout(systems);
+        let levels = schedule.levels();
+        debug_assert_eq!(
+            levels,
+            layout.levels(),
+            "projected Schedule levels != FrameLayout::levels()"
+        );
+        let order: Vec<usize> = levels.iter().flatten().copied().collect();
+        Ok((layout, order))
+    }
+}
+
+/// Borrowed per-frame pass dispatch context shared by all
+/// `RenderFrame3D` execution paths (sequential, parallel,
+/// schedule-ordered): the registry plus the frame inputs a
+/// borrowed-encoder [`Frame`] is built from.
+struct PassDispatch<'a> {
+    systems: &'a SystemSet,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    renderer: &'a Renderer3D,
+    mesh: &'a Mesh,
+    instance_count: u32,
+}
+
+/// Frame inputs for [`RenderFrame3D::render_to_buffers`] (E2): GPU
+/// handles, draw state and the handover sink, grouped to stay within the
+/// argument budget. Native-only, like the call itself.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct BufferRenderContext<'a> {
+    /// Device used for the per-pass encoders.
+    pub device: &'a wgpu::Device,
+    /// Upload/submit queue.
+    pub queue: &'a wgpu::Queue,
+    /// Swapchain view of the frame.
+    pub target: &'a wgpu::TextureView,
+    /// Deferred renderer (pipelines + buffers).
+    pub renderer: &'a Renderer3D,
+    /// Instanced mesh drawn by the frame.
+    pub mesh: &'a Mesh,
+    /// Instances to draw.
+    pub instance_count: u32,
+    /// E2 handover sink for the per-pass command buffers.
+    pub buffers: &'a FrameCommandBuffers,
+}
+
+/// Runs one pass through the registry dispatch: builds the
+/// borrowed-encoder [`Frame`] and invokes the typed runner (S2b).
+fn dispatch_pass(
+    dispatch: &PassDispatch<'_>,
+    encoder: &mut wgpu::CommandEncoder,
+    pass: &PassViews<'_>,
+) {
+    let mut frame = Frame {
+        device: dispatch.device,
+        queue: dispatch.queue,
+        encoder,
+        renderer: dispatch.renderer,
+        mesh: dispatch.mesh,
+        instance_count: dispatch.instance_count,
+    };
+    if !dispatch.systems.run_pass(pass.pass().id, pass, &mut frame) {
+        unreachable!(
+            "render frame 3d: pass '{}' is not a typed system",
+            pass.pass().name
+        );
     }
 }
 

@@ -5,7 +5,10 @@
 //! `ornis-schedule` engine. Semantic drift on either side = red CI.
 
 use ornis_core::{Resources, Schedule, System, SystemAccess};
-use ornis_render::{ResourceId, SizePolicy, SystemSet, TextureSpec};
+use ornis_render::{
+    FrameResource, ProjectionError, ResourceId, ResourceKind, SizePolicy, SystemSet, TextureSpec,
+    try_project_schedule,
+};
 
 /// Core resource namespace keys (marker types in this file,
 /// real singleton resources are not needed for the plan).
@@ -206,4 +209,152 @@ fn lcg_scenarios_match_across_frontends() {
     assert_eq!(core, render, "parity without explicit edges");
     let (core, render) = mirrored_levels(&reads, &writes, &[("s2", "s8"), ("s0", "s11")]);
     assert_eq!(core, render, "parity with explicit edges");
+}
+
+// ── E1 (S5e): passes projected as core `Schedule` systems ─────────────
+//
+// The gate of the E1 decomposition step: `try_project_schedule` mirrors a
+// typed-registered `SystemSet` into a core `Schedule` whose levels must
+// equal `FrameLayout::levels()` bitwise — the same anti-drift contract as
+// above, now through the pass-as-system adapter (`schedule_bridge`).
+
+/// Typed frame resources for the projection (the bridge keys core
+/// accesses by `FrameResource` `TypeId`s, so registration must be typed).
+macro_rules! typed_resources {
+    ($($r:ident => $name:literal),+ $(,)?) => {
+        $(
+            struct $r;
+            impl FrameResource for $r {
+                const NAME: &'static str = $name;
+                fn kind() -> ResourceKind {
+                    ResourceKind::FrameOwned
+                }
+                fn spec(_: wgpu::TextureFormat) -> TextureSpec {
+                    spec()
+                }
+            }
+        )+
+    };
+}
+
+typed_resources!(
+    R0 => "r0", R1 => "r1", R2 => "r2", R3 => "r3",
+    R4 => "r4", R5 => "r5", R6 => "r6", R7 => "r7",
+);
+
+/// Builds a typed-registered plan for one topology and returns
+/// (projected core Schedule levels, frame layout levels).
+fn projected_levels(
+    reads: &[Vec<usize>],
+    writes: &[Vec<usize>],
+    edges: &[(&'static str, &'static str)],
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    const NAMES: [&str; 6] = ["s0", "s1", "s2", "s3", "s4", "s5"];
+    assert_eq!(reads.len(), writes.len(), "parallel access slices");
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut plan = SystemSet::new();
+    plan.set_surface_size((640, 480));
+    let ids = [
+        plan.register_resource::<R0>(format),
+        plan.register_resource::<R1>(format),
+        plan.register_resource::<R2>(format),
+        plan.register_resource::<R3>(format),
+        plan.register_resource::<R4>(format),
+        plan.register_resource::<R5>(format),
+        plan.register_resource::<R6>(format),
+        plan.register_resource::<R7>(format),
+    ];
+    for i in 0..reads.len() {
+        let mut pass = plan.add_pass(NAMES[i]);
+        for &k in &reads[i] {
+            pass = pass.read(ids[k]);
+        }
+        for &k in &writes[i] {
+            pass = pass.write(ids[k]);
+        }
+    }
+    for &(before, after) in edges {
+        plan.order_before_named(before, after);
+    }
+    let schedule = try_project_schedule(&plan).expect("typed registration projects");
+    (schedule.levels(), plan.build().levels())
+}
+
+/// E1 gate: adapter levels == `FrameLayout::levels()` on representative
+/// topologies (chains, shared levels, explicit-edge splits).
+#[test]
+fn projected_pass_system_levels_match_layout_levels() {
+    // Chain: RaW/WaW dependencies serialize level by level.
+    let (projected, layout) = projected_levels(
+        &[vec![], vec![0], vec![1]],
+        &[vec![0], vec![1], vec![2]],
+        &[],
+    );
+    assert_eq!(projected, layout, "chain: adapter levels != layout levels");
+    assert_eq!(projected, vec![vec![0], vec![1], vec![2]]);
+
+    // Independent writers share a level; the reader closes the frame.
+    let (projected, layout) = projected_levels(
+        &[vec![], vec![], vec![0, 1]],
+        &[vec![0], vec![1], vec![2]],
+        &[],
+    );
+    assert_eq!(
+        projected, layout,
+        "shared level: adapter levels != layout levels"
+    );
+    assert_eq!(projected, vec![vec![0, 1], vec![2]]);
+
+    // An explicit edge splits a shared level on both sides.
+    let (projected, layout) =
+        projected_levels(&[vec![], vec![]], &[vec![0], vec![1]], &[("s0", "s1")]);
+    assert_eq!(
+        projected, layout,
+        "edge split: adapter levels != layout levels"
+    );
+    assert_eq!(projected, vec![vec![0], vec![1]]);
+}
+
+/// Disabled passes drop out of the projection together with their edges —
+/// mirroring `TransientPool::layout_levels` exactly.
+#[test]
+fn projection_skips_disabled_passes_and_their_edges() {
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut plan = SystemSet::new();
+    plan.set_surface_size((640, 480));
+    let r0 = plan.register_resource::<R0>(format);
+    let r1 = plan.register_resource::<R1>(format);
+    let mid = plan.add_pass("mid").write(r0).id();
+    let last = plan.add_pass("last").write(r1).id();
+    plan.order_before(mid, last);
+    plan.set_pass_enabled(mid, false);
+
+    let schedule = try_project_schedule(&plan).expect("typed registration projects");
+    assert_eq!(schedule.levels(), vec![vec![0]]);
+    assert_eq!(
+        schedule.levels(),
+        plan.build().levels(),
+        "disabled pass culling must match the layout"
+    );
+}
+
+/// The projection is honest about what it cannot mirror: resources
+/// declared without a typed identity have no core `TypeId` to project.
+#[test]
+fn projection_rejects_untyped_resources() {
+    let mut plan = SystemSet::new();
+    plan.set_surface_size((640, 480));
+    let untyped = plan.create_resource("untyped", spec());
+    plan.add_pass("user").read(untyped);
+
+    let error = try_project_schedule(&plan)
+        .err()
+        .expect("projection must reject untyped resources");
+    assert_eq!(
+        error,
+        ProjectionError::UntypedResource {
+            pass: "user",
+            resource: untyped,
+        }
+    );
 }

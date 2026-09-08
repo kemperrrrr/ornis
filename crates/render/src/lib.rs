@@ -13,6 +13,11 @@ pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
 pub mod frame_passes;
 /// GPU resources as ECS singletons for the unified scheduler (S7 design).
+/// Native-only: stores wgpu `Device`/`Queue`/`Surface`/`CommandBuffer` as
+/// `World` resources (`Send + Sync` bound), but wgpu's web backend types
+/// are `!Send`/`!Sync` (Rc, JS callbacks). The wasm path renders through
+/// `RenderWorld` extraction + `ornis-wasm`, not through this module.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_resources;
 /// GPU mesh representation and primitive generation.
 pub mod mesh;
@@ -22,6 +27,9 @@ pub mod render_backend;
 pub mod renderer;
 /// RON-serializable scene description types.
 pub mod scene;
+/// E1 (S5e) bridge: frame passes projected as ordinary core `Schedule`
+/// systems (declaration twins; level parity pinned by `scheduler_parity`).
+pub mod schedule_bridge;
 /// WGSL shader assembly and Rust-side BRDF math kernels.
 pub mod shaders;
 /// Typed plan systems + single declaration registry (d3).
@@ -34,7 +42,9 @@ pub mod transient_pool;
 
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
-pub use extraction::{RenderExtracted, RenderWorld, extract_render_data, install_render_extract};
+pub use extraction::{
+    FrameUpload, RenderLights, RenderWorld, extract_render_data, max_mesh_params,
+};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
@@ -48,6 +58,7 @@ pub use renderer::{
     CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,
     InstanceData, LightingPass, PerObjectGpu, Renderer3D,
 };
+pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use system::{
     Access, AccessSet, ClearBlack, ClearTransparent, ClearValue, ClearWhite, Frame, FramePass,
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,

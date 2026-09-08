@@ -4,7 +4,7 @@
 //!
 //! Renders the live scene from `/api/scene` (polled ~1/s) when the remote
 //! server provides it; otherwise falls back to `assets/scene.ron` through
-//! the shared ECS [`RenderWorld`], [`RenderExtracted`], and
+//! the shared ECS [`RenderWorld`], [`FrameUpload`], and
 //! [`RenderFrame3D`] frame contract. The orbit
 //! camera is client-side only.
 //!
@@ -17,10 +17,10 @@ use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use ornis_render::scene::{LightDesc, Scene};
+use ornis_render::scene::Scene;
 use ornis_render::{
-    OrbitCamera, RenderContext, RenderExtracted, RenderFrame3D, RenderWorld, Renderer3D, Technique,
-    install_orbit_camera, read_orbit_camera,
+    FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, RenderWorld, Renderer3D,
+    Technique, install_orbit_camera, read_orbit_camera,
 };
 
 mod scene_api;
@@ -116,36 +116,28 @@ struct GpuScene {
     /// (segments, rings) of the shared unit sphere — recreate the mesh only
     /// when these change.
     mesh_params: (u32, u32),
-    extracted: RenderExtracted,
+    extracted: FrameUpload,
     lights: Vec<([f32; 3], f32, [f32; 3])>,
     ambient: [f32; 3],
 }
 
 fn build_gpu_scene(device: &wgpu::Device, render_world: &RenderWorld, scene: &Scene) -> GpuScene {
-    let extracted = render_world.extracted();
+    let extracted = render_world.frame_upload();
     // RenderFrame3D draws one shared mesh instanced. Each sphere's radius is
     // already folded into its extracted model scale, so the maximum
     // tessellation is sufficient for every entity.
     let mesh_params = extracted.mesh_params;
     let mesh = ornis_render::create_sphere(device, 1.0, mesh_params.0, mesh_params.1);
-    let lights = scene
-        .lights
-        .iter()
-        .map(|light| match light {
-            LightDesc::Directional {
-                direction,
-                intensity,
-                color,
-            } => (*direction, *intensity, *color),
-        })
-        .collect();
+    // X3: scene lighting flows through the shared `RenderLights` canon
+    // (`set_lights_args`) — the same conversion the native runtime uses.
+    let lights = RenderLights::from_scene(scene);
 
     GpuScene {
         mesh,
         mesh_params,
         extracted,
-        lights,
-        ambient: scene.ambient,
+        lights: lights.set_lights_args(),
+        ambient: lights.ambient,
     }
 }
 
@@ -990,10 +982,11 @@ mod integration_tests {
         let mut render_world = RenderWorld::from_scene(&live.scene);
 
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
-        assert_eq!(render_world.engine().schedule().len(), 1);
+        // X4: no scheduled extraction system — the lanes are read directly.
+        assert_eq!(render_world.engine().schedule().len(), 0);
 
         render_world.run_frame(0.0);
-        let extracted = render_world.extracted();
+        let extracted = render_world.frame_upload();
 
         assert_eq!(extracted.mesh_params, (32, 24));
         assert_eq!(extracted.materials.len(), live.scene.entities.len());

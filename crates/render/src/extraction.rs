@@ -3,25 +3,27 @@
 //! A [`RenderWorld`] is a small render-domain view over the logical
 //! [`ornis_core::Engine`]. Scene descriptions are deserialized at the
 //! serialization boundary and inserted as `TransformDesc`, `MeshDesc` and
-//! `MaterialDesc` component lanes. The scheduled [`install_render_extract`]
-//! system then produces one backend-neutral [`RenderExtracted`] snapshot.
+//! `MaterialDesc` component lanes; the frame payload is read directly
+//! from the lanes on demand ([`extract_render_data`] → [`FrameUpload`],
+//! X4/Extract-free — no scheduled snapshot round-trip).
 //!
-//! GPU resources, cameras and lights remain owned by the platform renderer;
-//! this module deliberately stops at CPU-side instance/material data. That
-//! keeps the server/editor world authoritative while allowing a native or
-//! browser client to build its own physical GPU representation.
-
-use std::sync::Mutex;
+//! GPU resources and cameras remain owned by the platform renderer;
+//! lighting is the [`RenderLights`] resource (X3). This module
+//! deliberately stops at CPU-side instance/material data. That keeps the
+//! server/editor world authoritative while allowing a native or browser
+//! client to build its own physical GPU representation.
 
 use glam::{Mat4, Quat, Vec3};
-use ornis_core::{Engine, Entity, OpenPBRMaterial, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Engine, Entity, OpenPBRMaterial, SmartStore};
 
 use crate::renderer::InstanceData;
-use crate::scene::{MaterialDesc, MeshDesc, Scene, TransformDesc};
+use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
-/// CPU-side render data extracted from ECS for one frame.
+/// CPU-side render data read from the ECS lanes for one frame (X4:
+/// the former `RenderExtracted` snapshot, now a direct-read payload —
+/// no scheduled `Mutex` round-trip).
 #[derive(Clone, Debug)]
-pub struct RenderExtracted {
+pub struct FrameUpload {
     /// Maximum sphere tessellation required by the extracted entities.
     pub mesh_params: (u32, u32),
     /// GPU-ready materials in the same order as [`Self::instances`].
@@ -30,13 +32,81 @@ pub struct RenderExtracted {
     pub instances: Vec<InstanceData>,
 }
 
-impl Default for RenderExtracted {
+/// Tessellation floor when no complete renderable entity asks for more
+/// (the `FrameUpload::default` `mesh_params`).
+const DEFAULT_MESH_PARAMS: (u32, u32) = (32, 24);
+
+impl Default for FrameUpload {
     fn default() -> Self {
         Self {
-            mesh_params: (32, 24),
+            mesh_params: DEFAULT_MESH_PARAMS,
             materials: Vec::new(),
             instances: Vec::new(),
         }
+    }
+}
+
+/// Ambient plus directional lights of the frame as a world resource (X3,
+/// Extract-free).
+///
+/// Written by the scene loader between frames (`RenderWorld::replace_scene`
+/// or the platform's equivalent) and only read inside the schedule, so no
+/// `Mutex` is needed (same contract as `GpuSurfaceState`). `RenderSubmit`
+/// uploads it via [`Self::set_lights_args`] instead of a hardcoded rig.
+#[derive(Debug, Clone)]
+pub struct RenderLights {
+    /// Ambient RGB contribution.
+    pub ambient: [f32; 3],
+    /// Directional sources; the renderer uploads the first four.
+    pub lights: Vec<LightDesc>,
+}
+
+/// The lighting rig `RenderSubmit` hardcoded before X3 — the resource
+/// default, so a runtime that never loads a scene renders exactly as it
+/// did (gate: zero pixel differences).
+const LEGACY_AMBIENT: [f32; 3] = [0.10, 0.10, 0.15];
+const LEGACY_KEY_LIGHT: LightDesc = LightDesc::Directional {
+    direction: [1.0, 1.0, 1.0],
+    intensity: 0.6,
+    color: [1.0, 1.0, 1.0],
+};
+const LEGACY_FILL_LIGHT: LightDesc = LightDesc::Directional {
+    direction: [-0.5, 0.5, -0.5],
+    intensity: 0.3,
+    color: [0.8, 0.8, 1.0],
+};
+
+impl Default for RenderLights {
+    fn default() -> Self {
+        Self {
+            ambient: LEGACY_AMBIENT,
+            lights: vec![LEGACY_KEY_LIGHT, LEGACY_FILL_LIGHT],
+        }
+    }
+}
+
+impl RenderLights {
+    /// The lighting of a serialized scene as the resource (X3).
+    pub fn from_scene(scene: &Scene) -> Self {
+        Self {
+            ambient: scene.ambient,
+            lights: scene.lights.clone(),
+        }
+    }
+
+    /// Converts the lights into `Renderer3D::set_lights` arguments —
+    /// `(direction, intensity, color)` per directional source.
+    pub fn set_lights_args(&self) -> Vec<([f32; 3], f32, [f32; 3])> {
+        self.lights
+            .iter()
+            .map(|light| match light {
+                LightDesc::Directional {
+                    direction,
+                    intensity,
+                    color,
+                } => (*direction, *intensity, *color),
+            })
+            .collect()
     }
 }
 
@@ -59,12 +129,12 @@ impl Default for RenderWorld {
 }
 
 impl RenderWorld {
-    /// Creates an empty render world and installs the shared extraction pass.
+    /// Creates an empty render world — the scene-loader host (X4: no
+    /// scheduled extraction pass; the frame payload is read directly
+    /// via [`extract_render_data`]).
     pub fn new() -> Self {
-        let mut engine = Engine::new();
-        install_render_extract(&mut engine);
         Self {
-            engine,
+            engine: Engine::new(),
             entities: Vec::new(),
         }
     }
@@ -104,11 +174,12 @@ impl RenderWorld {
         &self.entities
     }
 
-    /// Replaces the renderable ECS entities with `scene.entities`.
+    /// Replaces the renderable ECS entities with `scene.entities` and
+    /// publishes the scene lighting as the [`RenderLights`] resource (X3).
     ///
-    /// Camera, lights and ambient values are intentionally not copied here:
-    /// they are frame/view state owned by the caller, while this world owns
-    /// only renderable component lanes. The next [`Self::run_frame`] refreshes
+    /// The camera stays frame/view state owned by the caller; lights and
+    /// ambient are world state now — `RenderSubmit` reads the resource
+    /// instead of a hardcoded rig. The next [`Self::run_frame`] refreshes
     /// the extracted snapshot.
     pub fn replace_scene(&mut self, scene: &Scene) {
         let previous = std::mem::take(&mut self.entities);
@@ -120,40 +191,24 @@ impl RenderWorld {
             }
         }
         self.entities = insert_scene_entities(&mut self.engine, &scene.entities);
+        let _ = self
+            .engine
+            .world_mut()
+            .insert(RenderLights::from_scene(scene));
     }
 
-    /// Publishes time and runs the shared extraction schedule for one frame.
+    /// Publishes time and runs the world schedule for one frame.
     pub fn run_frame(&mut self, delta_seconds: f32) {
         self.engine.run_frame(delta_seconds);
     }
 
-    /// Returns the latest scheduled extraction snapshot.
+    /// Reads the frame payload directly from the component lanes.
     ///
-    /// Call [`Self::run_frame`] after mutating the ECS or replacing the scene
-    /// to publish a fresh value. A newly created world returns the default
-    /// empty snapshot until its first frame.
-    pub fn extracted(&self) -> RenderExtracted {
-        self.engine
-            .world()
-            .resources()
-            .get::<Mutex<RenderExtracted>>()
-            .expect("RenderWorld always installs RenderExtracted")
-            .lock()
-            .expect("render extraction lock")
-            .clone()
+    /// Equivalent to calling [`extract_render_data`] on this world's
+    /// store; provided for callers that own the [`RenderWorld`].
+    pub fn frame_upload(&self) -> FrameUpload {
+        extract_render_data(self.engine.world().store().expect("render world store"))
     }
-}
-
-/// Installs the extraction resource and system in `engine`.
-///
-/// The stage is backend-neutral: it converts ECS scene components into
-/// CPU-side [`InstanceData`] and [`OpenPBRMaterial`] tables. A native or WASM
-/// renderer can upload the snapshot to its own GPU resources afterwards.
-pub fn install_render_extract(engine: &mut Engine) {
-    let _ = engine
-        .world_mut()
-        .insert(Mutex::new(RenderExtracted::default()));
-    engine.schedule_mut().add_system(RenderExtract);
 }
 
 /// Extracts complete renderable entities from the ECS store.
@@ -161,8 +216,8 @@ pub fn install_render_extract(engine: &mut Engine) {
 /// Entities missing any of the three render components are skipped. Dense
 /// lane order is used as the deterministic extraction order; each instance's
 /// material index points at the material emitted in the same iteration.
-pub fn extract_render_data(store: &SmartStore) -> RenderExtracted {
-    let mut extracted = RenderExtracted::default();
+pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
+    let mut extracted = FrameUpload::default();
     let Some(transforms) = store.read_lane::<TransformDesc>() else {
         return extracted;
     };
@@ -202,32 +257,36 @@ pub fn extract_render_data(store: &SmartStore) -> RenderExtracted {
     extracted
 }
 
-/// The schedule system that turns the three ECS render lanes into a snapshot.
-struct RenderExtract;
-
-impl System for RenderExtract {
-    fn name(&self) -> &'static str {
-        "render_extract"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<SmartStore>()
-            .reads_lane::<TransformDesc>()
-            .reads_lane::<MeshDesc>()
-            .reads_lane::<MaterialDesc>()
-            .writes::<Mutex<RenderExtracted>>()
-    }
-
-    fn run(&self, resources: &Resources) {
-        let Some(store) = resources.get::<SmartStore>() else {
-            return;
-        };
-        let Some(output) = resources.get::<Mutex<RenderExtracted>>() else {
-            return;
-        };
-        *output.lock().expect("render extraction lock") = extract_render_data(store);
-    }
+/// Maximum sphere tessellation over complete renderable entities — the
+/// GPU mesh re-create criterion (X2, Extract-free).
+///
+/// The same canon as [`extract_render_data`]: entities missing any of
+/// the three render components are skipped (even for the maximum), and
+/// the result never falls below the `FrameUpload::default` floor
+/// (32, 24). Iterator form: the lane walk lives in closures (the
+/// sanctioned lenient form, `rustqual.toml`).
+pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
+    let Some(transforms) = store.read_lane::<TransformDesc>() else {
+        return DEFAULT_MESH_PARAMS;
+    };
+    let Some(meshes) = store.read_lane::<MeshDesc>() else {
+        return DEFAULT_MESH_PARAMS;
+    };
+    let Some(materials) = store.read_lane::<MaterialDesc>() else {
+        return DEFAULT_MESH_PARAMS;
+    };
+    transforms
+        .entities
+        .iter()
+        // Complete entities only: all three render components present.
+        .filter(|&&entity| meshes.get(entity).is_some() && materials.get(entity).is_some())
+        .filter_map(|&entity| meshes.get(entity))
+        .fold(DEFAULT_MESH_PARAMS, |params, mesh| {
+            let MeshDesc::Sphere {
+                segments, rings, ..
+            } = mesh;
+            (params.0.max(*segments), params.1.max(*rings))
+        })
 }
 
 fn insert_scene_entities(
@@ -328,12 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn render_world_runs_shared_engine_extraction() {
+    fn render_world_extracts_scene_entities_from_lanes() {
         let mut world = RenderWorld::from_scene(&scene());
         assert_eq!(world.entity_count(), 1);
         world.run_frame(0.0);
 
-        let extracted = world.extracted();
+        let extracted = world.frame_upload();
         assert_eq!(extracted.mesh_params, (48, 32));
         assert_eq!(extracted.materials.len(), 1);
         assert_eq!(extracted.instances.len(), 1);
@@ -355,7 +414,104 @@ mod tests {
         world.run_frame(0.0);
 
         assert_eq!(world.entity_count(), 0);
-        assert!(world.extracted().instances.is_empty());
+        assert!(world.frame_upload().instances.is_empty());
+    }
+
+    #[test]
+    fn frame_upload_matches_the_direct_lane_canon() {
+        // X1/X4 (Extract-free) data gate: `extract_render_data` is the
+        // single canon — `RenderWorld::frame_upload` and a plain canon
+        // call on the same store must agree for a scene mixing all three
+        // material kinds and varied tessellation (materials compared as
+        // Pod bytes, instances field-wise over the glam matrices).
+        let varied = Scene {
+            name: "oracle".into(),
+            entities: vec![
+                crate::scene::EntityDesc {
+                    name: "dielectric".into(),
+                    transform: TransformDesc {
+                        translation: [1.0, 2.0, 3.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 2.0,
+                        segments: 24,
+                        rings: 16,
+                    },
+                    material: MaterialDesc::Dielectric {
+                        base_color: [0.8, 0.2, 0.2],
+                        roughness: 0.4,
+                    },
+                },
+                crate::scene::EntityDesc {
+                    name: "metal".into(),
+                    transform: TransformDesc {
+                        translation: [-1.0, 0.0, 2.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [2.0, 2.0, 2.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 0.5,
+                        segments: 48,
+                        rings: 32,
+                    },
+                    material: MaterialDesc::Metal {
+                        base_color: [0.9, 0.8, 0.2],
+                        roughness: 0.2,
+                    },
+                },
+                crate::scene::EntityDesc {
+                    name: "coat".into(),
+                    transform: TransformDesc {
+                        translation: [0.0, 5.0, -3.0],
+                        rotation: [0.3, 0.2, 0.1, 0.9],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 32,
+                        rings: 24,
+                    },
+                    material: MaterialDesc::Coat {
+                        base_color: [0.2, 0.4, 0.9],
+                        coat_weight: 0.7,
+                        coat_roughness: 0.1,
+                    },
+                },
+            ],
+            lights: Vec::new(),
+            camera: crate::scene::CameraDesc {
+                position: [0.0, 2.5, 9.0],
+                target: [0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov: 60.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            ambient: [0.1, 0.1, 0.1],
+        };
+        let mut world = RenderWorld::from_scene(&varied);
+        world.run_frame(0.0);
+
+        // X1/X4 canon: one direct lane read covers all material kinds;
+        // `RenderWorld::frame_upload` must agree with the plain canon
+        // call on the same store (materials as Pod bytes).
+        let snapshot = world.frame_upload();
+        let direct = extract_render_data(world.engine().world().store().expect("store"));
+        assert_eq!(snapshot.mesh_params, (48, 32));
+        assert_eq!(snapshot.instances.len(), 3);
+        assert_eq!(direct.mesh_params, snapshot.mesh_params);
+        assert_eq!(direct.instances.len(), snapshot.instances.len());
+        for (direct, snapshot) in direct.instances.iter().zip(&snapshot.instances) {
+            assert_eq!(direct.model_matrix, snapshot.model_matrix);
+            assert_eq!(direct.normal_matrix, snapshot.normal_matrix);
+            assert_eq!(direct.material_index, snapshot.material_index);
+        }
+        assert_eq!(direct.materials.len(), snapshot.materials.len());
+        for (direct, snapshot) in direct.materials.iter().zip(&snapshot.materials) {
+            assert_eq!(bytemuck::bytes_of(direct), bytemuck::bytes_of(snapshot));
+        }
     }
 
     #[test]
@@ -374,12 +530,137 @@ mod tests {
                 scale: Vec3::ONE.to_array(),
             },
         );
-        install_render_extract(&mut engine);
-        engine.run_frame(0.0);
         assert!(
             extract_render_data(engine.world().store().expect("store"))
                 .instances
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn max_mesh_params_is_the_extraction_mesh_canon() {
+        // X2 canon tie: the mesh re-create criterion must be exactly the
+        // oracle's `mesh_params` — max tessellation over COMPLETE entities
+        // only, floor (32, 24). The incomplete entity (mesh + material,
+        // no transform, 96/64) must not push the maximum.
+        let complete = Scene {
+            name: "canon".into(),
+            entities: vec![
+                crate::scene::EntityDesc {
+                    name: "fine".into(),
+                    transform: TransformDesc {
+                        translation: [0.0, 0.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 48,
+                        rings: 32,
+                    },
+                    material: MaterialDesc::Metal {
+                        base_color: [0.9, 0.8, 0.2],
+                        roughness: 0.2,
+                    },
+                },
+                crate::scene::EntityDesc {
+                    name: "coarse".into(),
+                    transform: TransformDesc {
+                        translation: [2.0, 0.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    mesh: MeshDesc::Sphere {
+                        radius: 1.0,
+                        segments: 16,
+                        rings: 12,
+                    },
+                    material: MaterialDesc::Dielectric {
+                        base_color: [0.2, 0.8, 0.2],
+                        roughness: 0.5,
+                    },
+                },
+            ],
+            lights: Vec::new(),
+            camera: crate::scene::CameraDesc {
+                position: [0.0, 2.5, 9.0],
+                target: [0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov: 60.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            ambient: [0.1, 0.1, 0.1],
+        };
+        let mut world = RenderWorld::from_scene(&complete);
+        // Incomplete entity: mesh + material without a transform lane
+        // entry — a high tessellation that must NOT move the maximum.
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let incomplete = store.create_entity();
+        store.insert(
+            incomplete,
+            MeshDesc::Sphere {
+                radius: 1.0,
+                segments: 96,
+                rings: 64,
+            },
+        );
+        store.insert(
+            incomplete,
+            MaterialDesc::Coat {
+                base_color: [0.2, 0.4, 0.9],
+                coat_weight: 0.7,
+                coat_roughness: 0.1,
+            },
+        );
+        world.run_frame(0.0);
+
+        let store = world.engine().world().store().expect("store");
+        let extracted = extract_render_data(store);
+        assert_eq!(extracted.mesh_params, (48, 32));
+        assert_eq!(max_mesh_params(store), extracted.mesh_params);
+    }
+
+    #[test]
+    fn default_lights_reproduce_the_legacy_hardcoded_rig() {
+        // X3: `RenderSubmit` no longer inlines a lighting rig — the
+        // resource default must be exactly the old hardcoded arguments
+        // (gate: zero pixel differences).
+        let rig = RenderLights::default();
+        assert_eq!(rig.ambient, [0.10, 0.10, 0.15]);
+        assert_eq!(
+            rig.set_lights_args(),
+            vec![
+                ([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]),
+                ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_scene_publishes_scene_lighting_as_resource() {
+        // X3: the scene loader owns lights/ambient — replacing a scene
+        // must publish them as the `RenderLights` resource.
+        let world = RenderWorld::from_scene(&Scene {
+            lights: vec![LightDesc::Directional {
+                direction: [0.0, -1.0, 0.0],
+                intensity: 2.0,
+                color: [1.0, 0.9, 0.8],
+            }],
+            ambient: [0.2, 0.2, 0.2],
+            ..scene()
+        });
+        let lights = world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("scene loader publishes RenderLights");
+        assert_eq!(lights.ambient, [0.2, 0.2, 0.2]);
+        assert_eq!(lights.lights.len(), 1);
+        assert_eq!(
+            lights.set_lights_args(),
+            vec![([0.0, -1.0, 0.0], 2.0, [1.0, 0.9, 0.8])]
         );
     }
 }

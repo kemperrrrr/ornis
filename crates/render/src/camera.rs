@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use ornis_core::{Engine, InputState, Resources, System, SystemAccess};
 
 use crate::scene::CameraDesc;
@@ -147,6 +147,25 @@ impl System for OrbitCameraSystem {
     }
 }
 
+/// Frame view-projection from orbit view parameters and a surface size
+/// (S7): the aspect falls back to 1.0 for a zero dimension, the
+/// perspective is the DirectX-style projection of the legacy renderer.
+///
+/// Kept as a free function so `RenderSubmit::run` stays pure
+/// orchestration (IOSP): guards, one lane read, one projection, uploads.
+pub fn camera_view_projection(
+    view: (Vec3, Vec3, Vec3, f32, f32, f32),
+    surface_size: (u32, u32),
+) -> (Mat4, Vec3) {
+    let (cam_pos, cam_target, cam_up, fov, near, far) = view;
+    let (w, h) = (surface_size.0 as f64, surface_size.1 as f64);
+    let aspect = if h > 0.0 { w as f32 / h as f32 } else { 1.0 };
+    let view_matrix = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
+    let projection =
+        glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
+    (projection * view_matrix, cam_pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +237,19 @@ mod tests {
         orbit.apply_input(&input);
         let position = orbit.position();
         assert!(position.y.abs() < position.length());
+    }
+
+    #[test]
+    fn view_projection_aspect_fallback_and_finite_matrices() {
+        let orbit = OrbitCamera::from_desc(&camera());
+        let view = orbit.view_parameters();
+        let (view_proj, cam_pos) = camera_view_projection(view, (1920, 1080));
+        assert_eq!(cam_pos, view.0);
+        assert!(view_proj.to_cols_array().iter().all(|c| c.is_finite()));
+        // A zero dimension falls back to square aspect — no NaN, and the
+        // projection differs from the wide-surface one.
+        let (square, _) = camera_view_projection(view, (0, 0));
+        assert!(square.to_cols_array().iter().all(|c| c.is_finite()));
+        assert_ne!(square, view_proj);
     }
 }
