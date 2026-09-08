@@ -237,3 +237,62 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     })
 }
+
+/// Translate a plain WGSL helper function from Rust: `#[wgsl_fn] fn name(
+/// params ) -> Ret { body }` is replaced by a `pub mod` exposing
+/// `wgsl_source()` with `fn name(params) -> Ret { … }`.
+///
+/// Same translation as [`stage`](stage), minus the `@vertex`/`@fragment`
+/// wrapper and the parameter interface attributes: parameter and return
+/// types map through [`named_type`] (glam vectors included, any other named
+/// type passes through verbatim — e.g. `mat: OpenPBRMaterial`). The Rust
+/// body is never compiled, so helper bodies may name shader-side values
+/// freely, exactly like stage entries.
+pub fn wgsl_fn(_args: TokenStream, input: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(input as syn::ItemFn);
+    let fn_name = func.sig.ident.clone();
+    let wgsl_ret = match &func.sig.output {
+        syn::ReturnType::Type(_, ty) => named_type(ty),
+        syn::ReturnType::Default => "void".to_string(),
+    };
+
+    let mut params = Vec::new();
+    for arg in &func.sig.inputs {
+        let syn::FnArg::Typed(pat_ty) = arg else {
+            return syn::Error::new_spanned(
+                arg,
+                "wgsl_fn: `self` receivers are not supported in helpers",
+            )
+            .to_compile_error()
+            .into();
+        };
+        let syn::Pat::Ident(pi) = pat_ty.pat.as_ref() else {
+            return syn::Error::new_spanned(
+                &pat_ty.pat,
+                "wgsl_fn: helper parameters must be plain `name: Type` bindings",
+            )
+            .to_compile_error()
+            .into();
+        };
+        params.push(format!("{}: {}", pi.ident, named_type(&pat_ty.ty)));
+    }
+
+    let body = crate::wgsl::wgsl_main_body(&func);
+    let helper_wgsl = format!(
+        "fn {fn_name}({}) -> {wgsl_ret} {{\n{body}\n}}\n",
+        params.join(", "),
+        fn_name = func.sig.ident,
+    );
+    let helper_lit = proc_macro2::Literal::string(&helper_wgsl);
+
+    TokenStream::from(quote! {
+        #[doc(hidden)]
+        pub mod #fn_name {
+            /// The translated WGSL helper function (signature + body).
+            #[allow(dead_code)]
+            pub fn wgsl_source() -> &'static str {
+                #helper_lit
+            }
+        }
+    })
+}

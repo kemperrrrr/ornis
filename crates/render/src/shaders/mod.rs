@@ -9,6 +9,7 @@ pub mod bloom_generated;
 pub mod composite_generated;
 pub mod gbuffer_generated;
 pub mod hdr_composite_generated;
+pub mod helpers;
 pub mod interface;
 pub mod lighting_generated;
 pub mod math;

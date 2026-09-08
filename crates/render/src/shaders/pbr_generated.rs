@@ -14,7 +14,7 @@
 //! duplicating it.
 
 use super::interface::GbufferFragmentInput as FragmentInput;
-use super::{OPENPBR_MATERIAL_DECL, wgsl_decl};
+use super::{OPENPBR_MATERIAL_DECL, helpers, wgsl_decl};
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::{gbuffer_generated, math};
 use ornis_macros::stage;
@@ -55,14 +55,15 @@ pub fn wgsl_source() -> String {
         math::srgb_to_linear::wgsl_source(),
     ];
     let mut src = format!(
-        "\n{cam}\n{light}\n{lighting}{mat}\n{restA}\n{fin}\n{helpers}\n{entry}",
+        "\n{cam}\n{light}\n{lighting}{mat}\n{restA}\n{fin}\n{consts}\n{helpers}\n{entry}",
         cam = CameraUniform::WGSL_SOURCE,
         light = wgsl_decl(GpuLight::WGSL_SOURCE),
         lighting = wgsl_decl(LightingUniform::WGSL_SOURCE),
         mat = OPENPBR_MATERIAL_DECL,
         restA = WGSL_FRAGMENT_HEAD,
         fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
-        helpers = WGSL_FRAGMENT_HELPERS,
+        consts = helpers::wgsl_consts(),
+        helpers = helpers::wgsl_shared_helpers(),
         entry = pbr_fragment_entry::wgsl_source(),
     );
     for k in &kernels {
@@ -261,146 +262,6 @@ const WGSL_FRAGMENT_HEAD: &str = r#"@group(0) @binding(0) var<uniform> camera: C
 @group(0) @binding(3) var<uniform> lighting: Lighting;
 "#;
 
-const WGSL_FRAGMENT_HELPERS: &str = r#"const PI: f32 = 3.14159265359;
-const EPS: f32 = 1e-6;
-const INV_PI: f32 = 0.31830988618;
-
-fn evaluate_base_layer(
-    N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
-    NoV: f32, NoL: f32, NoH: f32, VoH: f32,
-    mat: OpenPBRMaterial,
-    base_weight: f32, base_color: vec3<f32>, metalness: f32,
-    diffuse_roughness: f32,
-    specular_weight: f32, specular_roughness: f32, specular_ior: f32, specular_anisotropy: f32, specular_edge_tint: vec3<f32>,
-    T: vec3<f32>, B: vec3<f32>,
-    thin_film_mod: vec3<f32>
-) -> vec3<f32> {
-    let F0_dielectric = vec3<f32>(fresnel0_from_ior(specular_ior));
-    let F0_metal = base_color * base_weight;
-    let F0 = mix(F0_dielectric, F0_metal, metalness);
-    let F = fresnel_f82_tint(VoH, F0, specular_edge_tint);
-    let alpha = openpbr_anisotropy(specular_roughness, specular_anisotropy);
-    let alpha_u = alpha.x;
-    let alpha_v = alpha.y;
-    let D = ggx_ndf_aniso(NoH, H, T, B, alpha_u, alpha_v);
-    let G = smith_ggx_aniso(NoV, NoL, V, L, T, B, alpha_u, alpha_v);
-    let spec_brdf = D * G * F / max(4.0 * NoV * NoL, EPS);
-    let diffuse_color = base_color * (1.0 - metalness);
-    let diff_roughness = max(diffuse_roughness, specular_roughness);
-    let diff_alpha = diff_roughness * diff_roughness;
-    let cos_phi = max(dot(normalize(V - N * NoV), normalize(L - N * NoL)), 0.0);
-    let diff_brdf = oren_nayar_brdf(NoV, NoL, cos_phi, diff_alpha);
-    let kS = F * specular_weight;
-    let kD = (vec3<f32>(1.0) - luminance(kS)) * (1.0 - metalness);
-    let base_bsdf = kD * diff_brdf * diffuse_color + kS * spec_brdf;
-    return base_bsdf * base_weight * thin_film_mod;
-}
-
-fn evaluate_coat_layer(
-    N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
-    NoV: f32, NoL: f32, NoH: f32, VoH: f32,
-    mat: OpenPBRMaterial,
-    coat_weight: f32, coat_roughness: f32, coat_anisotropy: f32, coat_dark: f32, coat_ior: f32, coat_color: vec3<f32>,
-    base_metalness: f32, base_color: vec3<f32>, base_weight: f32, specular_weight: f32,
-    subsurface_weight: f32, subsurface_color: vec3<f32>,
-    T: vec3<f32>, B: vec3<f32>
-) -> vec3<f32> {
-    if coat_weight <= 0.0 { return vec3<f32>(0.0); }
-    let coat_F0 = vec3<f32>(fresnel0_from_ior(coat_ior));
-    let coat_F = fresnel_schlick_vec(VoH, coat_F0);
-    let coat_alpha = openpbr_anisotropy(coat_roughness, coat_anisotropy);
-    let coat_alpha_u = coat_alpha.x;
-    let coat_alpha_v = coat_alpha.y;
-    let coat_D = ggx_ndf_aniso(NoH, H, T, B, coat_alpha_u, coat_alpha_v);
-    let coat_G = smith_ggx_aniso(NoV, NoL, V, L, T, B, coat_alpha_u, coat_alpha_v);
-    let coat_brdf = coat_D * coat_G * coat_F / max(4.0 * NoV * NoL, EPS);
-    let mix_factor = coat_weight * coat_dark;
-    let base_darkening = coat_base_darkening(
-        coat_ior, base_metalness, base_color, base_weight,
-        specular_weight, subsurface_weight, subsurface_color
-    );
-    let darkening = coat_blend_darkened(base_darkening, mix_factor);
-    let coat_albedo_approx = coat_color * coat_weight * luminance(coat_F0);
-    return coat_color * coat_brdf * coat_weight + darkening * coat_albedo_approx;
-}
-
-fn evaluate_fuzz_layer(
-    N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
-    NoV: f32, NoL: f32, NoH: f32, VoH: f32,
-    fuzz_weight: f32, fuzz_roughness: f32, fuzz_color: vec3<f32>
-) -> vec3<f32> {
-    if fuzz_weight <= 0.0 { return vec3<f32>(0.0); }
-    let sheen = sheen_brdf(NoV, NoL, NoH, VoH, fuzz_roughness);
-    return fuzz_color * sheen * fuzz_weight;
-}
-
-fn evaluate_transmission_layer(
-    N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
-    NoV: f32, NoL: f32, NoH: f32, VoH: f32,
-    mat: OpenPBRMaterial,
-    transmission_weight: f32, transmission_depth: f32, transmission_dispersion_scale: f32, transmission_dispersion_abbe: f32,
-    transmission_color: vec3<f32>, transmission_scatter: vec3<f32>, transmission_scatter_anisotropy: f32,
-    specular_ior: f32, specular_roughness: f32, specular_anisotropy: f32,
-    thin_walled: f32
-) -> vec3<f32> {
-    if transmission_weight <= 0.0 { return vec3<f32>(0.0); }
-    let ior_out = 1.0;
-    let ior_in = specular_ior;
-    let eta = ior_in / ior_out;
-    let alpha = openpbr_anisotropy(specular_roughness, specular_anisotropy);
-    let extinction = transmission_color_to_extinction(transmission_color, transmission_depth);
-    let distance = transmission_depth;
-    let btdf = transmission_btdf(NoV, NoL, VoH, ior_in, ior_out, alpha.x, extinction, distance);
-    return transmission_color * btdf * transmission_weight;
-}
-
-fn evaluate_subsurface_layer(
-    N: vec3<f32>, V: vec3<f32>, L: vec3<f32>,
-    NoV: f32, NoL: f32,
-    subsurface_weight: f32, subsurface_radius: f32, subsurface_radius_scale_r: f32,
-    subsurface_radius_scale_g: f32, subsurface_radius_scale_b: f32,
-    subsurface_scatter_anisotropy: f32, subsurface_color: vec3<f32>
-) -> vec3<f32> {
-    if subsurface_weight <= 0.0 { return vec3<f32>(0.0); }
-    let radius = vec3<f32>(
-        subsurface_radius * subsurface_radius_scale_r,
-        subsurface_radius * subsurface_radius_scale_g,
-        subsurface_radius * subsurface_radius_scale_b
-    );
-    let V_proj = V - N * NoV;
-    let L_proj = L - N * NoL;
-    let distance = length(V_proj - L_proj);
-    let ss_brdf = subsurface_brdf(NoV, NoL, distance, radius, subsurface_scatter_anisotropy);
-    return subsurface_color * ss_brdf * subsurface_weight;
-}
-
-fn evaluate_emission(
-    emission_luminance: f32, emission_color: vec3<f32>,
-    coat_weight: f32, coat_color: vec3<f32>,
-    NoV: f32
-) -> vec3<f32> {
-    if emission_luminance <= 0.0 { return vec3<f32>(0.0); }
-    let base_emission = emission_color * emission_luminance * INV_PI;
-    let coat_emission = coat_color * base_emission * (pow(1.0 - NoV, 5.0) * coat_weight + (1.0 - coat_weight));
-    return mix(base_emission, coat_emission, coat_weight);
-}
-
-fn transmission_btdf(
-    NoV: f32, NoL: f32, VoH: f32,
-    ior_in: f32, ior_out: f32,
-    alpha: f32, extinction: vec3<f32>, distance: f32
-) -> vec3<f32> {
-    let eta = ior_in / ior_out;
-    let cos_theta_t = sqrt(max(1.0 - eta * eta * (1.0 - NoV * NoV), 0.0));
-    let cos_theta_i = NoV;
-    let f = fresnel_schlick(max(cos_theta_i, EPS), fresnel0_from_ior(ior_in));
-    let T = 1.0 - f;
-    let D = ggx_ndf(VoH, alpha);
-    let G = smith_ggx_correlated(NoV, NoL, alpha);
-    let extinction_factor = exp(-extinction * distance);
-    return vec3<f32>(D * G * T / max(4.0 * NoV * NoL, EPS)) * extinction_factor;
-}
-"#;
 #[cfg(test)]
 mod tests {
     use super::*;

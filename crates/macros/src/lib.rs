@@ -124,6 +124,16 @@ pub fn stage(attr: TokenStream, item: TokenStream) -> TokenStream {
     stages::stage(attr, item)
 }
 
+/// Translate a plain WGSL helper function from Rust.
+///
+/// Same body translation as [`stage`](stage) but without the
+/// `@vertex`/`@fragment` wrapper: `fn name(params) -> Ret`. The Rust body is
+/// never compiled, so helper bodies may name shader-side values freely.
+#[proc_macro_attribute]
+pub fn wgsl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
+    stages::wgsl_fn(attr, item)
+}
+
 /// Translate a small Rust function into WGSL compute-shader code.
 ///
 /// Parses the annotated function's AST (not runtime execution) and re-emits
