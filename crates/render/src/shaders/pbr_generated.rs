@@ -381,11 +381,12 @@ mod tests {
 
     #[test]
     fn pbr_generated_parity_with_legacy_assembly() {
-        // The only admitted difference: the `_padding` line is gone — skipped
-        // padding is not shader-visible (`#[wgsl(skip)]`).
-        let legacy_vertex =
-            include_str!("wgsl/pbr_vertex.wgsl").replace("    _padding: u32,\n", "");
-        assert_eq!(wgsl_vertex_source(), legacy_vertex);
+        // Vertex is shared with gbuffer (translated — see
+        // `gbuffer_vertex_entry_matches_legacy_shape`); pin the sharing.
+        assert_eq!(
+            wgsl_vertex_source(),
+            super::super::gbuffer_generated::wgsl_vertex_source()
+        );
         let kernels = [
             math::luminance::wgsl_source(),
             math::aces_tonemap::wgsl_source(),

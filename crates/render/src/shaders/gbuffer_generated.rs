@@ -16,11 +16,35 @@
 
 use super::OPENPBR_MATERIAL_DECL;
 use super::interface::{
-    GbufferFragmentInput, GbufferOutput, GbufferVertexInput, GbufferVertexOutput,
+    GbufferFragmentInput, GbufferOutput, GbufferVertexInput as VertexInput,
+    GbufferVertexOutput as VertexOutput,
 };
 use super::wgsl_decl;
 use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::math::octahedral_encode;
+use ornis_macros::stage;
+
+/// G-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
+/// instance transform + world-space varying. DSL-only — free `per_objects`
+/// / `camera` binding identifiers.
+#[stage(vertex, entry = "vs_main")]
+fn gbuffer_vs_entry(
+    input: VertexInput,
+    #[wgsl(builtin = "instance_index")] instance: u32,
+) -> VertexOutput {
+    let obj = per_objects[instance];
+    let world_pos = obj.model * Vec4::new(input.position, 1.0);
+    let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
+    let mut world_tangent = normalize((obj.normal_matrix * Vec4::new(input.tangent, 0.0)).xyz);
+    let mut output: VertexOutput;
+    output.clip_position = camera.view_proj * world_pos;
+    output.world_position = world_pos.xyz;
+    output.world_normal = world_normal;
+    output.uv = input.uv;
+    output.world_tangent = world_tangent;
+    output.material_index = obj.material_index;
+    return output;
+}
 
 /// G-buffer vertex shader: instance transforms + world position.
 ///
@@ -39,9 +63,9 @@ pub fn wgsl_vertex_source() -> String {
         cam = CameraUniform::WGSL_SOURCE,
         per = PerObjectGpu::WGSL_SOURCE,
         bindings = WGSL_VERTEX_BINDINGS,
-        vin = wgsl_decl(GbufferVertexInput::WGSL_SOURCE),
-        vout = wgsl_decl(GbufferVertexOutput::WGSL_SOURCE),
-        body = WGSL_VERTEX_BODY,
+        vin = wgsl_decl(VertexInput::WGSL_SOURCE),
+        vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
+        body = gbuffer_vs_entry::wgsl_source(),
     )
 }
 
@@ -70,29 +94,6 @@ pub fn wgsl_source_static() -> String {
 
 const WGSL_VERTEX_BINDINGS: &str = r#"@group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> per_objects: array<PerObject>;
-"#;
-
-const WGSL_VERTEX_BODY: &str = r#"@vertex
-fn vs_main(
-    input: VertexInput,
-    @builtin(instance_index) instance: u32,
-) -> VertexOutput {
-    let obj = per_objects[instance];
-    let world_pos = obj.model * vec4<f32>(input.position, 1.0);
-    var world_normal = (obj.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz;
-    world_normal = normalize(world_normal);
-    var world_tangent = (obj.normal_matrix * vec4<f32>(input.tangent, 0.0)).xyz;
-    world_tangent = normalize(world_tangent);
-
-    var output: VertexOutput;
-    output.clip_position = camera.view_proj * world_pos;
-    output.world_position = world_pos.xyz;
-    output.world_normal = world_normal;
-    output.uv = input.uv;
-    output.world_tangent = world_tangent;
-    output.material_index = obj.material_index;
-    return output;
-}
 "#;
 
 const WGSL_FRAGMENT_BINDINGS: &str = r#"@group(0) @binding(2) var<storage, read> materials: array<OpenPBRMaterial>;
@@ -170,24 +171,30 @@ mod tests {
         assert!(fs.contains("fn octahedral_encode"));
     }
 
+    /// The translated vertex entry must keep the legacy shape: storage read,
+    /// instance transform, var-out varying. (Byte-parity no longer applies —
+    /// the generated entry is single-line.)
+    #[test]
+    fn gbuffer_vertex_entry_matches_legacy_shape() {
+        let entry = gbuffer_vs_entry::wgsl_source();
+        assert!(entry.starts_with(
+            "@vertex\nfn vs_main(input: VertexInput, @builtin(instance_index) instance: u32)"
+        ));
+        assert!(entry.contains("-> VertexOutput"));
+        assert!(entry.contains("let obj = per_objects[instance];"));
+        assert!(entry.contains("output.clip_position = camera.view_proj * world_pos;"));
+        assert!(entry.contains("output.material_index = obj.material_index;"));
+        assert!(entry.contains("return output;"));
+    }
+
     #[test]
     fn gbuffer_generated_parity_with_legacy_assembly() {
-        // The only admitted difference: the `_padding` line is gone — skipped
-        // padding is not shader-visible (`#[wgsl(skip)]`).
-        let legacy_vertex =
-            include_str!("wgsl/gbuffer_vertex.wgsl").replace("    _padding: u32,\n", "");
-        assert_eq!(wgsl_vertex_source(), legacy_vertex);
+        // Fragment only: the vertex entry is translated (see above).
         let legacy_fragment = format!(
             "{}\n{}",
             include_str!("wgsl/gbuffer_fragment.wgsl"),
             octahedral_encode::wgsl_source()
         );
         assert_eq!(wgsl_source(), legacy_fragment);
-    }
-
-    #[test]
-    fn gbuffer_vertex_shared_with_pbr_vertex() {
-        let pbr_vertex = include_str!("wgsl/pbr_vertex.wgsl").replace("    _padding: u32,\n", "");
-        assert_eq!(wgsl_vertex_source(), pbr_vertex);
     }
 }
