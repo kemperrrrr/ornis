@@ -16,8 +16,8 @@
 
 use super::OPENPBR_MATERIAL_DECL;
 use super::interface::{
-    GbufferFragmentInput, GbufferOutput, GbufferVertexInput as VertexInput,
-    GbufferVertexOutput as VertexOutput,
+    GbufferFragmentInput as FragmentInput, GbufferOutput as GBufferOutput,
+    GbufferVertexInput as VertexInput, GbufferVertexOutput as VertexOutput,
 };
 use super::wgsl_decl;
 use crate::renderer::{CameraUniform, PerObjectGpu};
@@ -69,20 +69,53 @@ pub fn wgsl_vertex_source() -> String {
     )
 }
 
+/// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
+/// 5-MRT packing. DSL-only — free `materials` binding identifier.
+#[stage(fragment, entry = "fs_main")]
+fn gbuffer_fs_entry(input: FragmentInput) -> GBufferOutput {
+    let mat = materials[input.material_index];
+    let n = normalize(input.world_normal);
+    let world_pos = input.world_position;
+    let base_color = mat.base_color.rgb;
+    let opacity = mat.base_color.a;
+    let normal_enc = octahedral_encode(n);
+    let material_id = input.material_index;
+    let world_pos_enc = Vec2::new(world_pos.x, world_pos.y);
+    let roughness = mat.specular_params.y;
+    let metalness = mat.base_params.z;
+    let specular_weight = mat.specular_params.x;
+    let specular_ior = mat.specular_params.z;
+    let coat_weight = mat.coat_params.x;
+    let coat_roughness = mat.coat_params.y;
+    let subsurface_weight = mat.subsurface_params.x;
+    let transmission_weight = mat.transmission_params.x;
+    let fuzz_weight = mat.fuzz_params.x;
+    let thin_film_weight = mat.thin_film_params.x;
+    let emission_luminance = mat.emission_params.x;
+    let mat_params = Vec4::new(roughness, metalness, specular_ior, coat_weight);
+    let mut output: GBufferOutput;
+    output.albedo = Vec4::new(base_color, opacity);
+    output.normal = normal_enc;
+    output.material_id = material_id;
+    output.world_pos = world_pos_enc;
+    output.mat_params = mat_params;
+    return output;
+}
+
 /// G-buffer fragment shader: 5-MRT packing, splicing the octahedral
 /// normal-encoding kernel via `wgsl_source()`.
 ///
-/// Assembled from the shared [`OPENPBR_MATERIAL_DECL`] plus the fragment body
-/// and kernel; entry point `fs_main` is kept. Byte-identical to the legacy
-/// `shaders::gbuffer_fragment()`.
+/// Assembled from the shared [`OPENPBR_MATERIAL_DECL`], the shared varyings,
+/// the translated [`gbuffer_fs_entry`] body and kernel; entry point `fs_main`
+/// is kept.
 pub fn wgsl_source() -> String {
     format!(
         "{mat}\n{bindings}\n{fin}\n{gout}\n{body}\n{kernel}",
         mat = OPENPBR_MATERIAL_DECL,
         bindings = WGSL_FRAGMENT_BINDINGS,
-        fin = wgsl_decl(GbufferFragmentInput::WGSL_SOURCE),
-        gout = wgsl_decl(GbufferOutput::WGSL_SOURCE),
-        body = WGSL_FRAGMENT_BODY,
+        fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
+        gout = wgsl_decl(GBufferOutput::WGSL_SOURCE),
+        body = gbuffer_fs_entry::wgsl_source(),
         kernel = octahedral_encode::wgsl_source()
     )
 }
@@ -97,45 +130,6 @@ const WGSL_VERTEX_BINDINGS: &str = r#"@group(0) @binding(0) var<uniform> camera:
 "#;
 
 const WGSL_FRAGMENT_BINDINGS: &str = r#"@group(0) @binding(2) var<storage, read> materials: array<OpenPBRMaterial>;
-"#;
-
-const WGSL_FRAGMENT_BODY: &str = r#"@fragment
-fn fs_main(input: FragmentInput) -> GBufferOutput {
-    let mat = materials[input.material_index];
-
-    let N = normalize(input.world_normal);
-    let world_pos = input.world_position;
-    let base_color = mat.base_color.rgb;
-    let opacity = mat.base_color.a;
-
-    let normal_enc = octahedral_encode(N);
-
-    let material_id = input.material_index;
-
-    let world_pos_enc = vec2<f32>(world_pos.x, world_pos.y);
-
-    let roughness = mat.specular_params.y;
-    let metalness = mat.base_params.z;
-    let specular_weight = mat.specular_params.x;
-    let specular_ior = mat.specular_params.z;
-    let coat_weight = mat.coat_params.x;
-    let coat_roughness = mat.coat_params.y;
-    let subsurface_weight = mat.subsurface_params.x;
-    let transmission_weight = mat.transmission_params.x;
-    let fuzz_weight = mat.fuzz_params.x;
-    let thin_film_weight = mat.thin_film_params.x;
-    let emission_luminance = mat.emission_params.x;
-
-    let mat_params = vec4<f32>(roughness, metalness, specular_ior, coat_weight);
-
-    var output: GBufferOutput;
-    output.albedo = vec4<f32>(base_color, opacity);
-    output.normal = normal_enc;
-    output.material_id = material_id;
-    output.world_pos = world_pos_enc;
-    output.mat_params = mat_params;
-    return output;
-}
 "#;
 
 #[cfg(test)]
@@ -187,14 +181,26 @@ mod tests {
         assert!(entry.contains("return output;"));
     }
 
+    /// The translated fragment entry must keep the legacy shape: storage
+    /// read, 5-MRT packing, same kernel call. (Byte-parity no longer
+    /// applies — the generated entry is single-line.)
+    #[test]
+    fn gbuffer_fragment_entry_matches_legacy_shape() {
+        let entry = gbuffer_fs_entry::wgsl_source();
+        assert!(entry.starts_with("@fragment\nfn fs_main(input: FragmentInput)"));
+        assert!(entry.contains("-> GBufferOutput"));
+        assert!(entry.contains("let mat = materials[input.material_index];"));
+        assert!(entry.contains("let normal_enc = octahedral_encode(n);"));
+        assert!(entry.contains("output.mat_params = mat_params;"));
+        assert!(entry.contains("return output;"));
+    }
+
     #[test]
     fn gbuffer_generated_parity_with_legacy_assembly() {
-        // Fragment only: the vertex entry is translated (see above).
-        let legacy_fragment = format!(
-            "{}\n{}",
-            include_str!("wgsl/gbuffer_fragment.wgsl"),
-            octahedral_encode::wgsl_source()
-        );
-        assert_eq!(wgsl_source(), legacy_fragment);
+        // Layouts still splice the derived declarations.
+        let src = wgsl_source();
+        assert!(src.contains(OPENPBR_MATERIAL_DECL));
+        assert!(src.contains(&wgsl_decl(FragmentInput::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(GBufferOutput::WGSL_SOURCE)));
     }
 }
