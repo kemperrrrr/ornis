@@ -6,6 +6,8 @@
 //! `shaders/wgsl/composite.wgsl` remains as a reference/legacy, but
 //! `composite.rs` (LegacyCompositePass) now uses only this module.
 
+use super::interface::UiCompositeOut;
+use super::wgsl_decl;
 use crate::shaders::math::srgb_to_linear;
 
 /// WGSL bindings + quad constants + vertex/fragment entry points.
@@ -14,16 +16,17 @@ use crate::shaders::math::srgb_to_linear;
 /// `srgb_to_linear::wgsl_source()` — the single `srgb_to_linear` in the
 /// system. This removes duplication of the WGSL literal from `composite.rs`.
 fn composite_wgsl_body() -> String {
-    // Header: bindings, VertexOutput, QUAD/UVS, vertex entry.
-    // Format is identical to `shaders/wgsl/composite.wgsl`; entry point names `vs`/`fs`
-    // are kept for compatibility with `CompositePass::new`.
-    let header = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
+    // Header: derived `VertexOutput` varying plus bindings, QUAD/UVS, vertex
+    // entry. Format is identical to `shaders/wgsl/composite.wgsl`; entry
+    // point names `vs`/`fs` are kept for compatibility with
+    // `CompositePass::new`.
+    let header = format!(
+        "\n{vout}\n{rest}",
+        vout = wgsl_decl(UiCompositeOut::WGSL_SOURCE),
+        rest = COMPOSITE_HEADER_REST,
+    );
 
-@group(0) @binding(0) var pbr_tex: texture_2d<f32>;
+    const COMPOSITE_HEADER_REST: &str = r#"@group(0) @binding(0) var pbr_tex: texture_2d<f32>;
 @group(0) @binding(1) var pbr_sampler: sampler;
 @group(0) @binding(2) var ui_tex: texture_2d<f32>;
 @group(0) @binding(3) var ui_sampler: sampler;

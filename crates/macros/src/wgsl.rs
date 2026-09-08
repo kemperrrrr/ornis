@@ -456,6 +456,10 @@ mod wgsl_calls {
                 | "wyzx"
                 | "wzxy"
                 | "wzyx"
+                // Single-channel color aliases are covered above (r/g/b/a);
+                // multi-channel color swizzles used by render passes:
+                | "rgb"
+                | "rgba"
         )
     }
 
@@ -614,25 +618,50 @@ mod wgsl_flow {
                 p, else_val, cond, p, then_val
             );
         }
-        let p = pat(&local.pat);
+        let (p, is_mut) = match &local.pat {
+            syn::Pat::Ident(pi) => (pi.ident.to_string(), pi.mutability.is_some()),
+            syn::Pat::Type(pt) => match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => (pi.ident.to_string(), pi.mutability.is_some()),
+                _ => (pat(&local.pat), false),
+            },
+            _ => (pat(&local.pat), false),
+        };
         let init = local
             .init
             .as_ref()
             .map(|init| crate::wgsl::WgslGen::expr(&init.expr));
         // Rust `let mut` becomes WGSL `var` — the only WGSL binding kind that
         // can be reassigned.
-        let kw = if let syn::Pat::Ident(pi) = &local.pat
-            && pi.mutability.is_some()
-        {
-            "var"
-        } else {
-            "let"
-        };
+        let kw = if is_mut { "var" } else { "let" };
         if let Some(init_val) = init {
             format!("{kw} {p} = {init_val}; ")
+        } else if let syn::Pat::Type(pt) = &local.pat {
+            // Uninitialized declaration (`let mut out: T;`): WGSL needs the
+            // explicit type. Only occurs in stripped stage bodies — compiled
+            // Rust always initializes through the first branch.
+            format!("{kw} {p}: {}; ", var_type(&pt.ty))
         } else {
             format!("{kw} {p}; ")
         }
+    }
+
+    /// WGSL type for an uninitialized `var` declaration. Scalars and glam
+    /// vectors map to their WGSL spellings; any other named type passes
+    /// through verbatim (varying/uniform struct names).
+    fn var_type(ty: &syn::Type) -> String {
+        if let syn::Type::Path(tp) = ty
+            && let Some(last) = tp.path.segments.last().map(|s| s.ident.to_string())
+        {
+            return match last.as_str() {
+                "f32" | "i32" | "u32" | "bool" => last,
+                "Vec2" | "vec2" => "vec2<f32>".to_string(),
+                "Vec3" | "vec3" => "vec3<f32>".to_string(),
+                "Vec4" | "vec4" => "vec4<f32>".to_string(),
+                "Mat4" | "mat4" => "mat4x4<f32>".to_string(),
+                _ => last,
+            };
+        }
+        crate::wgsl::rust_type_to_wgsl(ty)
     }
 
     /// Translate an expression used as a statement. `return` is always

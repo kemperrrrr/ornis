@@ -7,28 +7,79 @@
 
 pub mod bloom_generated;
 pub mod composite_generated;
+pub mod gbuffer_generated;
+pub mod hdr_composite_generated;
+pub mod interface;
 pub mod lighting_generated;
 pub mod math;
+pub mod pbr_generated;
 
-/// ── COMPOSITE_VERTEX ────────────────────────────────────────────────
-const COMPOSITE_VERTEX_BOILERPLATE: &str = include_str!("wgsl/composite_vertex.wgsl");
-
-/// Assemble the full-screen composite vertex shader (triangle-strip quad).
-pub fn composite_vertex() -> String {
-    COMPOSITE_VERTEX_BOILERPLATE.to_string()
+/// Splice a derived [`WgslStruct`](ornis_macros::WgslStruct) declaration into
+/// assembled WGSL, terminated the way the legacy `shaders/wgsl/*.wgsl`
+/// references spell it (`};` plus newline).
+///
+/// The derive emits `struct Foo {\n…\n}\n`; every handwritten reference this
+/// replaces used `};`, so the terminator keeps assembled modules
+/// byte-identical to the legacy files (pinned by the
+/// `*_parity_with_legacy_assembly` tests).
+pub(crate) fn wgsl_decl(source: &'static str) -> String {
+    format!("{};\n", source.trim_end())
 }
 
-/// ── COMPOSITE_FRAGMENT ──────────────────────────────────────────────
-const COMPOSITE_FRAGMENT_BOILERPLATE: &str = include_str!("wgsl/composite_fragment.wgsl");
+/// Shared `OpenPBRMaterial` WGSL declaration (20 `vec4` slots), used by the
+/// g-buffer, lighting and forward-PBR skeletons.
+///
+/// Still handwritten: the CPU-side
+/// [`OpenPBRMaterial`](ornis_core::material::OpenPBRMaterial) is grouped
+/// (`BaseGroup`, `SpecularGroup`, …), not flat, so there is no 1:1 field
+/// mirror to derive from. The `openpbr_rust_layout_matches_wgsl_order` test
+/// below pins the group offsets against this declaration order instead.
+/// Leading/trailing newlines are part of the legacy assembly contract.
+pub(crate) const OPENPBR_MATERIAL_DECL: &str = r#"
+struct OpenPBRMaterial {
+    base_params: vec4<f32>,
+    base_color: vec4<f32>,
+    specular_params: vec4<f32>,
+    specular_color: vec4<f32>,
+    transmission_params: vec4<f32>,
+    transmission_color: vec4<f32>,
+    transmission_scatter: vec4<f32>,
+    subsurface_params: vec4<f32>,
+    subsurface_color: vec4<f32>,
+    subsurface_radius_scale_gb: vec4<f32>,
+    fuzz_params: vec4<f32>,
+    fuzz_color: vec4<f32>,
+    coat_params: vec4<f32>,
+    coat_color: vec4<f32>,
+    coat_ior: vec4<f32>,
+    thin_film_params: vec4<f32>,
+    emission_params: vec4<f32>,
+    emission_color: vec4<f32>,
+    geometry_params: vec4<f32>,
+    geometry_params2: vec4<f32>,
+};
+"#;
+
+// ── COMPOSITE_VERTEX ────────────────────────────────────────────────
+
+/// Assemble the full-screen composite vertex shader (triangle-strip quad).
+///
+/// Single source of truth — [`hdr_composite_generated::wgsl_vertex_source`]
+/// (Rust → WGSL, path 2). Legacy `wgsl/composite_vertex.wgsl` remains as a
+/// reference; parity is pinned by `hdr_generated_parity_with_legacy_assembly`.
+pub fn composite_vertex() -> String {
+    hdr_composite_generated::wgsl_vertex_source()
+}
+
+// ── COMPOSITE_FRAGMENT ──────────────────────────────────────────────
 
 /// Assemble the composite fragment shader: HDR mix + bloom, splicing the ACES tonemap and luminance kernels via `wgsl_source()`.
+///
+/// Single source of truth — [`hdr_composite_generated::wgsl_source`]
+/// (Rust → WGSL, path 2). Legacy `wgsl/composite_fragment.wgsl` remains as a
+/// reference; parity is pinned by `hdr_generated_parity_with_legacy_assembly`.
 pub fn composite_fragment() -> String {
-    format!(
-        "{}\n{}\n{}",
-        COMPOSITE_FRAGMENT_BOILERPLATE,
-        math::aces_tonemap::wgsl_source(),
-        math::luminance::wgsl_source(),
-    )
+    hdr_composite_generated::wgsl_source()
 }
 
 // ── BLOOM ───────────────────────────────────────────────────────────
@@ -40,24 +91,26 @@ pub fn bloom_fragment() -> String {
     bloom_generated::wgsl_source()
 }
 
-/// ── GBUFFER_VERTEX ──────────────────────────────────────────────────
-const GBUFFER_VERTEX_BOILERPLATE: &str = include_str!("wgsl/gbuffer_vertex.wgsl");
+// ── GBUFFER_VERTEX ────────────────────────────────────────────────────
 
 /// Assemble the gbuffer vertex shader (instance transforms + world position).
+///
+/// Single source of truth — [`gbuffer_generated::wgsl_vertex_source`]
+/// (Rust → WGSL, path 2). Legacy `wgsl/gbuffer_vertex.wgsl` remains as a
+/// reference; parity is pinned by `gbuffer_generated_parity_with_legacy_assembly`.
 pub fn gbuffer_vertex() -> String {
-    GBUFFER_VERTEX_BOILERPLATE.to_string()
+    gbuffer_generated::wgsl_vertex_source()
 }
 
-/// ── GBUFFER_FRAGMENT ────────────────────────────────────────────────
-const GBUFFER_FRAGMENT_BOILERPLATE: &str = include_str!("wgsl/gbuffer_fragment.wgsl");
+// ── GBUFFER_FRAGMENT ──────────────────────────────────────────────────
 
 /// Assemble the 5-MRT gbuffer fragment shader, splicing the octahedral normal-encoding kernel.
+///
+/// Single source of truth — [`gbuffer_generated::wgsl_source`]
+/// (Rust → WGSL, path 2). Legacy `wgsl/gbuffer_fragment.wgsl` remains as a
+/// reference; parity is pinned by `gbuffer_generated_parity_with_legacy_assembly`.
 pub fn gbuffer_fragment() -> String {
-    format!(
-        "{}\n{}",
-        GBUFFER_FRAGMENT_BOILERPLATE,
-        math::octahedral_encode::wgsl_source(),
-    )
+    gbuffer_generated::wgsl_source()
 }
 
 // ── LIGHTING_VERTEX ─────────────────────────────────────────────────
@@ -74,46 +127,27 @@ pub fn lighting_fragment() -> String {
     lighting_generated::wgsl_source()
 }
 
-/// ── PBR_VERTEX ──────────────────────────────────────────────────────
-const PBR_VERTEX_BOILERPLATE: &str = include_str!("wgsl/pbr_vertex.wgsl");
+// ── PBR_VERTEX ────────────────────────────────────────────────────────
 
 /// Assemble the forward PBR vertex shader.
+///
+/// Single source of truth — [`pbr_generated::wgsl_vertex_source`]
+/// (Rust → WGSL, path 2; shares the g-buffer instance-transform vertex).
+/// Legacy `wgsl/pbr_vertex.wgsl` remains as a reference; parity is pinned by
+/// `pbr_generated_parity_with_legacy_assembly`.
 pub fn pbr_vertex() -> String {
-    PBR_VERTEX_BOILERPLATE.to_string()
+    pbr_generated::wgsl_vertex_source()
 }
 
-/// ── PBR_FRAGMENT ────────────────────────────────────────────────────
-const PBR_FRAGMENT_BOILERPLATE: &str = include_str!("wgsl/pbr_fragment.wgsl");
+// ── PBR_FRAGMENT ──────────────────────────────────────────────────────
 
 /// Assemble the forward PBR fragment shader: full OpenPBR evaluation, splicing all BRDF math kernels via `wgsl_source()`.
+///
+/// Single source of truth — [`pbr_generated::wgsl_source`]
+/// (Rust → WGSL, path 2). Legacy `wgsl/pbr_fragment.wgsl` remains as a
+/// reference; parity is pinned by `pbr_generated_parity_with_legacy_assembly`.
 pub fn pbr_fragment() -> String {
-    let kernels = [
-        math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
-        math::fresnel0_from_ior::wgsl_source(),
-        math::fresnel_schlick::wgsl_source(),
-        math::fresnel_schlick_vec::wgsl_source(),
-        math::fresnel_f82_tint::wgsl_source(),
-        math::ggx_ndf::wgsl_source(),
-        math::ggx_ndf_aniso::wgsl_source(),
-        math::openpbr_anisotropy::wgsl_source(),
-        math::smith_ggx_correlated::wgsl_source(),
-        math::smith_ggx_aniso::wgsl_source(),
-        math::oren_nayar_brdf::wgsl_source(),
-        math::coat_base_darkening::wgsl_source(),
-        math::coat_blend_darkened::wgsl_source(),
-        math::thin_film_modulation::wgsl_source(),
-        math::sheen_brdf::wgsl_source(),
-        math::transmission_color_to_extinction::wgsl_source(),
-        math::subsurface_brdf::wgsl_source(),
-        math::srgb_to_linear::wgsl_source(),
-    ];
-    let mut src = PBR_FRAGMENT_BOILERPLATE.to_string();
-    for k in &kernels {
-        src.push('\n');
-        src.push_str(k);
-    }
-    src
+    pbr_generated::wgsl_source()
 }
 
 /// Rust mirror of the WGSL `octahedral_decode` used in the fragment shaders;
@@ -164,5 +198,28 @@ mod tests {
         for (name, source) in &shaders {
             assert_valid_wgsl(name, source);
         }
+    }
+
+    /// The grouped CPU-side `OpenPBRMaterial` must lay out its groups in the
+    /// exact order the shared WGSL declaration lists the `vec4` slots:
+    /// base(0) → specular(32) → transmission(64) → subsurface(112) →
+    /// fuzz(160) → coat(192) → thin_film(240) → emission(256) →
+    /// geometry(288), 320 bytes total. Any reordering breaks every pass that
+    /// splices [`OPENPBR_MATERIAL_DECL`].
+    #[test]
+    fn openpbr_rust_layout_matches_wgsl_order() {
+        use ornis_core::material::OpenPBRMaterial;
+        assert_eq!(std::mem::size_of::<OpenPBRMaterial>(), 320);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, base), 0);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, specular), 32);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, transmission), 64);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, subsurface), 112);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, fuzz), 160);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, coat), 192);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, thin_film), 240);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, emission), 256);
+        assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
+        // Within-group slot order mirrors the WGSL field order.
+        assert_eq!(OPENPBR_MATERIAL_DECL.matches("vec4<f32>").count(), 20);
     }
 }

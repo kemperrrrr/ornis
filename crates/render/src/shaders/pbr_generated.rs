@@ -1,92 +1,90 @@
-//! Lighting shader generated from Rust (Render path 2).
+//! Forward-PBR shader generated from Rust (Render path 2).
 //!
-//! Canonical source is the Rust code in this module; WGSL is assembled
-//! from constants + `math::*::wgsl_source()` kernels (OpenPBR BRDF).
-//! The handwritten `shaders/wgsl/lighting.wgsl` remains as a reference/legacy,
-//! but `lighting_fragment` is now assembled only from here. Prepares
-//! PBR lighting for the full Rust→WGSL transition (path 2).
+//! Canonical source is the Rust code in this module: the full OpenPBR
+//! fragment skeleton (layer evaluators + `fs_main`) lives here as a Rust
+//! string, and the 19 BRDF math kernels are spliced in from
+//! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
+//! The handwritten `shaders/wgsl/pbr_vertex.wgsl` and
+//! `shaders/wgsl/pbr_fragment.wgsl` remain as references; the
+//! `pbr_generated_parity_with_legacy_assembly` test pins this module
+//! byte-identical to them.
+//!
+//! Note: the vertex stage is shared with the g-buffer pass
+//! (`shaders/wgsl/pbr_vertex.wgsl` is byte-identical to
+//! `shaders/wgsl/gbuffer_vertex.wgsl`), so [`wgsl_vertex_source`] reuses
+//! [`crate::shaders::gbuffer_generated::wgsl_vertex_source`] instead of
+//! duplicating it.
 
-use super::interface::HdrFragmentOut;
-use super::wgsl_decl;
-use crate::shaders::math;
+use super::interface::GbufferFragmentInput;
+use super::{OPENPBR_MATERIAL_DECL, wgsl_decl};
+use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
+use crate::shaders::{gbuffer_generated, math};
 
-/// WGSL boilerplate for deferred lighting: structs, bindings, helpers, main.
-/// Identical to `shaders/wgsl/lighting.wgsl`; entry point names `fs_main`
-/// are kept for compatibility.
-fn lighting_wgsl_header() -> &'static str {
-    // This literal is the only `vec4<f32>` outside `*_generated.rs` that must
-    // be absent; here it is inside generated code, which is allowed by the grep rule.
-    r#"
-struct Camera {
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-};
+/// Forward-PBR vertex shader: instance transforms + world position.
+///
+/// Delegates to [`gbuffer_generated::wgsl_vertex_source`] — the two legacy
+/// vertex files are byte-identical. Entry point name `vs_main` is kept for
+/// compatibility with `create_pbr_pass`.
+pub fn wgsl_vertex_source() -> String {
+    gbuffer_generated::wgsl_vertex_source()
+}
 
-struct Light {
-    direction: vec4<f32>,
-    color: vec4<f32>,
-};
+/// Forward-PBR fragment shader: full OpenPBR evaluation.
+///
+/// Assembled as `{skeleton}\\n{kernel × 19}`, exactly like the legacy
+/// `shaders::pbr_fragment()`; entry point `fs_main` is kept.
+pub fn wgsl_source() -> String {
+    let kernels = [
+        math::luminance::wgsl_source(),
+        math::aces_tonemap::wgsl_source(),
+        math::fresnel0_from_ior::wgsl_source(),
+        math::fresnel_schlick::wgsl_source(),
+        math::fresnel_schlick_vec::wgsl_source(),
+        math::fresnel_f82_tint::wgsl_source(),
+        math::ggx_ndf::wgsl_source(),
+        math::ggx_ndf_aniso::wgsl_source(),
+        math::openpbr_anisotropy::wgsl_source(),
+        math::smith_ggx_correlated::wgsl_source(),
+        math::smith_ggx_aniso::wgsl_source(),
+        math::oren_nayar_brdf::wgsl_source(),
+        math::coat_base_darkening::wgsl_source(),
+        math::coat_blend_darkened::wgsl_source(),
+        math::thin_film_modulation::wgsl_source(),
+        math::sheen_brdf::wgsl_source(),
+        math::transmission_color_to_extinction::wgsl_source(),
+        math::subsurface_brdf::wgsl_source(),
+        math::srgb_to_linear::wgsl_source(),
+    ];
+    let mut src = format!(
+        "\n{cam}\n{light}\n{lighting}{mat}\n{restA}\n{fin}\n{restB}",
+        cam = CameraUniform::WGSL_SOURCE,
+        light = wgsl_decl(GpuLight::WGSL_SOURCE),
+        lighting = wgsl_decl(LightingUniform::WGSL_SOURCE),
+        mat = OPENPBR_MATERIAL_DECL,
+        restA = WGSL_FRAGMENT_HEAD,
+        fin = wgsl_decl(GbufferFragmentInput::WGSL_SOURCE),
+        restB = WGSL_FRAGMENT_TAIL,
+    );
+    for k in &kernels {
+        src.push('\n');
+        src.push_str(k);
+    }
+    src
+}
 
-struct Lighting {
-    ambient_color: vec4<f32>,
-    lights: array<Light, 4>,
-    light_count: u32,
-};
+/// Static view for naga validation in tests.
+pub fn wgsl_source_static() -> String {
+    wgsl_source()
+}
 
-struct OpenPBRMaterial {
-    base_params: vec4<f32>,
-    base_color: vec4<f32>,
-    specular_params: vec4<f32>,
-    specular_color: vec4<f32>,
-    transmission_params: vec4<f32>,
-    transmission_color: vec4<f32>,
-    transmission_scatter: vec4<f32>,
-    subsurface_params: vec4<f32>,
-    subsurface_color: vec4<f32>,
-    subsurface_radius_scale_gb: vec4<f32>,
-    fuzz_params: vec4<f32>,
-    fuzz_color: vec4<f32>,
-    coat_params: vec4<f32>,
-    coat_color: vec4<f32>,
-    coat_ior: vec4<f32>,
-    thin_film_params: vec4<f32>,
-    emission_params: vec4<f32>,
-    emission_color: vec4<f32>,
-    geometry_params: vec4<f32>,
-    geometry_params2: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<uniform> lighting: Lighting;
+const WGSL_FRAGMENT_HEAD: &str = r#"@group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(2) var<storage, read> materials: array<OpenPBRMaterial>;
-@group(0) @binding(3) var albedo_tex: texture_2d<f32>;
-@group(0) @binding(4) var normal_tex: texture_2d<f32>;
-@group(0) @binding(5) var material_id_tex: texture_2d<u32>;
-@group(0) @binding(6) var world_pos_tex: texture_2d<f32>;
-@group(0) @binding(7) var mat_params_tex: texture_2d<f32>;
-@group(0) @binding(8) var depth_tex: texture_depth_2d;
-@group(0) @binding(9) var lighting_sampler: sampler;
+@group(0) @binding(3) var<uniform> lighting: Lighting;
+"#;
 
-const PI: f32 = 3.14159265359;
+const WGSL_FRAGMENT_TAIL: &str = r#"const PI: f32 = 3.14159265359;
 const EPS: f32 = 1e-6;
 const INV_PI: f32 = 0.31830988618;
-
-fn octahedral_decode(p: vec2<f32>) -> vec3<f32> {
-    var n = vec3<f32>(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
-    let t = max(-n.z, 0.0);
-    let offset = select(-n.yx, n.yx, n.xy >= vec2<f32>(0.0)) * t;
-    n.x += offset.x;
-    n.y += offset.y;
-    return normalize(n);
-}
-
-fn reconstruct_world_pos(uv: vec2<f32>, depth: f32, camera: Camera) -> vec3<f32> {
-    let ndc = vec3<f32>(uv * 2.0 - 1.0, depth * 2.0 - 1.0);
-    let clip = vec4<f32>(ndc, 1.0);
-    let view = camera.inv_view_proj * clip;
-    return view.xyz / view.w;
-}
 
 fn evaluate_base_layer(
     N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, H: vec3<f32>,
@@ -225,30 +223,26 @@ fn transmission_btdf(
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let depth = textureLoad(depth_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(depth_tex))), 0);
-    let albedo = textureSampleLevel(albedo_tex, lighting_sampler, uv, 0.0);
-    let normal_enc = textureSampleLevel(normal_tex, lighting_sampler, uv, 0.0);
-    let material_id = textureLoad(material_id_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(material_id_tex))), 0).r;
-    let world_pos_enc = textureSampleLevel(world_pos_tex, lighting_sampler, uv, 0.0);
-    let mat_params = textureSampleLevel(mat_params_tex, lighting_sampler, uv, 0.0);
-    let mat = materials[material_id];
-    if albedo.a < 0.001 {
-        discard;
-    }
-    let N = octahedral_decode(normal_enc.rg);
-    let world_pos = reconstruct_world_pos(uv, depth, camera);
-    let V = normalize(camera.camera_pos.xyz - world_pos);
+fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
+    let mat = materials[input.material_index];
+    let N = normalize(input.world_normal);
+    let V = normalize(camera.camera_pos.xyz - input.world_position);
     let NoV = max(dot(N, V), EPS);
+
+    let T = normalize(input.world_tangent);
+    let B = cross(N, T);
+
     let base_weight = mat.base_params.x;
     let base_color = mat.base_color.rgb;
     let metalness = mat.base_params.z;
     let diffuse_roughness = mat.base_params.y;
+
     let specular_weight = mat.specular_params.x;
     let specular_roughness = mat.specular_params.y;
     let specular_ior = mat.specular_params.z;
     let specular_anisotropy = mat.specular_params.w;
     let specular_edge_tint = mat.specular_color.rgb;
+
     let transmission_weight = mat.transmission_params.x;
     let transmission_depth = mat.transmission_params.y;
     let transmission_dispersion_scale = mat.transmission_params.z;
@@ -256,6 +250,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let transmission_color = mat.transmission_color.rgb;
     let transmission_scatter = mat.transmission_scatter.rgb;
     let transmission_scatter_anisotropy = mat.transmission_scatter.a;
+
     let subsurface_weight = mat.subsurface_params.x;
     let subsurface_radius = mat.subsurface_params.y;
     let subsurface_radius_scale_r = mat.subsurface_params.z;
@@ -263,42 +258,52 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let subsurface_color = mat.subsurface_color.rgb;
     let subsurface_radius_scale_g = mat.subsurface_radius_scale_gb.x;
     let subsurface_radius_scale_b = mat.subsurface_radius_scale_gb.y;
+
     let fuzz_weight = mat.fuzz_params.x;
     let fuzz_roughness = mat.fuzz_params.y;
     let fuzz_color = mat.fuzz_color.rgb;
+
     let coat_weight = mat.coat_params.x;
     let coat_roughness = mat.coat_params.y;
     let coat_anisotropy = mat.coat_params.z;
     let coat_darkening = mat.coat_params.w;
     let coat_color = mat.coat_color.rgb;
     let coat_ior = mat.coat_ior.x;
+
     let thin_film_weight = mat.thin_film_params.x;
     let thin_film_thickness_um = mat.thin_film_params.y;
     let thin_film_ior = mat.thin_film_params.z;
+
     let emission_luminance = mat.emission_params.x;
     let emission_color = mat.emission_color.rgb;
+
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
+
     var Lo = vec3<f32>(0.0);
+
     let thin_film_mod = thin_film_modulation(NoV, thin_film_ior, thin_film_thickness_um, 1.0);
-    let T = normalize(cross(N, vec3<f32>(0.0, 1.0, 0.0)));
-    let B = cross(N, T);
+
     for (var i = 0u; i < lighting.light_count; i = i + 1u) {
         let L = normalize(lighting.lights[i].direction.xyz);
         let H = normalize(V + L);
         let light_color = lighting.lights[i].color.rgb;
         let intensity = lighting.lights[i].color.w;
         let radiance = light_color * intensity;
+
         let NoL = max(dot(N, L), EPS);
         let NoH = max(dot(N, H), EPS);
         let VoH = max(dot(V, H), EPS);
+
         if (NoL <= EPS) { continue; }
+
         let base_bsdf = evaluate_base_layer(
             N, V, L, H, NoV, NoL, NoH, VoH, mat,
             base_weight, base_color, metalness, diffuse_roughness,
             specular_weight, specular_roughness, specular_ior, specular_anisotropy, specular_edge_tint,
             T, B, thin_film_mod
         );
+
         let coat_bsdf = evaluate_coat_layer(
             N, V, L, H, NoV, NoL, NoH, VoH, mat,
             coat_weight, coat_roughness, coat_anisotropy, coat_darkening, coat_ior, coat_color,
@@ -306,10 +311,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             subsurface_weight, subsurface_color,
             T, B
         );
+
         let fuzz_bsdf = evaluate_fuzz_layer(
             N, V, L, H, NoV, NoL, NoH, VoH,
             fuzz_weight, fuzz_roughness, fuzz_color
         );
+
         let trans_bsdf = evaluate_transmission_layer(
             N, V, L, H, NoV, NoL, NoH, VoH, mat,
             transmission_weight, transmission_depth, transmission_dispersion_scale, transmission_dispersion_abbe,
@@ -317,93 +324,26 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             specular_ior, specular_roughness, specular_anisotropy,
             thin_walled
         );
+
         let ss_bsdf = evaluate_subsurface_layer(
             N, V, L, NoV, NoL,
             subsurface_weight, subsurface_radius, subsurface_radius_scale_r,
             subsurface_radius_scale_g, subsurface_radius_scale_b,
             subsurface_scatter_anisotropy, subsurface_color
         );
+
         let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;
         Lo += layer_bsdf * radiance * NoL;
     }
+
     let ambient = lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
     let emission = evaluate_emission(emission_luminance, emission_color, coat_weight, coat_color, NoV);
+
     let color = ambient + Lo + emission;
     let tone_mapped = aces_tonemap(color);
     return vec4<f32>(tone_mapped, opacity);
 }
-"#
-}
-
-fn lighting_fragment_kernels() -> String {
-    let kernels = [
-        math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
-        math::fresnel0_from_ior::wgsl_source(),
-        math::fresnel_schlick::wgsl_source(),
-        math::fresnel_schlick_vec::wgsl_source(),
-        math::fresnel_f82_tint::wgsl_source(),
-        math::ggx_ndf::wgsl_source(),
-        math::ggx_ndf_aniso::wgsl_source(),
-        math::openpbr_anisotropy::wgsl_source(),
-        math::smith_ggx_correlated::wgsl_source(),
-        math::smith_ggx_aniso::wgsl_source(),
-        math::oren_nayar_brdf::wgsl_source(),
-        math::coat_base_darkening::wgsl_source(),
-        math::coat_blend_darkened::wgsl_source(),
-        math::thin_film_modulation::wgsl_source(),
-        math::sheen_brdf::wgsl_source(),
-        math::transmission_color_to_extinction::wgsl_source(),
-        math::subsurface_brdf::wgsl_source(),
-    ];
-    kernels.join("\n")
-}
-
-/// Full WGSL source for deferred lighting, assembled from Rust.
-pub fn wgsl_source() -> String {
-    format!(
-        "{}\n{}\n",
-        lighting_wgsl_header(),
-        lighting_fragment_kernels()
-    )
-}
-
-/// Vertex WGSL: full-screen quad (triangle strip) — quad constants and entry
-/// body stay handwritten; the varying splices the shared `QuadVertexOutput`
-/// declaration (`HdrFragmentOut`).
-pub fn wgsl_vertex_source() -> String {
-    format!(
-        "\n{quad}{qo}{body}",
-        quad = WGSL_VERTEX_QUAD_UV,
-        qo = wgsl_decl(HdrFragmentOut::WGSL_SOURCE),
-        body = WGSL_VERTEX_BODY,
-    )
-}
-
-const WGSL_VERTEX_QUAD_UV: &str = r#"const QUAD: array<vec4<f32>, 4> = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
-);
-const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(1.0, 0.0),
-);
 "#;
-
-const WGSL_VERTEX_BODY: &str = r#"@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> QuadVertexOutput {
-    return QuadVertexOutput(QUAD[idx], UVS[idx]);
-}
-"#;
-
-/// Static view for naga validation and snapshot tests.
-pub fn wgsl_source_static() -> String {
-    wgsl_source()
-}
 
 #[cfg(test)]
 mod tests {
@@ -422,44 +362,56 @@ mod tests {
     }
 
     #[test]
-    fn lighting_generated_validates_with_naga() {
-        assert_valid_wgsl("lighting_generated", &wgsl_source());
+    fn pbr_generated_validates_with_naga() {
+        assert_valid_wgsl("pbr_vertex", &wgsl_vertex_source());
+        assert_valid_wgsl("pbr_fragment", &wgsl_source());
     }
 
     #[test]
-    fn lighting_generated_contains_expected_kernels() {
-        let src = wgsl_source();
-        assert!(src.contains("fn aces_tonemap"));
-        assert!(src.contains("fn fresnel_f82_tint"));
-        assert!(src.contains("fn ggx_ndf_aniso"));
-        assert!(src.contains("fn fs_main"));
+    fn pbr_generated_contains_expected_bindings() {
+        let vs = wgsl_vertex_source();
+        assert!(vs.contains("@group(0) @binding(1) var<storage, read> per_objects"));
+        assert!(vs.contains("fn vs_main("));
+        let fs = wgsl_source();
+        assert!(fs.contains("@group(0) @binding(3) var<uniform> lighting"));
+        assert!(fs.contains("fn fs_main("));
+        assert!(fs.contains("fn evaluate_base_layer"));
+        assert!(fs.contains("fn aces_tonemap"));
     }
 
-    /// The handwritten struct blocks in the lighting header must stay
-    /// identical to the derived layouts: the field lists on the Rust mirrors
-    /// are the authority, this test is the tripwire. (The header keeps its
-    /// monolithic shape instead of splices so the 200-line evaluator body is
-    /// never retyped.)
     #[test]
-    fn lighting_struct_blocks_match_derived_layouts() {
-        use super::super::{OPENPBR_MATERIAL_DECL, wgsl_decl};
-        use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
-        let src = wgsl_source();
-        assert!(
-            src.contains(&wgsl_decl(CameraUniform::WGSL_SOURCE)),
-            "Camera block drifted from CameraUniform layout"
-        );
-        assert!(
-            src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)),
-            "Light block drifted from GpuLight layout"
-        );
-        assert!(
-            src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)),
-            "Lighting block drifted from LightingUniform layout"
-        );
-        assert!(
-            src.contains(OPENPBR_MATERIAL_DECL),
-            "OpenPBR block drifted from the shared declaration"
-        );
+    fn pbr_generated_parity_with_legacy_assembly() {
+        // The only admitted difference: the `_padding` line is gone — skipped
+        // padding is not shader-visible (`#[wgsl(skip)]`).
+        let legacy_vertex =
+            include_str!("wgsl/pbr_vertex.wgsl").replace("    _padding: u32,\n", "");
+        assert_eq!(wgsl_vertex_source(), legacy_vertex);
+        let kernels = [
+            math::luminance::wgsl_source(),
+            math::aces_tonemap::wgsl_source(),
+            math::fresnel0_from_ior::wgsl_source(),
+            math::fresnel_schlick::wgsl_source(),
+            math::fresnel_schlick_vec::wgsl_source(),
+            math::fresnel_f82_tint::wgsl_source(),
+            math::ggx_ndf::wgsl_source(),
+            math::ggx_ndf_aniso::wgsl_source(),
+            math::openpbr_anisotropy::wgsl_source(),
+            math::smith_ggx_correlated::wgsl_source(),
+            math::smith_ggx_aniso::wgsl_source(),
+            math::oren_nayar_brdf::wgsl_source(),
+            math::coat_base_darkening::wgsl_source(),
+            math::coat_blend_darkened::wgsl_source(),
+            math::thin_film_modulation::wgsl_source(),
+            math::sheen_brdf::wgsl_source(),
+            math::transmission_color_to_extinction::wgsl_source(),
+            math::subsurface_brdf::wgsl_source(),
+            math::srgb_to_linear::wgsl_source(),
+        ];
+        let mut legacy_fragment = include_str!("wgsl/pbr_fragment.wgsl").to_string();
+        for k in &kernels {
+            legacy_fragment.push('\n');
+            legacy_fragment.push_str(k);
+        }
+        assert_eq!(wgsl_source(), legacy_fragment);
     }
 }

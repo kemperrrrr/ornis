@@ -6,6 +6,9 @@
 //! `shaders/wgsl/bloom_fragment.wgsl` remains as a reference/legacy, but
 //! `renderer::create_bloom_pass` now uses only this module.
 
+use super::interface::BloomVertexOut;
+use super::wgsl_decl;
+use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
 
 /// WGSL bindings + quad constants + vertex/fragment entry points.
@@ -13,15 +16,19 @@ use crate::shaders::math::luminance;
 /// Assembled at runtime as a `String`, but the source is Rust: constants and
 /// `luminance::wgsl_source()` — the single `luminance` in the system.
 fn bloom_wgsl_body() -> String {
-    let header = r#"
-struct BloomParams {
-    threshold: f32,
-    intensity: f32,
-    mode: u32,
-    _pad: f32,
-};
+    // Derived `BloomParams` layout and `BloomVertexOut` varying spliced into
+    // the handwritten header rest (bindings + quad + entries). Byte-identical
+    // to the previous assembly except the dropped `_pad` line
+    // (`#[wgsl(skip)]` pads are not shader-visible).
+    let header = format!(
+        "\n{bloom}\n{head}\n{vout}\n{tail}",
+        bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
+        head = BLOOM_HEADER_HEAD,
+        vout = wgsl_decl(BloomVertexOut::WGSL_SOURCE),
+        tail = BLOOM_HEADER_TAIL,
+    );
 
-@group(0) @binding(0) var src_tex: texture_2d<f32>;
+    const BLOOM_HEADER_HEAD: &str = r#"@group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
 @group(0) @binding(2) var<uniform> bloom_params: BloomParams;
 
@@ -38,13 +45,9 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(0.0, 0.0),
     vec2<f32>(1.0, 0.0),
 );
+"#;
 
-struct BloomVertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
+    const BLOOM_HEADER_TAIL: &str = r#"@vertex
 fn vs_main(@builtin(vertex_index) idx: u32) -> BloomVertexOutput {
     return BloomVertexOutput(QUAD[idx], UVS[idx]);
 }

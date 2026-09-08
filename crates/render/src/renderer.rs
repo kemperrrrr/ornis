@@ -8,12 +8,18 @@ use crate::mesh::{Mesh, Vertex};
 use crate::shaders;
 use glam::Mat4;
 use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
+use ornis_macros::WgslStruct;
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
 /// Frame-global camera uniform (binding shared by every pass).
+///
+/// The WGSL `Camera` declaration is generated from this layout
+/// ([`CameraUniform::WGSL_SOURCE`]); the field list here is the single source
+/// of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "Camera")]
 pub struct CameraUniform {
     /// View-projection matrix.
     pub view_proj: [[f32; 4]; 4],
@@ -24,8 +30,13 @@ pub struct CameraUniform {
 }
 
 /// GPU per-instance record mirroring CPU [`InstanceData`] with padding to 16 bytes.
+///
+/// The WGSL `PerObject` declaration is generated from this layout
+/// ([`PerObjectGpu::WGSL_SOURCE`]); the field list here is the single source
+/// of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "PerObject")]
 pub struct PerObjectGpu {
     /// Local-to-world matrix.
     pub model: [[f32; 4]; 4],
@@ -33,23 +44,41 @@ pub struct PerObjectGpu {
     pub normal_matrix: [[f32; 4]; 4],
     /// Index into the material buffer uploaded by `upload_materials`.
     pub material_index: u32,
-    /// Aligns the record to 16-byte stride.
+    /// Aligns the record to 16-byte stride (padding: not shader-visible).
+    #[wgsl(skip)]
     _padding: [u32; 3],
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuLight {
+/// One GPU light: direction + color packed as `vec4`s.
+///
+/// The WGSL `Light` declaration is generated from this layout
+/// ([`GpuLight::WGSL_SOURCE`]). `align(16)` matches the WGSL struct alignment
+/// so the derive's nested-layout check holds (cf. physics `GpuBodyState`).
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "Light")]
+pub(crate) struct GpuLight {
     direction: [f32; 4],
     color: [f32; 4],
 }
 
+/// Lighting uniform block: ambient + fixed light array + count.
+///
+/// The WGSL `Lighting` declaration is generated from this layout
+/// ([`LightingUniform::WGSL_SOURCE`]); the field list here is the single
+/// source of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct LightingUniform {
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "Lighting")]
+pub(crate) struct LightingUniform {
     ambient_color: [f32; 4],
+    /// Four lights; spelled `array<Light, 4>` in WGSL (the inner struct's
+    /// `name` override is not visible here, hence the explicit `to`).
+    #[wgsl(to = "Light")]
     lights: [GpuLight; 4],
     light_count: u32,
+    /// Trailing pad to a 16-multiple size (padding: not shader-visible).
+    #[wgsl(skip)]
     _pad: [u32; 3],
 }
 
@@ -168,12 +197,18 @@ pub struct CompositeInputs<'a> {
 /// `intensity` scales the bloom contribution in the composite pass.
 /// `mode` (composite only) picks the layer mix: 0 = deferred-only,
 /// 1 = forward-only, 2 = hybrid.
+///
+/// The WGSL `BloomParams` declaration is generated from this layout
+/// ([`BloomUniform::WGSL_SOURCE`]).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BloomUniform {
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "BloomParams")]
+pub(crate) struct BloomUniform {
     threshold: f32,
     intensity: f32,
     mode: u32,
+    /// Trailing pad (padding: not shader-visible).
+    #[wgsl(skip)]
     _pad: f32,
 }
 

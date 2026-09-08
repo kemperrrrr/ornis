@@ -9,6 +9,9 @@
 //! - `#[derive(WgslStruct)]` — mirror a Rust struct as a WGSL struct
 //!   definition so shader-side types stay layout-compatible with the Rust
 //!   side.
+//! - `#[derive(WgslInterface)]` — mirror a Rust struct as a WGSL
+//!   shader-interface struct (vertex inputs, varyings): location/builtin
+//!   assignments generated from field attributes.
 //! - `#[kernel]` — translate a small Rust function AST into WGSL compute
 //!   code (used e.g. for BRDF math in `render/shaders/math.rs`).
 //! - `#[gpu_pipeline]`, `#[derive(PipelineConfig)]`,
@@ -27,6 +30,7 @@ mod register_component;
 mod smart_pipeline;
 mod static_profile;
 mod wgsl;
+mod wgsl_interface;
 mod wgsl_struct;
 
 use proc_macro::TokenStream;
@@ -57,9 +61,19 @@ pub fn derive_pack(input: TokenStream) -> TokenStream {
 /// vector/matrix types) so the shader-side type stays in sync with the CPU
 /// definition; intended to be combined with packing derives to guarantee
 /// identical memory layouts on both sides of a buffer upload.
-#[proc_macro_derive(WgslStruct)]
+#[proc_macro_derive(WgslStruct, attributes(wgsl))]
 pub fn derive_wgsl_struct(input: TokenStream) -> TokenStream {
     wgsl_struct::derive(input)
+}
+
+/// Mirror a Rust struct as a WGSL shader-interface struct definition.
+///
+/// Emits the `struct { ... }` with `@location`/`@builtin`/`@interpolate`
+/// attributes generated from `#[wgsl(...)]` field attributes, so the
+/// interface assignment lives in Rust instead of a handwritten literal.
+#[proc_macro_derive(WgslInterface, attributes(wgsl))]
+pub fn derive_wgsl_interface(input: TokenStream) -> TokenStream {
+    wgsl_interface::derive(input)
 }
 
 /// Stamp a code block once per registered entity component.

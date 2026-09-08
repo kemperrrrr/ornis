@@ -165,6 +165,59 @@
    > шейдеров не изменились). Все builder'ы и composite-шейдер проходят
    > naga-валидацию в тестах (`parse_str` + `Validator`). Сам перевод пассов
    > на Rust→WGSL по-прежнему впереди.
+   >
+   > ✅ **Релокация пассов в Rust выполнена 2026-09-08** (не путать с
+   > настоящей генерацией): все 9 собираемых шейдеров идут из
+   > `*_generated.rs`-модулей (`bloom`, `composite`/`hdr_composite`,
+   > `lighting`, `gbuffer`, `pbr`; вершины gbuffer/pbr — один общий
+   > источник). По-настоящему генерируются только math-ядра (`#[kernel]`);
+   > скелеты стадий — пока встроенные WGSL-строки, пересобранные из Rust.
+   > Каждый модуль держит паритет-тест против legacy-сборки
+   > (`*_parity_with_legacy_assembly`) + naga-валидацию; legacy `.wgsl`
+   > остаются только референсами. `rg "vec4<f32>" crates/render/src
+   > --glob '*.rs'` пуст вне `*_generated.rs` и `tests/`,
+   > `cargo test -p ornis-render` зелёный (lib 117 + пиксельные
+   > `schedule_render`/`scheduler_parity`/`light_resource`/
+   > `mesh_resource`/`parallel_render`, golden-probe в lib).
+   > Открыто — настоящая генерация скелетов: раскладки через
+   > `#[derive(WgslStruct)]` (как `GpuBodyState` в физике) + тела стадий
+   > через DSL (`#[kernel]`/`#[gpu_pipeline]` с vertex/fragment entry
+   > points; сейчас render-режим макроса умеет только fullscreen-quad
+   > шим — `gpu_pipeline.rs:526-544` — и не выражает instance-vertex
+   > с varyings).
+   >
+   > ✅ **Раскладки через `WgslStruct` выполнены 2026-09-08 (п.1)**: макрос
+   > расширен (`name`-override, `[[f32;4];4]`→`mat4x4`, вложенные структуры
+   > + `array<Inner,N>` через `#[wgsl(as)]`, `#[wgsl(skip)]`-паддинги с
+   > compile-time офсетами); `CameraUniform→Camera`, `PerObjectGpu→
+   > PerObject`, `GpuLight→Light`, `LightingUniform→Lighting`,
+   > `BloomUniform→BloomParams` выведены из Rust-полей с `offset_of`/`size_of`
+   > гейтами, все 5 модулей сплайсят их (lighting — tripwire-тест).
+   > `OpenPBRMaterial` остался рукописным shared-const (CPU-сторона
+   > сгруппирована, не flat) + `openpbr_rust_layout_matches_wgsl_order`-тест.
+   > Пиксельные гейты зелёные — раскладки совместимы. Остаток: тела стадий
+   > через DSL (п.2) и varyings с `@location`/`@interpolate` (нужен отдельный
+   > derive с атрибутами).
+   >
+   > ✅ **Varyings через `WgslInterface` выполнены 2026-09-08 (п.2а)**:
+   > отдельный derive (`location = N` / `builtin = "…"` /
+   > `interpolate = "flat"`, без layout-ассертов — у интерфейсов нет
+   > CPU-контракта, их контракт naga + пиксели); зеркала —
+   > `crates/render/src/shaders/interface.rs` (9 структур, WGSL-имена через
+   > `#[wgsl(name)]` совпадают с legacy). Все зеркала, кроме
+   > `LightingVertexOut`, подсоединены: gbuffer (все 4: in/out ×
+   > vertex/fragment; `FragmentInput` shared с pbr-фрагментом), hdr-вершина
+   > и hdr-фрагмент, bloom, legacy-composite, lighting-вершина (через общий
+   > `HdrFragmentOut`, без изменения текста) — паритеты зелёные, пиксельные
+   > гейты зелёные. `LightingVertexOut` не используется (вершина lighting
+   > уже говорит `QuadVertexOutput`) — кандидат на удаление.
+   > Зафиксированные шероховатости (на усмотрение владельца): в
+   > `WgslStruct` остался неиспользуемый дубль (`interface`-режим +
+   > List-синтаксис `location(N)`/`builtin(n)`/`flat`) — никто не пользуется,
+   > все сидят на `WgslInterface`; поле `as` переименовано в `to` (миграция
+   > завершена, остались только доки — поправлены); Rust-строка
+   > lighting-вершины расходится с legacy-файлом (`QuadVertexOutput` vs
+   > `LightingVertexOutput` в файле) — предсуществующее, не моё.
 
 9. **Документация Rust-кода: массовые пропуски, но мало лжи**
 
