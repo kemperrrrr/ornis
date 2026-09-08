@@ -6,7 +6,7 @@
 //! `shaders/wgsl/bloom_fragment.wgsl` remains as a reference/legacy, but
 //! `renderer::create_bloom_pass` now uses only this module.
 
-use super::interface::BloomVertexOut;
+use super::interface::BloomVertexOut as BloomVertexOutput;
 use super::wgsl_decl;
 use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
@@ -14,9 +14,9 @@ use ornis_macros::stage;
 
 /// Bloom vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `bloom_vertex_entry::wgsl_source()`.
-#[stage(vertex, entry = "vs_main", returns = "BloomVertexOutput")]
-fn bloom_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> BloomVertexOut {
-    return BloomVertexOut {
+#[stage(vertex, entry = "vs_main")]
+fn bloom_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> BloomVertexOutput {
+    return BloomVertexOutput {
         clip_position: QUAD[idx],
         uv: UVS[idx],
     };
@@ -47,7 +47,7 @@ fn bloom_wgsl_body() -> String {
         "\n{bloom}\n{head}\n{vout}\n{vs}",
         bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
         head = BLOOM_HEADER_HEAD,
-        vout = wgsl_decl(BloomVertexOut::WGSL_SOURCE),
+        vout = wgsl_decl(BloomVertexOutput::WGSL_SOURCE),
         vs = bloom_vertex_entry::wgsl_source(),
     );
 

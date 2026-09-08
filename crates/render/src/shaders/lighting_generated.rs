@@ -6,9 +6,10 @@
 //! but `lighting_fragment` is now assembled only from here. Prepares
 //! PBR lighting for the full Rust→WGSL transition (path 2).
 
-use super::interface::HdrFragmentOut;
+use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::wgsl_decl;
 use crate::shaders::math;
+use ornis_macros::stage;
 
 /// WGSL boilerplate for deferred lighting: structs, bindings, helpers, main.
 /// Identical to `shaders/wgsl/lighting.wgsl`; entry point names `fs_main`
@@ -368,15 +369,25 @@ pub fn wgsl_source() -> String {
     )
 }
 
-/// Vertex WGSL: full-screen quad (triangle strip) — quad constants and entry
-/// body stay handwritten; the varying splices the shared `QuadVertexOutput`
-/// declaration (`HdrFragmentOut`).
+/// Vertex entry, translated by [`stage`](ornis_macros::stage).
+/// DSL-only — replaced by `lighting_vertex_entry::wgsl_source()`.
+#[stage(vertex, entry = "vs_main")]
+fn lighting_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> QuadVertexOutput {
+    return QuadVertexOutput {
+        clip_position: QUAD[idx],
+        uv: UVS[idx],
+    };
+}
+
+/// Vertex WGSL: full-screen quad (triangle strip) — quad constants stay
+/// handwritten; the varying splices the shared `QuadVertexOutput`
+/// declaration (`HdrFragmentOut`) and the entry is translated.
 pub fn wgsl_vertex_source() -> String {
     format!(
         "\n{quad}{qo}{body}",
         quad = WGSL_VERTEX_QUAD_UV,
-        qo = wgsl_decl(HdrFragmentOut::WGSL_SOURCE),
-        body = WGSL_VERTEX_BODY,
+        qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
+        body = lighting_vertex_entry::wgsl_source(),
     )
 }
 
@@ -392,12 +403,6 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(0.0, 0.0),
     vec2<f32>(1.0, 0.0),
 );
-"#;
-
-const WGSL_VERTEX_BODY: &str = r#"@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> QuadVertexOutput {
-    return QuadVertexOutput(QUAD[idx], UVS[idx]);
-}
 "#;
 
 /// Static view for naga validation and snapshot tests.

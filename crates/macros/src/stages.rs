@@ -5,11 +5,13 @@
 //! `@fragment` entry wrapper with the translated body:
 //!
 //! ```text
-//! #[stage(vertex, entry = "vs_main", returns = "CompositeVertexOutput")]
+//! use super::interface::HdrVertexOutput as CompositeVertexOutput;
+//!
+//! #[stage(vertex, entry = "vs_main")]
 //! fn composite_vertex_entry(
 //!     #[wgsl(builtin = "vertex_index")] idx: u32,
-//! ) -> HdrVertexOutput {
-//!     return HdrVertexOutput { clip_position: QUAD[idx], uv: UVS[idx] };
+//! ) -> CompositeVertexOutput {
+//!     return CompositeVertexOutput { clip_position: QUAD[idx], uv: UVS[idx] };
 //! }
 //! ```
 //!
@@ -23,10 +25,14 @@
 //!
 //! Conventions (checked where the macro can see them):
 //! - parameter and return types are spelled with their Rust idents; the WGSL
-//!   spelling is identical by convention (interface mirrors keep WGSL names).
-//!   A renamed mirror (Rust `HdrVertexOutput` → WGSL `CompositeVertexOutput`)
-//!   needs `returns = "..."`, which also renames constructor calls to that
-//!   type inside the body.
+//!   spelling is identical by convention. A renamed mirror (Rust
+//!   `HdrVertexOutput` → WGSL `CompositeVertexOutput`) is spelled through a
+//!   Rust import alias (`use HdrVertexOutput as CompositeVertexOutput;`) at
+//!   the use site — the macro then never needs a name mapping, and the alias
+//!   keeps rust-analyzer honest.
+//! - `returns = "..."` overrides the full WGSL return specification; it
+//!   exists for located value returns (`@location(0) vec4<f32>`), which have
+//!   no Rust spelling.
 //! - parameter interface attributes ride on `#[wgsl(...)]` (stripped from the
 //!   output, never name-resolved): `builtin = "vertex_index"` or
 //!   `location = 0`. Scalar and glam types map as in [`crate::wgsl`]; any
@@ -37,7 +43,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser;
-use syn::visit_mut::VisitMut;
 use syn::{parse_macro_input, punctuated::Punctuated, token::Comma};
 
 /// `#[stage]` attribute arguments.
@@ -135,26 +140,6 @@ fn param_prefix(attrs: &[syn::Attribute]) -> syn::Result<String> {
     Ok(out)
 }
 
-/// Rename constructor calls of the Rust return type to the WGSL `returns`
-/// name: the translator only sees the Rust ident.
-struct StructRenamer {
-    from: String,
-    to: String,
-}
-
-impl syn::visit_mut::VisitMut for StructRenamer {
-    fn visit_expr_struct_mut(&mut self, s: &mut syn::ExprStruct) {
-        if let Some(seg) = s.path.segments.last_mut()
-            && seg.ident == self.from
-        {
-            seg.ident = syn::Ident::new(&self.to, seg.ident.span());
-        }
-        for field in &mut s.fields {
-            self.visit_expr_mut(&mut field.expr);
-        }
-    }
-}
-
 /// WGSL spelling of a parameter/return type: scalars and glam vectors map as
 /// in [`crate::wgsl`]; any other named type passes through verbatim
 /// (interface mirrors keep WGSL names by convention).
@@ -180,20 +165,19 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
     };
-    let mut func = parse_macro_input!(input as syn::ItemFn);
+    let func = parse_macro_input!(input as syn::ItemFn);
     let fn_name = func.sig.ident.clone();
 
-    // Return type: Rust ident verbatim, or the explicit WGSL override.
-    let rust_ret = match &func.sig.output {
-        syn::ReturnType::Type(_, ty) => named_type(ty),
+    // Return type: Rust ident verbatim (renamed mirrors are spelled through
+    // import aliases at the use site), or the explicit WGSL override for
+    // located value returns.
+    let wgsl_ret = match &func.sig.output {
+        syn::ReturnType::Type(_, ty) => {
+            let rust = named_type(ty);
+            returns.unwrap_or(rust)
+        }
         syn::ReturnType::Default => "void".to_string(),
     };
-    let wgsl_ret = returns.clone().unwrap_or_else(|| rust_ret.clone());
-    // Constructor calls spell the Rust type; rewrite them to the WGSL name.
-    if let Some(to) = returns {
-        let mut renamer = StructRenamer { from: rust_ret, to };
-        renamer.visit_item_fn_mut(&mut func);
-    }
 
     let mut params = Vec::new();
     for arg in &func.sig.inputs {

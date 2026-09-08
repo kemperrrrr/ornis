@@ -6,9 +6,31 @@
 //! `shaders/wgsl/composite.wgsl` remains as a reference/legacy, but
 //! `composite.rs` (LegacyCompositePass) now uses only this module.
 
-use super::interface::UiCompositeOut;
+use super::interface::UiCompositeOut as VertexOutput;
 use super::wgsl_decl;
 use crate::shaders::math::srgb_to_linear;
+use ornis_macros::stage;
+
+/// Legacy composite vertex entry, translated by [`stage`](ornis_macros::stage).
+/// DSL-only — replaced by `composite_vs_entry::wgsl_source()`. Uses the
+/// `var`-out form (`let mut out: T;` + field assignment).
+#[stage(vertex, entry = "vs")]
+fn composite_vs_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> VertexOutput {
+    let mut out: VertexOutput;
+    out.position = QUAD[idx];
+    out.uv = UVS[idx];
+    return out;
+}
+
+/// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
+/// DSL-only — free texture identifiers.
+#[stage(fragment, entry = "fs", returns = "@location(0) vec4<f32>")]
+fn composite_fs_entry(input: VertexOutput) -> glam::Vec4 {
+    let bg = textureSampleLevel(pbr_tex, pbr_sampler, input.uv, 0.0);
+    let ui = textureSampleLevel(ui_tex, ui_sampler, input.uv, 0.0);
+    let ui_linear = srgb_to_linear(ui.rgb);
+    return glam::Vec4::new(mix(bg.rgb, ui_linear, ui.a), 1.0);
+}
 
 /// WGSL bindings + quad constants + vertex/fragment entry points.
 ///
@@ -21,9 +43,10 @@ fn composite_wgsl_body() -> String {
     // point names `vs`/`fs` are kept for compatibility with
     // `CompositePass::new`.
     let header = format!(
-        "\n{vout}\n{rest}",
-        vout = wgsl_decl(UiCompositeOut::WGSL_SOURCE),
+        "\n{vout}\n{rest}\n{vs}",
+        vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
         rest = COMPOSITE_HEADER_REST,
+        vs = composite_vs_entry::wgsl_source(),
     );
 
     const COMPOSITE_HEADER_REST: &str = r#"@group(0) @binding(0) var pbr_tex: texture_2d<f32>;
@@ -43,27 +66,11 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(1.0, 1.0),
     vec2<f32>(1.0, 0.0),
 );
-
-@vertex
-fn vs(@builtin(vertex_index) idx: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = QUAD[idx];
-    out.uv = UVS[idx];
-    return out;
-}
 "#;
 
-    // Fragment entry: sampling + sRGB decode + mix. Uses `srgb_to_linear`
-    // from the kernel (same name in WGSL).
-    let fragment = r#"
-@fragment
-fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
-    let bg = textureSampleLevel(pbr_tex, pbr_sampler, input.uv, 0.0);
-    let ui = textureSampleLevel(ui_tex, ui_sampler, input.uv, 0.0);
-    let ui_linear = srgb_to_linear(ui.rgb);
-    return vec4<f32>(mix(bg.rgb, ui_linear, ui.a), 1.0);
-}
-"#;
+    // Fragment entry: sampling + sRGB decode + mix. Translated above; the
+    // kernel (same `srgb_to_linear` name in WGSL) splices in below.
+    let fragment = composite_fs_entry::wgsl_source();
 
     // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
     let kernel = srgb_to_linear::wgsl_source();

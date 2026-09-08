@@ -9,7 +9,7 @@
 //! `hdr_generated_parity_with_legacy_assembly` test pins this module
 //! byte-identical to them.
 
-use super::interface::{HdrFragmentOut, HdrVertexOutput};
+use super::interface::{HdrFragmentOut, HdrVertexOutput as CompositeVertexOutput};
 use super::wgsl_decl;
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
@@ -19,9 +19,9 @@ use ornis_macros::stage;
 /// [`stage`](ornis_macros::stage): fullscreen-quad corner passthrough.
 /// DSL-only (free `QUAD`/`UVS` binding identifiers) — replaced by
 /// `composite_vertex_entry::wgsl_source()`, never compiled as Rust.
-#[stage(vertex, entry = "vs_main", returns = "CompositeVertexOutput")]
-fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> HdrVertexOutput {
-    return HdrVertexOutput {
+#[stage(vertex, entry = "vs_main")]
+fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> CompositeVertexOutput {
+    return CompositeVertexOutput {
         clip_position: QUAD[idx],
         uv: UVS[idx],
     };
@@ -29,7 +29,7 @@ fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> HdrVert
 
 /// HDR composite vertex shader: fullscreen quad from `vertex_index`.
 ///
-/// Assembled from the quad constants, the derived [`HdrVertexOutput`]
+/// Assembled from the quad constants, the derived `CompositeVertexOutput`
 /// layout and the translated [`composite_vertex_entry`] body. Structurally
 /// identical to `shaders/wgsl/composite_vertex.wgsl` (same signature and
 /// constructor call; the generated entry is single-line) — pinned by
@@ -38,7 +38,7 @@ pub fn wgsl_vertex_source() -> String {
     format!(
         "\n{quad}\n{vout}\n{body}",
         quad = WGSL_VERTEX_QUAD,
-        vout = wgsl_decl(HdrVertexOutput::WGSL_SOURCE),
+        vout = wgsl_decl(CompositeVertexOutput::WGSL_SOURCE),
         body = composite_vertex_entry::wgsl_source(),
     )
 }
