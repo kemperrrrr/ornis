@@ -218,6 +218,23 @@
    > завершена, остались только доки — поправлены); Rust-строка
    > lighting-вершины расходится с legacy-файлом (`QuadVertexOutput` vs
    > `LightingVertexOutput` в файле) — предсуществующее, не моё.
+   >
+   > ✅ **Тела стадий через `#[stage]` выполнены 2026-09-08 (п.2б)**:
+   > новый макрос `crates/macros/src/stages.rs` (`entry`, `returns`,
+   > `@builtin/@location/@interpolate`-параметры, glam→WGSL, переименования
+   > через Rust import-алиасы); в DSL достроено недостающее: struct-литералы
+   > → позиционные конструкторы, `for`-диапазоны, `continue`/`break`,
+   > остальное — громкая naga-ошибка, не тихий дроп. Переведены все entries:
+   > composite vs/fs, bloom vs/fs, lighting vs, hdr vs/fs, gbuffer vs/fs,
+   > pbr fs, lighting fs (последний, с `discard` + `textureLoad`-координатами).
+   > Паритет-тесты переведены с byte-compare на shape-пины (single-line
+   > генерация, нормализованные `u32`-суффиксы); naga — все 9 шейдеров;
+   > lib 125 + все пиксельные гейты зелёные, clippy 0, fmt чисто.
+   > Рукописным WGSL остались только хелперы (lighting/pbr evaluator'ы,
+   > ~200 строк каждый, вызываются из entries по имени) и math-ядра.
+   > Legacy `shaders/wgsl/` больше ничем не подключается (`include_str!`
+   > не найден) — кандидаты на удаление, решение за владельцем.
+   > Остаток трека: авто-GPU ECS-путь не тронут.
 
 9. **Документация Rust-кода: массовые пропуски, но мало лжи**
 
