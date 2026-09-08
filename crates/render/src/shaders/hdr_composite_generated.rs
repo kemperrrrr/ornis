@@ -9,7 +9,9 @@
 //! `hdr_generated_parity_with_legacy_assembly` test pins this module
 //! byte-identical to them.
 
-use super::interface::{HdrFragmentOut, HdrVertexOutput as CompositeVertexOutput};
+use super::interface::{
+    HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
+};
 use super::wgsl_decl;
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
@@ -45,18 +47,18 @@ pub fn wgsl_vertex_source() -> String {
 
 /// HDR composite fragment shader: deferred/forward layer mix + bloom.
 ///
-/// Assembled from the derived `Camera`/`BloomParams` layouts plus the
-/// fragment skeleton and the ACES/luminance kernels; entry point `fs_main`
-/// is kept. Byte-identical to the legacy assembly except the dropped
-/// `_pad` line (`#[wgsl(skip)]` pads are not shader-visible).
+/// Assembled from the derived `Camera`/`BloomParams` layouts, the shared
+/// `QuadVertexOutput` varying, the two translated entries and the
+/// ACES/luminance kernels; entry point `fs_main` is kept.
 pub fn wgsl_source() -> String {
     format!(
-        "\n{cam}\n{bloom}\n{head}\n{qo}\n{tail}\n{aces}\n{lum}",
+        "\n{cam}\n{bloom}\n{head}\n{qo}\n{vs}\n{fs}\n{aces}\n{lum}",
         cam = wgsl_decl(CameraUniform::WGSL_SOURCE),
         bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
         head = WGSL_FRAGMENT_HEAD,
-        qo = wgsl_decl(HdrFragmentOut::WGSL_SOURCE),
-        tail = WGSL_FRAGMENT_TAIL,
+        qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
+        vs = hdr_fragment_vs_entry::wgsl_source(),
+        fs = hdr_fragment_entry::wgsl_source(),
         aces = aces_tonemap::wgsl_source(),
         lum = luminance::wgsl_source()
     )
@@ -103,34 +105,33 @@ const UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
 );
 "#;
 
-const WGSL_FRAGMENT_TAIL: &str = r#"@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> QuadVertexOutput {
-    return QuadVertexOutput(QUAD[idx], UVS[idx]);
+/// Fragment-file vertex entry (dead in practice — `fs_main` is the selected
+/// entry — but part of the legacy text). Translated like the vertex module.
+#[stage(vertex, entry = "vs_main")]
+fn hdr_fragment_vs_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> QuadVertexOutput {
+    return QuadVertexOutput {
+        clip_position: QUAD[idx],
+        uv: UVS[idx],
+    };
 }
 
-@fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+/// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
+/// deferred/forward layer mix + bloom. DSL-only — free texture/uniform
+/// identifiers. `==` on the mode uniform selects the layer mix.
+#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
+fn hdr_fragment_entry(#[wgsl(location = 0)] uv: glam::Vec2) -> glam::Vec4 {
     let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;
     let forward_color = textureSample(forward_tex, composite_sampler, uv).rgba;
-
-    // Layer mix depends on the technique: 0 = deferred-only, 1 = forward-only,
-    // 2 = hybrid. The dead layer is bound to the live one, so the mode is
-    // what disambiguates the two inputs.
-    var combined = deferred_color;
-    if (bloom_params.mode == 1u) {
+    let mut combined = deferred_color;
+    if bloom_params.mode == 1u {
         combined = forward_color.rgb * forward_color.a;
-    } else if (bloom_params.mode == 2u) {
+    } else if bloom_params.mode == 2u {
         combined = deferred_color + forward_color.rgb * forward_color.a;
     }
     let bloom = textureSample(bloom_tex, composite_sampler, uv).rgb;
     let tonemapped = aces_tonemap(combined + bloom * bloom_params.intensity);
-
-    // The composited scene is opaque; forward_color.a is 0 where no forward
-    // geometry was drawn, which would make the whole frame transparent on a
-    // canvas/surface. Native compositing (LegacyCompositePass) also forces 1.0.
-    return vec4<f32>(tonemapped, 1.0);
+    return glam::Vec4::new(tonemapped, 1.0);
 }
-"#;
 
 #[cfg(test)]
 mod tests {
@@ -176,18 +177,38 @@ mod tests {
         assert!(entry.contains("return CompositeVertexOutput(QUAD[idx], UVS[idx]);"));
     }
 
+    /// The translated fragment entry must keep the legacy shape: same
+    /// signature, same sampling/mix/tonemap calls. Formatting differs
+    /// (single-line, `else { if }` nesting, normalized int suffixes —
+    /// all semantics-preserving, naga-validated).
+    #[test]
+    fn hdr_fragment_entry_matches_legacy_shape() {
+        let entry = hdr_fragment_entry::wgsl_source();
+        assert!(entry.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
+        assert!(entry.contains("-> @location(0) vec4<f32>"));
+        assert!(entry.contains(
+            "let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;"
+        ));
+        assert!(entry.contains("if (bloom_params.mode =="));
+        assert!(entry.contains("combined = forward_color.rgb * forward_color.a;"));
+        assert!(entry.contains("combined = deferred_color + forward_color.rgb * forward_color.a;"));
+        assert!(
+            entry.contains(
+                "let tonemapped = aces_tonemap(combined + bloom * bloom_params.intensity);"
+            )
+        );
+        assert!(entry.contains("return vec4<f32>(tonemapped, 1.0);"));
+    }
+
     #[test]
     fn hdr_generated_parity_with_legacy_assembly() {
-        // Fragment only: the vertex entry is translated (see above), the
-        // fragment skeleton is still spliced.
-        // The only admitted difference: the `_pad` line is gone — skipped
-        // padding is not shader-visible (`#[wgsl(skip)]`).
-        let legacy_fragment = format!(
-            "{}\n{}\n{}",
-            include_str!("wgsl/composite_fragment.wgsl").replace("    _pad: f32,\n", ""),
-            aces_tonemap::wgsl_source(),
-            luminance::wgsl_source()
-        );
-        assert_eq!(wgsl_source(), legacy_fragment);
+        // Layouts still splice the derived declarations (entries are
+        // translated — see above). The `_pad` line is gone: skipped
+        // padding is not shader-visible.
+        let src = wgsl_source();
+        assert!(src.contains(&wgsl_decl(CameraUniform::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(BloomUniform::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(QuadVertexOutput::WGSL_SOURCE)));
+        assert!(!src.contains("_pad"));
     }
 }

@@ -33,6 +33,20 @@ impl WgslGen {
             Assign(a) => Self::assign(a),
             Index(ix) => format!("{}[{}]", Self::expr(&ix.expr), Self::expr(&ix.index)),
             Struct(s) => Self::struct_lit(s),
+            Continue(c) => {
+                if c.label.is_some() {
+                    wgsl_flow::unsupported()
+                } else {
+                    "continue".to_string()
+                }
+            }
+            Break(b) => {
+                if b.label.is_some() || b.expr.is_some() {
+                    wgsl_flow::unsupported()
+                } else {
+                    "break".to_string()
+                }
+            }
             // Rust casts are type-coercion hints for the DSL; WGSL infers the
             // type from context, so the cast itself is dropped.
             Cast(c) => Self::expr(&c.expr),
@@ -607,9 +621,49 @@ mod wgsl_flow {
     pub(super) fn stmt(s: &Stmt, is_tail: bool) -> String {
         match s {
             Stmt::Local(local) => local_stmt(local),
+            Stmt::Expr(syn::Expr::ForLoop(f), _) => for_range(f),
             Stmt::Expr(expr, semi) => expr_stmt(expr, *semi, is_tail),
-            _ => String::new(),
+            // Loud by construction: anything untranslatable emits an unknown
+            // call that naga rejects, instead of vanishing silently and
+            // changing shader semantics. Pixel probes backstop drift.
+            _ => format!("{}; ", unsupported()),
         }
+    }
+
+    /// Marker call for untranslatable syntax: guaranteed to fail naga
+    /// (`no definition in scope`), never to pass silently.
+    pub(super) fn unsupported() -> String {
+        "__wgsl_dsl_unsupported_statement__()".to_string()
+    }
+
+    /// `for i in start..end` / `start..=end` → WGSL range loop over `u32`.
+    /// Anything else (iterators, steps, patterns) is loud via [`unsupported`].
+    fn for_range(f: &syn::ExprForLoop) -> String {
+        let syn::Pat::Ident(pi) = &*f.pat else {
+            return format!("{}; ", unsupported());
+        };
+        let (start, end, op) = match &*f.expr {
+            syn::Expr::Range(r) => {
+                let start = r
+                    .start
+                    .as_ref()
+                    .map(|e| crate::wgsl::WgslGen::expr(e))
+                    .unwrap_or_else(|| "0u".to_string());
+                let end = r.end.as_ref().map(|e| crate::wgsl::WgslGen::expr(e));
+                let op = match r.limits {
+                    syn::RangeLimits::HalfOpen(_) => "<",
+                    syn::RangeLimits::Closed(_) => "<=",
+                };
+                (start, end, op)
+            }
+            _ => return format!("{}; ", unsupported()),
+        };
+        let Some(end) = end else {
+            return format!("{}; ", unsupported());
+        };
+        let var = pi.ident.to_string();
+        let body = block(&f.body);
+        format!("for (var {var}: u32 = {start}; {var} {op} {end}; {var} = {var} + 1) {{ {body} }} ")
     }
 
     /// Translate a `let` / `let mut` binding. `let mut` maps to WGSL `var`
@@ -919,6 +973,46 @@ mod tests {
     fn vec3_construction() {
         let expr: syn::Expr = parse_quote!(glam::Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(rust_to_wgsl(&expr), "vec3<f32>(1.0, 2.0, 3.0)");
+    }
+
+    #[test]
+    fn struct_literal_is_positional_constructor() {
+        let expr: syn::Expr = parse_quote!(VertexOutput {
+            clip_position: QUAD[idx],
+            uv: UVS[idx]
+        });
+        assert_eq!(rust_to_wgsl(&expr), "VertexOutput(QUAD[idx], UVS[idx])");
+    }
+
+    #[test]
+    fn for_range_loop_shape() {
+        let func: syn::ItemFn = parse_quote!(
+            fn f() {
+                for i in 0u..n {
+                    continue;
+                }
+            }
+        );
+        let body = wgsl_main_body(&func);
+        assert!(
+            body.contains("for (var i: u32 = 0; i < n; i = i + 1)"),
+            "{body}"
+        );
+        assert!(body.contains("continue;"), "{body}");
+    }
+
+    #[test]
+    fn unsupported_statement_is_loud() {
+        let func: syn::ItemFn = parse_quote!(
+            fn f() {
+                for x in items {}
+            }
+        );
+        let body = wgsl_main_body(&func);
+        assert!(
+            body.contains("__wgsl_dsl_unsupported_statement__"),
+            "{body}"
+        );
     }
 
     #[test]
