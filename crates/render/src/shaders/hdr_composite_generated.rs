@@ -4,10 +4,9 @@
 //! boilerplate and the HDR-mix fragment skeleton live here as Rust strings,
 //! and the `aces_tonemap` / `luminance` kernels are spliced in from
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
-//! The handwritten `shaders/wgsl/composite_vertex.wgsl` and
-//! `shaders/wgsl/composite_fragment.wgsl` remain as references; the
-//! `hdr_generated_parity_with_legacy_assembly` test pins this module
-//! byte-identical to them.
+//! The former handwritten `shaders/wgsl/composite_*.wgsl` sources were
+//! deleted after the `#[stage]` translation; the `hdr_*_matches_legacy_shape`
+//! tests pin the entry shapes.
 
 use super::interface::{
     HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
@@ -33,7 +32,7 @@ fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> Composi
 ///
 /// Assembled from the quad constants, the derived `CompositeVertexOutput`
 /// layout and the translated [`composite_vertex_entry`] body. Structurally
-/// identical to `shaders/wgsl/composite_vertex.wgsl` (same signature and
+/// identical to the former handwritten vertex (same signature and
 /// constructor call; the generated entry is single-line) — pinned by
 /// `hdr_vertex_entry_matches_legacy_shape` plus naga and the pixel probes.
 pub fn wgsl_vertex_source() -> String {

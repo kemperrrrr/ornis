@@ -2,9 +2,9 @@
 //!
 //! Canonical source is the Rust code in this module; WGSL is assembled
 //! from constants + `luminance::wgsl_source()` (kernel from
-//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The handwritten
-//! `shaders/wgsl/bloom_fragment.wgsl` remains as a reference/legacy, but
-//! `renderer::create_bloom_pass` now uses only this module.
+//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The former
+//! handwritten `shaders/wgsl/bloom_fragment.wgsl` was deleted after the
+//! `#[stage]` translation; `renderer::create_bloom_pass` now uses only this module.
 
 use super::interface::BloomVertexOut as BloomVertexOutput;
 use super::wgsl_decl;

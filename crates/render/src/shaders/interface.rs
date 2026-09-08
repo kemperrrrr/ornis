@@ -10,8 +10,8 @@
 //! signatures will take them as parameters once the DSL covers entries).
 //!
 //! Naming: the Rust type names are pass-scoped (`HdrVertexOut`, …); the WGSL
-//! names they emit (`#[wgsl(name)]`) match the legacy `shaders/wgsl/*.wgsl`
-//! references.
+//! names they emit (`#[wgsl(name)]`) match the former handwritten WGSL
+//! interface names.
 
 #![allow(dead_code)]
 

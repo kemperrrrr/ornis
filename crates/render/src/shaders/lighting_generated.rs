@@ -2,8 +2,9 @@
 //!
 //! Canonical source is the Rust code in this module; WGSL is assembled
 //! from constants + `math::*::wgsl_source()` kernels (OpenPBR BRDF).
-//! The handwritten `shaders/wgsl/lighting.wgsl` remains as a reference/legacy,
-//! but `lighting_fragment` is now assembled only from here. Prepares
+//! The former handwritten `shaders/wgsl/lighting.wgsl` was deleted after the
+//! `#[stage]` translation of `fs_main`; `lighting_fragment` is now assembled
+//! only from here. Prepares
 //! PBR lighting for the full Rust→WGSL transition (path 2).
 
 use super::interface::HdrFragmentOut as QuadVertexOutput;
@@ -12,8 +13,8 @@ use crate::shaders::math;
 use ornis_macros::stage;
 
 /// WGSL boilerplate for deferred lighting: structs, bindings, helpers, main.
-/// Identical to `shaders/wgsl/lighting.wgsl`; entry point names `fs_main`
-/// are kept for compatibility.
+/// Self-contained since the `#[stage]` translation; entry point name `fs_main`
+/// is kept for compatibility.
 fn lighting_wgsl_header() -> &'static str {
     // This literal is the only `vec4<f32>` outside `*_generated.rs` that must
     // be absent; here it is inside generated code, which is allowed by the grep rule.

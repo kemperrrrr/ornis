@@ -1332,7 +1332,6 @@ impl Renderer3D {
     fn create_bloom_pass(device: &wgpu::Device) -> BloomPass {
         // Bloom WGSL is now generated from Rust (path 2) — single
         // source of truth `shaders::bloom_generated::wgsl_source()`.
-        // Legacy `shaders/wgsl/bloom_fragment.wgsl` remains as a reference.
         let bloom_source = shaders::bloom_generated::wgsl_source();
         let bloom_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bloom shader (generated)"),

@@ -4,13 +4,11 @@
 //! vertex boilerplate and the 5-MRT fragment skeleton live here as Rust
 //! strings, and the `octahedral_encode` kernel is spliced in from
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
-//! The handwritten `shaders/wgsl/gbuffer_vertex.wgsl` and
-//! `shaders/wgsl/gbuffer_fragment.wgsl` remain as references; the
-//! `gbuffer_generated_parity_with_legacy_assembly` test pins this module
-//! byte-identical to them.
+//! The former handwritten `shaders/wgsl/gbuffer_*.wgsl` sources were deleted
+//! after the `#[stage]` translation; the `gbuffer_*_matches_legacy_shape`
+//! tests pin the entry shapes.
 //!
-//! Note: the vertex boilerplate is byte-identical to the forward-PBR vertex
-//! (`shaders/wgsl/pbr_vertex.wgsl`); both passes share the same instance
+//! Note: the vertex boilerplate matches the forward-PBR vertex (same
 //! transform. The PBR migration (`pbr_generated`) reuses
 //! [`wgsl_vertex_source`] rather than duplicating it.
 
@@ -50,11 +48,11 @@ fn gbuffer_vs_entry(
 ///
 /// Assembled from the derived `Camera`/`PerObject` layouts plus the vertex
 /// body; entry point name `vs_main` is kept for compatibility with
-/// `create_gbuffer_pass` / `create_pbr_pass`. Byte-identical to
-/// `shaders/wgsl/gbuffer_vertex.wgsl` except the dropped `_padding` line
+/// `create_gbuffer_pass` / `create_pbr_pass`. Matches the former handwritten
+/// vertex except the dropped `_padding` line
 /// (`#[wgsl(skip)]` pads are not shader-visible).
 ///
-/// Note: unlike the fragment skeletons, this legacy file terminates structs
+/// Note: unlike the fragment skeletons, this stage terminates structs
 /// with bare `}` (no `;`), so the layouts splice raw here instead of via
 /// [`wgsl_decl`](super::wgsl_decl).
 pub fn wgsl_vertex_source() -> String {

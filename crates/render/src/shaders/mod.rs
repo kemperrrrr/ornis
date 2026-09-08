@@ -15,13 +15,13 @@ pub mod math;
 pub mod pbr_generated;
 
 /// Splice a derived [`WgslStruct`](ornis_macros::WgslStruct) declaration into
-/// assembled WGSL, terminated the way the legacy `shaders/wgsl/*.wgsl`
-/// references spell it (`};` plus newline).
+/// assembled WGSL, terminated the way the former handwritten references
+/// spelled it (`};` plus newline).
 ///
 /// The derive emits `struct Foo {\n…\n}\n`; every handwritten reference this
 /// replaces used `};`, so the terminator keeps assembled modules
-/// byte-identical to the legacy files (pinned by the
-/// `*_parity_with_legacy_assembly` tests).
+/// shaped like the former handwritten sources (pinned by the
+/// `*_matches_legacy_shape` tests).
 pub(crate) fn wgsl_decl(source: &'static str) -> String {
     format!("{};\n", source.trim_end())
 }
@@ -65,8 +65,7 @@ struct OpenPBRMaterial {
 /// Assemble the full-screen composite vertex shader (triangle-strip quad).
 ///
 /// Single source of truth — [`hdr_composite_generated::wgsl_vertex_source`]
-/// (Rust → WGSL, path 2). Legacy `wgsl/composite_vertex.wgsl` remains as a
-/// reference; parity is pinned by `hdr_generated_parity_with_legacy_assembly`.
+/// (Rust → WGSL, path 2); shape pinned by `hdr_vertex_entry_matches_legacy_shape`.
 pub fn composite_vertex() -> String {
     hdr_composite_generated::wgsl_vertex_source()
 }
@@ -76,17 +75,15 @@ pub fn composite_vertex() -> String {
 /// Assemble the composite fragment shader: HDR mix + bloom, splicing the ACES tonemap and luminance kernels via `wgsl_source()`.
 ///
 /// Single source of truth — [`hdr_composite_generated::wgsl_source`]
-/// (Rust → WGSL, path 2). Legacy `wgsl/composite_fragment.wgsl` remains as a
-/// reference; parity is pinned by `hdr_generated_parity_with_legacy_assembly`.
+/// (Rust → WGSL, path 2); shape pinned by `hdr_fragment_entry_matches_legacy_shape`.
 pub fn composite_fragment() -> String {
     hdr_composite_generated::wgsl_source()
 }
 
 // ── BLOOM ───────────────────────────────────────────────────────────
 /// Single source of truth — `bloom_generated::wgsl_source()`
-/// (Rust → WGSL, path 2). Legacy `wgsl/bloom_fragment.wgsl` remains as a
-/// reference; `renderer::create_bloom_pass` and this forwarder use only the
-/// generated version.
+/// (Rust → WGSL, path 2); `renderer::create_bloom_pass` and this forwarder
+/// use only the generated version.
 pub fn bloom_fragment() -> String {
     bloom_generated::wgsl_source()
 }
@@ -96,8 +93,7 @@ pub fn bloom_fragment() -> String {
 /// Assemble the gbuffer vertex shader (instance transforms + world position).
 ///
 /// Single source of truth — [`gbuffer_generated::wgsl_vertex_source`]
-/// (Rust → WGSL, path 2). Legacy `wgsl/gbuffer_vertex.wgsl` remains as a
-/// reference; parity is pinned by `gbuffer_generated_parity_with_legacy_assembly`.
+/// (Rust → WGSL, path 2); shape pinned by `gbuffer_vertex_entry_matches_legacy_shape`.
 pub fn gbuffer_vertex() -> String {
     gbuffer_generated::wgsl_vertex_source()
 }
@@ -107,8 +103,7 @@ pub fn gbuffer_vertex() -> String {
 /// Assemble the 5-MRT gbuffer fragment shader, splicing the octahedral normal-encoding kernel.
 ///
 /// Single source of truth — [`gbuffer_generated::wgsl_source`]
-/// (Rust → WGSL, path 2). Legacy `wgsl/gbuffer_fragment.wgsl` remains as a
-/// reference; parity is pinned by `gbuffer_generated_parity_with_legacy_assembly`.
+/// (Rust → WGSL, path 2); shape pinned by `gbuffer_fragment_entry_matches_legacy_shape`.
 pub fn gbuffer_fragment() -> String {
     gbuffer_generated::wgsl_source()
 }
@@ -133,8 +128,6 @@ pub fn lighting_fragment() -> String {
 ///
 /// Single source of truth — [`pbr_generated::wgsl_vertex_source`]
 /// (Rust → WGSL, path 2; shares the g-buffer instance-transform vertex).
-/// Legacy `wgsl/pbr_vertex.wgsl` remains as a reference; parity is pinned by
-/// `pbr_generated_parity_with_legacy_assembly`.
 pub fn pbr_vertex() -> String {
     pbr_generated::wgsl_vertex_source()
 }
@@ -144,8 +137,7 @@ pub fn pbr_vertex() -> String {
 /// Assemble the forward PBR fragment shader: full OpenPBR evaluation, splicing all BRDF math kernels via `wgsl_source()`.
 ///
 /// Single source of truth — [`pbr_generated::wgsl_source`]
-/// (Rust → WGSL, path 2). Legacy `wgsl/pbr_fragment.wgsl` remains as a
-/// reference; parity is pinned by `pbr_generated_parity_with_legacy_assembly`.
+/// (Rust → WGSL, path 2); shape pinned by `pbr_fragment_entry_matches_legacy_shape`.
 pub fn pbr_fragment() -> String {
     pbr_generated::wgsl_source()
 }

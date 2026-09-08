@@ -2,9 +2,9 @@
 //!
 //! Canonical source is the Rust code in this module; WGSL is assembled
 //! from constants + `srgb_to_linear::wgsl_source()` (kernel from
-//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The handwritten
-//! `shaders/wgsl/composite.wgsl` remains as a reference/legacy, but
-//! `composite.rs` (LegacyCompositePass) now uses only this module.
+//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The former
+//! handwritten `shaders/wgsl/composite.wgsl` was deleted after the `#[stage]`
+//! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use super::interface::UiCompositeOut as VertexOutput;
 use super::wgsl_decl;
@@ -39,7 +39,7 @@ fn composite_fs_entry(input: VertexOutput) -> glam::Vec4 {
 /// system. This removes duplication of the WGSL literal from `composite.rs`.
 fn composite_wgsl_body() -> String {
     // Header: derived `VertexOutput` varying plus bindings, QUAD/UVS, vertex
-    // entry. Format is identical to `shaders/wgsl/composite.wgsl`; entry
+    // entry. Format matches the former handwritten composite; entry
     // point names `vs`/`fs` are kept for compatibility with
     // `CompositePass::new`.
     let header = format!(

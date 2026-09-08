@@ -4,14 +4,12 @@
 //! fragment skeleton (layer evaluators + `fs_main`) lives here as a Rust
 //! string, and the 19 BRDF math kernels are spliced in from
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
-//! The handwritten `shaders/wgsl/pbr_vertex.wgsl` and
-//! `shaders/wgsl/pbr_fragment.wgsl` remain as references; the
-//! `pbr_generated_parity_with_legacy_assembly` test pins this module
-//! byte-identical to them.
+//! The former handwritten `shaders/wgsl/pbr_*.wgsl` sources were deleted
+//! after the `#[stage]` translation of `fs_main`; the
+//! `pbr_fragment_entry_matches_legacy_shape` test pins the entry shape.
 //!
-//! Note: the vertex stage is shared with the g-buffer pass
-//! (`shaders/wgsl/pbr_vertex.wgsl` is byte-identical to
-//! `shaders/wgsl/gbuffer_vertex.wgsl`), so [`wgsl_vertex_source`] reuses
+//! Note: the vertex stage is shared with the g-buffer pass (same instance
+//! transform), so [`wgsl_vertex_source`] reuses
 //! [`crate::shaders::gbuffer_generated::wgsl_vertex_source`] instead of
 //! duplicating it.
 
@@ -465,7 +463,7 @@ mod tests {
             super::super::gbuffer_generated::wgsl_vertex_source()
         );
         // Fragment layouts still splice the derived declarations (Camera
-        // raw — that legacy file terminates it with bare `}`).
+        // raw — that declaration terminates with bare `}`).
         let src = wgsl_source();
         assert!(src.contains(CameraUniform::WGSL_SOURCE));
         assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
