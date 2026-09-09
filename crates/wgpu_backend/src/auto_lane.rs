@@ -72,6 +72,16 @@ impl<T: bytemuck::Pod> AutoLane<T> {
         self.buf.cpu_data()
     }
 
+    /// Element count of the lane.
+    pub fn len(&self) -> usize {
+        self.buf.cpu_data().len()
+    }
+
+    /// Whether the lane holds no elements.
+    pub fn is_empty(&self) -> bool {
+        self.buf.cpu_data().is_empty()
+    }
+
     /// GPU buffer backing this lane, for bind-group construction.
     pub fn gpu_buffer(&self) -> Option<&wgpu::Buffer> {
         self.buf.gpu_buffer()

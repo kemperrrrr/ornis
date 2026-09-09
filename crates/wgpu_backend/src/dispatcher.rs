@@ -54,6 +54,7 @@ pub enum Platform {
 
 /// Per-dispatch knobs: which target policy to apply, the compute workgroup
 /// size, and a debug label for GPU captures.
+#[derive(Debug, Clone)]
 pub struct DispatchConfig {
     /// Policy deciding CPU vs GPU for this dispatch.
     pub target: ExecutionTarget,

@@ -27,6 +27,8 @@ pub mod context;
 pub mod dispatcher;
 /// Zero-cost executors and dispatch entry points for lanes.
 pub mod execute;
+/// Typed bridge from `SmartStore` lanes to automatic GPU execution.
+pub mod gpu_lanes;
 /// LEAK-style WGSL shader generation and one-shot dispatch.
 pub mod leak;
 /// Hardware calibration of the GPU/CPU crossover point.
@@ -43,6 +45,7 @@ pub use buffer::{create_buffer_from_slice, create_buffer_from_store};
 pub use context::WgpuContext;
 pub use dispatcher::{DispatchConfig, ExecutionTarget, Platform, choose_platform};
 pub use execute::{CpuExecutor, ExecuteLane, GpuExecutor, dispatch_lane, dispatch_with};
+pub use gpu_lanes::GpuLanes;
 pub use leak::{LeakDispatch, leak_wgsl, leak_wgsl_typed};
 pub use profiler::{AutoProfiler, ProfilerConfig};
 pub use pso_cache::PsoCache;
