@@ -145,7 +145,9 @@ mod tests {
     fn bloom_entries_match_legacy_shape() {
         let vs = bloom_vertex_entry::wgsl_source();
         assert!(vs.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
-        assert!(vs.contains("return BloomVertexOutput(QUAD[idx], UVS[idx]);"));
+        assert!(
+            vs.contains("return BloomVertexOutput(QUAD[idx], UVS[idx]) /* clip_position, uv */;")
+        );
         let fs = bloom_fragment_entry::wgsl_source();
         assert!(fs.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
         assert!(fs.contains("-> @location(0) vec4<f32>"));

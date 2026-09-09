@@ -35,7 +35,7 @@ fn stage_vertex_entry_shape() {
         "{src}"
     );
     assert!(src.contains("-> WgslName"), "{src}");
-    assert!(src.contains("return WgslName(QUAD[idx]);"), "{src}");
+    assert!(src.contains("return WgslName(QUAD[idx]) /* x */;"), "{src}");
     assert_eq!(quad_vs_entry::entry_point(), "vs_main");
 }
 

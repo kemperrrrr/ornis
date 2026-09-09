@@ -359,6 +359,103 @@ pub fn octahedral_decode_rust(p: glam::Vec2) -> glam::Vec3 {
 mod tests {
     use super::*;
 
+    /// Extract `(Type, [field names])` markers from `Type(args) /* f1, f2 */`
+    /// constructor comments emitted by struct-literal translation.
+    fn extract_ctors(src: &str) -> Vec<(String, Vec<String>)> {
+        let mut out = Vec::new();
+        let mut rest = src;
+        while let Some(cstart) = rest.find("/* ") {
+            let before = rest[..cstart].trim_end();
+            let Some(cend) = rest[cstart..].find("*/") else {
+                break;
+            };
+            let names: Vec<String> = rest[cstart + 3..cstart + cend]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            // Walk back balanced parens from the ')' ending `before` to the
+            // constructor's opening paren; the identifier before it is the type.
+            if before.ends_with(')') {
+                let mut depth = 0u32;
+                let mut open = None;
+                for (i, ch) in before.char_indices().rev() {
+                    match ch {
+                        ')' => depth += 1,
+                        '(' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                open = Some(i);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(i) = open {
+                    let ident: String = before[..i]
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    if !ident.is_empty() {
+                        out.push((ident, names));
+                    }
+                }
+            }
+            rest = &rest[cstart + cend + 2..];
+        }
+        out
+    }
+
+    /// Stage-entry struct literals are positional constructors: the emitted
+    /// `/* names */` comment must list the mirror's fields in `WGSL_FIELDS`
+    /// order. A wrong order would still parse and could pass pixels by
+    /// accident — this test pins the contract instead.
+    #[test]
+    fn interface_field_order() {
+        use super::interface::{
+            BloomVertexOut, GbufferVertexOutput, HdrFragmentOut, HdrVertexOutput, UiCompositeOut,
+        };
+        let mirrors: &[(&str, &[&str])] = &[
+            (HdrVertexOutput::WGSL_NAME, HdrVertexOutput::WGSL_FIELDS),
+            (HdrFragmentOut::WGSL_NAME, HdrFragmentOut::WGSL_FIELDS),
+            (BloomVertexOut::WGSL_NAME, BloomVertexOut::WGSL_FIELDS),
+            (UiCompositeOut::WGSL_NAME, UiCompositeOut::WGSL_FIELDS),
+            (
+                GbufferVertexOutput::WGSL_NAME,
+                GbufferVertexOutput::WGSL_FIELDS,
+            ),
+        ];
+        let entries: &[String] = &[
+            hdr_composite_generated::composite_vertex_entry::wgsl_source().to_string(),
+            hdr_composite_generated::hdr_fragment_vs_entry::wgsl_source().to_string(),
+            bloom_generated::bloom_vertex_entry::wgsl_source().to_string(),
+            lighting_generated::lighting_vertex_entry::wgsl_source().to_string(),
+            composite_generated::composite_vs_entry::wgsl_source().to_string(),
+            gbuffer_generated::gbuffer_vs_entry::wgsl_source().to_string(),
+        ];
+        let mut checked = 0;
+        for src in entries {
+            for (ty, names) in extract_ctors(src) {
+                let fields = mirrors
+                    .iter()
+                    .find(|(n, _)| *n == ty)
+                    .unwrap_or_else(|| panic!("constructor {ty} has no registered mirror"));
+                assert_eq!(
+                    names, fields.1,
+                    "struct literal {ty} lists fields out of mirror order"
+                );
+                checked += 1;
+            }
+        }
+        // Four vertex entries construct varyings today; zero hits would mean
+        // the comments vanished and the test passes vacuously.
+        assert!(checked >= 4, "expected struct literals, found {checked}");
+    }
+
     /// Parse and fully validate an assembled WGSL module with naga.
     fn assert_valid_wgsl(name: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)

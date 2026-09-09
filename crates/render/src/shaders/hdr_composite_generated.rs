@@ -197,7 +197,9 @@ mod tests {
         let entry = composite_vertex_entry::wgsl_source();
         assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
         assert!(entry.contains("-> CompositeVertexOutput"));
-        assert!(entry.contains("return CompositeVertexOutput(QUAD[idx], UVS[idx]);"));
+        assert!(entry.contains(
+            "return CompositeVertexOutput(QUAD[idx], UVS[idx]) /* clip_position, uv */;"
+        ));
     }
 
     /// The translated fragment entry must keep the legacy shape: same

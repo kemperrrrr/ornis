@@ -275,6 +275,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let decl_text = format!("struct {wgsl_name} {{\n{}\n}}\n", decl_lines.join("\n"));
     let decl_lit = proc_macro2::Literal::string(&decl_text);
+    let name_lit = proc_macro2::Literal::string(&wgsl_name);
+    let field_names: Vec<String> = named
+        .named
+        .iter()
+        .map(|f| f.ident.as_ref().expect("named field").to_string())
+        .collect();
 
     let expanded = quote! {
         impl #name {
@@ -284,6 +290,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// location/builtin assignment; see the `WgslInterface` derive
             /// documentation.
             pub const WGSL_SOURCE: &'static str = #decl_lit;
+
+            /// The WGSL type name of this interface (the `#[wgsl(name)]`
+            /// override when present, else the Rust type name).
+            pub const WGSL_NAME: &'static str = #name_lit;
+
+            /// Field names in declaration order — the positional order
+            /// stage-entry struct literals must follow (checked by the
+            /// `interface_field_order` shader test).
+            pub const WGSL_FIELDS: &'static [&'static str] = &[#(#field_names),*];
         }
     };
 

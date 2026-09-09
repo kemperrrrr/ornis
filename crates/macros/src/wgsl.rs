@@ -70,9 +70,11 @@ impl WgslGen {
     }
 
     /// Struct literal → positional WGSL constructor: field values in literal
-    /// order (`VertexOutput { a, b }` → `VertexOutput(a, b)`). Callers must
-    /// list fields in declaration order — the macro cannot see the struct
-    /// definition; stage parity tests and pixel probes pin mistakes.
+    /// order (`VertexOutput { a, b }` → `VertexOutput(a, b) /* a, b */`).
+    /// Callers must list fields in declaration order — the macro cannot see
+    /// the struct definition. The emitted `/* names */` comment lets the
+    /// `interface_field_order` shader test verify the order against the
+    /// mirror's `WGSL_FIELDS` instead of trusting it blindly.
     fn struct_lit(s: &syn::ExprStruct) -> String {
         let name = match s.path.segments.last() {
             Some(seg) => seg.ident.to_string(),
@@ -86,8 +88,16 @@ impl WgslGen {
             .to_compile_error()
             .to_string();
         }
-        let args: Vec<String> = s.fields.iter().map(|f| Self::expr(&f.expr)).collect();
-        format!("{}({})", name, args.join(", "))
+        let mut names = Vec::new();
+        let mut args = Vec::new();
+        for f in &s.fields {
+            match &f.member {
+                syn::Member::Named(ident) => names.push(ident.to_string()),
+                syn::Member::Unnamed(index) => names.push(index.index.to_string()),
+            }
+            args.push(Self::expr(&f.expr));
+        }
+        format!("{}({}) /* {} */", name, args.join(", "), names.join(", "))
     }
 
     fn ret(r: &syn::ExprReturn) -> String {
@@ -981,7 +991,10 @@ mod tests {
             clip_position: QUAD[idx],
             uv: UVS[idx]
         });
-        assert_eq!(rust_to_wgsl(&expr), "VertexOutput(QUAD[idx], UVS[idx])");
+        assert_eq!(
+            rust_to_wgsl(&expr),
+            "VertexOutput(QUAD[idx], UVS[idx]) /* clip_position, uv */"
+        );
     }
 
     #[test]
