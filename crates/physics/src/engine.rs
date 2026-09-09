@@ -17,7 +17,7 @@ use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{
-    BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats, StepTiming,
+    BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming,
 };
 use crate::distance;
 #[cfg(feature = "gpu")]
@@ -2099,6 +2099,13 @@ pub struct BuiltinPhysicsEngine {
     trigger_pairs: HashSet<(usize, usize)>,
     /// Wall-clock breakdown of the last completed `step` (diagnostics only).
     last_step_timing: StepTiming,
+    /// Worst-case budget: deterministic substep shedding (see
+    /// [`StepBudget`]). `None` disables shedding. Default: on.
+    step_budget: Option<StepBudget>,
+    /// Substeps shed by the budget on the last completed `step` (0 when the
+    /// full speed-requested count ran). Observable marker for the fallback,
+    /// read via [`BuiltinPhysicsEngine::last_substep_shed`].
+    last_shed: u32,
     /// Enter/exit transitions waiting for the caller to drain.
     trigger_events: Vec<TriggerEvent>,
     /// G7: enable SIMD-wide contact solver for single-point manifolds.
@@ -2141,6 +2148,8 @@ impl BuiltinPhysicsEngine {
             debug_pairs: Vec::new(),
             trigger_pairs: HashSet::new(),
             last_step_timing: StepTiming::default(),
+            step_budget: Some(StepBudget::default()),
+            last_shed: 0,
             trigger_events: Vec::new(),
             wide_solver: true,
             scratch_manifolds: Vec::new(),
@@ -2231,6 +2240,39 @@ impl BuiltinPhysicsEngine {
     /// (default 12). More substeps = more stable stacks, linearly more cost.
     pub fn set_substeps(&mut self, n: u32) {
         self.substeps = n;
+    }
+
+    /// Worst-case step budget (default: on, see [`StepBudget::default`]).
+    /// `None` disables shedding and always runs the speed-requested count.
+    /// Some budget sheds substeps — never pairs — when the candidate-pair
+    /// count times the requested count exceeds the budget. The shed count of
+    /// the last step is observable via [`Self::last_substep_shed`].
+    pub fn set_step_budget(&mut self, budget: Option<StepBudget>) {
+        self.step_budget = budget;
+    }
+
+    /// Substeps shed by the budget on the last completed `step`: requested
+    /// minus applied (0 when the full count ran, or when the world slept
+    /// through the step). Diagnostics for tuning; not part of the
+    /// simulation contract.
+    pub fn last_substep_shed(&self) -> u32 {
+        self.last_shed
+    }
+
+    /// Applies the worst-case budget to a speed-requested substep count,
+    /// given the broadphase candidate-pair count. Returns
+    /// `(applied, shed)`. Pure counts, no wall-clock: deterministic for a
+    /// given scene trajectory.
+    fn apply_step_budget(&self, requested: u32, pairs: usize) -> (u32, u32) {
+        let Some(budget) = self.step_budget else {
+            return (requested, 0);
+        };
+        if requested <= budget.min_substeps || pairs == 0 {
+            return (requested, 0);
+        }
+        let allowed = u32::try_from(budget.max_pair_substeps / pairs).unwrap_or(u32::MAX);
+        let applied = requested.min(allowed.max(budget.min_substeps));
+        (applied, requested - applied)
     }
 
     /// Sequential-impulse velocity iterations per substep (default 8).
@@ -3014,14 +3056,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // Fully sleeping world: no substep loop ran, so no phase work
             // happened this step.
             self.last_step_timing = StepTiming::default();
+            self.last_shed = 0;
             return;
         }
-        let eff_substeps = self.effective_substeps(dt);
-        let sub_dt = dt / eff_substeps as f32;
-        let mut timing = StepTiming {
-            substeps: eff_substeps,
-            ..StepTiming::default()
-        };
+        let eff_substeps_before_budget = self.effective_substeps(dt);
         // Diagnostics: contact-manifold partners per body from the last
         // Reuse scratch buffers across substeps; keep capacity across frames.
         self.scratch_manifolds.clear();
@@ -3033,8 +3071,20 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // contacts depend on moving poses, but candidate list is reused.
         let t0 = Instant::now();
         self.broadphase.update(&self.bodies, dt);
-        timing.broad_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
+        let broad_phase_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
+        // Worst-case budget (deterministic): shed substeps against the known
+        // pair count — never pairs. `timing.substeps` records the applied
+        // count; the shed count is kept in `last_shed` for observability.
+        let (eff_substeps, shed) =
+            self.apply_step_budget(eff_substeps_before_budget, broad_active.len());
+        self.last_shed = shed;
+        let sub_dt = dt / eff_substeps as f32;
+        let mut timing = StepTiming {
+            substeps: eff_substeps,
+            broad_phase_ms,
+            ..StepTiming::default()
+        };
         // B: per-body required substeps for filtering extra substeps.
         let body_needed = self.body_required_substeps(dt);
         let body_needed_opt: Option<&[u32]> = {
@@ -3410,6 +3460,81 @@ mod tests {
         // Explicit selections report no auto-active backend.
         physics.set_broadphase(BroadPhaseKind::UniformGrid);
         assert_eq!(physics.auto_active_broadphase(), None);
+    }
+
+    #[test]
+    fn step_budget_shed_arithmetic_is_deterministic() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.set_step_budget(Some(StepBudget {
+            max_pair_substeps: 200_000,
+            min_substeps: 4,
+        }));
+        assert_eq!(physics.apply_step_budget(12, 0), (12, 0));
+        // Tiled-10k-cold scale stays untouched under the default budget.
+        assert_eq!(physics.apply_step_budget(12, 14_161), (12, 0));
+        assert_eq!(physics.apply_step_budget(12, 1_000_000), (4, 8));
+        // The floor is never shed, even under extreme load.
+        assert_eq!(physics.apply_step_budget(4, 1_000_000), (4, 0));
+        physics.set_step_budget(None);
+        assert_eq!(physics.apply_step_budget(12, 1_000_000), (12, 0));
+    }
+
+    fn dense_shedding_scene() -> BuiltinPhysicsEngine {
+        // 24 overlapping dynamic boxes (276 candidate pairs) plus one fast
+        // body forcing the 12-substep speed request.
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        for i in 0..24 {
+            physics.add_body(RigidBody::new_box(
+                Vec3::new((i % 5) as f32 * 0.1, (i / 5) as f32 * 0.1, 0.0),
+                Vec3::splat(0.4),
+                1.0,
+            ));
+        }
+        let mut fast = RigidBody::new_box(Vec3::new(0.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        fast.velocity = Vec3::new(0.0, -40.0, 0.0);
+        physics.add_body(fast);
+        physics
+    }
+
+    #[test]
+    fn step_budget_leaves_typical_scenes_untouched() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            0.0,
+        ));
+        let mut fast = RigidBody::new_box(Vec3::new(0.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        fast.velocity = Vec3::new(0.0, -40.0, 0.0);
+        physics.add_body(fast);
+        physics.step(1.0 / 60.0);
+        assert_eq!(physics.step_timing().substeps, 12);
+        assert_eq!(physics.last_substep_shed(), 0);
+    }
+
+    #[test]
+    fn step_budget_sheds_substeps_but_never_pairs() {
+        let mut budgeted = dense_shedding_scene();
+        budgeted.set_step_budget(Some(StepBudget {
+            max_pair_substeps: 100,
+            min_substeps: 4,
+        }));
+        budgeted.step(1.0 / 60.0);
+        assert_eq!(budgeted.step_timing().substeps, 4);
+        assert_eq!(budgeted.last_substep_shed(), 8);
+
+        // Same trajectory without a budget: full count runs, and the pair
+        // set is identical — shedding never drops contacts.
+        let mut unbudgeted = dense_shedding_scene();
+        unbudgeted.set_step_budget(None);
+        unbudgeted.step(1.0 / 60.0);
+        assert_eq!(unbudgeted.step_timing().substeps, 12);
+        assert_eq!(unbudgeted.last_substep_shed(), 0);
+        assert_eq!(
+            budgeted.broadphase_stats().candidate_pairs,
+            unbudgeted.broadphase_stats().candidate_pairs
+        );
+        assert!(budgeted.broadphase_stats().candidate_pairs > 0);
     }
 
     #[test]

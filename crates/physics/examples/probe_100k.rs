@@ -232,6 +232,10 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
                     physics.auto_active_broadphase()
                 );
             }
+            let shed = physics.last_substep_shed();
+            if shed > 0 {
+                println!("budget shed {shed} substeps this step");
+            }
         }
     }
     if !steady.is_empty() {

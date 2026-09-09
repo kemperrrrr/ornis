@@ -34,7 +34,7 @@ pub mod trigger;
 pub(crate) mod wide;
 
 pub use body::{BodyHandle, BodyType, RigidBody};
-pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepTiming};
+pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
 pub use joint::{JointHandle, JointKind};
 pub use math::{AABB, Ray, RaycastHit};

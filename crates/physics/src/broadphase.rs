@@ -77,6 +77,41 @@ impl StepTiming {
     }
 }
 
+/// Deterministic worst-case step budget: degradation by quality scaling.
+///
+/// After broadphase the engine knows the candidate-pair count `P` and the
+/// speed-requested substep count `S`. When `P × S` exceeds
+/// `max_pair_substeps`, substeps shed toward `P × S <= max` — never below
+/// `min_substeps`, never below an already-low request. The shed is analytic
+/// (counts only, no wall-clock), so it is deterministic for a given scene
+/// trajectory, exactly like the adaptive-substep heuristic it follows.
+///
+/// The guarantee is deliberately narrow: candidate pairs are never dropped
+/// (completeness is preserved; a shed step solves the same contacts with
+/// fewer passes), and the solver-side per-island iteration scaling is
+/// untouched. Calibration: tiled 10k settled runs ~14k × 4 = 56k and cold
+/// ~14k × 12 = 170k, so the default 200k stays out of the way of every
+/// measured ≤10k workload and only bites at 100k scale (where it sheds to
+/// the floor instead of running away).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepBudget {
+    /// Maximum candidate-pairs × substeps product per step before shedding.
+    /// Zero means every multi-substep request sheds to the floor.
+    pub max_pair_substeps: usize,
+    /// Shedding floor. Requests at or below this are never shed, so
+    /// explicit low-substep configurations are untouched.
+    pub min_substeps: u32,
+}
+
+impl Default for StepBudget {
+    fn default() -> Self {
+        Self {
+            max_pair_substeps: 200_000,
+            min_substeps: 4,
+        }
+    }
+}
+
 /// Available candidate-pair backends for [`crate::BuiltinPhysicsEngine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadPhaseKind {
