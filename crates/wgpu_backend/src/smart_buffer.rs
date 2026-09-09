@@ -114,12 +114,21 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
     /// Download GPU data to CPU if DIRTY_GPU is set (blocking).
     /// Requires COPY_SRC usage on the buffer; the read goes through a
     /// MAP_READ staging buffer (a storage buffer cannot be mapped).
-    pub fn sync_to_cpu_blocking(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+    ///
+    /// Returns `true` when the CPU copy was updated (or no download was
+    /// needed). On mapping or buffer errors it returns `false` and preserves
+    /// `DIRTY_GPU`, allowing the caller to retry instead of observing stale
+    /// data as if it were current.
+    pub fn sync_to_cpu_blocking(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
         if !self.flags.contains(ResidencyFlags::DIRTY_GPU) {
-            return;
+            return true;
         }
 
-        if let Some(ref buffer) = self.gpu_buffer {
+        let Some(buffer) = self.gpu_buffer.as_ref() else {
+            return false;
+        };
+        {
+
             let staging = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smart_buffer staging"),
                 size: self._size as u64,
@@ -143,16 +152,27 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
                     timeout: None,
                 })
                 .ok();
-            if let Ok(Ok(())) = receiver.recv() {
-                let view = buffer_slice.get_mapped_range().unwrap();
-                let downloaded: &[T] = bytemuck::cast_slice(&view);
-                self.cpu_data.copy_from_slice(downloaded);
+            let Ok(Ok(())) = receiver.recv() else {
+                return false;
+            };
+            let Ok(view) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                buffer_slice.get_mapped_range()
+            })) else {
+                return false;
+            };
+            let downloaded: &[T] = bytemuck::cast_slice(&view);
+            if downloaded.len() != self.cpu_data.len() {
                 drop(view);
                 staging.unmap();
+                return false;
             }
+            self.cpu_data.copy_from_slice(downloaded);
+            drop(view);
+            staging.unmap();
         }
 
         self.flags.remove(ResidencyFlags::DIRTY_GPU);
+        true
     }
 
     /// Ensure GPU buffer exists (recreate if dropped).
@@ -234,7 +254,7 @@ mod tests {
     #[test]
     fn sync_to_cpu_is_noop_when_clean() {
         let (ctx, mut buf) = test_buffer(vec![1.0f32, 2.0, 3.0]);
-        buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue);
+        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue));
         assert_eq!(buf.flags(), ResidencyFlags::empty());
         assert_eq!(buf.cpu_data(), &[1.0, 2.0, 3.0]);
     }
@@ -259,7 +279,7 @@ mod tests {
         // The initial contents were uploaded at construction; downloading
         // them must reproduce the same bytes.
         buf.mark_gpu_dirty();
-        buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue);
+        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue));
         assert_eq!(buf.cpu_data(), &[7.5, -1.25, 0.0]);
         assert_eq!(buf.flags(), ResidencyFlags::empty());
     }
@@ -283,7 +303,7 @@ mod tests {
         buf.cpu_data_mut()[0] = 43;
         buf.sync_to_gpu(&ctx.queue);
         buf.mark_gpu_dirty();
-        buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue);
+        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue));
         assert_eq!(buf.cpu_data(), &[43]);
     }
 }
