@@ -16,9 +16,9 @@ use crate::shaders::math::luminance;
 use ornis_macros::stage;
 
 /// Bloom vertex entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — replaced by `bloom_vertex_entry::wgsl_source()`.
-#[stage(vertex, entry = "vs_main")]
-fn bloom_vertex_entry(
+/// DSL-only — replaced by `vs_main::wgsl_source()`.
+#[stage(vertex)]
+fn vs_main(
     vertex_index: super::VertexIndex,
     ctx: Context<super::QuadContext>,
 ) -> BloomVertexOutput {
@@ -42,11 +42,8 @@ pub(crate) struct BloomContext {
     pub bloom_params: BloomUniform,
 }
 
-#[stage(fragment, entry = "fs_main")]
-fn bloom_fragment_entry(
-    input: BloomVertexOutput,
-    ctx: Context<BloomContext>,
-) -> super::Location<0, glam::Vec4> {
+#[stage(fragment)]
+fn fs_main(input: BloomVertexOutput, ctx: Context<BloomContext>) -> super::Location<0, glam::Vec4> {
     let color = textureSample(ctx.src_tex, ctx.src_sampler, input.uv).rgb;
     let luma = luminance(color);
     let keep = smoothstep(
@@ -100,7 +97,7 @@ fn bloom_wgsl_body() -> String {
         bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
         head = bloom_header_head(),
         vout = wgsl_decl(BloomVertexOutput::WGSL_SOURCE),
-        vs = bloom_vertex_entry::wgsl_source(),
+        vs = vs_main::wgsl_source(),
     );
 
     /// WGSL bindings + quad constants, all assembled from Rust: the binding
@@ -112,7 +109,7 @@ fn bloom_wgsl_body() -> String {
         out
     }
 
-    let fragment = bloom_fragment_entry::wgsl_source();
+    let fragment = fs_main::wgsl_source();
 
     let kernel = luminance::wgsl_source();
     format!("{header}\n{kernel}\n{fragment}\n")
@@ -164,12 +161,12 @@ mod tests {
     /// rest; generated entries are single-line).
     #[test]
     fn bloom_entries_match_legacy_shape() {
-        let vs = bloom_vertex_entry::wgsl_source();
+        let vs = vs_main::wgsl_source();
         assert!(vs.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"));
         assert!(
             vs.contains("return BloomVertexOutput(quad[vertex_index], uvs[vertex_index]) /* clip_position, uv */;")
         );
-        let fs = bloom_fragment_entry::wgsl_source();
+        let fs = fs_main::wgsl_source();
         assert!(fs.starts_with("@fragment\nfn fs_main(input: BloomVertexOutput)"));
         assert!(fs.contains("-> @location(0) vec4<f32>"));
         assert!(fs.contains("let color = textureSample(src_tex, src_sampler, input.uv).rgb;"));

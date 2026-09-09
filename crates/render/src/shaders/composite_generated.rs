@@ -22,13 +22,10 @@ pub(crate) struct CompositeContext {
 }
 
 /// Legacy composite vertex entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — replaced by `composite_vs_entry::wgsl_source()`. Uses the
+/// DSL-only — replaced by `vs_main::wgsl_source()`. Uses the
 /// `var`-out form (`let mut out: T;` + field assignment).
-#[stage(vertex, entry = "vs")]
-fn composite_vs_entry(
-    vertex_index: super::VertexIndex,
-    ctx: Context<super::QuadContext>,
-) -> VertexOutput {
+#[stage(vertex)]
+fn vs_main(vertex_index: super::VertexIndex, ctx: Context<super::QuadContext>) -> VertexOutput {
     let mut out: VertexOutput;
     out.position = ctx.quad[vertex_index];
     out.uv = ctx.uvs[vertex_index];
@@ -37,11 +34,8 @@ fn composite_vs_entry(
 
 /// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — texture bundle (`ctx: CompositeContext`).
-#[stage(fragment, entry = "fs")]
-fn composite_fs_entry(
-    input: VertexOutput,
-    ctx: Context<CompositeContext>,
-) -> super::Location<0, glam::Vec4> {
+#[stage(fragment)]
+fn fs_main(input: VertexOutput, ctx: Context<CompositeContext>) -> super::Location<0, glam::Vec4> {
     let bg = textureSampleLevel(ctx.pbr_tex, ctx.pbr_sampler, input.uv, 0.0);
     let ui = textureSampleLevel(ctx.ui_tex, ctx.ui_sampler, input.uv, 0.0);
     let ui_linear = srgb_to_linear(ui.rgb);
@@ -111,7 +105,7 @@ fn composite_wgsl_body() -> String {
         "\n{vout}\n{rest}\n{vs}",
         vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
         rest = composite_header_rest(),
-        vs = composite_vs_entry::wgsl_source(),
+        vs = vs_main::wgsl_source(),
     );
 
     /// Bindings (0–3) from the table + quad constants, all assembled from Rust.
@@ -124,7 +118,7 @@ fn composite_wgsl_body() -> String {
 
     // Fragment entry: sampling + sRGB decode + mix. Translated above; the
     // kernel (same `srgb_to_linear` name in WGSL) splices in below.
-    let fragment = composite_fs_entry::wgsl_source();
+    let fragment = fs_main::wgsl_source();
 
     // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
     let kernel = srgb_to_linear::wgsl_source();
@@ -170,8 +164,8 @@ mod tests {
         assert!(src.contains("@group(0) @binding(1) var pbr_sampler"));
         assert!(src.contains("@group(0) @binding(2) var ui_tex"));
         assert!(src.contains("@group(0) @binding(3) var ui_sampler"));
-        assert!(src.contains("fn vs("));
-        assert!(src.contains("fn fs("));
+        assert!(src.contains("fn vs_main("));
+        assert!(src.contains("fn fs_main("));
         assert!(src.contains("fn srgb_to_linear"));
     }
 

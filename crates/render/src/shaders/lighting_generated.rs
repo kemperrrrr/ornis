@@ -172,8 +172,8 @@ pub(crate) struct LightingContext {
     pub lighting: LightingUniform,
 }
 
-#[stage(fragment, entry = "fs_main")]
-fn lighting_fragment_entry(
+#[stage(fragment)]
+fn fs_main(
     input: QuadVertexOutput,
     ctx: Context<LightingContext>,
 ) -> super::Location<0, glam::Vec4> {
@@ -378,18 +378,15 @@ pub fn wgsl_source() -> String {
         helpers::wgsl_consts(),
         helpers::wgsl_lighting_decode(),
         helpers::wgsl_shared_helpers(),
-        lighting_fragment_entry::wgsl_source(),
+        fs_main::wgsl_source(),
         lighting_fragment_kernels(),
     )
 }
 
 /// Vertex entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — replaced by `lighting_vertex_entry::wgsl_source()`.
-#[stage(vertex, entry = "vs_main")]
-fn lighting_vertex_entry(
-    vertex_index: super::VertexIndex,
-    ctx: Context<super::QuadContext>,
-) -> QuadVertexOutput {
+/// DSL-only — replaced by `vs_main::wgsl_source()`.
+#[stage(vertex)]
+fn vs_main(vertex_index: super::VertexIndex, ctx: Context<super::QuadContext>) -> QuadVertexOutput {
     return QuadVertexOutput {
         clip_position: ctx.quad[vertex_index],
         uv: ctx.uvs[vertex_index],
@@ -405,7 +402,7 @@ pub fn wgsl_vertex_source() -> String {
         "\n{quad}{qo}{body}",
         quad = vertex_quad_uv(),
         qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
-        body = lighting_vertex_entry::wgsl_source(),
+        body = vs_main::wgsl_source(),
     )
 }
 
@@ -497,8 +494,8 @@ mod tests {
     /// with the early-out, and the summed layer BSDF. (Byte-parity no
     /// longer applies — the generated entry is single-line.)
     #[test]
-    fn lighting_fragment_entry_matches_legacy_shape() {
-        let entry = lighting_fragment_entry::wgsl_source();
+    fn fs_main_matches_legacy_shape() {
+        let entry = fs_main::wgsl_source();
         assert!(entry.starts_with("@fragment\nfn fs_main(input: QuadVertexOutput)"));
         assert!(entry.contains("-> @location(0) vec4<f32>"));
         assert!(entry.contains(

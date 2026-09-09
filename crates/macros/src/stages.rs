@@ -57,10 +57,12 @@ use quote::quote;
 use syn::parse::Parser;
 use syn::{parse_macro_input, punctuated::Punctuated, token::Comma};
 
-/// `#[stage]` attribute arguments.
+/// `#[stage]` attribute arguments. `entry` is an optional override; without
+/// it the WGSL entry name is the Rust function ident (`fn vs_main` →
+/// `fn vs_main`) — one identifier, no second spelling.
 struct StageArgs {
     stage: String,
-    entry: String,
+    entry: Option<String>,
     returns: Option<String>,
 }
 
@@ -107,14 +109,14 @@ fn parse_args(args: TokenStream) -> syn::Result<StageArgs> {
         }
     }
     match (stage, entry) {
-        (Some(stage), Some(entry)) => Ok(StageArgs {
+        (Some(stage), entry) => Ok(StageArgs {
             stage,
             entry,
             returns,
         }),
         _ => Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "stage: `vertex`|`fragment` and `entry = \"...\"` are required",
+            "stage: `vertex`|`fragment` is required (`entry = \"...\"` optionally overrides the Rust fn name)",
         )),
     }
 }
@@ -374,6 +376,8 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     let func = parse_macro_input!(input as syn::ItemFn);
     let fn_name = func.sig.ident.clone();
+    // Without an explicit override the WGSL entry name is the Rust fn name.
+    let entry = entry.unwrap_or_else(|| fn_name.to_string());
 
     // Return type: Rust ident verbatim (renamed mirrors are spelled through
     // import aliases at the use site), a `Location<N, T>` wrapper for

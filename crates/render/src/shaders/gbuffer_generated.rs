@@ -34,8 +34,8 @@ pub(crate) struct GbufferVertexContext {
 /// G-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
 /// instance transform + world-space varying. DSL-only — `per_objects` /
 /// `camera` globals declared via `#[wgsl(global)]`.
-#[stage(vertex, entry = "vs_main")]
-fn gbuffer_vs_entry(
+#[stage(vertex)]
+fn vs_main(
     input: VertexInput,
     instance_index: super::InstanceIndex,
     ctx: Context<GbufferVertexContext>,
@@ -73,15 +73,15 @@ pub fn wgsl_vertex_source() -> String {
         bindings = vertex_bindings(),
         vin = wgsl_decl(VertexInput::WGSL_SOURCE),
         vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
-        body = gbuffer_vs_entry::wgsl_source(),
+        body = vs_main::wgsl_source(),
     )
 }
 
 /// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
 /// 5-MRT packing. DSL-only — `materials` global declared via
 /// `#[wgsl(global)]`.
-#[stage(fragment, entry = "fs_main")]
-fn gbuffer_fs_entry(
+#[stage(fragment)]
+fn fs_main(
     input: FragmentInput,
     #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
 ) -> GBufferOutput {
@@ -118,7 +118,7 @@ fn gbuffer_fs_entry(
 /// normal-encoding kernel via `wgsl_source()`.
 ///
 /// Assembled from the shared [`openpbr_material_decl()`], the shared varyings,
-/// the translated [`gbuffer_fs_entry`] body and kernel; entry point `fs_main`
+/// the translated [`fs_main`] body and kernel; entry point `fs_main`
 /// is kept.
 pub fn wgsl_source() -> String {
     format!(
@@ -127,7 +127,7 @@ pub fn wgsl_source() -> String {
         bindings = fragment_bindings(),
         fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
         gout = wgsl_decl(GBufferOutput::WGSL_SOURCE),
-        body = gbuffer_fs_entry::wgsl_source(),
+        body = fs_main::wgsl_source(),
         kernel = octahedral_encode::wgsl_source()
     )
 }
@@ -215,7 +215,7 @@ mod tests {
     /// the generated entry is single-line.)
     #[test]
     fn gbuffer_vertex_entry_matches_legacy_shape() {
-        let entry = gbuffer_vs_entry::wgsl_source();
+        let entry = vs_main::wgsl_source();
         assert!(entry.starts_with(
             "@vertex\nfn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32)"
         ));
@@ -231,7 +231,7 @@ mod tests {
     /// applies — the generated entry is single-line.)
     #[test]
     fn gbuffer_fragment_entry_matches_legacy_shape() {
-        let entry = gbuffer_fs_entry::wgsl_source();
+        let entry = fs_main::wgsl_source();
         assert!(entry.starts_with("@fragment\nfn fs_main(input: FragmentInput)"));
         assert!(entry.contains("-> GBufferOutput"));
         assert!(entry.contains("let mat = materials[input.material_index];"));

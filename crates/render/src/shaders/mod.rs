@@ -484,12 +484,11 @@ mod tests {
             ),
         ];
         let entries: &[String] = &[
-            hdr_composite_generated::composite_vertex_entry::wgsl_source().to_string(),
-            hdr_composite_generated::hdr_fragment_vs_entry::wgsl_source().to_string(),
-            bloom_generated::bloom_vertex_entry::wgsl_source().to_string(),
-            lighting_generated::lighting_vertex_entry::wgsl_source().to_string(),
-            composite_generated::composite_vs_entry::wgsl_source().to_string(),
-            gbuffer_generated::gbuffer_vs_entry::wgsl_source().to_string(),
+            hdr_composite_generated::vs_main::wgsl_source().to_string(),
+            bloom_generated::vs_main::wgsl_source().to_string(),
+            lighting_generated::vs_main::wgsl_source().to_string(),
+            composite_generated::vs_main::wgsl_source().to_string(),
+            gbuffer_generated::vs_main::wgsl_source().to_string(),
         ];
         let mut checked = 0;
         for src in entries {
@@ -505,9 +504,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // Four vertex entries construct varyings today; zero hits would mean
-        // the comments vanished and the test passes vacuously.
-        assert!(checked >= 4, "expected struct literals, found {checked}");
+        // Three vertex entries construct varyings positionally today (the
+        // rest use the `var`-out form); zero hits would mean the comments
+        // vanished and the test passes vacuously.
+        assert!(checked >= 3, "expected struct literals, found {checked}");
     }
 
     /// Every context-bundle / `#[wgsl(global)]` name an entry reads must
@@ -556,7 +556,7 @@ mod tests {
                 vec![gbuffer_vertex],
             ),
             (
-                gbuffer_generated::gbuffer_fs_entry::globals(),
+                gbuffer_generated::fs_main::globals(),
                 vec![gbuffer_fragment],
             ),
             (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
@@ -580,33 +580,25 @@ mod tests {
         );
     }
 
-    /// Entry-point namespace is closed: every generated `entry_point()`
-    /// must be one of the four pipeline-convention names. The renderer and
-    /// `composite.rs` request entries through these same accessors (no
-    /// literals), so a rename propagates by construction — but the names
-    /// themselves are external (pipeline caches, debug labels, snapshots),
-    /// hence pinned here as a set.
+    /// Entry-point ABI is pinned per pass: each generated `entry_point()`
+    /// must be exactly the pipeline-convention name for its pass. A set
+    /// cannot catch distribution drift (one entry renamed, another taking
+    /// its place), so every entry is asserted individually. The renderer
+    /// and `composite.rs` request entries through these same accessors —
+    /// the names below are the external ABI (pipeline caches, snapshots).
     #[test]
-    fn entry_namespace_is_closed() {
-        use std::collections::HashSet;
-        let entries = [
-            hdr_composite_generated::composite_vertex_entry::entry_point(),
-            hdr_composite_generated::hdr_fragment_vs_entry::entry_point(),
-            hdr_composite_generated::hdr_fragment_entry::entry_point(),
-            bloom_generated::bloom_vertex_entry::entry_point(),
-            bloom_generated::bloom_fragment_entry::entry_point(),
-            lighting_generated::lighting_vertex_entry::entry_point(),
-            lighting_generated::lighting_fragment_entry::entry_point(),
-            composite_generated::composite_vs_entry::entry_point(),
-            composite_generated::composite_fs_entry::entry_point(),
-            gbuffer_generated::gbuffer_vs_entry::entry_point(),
-            gbuffer_generated::gbuffer_fs_entry::entry_point(),
-            pbr_generated::pbr_fragment_entry::entry_point(),
-        ];
-        // Twelve entries today; fewer means one escaped the pin.
-        assert_eq!(entries.len(), 12);
-        let set: HashSet<&str> = entries.into_iter().collect();
-        assert_eq!(set, HashSet::from(["vs_main", "fs_main", "vs", "fs"]));
+    fn entry_points_match_pass_abi() {
+        assert_eq!(hdr_composite_generated::vs_main::entry_point(), "vs_main");
+        assert_eq!(hdr_composite_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(bloom_generated::vs_main::entry_point(), "vs_main");
+        assert_eq!(bloom_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
+        assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(composite_generated::vs_main::entry_point(), "vs_main");
+        assert_eq!(composite_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(gbuffer_generated::vs_main::entry_point(), "vs_main");
+        assert_eq!(gbuffer_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
     }
 
     /// Parse and fully validate an assembled WGSL module with naga.

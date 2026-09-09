@@ -6,7 +6,7 @@
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
 //! The former handwritten `shaders/wgsl/pbr_*.wgsl` sources were deleted
 //! after the `#[stage]` translation of `fs_main`; the
-//! `pbr_fragment_entry_matches_legacy_shape` test pins the entry shape.
+//! `fs_main_matches_legacy_shape` test pins the entry shape.
 //!
 //! Note: the vertex stage is shared with the g-buffer pass (same instance
 //! transform), so [`wgsl_vertex_source`] reuses
@@ -68,7 +68,7 @@ pub fn wgsl_source() -> String {
         fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
         consts = helpers::wgsl_consts(),
         helpers = helpers::wgsl_shared_helpers(),
-        entry = pbr_fragment_entry::wgsl_source(),
+        entry = fs_main::wgsl_source(),
     );
     for k in &kernels {
         src.push('\n');
@@ -91,11 +91,8 @@ pub(crate) struct PbrContext {
     pub lighting: LightingUniform,
 }
 
-#[stage(fragment, entry = "fs_main")]
-fn pbr_fragment_entry(
-    input: FragmentInput,
-    ctx: Context<PbrContext>,
-) -> super::Location<0, glam::Vec4> {
+#[stage(fragment)]
+fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0, glam::Vec4> {
     let mat = ctx.materials[input.material_index];
     let n = normalize(input.world_normal);
     let v = normalize(ctx.camera.camera_pos.xyz - input.world_position);
@@ -356,8 +353,8 @@ mod tests {
     /// early-out. (Byte-parity no longer applies — the generated entry is
     /// single-line with normalized int suffixes.)
     #[test]
-    fn pbr_fragment_entry_matches_legacy_shape() {
-        let entry = pbr_fragment_entry::wgsl_source();
+    fn fs_main_matches_legacy_shape() {
+        let entry = fs_main::wgsl_source();
         assert!(entry.starts_with("@fragment\nfn fs_main(input: FragmentInput)"));
         assert!(entry.contains("-> @location(0) vec4<f32>"));
         assert!(entry.contains("let mat = materials[input.material_index];"));

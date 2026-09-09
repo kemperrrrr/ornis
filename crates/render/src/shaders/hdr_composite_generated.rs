@@ -23,9 +23,9 @@ use ornis_macros::stage;
 /// HDR composite vertex entry, written in Rust and translated to WGSL by
 /// [`stage`](ornis_macros::stage): fullscreen-quad corner passthrough.
 /// DSL-only (`QUAD`/`UVS` globals declared via `#[wgsl(global)]`) — replaced by
-/// `composite_vertex_entry::wgsl_source()`, never compiled as Rust.
-#[stage(vertex, entry = "vs_main")]
-fn composite_vertex_entry(
+/// `vs_main::wgsl_source()`, never compiled as Rust.
+#[stage(vertex)]
+fn vs_main(
     vertex_index: super::VertexIndex,
     ctx: Context<super::QuadContext>,
 ) -> CompositeVertexOutput {
@@ -38,7 +38,7 @@ fn composite_vertex_entry(
 /// HDR composite vertex shader: fullscreen quad from `vertex_index`.
 ///
 /// Assembled from the quad constants, the derived `CompositeVertexOutput`
-/// layout and the translated [`composite_vertex_entry`] body. Structurally
+/// layout and the translated [`vs_main`] body. Structurally
 /// identical to the former handwritten vertex (same signature and
 /// constructor call; the generated entry is single-line) — pinned by
 /// `hdr_vertex_entry_matches_legacy_shape` plus naga and the pixel probes.
@@ -47,7 +47,7 @@ pub fn wgsl_vertex_source() -> String {
         "\n{quad}\n{vout}\n{body}",
         quad = vertex_quad(),
         vout = wgsl_decl(CompositeVertexOutput::WGSL_SOURCE),
-        body = composite_vertex_entry::wgsl_source(),
+        body = vs_main::wgsl_source(),
     )
 }
 
@@ -58,13 +58,12 @@ pub fn wgsl_vertex_source() -> String {
 /// ACES/luminance kernels; entry point `fs_main` is kept.
 pub fn wgsl_source() -> String {
     format!(
-        "\n{cam}\n{bloom}\n{head}\n{qo}\n{vs}\n{fs}\n{aces}\n{lum}",
+        "\n{cam}\n{bloom}\n{head}\n{qo}\n{fs}\n{aces}\n{lum}",
         cam = wgsl_decl(CameraUniform::WGSL_SOURCE),
         bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
         head = fragment_head(),
         qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
-        vs = hdr_fragment_vs_entry::wgsl_source(),
-        fs = hdr_fragment_entry::wgsl_source(),
+        fs = fs_main::wgsl_source(),
         aces = aces_tonemap::wgsl_source(),
         lum = luminance::wgsl_source()
     )
@@ -134,19 +133,6 @@ fn fragment_head() -> String {
     out
 }
 
-/// Fragment-file vertex entry (dead in practice — `fs_main` is the selected
-/// entry — but part of the legacy text). Translated like the vertex module.
-#[stage(vertex, entry = "vs_main")]
-fn hdr_fragment_vs_entry(
-    vertex_index: super::VertexIndex,
-    ctx: Context<super::QuadContext>,
-) -> QuadVertexOutput {
-    return QuadVertexOutput {
-        clip_position: ctx.quad[vertex_index],
-        uv: ctx.uvs[vertex_index],
-    };
-}
-
 /// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
 /// deferred/forward layer mix + bloom. DSL-only — resource bundle
 /// (`ctx: HdrContext`). `==` on the mode uniform selects the layer mix.
@@ -161,11 +147,8 @@ pub(crate) struct HdrContext {
     pub bloom_params: BloomUniform,
 }
 
-#[stage(fragment, entry = "fs_main")]
-fn hdr_fragment_entry(
-    input: QuadVertexOutput,
-    ctx: Context<HdrContext>,
-) -> super::Location<0, glam::Vec4> {
+#[stage(fragment)]
+fn fs_main(input: QuadVertexOutput, ctx: Context<HdrContext>) -> super::Location<0, glam::Vec4> {
     let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, input.uv).rgb;
     let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, input.uv).rgba;
     let mut combined = deferred_color;
@@ -206,10 +189,12 @@ mod tests {
         let src = wgsl_source();
         assert!(src.contains("@group(0) @binding(0) var deferred_tex"));
         assert!(src.contains("@group(0) @binding(4) var<uniform> bloom_params"));
-        assert!(src.contains("fn vs_main("));
         assert!(src.contains("fn fs_main("));
         assert!(src.contains("fn aces_tonemap"));
         assert!(src.contains("fn luminance"));
+        // The vertex entry lives in the vertex assembly (the fragment
+        // module no longer carries the dead second `vs_main`).
+        assert!(wgsl_vertex_source().contains("fn vs_main("));
     }
 
     /// The translated vertex entry must keep the legacy shape: same entry
@@ -217,7 +202,7 @@ mod tests {
     /// (Byte-parity no longer applies — the generated entry is single-line.)
     #[test]
     fn hdr_vertex_entry_matches_legacy_shape() {
-        let entry = composite_vertex_entry::wgsl_source();
+        let entry = vs_main::wgsl_source();
         assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"));
         assert!(entry.contains("-> CompositeVertexOutput"));
         assert!(entry.contains(
@@ -230,8 +215,8 @@ mod tests {
     /// (single-line, `else { if }` nesting, normalized int suffixes —
     /// all semantics-preserving, naga-validated).
     #[test]
-    fn hdr_fragment_entry_matches_legacy_shape() {
-        let entry = hdr_fragment_entry::wgsl_source();
+    fn fs_main_matches_legacy_shape() {
+        let entry = fs_main::wgsl_source();
         assert!(entry.starts_with("@fragment\nfn fs_main(input: QuadVertexOutput)"));
         assert!(entry.contains("-> @location(0) vec4<f32>"));
         assert!(entry.contains(
