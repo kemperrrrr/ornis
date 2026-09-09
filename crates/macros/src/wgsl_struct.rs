@@ -10,7 +10,7 @@
 //! # Layout contract
 //!
 //! The struct must be `#[repr(C)]` (align(16) recommended) and every field
-//! must be a scalar (`f32`, `u32`, `i32`), a fixed-size array of one
+//! must be a scalar (`f32`, `u32`, `i32`, or `GpuBool`), a fixed-size array of one
 //! (`[f32; 2..=4]` etc., mapping to WGSL vectors), a 4×4 float matrix
 //! (`[[f32; 4]; 4]`, mapping to `mat4x4<f32>`), or another (possibly arrayed)
 //! struct that itself has a WGSL layout.
@@ -76,6 +76,10 @@ fn scalar_elem(ty: &syn::Type) -> Option<(&'static str, usize)> {
             Some("f32") => Some(("f32", 4)),
             Some("u32") => Some(("u32", 4)),
             Some("i32") => Some(("i32", 4)),
+            // `GpuBool` is a transparent u32 wrapper and is intentionally spelled
+            // `u32` in host-shareable WGSL. Native Rust `bool` is not
+            // recognized because its representation is not a GPU contract.
+            Some("GpuBool") => Some(("u32", 4)),
             _ => None,
         }
     } else {
@@ -211,7 +215,7 @@ fn wgsl_field_layout(
         }
         return Err(syn::Error::new(
             arr.elem.span(),
-            "WgslStruct: unsupported array element type; use f32/u32/i32 or a struct with a WGSL layout",
+            "WgslStruct: unsupported array element type; use f32/u32/i32/GpuBool or a struct with a WGSL layout",
         ));
     }
     // Nested struct by value: `label: Inner` ↔ `label: W` (see above).
@@ -237,7 +241,7 @@ fn wgsl_field_layout(
     }
     Err(syn::Error::new(
         ty.span(),
-        "WgslStruct: unsupported field type; use f32/u32/i32, fixed-size arrays of them, [[f32; 4]; 4], or a struct with a WGSL layout",
+        "WgslStruct: unsupported field type; use f32/u32/i32/GpuBool, fixed-size arrays of them, [[f32; 4]; 4], or a struct with a WGSL layout",
     ))
 }
 

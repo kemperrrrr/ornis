@@ -18,6 +18,8 @@ mod dispatcher;
 mod engine;
 mod entity;
 mod gameplay;
+/// Stable scalar wrappers for GPU-compatible buffer representations.
+pub mod gpu_types;
 mod input;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
@@ -43,6 +45,7 @@ pub use engine::{
     DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, FixedTime, Time,
 };
 pub use entity::{Entity, EntityAllocator};
+pub use gpu_types::GpuBool;
 pub use gameplay::{
     GameplayPlugin, Player, Position, RenderSnapshot, RenderWorldView, Velocity, install_gameplay,
     physics_push, player_input, transform_update,
