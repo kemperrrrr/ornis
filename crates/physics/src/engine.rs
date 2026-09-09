@@ -1193,6 +1193,209 @@ fn detect_collisions(
     out
 }
 
+/// Base speculative margin (m): also the AABB inflation used by the
+/// broadphase, so pairs within it are guaranteed to reach narrow phase.
+const SPEC_BASE: f32 = 0.05;
+
+/// Per-pair narrowphase kernel shared by the parallel and sequential paths:
+/// filters, speculative margin, all 9 shape combos with the unified SAT-cache
+/// gate, and canonical body ids on the manifold. Pure over shared borrows
+/// (`sat_cache` is lock-free), so any scheduler can shard it — this is the
+/// unit the scheduler spike compares against rayon.
+#[allow(clippy::too_many_arguments)]
+fn narrow_pair(
+    bodies: &[RigidBody],
+    asleep: &[bool],
+    i: usize,
+    j: usize,
+    body_required: Option<&[u32]>,
+    cur_substep: u32,
+    sub_dt: f32,
+    sat_cache: Option<&SatCache>,
+) -> Option<Manifold> {
+    let a = &bodies[i];
+    let b = &bodies[j];
+    if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
+        return None;
+    }
+    if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
+        return None;
+    }
+    // G7: both-asleep pairs are frozen in place — their relative geometry
+    // cannot change, so re-running the narrow phase (SAT!) per substep is
+    // pure waste. On a settled scene this IS the frame cost. The island
+    // graph keeps them composed via the frozen-asleep union instead.
+    if asleep[i] && asleep[j] {
+        return None;
+    }
+    // B: per-body substeps — slow pairs only needed for first
+    // MIN substeps; fast pairs need all. Skip extra substeps.
+    if let Some(req) = body_required
+        && req[i].max(req[j]) <= cur_substep
+    {
+        return None;
+    }
+    let rel_speed = (a.velocity - b.velocity).length();
+    let margin = SPEC_BASE + rel_speed * sub_dt;
+    let manifold = match (&a.shape, &b.shape) {
+        (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
+            sphere_vs_sphere(a.position, ra, b.position, rb, margin)
+                .map(|c| Manifold::single(i, j, c))
+        }
+        (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
+            sphere_vs_obb(a.position, ra, b.position, hb, b.orientation, margin)
+                .map(|c| Manifold::single(i, j, c))
+        }
+        (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
+            sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(|c| {
+                Manifold::single(
+                    i,
+                    j,
+                    Contact {
+                        normal: -c.normal,
+                        penetration: c.penetration,
+                        contact_point: c.contact_point,
+                    },
+                )
+            })
+        }
+        (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
+            // SAT cache is lock-free (DashMap): shared by both paths; hits
+            // reuse the axis only, contacts rebuild from live geometry.
+            let use_sat = sat_cache.is_some()
+                && cur_substep == 0
+                && rel_speed <= 0.5
+                && a.angular_velocity.length_squared() <= 0.25
+                && b.angular_velocity.length_squared() <= 0.25;
+            if use_sat {
+                box_manifold_cached(
+                    a.position,
+                    ha,
+                    a.orientation,
+                    b.position,
+                    hb,
+                    b.orientation,
+                    margin,
+                    Some((i, j)),
+                    sat_cache,
+                    true,
+                )
+            } else {
+                box_manifold(
+                    a.position,
+                    ha,
+                    a.orientation,
+                    b.position,
+                    hb,
+                    b.orientation,
+                    margin,
+                )
+            }
+        }
+        (
+            &Shape::Capsule {
+                radius: ra,
+                half_height: ha,
+            },
+            &Shape::Capsule {
+                radius: rb,
+                half_height: hb,
+            },
+        ) => capsule_vs_capsule(
+            &CapsuleShape {
+                pos: a.position,
+                radius: ra,
+                half_height: ha,
+                rot: a.orientation,
+            },
+            &CapsuleShape {
+                pos: b.position,
+                radius: rb,
+                half_height: hb,
+                rot: b.orientation,
+            },
+            margin,
+        )
+        .map(|c| Manifold::single(i, j, c)),
+        (
+            &Shape::Sphere { radius: r },
+            &Shape::Capsule {
+                radius: cr,
+                half_height: hh,
+            },
+        ) => sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
+            .map(|c| Manifold::single(i, j, c)),
+        (
+            &Shape::Capsule {
+                radius: cr,
+                half_height: hh,
+            },
+            &Shape::Sphere { radius: r },
+        ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(
+            |c| {
+                Manifold::single(
+                    i,
+                    j,
+                    Contact {
+                        normal: -c.normal,
+                        penetration: c.penetration,
+                        contact_point: c.contact_point,
+                    },
+                )
+            },
+        ),
+        (
+            &Shape::Box { half_extents: ha },
+            &Shape::Capsule {
+                radius: cr,
+                half_height: hh,
+            },
+        ) => box_vs_capsule(
+            a.position,
+            ha,
+            a.orientation,
+            b.position,
+            cr,
+            hh,
+            b.orientation,
+            margin,
+        )
+        .map(|c| Manifold::single(i, j, c)),
+        (
+            &Shape::Capsule {
+                radius: cr,
+                half_height: hh,
+            },
+            &Shape::Box { half_extents: ha },
+        ) => box_vs_capsule(
+            b.position,
+            ha,
+            b.orientation,
+            a.position,
+            cr,
+            hh,
+            a.orientation,
+            margin,
+        )
+        .map(|c| {
+            Manifold::single(
+                i,
+                j,
+                Contact {
+                    normal: -c.normal,
+                    penetration: c.penetration,
+                    contact_point: c.contact_point,
+                },
+            )
+        }),
+    };
+    manifold.map(|mut m| {
+        m.body_a = i;
+        m.body_b = j;
+        m
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 #[allow(clippy::collapsible_if)]
@@ -1206,9 +1409,6 @@ fn detect_collisions_into(
     cur_substep: u32,
     sat_cache: Option<&SatCache>,
 ) {
-    /// Base speculative margin (m): also the AABB inflation used by the
-    /// broadphase, so pairs within it are guaranteed to reach narrow phase.
-    const SPEC_BASE: f32 = 0.05;
     out.clear();
     // Parallel narrowphase for large candidate sets: SAT/box_manifold is heavy,
     // and bodies/asleep are read-only. Threshold keeps small scenes sequential.
@@ -1217,185 +1417,9 @@ fn detect_collisions_into(
         let results: Vec<Option<Manifold>> = active
             .par_iter()
             .map(|&(i, j)| {
-                let a = &bodies[i];
-                let b = &bodies[j];
-                if !a.can_collide_with(b) || a.is_trigger || b.is_trigger {
-                    return None;
-                }
-                if a.body_type == BodyType::Static && b.body_type == BodyType::Static {
-                    return None;
-                }
-                if asleep[i] && asleep[j] {
-                    return None;
-                }
-                // B: per-body substeps — slow pairs only needed for first
-                // MIN substeps; fast pairs need all. Skip extra substeps.
-                if let Some(req) = body_required
-                    && req[i].max(req[j]) <= cur_substep
-                {
-                    return None;
-                }
-                let rel_speed = (a.velocity - b.velocity).length();
-                let margin = SPEC_BASE + rel_speed * sub_dt;
-                let manifold = match (&a.shape, &b.shape) {
-                    (&Shape::Sphere { radius: ra }, &Shape::Sphere { radius: rb }) => {
-                        sphere_vs_sphere(a.position, ra, b.position, rb, margin)
-                            .map(|c| Manifold::single(i, j, c))
-                    }
-                    (&Shape::Sphere { radius: ra }, &Shape::Box { half_extents: hb }) => {
-                        sphere_vs_obb(a.position, ra, b.position, hb, b.orientation, margin)
-                            .map(|c| Manifold::single(i, j, c))
-                    }
-                    (&Shape::Box { half_extents: ha }, &Shape::Sphere { radius: rb }) => {
-                        sphere_vs_obb(b.position, rb, a.position, ha, a.orientation, margin).map(
-                            |c| {
-                                Manifold::single(
-                                    i,
-                                    j,
-                                    Contact {
-                                        normal: -c.normal,
-                                        penetration: c.penetration,
-                                        contact_point: c.contact_point,
-                                    },
-                                )
-                            },
-                        )
-                    }
-                    (&Shape::Box { half_extents: ha }, &Shape::Box { half_extents: hb }) => {
-                        let slow = (a.velocity - b.velocity).length() <= 0.5
-                            && a.angular_velocity.length_squared() <= 0.25
-                            && b.angular_velocity.length_squared() <= 0.25
-                            && cur_substep == 0;
-                        if slow && sat_cache.is_some() {
-                            box_manifold_cached(
-                                a.position,
-                                ha,
-                                a.orientation,
-                                b.position,
-                                hb,
-                                b.orientation,
-                                margin,
-                                Some((i, j)),
-                                sat_cache,
-                                true,
-                            )
-                        } else {
-                            box_manifold(
-                                a.position,
-                                ha,
-                                a.orientation,
-                                b.position,
-                                hb,
-                                b.orientation,
-                                margin,
-                            )
-                        }
-                    }
-                    (
-                        &Shape::Capsule {
-                            radius: ra,
-                            half_height: ha,
-                        },
-                        &Shape::Capsule {
-                            radius: rb,
-                            half_height: hb,
-                        },
-                    ) => capsule_vs_capsule(
-                        &CapsuleShape {
-                            pos: a.position,
-                            radius: ra,
-                            half_height: ha,
-                            rot: a.orientation,
-                        },
-                        &CapsuleShape {
-                            pos: b.position,
-                            radius: rb,
-                            half_height: hb,
-                            rot: b.orientation,
-                        },
-                        margin,
-                    )
-                    .map(|c| Manifold::single(i, j, c)),
-                    (
-                        &Shape::Sphere { radius: r },
-                        &Shape::Capsule {
-                            radius: cr,
-                            half_height: hh,
-                        },
-                    ) => {
-                        sphere_vs_capsule(a.position, r, b.position, cr, hh, b.orientation, margin)
-                            .map(|c| Manifold::single(i, j, c))
-                    }
-                    (
-                        &Shape::Capsule {
-                            radius: cr,
-                            half_height: hh,
-                        },
-                        &Shape::Sphere { radius: r },
-                    ) => {
-                        sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin)
-                            .map(|c| {
-                                Manifold::single(
-                                    i,
-                                    j,
-                                    Contact {
-                                        normal: -c.normal,
-                                        penetration: c.penetration,
-                                        contact_point: c.contact_point,
-                                    },
-                                )
-                            })
-                    }
-                    (
-                        &Shape::Box { half_extents: ha },
-                        &Shape::Capsule {
-                            radius: cr,
-                            half_height: hh,
-                        },
-                    ) => box_vs_capsule(
-                        a.position,
-                        ha,
-                        a.orientation,
-                        b.position,
-                        cr,
-                        hh,
-                        b.orientation,
-                        margin,
-                    )
-                    .map(|c| Manifold::single(i, j, c)),
-                    (
-                        &Shape::Capsule {
-                            radius: cr,
-                            half_height: hh,
-                        },
-                        &Shape::Box { half_extents: ha },
-                    ) => box_vs_capsule(
-                        b.position,
-                        ha,
-                        b.orientation,
-                        a.position,
-                        cr,
-                        hh,
-                        a.orientation,
-                        margin,
-                    )
-                    .map(|c| {
-                        Manifold::single(
-                            i,
-                            j,
-                            Contact {
-                                normal: -c.normal,
-                                penetration: c.penetration,
-                                contact_point: c.contact_point,
-                            },
-                        )
-                    }),
-                };
-                manifold.map(|mut m| {
-                    m.body_a = i;
-                    m.body_b = j;
-                    m
-                })
+                narrow_pair(
+                    bodies, asleep, i, j, body_required, cur_substep, sub_dt, sat_cache,
+                )
             })
             .collect();
         out.reserve(results.len());

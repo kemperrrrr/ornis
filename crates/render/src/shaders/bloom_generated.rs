@@ -43,11 +43,8 @@ pub(crate) struct BloomContext {
 }
 
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn bloom_fragment_entry(
-    #[wgsl(location = 0)] uv: glam::Vec2,
-    ctx: Context<BloomContext>,
-) -> glam::Vec4 {
-    let color = textureSample(ctx.src_tex, ctx.src_sampler, uv).rgb;
+fn bloom_fragment_entry(input: BloomVertexOutput, ctx: Context<BloomContext>) -> glam::Vec4 {
+    let color = textureSample(ctx.src_tex, ctx.src_sampler, input.uv).rgb;
     let luma = luminance(color);
     let keep = smoothstep(
         ctx.bloom_params.threshold,
@@ -170,9 +167,9 @@ mod tests {
             vs.contains("return BloomVertexOutput(quad[vertex_index], uvs[vertex_index]) /* clip_position, uv */;")
         );
         let fs = bloom_fragment_entry::wgsl_source();
-        assert!(fs.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
+        assert!(fs.starts_with("@fragment\nfn fs_main(input: BloomVertexOutput)"));
         assert!(fs.contains("-> @location(0) vec4<f32>"));
-        assert!(fs.contains("let color = textureSample(src_tex, src_sampler, uv).rgb;"));
+        assert!(fs.contains("let color = textureSample(src_tex, src_sampler, input.uv).rgb;"));
         assert!(fs.contains("return vec4<f32>(color * keep, 1.0);"));
     }
 

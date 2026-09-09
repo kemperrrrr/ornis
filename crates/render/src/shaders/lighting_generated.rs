@@ -173,31 +173,28 @@ pub(crate) struct LightingContext {
 }
 
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn lighting_fragment_entry(
-    #[wgsl(location = 0)] uv: glam::Vec2,
-    ctx: Context<LightingContext>,
-) -> glam::Vec4 {
+fn lighting_fragment_entry(input: QuadVertexOutput, ctx: Context<LightingContext>) -> glam::Vec4 {
     let depth = textureLoad(
         ctx.depth_tex,
-        UVec2::new(uv * Vec2::new(textureDimensions(ctx.depth_tex))),
+        UVec2::new(input.uv * Vec2::new(textureDimensions(ctx.depth_tex))),
         0,
     );
-    let albedo = textureSampleLevel(ctx.albedo_tex, ctx.lighting_sampler, uv, 0.0);
-    let normal_enc = textureSampleLevel(ctx.normal_tex, ctx.lighting_sampler, uv, 0.0);
+    let albedo = textureSampleLevel(ctx.albedo_tex, ctx.lighting_sampler, input.uv, 0.0);
+    let normal_enc = textureSampleLevel(ctx.normal_tex, ctx.lighting_sampler, input.uv, 0.0);
     let material_id = textureLoad(
         ctx.material_id_tex,
-        UVec2::new(uv * Vec2::new(textureDimensions(ctx.material_id_tex))),
+        UVec2::new(input.uv * Vec2::new(textureDimensions(ctx.material_id_tex))),
         0,
     )
     .r;
-    let world_pos_enc = textureSampleLevel(ctx.world_pos_tex, ctx.lighting_sampler, uv, 0.0);
-    let mat_params = textureSampleLevel(ctx.mat_params_tex, ctx.lighting_sampler, uv, 0.0);
+    let world_pos_enc = textureSampleLevel(ctx.world_pos_tex, ctx.lighting_sampler, input.uv, 0.0);
+    let mat_params = textureSampleLevel(ctx.mat_params_tex, ctx.lighting_sampler, input.uv, 0.0);
     let mat = ctx.materials[material_id];
     if albedo.a < 0.001 {
         discard;
     }
     let n = octahedral_decode(normal_enc.rg);
-    let world_pos = reconstruct_world_pos(uv, depth, ctx.camera);
+    let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
     let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
     let nov = max(dot(n, v), EPS);
     let base_weight = mat.base_params.x;
@@ -372,8 +369,9 @@ fn lighting_fragment_entry(
 /// Full WGSL source for deferred lighting, assembled from Rust.
 pub fn wgsl_source() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         lighting_wgsl_header(),
+        wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
         helpers::wgsl_consts(),
         helpers::wgsl_lighting_decode(),
         helpers::wgsl_shared_helpers(),
@@ -498,10 +496,10 @@ mod tests {
     #[test]
     fn lighting_fragment_entry_matches_legacy_shape() {
         let entry = lighting_fragment_entry::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
+        assert!(entry.starts_with("@fragment\nfn fs_main(input: QuadVertexOutput)"));
         assert!(entry.contains("-> @location(0) vec4<f32>"));
         assert!(entry.contains(
-            "textureLoad(depth_tex, vec2<u32>(uv * vec2<f32>(textureDimensions(depth_tex))), 0)"
+            "textureLoad(depth_tex, vec2<u32>(input.uv * vec2<f32>(textureDimensions(depth_tex))), 0)"
         ));
         assert!(entry.contains("discard;"));
         assert!(entry.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));

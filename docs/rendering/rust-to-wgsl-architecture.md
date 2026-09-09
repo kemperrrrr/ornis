@@ -376,7 +376,10 @@ Rust functions ─> AST ───┘       (IR)
    `ctx: Context<Bundle>` + `#[derive(ShaderContext)]`
    (плоская bundle-форма, 12 entry, 30 имён под `stage_globals_declared`);
    одиночные ресурсы — `#[wgsl(global = "...")]`; builtin-индексы —
-   newtypes `VertexIndex`/`InstanceIndex` без атрибутов. Сигнатуры entry —
+   newtypes `VertexIndex`/`InstanceIndex` без атрибутов; location'ы
+   объявлены до функций — на полях `WgslInterface`-структур, entry берут
+   готовый struct-input (`input: QuadVertexOutput`, а не голый
+   `uv + location`). Сигнатуры entry —
    чистый Rust без `#[wgsl(...)]` на bundle/newtype-параметрах: маркер
    bundle — сама обёртка `Context<…>` (bare-структура `input: VertexInput`
    остаётся настоящим WGSL-параметром).

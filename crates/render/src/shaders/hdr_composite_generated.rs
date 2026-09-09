@@ -162,19 +162,16 @@ pub(crate) struct HdrContext {
 }
 
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn hdr_fragment_entry(
-    #[wgsl(location = 0)] uv: glam::Vec2,
-    ctx: Context<HdrContext>,
-) -> glam::Vec4 {
-    let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, uv).rgb;
-    let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, uv).rgba;
+fn hdr_fragment_entry(input: QuadVertexOutput, ctx: Context<HdrContext>) -> glam::Vec4 {
+    let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, input.uv).rgb;
+    let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, input.uv).rgba;
     let mut combined = deferred_color;
     if ctx.bloom_params.mode == 1u {
         combined = forward_color.rgb * forward_color.a;
     } else if ctx.bloom_params.mode == 2u {
         combined = deferred_color + forward_color.rgb * forward_color.a;
     }
-    let bloom = textureSample(ctx.bloom_tex, ctx.composite_sampler, uv).rgb;
+    let bloom = textureSample(ctx.bloom_tex, ctx.composite_sampler, input.uv).rgb;
     let tonemapped = aces_tonemap(combined + bloom * ctx.bloom_params.intensity);
     return glam::Vec4::new(tonemapped, 1.0);
 }
@@ -232,10 +229,10 @@ mod tests {
     #[test]
     fn hdr_fragment_entry_matches_legacy_shape() {
         let entry = hdr_fragment_entry::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
+        assert!(entry.starts_with("@fragment\nfn fs_main(input: QuadVertexOutput)"));
         assert!(entry.contains("-> @location(0) vec4<f32>"));
         assert!(entry.contains(
-            "let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;"
+            "let deferred_color = textureSample(deferred_tex, composite_sampler, input.uv).rgb;"
         ));
         assert!(entry.contains("if (bloom_params.mode =="));
         assert!(entry.contains("combined = forward_color.rgb * forward_color.a;"));
