@@ -1482,7 +1482,7 @@ fn detect_collisions_into(
         });
         out.reserve(active.len());
         for b in &pool.bufs {
-            out.extend(b.lock().unwrap().iter().cloned());
+            out.extend(b.lock().unwrap().drain(..));
         }
         return;
     }
