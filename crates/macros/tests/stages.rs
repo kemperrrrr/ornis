@@ -5,7 +5,7 @@
 //! mirrors are spelled through Rust import aliases (see below), so the macro
 //! itself needs no name mapping.
 
-use ornis_macros::stage;
+use ornis_macros::{ShaderContext, stage};
 
 #[allow(dead_code)]
 struct RustMirror {
@@ -74,4 +74,33 @@ fn stage_global_params_renamed_and_excluded() {
     assert!(src.contains("QUAD[idx]"), "{src}");
     assert!(src.contains("camera.view[3]"), "{src}");
     assert_eq!(quad_global_entry::globals(), &["QUAD", "camera"]);
+}
+
+/// Context bundles: excluded from the signature, `ctx.field` lowered to
+/// the global `field`.
+#[allow(dead_code)]
+#[derive(ShaderContext)]
+struct QuadBundle {
+    quad: [[f32; 4]; 4],
+    uvs: [[f32; 2]; 4],
+}
+
+#[stage(vertex, entry = "vs_main")]
+fn quad_ctx_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(context)] ctx: QuadBundle,
+) -> WgslName {
+    return WgslName { x: ctx.quad[idx] };
+}
+
+#[test]
+fn stage_context_bundle_strips_prefix() {
+    let src = quad_ctx_entry::wgsl_source();
+    assert!(
+        src.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"),
+        "{src}"
+    );
+    assert!(!src.contains("ctx."), "bundle prefix must not leak: {src}");
+    assert!(src.contains("return WgslName(quad[idx]) /* x */;"), "{src}");
+    assert_eq!(QuadBundle::GLOBALS, &["quad", "uvs"]);
 }

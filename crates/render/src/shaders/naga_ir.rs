@@ -278,19 +278,23 @@ fn add_const_vec_array(module: &mut naga::Module, name: &str, vals: &[Vec<f32>])
     );
 }
 
-/// Print one `const QUAD` + `const UVS` block from Rust quad data, via IR.
+/// Print one `const quad` + `const uvs` block from Rust quad data, via IR.
 /// Replaces the former `const_vec4_array`/`const_vec2_array` text builders:
 /// values are Rust floats, spelling is naga's.
+///
+/// Names are lowercase on purpose: entry bodies spell `ctx.quad`/`ctx.uvs`
+/// through context bundles, and the WGSL global must match the Rust field
+/// exactly — no name mapping anywhere.
 pub fn const_block(quad: &[[f32; 4]], uvs: &[[f32; 2]]) -> String {
     let mut module = naga::Module::default();
     add_const_vec_array(
         &mut module,
-        "QUAD",
+        "quad",
         &quad.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
     );
     add_const_vec_array(
         &mut module,
-        "UVS",
+        "uvs",
         &uvs.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
     );
     // No resource globals in this module: print with an empty table.
@@ -309,8 +313,8 @@ mod tests {
     fn const_block_round_trip() {
         use super::super::{STANDARD_QUAD, STANDARD_UVS};
         let wgsl = const_block(&STANDARD_QUAD, &STANDARD_UVS);
-        assert!(wgsl.contains("const QUAD"), "{wgsl}");
-        assert!(wgsl.contains("const UVS"), "{wgsl}");
+        assert!(wgsl.contains("const quad"), "{wgsl}");
+        assert!(wgsl.contains("const uvs"), "{wgsl}");
         let module = naga::front::wgsl::parse_str(&wgsl).expect("const block must parse");
         fn scalars(
             module: &naga::Module,
@@ -334,11 +338,11 @@ mod tests {
             .collect();
         for (name, want) in [
             (
-                "QUAD",
+                "quad",
                 STANDARD_QUAD.iter().flatten().copied().collect::<Vec<_>>(),
             ),
             (
-                "UVS",
+                "uvs",
                 STANDARD_UVS.iter().flatten().copied().collect::<Vec<_>>(),
             ),
         ] {

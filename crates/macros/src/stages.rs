@@ -36,10 +36,14 @@
 //! - parameter interface attributes ride on `#[wgsl(...)]` (stripped from the
 //!   output, never name-resolved): `builtin = "vertex_index"` or
 //!   `location = 0`. Module globals the entry reads are declared the same
-//!   way — `#[wgsl(global = "QUAD")] quad: ...`: the parameter leaves the
+//!   way — `#[wgsl(global = "camera")] camera: ...`: the parameter leaves the
 //!   WGSL signature, every use is renamed to the global, and the names are
 //!   re-exported via `globals()` so tests can pin them against the assembled
-//!   shader. Scalar and glam types map as in [`crate::wgsl`]; any
+//!   shader. Several globals share one bundle instead:
+//!   `#[wgsl(context)] ctx: LightingContext` lowers every `ctx.field` to the
+//!   global `field` (field name === global name; the bundle struct plus
+//!   `#[derive(ShaderContext)]` is the contract). Scalar and glam types map
+//!   as in [`crate::wgsl`]; any
 //!   other named type passes through verbatim (varying structs).
 //! - bodies require an explicit `return` (a tail value would also translate,
 //!   but entries must not look like value functions).
@@ -111,9 +115,56 @@ fn parse_args(args: TokenStream) -> syn::Result<StageArgs> {
     }
 }
 
+/// `#[wgsl(context)]` on an entry parameter: the parameter is a context
+/// bundle (`ctx: LightingContext`), not a WGSL function parameter. Every
+/// `ctx.field` use lowers to the global `field` (field name === global
+/// name); the bundle struct (via `#[derive(ShaderContext)]`) is the
+/// contract. Returns true when present.
+fn param_is_context(attrs: &[syn::Attribute]) -> syn::Result<bool> {
+    let mut context = false;
+    let mut saw_other = false;
+    let mut first_wgsl: Option<&syn::Attribute> = None;
+    for attr in attrs {
+        if !attr.path().is_ident("wgsl") {
+            continue;
+        }
+        first_wgsl = first_wgsl.or(Some(attr));
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("context") {
+                if meta.input.peek(syn::Token![=]) {
+                    return Err(meta.error("stage: `context` takes no value — `#[wgsl(context)] ctx: Bundle`"));
+                }
+                context = true;
+                Ok(())
+            } else if meta.path.is_ident("builtin")
+                || meta.path.is_ident("location")
+                || meta.path.is_ident("global")
+            {
+                // Not ours — but the value must still be consumed, or the
+                // outer meta parser stalls expecting `,`.
+                meta.value()?.parse::<syn::Lit>()?;
+                saw_other = true;
+                Ok(())
+            } else {
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N`, `global = \"...\"` or `context`"))
+            }
+        })?;
+    }
+    if context
+        && saw_other
+        && let Some(attr) = first_wgsl
+    {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "stage: `context` cannot combine with `builtin`/`location`/`global` — bundles are not function parameters",
+        ));
+    }
+    Ok(context)
+}
+
 /// `#[wgsl(global = "NAME")]` on an entry parameter: the parameter is not a
-/// WGSL function parameter but a module-global resource (`QUAD`, `camera`,
-/// …). Returns the global name when present.
+/// WGSL function parameter but a module-global resource (`camera`, …).
+/// Returns the global name when present.
 fn param_global(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
     let mut global: Option<String> = None;
     let mut saw_interface = false;
@@ -134,8 +185,13 @@ fn param_global(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
                 meta.value()?.parse::<syn::Lit>()?;
                 saw_interface = true;
                 Ok(())
+            } else if meta.path.is_ident("context") {
+                // Word option, nothing to consume; exclusivity is enforced
+                // by `param_is_context`.
+                saw_interface = true;
+                Ok(())
             } else {
-                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N` or `global = \"...\"`"))
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N`, `global = \"...\"` or `context`"))
             }
         })?;
     }
@@ -149,6 +205,38 @@ fn param_global(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
         ));
     }
     Ok(global)
+}
+
+/// Strip a context-bundle prefix: `ctx.field` → `field` for every bundle
+/// ident in `contexts`. The bundle struct (via `#[derive(ShaderContext)]`)
+/// guarantees `field` names a WGSL global, so the lowered body spells the
+/// global directly. Single level only — deeper paths (`ctx.a.b` lower to
+/// `a.b`, which must itself resolve) fail loudly in naga if misused; a
+/// bare `ctx` (no field) is left alone and fails the same way.
+struct ContextStripper<'a> {
+    contexts: &'a std::collections::HashSet<String>,
+}
+
+impl<'a> syn::visit_mut::VisitMut for ContextStripper<'a> {
+    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+        if let syn::Expr::Field(field) = expr
+            && let syn::Expr::Path(base) = field.base.as_ref()
+            && base.qself.is_none()
+            && base.path.segments.len() == 1
+            && let syn::Member::Named(member) = &field.member
+            && self
+                .contexts
+                .contains(&base.path.segments[0].ident.to_string())
+        {
+            *expr = syn::Expr::Path(syn::ExprPath {
+                attrs: Vec::new(),
+                qself: None,
+                path: member.clone().into(),
+            });
+            return;
+        }
+        syn::visit_mut::visit_expr_mut(self, expr);
+    }
 }
 
 /// Rename every `from` identifier to `to` in `block` (paths and bindings;
@@ -194,8 +282,12 @@ fn param_prefix(attrs: &[syn::Attribute]) -> syn::Result<String> {
                 // value must still be consumed here.
                 meta.value()?.parse::<syn::LitStr>()?;
                 Ok(())
+            } else if meta.path.is_ident("context") {
+                // Word option, nothing to consume; handled by
+                // `param_is_context`.
+                Ok(())
             } else {
-                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N` or `global = \"...\"`"))
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N`, `global = \"...\"` or `context`"))
             }
         })?;
     }
@@ -249,10 +341,12 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let mut params = Vec::new();
-    // Global resource params (`#[wgsl(global = "QUAD")] quad: ...`): excluded
-    // from the WGSL signature, renamed to the global at every use, and
-    // re-exported via `globals()` so tests can pin the contract.
+    // Global resource params (`#[wgsl(global = "camera")] camera: ...`) and
+    // context bundles (`#[wgsl(context)] ctx: LightingContext`): excluded
+    // from the WGSL signature, lowered in the body (rename / `ctx.` strip),
+    // and re-exported via `globals()` so tests can pin the contract.
     let mut renames = std::collections::HashMap::new();
+    let mut contexts = std::collections::HashSet::new();
     let mut declared_globals = Vec::new();
     for arg in &func.sig.inputs {
         let syn::FnArg::Typed(pat_ty) = arg else {
@@ -275,6 +369,13 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
         // syn may attach them to the `PatType` or the inner `Pat::Ident`.
         let mut all_attrs = pat_ty.attrs.clone();
         all_attrs.extend(pi.attrs.iter().cloned());
+        if match param_is_context(&all_attrs) {
+            Ok(c) => c,
+            Err(e) => return e.to_compile_error().into(),
+        } {
+            contexts.insert(pi.ident.to_string());
+            continue;
+        }
         let global = match param_global(&all_attrs) {
             Ok(g) => g,
             Err(e) => return e.to_compile_error().into(),
@@ -297,8 +398,14 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     let mut body_func = func.clone();
+    use syn::visit_mut::VisitMut;
+    if !contexts.is_empty() {
+        ContextStripper {
+            contexts: &contexts,
+        }
+        .visit_block_mut(&mut body_func.block);
+    }
     if !renames.is_empty() {
-        use syn::visit_mut::VisitMut;
         GlobalRenamer { map: &renames }.visit_block_mut(&mut body_func.block);
     }
     let body = crate::wgsl::wgsl_main_body(&body_func);

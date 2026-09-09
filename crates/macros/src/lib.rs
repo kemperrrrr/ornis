@@ -31,6 +31,7 @@ mod smart_pipeline;
 mod stages;
 mod static_profile;
 mod wgsl;
+mod wgsl_context;
 mod wgsl_interface;
 mod wgsl_struct;
 
@@ -112,6 +113,14 @@ pub fn derive_pipeline_config(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn gpu_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
     gpu_pipeline::gpu_pipeline(attr, item)
+}
+
+/// Derive the `GLOBALS` contract list on a stage-entry context bundle.
+///
+/// See [`wgsl_context`](mod@wgsl_context) for the bundle contract.
+#[proc_macro_derive(ShaderContext)]
+pub fn derive_shader_context(input: TokenStream) -> TokenStream {
+    wgsl_context::derive(input)
 }
 
 /// Translate a stage-entry Rust function to a WGSL entry point.

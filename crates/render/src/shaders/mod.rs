@@ -211,6 +211,31 @@ pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [
 /// Fullscreen-quad UVs shared by the bloom/hdr/lighting passes, as Rust data.
 pub(crate) const STANDARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
 
+/// DSL-only GPU handle markers: nominal field types for stage-entry context
+/// bundles (`ctx: LightingContext`). The Rust functions are never compiled,
+/// so these are never instantiated — they exist so context structs are real,
+/// name-resolving Rust items whose fields document the WGSL global each maps
+/// to (field name === global name, enforced by `stage_globals_declared`).
+/// No constructors, no methods, no runtime footprint.
+pub struct Texture2d;
+/// 2D unsigned-int texture handle marker; see [`Texture2d`].
+pub struct Texture2dUint;
+/// Depth-texture handle marker; see [`Texture2d`].
+pub struct DepthTexture;
+/// Sampler handle marker; see [`Texture2d`].
+pub struct Sampler;
+
+/// Quad constants as a stage-entry context bundle: five vertex entries share
+/// it (`ctx: QuadContext`, `ctx.quad[idx]`). Field names match the WGSL
+/// `const` names exactly — the `#[stage]` `context` lowering strips the
+/// `ctx.` prefix, no renaming involved.
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct QuadContext {
+    pub quad: [[f32; 4]; 4],
+    pub uvs: [[f32; 2]; 4],
+}
+
 /// Shared `OpenPBRMaterial` WGSL declaration (20 `vec4` slots), used by the
 /// g-buffer, lighting and forward-PBR skeletons.
 ///
@@ -456,10 +481,12 @@ mod tests {
         assert!(checked >= 4, "expected struct literals, found {checked}");
     }
 
-    /// Every `#[wgsl(global)]` name an entry declares must exist in the
-    /// assembled shader it splices into. Catches a typo'd global (the entry
-    /// still parses, naga only fails if the name is *used* undeclared — an
-    /// unused declaration would pass silently).
+    /// Every context-bundle / `#[wgsl(global)]` name an entry reads must
+    /// exist in the assembled shader it splices into. Bundle structs (via
+    /// `#[derive(ShaderContext)]`) are the single source: adding a field
+    /// without wiring the global fails here. Catches a typo'd name (the
+    /// entry still parses, naga only fails if the name is *used*
+    /// undeclared — an unused declaration would pass silently).
     #[test]
     fn stage_globals_declared() {
         let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
@@ -471,71 +498,55 @@ mod tests {
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
         let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
-        // (entry globals, assemblies containing them). The fragment-file
-        // vertex entry is dead in practice, so it pins against the vertex
-        // assembly carrying the same quad constants.
+        // (bundle/entry globals, assemblies containing them). QuadContext is
+        // shared by five vertex entries, so it pins against all five
+        // assemblies carrying the quad constants.
         let pairs: &[(&[&str], Vec<String>)] = &[
             (
-                hdr_composite_generated::composite_vertex_entry::globals(),
-                vec![hdr_vertex.clone()],
+                QuadContext::GLOBALS,
+                vec![
+                    hdr_vertex.clone(),
+                    hdr_fragment.clone(),
+                    bloom.clone(),
+                    lighting_vertex.clone(),
+                    composite.clone(),
+                ],
             ),
             (
-                hdr_composite_generated::hdr_fragment_vs_entry::globals(),
-                vec![hdr_vertex],
-            ),
-            (
-                hdr_composite_generated::hdr_fragment_entry::globals(),
+                hdr_composite_generated::HdrContext::GLOBALS,
                 vec![hdr_fragment],
             ),
+            (bloom_generated::BloomContext::GLOBALS, vec![bloom]),
+            (lighting_generated::LightingContext::GLOBALS, vec![lighting]),
             (
-                bloom_generated::bloom_vertex_entry::globals(),
-                vec![bloom.clone()],
-            ),
-            (
-                bloom_generated::bloom_fragment_entry::globals(),
-                vec![bloom],
-            ),
-            (
-                lighting_generated::lighting_vertex_entry::globals(),
-                vec![lighting_vertex],
-            ),
-            (
-                lighting_generated::lighting_fragment_entry::globals(),
-                vec![lighting],
-            ),
-            (
-                composite_generated::composite_vs_entry::globals(),
-                vec![composite.clone()],
-            ),
-            (
-                composite_generated::composite_fs_entry::globals(),
+                composite_generated::CompositeContext::GLOBALS,
                 vec![composite],
             ),
             (
-                gbuffer_generated::gbuffer_vs_entry::globals(),
+                gbuffer_generated::GbufferVertexContext::GLOBALS,
                 vec![gbuffer_vertex],
             ),
             (
                 gbuffer_generated::gbuffer_fs_entry::globals(),
                 vec![gbuffer_fragment],
             ),
-            (pbr_generated::pbr_fragment_entry::globals(), vec![pbr]),
+            (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
         ];
         let mut checked = 0;
         for (globals, assemblies) in pairs {
-            assert!(!globals.is_empty(), "entry must declare its globals");
+            assert!(!globals.is_empty(), "bundle must declare its globals");
             for global in *globals {
                 assert!(
                     assemblies.iter().any(|src| src.contains(global)),
-                    "global `{global}` declared by an entry is missing from its assembled shader"
+                    "global `{global}` declared by a bundle is missing from its assembled shader"
                 );
                 checked += 1;
             }
         }
-        // Twelve entries declare 38 names today; fewer means a declaration
-        // was dropped and the test passes vacuously.
+        // Seven bundles plus one lone `global` param declare 30 names today;
+        // fewer means a declaration was dropped and the test passes vacuously.
         assert!(
-            checked >= 38,
+            checked >= 30,
             "expected global declarations, found {checked}"
         );
     }

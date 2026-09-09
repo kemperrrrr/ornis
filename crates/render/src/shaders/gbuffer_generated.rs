@@ -23,6 +23,14 @@ use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::math::octahedral_encode;
 use ornis_macros::stage;
 
+/// G-buffer vertex resources as a context bundle (`ctx.per_objects`, …).
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct GbufferVertexContext {
+    pub per_objects: Vec<PerObjectGpu>,
+    pub camera: CameraUniform,
+}
+
 /// G-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
 /// instance transform + world-space varying. DSL-only — `per_objects` /
 /// `camera` globals declared via `#[wgsl(global)]`.
@@ -30,15 +38,14 @@ use ornis_macros::stage;
 fn gbuffer_vs_entry(
     input: VertexInput,
     #[wgsl(builtin = "instance_index")] instance: u32,
-    #[wgsl(global = "per_objects")] per_objects: [PerObjectGpu],
-    #[wgsl(global = "camera")] camera: CameraUniform,
+    #[wgsl(context)] ctx: GbufferVertexContext,
 ) -> VertexOutput {
-    let obj = per_objects[instance];
+    let obj = ctx.per_objects[instance];
     let world_pos = obj.model * Vec4::new(input.position, 1.0);
     let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
     let mut world_tangent = normalize((obj.normal_matrix * Vec4::new(input.tangent, 0.0)).xyz);
     let mut output: VertexOutput;
-    output.clip_position = camera.view_proj * world_pos;
+    output.clip_position = ctx.camera.view_proj * world_pos;
     output.world_position = world_pos.xyz;
     output.world_normal = world_normal;
     output.uv = input.uv;

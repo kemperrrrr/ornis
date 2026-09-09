@@ -12,7 +12,10 @@ use super::interface::{
     HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
 };
 use super::wgsl_decl;
-use super::{Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, naga_ir, resource_decls};
+use super::{
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, Texture2d, naga_ir,
+    resource_decls,
+};
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
 use ornis_macros::stage;
@@ -24,12 +27,11 @@ use ornis_macros::stage;
 #[stage(vertex, entry = "vs_main")]
 fn composite_vertex_entry(
     #[wgsl(builtin = "vertex_index")] idx: u32,
-    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
-    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+    #[wgsl(context)] ctx: super::QuadContext,
 ) -> CompositeVertexOutput {
     return CompositeVertexOutput {
-        clip_position: quad[idx],
-        uv: uvs[idx],
+        clip_position: ctx.quad[idx],
+        uv: ctx.uvs[idx],
     };
 }
 
@@ -137,37 +139,43 @@ fn fragment_head() -> String {
 #[stage(vertex, entry = "vs_main")]
 fn hdr_fragment_vs_entry(
     #[wgsl(builtin = "vertex_index")] idx: u32,
-    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
-    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+    #[wgsl(context)] ctx: super::QuadContext,
 ) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: quad[idx],
-        uv: uvs[idx],
+        clip_position: ctx.quad[idx],
+        uv: ctx.uvs[idx],
     };
 }
 
 /// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
-/// deferred/forward layer mix + bloom. DSL-only — texture/uniform globals
-/// declared via `#[wgsl(global)]`. `==` on the mode uniform selects the layer mix.
+/// deferred/forward layer mix + bloom. DSL-only — resource bundle
+/// (`ctx: HdrContext`). `==` on the mode uniform selects the layer mix.
+/// HDR layer-mix resources as a context bundle (`ctx.deferred_tex`, …).
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct HdrContext {
+    pub deferred_tex: Texture2d,
+    pub forward_tex: Texture2d,
+    pub bloom_tex: Texture2d,
+    pub composite_sampler: Sampler,
+    pub bloom_params: BloomUniform,
+}
+
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
 fn hdr_fragment_entry(
     #[wgsl(location = 0)] uv: glam::Vec2,
-    #[wgsl(global = "deferred_tex")] deferred_tex: Texture2d,
-    #[wgsl(global = "forward_tex")] forward_tex: Texture2d,
-    #[wgsl(global = "bloom_tex")] bloom_tex: Texture2d,
-    #[wgsl(global = "composite_sampler")] composite_sampler: Sampler,
-    #[wgsl(global = "bloom_params")] bloom_params: BloomUniform,
+    #[wgsl(context)] ctx: HdrContext,
 ) -> glam::Vec4 {
-    let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;
-    let forward_color = textureSample(forward_tex, composite_sampler, uv).rgba;
+    let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, uv).rgb;
+    let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, uv).rgba;
     let mut combined = deferred_color;
-    if bloom_params.mode == 1u {
+    if ctx.bloom_params.mode == 1u {
         combined = forward_color.rgb * forward_color.a;
-    } else if bloom_params.mode == 2u {
+    } else if ctx.bloom_params.mode == 2u {
         combined = deferred_color + forward_color.rgb * forward_color.a;
     }
-    let bloom = textureSample(bloom_tex, composite_sampler, uv).rgb;
-    let tonemapped = aces_tonemap(combined + bloom * bloom_params.intensity);
+    let bloom = textureSample(ctx.bloom_tex, ctx.composite_sampler, uv).rgb;
+    let tonemapped = aces_tonemap(combined + bloom * ctx.bloom_params.intensity);
     return glam::Vec4::new(tonemapped, 1.0);
 }
 
@@ -213,7 +221,7 @@ mod tests {
         assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
         assert!(entry.contains("-> CompositeVertexOutput"));
         assert!(entry.contains(
-            "return CompositeVertexOutput(QUAD[idx], UVS[idx]) /* clip_position, uv */;"
+            "return CompositeVertexOutput(quad[idx], uvs[idx]) /* clip_position, uv */;"
         ));
     }
 

@@ -8,7 +8,8 @@
 
 use super::interface::BloomVertexOut as BloomVertexOutput;
 use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, naga_ir, resource_decls, wgsl_decl,
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, Texture2d, naga_ir,
+    resource_decls, wgsl_decl,
 };
 use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
@@ -19,30 +20,40 @@ use ornis_macros::stage;
 #[stage(vertex, entry = "vs_main")]
 fn bloom_vertex_entry(
     #[wgsl(builtin = "vertex_index")] idx: u32,
-    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
-    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+    #[wgsl(context)] ctx: super::QuadContext,
 ) -> BloomVertexOutput {
     return BloomVertexOutput {
-        clip_position: quad[idx],
-        uv: uvs[idx],
+        clip_position: ctx.quad[idx],
+        uv: ctx.uvs[idx],
     };
 }
 
 /// Bloom fragment entry, translated by [`stage`](ornis_macros::stage):
-/// bright-pass reselection. DSL-only — texture/uniform globals declared via
-/// `#[wgsl(global)]`.
+/// bright-pass reselection. DSL-only — resource bundle
+/// (`ctx: BloomContext`).
 /// `Vec4::new(vec3, scalar)` spells the WGSL `vec4<f32>(vec3, f32)`
 /// constructor; the `returns` override carries the `@location` return.
+/// Bloom bright-pass resources as a context bundle (`ctx.src_tex`, …).
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct BloomContext {
+    pub src_tex: Texture2d,
+    pub src_sampler: Sampler,
+    pub bloom_params: BloomUniform,
+}
+
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
 fn bloom_fragment_entry(
     #[wgsl(location = 0)] uv: glam::Vec2,
-    #[wgsl(global = "src_tex")] src_tex: Texture2d,
-    #[wgsl(global = "src_sampler")] src_sampler: Sampler,
-    #[wgsl(global = "bloom_params")] bloom_params: BloomUniform,
+    #[wgsl(context)] ctx: BloomContext,
 ) -> glam::Vec4 {
-    let color = textureSample(src_tex, src_sampler, uv).rgb;
+    let color = textureSample(ctx.src_tex, ctx.src_sampler, uv).rgb;
     let luma = luminance(color);
-    let keep = smoothstep(bloom_params.threshold, bloom_params.threshold + 0.05, luma);
+    let keep = smoothstep(
+        ctx.bloom_params.threshold,
+        ctx.bloom_params.threshold + 0.05,
+        luma,
+    );
     return glam::Vec4::new(color * keep, 1.0);
 }
 
@@ -156,7 +167,7 @@ mod tests {
         let vs = bloom_vertex_entry::wgsl_source();
         assert!(vs.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
         assert!(
-            vs.contains("return BloomVertexOutput(QUAD[idx], UVS[idx]) /* clip_position, uv */;")
+            vs.contains("return BloomVertexOutput(quad[idx], uvs[idx]) /* clip_position, uv */;")
         );
         let fs = bloom_fragment_entry::wgsl_source();
         assert!(fs.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));

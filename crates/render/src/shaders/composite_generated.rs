@@ -7,9 +7,19 @@
 //! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use super::interface::UiCompositeOut as VertexOutput;
-use super::{Resource, ResourceKind, naga_ir, resource_decls, wgsl_decl};
+use super::{Resource, ResourceKind, Sampler, Texture2d, naga_ir, resource_decls, wgsl_decl};
 use crate::shaders::math::srgb_to_linear;
 use ornis_macros::stage;
+
+/// Composite fragment resources as a context bundle (`ctx.pbr_tex`, …).
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct CompositeContext {
+    pub pbr_tex: Texture2d,
+    pub pbr_sampler: Sampler,
+    pub ui_tex: Texture2d,
+    pub ui_sampler: Sampler,
+}
 
 /// Legacy composite vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `composite_vs_entry::wgsl_source()`. Uses the
@@ -17,27 +27,20 @@ use ornis_macros::stage;
 #[stage(vertex, entry = "vs")]
 fn composite_vs_entry(
     #[wgsl(builtin = "vertex_index")] idx: u32,
-    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
-    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+    #[wgsl(context)] ctx: super::QuadContext,
 ) -> VertexOutput {
     let mut out: VertexOutput;
-    out.position = quad[idx];
-    out.uv = uvs[idx];
+    out.position = ctx.quad[idx];
+    out.uv = ctx.uvs[idx];
     return out;
 }
 
 /// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — texture globals declared via `#[wgsl(global)]`.
+/// DSL-only — texture bundle (`ctx: CompositeContext`).
 #[stage(fragment, entry = "fs", returns = "@location(0) vec4<f32>")]
-fn composite_fs_entry(
-    input: VertexOutput,
-    #[wgsl(global = "pbr_tex")] pbr_tex: Texture2d,
-    #[wgsl(global = "pbr_sampler")] pbr_sampler: Sampler,
-    #[wgsl(global = "ui_tex")] ui_tex: Texture2d,
-    #[wgsl(global = "ui_sampler")] ui_sampler: Sampler,
-) -> glam::Vec4 {
-    let bg = textureSampleLevel(pbr_tex, pbr_sampler, input.uv, 0.0);
-    let ui = textureSampleLevel(ui_tex, ui_sampler, input.uv, 0.0);
+fn composite_fs_entry(input: VertexOutput, #[wgsl(context)] ctx: CompositeContext) -> glam::Vec4 {
+    let bg = textureSampleLevel(ctx.pbr_tex, ctx.pbr_sampler, input.uv, 0.0);
+    let ui = textureSampleLevel(ctx.ui_tex, ctx.ui_sampler, input.uv, 0.0);
     let ui_linear = srgb_to_linear(ui.rgb);
     return glam::Vec4::new(mix(bg.rgb, ui_linear, ui.a), 1.0);
 }

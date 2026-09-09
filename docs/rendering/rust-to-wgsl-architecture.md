@@ -138,36 +138,44 @@ mod lighting {
 - проверку конфликтов binding;
 - список доступных shader-идентификаторов.
 Это уберёт рассинхронизацию между Rust runtime и WGSL header.
-### 4. Убрать свободные идентификаторы из `#[stage]`
-Сейчас stage-тело может использовать `QUAD`, `UVS`, `per_objects` и другие имена, которых Rust-компилятор не видит. Это удобно для прототипа, но сильно ухудшает читаемость и диагностику.
-Вместо этого передавай ресурсы явно:
-Rust
-```
-#[stage(vertex, entry = "vs_main")]
-fn composite_vertex(
-    #[builtin(vertex_index)] index: u32,
-    quad: &QuadData,
-) -> CompositeVertexOutput {
-    CompositeVertexOutput {
-        clip_position: quad.positions[index],
-        uv: quad.uvs[index],
-    }
+### 4. Убрать свободные идентификаторы из `#[stage]` — выполнено (bundle-форма)
+
+Свободные идентификаторы убраны из всех 12 entry: ресурсы передаются
+явно — либо одиночным `#[wgsl(global = "camera")] camera: ...`, либо (2+
+ресурса) bundle-параметром `#[wgsl(context)] ctx: LightingContext`:
+
+```rust
+#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
+fn lighting_fragment_entry(
+    #[wgsl(location = 0)] uv: glam::Vec2,
+    #[wgsl(context)] ctx: LightingContext,
+) -> glam::Vec4 {
+    let depth = textureLoad(ctx.depth_tex, /* … */ 0);
+    // …
 }
-
-
 ```
-Или введи специальный тип контекста:
-Rust
-```
-fn vertex(ctx: VertexContext, index: u32) -> CompositeVertexOutput
 
+Правила:
+- bundle-параметр уходит из WGSL-сигнатуры; `ctx.field` понижается до
+  глобала `field` (имя поля === имя глобала, без маппинга);
+- контракт — сама структура + `#[derive(ShaderContext)]` (`GLOBALS`),
+  тест `stage_globals_declared` сверяет все 30 имён со собранными
+  шейдерами;
+- WGSL-константы переименованы в lowercase (`const quad`/`const uvs`),
+  чтобы Rust-поле и глобал совпадали буквально;
+- типы полей — настоящие Rust-типы (`CameraUniform`, `Vec<PerObjectGpu>`)
+  либо номинальные DSL-маркеры (`Texture2d`, `Sampler`), которые никогда
+  не инстанцируются.
 
-```
-Макрос сможет проверить:
-- существует ли ресурс;
-- совпадает ли тип;
-- разрешён ли ресурс на данной стадии;
-- не используется ли texture в vertex stage без соответствующей возможности.
+Остаток свободных имён: константы `EPS`/`PI` в `#[wgsl_fn]`-хелперах и
+имена kernel-функций — шаги 2–3 плана (единый `ShaderType`,
+типизированное разрешение имён).
+
+Честная граница: proc-макрос не видит определение структуры из `#[stage]`
+(cross-item информации нет), поэтому соответствие «поле → глобал» —
+конвенция, enforced тестами, а не макросом. Макрос проверяет только
+комбинации (`context` несовместим с `builtin`/`location`/`global`) и
+валидность синтаксиса опций.
 ### 5. Разделить shader-типы и CPU-типы
 `glam::Vec3` удобен для CPU, но он не должен быть единственным источником shader-семантики. Нужен явный типовой слой:
 Rust
@@ -287,31 +295,32 @@ shader-код должен оставаться обычным, читаемым
 
 ## Принятые решения
 
-### Типизированный shader-контекст
+### Типизированный shader-контекст — реализован (плоская bundle-форма)
 
-Stage-функции получают ресурсы, входы и выходы через Rust-типы контекста.
-Свободные WGSL-идентификаторы (`QUAD`, `UVS`, `materials` и подобные) не
-должны быть основным API. Контекст делает зависимости функции явными и
-позволяет проверять их на этапе компиляции.
-
-Целевой стиль:
+Stage-функции получают ресурсы через `#[wgsl(context)] ctx: Bundle`
+(плюс одиночные `#[wgsl(global)]`-параметры). Реализованный стиль —
+плоский, а не вложенный как в исходном наброске (`ctx.quad.positions`
+ниже заменено на `ctx.quad`: вложенные структуры контекста — будущее,
+когда появится типизированное разрешение имён):
 
 ```rust
-#[shader_stage(vertex, entry = "vs_main")]
+#[stage(vertex, entry = "vs_main")]
 fn vertex(
-    ctx: VertexContext,
-    #[builtin(vertex_index)] index: u32,
+    #[wgsl(builtin = "vertex_index")] index: u32,
+    #[wgsl(context)] ctx: super::QuadContext,
 ) -> CompositeVertexOutput {
     CompositeVertexOutput {
-        clip_position: ctx.quad.positions[index],
-        uv: ctx.quad.uvs[index],
+        clip_position: ctx.quad[index],
+        uv: ctx.uvs[index],
     }
 }
 ```
 
-Контекст должен содержать только разрешённые для конкретной стадии ресурсы.
-Макрос проверяет типы полей, binding-и, доступность ресурса и соответствие
-интерфейсов; генератор не получает имена через неявные строки.
+Контекст содержит только ресурсы своей стадии; соответствие
+поле → глобал — конвенция (имя совпадает буквально), enforced тестом
+`stage_globals_declared`, а не макросом (proc-макрос не видит чужого
+item'а). Проверка типов полей, binding-ов и stage-доступности —
+шаги 2–3 плана миграции.
 
 ### Вариант A: собственный промежуточный IR
 
@@ -363,8 +372,10 @@ Rust functions ─> AST ───┘       (IR)
 
 ## План миграции
 
-1. Ввести типизированный контекст stage-функций (`#[wgsl(global = "...")]`),
-   убрать свободные идентификаторы.
+1. Ввести типизированный контекст stage-функций — выполнено:
+   `#[wgsl(context)] ctx: Bundle` + `#[derive(ShaderContext)]`
+   (плоская bundle-форма, 12 entry, 30 имён под `stage_globals_declared`);
+   одиночные ресурсы — `#[wgsl(global = "...")]`.
 2. Ввести `ShaderType`/`TypeId` и enum builtin'ов вместо угадывания по именам.
 3. Вынести `Expr`, `Stmt`, `Type`, `Function`, `Module` и связанные symbols
    в отдельный Shader IR.

@@ -10,10 +10,12 @@
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, naga_ir, wgsl_decl,
+    DepthTexture, OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler,
+    Texture2d, Texture2dUint, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
+use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
 
 /// WGSL boilerplate for deferred lighting: derived layouts plus resource
@@ -154,42 +156,49 @@ fn lighting_fragment_kernels() -> String {
 /// declared via `#[wgsl(global)]`. `discard` is a bare path statement;
 /// `Vec2/3/4::new` spell WGSL constructors; `lo = lo + …` avoids `+=`,
 /// which the DSL does not cover.
+/// Deferred-lighting resources as a context bundle (`ctx.depth_tex`, …).
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct LightingContext {
+    pub depth_tex: DepthTexture,
+    pub albedo_tex: Texture2d,
+    pub normal_tex: Texture2d,
+    pub material_id_tex: Texture2dUint,
+    pub world_pos_tex: Texture2d,
+    pub mat_params_tex: Texture2d,
+    pub lighting_sampler: Sampler,
+    pub materials: Vec<OpenPBRMaterial>,
+    pub camera: CameraUniform,
+    pub lighting: LightingUniform,
+}
+
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
 fn lighting_fragment_entry(
     #[wgsl(location = 0)] uv: glam::Vec2,
-    #[wgsl(global = "depth_tex")] depth_tex: DepthTexture,
-    #[wgsl(global = "albedo_tex")] albedo_tex: Texture2d,
-    #[wgsl(global = "normal_tex")] normal_tex: Texture2d,
-    #[wgsl(global = "material_id_tex")] material_id_tex: Texture2dUint,
-    #[wgsl(global = "world_pos_tex")] world_pos_tex: Texture2d,
-    #[wgsl(global = "mat_params_tex")] mat_params_tex: Texture2d,
-    #[wgsl(global = "lighting_sampler")] lighting_sampler: Sampler,
-    #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
-    #[wgsl(global = "camera")] camera: CameraUniform,
-    #[wgsl(global = "lighting")] lighting: LightingUniform,
+    #[wgsl(context)] ctx: LightingContext,
 ) -> glam::Vec4 {
     let depth = textureLoad(
-        depth_tex,
-        UVec2::new(uv * Vec2::new(textureDimensions(depth_tex))),
+        ctx.depth_tex,
+        UVec2::new(uv * Vec2::new(textureDimensions(ctx.depth_tex))),
         0,
     );
-    let albedo = textureSampleLevel(albedo_tex, lighting_sampler, uv, 0.0);
-    let normal_enc = textureSampleLevel(normal_tex, lighting_sampler, uv, 0.0);
+    let albedo = textureSampleLevel(ctx.albedo_tex, ctx.lighting_sampler, uv, 0.0);
+    let normal_enc = textureSampleLevel(ctx.normal_tex, ctx.lighting_sampler, uv, 0.0);
     let material_id = textureLoad(
-        material_id_tex,
-        UVec2::new(uv * Vec2::new(textureDimensions(material_id_tex))),
+        ctx.material_id_tex,
+        UVec2::new(uv * Vec2::new(textureDimensions(ctx.material_id_tex))),
         0,
     )
     .r;
-    let world_pos_enc = textureSampleLevel(world_pos_tex, lighting_sampler, uv, 0.0);
-    let mat_params = textureSampleLevel(mat_params_tex, lighting_sampler, uv, 0.0);
-    let mat = materials[material_id];
+    let world_pos_enc = textureSampleLevel(ctx.world_pos_tex, ctx.lighting_sampler, uv, 0.0);
+    let mat_params = textureSampleLevel(ctx.mat_params_tex, ctx.lighting_sampler, uv, 0.0);
+    let mat = ctx.materials[material_id];
     if albedo.a < 0.001 {
         discard;
     }
     let n = octahedral_decode(normal_enc.rg);
-    let world_pos = reconstruct_world_pos(uv, depth, camera);
-    let v = normalize(camera.camera_pos.xyz - world_pos);
+    let world_pos = reconstruct_world_pos(uv, depth, ctx.camera);
+    let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
     let nov = max(dot(n, v), EPS);
     let base_weight = mat.base_params.x;
     let base_color = mat.base_color.rgb;
@@ -234,11 +243,11 @@ fn lighting_fragment_entry(
     let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
     let t = normalize(cross(n, Vec3::new(0.0, 1.0, 0.0)));
     let b = cross(n, t);
-    for i in 0u..lighting.light_count {
-        let l = normalize(lighting.lights[i].direction.xyz);
+    for i in 0u..ctx.lighting.light_count {
+        let l = normalize(ctx.lighting.lights[i].direction.xyz);
         let h = normalize(v + l);
-        let light_color = lighting.lights[i].color.rgb;
-        let intensity = lighting.lights[i].color.w;
+        let light_color = ctx.lighting.lights[i].color.rgb;
+        let intensity = ctx.lighting.lights[i].color.w;
         let radiance = light_color * intensity;
         let nol = max(dot(n, l), EPS);
         let noh = max(dot(n, h), EPS);
@@ -347,7 +356,7 @@ fn lighting_fragment_entry(
         lo = lo + layer_bsdf * radiance * nol;
     }
     let ambient =
-        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
+        ctx.lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
     let emission = evaluate_emission(
         emission_luminance,
         emission_color,
@@ -378,12 +387,11 @@ pub fn wgsl_source() -> String {
 #[stage(vertex, entry = "vs_main")]
 fn lighting_vertex_entry(
     #[wgsl(builtin = "vertex_index")] idx: u32,
-    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
-    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+    #[wgsl(context)] ctx: super::QuadContext,
 ) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: quad[idx],
-        uv: uvs[idx],
+        clip_position: ctx.quad[idx],
+        uv: ctx.uvs[idx],
     };
 }
 

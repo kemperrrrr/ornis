@@ -20,6 +20,7 @@ use super::{
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
+use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
 
 /// Forward-PBR vertex shader: instance transforms + world position.
@@ -81,16 +82,20 @@ pub fn wgsl_source() -> String {
 /// `camera`/`lighting`/`materials` globals declared via `#[wgsl(global)]`.
 /// Layer evaluators
 /// stay handwritten below and are called by name.
+/// Forward-PBR resources as a context bundle (`ctx.materials`, …).
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct PbrContext {
+    pub materials: Vec<OpenPBRMaterial>,
+    pub camera: CameraUniform,
+    pub lighting: LightingUniform,
+}
+
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn pbr_fragment_entry(
-    input: FragmentInput,
-    #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
-    #[wgsl(global = "camera")] camera: CameraUniform,
-    #[wgsl(global = "lighting")] lighting: LightingUniform,
-) -> glam::Vec4 {
-    let mat = materials[input.material_index];
+fn pbr_fragment_entry(input: FragmentInput, #[wgsl(context)] ctx: PbrContext) -> glam::Vec4 {
+    let mat = ctx.materials[input.material_index];
     let n = normalize(input.world_normal);
-    let v = normalize(camera.camera_pos.xyz - input.world_position);
+    let v = normalize(ctx.camera.camera_pos.xyz - input.world_position);
     let nov = max(dot(n, v), EPS);
     let t = normalize(input.world_tangent);
     let b = cross(n, t);
@@ -135,11 +140,11 @@ fn pbr_fragment_entry(
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
     let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
-    for i in 0u..lighting.light_count {
-        let l = normalize(lighting.lights[i].direction.xyz);
+    for i in 0u..ctx.lighting.light_count {
+        let l = normalize(ctx.lighting.lights[i].direction.xyz);
         let h = normalize(v + l);
-        let light_color = lighting.lights[i].color.rgb;
-        let intensity = lighting.lights[i].color.w;
+        let light_color = ctx.lighting.lights[i].color.rgb;
+        let intensity = ctx.lighting.lights[i].color.w;
         let radiance = light_color * intensity;
         let nol = max(dot(n, l), EPS);
         let noh = max(dot(n, h), EPS);
@@ -248,7 +253,7 @@ fn pbr_fragment_entry(
         lo = lo + layer_bsdf * radiance * nol;
     }
     let ambient =
-        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
+        ctx.lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
     let emission = evaluate_emission(
         emission_luminance,
         emission_color,
