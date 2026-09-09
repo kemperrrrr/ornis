@@ -379,7 +379,9 @@ Rust functions ─> AST ───┘       (IR)
    newtypes `VertexIndex`/`InstanceIndex` без атрибутов; location'ы
    объявлены до функций — на полях `WgslInterface`-структур, entry берут
    готовый struct-input (`input: QuadVertexOutput`, а не голый
-   `uv + location`). Сигнатуры entry —
+   `uv + location`); located-возвраты — типом
+   `-> Location<0, glam::Vec4>` вместо строки `returns = "…"`
+   (число + настоящий тип, оба проверяет rustc). Сигнатуры entry —
    чистый Rust без `#[wgsl(...)]` на bundle/newtype-параметрах: маркер
    bundle — сама обёртка `Context<…>` (bare-структура `input: VertexInput`
    остаётся настоящим WGSL-параметром).

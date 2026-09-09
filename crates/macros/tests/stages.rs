@@ -130,3 +130,23 @@ fn stage_newtype_builtin_needs_no_attribute() {
     );
     assert!(src.contains("quad[vertex_index]"), "{src}");
 }
+
+/// Located-value returns: `Location<N, T>` lowers to `@location(N) …`,
+/// no `returns` string. (Local definition — matched by name.)
+#[allow(dead_code)]
+struct Location<const N: usize, T>(T, core::marker::PhantomData<[u8; N]>);
+
+#[stage(fragment, entry = "fs_main")]
+fn quad_loc_entry(uv: Vec2) -> Location<0, Vec4> {
+    return Vec4(uv.x, uv.y, 0.0, 1.0);
+}
+
+#[test]
+fn stage_location_return_needs_no_attribute() {
+    let src = quad_loc_entry::wgsl_source();
+    assert!(
+        src.starts_with("@fragment\nfn fs_main(uv: vec2<f32>)"),
+        "{src}"
+    );
+    assert!(src.contains("-> @location(0) vec4<f32>"), "{src}");
+}

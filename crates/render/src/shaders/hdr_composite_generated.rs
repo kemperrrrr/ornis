@@ -161,8 +161,11 @@ pub(crate) struct HdrContext {
     pub bloom_params: BloomUniform,
 }
 
-#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn hdr_fragment_entry(input: QuadVertexOutput, ctx: Context<HdrContext>) -> glam::Vec4 {
+#[stage(fragment, entry = "fs_main")]
+fn hdr_fragment_entry(
+    input: QuadVertexOutput,
+    ctx: Context<HdrContext>,
+) -> super::Location<0, glam::Vec4> {
     let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, input.uv).rgb;
     let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, input.uv).rgba;
     let mut combined = deferred_color;

@@ -37,8 +37,11 @@ fn composite_vs_entry(
 
 /// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — texture bundle (`ctx: CompositeContext`).
-#[stage(fragment, entry = "fs", returns = "@location(0) vec4<f32>")]
-fn composite_fs_entry(input: VertexOutput, ctx: Context<CompositeContext>) -> glam::Vec4 {
+#[stage(fragment, entry = "fs")]
+fn composite_fs_entry(
+    input: VertexOutput,
+    ctx: Context<CompositeContext>,
+) -> super::Location<0, glam::Vec4> {
     let bg = textureSampleLevel(ctx.pbr_tex, ctx.pbr_sampler, input.uv, 0.0);
     let ui = textureSampleLevel(ctx.ui_tex, ctx.ui_sampler, input.uv, 0.0);
     let ui_linear = srgb_to_linear(ui.rgb);

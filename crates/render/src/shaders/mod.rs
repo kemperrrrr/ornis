@@ -245,6 +245,15 @@ pub struct InstanceIndex(pub u32);
 /// markers.
 pub struct Context<T>(T);
 
+/// Located-value return: `-> Location<0, glam::Vec4>` lowers to
+/// `-> @location(0) vec4<f32>`. A bare Rust return type cannot spell a
+/// WGSL location attribute, and the old `returns = "@location(0) …"`
+/// string embedded WGSL syntax in the signature — the wrapper keeps both
+/// the location number and a real, rustc-checked inner type. Never
+/// instantiated; combining it with an explicit `returns = "…"` is an
+/// error (two sources of truth).
+pub struct Location<const N: usize, T>(T, core::marker::PhantomData<[u8; N]>);
+
 /// Quad constants as a stage-entry context bundle: five vertex entries share
 /// it (`ctx: QuadContext`, `ctx.quad[idx]`). Field names match the WGSL
 /// `const` names exactly — the `#[stage]` `context` lowering strips the

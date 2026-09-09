@@ -42,8 +42,11 @@ pub(crate) struct BloomContext {
     pub bloom_params: BloomUniform,
 }
 
-#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn bloom_fragment_entry(input: BloomVertexOutput, ctx: Context<BloomContext>) -> glam::Vec4 {
+#[stage(fragment, entry = "fs_main")]
+fn bloom_fragment_entry(
+    input: BloomVertexOutput,
+    ctx: Context<BloomContext>,
+) -> super::Location<0, glam::Vec4> {
     let color = textureSample(ctx.src_tex, ctx.src_sampler, input.uv).rgb;
     let luma = luminance(color);
     let keep = smoothstep(

@@ -143,6 +143,61 @@ fn context_wrapper(ty: &syn::Type) -> syn::Result<bool> {
     }
 }
 
+/// Located-value return (`-> Location<0, glam::Vec4>` → `-> @location(0)
+/// vec4<f32>`): a bare Rust return type cannot spell a WGSL location
+/// attribute, so the number and the real inner type travel in the wrapper.
+/// Matches the last path segment; combining it with an explicit
+/// `returns = "…"` is two sources of truth.
+fn location_return(ty: &syn::Type) -> syn::Result<Option<String>> {
+    let syn::Type::Path(path) = ty else {
+        return Ok(None);
+    };
+    if path.qself.is_some() {
+        return Ok(None);
+    }
+    let Some(seg) = path.path.segments.last() else {
+        return Ok(None);
+    };
+    if seg.ident != "Location" {
+        return Ok(None);
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "stage: `Location` return takes a number and a type (`-> Location<0, glam::Vec4>`)",
+        ));
+    };
+    let mut args = args.args.iter();
+    let (Some(first), Some(second), None) = (args.next(), args.next(), args.next()) else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "stage: `Location` return takes a number and a type (`-> Location<0, glam::Vec4>`)",
+        ));
+    };
+    let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = first else {
+        return Err(syn::Error::new_spanned(
+            first,
+            "stage: `Location` number must be an integer literal (`Location<0, …>`)",
+        ));
+    };
+    let syn::Lit::Int(n) = &lit.lit else {
+        return Err(syn::Error::new_spanned(
+            first,
+            "stage: `Location` number must be an integer literal (`Location<0, …>`)",
+        ));
+    };
+    let n: u32 = n
+        .base10_parse()
+        .map_err(|_| syn::Error::new_spanned(first, "stage: `Location` number must fit in u32"))?;
+    let syn::GenericArgument::Type(inner) = second else {
+        return Err(syn::Error::new_spanned(
+            second,
+            "stage: `Location` inner must be a type (`Location<0, glam::Vec4>`)",
+        ));
+    };
+    Ok(Some(format!("@location({n}) {}", named_type(inner))))
+}
+
 /// Builtin-index newtypes (`VertexIndex` → `@builtin(vertex_index)`,
 /// `InstanceIndex` → `@builtin(instance_index)`): a bare `u32` cannot say
 /// which index it is, so the meaning travels in the type and no attribute
@@ -321,13 +376,28 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     let fn_name = func.sig.ident.clone();
 
     // Return type: Rust ident verbatim (renamed mirrors are spelled through
-    // import aliases at the use site), or the explicit WGSL override for
-    // located value returns.
+    // import aliases at the use site), a `Location<N, T>` wrapper for
+    // located value returns, or the explicit WGSL override for legacy
+    // string `returns`.
     let wgsl_ret = match &func.sig.output {
-        syn::ReturnType::Type(_, ty) => {
-            let rust = named_type(ty);
-            returns.unwrap_or(rust)
-        }
+        syn::ReturnType::Type(_, ty) => match location_return(ty) {
+            Ok(Some(located)) => {
+                if returns.is_some() {
+                    return syn::Error::new_spanned(
+                        ty,
+                        "stage: `Location<…>` return already carries the location; drop `returns = \"…\"`",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                located
+            }
+            Ok(None) => {
+                let rust = named_type(ty);
+                returns.unwrap_or(rust)
+            }
+            Err(e) => return e.to_compile_error().into(),
+        },
         syn::ReturnType::Default => "void".to_string(),
     };
 

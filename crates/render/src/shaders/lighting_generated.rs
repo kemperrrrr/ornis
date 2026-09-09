@@ -172,8 +172,11 @@ pub(crate) struct LightingContext {
     pub lighting: LightingUniform,
 }
 
-#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn lighting_fragment_entry(input: QuadVertexOutput, ctx: Context<LightingContext>) -> glam::Vec4 {
+#[stage(fragment, entry = "fs_main")]
+fn lighting_fragment_entry(
+    input: QuadVertexOutput,
+    ctx: Context<LightingContext>,
+) -> super::Location<0, glam::Vec4> {
     let depth = textureLoad(
         ctx.depth_tex,
         UVec2::new(input.uv * Vec2::new(textureDimensions(ctx.depth_tex))),

@@ -91,8 +91,11 @@ pub(crate) struct PbrContext {
     pub lighting: LightingUniform,
 }
 
-#[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn pbr_fragment_entry(input: FragmentInput, ctx: Context<PbrContext>) -> glam::Vec4 {
+#[stage(fragment, entry = "fs_main")]
+fn pbr_fragment_entry(
+    input: FragmentInput,
+    ctx: Context<PbrContext>,
+) -> super::Location<0, glam::Vec4> {
     let mat = ctx.materials[input.material_index];
     let n = normalize(input.world_normal);
     let v = normalize(ctx.camera.camera_pos.xyz - input.world_position);
