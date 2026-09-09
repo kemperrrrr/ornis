@@ -10,14 +10,20 @@
 //! This is an experimental backend. Compare it against `SweepAndPrune` and
 //! `UniformGrid` through the physics benchmarks before choosing a default.
 //!
-//! Matrix 2026-09-09 (`probe_100k`, 10k bodies, cold): candidate pairs are
-//! identical to `UniformGrid` on all five scenes (tiled/giant_floor/sparse/
-//! islands/heterogeneous), but wall time trails the grid ~2–6x (tiled
-//! 394 vs 121 ms, sparse 86 vs 14 ms). Known causes: every dynamic proxy is
-//! re-queried each update (the `moved` hook is not yet a skip), escaped
-//! proxies pay remove+reinsert, and the tree has no rotations yet, so
-//! insertion order can degenerate query depth. Until rebalance + moved-skip
-//! land, the tree stays explicit opt-in and `Auto` never routes to it.
+//! Matrix 2026-09-09 (`probe_100k`, cold): candidate pairs are identical to
+//! `UniformGrid` on all five 10k scenes (tiled/giant_floor/sparse/
+//! islands/heterogeneous). AVL-style single rotations on the insert climb
+//! (plus `height` maintenance in `refit_node`) brought depth from 87 to
+//! ≤24 on 2000 grid-ordered bodies; the 10k matrix now beats the grid on
+//! tiled (68 vs 121 ms), giant_floor (97 vs 141 ms) and islands (13.5 vs
+//! 21.7 ms) and ties on sparse/hetero. 100k tiled: tree 759 ms vs grid-8
+//! 604 ms — same band, ~10x under the historical 8 s grid number.
+//!
+//! Stays explicit opt-in (and `Auto` never routes here yet): the tree still
+//! re-queries every dynamic proxy each update, while the incremental grid
+//! owns the settled state (~1 ms broadphase). Next: a settled-state matrix
+//! plus moved-body query skip (pair buffering), then route sparse worlds
+//! in `Auto`.
 
 use glam::Vec3;
 
@@ -55,6 +61,10 @@ struct Node {
     child2: Option<usize>,
     /// Leaf nodes reference a body index; internal nodes are `None`.
     body: Option<usize>,
+    /// Leaf height is 0; internal height is one plus the taller child.
+    /// Maintained by `refit_node`; stale values only cost query depth,
+    /// never correctness (queries prune on AABBs, not heights).
+    height: i32,
 }
 
 /// One AABB tree over a set of body proxies, stored in a node pool with a free list.
@@ -66,7 +76,7 @@ struct Tree {
 }
 
 impl Tree {
-    fn alloc_node(&mut self, aabb: AABB, body: Option<usize>) -> usize {
+    fn alloc_node(&mut self, aabb: AABB, body: Option<usize>, height: i32) -> usize {
         if let Some(i) = self.free.pop() {
             self.nodes[i] = Node {
                 aabb,
@@ -74,6 +84,7 @@ impl Tree {
                 child1: None,
                 child2: None,
                 body,
+                height,
             };
             i
         } else {
@@ -83,6 +94,7 @@ impl Tree {
                 child1: None,
                 child2: None,
                 body,
+                height,
             });
             self.nodes.len() - 1
         }
@@ -97,11 +109,9 @@ impl Tree {
     }
 
     /// Insert a leaf node, growing the tree with a greedy SAH-like sibling
-    /// choice (Box3D `b3DynamicTree` insert, no rotations yet).
+    /// choice (Box3D `b3DynamicTree` insert) and single rotations on the
+    /// climb back up, so grid-order insertion cannot degenerate the tree.
     fn insert_leaf(&mut self, leaf: usize) {
-        // ponytail: greedy sibling selection, no tree rotations. Ceiling: no
-        // periodic rebalance, so bounds drift for long runs; add rotations when
-        // a measured workload shows degradation.
         if self.root.is_none() {
             self.root = Some(leaf);
             self.nodes[leaf].parent = None;
@@ -125,7 +135,11 @@ impl Tree {
         }
 
         let old_parent = self.nodes[node].parent;
-        let new_parent = self.alloc_node(self.nodes[node].aabb.union(&leaf_aabb), None);
+        let new_parent = self.alloc_node(
+            self.nodes[node].aabb.union(&leaf_aabb),
+            None,
+            1 + self.nodes[node].height,
+        );
         self.nodes[new_parent].parent = old_parent;
         self.nodes[new_parent].child1 = Some(node);
         self.nodes[new_parent].child2 = Some(leaf);
@@ -142,8 +156,9 @@ impl Tree {
         }
         let mut current = self.nodes[leaf].parent;
         while let Some(c) = current {
-            self.nodes[c].aabb = Self::refit(&self.nodes, c);
-            current = self.nodes[c].parent;
+            Self::refit_node(&mut self.nodes, c);
+            let balanced = self.rotate(c);
+            current = self.nodes[balanced].parent;
         }
     }
 
@@ -170,7 +185,7 @@ impl Tree {
             self.free_node(parent);
             let mut current = Some(gp);
             while let Some(c) = current {
-                self.nodes[c].aabb = Self::refit(&self.nodes, c);
+                Self::refit_node(&mut self.nodes, c);
                 current = self.nodes[c].parent;
             }
         } else {
@@ -180,11 +195,90 @@ impl Tree {
         }
     }
 
-    fn refit(nodes: &[Node], node: usize) -> AABB {
-        let n = &nodes[node];
-        match (n.child1, n.child2) {
-            (Some(c1), Some(c2)) => n.aabb.union(&nodes[c1].aabb).union(&nodes[c2].aabb),
-            _ => n.aabb,
+    /// Recomputes an internal node's union box and height from its children.
+    /// Leaves are left alone (their box/height are set at alloc/insert).
+    fn refit_node(nodes: &mut [Node], node: usize) {
+        if let (Some(c1), Some(c2)) = (nodes[node].child1, nodes[node].child2) {
+            let aabb = nodes[c1].aabb.union(&nodes[c2].aabb);
+            let height = 1 + nodes[c1].height.max(nodes[c2].height);
+            nodes[node].aabb = aabb;
+            nodes[node].height = height;
+        }
+    }
+
+    /// Sets both children of an internal node (and their parent links).
+    fn link(&mut self, parent: usize, child1: usize, child2: usize) {
+        self.nodes[parent].child1 = Some(child1);
+        self.nodes[parent].child2 = Some(child2);
+        self.nodes[child1].parent = Some(parent);
+        self.nodes[child2].parent = Some(parent);
+    }
+
+    /// Moves `new_root` into the tree slot `old_root` occupied. The parent
+    /// must be captured *before* any `link` calls (they overwrite parent
+    /// pointers, so reading it after would self-loop the tree).
+    fn relink_above(&mut self, parent: Option<usize>, old_root: usize, new_root: usize) {
+        self.nodes[new_root].parent = parent;
+        if let Some(p) = parent {
+            if self.nodes[p].child1 == Some(old_root) {
+                self.nodes[p].child1 = Some(new_root);
+            } else {
+                debug_assert_eq!(self.nodes[p].child2, Some(old_root));
+                self.nodes[p].child2 = Some(new_root);
+            }
+        } else {
+            self.root = Some(new_root);
+        }
+    }
+
+    /// Single AVL-style rotation when one child outweighs the other by more
+    /// than one level. The shorter grandchild joins the lighter side, so the
+    /// subtree height drops by one in every branch except exact ties (which
+    /// stay put in height but keep a canonical shape). Returns the node now
+    /// at this position. All choices are strict/deterministic, and boxes are
+    /// refit bottom-up, so queries stay exact and runs stay reproducible.
+    fn rotate(&mut self, a: usize) -> usize {
+        let (Some(b), Some(c)) = (self.nodes[a].child1, self.nodes[a].child2) else {
+            return a;
+        };
+        let (bh, ch) = (self.nodes[b].height, self.nodes[c].height);
+        let parent = self.nodes[a].parent;
+        if ch > bh + 1 {
+            let (Some(f), Some(g)) = (self.nodes[c].child1, self.nodes[c].child2) else {
+                return a;
+            };
+            if self.nodes[f].height >= self.nodes[g].height {
+                // C' = (A'(B, G), F).
+                self.link(a, b, g);
+                self.link(c, a, f);
+            } else {
+                // C' = (A'(B, F), G).
+                self.link(a, b, f);
+                self.link(c, a, g);
+            }
+            self.relink_above(parent, a, c);
+            Self::refit_node(&mut self.nodes, a);
+            Self::refit_node(&mut self.nodes, c);
+            c
+        } else if bh > ch + 1 {
+            let (Some(f), Some(g)) = (self.nodes[b].child1, self.nodes[b].child2) else {
+                return a;
+            };
+            if self.nodes[g].height >= self.nodes[f].height {
+                // B' = (A'(F, C), G).
+                self.link(a, f, c);
+                self.link(b, a, g);
+            } else {
+                // B' = (A'(G, C), F).
+                self.link(a, g, c);
+                self.link(b, a, f);
+            }
+            self.relink_above(parent, a, b);
+            Self::refit_node(&mut self.nodes, a);
+            Self::refit_node(&mut self.nodes, b);
+            b
+        } else {
+            a
         }
     }
 
@@ -372,7 +466,7 @@ impl DynamicAabbTree {
         } else {
             &mut self.dynamic_tree
         };
-        let node = tree.alloc_node(fat, Some(i));
+        let node = tree.alloc_node(fat, Some(i), 0);
         tree.insert_leaf(node);
         let proxy = Proxy {
             kind: if is_static {
@@ -619,5 +713,55 @@ mod tests {
         second.sort_unstable();
         assert_ne!(first, second);
         assert!(second.contains(&(1, 4)));
+    }
+
+    /// Iterative max depth of a tree (explicit stack: a degenerate chain
+    /// must not overflow the test thread while being measured).
+    fn max_depth(tree: &Tree) -> usize {
+        let Some(root) = tree.root else {
+            return 0;
+        };
+        let mut deepest = 0usize;
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, depth)) = stack.pop() {
+            deepest = deepest.max(depth);
+            if let Some(c1) = tree.nodes[node].child1 {
+                stack.push((c1, depth + 1));
+            }
+            if let Some(c2) = tree.nodes[node].child2 {
+                stack.push((c2, depth + 1));
+            }
+        }
+        deepest
+    }
+
+    fn grid_scene_2k() -> Vec<RigidBody> {
+        // 2000 dynamic boxes in index order: the insertion pattern the
+        // rotation-less tree serves worst.
+        let mut bodies = Vec::with_capacity(2000);
+        for i in 0..2000u32 {
+            bodies.push(RigidBody::new_box(
+                Vec3::new((i % 45) as f32 * 2.0, 1.0, (i / 45) as f32 * 2.0),
+                Vec3::splat(0.4),
+                1.0,
+            ));
+        }
+        bodies
+    }
+
+    #[test]
+    fn dynamic_tree_stays_bounded_under_grid_insertion_order() {
+        let bodies = grid_scene_2k();
+        let mut backend = DynamicAabbTree::new();
+        backend.update(&bodies, 1.0 / 60.0);
+        let depth = max_depth(&backend.dynamic_tree).max(max_depth(&backend.static_tree));
+        assert!(
+            depth <= 24,
+            "dynamic tree degenerated to depth {depth} on 2000 grid bodies"
+        );
+        // Balanced or not, the contract must hold exactly.
+        let mut pairs = backend.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
     }
 }
