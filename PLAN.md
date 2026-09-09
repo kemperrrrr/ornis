@@ -212,6 +212,11 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
 (Linux/Windows CI, miri) → адаптеры Rapier/Jolt за `PhysicsEngine` →
 документация API и релизная упаковка.
 
+**Rust → WGSL:** принято направление на типизированный shader-context и
+собственный промежуточный IR (`Rust AST → Shader IR → WGSL writer → naga`).
+План миграции и целевая архитектура:
+[`docs/rendering/rust-to-wgsl-architecture.md`](docs/rendering/rust-to-wgsl-architecture.md).
+
 ### g. Unified Scheduler (IDEAS §28, долгосрочно)
 
 Эволюция render graph в «третий путь» (scheduler как у Bevy + lifetime/aliasing

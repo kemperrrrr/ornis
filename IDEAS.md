@@ -169,6 +169,16 @@ pub struct ComponentStore<T> {
 
 ---
 
+## 4.5 Rust → WGSL: типизированный контекст и собственный IR
+
+Принятое решение и план миграции вынесены в отдельный документ:
+[`docs/rendering/rust-to-wgsl-architecture.md`](docs/rendering/rust-to-wgsl-architecture.md).
+Выбран типизированный context для shader-stage функций и вариант A:
+собственный IR между Rust AST и WGSL writer; `naga` используется для
+финальной валидации.
+
+---
+
 ## 5. Headless DOM — UI на HTML/CSS/JS без тяжелого браузера
 
 > **Статус (июль 2026):** Нативная реализация заморожена. Текущий путь — браузерный редактор + WebGPU/WASM.
