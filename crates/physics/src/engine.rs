@@ -8,9 +8,11 @@
 //! contact solving behind the `gpu` feature.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use dashmap::DashMap;
+use ornis_schedule::run_levels;
 
 use glam::{Quat, Vec3};
 use rayon::prelude::*;
@@ -1189,13 +1191,53 @@ fn detect_collisions(
     sub_dt: f32,
 ) -> Vec<Manifold> {
     let mut out = Vec::new();
-    detect_collisions_into(bodies, active, asleep, sub_dt, &mut out, None, 0, None);
+    let mut pool = NarrowShardPool::default();
+    detect_collisions_into(
+        bodies, active, asleep, sub_dt, &mut out, None, 0, None, &mut pool,
+    );
     out
 }
 
 /// Base speculative margin (m): also the AABB inflation used by the
 /// broadphase, so pairs within it are guaranteed to reach narrow phase.
 const SPEC_BASE: f32 = 0.05;
+
+/// Shard count rule for scheduler-dispatched narrowphase: enough coarse
+/// tasks to feed every worker without starving (the spike showed 8 shards
+/// on 8 threads ~50% slower than flat rayon from imbalance, while 32
+/// shards ran ~20% faster). Order-preserving concat keeps results
+/// deterministic for any shard count.
+fn narrow_shard_count(pairs: usize) -> usize {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (threads * 4).clamp(4, 64).min(pairs.max(1))
+}
+
+/// Pooled narrowphase shard buffers for scheduler dispatch: one uncontended
+/// `Mutex<Vec>` per shard plus the cached single-group level plan. Owned by
+/// the engine and passed down like the other scratch buffers, so the hot
+/// loop never allocates. Resized only when the shard count moves.
+#[derive(Debug, Default)]
+struct NarrowShardPool {
+    bufs: Vec<Mutex<Vec<Manifold>>>,
+    level: Vec<Vec<usize>>,
+}
+
+impl NarrowShardPool {
+    fn ensure(&mut self, shards: usize) {
+        if self.bufs.len() != shards {
+            self.bufs.clear();
+            for _ in 0..shards {
+                self.bufs.push(Mutex::new(Vec::new()));
+            }
+            self.level = vec![(0..shards).collect()];
+        }
+        for b in &self.bufs {
+            b.lock().unwrap().clear();
+        }
+    }
+}
 
 /// Per-pair narrowphase kernel shared by the parallel and sequential paths:
 /// filters, speculative margin, all 9 shape combos with the unified SAT-cache
@@ -1406,16 +1448,25 @@ fn detect_collisions_into(
     body_required: Option<&[u32]>,
     cur_substep: u32,
     sat_cache: Option<&SatCache>,
+    pool: &mut NarrowShardPool,
 ) {
     out.clear();
     // Parallel narrowphase for large candidate sets: SAT/box_manifold is heavy,
     // and bodies/asleep are read-only. Threshold keeps small scenes sequential.
     if active.len() > 256 {
-        use rayon::prelude::*;
-        let results: Vec<Option<Manifold>> = active
-            .par_iter()
-            .map(|&(i, j)| {
-                narrow_pair(
+        // Scheduler dispatch (one level, K coarse shards): same kernel, same
+        // order-preserving concat as the flat rayon path it replaces, so
+        // results are identical for any shard count. Shard buffers come from
+        // the engine-owned pool — no allocation on the hot path.
+        let shards = narrow_shard_count(active.len());
+        pool.ensure(shards);
+        let bufs = &pool.bufs;
+        run_levels(&pool.level, shards, true, |shard| {
+            let lo = shard * active.len() / shards;
+            let hi = (shard + 1) * active.len() / shards;
+            let mut guard = bufs[shard].lock().unwrap();
+            for &(i, j) in &active[lo..hi] {
+                if let Some(m) = narrow_pair(
                     bodies,
                     asleep,
                     i,
@@ -1424,12 +1475,14 @@ fn detect_collisions_into(
                     cur_substep,
                     sub_dt,
                     sat_cache,
-                )
-            })
-            .collect();
-        out.reserve(results.len());
-        for m in results.into_iter().flatten() {
-            out.push(m);
+                ) {
+                    guard.push(m);
+                }
+            }
+        });
+        out.reserve(active.len());
+        for b in &pool.bufs {
+            out.extend(b.lock().unwrap().iter().cloned());
         }
         return;
     }
@@ -1844,6 +1897,7 @@ fn detect_collisions_into_with_cache(
     cur_substep: u32,
     cache: &mut HashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: Option<&SatCache>,
+    pool: &mut NarrowShardPool,
 ) {
     // Only cache the first substep: later substeps are filtered to fast bodies,
     // hit rate is near zero and the HashMap overhead dominates.
@@ -1857,6 +1911,7 @@ fn detect_collisions_into_with_cache(
             body_required,
             cur_substep,
             sat_cache,
+            pool,
         );
         return;
     }
@@ -1927,6 +1982,7 @@ fn detect_collisions_into_with_cache(
             body_required,
             cur_substep,
             sat_cache,
+            pool,
         );
         out.extend(fast_tmp);
     }
@@ -1944,6 +2000,7 @@ fn detect_collisions_into_with_cache(
         body_required,
         cur_substep,
         sat_cache,
+        pool,
     );
     // Populate cache for misses.
     let mut tmp_map: HashMap<(usize, usize), Option<Manifold>> = HashMap::new();
@@ -2145,6 +2202,9 @@ pub struct BuiltinPhysicsEngine {
     scratch_pairs: Vec<(usize, usize)>,
     scratch_clamped: Vec<bool>,
     scratch_parent: Vec<usize>,
+    /// Pooled narrowphase shard buffers for scheduler dispatch, taken and
+    /// restored around the substep loop like the other scratch state.
+    scratch_narrow_shards: NarrowShardPool,
     /// G7: optional GPU contact solver (gpu feature). When attached,
     /// single-point manifolds are solved on the GPU instead of the CPU
     /// wide path; multi-point manifolds stay on the CPU island path.
@@ -2185,6 +2245,7 @@ impl BuiltinPhysicsEngine {
             scratch_pairs: Vec::new(),
             scratch_clamped: Vec::new(),
             scratch_parent: Vec::new(),
+            scratch_narrow_shards: NarrowShardPool::default(),
             narrow_cache: HashMap::new(),
             sat_cache: DashMap::new(),
             #[cfg(feature = "gpu")]
@@ -3124,6 +3185,9 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 Some(&body_needed)
             }
         };
+        // Scheduler narrowphase shard pool, taken once for the whole substep
+        // loop and restored after (same discipline as the other scratch).
+        let mut narrow_shards = std::mem::take(&mut self.scratch_narrow_shards);
         for s in 0..eff_substeps {
             // Box3D stage order: solve velocities BEFORE moving positions, so
             // a resting contact kills gravity's velocity gain in the same
@@ -3167,6 +3231,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     s,
                     &mut self.narrow_cache,
                     Some(&self.sat_cache),
+                    &mut narrow_shards,
                 );
                 self.scratch_pairs = filtered;
             } else {
@@ -3180,6 +3245,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     s,
                     &mut self.narrow_cache,
                     Some(&self.sat_cache),
+                    &mut narrow_shards,
                 );
             }
             timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
@@ -3207,6 +3273,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             self.scratch_clamped = clamped_buf;
             self.scratch_manifolds = manifolds_buf;
         }
+        self.scratch_narrow_shards = narrow_shards;
         // Diagnostics: contact-manifold partners per body from the last
         // substep (drives sleep/island debugging; tiny flat copy).
         self.debug_pairs.clear();
@@ -3644,6 +3711,7 @@ mod tests {
         let asleep = vec![false; bodies.len()];
         let cache = SatCache::new();
         let mut first: Vec<Manifold> = Vec::new();
+        let mut pool = NarrowShardPool::default();
         detect_collisions_into(
             &bodies,
             &pairs,
@@ -3653,6 +3721,7 @@ mod tests {
             None,
             0,
             Some(&cache),
+            &mut pool,
         );
         assert_eq!(
             cache.len(),
@@ -3670,6 +3739,7 @@ mod tests {
             None,
             0,
             Some(&cache),
+            &mut pool,
         );
         assert_eq!(second.len(), first.len());
         for (a, b) in first.iter().zip(second.iter()) {

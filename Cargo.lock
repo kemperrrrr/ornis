@@ -2504,6 +2504,7 @@ dependencies = [
  "glam",
  "naga",
  "ornis-macros",
+ "ornis-schedule",
  "pollster",
  "rayon",
  "wgpu",

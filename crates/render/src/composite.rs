@@ -53,13 +53,17 @@ impl CompositePass {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs"),
+                entry_point: Some(
+                    crate::shaders::composite_generated::composite_vs_entry::entry_point(),
+                ),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs"),
+                entry_point: Some(
+                    crate::shaders::composite_generated::composite_fs_entry::entry_point(),
+                ),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),

@@ -580,6 +580,35 @@ mod tests {
         );
     }
 
+    /// Entry-point namespace is closed: every generated `entry_point()`
+    /// must be one of the four pipeline-convention names. The renderer and
+    /// `composite.rs` request entries through these same accessors (no
+    /// literals), so a rename propagates by construction — but the names
+    /// themselves are external (pipeline caches, debug labels, snapshots),
+    /// hence pinned here as a set.
+    #[test]
+    fn entry_namespace_is_closed() {
+        use std::collections::HashSet;
+        let entries = [
+            hdr_composite_generated::composite_vertex_entry::entry_point(),
+            hdr_composite_generated::hdr_fragment_vs_entry::entry_point(),
+            hdr_composite_generated::hdr_fragment_entry::entry_point(),
+            bloom_generated::bloom_vertex_entry::entry_point(),
+            bloom_generated::bloom_fragment_entry::entry_point(),
+            lighting_generated::lighting_vertex_entry::entry_point(),
+            lighting_generated::lighting_fragment_entry::entry_point(),
+            composite_generated::composite_vs_entry::entry_point(),
+            composite_generated::composite_fs_entry::entry_point(),
+            gbuffer_generated::gbuffer_vs_entry::entry_point(),
+            gbuffer_generated::gbuffer_fs_entry::entry_point(),
+            pbr_generated::pbr_fragment_entry::entry_point(),
+        ];
+        // Twelve entries today; fewer means one escaped the pin.
+        assert_eq!(entries.len(), 12);
+        let set: HashSet<&str> = entries.into_iter().collect();
+        assert_eq!(set, HashSet::from(["vs_main", "fs_main", "vs", "fs"]));
+    }
+
     /// Parse and fully validate an assembled WGSL module with naga.
     fn assert_valid_wgsl(name: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)
