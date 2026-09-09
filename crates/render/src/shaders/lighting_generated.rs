@@ -10,8 +10,8 @@
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
-    OPENPBR_WGSL_NAME, STANDARD_QUAD, STANDARD_UVS, Resource, ResourceKind, bgl_entry,
-    const_vec2_array, const_vec4_array, openpbr_material_decl, resource_decl, wgsl_decl,
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array,
+    const_vec4_array, openpbr_material_decl, resource_decl, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -41,6 +41,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
         name: "camera",
         kind: ResourceKind::Uniform(CameraUniform::WGSL_NAME),
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -48,6 +49,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "lighting",
         kind: ResourceKind::Uniform(LightingUniform::WGSL_NAME),
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -55,6 +57,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "materials",
         kind: ResourceKind::StorageReadArray(OPENPBR_WGSL_NAME),
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -62,6 +65,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "albedo_tex",
         kind: ResourceKind::TextureFloat,
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -69,6 +73,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "normal_tex",
         kind: ResourceKind::TextureFloat,
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -76,6 +81,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "material_id_tex",
         kind: ResourceKind::TextureUint,
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -83,6 +89,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "world_pos_tex",
         kind: ResourceKind::TextureFloat,
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -90,6 +97,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "mat_params_tex",
         kind: ResourceKind::TextureFloat,
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -97,6 +105,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "depth_tex",
         kind: ResourceKind::TextureDepth,
+        min_size: None,
     },
     Resource {
         group: 0,
@@ -104,6 +113,7 @@ pub const LIGHTING_RESOURCES: [Resource; 10] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "lighting_sampler",
         kind: ResourceKind::Sampler,
+        min_size: None,
     },
 ];
 
@@ -418,10 +428,7 @@ mod tests {
         assert_eq!(LIGHTING_RESOURCES.len(), 10);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
-            assert!(decl.starts_with(&format!(
-                "@group({}) @binding({}) ",
-                r.group, r.binding
-            )));
+            assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
             let plain = bgl_entry(&r, false);
             let msaa = bgl_entry(&r, true);
             assert_eq!(plain.binding, r.binding);
@@ -434,9 +441,11 @@ mod tests {
             );
         }
         // Binding 0 (camera) is visible to the vertex stage too.
-        assert!(LIGHTING_RESOURCES[0]
-            .visibility
-            .contains(wgpu::ShaderStages::VERTEX));
+        assert!(
+            LIGHTING_RESOURCES[0]
+                .visibility
+                .contains(wgpu::ShaderStages::VERTEX)
+        );
     }
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {

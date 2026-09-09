@@ -7,7 +7,9 @@
 //! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use super::interface::UiCompositeOut as VertexOutput;
-use super::{binding, const_vec2_array, const_vec4_array, wgsl_decl};
+use super::{
+    Resource, ResourceKind, const_vec2_array, const_vec4_array, resource_decls, wgsl_decl,
+};
 use crate::shaders::math::srgb_to_linear;
 use ornis_macros::stage;
 
@@ -32,6 +34,55 @@ fn composite_fs_entry(input: VertexOutput) -> glam::Vec4 {
     return glam::Vec4::new(mix(bg.rgb, ui_linear, ui.a), 1.0);
 }
 
+/// Composite-specific quad corners/UVs (different winding from
+/// [`STANDARD_QUAD`](super::STANDARD_QUAD)), as Rust data.
+const COMPOSITE_QUAD: [[f32; 4]; 4] = [
+    [-1.0, -1.0, 0.0, 1.0],
+    [-1.0, 1.0, 0.0, 1.0],
+    [1.0, -1.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0, 1.0],
+];
+
+/// Composite-specific UVs, as Rust data.
+const COMPOSITE_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [0.0, 0.0], [1.0, 1.0], [1.0, 0.0]];
+
+/// Resource layout of the legacy composite pass (what `LegacyCompositePass`
+/// builds its layout from in `composite.rs`).
+pub const COMPOSITE_RESOURCES: [Resource; 4] = [
+    Resource {
+        group: 0,
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "pbr_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "pbr_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ui_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 3,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ui_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
+];
+
 /// WGSL bindings + quad constants + vertex/fragment entry points.
 ///
 /// Assembled at runtime as a `String`, but the source is Rust: constants and
@@ -49,25 +100,9 @@ fn composite_wgsl_body() -> String {
         vs = composite_vs_entry::wgsl_source(),
     );
 
-    /// Composite-specific quad corners/UVs (different winding from
-    /// [`STANDARD_QUAD`](super::STANDARD_QUAD)), as Rust data.
-    const COMPOSITE_QUAD: [[f32; 4]; 4] = [
-        [-1.0, -1.0, 0.0, 1.0],
-        [-1.0, 1.0, 0.0, 1.0],
-        [1.0, -1.0, 0.0, 1.0],
-        [1.0, 1.0, 0.0, 1.0],
-    ];
-
-    /// Composite-specific UVs, as Rust data.
-    const COMPOSITE_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [0.0, 0.0], [1.0, 1.0], [1.0, 0.0]];
-
-    /// Bindings + quad constants, all assembled from Rust.
+    /// Bindings (0–3) from the table + quad constants, all assembled from Rust.
     fn composite_header_rest() -> String {
-        let mut out = String::new();
-        out.push_str(&binding(0, 0, "var pbr_tex: texture_2d<f32>"));
-        out.push_str(&binding(0, 1, "var pbr_sampler: sampler"));
-        out.push_str(&binding(0, 2, "var ui_tex: texture_2d<f32>"));
-        out.push_str(&binding(0, 3, "var ui_sampler: sampler"));
+        let mut out = resource_decls(&COMPOSITE_RESOURCES, &[0, 1, 2, 3]);
         out.push('\n');
         out.push_str(&const_vec4_array("QUAD", &COMPOSITE_QUAD));
         out.push_str(&const_vec2_array("UVS", &COMPOSITE_UVS));
@@ -125,5 +160,19 @@ mod tests {
         assert!(src.contains("fn vs("));
         assert!(src.contains("fn fs("));
         assert!(src.contains("fn srgb_to_linear"));
+    }
+
+    /// Every table row's declaration appears in the assembled shader, and
+    /// every row maps to a layout entry: shader and pipeline agree.
+    #[test]
+    fn composite_resources_cover_shader_and_layout() {
+        use super::super::{bgl_entry, resource_decl};
+        let src = wgsl_source();
+        assert_eq!(COMPOSITE_RESOURCES.len(), 4);
+        for r in COMPOSITE_RESOURCES {
+            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+            let e = bgl_entry(&r, false);
+            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        }
     }
 }

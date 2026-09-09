@@ -49,6 +49,21 @@ fn contact_wgsl_source() {
     assert!(src.contains("count: u32"));
 }
 
+/// Renamed mirror: `WGSL_NAME` carries the override, `WGSL_SOURCE` uses it.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, WgslStruct)]
+#[wgsl(name = "Renamed")]
+struct Original {
+    a: [f32; 4],
+}
+
+#[test]
+fn wgsl_name_matches_override() {
+    assert_eq!(Original::WGSL_NAME, "Renamed");
+    assert!(Original::WGSL_SOURCE.contains("struct Renamed"));
+    assert_eq!(BodyState::WGSL_NAME, "BodyState");
+}
+
 #[test]
 fn layout_matches_wgsl_rules() {
     // These offsets are enforced at compile time by the derive; re-assert

@@ -14,8 +14,11 @@
 //! duplicating it.
 
 use super::interface::GbufferFragmentInput as FragmentInput;
-use super::{binding, helpers, openpbr_material_decl, wgsl_decl};
-use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
+use super::{
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, helpers, openpbr_material_decl, resource_decls,
+    wgsl_decl,
+};
+use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
 use ornis_macros::stage;
 
@@ -257,17 +260,47 @@ pub fn wgsl_source_static() -> String {
     wgsl_source()
 }
 
-/// Fragment resource bindings, assembled from Rust.
+/// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
+/// Shared by `create_pbr_bind_group` and `create_forward_pass`, whose
+/// handwritten layouts were identical. Type names come from the Rust side.
+pub const PBR_RESOURCES: [Resource; 4] = [
+    Resource {
+        group: 0,
+        binding: 0,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        name: "camera",
+        kind: ResourceKind::Uniform(CameraUniform::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 1,
+        visibility: wgpu::ShaderStages::VERTEX,
+        name: "per_objects",
+        kind: ResourceKind::StorageReadArray(PerObjectGpu::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "materials",
+        kind: ResourceKind::StorageReadArray(OPENPBR_WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 3,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "lighting",
+        kind: ResourceKind::Uniform(LightingUniform::WGSL_NAME),
+        min_size: None,
+    },
+];
+
+/// Fragment resource bindings (0, 2, 3) from the table.
 fn fragment_bindings() -> String {
-    let mut out = String::new();
-    out.push_str(&binding(0, 0, "var<uniform> camera: Camera"));
-    out.push_str(&binding(
-        0,
-        2,
-        "var<storage, read> materials: array<OpenPBRMaterial>",
-    ));
-    out.push_str(&binding(0, 3, "var<uniform> lighting: Lighting"));
-    out
+    resource_decls(&PBR_RESOURCES, &[0, 2, 3])
 }
 
 #[cfg(test)]
@@ -338,5 +371,19 @@ mod tests {
         assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)));
         assert!(src.contains(openpbr_material_decl().as_str()));
+    }
+
+    /// Every table row's declaration appears across the assembled stages,
+    /// and every row maps to a layout entry: shader and pipeline agree.
+    #[test]
+    fn pbr_resources_cover_stages_and_layout() {
+        use super::super::{bgl_entry, resource_decl};
+        let src = wgsl_vertex_source() + &wgsl_source();
+        assert_eq!(PBR_RESOURCES.len(), 4);
+        for r in PBR_RESOURCES {
+            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+            let e = bgl_entry(&r, false);
+            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        }
     }
 }

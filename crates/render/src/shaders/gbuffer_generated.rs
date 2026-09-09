@@ -12,13 +12,13 @@
 //! transform. The PBR migration (`pbr_generated`) reuses
 //! [`wgsl_vertex_source`] rather than duplicating it.
 
-use super::binding;
 use super::interface::{
     GbufferFragmentInput as FragmentInput, GbufferOutput as GBufferOutput,
     GbufferVertexInput as VertexInput, GbufferVertexOutput as VertexOutput,
 };
-use super::openpbr_material_decl;
-use super::wgsl_decl;
+use super::{
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, openpbr_material_decl, resource_decls, wgsl_decl,
+};
 use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::math::octahedral_encode;
 use ornis_macros::stage;
@@ -124,25 +124,48 @@ pub fn wgsl_source_static() -> String {
     wgsl_source()
 }
 
-/// Vertex resource bindings, assembled from Rust.
+/// Resource layout of the g-buffer pass. Type names come from the Rust
+/// side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
+pub const GBUFFER_RESOURCES: [Resource; 3] = [
+    Resource {
+        group: 0,
+        binding: 0,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        name: "camera",
+        kind: ResourceKind::Uniform(CameraUniform::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 1,
+        visibility: wgpu::ShaderStages::VERTEX,
+        name: "per_objects",
+        kind: ResourceKind::StorageReadArray(PerObjectGpu::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "materials",
+        kind: ResourceKind::StorageReadArray(OPENPBR_WGSL_NAME),
+        min_size: None,
+    },
+];
+
+/// Vertex resource bindings (0, 1) from the table.
 fn vertex_bindings() -> String {
-    let mut out = String::new();
-    out.push_str(&binding(0, 0, "var<uniform> camera: Camera"));
-    out.push_str(&binding(
-        0,
-        1,
-        "var<storage, read> per_objects: array<PerObject>",
-    ));
-    out
+    resource_decls(&GBUFFER_RESOURCES, &[0, 1])
 }
 
-/// Fragment resource binding, assembled from Rust.
+/// Fragment resource binding (2) from the table.
 fn fragment_bindings() -> String {
-    binding(0, 2, "var<storage, read> materials: array<OpenPBRMaterial>")
+    resource_decls(&GBUFFER_RESOURCES, &[2])
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{bgl_entry, resource_decl};
     use super::*;
 
     fn assert_valid_wgsl(name: &str, source: &str) {
@@ -202,6 +225,19 @@ mod tests {
         assert!(entry.contains("let normal_enc = octahedral_encode(n);"));
         assert!(entry.contains("output.mat_params = mat_params;"));
         assert!(entry.contains("return output;"));
+    }
+
+    /// Every table row's declaration appears in the assembled stages, and
+    /// every row maps to a layout entry: shader and pipeline agree.
+    #[test]
+    fn gbuffer_resources_cover_stages_and_layout() {
+        let src = wgsl_vertex_source() + &wgsl_source();
+        assert_eq!(GBUFFER_RESOURCES.len(), 3);
+        for r in GBUFFER_RESOURCES {
+            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+            let e = bgl_entry(&r, false);
+            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        }
     }
 
     #[test]

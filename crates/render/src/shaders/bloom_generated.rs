@@ -7,7 +7,10 @@
 //! `#[stage]` translation; `renderer::create_bloom_pass` now uses only this module.
 
 use super::interface::BloomVertexOut as BloomVertexOutput;
-use super::{STANDARD_QUAD, STANDARD_UVS, binding, const_vec2_array, const_vec4_array, wgsl_decl};
+use super::{
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array, const_vec4_array,
+    resource_decls, wgsl_decl,
+};
 use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
 use ornis_macros::stage;
@@ -38,6 +41,35 @@ fn bloom_fragment_entry(#[wgsl(location = 0)] uv: glam::Vec2) -> glam::Vec4 {
 ///
 /// Assembled at runtime as a `String`, but the source is Rust: constants and
 /// `luminance::wgsl_source()` — the single `luminance` in the system.
+/// Resource layout of the bloom pass. The uniform carries the explicit
+/// minimum size the handwritten layout spelled (`size_of::<BloomUniform>`).
+pub const BLOOM_RESOURCES: [Resource; 3] = [
+    Resource {
+        group: 0,
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "src_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "src_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "bloom_params",
+        kind: ResourceKind::Uniform(BloomUniform::WGSL_NAME),
+        min_size: Some(std::mem::size_of::<BloomUniform>() as u64),
+    },
+];
+
 fn bloom_wgsl_body() -> String {
     // Derived `BloomParams` layout and `BloomVertexOut` varying spliced into
     // the handwritten header rest (bindings + quad + entries). Byte-identical
@@ -52,12 +84,9 @@ fn bloom_wgsl_body() -> String {
     );
 
     /// WGSL bindings + quad constants, all assembled from Rust: the binding
-    /// lines from [`binding`], QUAD/UVS from [`STANDARD_QUAD`]/[`STANDARD_UVS`].
+    /// lines from the table, QUAD/UVS from [`STANDARD_QUAD`]/[`STANDARD_UVS`].
     fn bloom_header_head() -> String {
-        let mut out = String::new();
-        out.push_str(&binding(0, 0, "var src_tex: texture_2d<f32>"));
-        out.push_str(&binding(0, 1, "var src_sampler: sampler"));
-        out.push_str(&binding(0, 2, "var<uniform> bloom_params: BloomParams"));
+        let mut out = resource_decls(&BLOOM_RESOURCES, &[0, 1, 2]);
         out.push('\n');
         out.push_str(&const_vec4_array("QUAD", &STANDARD_QUAD));
         out.push('\n');
@@ -125,5 +154,24 @@ mod tests {
         assert!(fs.contains("-> @location(0) vec4<f32>"));
         assert!(fs.contains("let color = textureSample(src_tex, src_sampler, uv).rgb;"));
         assert!(fs.contains("return vec4<f32>(color * keep, 1.0);"));
+    }
+
+    /// Every table row's declaration appears in the assembled shader, and
+    /// every row maps to a layout entry: shader and pipeline agree.
+    #[test]
+    fn bloom_resources_cover_shader_and_layout() {
+        use super::super::{bgl_entry, resource_decl};
+        let src = wgsl_source();
+        assert_eq!(BLOOM_RESOURCES.len(), 3);
+        for r in BLOOM_RESOURCES {
+            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+            let e = bgl_entry(&r, false);
+            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        }
+        // The uniform row carries the explicit minimum size.
+        assert!(matches!(
+            BLOOM_RESOURCES[2].min_size,
+            Some(s) if s == std::mem::size_of::<BloomUniform>() as u64
+        ));
     }
 }

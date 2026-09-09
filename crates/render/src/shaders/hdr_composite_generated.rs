@@ -12,7 +12,10 @@ use super::interface::{
     HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
 };
 use super::wgsl_decl;
-use super::{STANDARD_QUAD, STANDARD_UVS, binding, const_vec2_array, const_vec4_array};
+use super::{
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array, const_vec4_array,
+    resource_decls,
+};
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
 use ornis_macros::stage;
@@ -78,14 +81,55 @@ fn vertex_quad() -> String {
     out
 }
 
-/// Fragment resource bindings + quad constants, assembled from Rust.
+/// Resource layout of the HDR composite pass (what `create_composite_pass`
+/// builds its layout from). The uniform carries the explicit minimum size
+/// the handwritten layout spelled.
+pub const HDR_RESOURCES: [Resource; 5] = [
+    Resource {
+        group: 0,
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "deferred_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "forward_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "composite_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 3,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "bloom_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 4,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "bloom_params",
+        kind: ResourceKind::Uniform(BloomUniform::WGSL_NAME),
+        min_size: Some(std::mem::size_of::<BloomUniform>() as u64),
+    },
+];
+
+/// Fragment resource bindings (0–4) from the table, plus quad constants.
 fn fragment_head() -> String {
-    let mut out = String::new();
-    out.push_str(&binding(0, 0, "var deferred_tex: texture_2d<f32>"));
-    out.push_str(&binding(0, 1, "var forward_tex: texture_2d<f32>"));
-    out.push_str(&binding(0, 2, "var composite_sampler: sampler"));
-    out.push_str(&binding(0, 3, "var bloom_tex: texture_2d<f32>"));
-    out.push_str(&binding(0, 4, "var<uniform> bloom_params: BloomParams"));
+    let mut out = resource_decls(&HDR_RESOURCES, &[0, 1, 2, 3, 4]);
     out.push('\n');
     out.push_str(&vertex_quad());
     out
@@ -196,5 +240,19 @@ mod tests {
         assert!(src.contains(&wgsl_decl(BloomUniform::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(QuadVertexOutput::WGSL_SOURCE)));
         assert!(!src.contains("_pad"));
+    }
+
+    /// Every table row's declaration appears in the assembled shader, and
+    /// every row maps to a layout entry: shader and pipeline agree.
+    #[test]
+    fn hdr_resources_cover_shader_and_layout() {
+        use super::super::{bgl_entry, resource_decl};
+        let src = wgsl_source();
+        assert_eq!(HDR_RESOURCES.len(), 5);
+        for r in HDR_RESOURCES {
+            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+            let e = bgl_entry(&r, false);
+            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        }
     }
 }

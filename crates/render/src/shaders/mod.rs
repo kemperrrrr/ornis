@@ -27,14 +27,6 @@ pub(crate) fn wgsl_decl(source: &'static str) -> String {
     format!("{};\n", source.trim_end())
 }
 
-/// Build one `@group/@binding` resource line from its parts, e.g.
-/// `binding(0, 2, "var<storage, read> materials: array<OpenPBRMaterial>")`.
-/// Group/binding numbers stay explicit at each call site so the layout is
-/// reviewable where it is used.
-pub(crate) fn binding(group: u32, binding: u32, decl: &str) -> String {
-    format!("@group({group}) @binding({binding}) {decl};\n")
-}
-
 /// Address-space / resource class of one pass resource.
 ///
 /// The WGSL type name for buffers comes from the Rust side
@@ -66,9 +58,7 @@ impl ResourceKind {
     /// from the Rust side.
     pub fn wgsl_ty_full(&self) -> String {
         match self {
-            Self::Uniform(ty) | Self::StorageRead(ty) | Self::StorageRw(ty) => {
-                ty.to_string()
-            }
+            Self::Uniform(ty) | Self::StorageRead(ty) | Self::StorageRw(ty) => ty.to_string(),
             Self::StorageReadArray(elem) => format!("array<{elem}>"),
             Self::TextureFloat => "texture_2d<f32>".to_string(),
             Self::TextureUint => "texture_2d<u32>".to_string(),
@@ -83,9 +73,7 @@ impl ResourceKind {
             Self::Uniform(_) => "var<uniform>",
             Self::StorageRead(_) | Self::StorageReadArray(_) => "var<storage, read>",
             Self::StorageRw(_) => "var<storage, read_write>",
-            Self::TextureFloat | Self::TextureUint | Self::TextureDepth | Self::Sampler => {
-                "var"
-            }
+            Self::TextureFloat | Self::TextureUint | Self::TextureDepth | Self::Sampler => "var",
         }
     }
 
@@ -98,13 +86,11 @@ impl ResourceKind {
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
-            Self::StorageRead(_) | Self::StorageReadArray(_) => {
-                wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }
-            }
+            Self::StorageRead(_) | Self::StorageReadArray(_) => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             Self::StorageRw(_) => wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: false },
                 has_dynamic_offset: false,
@@ -147,6 +133,25 @@ pub struct Resource {
     pub name: &'static str,
     /// Address space / resource class.
     pub kind: ResourceKind,
+    /// Minimum buffer binding size in bytes (`Some` only where the
+    /// handwritten layout carried an explicit size); ignored for
+    /// textures/samplers.
+    pub min_size: Option<u64>,
+}
+
+/// WGSL declaration lines for a subset of a [`Resource`] table (one
+/// shader stage): `bindings` lists the `@binding` indices that stage
+/// declares, in order.
+pub fn resource_decls(table: &[Resource], bindings: &[u32]) -> String {
+    let mut out = String::new();
+    for b in bindings {
+        let r = table
+            .iter()
+            .find(|r| r.binding == *b)
+            .unwrap_or_else(|| panic!("resource table lacks binding {b}"));
+        out.push_str(&resource_decl(r));
+    }
+    out
 }
 
 /// WGSL declaration line for one [`Resource`].
@@ -164,10 +169,31 @@ pub fn resource_decl(r: &Resource) -> String {
 /// `wgpu` bind-group-layout entry for one [`Resource`]; `multisampled`
 /// threads the runtime MSAA flag through to texture resources.
 pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry {
+    let min_binding_size = match (r.min_size, &r.kind) {
+        (
+            Some(bytes),
+            ResourceKind::Uniform(_)
+            | ResourceKind::StorageRead(_)
+            | ResourceKind::StorageReadArray(_)
+            | ResourceKind::StorageRw(_),
+        ) => Some(std::num::NonZeroU64::new(bytes).expect("resource min_size must be nonzero")),
+        _ => None,
+    };
     wgpu::BindGroupLayoutEntry {
         binding: r.binding,
         visibility: r.visibility,
-        ty: r.kind.bgl_ty(multisampled),
+        ty: match r.kind.bgl_ty(multisampled) {
+            wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset,
+                ..
+            } => wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset,
+                min_binding_size,
+            },
+            other => other,
+        },
         count: None,
     }
 }
