@@ -1331,19 +1331,17 @@ fn narrow_pair(
                 half_height: hh,
             },
             &Shape::Sphere { radius: r },
-        ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(
-            |c| {
-                Manifold::single(
-                    i,
-                    j,
-                    Contact {
-                        normal: -c.normal,
-                        penetration: c.penetration,
-                        contact_point: c.contact_point,
-                    },
-                )
-            },
-        ),
+        ) => sphere_vs_capsule(b.position, r, a.position, cr, hh, a.orientation, margin).map(|c| {
+            Manifold::single(
+                i,
+                j,
+                Contact {
+                    normal: -c.normal,
+                    penetration: c.penetration,
+                    contact_point: c.contact_point,
+                },
+            )
+        }),
         (
             &Shape::Box { half_extents: ha },
             &Shape::Capsule {
@@ -1418,7 +1416,14 @@ fn detect_collisions_into(
             .par_iter()
             .map(|&(i, j)| {
                 narrow_pair(
-                    bodies, asleep, i, j, body_required, cur_substep, sub_dt, sat_cache,
+                    bodies,
+                    asleep,
+                    i,
+                    j,
+                    body_required,
+                    cur_substep,
+                    sub_dt,
+                    sat_cache,
                 )
             })
             .collect();
