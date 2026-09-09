@@ -27,7 +27,7 @@ pub(crate) struct CompositeContext {
 #[stage(vertex, entry = "vs")]
 fn composite_vs_entry(
     vertex_index: super::VertexIndex,
-    #[wgsl(context)] ctx: super::QuadContext,
+    ctx: Context<super::QuadContext>,
 ) -> VertexOutput {
     let mut out: VertexOutput;
     out.position = ctx.quad[vertex_index];
@@ -38,7 +38,7 @@ fn composite_vs_entry(
 /// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — texture bundle (`ctx: CompositeContext`).
 #[stage(fragment, entry = "fs", returns = "@location(0) vec4<f32>")]
-fn composite_fs_entry(input: VertexOutput, #[wgsl(context)] ctx: CompositeContext) -> glam::Vec4 {
+fn composite_fs_entry(input: VertexOutput, ctx: Context<CompositeContext>) -> glam::Vec4 {
     let bg = textureSampleLevel(ctx.pbr_tex, ctx.pbr_sampler, input.uv, 0.0);
     let ui = textureSampleLevel(ctx.ui_tex, ctx.ui_sampler, input.uv, 0.0);
     let ui_linear = srgb_to_linear(ui.rgb);

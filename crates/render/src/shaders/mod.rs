@@ -235,6 +235,16 @@ pub struct VertexIndex(pub u32);
 /// Per-instance index newtype; see [`VertexIndex`].
 pub struct InstanceIndex(pub u32);
 
+/// Context-bundle wrapper: `ctx: Context<LightingContext>` marks the
+/// parameter as a resource bundle (excluded from the WGSL signature;
+/// `ctx.field` lowers to the global `field`), while a bare struct param
+/// (`input: VertexInput`) stays a real WGSL function parameter. The two
+/// spellings are syntactically identical otherwise, so the wrapper — not
+/// an attribute — carries the one disambiguating bit, and signatures stay
+/// attribute-free pure Rust. Never instantiated; see the `Texture2d`
+/// markers.
+pub struct Context<T>(T);
+
 /// Quad constants as a stage-entry context bundle: five vertex entries share
 /// it (`ctx: QuadContext`, `ctx.quad[idx]`). Field names match the WGSL
 /// `const` names exactly — the `#[stage]` `context` lowering strips the

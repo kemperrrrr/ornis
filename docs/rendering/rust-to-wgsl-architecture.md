@@ -306,12 +306,12 @@ Stage-функции получают ресурсы через `#[wgsl(context)
 ```rust
 #[stage(vertex, entry = "vs_main")]
 fn vertex(
-    #[wgsl(builtin = "vertex_index")] index: u32,
-    #[wgsl(context)] ctx: super::QuadContext,
+    vertex_index: super::VertexIndex,
+    ctx: Context<super::QuadContext>,
 ) -> CompositeVertexOutput {
     CompositeVertexOutput {
-        clip_position: ctx.quad[index],
-        uv: ctx.uvs[index],
+        clip_position: ctx.quad[vertex_index],
+        uv: ctx.uvs[vertex_index],
     }
 }
 ```
@@ -373,9 +373,13 @@ Rust functions ─> AST ───┘       (IR)
 ## План миграции
 
 1. Ввести типизированный контекст stage-функций — выполнено:
-   `#[wgsl(context)] ctx: Bundle` + `#[derive(ShaderContext)]`
+   `ctx: Context<Bundle>` + `#[derive(ShaderContext)]`
    (плоская bundle-форма, 12 entry, 30 имён под `stage_globals_declared`);
-   одиночные ресурсы — `#[wgsl(global = "...")]`.
+   одиночные ресурсы — `#[wgsl(global = "...")]`; builtin-индексы —
+   newtypes `VertexIndex`/`InstanceIndex` без атрибутов. Сигнатуры entry —
+   чистый Rust без `#[wgsl(...)]` на bundle/newtype-параметрах: маркер
+   bundle — сама обёртка `Context<…>` (bare-структура `input: VertexInput`
+   остаётся настоящим WGSL-параметром).
 2. Ввести `ShaderType`/`TypeId` и enum builtin'ов вместо угадывания по именам.
 3. Вынести `Expr`, `Stmt`, `Type`, `Function`, `Module` и связанные symbols
    в отдельный Shader IR.

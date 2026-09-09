@@ -20,7 +20,7 @@ use ornis_macros::stage;
 #[stage(vertex, entry = "vs_main")]
 fn bloom_vertex_entry(
     vertex_index: super::VertexIndex,
-    #[wgsl(context)] ctx: super::QuadContext,
+    ctx: Context<super::QuadContext>,
 ) -> BloomVertexOutput {
     return BloomVertexOutput {
         clip_position: ctx.quad[vertex_index],
@@ -45,7 +45,7 @@ pub(crate) struct BloomContext {
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
 fn bloom_fragment_entry(
     #[wgsl(location = 0)] uv: glam::Vec2,
-    #[wgsl(context)] ctx: BloomContext,
+    ctx: Context<BloomContext>,
 ) -> glam::Vec4 {
     let color = textureSample(ctx.src_tex, ctx.src_sampler, uv).rgb;
     let luma = luminance(color);

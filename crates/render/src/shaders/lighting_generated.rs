@@ -175,7 +175,7 @@ pub(crate) struct LightingContext {
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
 fn lighting_fragment_entry(
     #[wgsl(location = 0)] uv: glam::Vec2,
-    #[wgsl(context)] ctx: LightingContext,
+    ctx: Context<LightingContext>,
 ) -> glam::Vec4 {
     let depth = textureLoad(
         ctx.depth_tex,
@@ -387,7 +387,7 @@ pub fn wgsl_source() -> String {
 #[stage(vertex, entry = "vs_main")]
 fn lighting_vertex_entry(
     vertex_index: super::VertexIndex,
-    #[wgsl(context)] ctx: super::QuadContext,
+    ctx: Context<super::QuadContext>,
 ) -> QuadVertexOutput {
     return QuadVertexOutput {
         clip_position: ctx.quad[vertex_index],

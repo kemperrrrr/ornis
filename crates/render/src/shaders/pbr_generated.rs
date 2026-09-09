@@ -92,7 +92,7 @@ pub(crate) struct PbrContext {
 }
 
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn pbr_fragment_entry(input: FragmentInput, #[wgsl(context)] ctx: PbrContext) -> glam::Vec4 {
+fn pbr_fragment_entry(input: FragmentInput, ctx: Context<PbrContext>) -> glam::Vec4 {
     let mat = ctx.materials[input.material_index];
     let n = normalize(input.world_normal);
     let v = normalize(ctx.camera.camera_pos.xyz - input.world_position);

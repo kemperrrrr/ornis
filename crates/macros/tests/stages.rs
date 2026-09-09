@@ -77,7 +77,11 @@ fn stage_global_params_renamed_and_excluded() {
 }
 
 /// Context bundles: excluded from the signature, `ctx.field` lowered to
-/// the global `field`.
+/// the global `field`. (Local `Context` — the macro matches the wrapper
+/// by name, mirroring glam.)
+#[allow(dead_code)]
+struct Context<T>(T);
+
 #[allow(dead_code)]
 #[derive(ShaderContext)]
 struct QuadBundle {
@@ -88,7 +92,7 @@ struct QuadBundle {
 #[stage(vertex, entry = "vs_main")]
 fn quad_ctx_entry(
     #[wgsl(builtin = "vertex_index")] idx: u32,
-    #[wgsl(context)] ctx: QuadBundle,
+    ctx: Context<QuadBundle>,
 ) -> WgslName {
     return WgslName { x: ctx.quad[idx] };
 }

@@ -40,9 +40,13 @@
 //!   WGSL signature, every use is renamed to the global, and the names are
 //!   re-exported via `globals()` so tests can pin them against the assembled
 //!   shader. Several globals share one bundle instead:
-//!   `#[wgsl(context)] ctx: LightingContext` lowers every `ctx.field` to the
+//!   `ctx: Context<LightingContext>` lowers every `ctx.field` to the
 //!   global `field` (field name === global name; the bundle struct plus
-//!   `#[derive(ShaderContext)]` is the contract). Scalar and glam types map
+//!   `#[derive(ShaderContext)]` is the contract). The `Context<...>`
+//!   wrapper — not an attribute — is what marks a bundle: a bare struct
+//!   param (`input: VertexInput`) stays a real WGSL parameter. Builtin
+//!   indices need no attribute either (`vertex_index: VertexIndex`).
+//!   Scalar and glam types map
 //!   as in [`crate::wgsl`]; any
 //!   other named type passes through verbatim (varying structs).
 //! - bodies require an explicit `return` (a tail value would also translate,
@@ -115,51 +119,28 @@ fn parse_args(args: TokenStream) -> syn::Result<StageArgs> {
     }
 }
 
-/// `#[wgsl(context)]` on an entry parameter: the parameter is a context
-/// bundle (`ctx: LightingContext`), not a WGSL function parameter. Every
-/// `ctx.field` use lowers to the global `field` (field name === global
-/// name); the bundle struct (via `#[derive(ShaderContext)]`) is the
-/// contract. Returns true when present.
-fn param_is_context(attrs: &[syn::Attribute]) -> syn::Result<bool> {
-    let mut context = false;
-    let mut saw_other = false;
-    let mut first_wgsl: Option<&syn::Attribute> = None;
-    for attr in attrs {
-        if !attr.path().is_ident("wgsl") {
-            continue;
-        }
-        first_wgsl = first_wgsl.or(Some(attr));
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("context") {
-                if meta.input.peek(syn::Token![=]) {
-                    return Err(meta.error("stage: `context` takes no value — `#[wgsl(context)] ctx: Bundle`"));
-                }
-                context = true;
-                Ok(())
-            } else if meta.path.is_ident("builtin")
-                || meta.path.is_ident("location")
-                || meta.path.is_ident("global")
-            {
-                // Not ours — but the value must still be consumed, or the
-                // outer meta parser stalls expecting `,`.
-                meta.value()?.parse::<syn::Lit>()?;
-                saw_other = true;
-                Ok(())
-            } else {
-                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N`, `global = \"...\"` or `context`"))
-            }
-        })?;
-    }
-    if context
-        && saw_other
-        && let Some(attr) = first_wgsl
+/// Context-bundle wrapper (`ctx: Context<LightingContext>`): the parameter
+/// is a resource bundle, not a WGSL function parameter. Detected locally —
+/// the last path segment is `Context` with exactly one generic argument —
+/// so no cross-item reading is needed and signatures stay attribute-free.
+/// A bare struct param (`input: VertexInput`) is still a real WGSL
+/// parameter; the wrapper carries the one disambiguating bit.
+fn context_wrapper(ty: &syn::Type) -> syn::Result<bool> {
+    if let syn::Type::Path(path) = ty
+        && path.qself.is_none()
+        && let Some(seg) = path.path.segments.last()
+        && seg.ident == "Context"
     {
-        return Err(syn::Error::new_spanned(
-            attr,
-            "stage: `context` cannot combine with `builtin`/`location`/`global` — bundles are not function parameters",
-        ));
+        match &seg.arguments {
+            syn::PathArguments::AngleBracketed(args) if args.args.len() == 1 => Ok(true),
+            _ => Err(syn::Error::new_spanned(
+                ty,
+                "stage: `Context` bundle takes exactly one type argument (`ctx: Context<Bundle>`)",
+            )),
+        }
+    } else {
+        Ok(false)
     }
-    Ok(context)
 }
 
 /// Builtin-index newtypes (`VertexIndex` → `@builtin(vertex_index)`,
@@ -204,13 +185,8 @@ fn param_global(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
                 meta.value()?.parse::<syn::Lit>()?;
                 saw_interface = true;
                 Ok(())
-            } else if meta.path.is_ident("context") {
-                // Word option, nothing to consume; exclusivity is enforced
-                // by `param_is_context`.
-                saw_interface = true;
-                Ok(())
             } else {
-                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N`, `global = \"...\"` or `context`"))
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N` or `global = \"...\"`"))
             }
         })?;
     }
@@ -301,12 +277,8 @@ fn param_prefix(attrs: &[syn::Attribute]) -> syn::Result<String> {
                 // value must still be consumed here.
                 meta.value()?.parse::<syn::LitStr>()?;
                 Ok(())
-            } else if meta.path.is_ident("context") {
-                // Word option, nothing to consume; handled by
-                // `param_is_context`.
-                Ok(())
             } else {
-                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N`, `global = \"...\"` or `context`"))
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N` or `global = \"...\"`"))
             }
         })?;
     }
@@ -388,10 +360,21 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
         // syn may attach them to the `PatType` or the inner `Pat::Ident`.
         let mut all_attrs = pat_ty.attrs.clone();
         all_attrs.extend(pi.attrs.iter().cloned());
-        if match param_is_context(&all_attrs) {
+        // Context bundles (`ctx: Context<Bundle>`) and builtin-index
+        // newtypes carry their meaning in the type: no attribute. A bundle
+        // combined with any `#[wgsl(...)]` option is two sources of truth.
+        if match context_wrapper(&pat_ty.ty) {
             Ok(c) => c,
             Err(e) => return e.to_compile_error().into(),
         } {
+            if all_attrs.iter().any(|a| a.path().is_ident("wgsl")) {
+                return syn::Error::new_spanned(
+                    &pat_ty.ty,
+                    "stage: `Context<Bundle>` is already a bundle; drop the attribute",
+                )
+                .to_compile_error()
+                .into();
+            }
             contexts.insert(pi.ident.to_string());
             continue;
         }

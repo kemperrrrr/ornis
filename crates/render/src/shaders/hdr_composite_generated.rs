@@ -27,7 +27,7 @@ use ornis_macros::stage;
 #[stage(vertex, entry = "vs_main")]
 fn composite_vertex_entry(
     vertex_index: super::VertexIndex,
-    #[wgsl(context)] ctx: super::QuadContext,
+    ctx: Context<super::QuadContext>,
 ) -> CompositeVertexOutput {
     return CompositeVertexOutput {
         clip_position: ctx.quad[vertex_index],
@@ -139,7 +139,7 @@ fn fragment_head() -> String {
 #[stage(vertex, entry = "vs_main")]
 fn hdr_fragment_vs_entry(
     vertex_index: super::VertexIndex,
-    #[wgsl(context)] ctx: super::QuadContext,
+    ctx: Context<super::QuadContext>,
 ) -> QuadVertexOutput {
     return QuadVertexOutput {
         clip_position: ctx.quad[vertex_index],
@@ -164,7 +164,7 @@ pub(crate) struct HdrContext {
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
 fn hdr_fragment_entry(
     #[wgsl(location = 0)] uv: glam::Vec2,
-    #[wgsl(context)] ctx: HdrContext,
+    ctx: Context<HdrContext>,
 ) -> glam::Vec4 {
     let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, uv).rgb;
     let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, uv).rgba;

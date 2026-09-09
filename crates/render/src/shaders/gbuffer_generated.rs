@@ -38,7 +38,7 @@ pub(crate) struct GbufferVertexContext {
 fn gbuffer_vs_entry(
     input: VertexInput,
     instance_index: super::InstanceIndex,
-    #[wgsl(context)] ctx: GbufferVertexContext,
+    ctx: Context<GbufferVertexContext>,
 ) -> VertexOutput {
     let obj = ctx.per_objects[instance_index];
     let world_pos = obj.model * Vec4::new(input.position, 1.0);
