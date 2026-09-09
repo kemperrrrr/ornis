@@ -268,7 +268,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .into();
                 }
                 format!("@builtin({b})")
-            },
+            }
         };
         decl_lines.push(format!("    {prefix} {ident}: {wgsl_ty},"));
     }
