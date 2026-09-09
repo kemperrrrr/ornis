@@ -393,6 +393,19 @@ impl UniformGrid {
         }
     }
 
+    fn set_cell_size(&mut self, cell_size: f32) {
+        assert!(
+            cell_size.is_finite() && cell_size > 0.0,
+            "uniform grid cell size must be finite and positive, got {cell_size}"
+        );
+        if self.cell_size != cell_size {
+            self.cell_size = cell_size;
+            // The spatial index and incremental state belong to the old cell
+            // size: force a full rebuild on the next update.
+            self.aabbs.clear();
+        }
+    }
+
     fn cell_bounds(&self, aabb: &AABB) -> (CellKey, CellKey, u64) {
         let minimum = CellKey::from_point(aabb.min, self.cell_size);
         let maximum = CellKey::from_point(aabb.max, self.cell_size);
@@ -675,6 +688,15 @@ impl BroadPhase for UniformGrid {
 /// `AUTO_SWITCH_COOLDOWN` steps since the last switch, so oscillation never
 /// thrashes the incremental grid state. The first update snaps immediately
 /// (no hysteresis) to avoid serving a huge scene from the wrong backend.
+///
+/// The grid cell is re-evaluated from scene density (never wall-clock):
+/// `raw ≈ 2 · ∛(volume / n)` over non-coarse bodies. `8.0` is sticky: it is
+/// the only cell with settled end-to-end validation (tiled 10k ~14–15 ms),
+/// so the estimate moves only on a strong signal (`raw < 3` → `2.0`,
+/// `raw > 12` → `16.0`). Coarse bodies ride the large-body escape path and
+/// are excluded from the density estimate so a giant floor cannot inflate
+/// the world volume. Re-evaluation runs at most every
+/// `AUTO_CELL_REEVAL_INTERVAL` updates or when the body count moves >25%.
 pub(crate) struct AdaptiveBroadphase {
     sweep: SweepAndPrune,
     grid: UniformGrid,
@@ -682,6 +704,8 @@ pub(crate) struct AdaptiveBroadphase {
     votes: u32,
     updates: u64,
     steps_since_switch: u64,
+    last_cell_eval: u64,
+    last_cell_n: usize,
 }
 
 /// Body counts at or below this use the sweep: sorting is trivial and the
@@ -693,8 +717,20 @@ const AUTO_GRID_MIN_N: usize = 1500;
 /// degrades on axis-spanning AABBs, so the middle band routes to the grid
 /// when at least one such body is present.
 const AUTO_LARGE_EXTENT: f32 = 64.0;
-/// Grid cell size for the adaptive backend: the measured tiled-10k optimum.
+/// Grid cell size for the adaptive backend: the measured tiled-10k optimum,
+/// also the fallback when the density estimate has no bodies to work with.
 const AUTO_GRID_CELL_SIZE: f32 = 8.0;
+/// Raw density estimates below this select the small cell (truly dense
+/// 3D packings); the tiled family sits at ~3.1 and stays on the default.
+const AUTO_CELL_SMALL_RAW: f32 = 3.0;
+/// Raw density estimates above this select the large cell (sparse worlds).
+const AUTO_CELL_LARGE_RAW: f32 = 12.0;
+/// Small adaptive cell for dense 3D packings.
+const AUTO_CELL_SMALL: f32 = 2.0;
+/// Large adaptive cell for sparse worlds.
+const AUTO_CELL_LARGE: f32 = 16.0;
+/// Minimum updates between grid cell re-evaluations.
+const AUTO_CELL_REEVAL_INTERVAL: u64 = 60;
 /// Consecutive dissenting votes required before switching backends.
 const AUTO_SWITCH_VOTES: u32 = 3;
 /// Minimum updates between backend switches (hysteresis against flapping).
@@ -720,6 +756,8 @@ impl AdaptiveBroadphase {
             votes: 0,
             updates: 0,
             steps_since_switch: 0,
+            last_cell_eval: 0,
+            last_cell_n: 0,
         }
     }
 
@@ -746,6 +784,46 @@ impl AdaptiveBroadphase {
     fn active_kind(&self) -> BroadPhaseKind {
         self.active
     }
+
+    /// Grid cell size currently backing the adaptive grid.
+    #[cfg(test)]
+    fn grid_cell_size(&self) -> f32 {
+        self.grid.cell_size
+    }
+
+    /// Desired grid cell from scene density: `2 · ∛(volume / n)` over
+    /// non-coarse bodies, quantized to `AUTO_CELL_OPTIONS` (ascending scan
+    /// with `<=` sends exact ties to the larger cell: fewer cells, less
+    /// bookkeeping). Falls back to `AUTO_GRID_CELL_SIZE` with no bodies.
+    fn desired_cell_size(bodies: &[RigidBody]) -> f32 {
+        let mut minimum = Vec3::splat(f32::INFINITY);
+        let mut maximum = Vec3::splat(f32::NEG_INFINITY);
+        let mut count = 0usize;
+        for body in bodies {
+            if body_max_extent(body) > AUTO_LARGE_EXTENT {
+                continue;
+            }
+            count += 1;
+            minimum = minimum.min(body.position);
+            maximum = maximum.max(body.position);
+        }
+        if count == 0 {
+            return AUTO_GRID_CELL_SIZE;
+        }
+        let span = (maximum - minimum).max(Vec3::splat(1.0));
+        let volume = span.x * span.y * span.z;
+        let raw = (2.0 * (volume / count as f32).cbrt()).clamp(2.0, 16.0);
+        let mut best = AUTO_CELL_OPTIONS[0];
+        let mut best_distance = (best - raw).abs();
+        for &candidate in &AUTO_CELL_OPTIONS[1..] {
+            let distance = (candidate - raw).abs();
+            if distance <= best_distance {
+                best = candidate;
+                best_distance = distance;
+            }
+        }
+        best
+    }
 }
 
 impl BroadPhase for AdaptiveBroadphase {
@@ -769,7 +847,24 @@ impl BroadPhase for AdaptiveBroadphase {
         }
         match self.active {
             BroadPhaseKind::SweepAndPrune => self.sweep.update(bodies, sub_dt),
-            _ => self.grid.update(bodies, sub_dt),
+            _ => {
+                // Re-evaluate the grid cell from scene density on the first
+                // update, at most every interval, or when the body count
+                // moves >25%. `set_cell_size` forces a full rebuild, so the
+                // incremental state always matches the active cell size.
+                let count = bodies.len();
+                let count_moved = count.abs_diff(self.last_cell_n) * 4 > self.last_cell_n;
+                if self.updates == 1
+                    || self.updates - self.last_cell_eval >= AUTO_CELL_REEVAL_INTERVAL
+                    || count_moved
+                {
+                    let want_cell = Self::desired_cell_size(bodies);
+                    self.grid.set_cell_size(want_cell);
+                    self.last_cell_eval = self.updates;
+                    self.last_cell_n = count;
+                }
+                self.grid.update(bodies, sub_dt);
+            }
         }
     }
 
@@ -927,11 +1022,19 @@ mod tests {
     }
 
     fn sparse_bodies(n: u32) -> Vec<RigidBody> {
+        grid_bodies(n, 20.0)
+    }
+
+    fn grid_bodies(n: u32, spacing: f32) -> Vec<RigidBody> {
         let mut bodies = Vec::with_capacity(n as usize);
         let side = (n as f32).sqrt().ceil() as u32;
         for i in 0..n {
             bodies.push(RigidBody::new_box(
-                Vec3::new((i % side) as f32 * 20.0, 5.0, (i / side) as f32 * 20.0),
+                Vec3::new(
+                    (i % side) as f32 * spacing,
+                    5.0,
+                    (i / side) as f32 * spacing,
+                ),
                 Vec3::splat(0.4),
                 1.0,
             ));
@@ -956,7 +1059,10 @@ mod tests {
         let mut auto = AdaptiveBroadphase::new();
         auto.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
-        let mut grid = UniformGrid::with_cell_size(AUTO_GRID_CELL_SIZE);
+        // Dynamics span ~90x1x90 outside the excluded coarse floor:
+        // 2 * cbrt(8100/2000) ~ 3.2 -> cell 4.0.
+        assert_eq!(auto.grid_cell_size(), 4.0);
+        let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
         grid.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active(), grid.active());
     }
@@ -967,25 +1073,71 @@ mod tests {
         let mut auto = AdaptiveBroadphase::new();
         auto.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
-        let mut grid = UniformGrid::with_cell_size(AUTO_GRID_CELL_SIZE);
+        assert_eq!(auto.grid_cell_size(), 16.0);
+        let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
         grid.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active(), grid.active());
     }
 
     #[test]
+    fn auto_cell_size_follows_scene_density() {
+        // Dense packing (spacing 2.0): 2 * cbrt(~8) ~ 4.0.
+        assert_eq!(
+            AdaptiveBroadphase::desired_cell_size(&grid_bodies(2000, 2.0)),
+            4.0
+        );
+        // Sparse world (spacing 20.0): raw ~14.6 -> 16.0.
+        assert_eq!(
+            AdaptiveBroadphase::desired_cell_size(&sparse_bodies(5000)),
+            16.0
+        );
+        // No measurable bodies: default optimum.
+        assert_eq!(AdaptiveBroadphase::desired_cell_size(&[]), 8.0);
+        assert_eq!(
+            AdaptiveBroadphase::desired_cell_size(&[RigidBody::new_box(
+                Vec3::ZERO,
+                Vec3::splat(500.0),
+                0.0
+            )]),
+            8.0
+        );
+    }
+
+    #[test]
     fn auto_routing_is_stable_across_updates() {
+        // 70 updates cross the cell re-evaluation interval: neither the
+        // backend nor the cell may move on a static scene.
         let bodies = giant_floor_bodies(2000);
         let mut auto = AdaptiveBroadphase::new();
-        for _ in 0..10 {
+        for _ in 0..70 {
             auto.update(&bodies, 1.0 / 60.0);
             assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
+            assert_eq!(auto.grid_cell_size(), 4.0);
         }
         let small = scene();
         let mut auto_small = AdaptiveBroadphase::new();
-        for _ in 0..10 {
+        for _ in 0..70 {
             auto_small.update(&small, 1.0 / 60.0);
             assert_eq!(auto_small.active_kind(), BroadPhaseKind::SweepAndPrune);
         }
+    }
+
+    #[test]
+    fn auto_grows_into_grid_when_the_scene_scales_up() {
+        let mut bodies = sparse_bodies(400);
+        let mut auto = AdaptiveBroadphase::new();
+        for _ in 0..70 {
+            auto.update(&bodies, 1.0 / 60.0);
+        }
+        assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
+        bodies.extend(grid_bodies(3000, 2.0));
+        for _ in 0..70 {
+            auto.update(&bodies, 1.0 / 60.0);
+        }
+        assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
+        let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
+        grid.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active(), grid.active());
     }
 
     #[test]
