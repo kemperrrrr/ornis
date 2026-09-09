@@ -104,3 +104,25 @@ fn stage_context_bundle_strips_prefix() {
     assert!(src.contains("return WgslName(quad[idx]) /* x */;"), "{src}");
     assert_eq!(QuadBundle::GLOBALS, &["quad", "uvs"]);
 }
+
+/// Builtin-index newtypes: the type carries the builtin, no attribute.
+/// (Local definition — the macro maps by type name, mirroring glam.)
+#[allow(dead_code)]
+struct VertexIndex(pub u32);
+
+#[stage(vertex, entry = "vs_main")]
+fn quad_newtype_entry(vertex_index: VertexIndex) -> WgslName {
+    return WgslName {
+        x: quad[vertex_index],
+    };
+}
+
+#[test]
+fn stage_newtype_builtin_needs_no_attribute() {
+    let src = quad_newtype_entry::wgsl_source();
+    assert!(
+        src.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"),
+        "{src}"
+    );
+    assert!(src.contains("quad[vertex_index]"), "{src}");
+}

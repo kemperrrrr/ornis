@@ -37,10 +37,10 @@ pub(crate) struct GbufferVertexContext {
 #[stage(vertex, entry = "vs_main")]
 fn gbuffer_vs_entry(
     input: VertexInput,
-    #[wgsl(builtin = "instance_index")] instance: u32,
+    instance_index: super::InstanceIndex,
     #[wgsl(context)] ctx: GbufferVertexContext,
 ) -> VertexOutput {
-    let obj = ctx.per_objects[instance];
+    let obj = ctx.per_objects[instance_index];
     let world_pos = obj.model * Vec4::new(input.position, 1.0);
     let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
     let mut world_tangent = normalize((obj.normal_matrix * Vec4::new(input.tangent, 0.0)).xyz);
@@ -217,10 +217,10 @@ mod tests {
     fn gbuffer_vertex_entry_matches_legacy_shape() {
         let entry = gbuffer_vs_entry::wgsl_source();
         assert!(entry.starts_with(
-            "@vertex\nfn vs_main(input: VertexInput, @builtin(instance_index) instance: u32)"
+            "@vertex\nfn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32)"
         ));
         assert!(entry.contains("-> VertexOutput"));
-        assert!(entry.contains("let obj = per_objects[instance];"));
+        assert!(entry.contains("let obj = per_objects[instance_index];"));
         assert!(entry.contains("output.clip_position = camera.view_proj * world_pos;"));
         assert!(entry.contains("output.material_index = obj.material_index;"));
         assert!(entry.contains("return output;"));

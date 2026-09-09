@@ -162,6 +162,25 @@ fn param_is_context(attrs: &[syn::Attribute]) -> syn::Result<bool> {
     Ok(context)
 }
 
+/// Builtin-index newtypes (`VertexIndex` → `@builtin(vertex_index)`,
+/// `InstanceIndex` → `@builtin(instance_index)`): a bare `u32` cannot say
+/// which index it is, so the meaning travels in the type and no attribute
+/// is needed. Matches the last path segment, so `super::VertexIndex`
+/// works; combining a newtype with any `#[wgsl(...)]` option is an error.
+fn builtin_newtype(ty: &syn::Type) -> Option<&'static str> {
+    if let syn::Type::Path(path) = ty
+        && path.qself.is_none()
+        && let Some(seg) = path.path.segments.last()
+    {
+        return match seg.ident.to_string().as_str() {
+            "VertexIndex" => Some("vertex_index"),
+            "InstanceIndex" => Some("instance_index"),
+            _ => None,
+        };
+    }
+    None
+}
+
 /// `#[wgsl(global = "NAME")]` on an entry parameter: the parameter is not a
 /// WGSL function parameter but a module-global resource (`camera`, …).
 /// Returns the global name when present.
@@ -374,6 +393,23 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
             Err(e) => return e.to_compile_error().into(),
         } {
             contexts.insert(pi.ident.to_string());
+            continue;
+        }
+        // Builtin-index newtypes carry their meaning in the type: no
+        // attribute, and combining one with any `#[wgsl(...)]` option is
+        // two sources of truth.
+        if let Some(builtin) = builtin_newtype(&pat_ty.ty) {
+            if all_attrs.iter().any(|a| a.path().is_ident("wgsl")) {
+                return syn::Error::new_spanned(
+                    &pat_ty.ty,
+                    format!(
+                        "stage: type `{builtin}` already implies `@builtin({builtin})`; drop the attribute"
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+            params.push(format!("@builtin({builtin}) {}: u32", pi.ident));
             continue;
         }
         let global = match param_global(&all_attrs) {

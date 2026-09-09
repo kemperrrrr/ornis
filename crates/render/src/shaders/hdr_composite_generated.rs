@@ -26,12 +26,12 @@ use ornis_macros::stage;
 /// `composite_vertex_entry::wgsl_source()`, never compiled as Rust.
 #[stage(vertex, entry = "vs_main")]
 fn composite_vertex_entry(
-    #[wgsl(builtin = "vertex_index")] idx: u32,
+    vertex_index: super::VertexIndex,
     #[wgsl(context)] ctx: super::QuadContext,
 ) -> CompositeVertexOutput {
     return CompositeVertexOutput {
-        clip_position: ctx.quad[idx],
-        uv: ctx.uvs[idx],
+        clip_position: ctx.quad[vertex_index],
+        uv: ctx.uvs[vertex_index],
     };
 }
 
@@ -138,12 +138,12 @@ fn fragment_head() -> String {
 /// entry — but part of the legacy text). Translated like the vertex module.
 #[stage(vertex, entry = "vs_main")]
 fn hdr_fragment_vs_entry(
-    #[wgsl(builtin = "vertex_index")] idx: u32,
+    vertex_index: super::VertexIndex,
     #[wgsl(context)] ctx: super::QuadContext,
 ) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: ctx.quad[idx],
-        uv: ctx.uvs[idx],
+        clip_position: ctx.quad[vertex_index],
+        uv: ctx.uvs[vertex_index],
     };
 }
 
@@ -218,10 +218,10 @@ mod tests {
     #[test]
     fn hdr_vertex_entry_matches_legacy_shape() {
         let entry = composite_vertex_entry::wgsl_source();
-        assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
+        assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"));
         assert!(entry.contains("-> CompositeVertexOutput"));
         assert!(entry.contains(
-            "return CompositeVertexOutput(quad[idx], uvs[idx]) /* clip_position, uv */;"
+            "return CompositeVertexOutput(quad[vertex_index], uvs[vertex_index]) /* clip_position, uv */;"
         ));
     }
 

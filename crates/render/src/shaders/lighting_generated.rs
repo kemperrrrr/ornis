@@ -386,12 +386,12 @@ pub fn wgsl_source() -> String {
 /// DSL-only — replaced by `lighting_vertex_entry::wgsl_source()`.
 #[stage(vertex, entry = "vs_main")]
 fn lighting_vertex_entry(
-    #[wgsl(builtin = "vertex_index")] idx: u32,
+    vertex_index: super::VertexIndex,
     #[wgsl(context)] ctx: super::QuadContext,
 ) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: ctx.quad[idx],
-        uv: ctx.uvs[idx],
+        clip_position: ctx.quad[vertex_index],
+        uv: ctx.uvs[vertex_index],
     };
 }
 

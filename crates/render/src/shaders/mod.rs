@@ -225,6 +225,16 @@ pub struct DepthTexture;
 /// Sampler handle marker; see [`Texture2d`].
 pub struct Sampler;
 
+/// Builtin index newtypes: a bare `u32` cannot say *which* index it is
+/// (`vertex_index`, `instance_index`, `@location(0)` and a plain local are
+/// all `u32`), so the meaning travels in the type. `#[stage]` maps
+/// `VertexIndex` → `@builtin(vertex_index) …: u32` (and likewise for
+/// `InstanceIndex`) with no attribute — one source of truth. Newtypes live
+/// in signature position only; bodies use the bare ident (no `.0` tax).
+pub struct VertexIndex(pub u32);
+/// Per-instance index newtype; see [`VertexIndex`].
+pub struct InstanceIndex(pub u32);
+
 /// Quad constants as a stage-entry context bundle: five vertex entries share
 /// it (`ctx: QuadContext`, `ctx.quad[idx]`). Field names match the WGSL
 /// `const` names exactly — the `#[stage]` `context` lowering strips the

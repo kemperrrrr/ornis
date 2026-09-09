@@ -26,12 +26,12 @@ pub(crate) struct CompositeContext {
 /// `var`-out form (`let mut out: T;` + field assignment).
 #[stage(vertex, entry = "vs")]
 fn composite_vs_entry(
-    #[wgsl(builtin = "vertex_index")] idx: u32,
+    vertex_index: super::VertexIndex,
     #[wgsl(context)] ctx: super::QuadContext,
 ) -> VertexOutput {
     let mut out: VertexOutput;
-    out.position = ctx.quad[idx];
-    out.uv = ctx.uvs[idx];
+    out.position = ctx.quad[vertex_index];
+    out.uv = ctx.uvs[vertex_index];
     return out;
 }
 

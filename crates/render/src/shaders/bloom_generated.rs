@@ -19,12 +19,12 @@ use ornis_macros::stage;
 /// DSL-only — replaced by `bloom_vertex_entry::wgsl_source()`.
 #[stage(vertex, entry = "vs_main")]
 fn bloom_vertex_entry(
-    #[wgsl(builtin = "vertex_index")] idx: u32,
+    vertex_index: super::VertexIndex,
     #[wgsl(context)] ctx: super::QuadContext,
 ) -> BloomVertexOutput {
     return BloomVertexOutput {
-        clip_position: ctx.quad[idx],
-        uv: ctx.uvs[idx],
+        clip_position: ctx.quad[vertex_index],
+        uv: ctx.uvs[vertex_index],
     };
 }
 
@@ -165,9 +165,9 @@ mod tests {
     #[test]
     fn bloom_entries_match_legacy_shape() {
         let vs = bloom_vertex_entry::wgsl_source();
-        assert!(vs.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"));
+        assert!(vs.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"));
         assert!(
-            vs.contains("return BloomVertexOutput(quad[idx], uvs[idx]) /* clip_position, uv */;")
+            vs.contains("return BloomVertexOutput(quad[vertex_index], uvs[vertex_index]) /* clip_position, uv */;")
         );
         let fs = bloom_fragment_entry::wgsl_source();
         assert!(fs.starts_with("@fragment\nfn fs_main(@location(0) uv: vec2<f32>)"));
