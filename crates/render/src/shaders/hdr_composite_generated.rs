@@ -19,13 +19,17 @@ use ornis_macros::stage;
 
 /// HDR composite vertex entry, written in Rust and translated to WGSL by
 /// [`stage`](ornis_macros::stage): fullscreen-quad corner passthrough.
-/// DSL-only (free `QUAD`/`UVS` binding identifiers) — replaced by
+/// DSL-only (`QUAD`/`UVS` globals declared via `#[wgsl(global)]`) — replaced by
 /// `composite_vertex_entry::wgsl_source()`, never compiled as Rust.
 #[stage(vertex, entry = "vs_main")]
-fn composite_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> CompositeVertexOutput {
+fn composite_vertex_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
+    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+) -> CompositeVertexOutput {
     return CompositeVertexOutput {
-        clip_position: QUAD[idx],
-        uv: UVS[idx],
+        clip_position: quad[idx],
+        uv: uvs[idx],
     };
 }
 
@@ -131,18 +135,29 @@ fn fragment_head() -> String {
 /// Fragment-file vertex entry (dead in practice — `fs_main` is the selected
 /// entry — but part of the legacy text). Translated like the vertex module.
 #[stage(vertex, entry = "vs_main")]
-fn hdr_fragment_vs_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> QuadVertexOutput {
+fn hdr_fragment_vs_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
+    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: QUAD[idx],
-        uv: UVS[idx],
+        clip_position: quad[idx],
+        uv: uvs[idx],
     };
 }
 
 /// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
-/// deferred/forward layer mix + bloom. DSL-only — free texture/uniform
-/// identifiers. `==` on the mode uniform selects the layer mix.
+/// deferred/forward layer mix + bloom. DSL-only — texture/uniform globals
+/// declared via `#[wgsl(global)]`. `==` on the mode uniform selects the layer mix.
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn hdr_fragment_entry(#[wgsl(location = 0)] uv: glam::Vec2) -> glam::Vec4 {
+fn hdr_fragment_entry(
+    #[wgsl(location = 0)] uv: glam::Vec2,
+    #[wgsl(global = "deferred_tex")] deferred_tex: Texture2d,
+    #[wgsl(global = "forward_tex")] forward_tex: Texture2d,
+    #[wgsl(global = "bloom_tex")] bloom_tex: Texture2d,
+    #[wgsl(global = "composite_sampler")] composite_sampler: Sampler,
+    #[wgsl(global = "bloom_params")] bloom_params: BloomUniform,
+) -> glam::Vec4 {
     let deferred_color = textureSample(deferred_tex, composite_sampler, uv).rgb;
     let forward_color = textureSample(forward_tex, composite_sampler, uv).rgba;
     let mut combined = deferred_color;

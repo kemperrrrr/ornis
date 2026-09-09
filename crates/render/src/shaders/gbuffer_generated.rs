@@ -24,12 +24,14 @@ use crate::shaders::math::octahedral_encode;
 use ornis_macros::stage;
 
 /// G-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
-/// instance transform + world-space varying. DSL-only — free `per_objects`
-/// / `camera` binding identifiers.
+/// instance transform + world-space varying. DSL-only — `per_objects` /
+/// `camera` globals declared via `#[wgsl(global)]`.
 #[stage(vertex, entry = "vs_main")]
 fn gbuffer_vs_entry(
     input: VertexInput,
     #[wgsl(builtin = "instance_index")] instance: u32,
+    #[wgsl(global = "per_objects")] per_objects: [PerObjectGpu],
+    #[wgsl(global = "camera")] camera: CameraUniform,
 ) -> VertexOutput {
     let obj = per_objects[instance];
     let world_pos = obj.model * Vec4::new(input.position, 1.0);
@@ -69,9 +71,13 @@ pub fn wgsl_vertex_source() -> String {
 }
 
 /// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
-/// 5-MRT packing. DSL-only — free `materials` binding identifier.
+/// 5-MRT packing. DSL-only — `materials` global declared via
+/// `#[wgsl(global)]`.
 #[stage(fragment, entry = "fs_main")]
-fn gbuffer_fs_entry(input: FragmentInput) -> GBufferOutput {
+fn gbuffer_fs_entry(
+    input: FragmentInput,
+    #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
+) -> GBufferOutput {
     let mat = materials[input.material_index];
     let n = normalize(input.world_normal);
     let world_pos = input.world_position;

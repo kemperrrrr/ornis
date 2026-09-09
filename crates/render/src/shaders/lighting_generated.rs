@@ -150,12 +150,24 @@ fn lighting_fragment_kernels() -> String {
 }
 
 /// Deferred-lighting fragment entry, translated by [`stage`](ornis_macros::stage):
-/// g-buffer decode + full OpenPBR evaluation. DSL-only — free texture /
-/// uniform / storage identifiers. `discard` is a bare path statement;
+/// g-buffer decode + full OpenPBR evaluation. DSL-only — resource globals
+/// declared via `#[wgsl(global)]`. `discard` is a bare path statement;
 /// `Vec2/3/4::new` spell WGSL constructors; `lo = lo + …` avoids `+=`,
 /// which the DSL does not cover.
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn lighting_fragment_entry(#[wgsl(location = 0)] uv: glam::Vec2) -> glam::Vec4 {
+fn lighting_fragment_entry(
+    #[wgsl(location = 0)] uv: glam::Vec2,
+    #[wgsl(global = "depth_tex")] depth_tex: DepthTexture,
+    #[wgsl(global = "albedo_tex")] albedo_tex: Texture2d,
+    #[wgsl(global = "normal_tex")] normal_tex: Texture2d,
+    #[wgsl(global = "material_id_tex")] material_id_tex: Texture2dUint,
+    #[wgsl(global = "world_pos_tex")] world_pos_tex: Texture2d,
+    #[wgsl(global = "mat_params_tex")] mat_params_tex: Texture2d,
+    #[wgsl(global = "lighting_sampler")] lighting_sampler: Sampler,
+    #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
+    #[wgsl(global = "camera")] camera: CameraUniform,
+    #[wgsl(global = "lighting")] lighting: LightingUniform,
+) -> glam::Vec4 {
     let depth = textureLoad(
         depth_tex,
         UVec2::new(uv * Vec2::new(textureDimensions(depth_tex))),
@@ -364,10 +376,14 @@ pub fn wgsl_source() -> String {
 /// Vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `lighting_vertex_entry::wgsl_source()`.
 #[stage(vertex, entry = "vs_main")]
-fn lighting_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> QuadVertexOutput {
+fn lighting_vertex_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
+    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: QUAD[idx],
-        uv: UVS[idx],
+        clip_position: quad[idx],
+        uv: uvs[idx],
     };
 }
 

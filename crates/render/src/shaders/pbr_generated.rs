@@ -77,11 +77,17 @@ pub fn wgsl_source() -> String {
 }
 
 /// Forward-PBR fragment entry, translated by [`stage`](ornis_macros::stage):
-/// full OpenPBR evaluation over the light array. DSL-only — free
-/// `camera`/`lighting`/`materials` binding identifiers. Layer evaluators
+/// full OpenPBR evaluation over the light array. DSL-only —
+/// `camera`/`lighting`/`materials` globals declared via `#[wgsl(global)]`.
+/// Layer evaluators
 /// stay handwritten below and are called by name.
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn pbr_fragment_entry(input: FragmentInput) -> glam::Vec4 {
+fn pbr_fragment_entry(
+    input: FragmentInput,
+    #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
+    #[wgsl(global = "camera")] camera: CameraUniform,
+    #[wgsl(global = "lighting")] lighting: LightingUniform,
+) -> glam::Vec4 {
     let mat = materials[input.material_index];
     let n = normalize(input.world_normal);
     let v = normalize(camera.camera_pos.xyz - input.world_position);

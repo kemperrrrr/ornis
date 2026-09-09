@@ -15,17 +15,27 @@ use ornis_macros::stage;
 /// DSL-only — replaced by `composite_vs_entry::wgsl_source()`. Uses the
 /// `var`-out form (`let mut out: T;` + field assignment).
 #[stage(vertex, entry = "vs")]
-fn composite_vs_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> VertexOutput {
+fn composite_vs_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
+    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+) -> VertexOutput {
     let mut out: VertexOutput;
-    out.position = QUAD[idx];
-    out.uv = UVS[idx];
+    out.position = quad[idx];
+    out.uv = uvs[idx];
     return out;
 }
 
 /// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — free texture identifiers.
+/// DSL-only — texture globals declared via `#[wgsl(global)]`.
 #[stage(fragment, entry = "fs", returns = "@location(0) vec4<f32>")]
-fn composite_fs_entry(input: VertexOutput) -> glam::Vec4 {
+fn composite_fs_entry(
+    input: VertexOutput,
+    #[wgsl(global = "pbr_tex")] pbr_tex: Texture2d,
+    #[wgsl(global = "pbr_sampler")] pbr_sampler: Sampler,
+    #[wgsl(global = "ui_tex")] ui_tex: Texture2d,
+    #[wgsl(global = "ui_sampler")] ui_sampler: Sampler,
+) -> glam::Vec4 {
     let bg = textureSampleLevel(pbr_tex, pbr_sampler, input.uv, 0.0);
     let ui = textureSampleLevel(ui_tex, ui_sampler, input.uv, 0.0);
     let ui_linear = srgb_to_linear(ui.rgb);

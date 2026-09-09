@@ -456,6 +456,90 @@ mod tests {
         assert!(checked >= 4, "expected struct literals, found {checked}");
     }
 
+    /// Every `#[wgsl(global)]` name an entry declares must exist in the
+    /// assembled shader it splices into. Catches a typo'd global (the entry
+    /// still parses, naga only fails if the name is *used* undeclared — an
+    /// unused declaration would pass silently).
+    #[test]
+    fn stage_globals_declared() {
+        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
+        let hdr_fragment = hdr_composite_generated::wgsl_source();
+        let bloom = bloom_generated::wgsl_source();
+        let lighting = lighting_generated::wgsl_source();
+        let lighting_vertex = lighting_generated::wgsl_vertex_source();
+        let composite = composite_generated::wgsl_source();
+        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
+        let gbuffer_fragment = gbuffer_generated::wgsl_source();
+        let pbr = pbr_generated::wgsl_source();
+        // (entry globals, assemblies containing them). The fragment-file
+        // vertex entry is dead in practice, so it pins against the vertex
+        // assembly carrying the same quad constants.
+        let pairs: &[(&[&str], Vec<String>)] = &[
+            (
+                hdr_composite_generated::composite_vertex_entry::globals(),
+                vec![hdr_vertex.clone()],
+            ),
+            (
+                hdr_composite_generated::hdr_fragment_vs_entry::globals(),
+                vec![hdr_vertex],
+            ),
+            (
+                hdr_composite_generated::hdr_fragment_entry::globals(),
+                vec![hdr_fragment],
+            ),
+            (
+                bloom_generated::bloom_vertex_entry::globals(),
+                vec![bloom.clone()],
+            ),
+            (
+                bloom_generated::bloom_fragment_entry::globals(),
+                vec![bloom],
+            ),
+            (
+                lighting_generated::lighting_vertex_entry::globals(),
+                vec![lighting_vertex],
+            ),
+            (
+                lighting_generated::lighting_fragment_entry::globals(),
+                vec![lighting],
+            ),
+            (
+                composite_generated::composite_vs_entry::globals(),
+                vec![composite.clone()],
+            ),
+            (
+                composite_generated::composite_fs_entry::globals(),
+                vec![composite],
+            ),
+            (
+                gbuffer_generated::gbuffer_vs_entry::globals(),
+                vec![gbuffer_vertex],
+            ),
+            (
+                gbuffer_generated::gbuffer_fs_entry::globals(),
+                vec![gbuffer_fragment],
+            ),
+            (pbr_generated::pbr_fragment_entry::globals(), vec![pbr]),
+        ];
+        let mut checked = 0;
+        for (globals, assemblies) in pairs {
+            assert!(!globals.is_empty(), "entry must declare its globals");
+            for global in *globals {
+                assert!(
+                    assemblies.iter().any(|src| src.contains(global)),
+                    "global `{global}` declared by an entry is missing from its assembled shader"
+                );
+                checked += 1;
+            }
+        }
+        // Twelve entries declare 38 names today; fewer means a declaration
+        // was dropped and the test passes vacuously.
+        assert!(
+            checked >= 38,
+            "expected global declarations, found {checked}"
+        );
+    }
+
     /// Parse and fully validate an assembled WGSL module with naga.
     fn assert_valid_wgsl(name: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)

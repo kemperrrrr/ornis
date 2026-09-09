@@ -27,6 +27,18 @@ fn quad_fs_entry(#[wgsl(location = 0)] uv: Vec2) -> Vec4 {
     return Vec4(uv.x, uv.y, 0.0, 1.0);
 }
 
+/// Global resource params: excluded from the signature, renamed at uses,
+/// re-exported via `globals()`.
+#[stage(vertex, entry = "vs_main")]
+fn quad_global_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
+    #[wgsl(global = "camera")] camera: CameraUniform,
+) -> WgslName {
+    let pos = camera.view[3];
+    return WgslName { x: quad[idx] };
+}
+
 #[test]
 fn stage_vertex_entry_shape() {
     let src = quad_vs_entry::wgsl_source();
@@ -47,4 +59,19 @@ fn stage_fragment_location_param() {
         "{src}"
     );
     assert!(src.contains("-> @location(0) vec4<f32>"), "{src}");
+}
+
+#[test]
+fn stage_global_params_renamed_and_excluded() {
+    let src = quad_global_entry::wgsl_source();
+    // Globals leave the signature; only the builtin param remains.
+    assert!(
+        src.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) idx: u32)"),
+        "{src}"
+    );
+    // Uses are renamed to the WGSL global names.
+    assert!(!src.contains("quad["), "global param must not leak: {src}");
+    assert!(src.contains("QUAD[idx]"), "{src}");
+    assert!(src.contains("camera.view[3]"), "{src}");
+    assert_eq!(quad_global_entry::globals(), &["QUAD", "camera"]);
 }

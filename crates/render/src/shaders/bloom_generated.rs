@@ -17,19 +17,29 @@ use ornis_macros::stage;
 /// Bloom vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `bloom_vertex_entry::wgsl_source()`.
 #[stage(vertex, entry = "vs_main")]
-fn bloom_vertex_entry(#[wgsl(builtin = "vertex_index")] idx: u32) -> BloomVertexOutput {
+fn bloom_vertex_entry(
+    #[wgsl(builtin = "vertex_index")] idx: u32,
+    #[wgsl(global = "QUAD")] quad: [[f32; 4]; 4],
+    #[wgsl(global = "UVS")] uvs: [[f32; 2]; 4],
+) -> BloomVertexOutput {
     return BloomVertexOutput {
-        clip_position: QUAD[idx],
-        uv: UVS[idx],
+        clip_position: quad[idx],
+        uv: uvs[idx],
     };
 }
 
 /// Bloom fragment entry, translated by [`stage`](ornis_macros::stage):
-/// bright-pass reselection. DSL-only — free texture/uniform identifiers.
+/// bright-pass reselection. DSL-only — texture/uniform globals declared via
+/// `#[wgsl(global)]`.
 /// `Vec4::new(vec3, scalar)` spells the WGSL `vec4<f32>(vec3, f32)`
 /// constructor; the `returns` override carries the `@location` return.
 #[stage(fragment, entry = "fs_main", returns = "@location(0) vec4<f32>")]
-fn bloom_fragment_entry(#[wgsl(location = 0)] uv: glam::Vec2) -> glam::Vec4 {
+fn bloom_fragment_entry(
+    #[wgsl(location = 0)] uv: glam::Vec2,
+    #[wgsl(global = "src_tex")] src_tex: Texture2d,
+    #[wgsl(global = "src_sampler")] src_sampler: Sampler,
+    #[wgsl(global = "bloom_params")] bloom_params: BloomUniform,
+) -> glam::Vec4 {
     let color = textureSample(src_tex, src_sampler, uv).rgb;
     let luma = luminance(color);
     let keep = smoothstep(bloom_params.threshold, bloom_params.threshold + 0.05, luma);

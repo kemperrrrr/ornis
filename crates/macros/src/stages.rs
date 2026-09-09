@@ -35,7 +35,11 @@
 //!   no Rust spelling.
 //! - parameter interface attributes ride on `#[wgsl(...)]` (stripped from the
 //!   output, never name-resolved): `builtin = "vertex_index"` or
-//!   `location = 0`. Scalar and glam types map as in [`crate::wgsl`]; any
+//!   `location = 0`. Module globals the entry reads are declared the same
+//!   way — `#[wgsl(global = "QUAD")] quad: ...`: the parameter leaves the
+//!   WGSL signature, every use is renamed to the global, and the names are
+//!   re-exported via `globals()` so tests can pin them against the assembled
+//!   shader. Scalar and glam types map as in [`crate::wgsl`]; any
 //!   other named type passes through verbatim (varying structs).
 //! - bodies require an explicit `return` (a tail value would also translate,
 //!   but entries must not look like value functions).
@@ -107,6 +111,66 @@ fn parse_args(args: TokenStream) -> syn::Result<StageArgs> {
     }
 }
 
+/// `#[wgsl(global = "NAME")]` on an entry parameter: the parameter is not a
+/// WGSL function parameter but a module-global resource (`QUAD`, `camera`,
+/// …). Returns the global name when present.
+fn param_global(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+    let mut global: Option<String> = None;
+    let mut saw_interface = false;
+    let mut first_wgsl: Option<&syn::Attribute> = None;
+    for attr in attrs {
+        if !attr.path().is_ident("wgsl") {
+            continue;
+        }
+        first_wgsl = first_wgsl.or(Some(attr));
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("global") {
+                let lit: syn::LitStr = meta.value()?.parse()?;
+                global = Some(lit.value());
+                Ok(())
+            } else if meta.path.is_ident("builtin") || meta.path.is_ident("location") {
+                // Not ours — but the value must still be consumed, or the
+                // outer meta parser stalls expecting `,`.
+                meta.value()?.parse::<syn::Lit>()?;
+                saw_interface = true;
+                Ok(())
+            } else {
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N` or `global = \"...\"`"))
+            }
+        })?;
+    }
+    if global.is_some()
+        && saw_interface
+        && let Some(attr) = first_wgsl
+    {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "stage: `global` cannot combine with `builtin`/`location` — globals are not function parameters",
+        ));
+    }
+    Ok(global)
+}
+
+/// Rename every `from` identifier to `to` in `block` (paths and bindings;
+/// field-member names are left alone). Global resource params are spelled
+/// in Rust however reads best (`quad`) but must emit the WGSL global name
+/// (`QUAD`) at every use.
+struct GlobalRenamer<'a> {
+    map: &'a std::collections::HashMap<String, String>,
+}
+
+impl<'a> syn::visit_mut::VisitMut for GlobalRenamer<'a> {
+    fn visit_ident_mut(&mut self, ident: &mut proc_macro2::Ident) {
+        if let Some(to) = self.map.get(&ident.to_string()) {
+            *ident = proc_macro2::Ident::new(to, ident.span());
+        }
+    }
+
+    fn visit_member_mut(&mut self, _member: &mut syn::Member) {
+        // Struct field names (`a.quad`) are not global references.
+    }
+}
+
 /// Parameter interface prefix from `#[wgsl(builtin = "...")]` /
 /// `#[wgsl(location = N)]` (at most one of each; both compose).
 fn param_prefix(attrs: &[syn::Attribute]) -> syn::Result<String> {
@@ -125,8 +189,13 @@ fn param_prefix(attrs: &[syn::Attribute]) -> syn::Result<String> {
                 let lit: syn::LitInt = meta.value()?.parse()?;
                 location = Some(lit.base10_parse::<u32>()?);
                 Ok(())
+            } else if meta.path.is_ident("global") {
+                // Handled by `param_global`; not an interface prefix — but the
+                // value must still be consumed here.
+                meta.value()?.parse::<syn::LitStr>()?;
+                Ok(())
             } else {
-                Err(meta.error("stage: parameter option is `builtin = \"...\"` or `location = N`"))
+                Err(meta.error("stage: parameter option is `builtin = \"...\"`, `location = N` or `global = \"...\"`"))
             }
         })?;
     }
@@ -180,6 +249,11 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let mut params = Vec::new();
+    // Global resource params (`#[wgsl(global = "QUAD")] quad: ...`): excluded
+    // from the WGSL signature, renamed to the global at every use, and
+    // re-exported via `globals()` so tests can pin the contract.
+    let mut renames = std::collections::HashMap::new();
+    let mut declared_globals = Vec::new();
     for arg in &func.sig.inputs {
         let syn::FnArg::Typed(pat_ty) = arg else {
             return syn::Error::new_spanned(
@@ -201,6 +275,15 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
         // syn may attach them to the `PatType` or the inner `Pat::Ident`.
         let mut all_attrs = pat_ty.attrs.clone();
         all_attrs.extend(pi.attrs.iter().cloned());
+        let global = match param_global(&all_attrs) {
+            Ok(g) => g,
+            Err(e) => return e.to_compile_error().into(),
+        };
+        if let Some(name) = global {
+            renames.insert(pi.ident.to_string(), name.clone());
+            declared_globals.push(name);
+            continue;
+        }
         let prefix = match param_prefix(&all_attrs) {
             Ok(p) => p,
             Err(e) => return e.to_compile_error().into(),
@@ -213,7 +296,12 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
         ));
     }
 
-    let body = crate::wgsl::wgsl_main_body(&func);
+    let mut body_func = func.clone();
+    if !renames.is_empty() {
+        use syn::visit_mut::VisitMut;
+        GlobalRenamer { map: &renames }.visit_block_mut(&mut body_func.block);
+    }
+    let body = crate::wgsl::wgsl_main_body(&body_func);
     let entry_wgsl = format!(
         "@{stage}\nfn {entry}({}) -> {wgsl_ret} {{\n{body}\n}}\n",
         params.join(", ")
@@ -233,6 +321,14 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
             #[allow(dead_code)]
             pub fn entry_point() -> &'static str {
                 #entry
+            }
+
+            /// Module-global resources this entry reads, declared via
+            /// `#[wgsl(global = "NAME")]` params. Tests pin each name against
+            /// the assembled shader so a typo can never pass silently.
+            #[allow(dead_code)]
+            pub fn globals() -> &'static [&'static str] {
+                &[#(#declared_globals),*]
             }
         }
     })
