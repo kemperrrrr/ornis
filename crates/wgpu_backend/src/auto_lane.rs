@@ -89,7 +89,11 @@ impl<T: bytemuck::Pod> AutoLane<T> {
 
     /// Run the lane: GPU dispatch or CPU closure, with residency handled.
     ///
-    /// After return the CPU copy is authoritative and no dirty flags remain
+    /// Returns `true` when the selected work completed and the CPU copy is
+    /// authoritative. A GPU readback failure returns `false` and preserves
+    /// the dirty flag so the caller can retry or report the device error.
+    ///
+    /// On success the CPU copy is authoritative and no dirty flags remain
     /// (a GPU run uploads first when the CPU side changed and downloads
     /// after; a CPU run leaves the GPU side stale by design — it will
     /// re-upload on the next GPU verdict).
@@ -99,17 +103,17 @@ impl<T: bytemuck::Pod> AutoLane<T> {
         pipeline: Option<&wgpu::ComputePipeline>,
         bind_group: Option<&wgpu::BindGroup>,
         cpu_work: impl FnOnce(&mut [T]),
-    ) {
+    ) -> bool {
         let n = self.buf.cpu_data().len();
         if n == 0 {
-            return;
+            return true;
         }
         let gpu_ready = matches!(self.platform_for(n), Platform::Gpu)
             && pipeline.is_some()
             && bind_group.is_some();
         if !gpu_ready {
             cpu_work(self.buf.cpu_data_mut());
-            return;
+            return true;
         }
         self.buf.sync_to_gpu(&self.queue);
         let wgc = (n as u32).div_ceil(self.config.workgroup_size);
@@ -121,7 +125,7 @@ impl<T: bytemuck::Pod> AutoLane<T> {
         );
         sync.flush();
         self.buf.mark_gpu_dirty();
-        self.buf.sync_to_cpu_blocking(&self.device, &self.queue);
+        self.buf.sync_to_cpu_blocking(&self.device, &self.queue)
     }
 }
 

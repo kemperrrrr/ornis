@@ -19,7 +19,9 @@
 //!   `linear`, …); only together with `location`.
 //!
 //! Field types are limited to scalars and `[T; 2..=4]` (WGSL scalars and
-//! vectors) — interfaces never carry matrices or nested structs.
+//! vectors) — interfaces never carry matrices or nested structs. Boolean
+//! interface fields are rejected because their interpolation/storage rules
+//! are not portable across shader stages.
 //!
 //! # Generated API
 //!
@@ -28,6 +30,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
+use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 
 /// Per-field interface assignment parsed from `#[wgsl(...)]`.
@@ -106,7 +109,6 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
             Some("f32") => return Ok("f32".to_string()),
             Some("u32") => return Ok("u32".to_string()),
             Some("i32") => return Ok("i32".to_string()),
-            Some("bool") => return Ok("bool".to_string()),
             _ => {}
         }
     }
@@ -193,6 +195,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     let mut decl_lines: Vec<String> = Vec::new();
+    let mut locations = HashSet::new();
+    let mut builtins = HashSet::new();
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named field");
         let attr = match parse_field_attr(&field.attrs) {
@@ -220,11 +224,33 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            (Some(loc), None, interp) => match interp {
-                Some(i) => format!("@location({loc}) @interpolate({i})"),
-                None => format!("@location({loc})"),
-            },
-            (None, Some(_), Some(_)) => {
+            (Some(loc), None, interp) => {
+                if !locations.insert(*loc) {
+                    return syn::Error::new(
+                        field.ident.span(),
+                        format!("WgslInterface: duplicate location {loc}"),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                if let Some(i) = interp {
+                    if !matches!(
+                        i.as_str(),
+                        "flat" | "perspective" | "linear" | "centroid" | "sample"
+                    ) {
+                        return syn::Error::new(
+                            field.ident.span(),
+                            format!("WgslInterface: unsupported interpolation qualifier `{i}`"),
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                    format!("@location({loc}) @interpolate({i})")
+                } else {
+                    format!("@location({loc})")
+                }
+            }
+            (None, Some(_b), Some(_)) => {
                 return syn::Error::new(
                     field.ident.span(),
                     "WgslInterface: `interpolate` requires `location`",
@@ -232,7 +258,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            (None, Some(b), None) => format!("@builtin({b})"),
+            (None, Some(b), None) => {
+                if !builtins.insert(b.clone()) {
+                    return syn::Error::new(
+                        field.ident.span(),
+                        format!("WgslInterface: duplicate builtin `{b}`"),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                format!("@builtin({b})")
+            }
         };
         decl_lines.push(format!("    {prefix} {ident}: {wgsl_ty},"));
     }

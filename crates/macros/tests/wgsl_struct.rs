@@ -75,3 +75,20 @@ fn layout_matches_wgsl_rules() {
     assert_eq!(std::mem::offset_of!(Contact, uv), 32);
     assert_eq!(std::mem::offset_of!(Contact, count), 64);
 }
+
+/// Native Rust `bool` is rejected; this explicit wrapper has a stable u32
+/// representation and is emitted as host-shareable WGSL `u32`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, WgslStruct)]
+struct Flags {
+    enabled: ornis_core::GpuBool,
+}
+
+#[test]
+fn gpu_bool_has_explicit_wgsl_u32_representation() {
+    assert_eq!(std::mem::size_of::<ornis_core::GpuBool>(), 4);
+    assert_eq!(ornis_core::GpuBool::new(true).as_u32(), 1);
+    assert!(!ornis_core::GpuBool::from_u32(0).get());
+    assert!(ornis_core::GpuBool::from_u32(7).get());
+    assert!(Flags::WGSL_SOURCE.contains("enabled: u32"));
+}
