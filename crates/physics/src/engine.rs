@@ -2160,6 +2160,9 @@ impl BuiltinPhysicsEngine {
     /// scene matrix: tiled / giant_floor / sparse / islands / heterogeneous).
     /// [`BroadPhaseKind::SweepAndPrune`] is retained as the compatibility
     /// baseline; [`BroadPhaseKind::DynamicAabbTree`] is experimental.
+    /// [`BroadPhaseKind::Auto`] routes analytically between sweep and grid
+    /// with hysteresis (never to the tree); see
+    /// [`BroadPhaseKind::Auto`] for the contract.
     pub fn set_broadphase(&mut self, kind: BroadPhaseKind) {
         if self.broadphase.kind() != kind {
             self.broadphase = BroadPhaseBackend::new(kind);
@@ -2170,6 +2173,15 @@ impl BuiltinPhysicsEngine {
     /// Returns the currently selected broadphase backend.
     pub fn broadphase_kind(&self) -> BroadPhaseKind {
         self.broadphase.kind()
+    }
+
+    /// Backend that served the latest update when
+    /// [`BroadPhaseKind::Auto`] is selected (`SweepAndPrune` or
+    /// `UniformGrid`, never `Auto` itself); `None` for explicit backend
+    /// selections. Diagnostics for tuning and benchmarks, not part of the
+    /// simulation contract.
+    pub fn auto_active_broadphase(&self) -> Option<BroadPhaseKind> {
+        self.broadphase.auto_active_kind()
     }
 
     /// Selects the uniform-grid backend and configures its cell size.
@@ -3370,6 +3382,34 @@ mod tests {
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
         physics.set_broadphase(BroadPhaseKind::SweepAndPrune);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::SweepAndPrune);
+    }
+
+    #[test]
+    fn auto_broadphase_routes_small_scene_to_sweep_and_steps() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.set_broadphase(BroadPhaseKind::Auto);
+        assert_eq!(physics.broadphase_kind(), BroadPhaseKind::Auto);
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            0.0,
+        ));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::splat(0.4),
+            1.0,
+        ));
+        physics.step(1.0 / 60.0);
+        assert_eq!(
+            physics.auto_active_broadphase(),
+            Some(BroadPhaseKind::SweepAndPrune)
+        );
+        let body = physics.get_body(1).unwrap();
+        assert!(body.position.y < 5.0, "dynamic body still falls under Auto");
+
+        // Explicit selections report no auto-active backend.
+        physics.set_broadphase(BroadPhaseKind::UniformGrid);
+        assert_eq!(physics.auto_active_broadphase(), None);
     }
 
     #[test]

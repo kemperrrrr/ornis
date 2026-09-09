@@ -86,6 +86,11 @@ pub enum BroadPhaseKind {
     UniformGrid,
     /// Experimental persistent dynamic AABB tree.
     DynamicAabbTree,
+    /// Analytic `SweepAndPrune` ↔ `UniformGrid` routing with hysteresis
+    /// (see `AdaptiveBroadphase`). Deterministic for a given scene
+    /// trajectory; never routes to `DynamicAabbTree`, which stays
+    /// explicit opt-in until it has a 10k/100k matrix behind it.
+    Auto,
 }
 
 /// Internal broadphase contract: update world AABBs and expose deterministic
@@ -107,6 +112,8 @@ pub(crate) enum BroadPhaseBackend {
     UniformGrid(UniformGrid),
     /// Experimental persistent dynamic AABB tree implementation.
     DynamicAabbTree(DynamicAabbTree),
+    /// Analytic `SweepAndPrune` ↔ `UniformGrid` routing.
+    Auto(AdaptiveBroadphase),
 }
 
 impl BroadPhaseBackend {
@@ -116,6 +123,16 @@ impl BroadPhaseBackend {
             BroadPhaseKind::SweepAndPrune => Self::SweepAndPrune(SweepAndPrune::new()),
             BroadPhaseKind::UniformGrid => Self::UniformGrid(UniformGrid::new()),
             BroadPhaseKind::DynamicAabbTree => Self::DynamicAabbTree(DynamicAabbTree::new()),
+            BroadPhaseKind::Auto => Self::Auto(AdaptiveBroadphase::new()),
+        }
+    }
+
+    /// Returns the backend that served the latest update when `Auto` is
+    /// selected, or `None` for explicit backend selections.
+    pub(crate) fn auto_active_kind(&self) -> Option<BroadPhaseKind> {
+        match self {
+            Self::Auto(adaptive) => Some(adaptive.active_kind()),
+            _ => None,
         }
     }
 
@@ -130,6 +147,7 @@ impl BroadPhaseBackend {
             Self::SweepAndPrune(_) => BroadPhaseKind::SweepAndPrune,
             Self::UniformGrid(_) => BroadPhaseKind::UniformGrid,
             Self::DynamicAabbTree(_) => BroadPhaseKind::DynamicAabbTree,
+            Self::Auto(_) => BroadPhaseKind::Auto,
         }
     }
 }
@@ -140,6 +158,7 @@ impl BroadPhase for BroadPhaseBackend {
             Self::SweepAndPrune(backend) => backend.update(bodies, sub_dt),
             Self::UniformGrid(backend) => backend.update(bodies, sub_dt),
             Self::DynamicAabbTree(backend) => backend.update(bodies, sub_dt),
+            Self::Auto(backend) => backend.update(bodies, sub_dt),
         }
     }
 
@@ -148,6 +167,7 @@ impl BroadPhase for BroadPhaseBackend {
             Self::SweepAndPrune(backend) => backend.active(),
             Self::UniformGrid(backend) => backend.active(),
             Self::DynamicAabbTree(backend) => backend.active(),
+            Self::Auto(backend) => backend.active(),
         }
     }
 
@@ -156,6 +176,7 @@ impl BroadPhase for BroadPhaseBackend {
             Self::SweepAndPrune(backend) => backend.stats(),
             Self::UniformGrid(backend) => backend.stats(),
             Self::DynamicAabbTree(backend) => backend.stats(),
+            Self::Auto(backend) => backend.stats(),
         }
     }
 }
@@ -638,6 +659,135 @@ impl BroadPhase for UniformGrid {
     }
 }
 
+/// Analytic `SweepAndPrune` ↔ `UniformGrid` routing with hysteresis.
+///
+/// The vote is a cheap O(n) scan over body counts and coarse body extents
+/// (no AABBs, no wall-clock), so routing is deterministic for a given scene
+/// trajectory. Thresholds come from the 1k/10k/100k probes: both backends
+/// are within noise at ~1k, the grid wins ~4–6x at 10k tiled and ~10x at
+/// 100k, and the sweep degrades on axis-spanning AABBs (giant floor).
+///
+/// Only the active backend updates each step; the idle one resynchronizes
+/// on return (`UniformGrid` falls back to a full rebuild when everything
+/// is dirty, `SweepAndPrune` rebuilds from scratch unconditionally), so the
+/// candidate-pair contract is identical to the explicitly selected backends.
+/// A switch needs `AUTO_SWITCH_VOTES` consecutive votes plus
+/// `AUTO_SWITCH_COOLDOWN` steps since the last switch, so oscillation never
+/// thrashes the incremental grid state. The first update snaps immediately
+/// (no hysteresis) to avoid serving a huge scene from the wrong backend.
+pub(crate) struct AdaptiveBroadphase {
+    sweep: SweepAndPrune,
+    grid: UniformGrid,
+    active: BroadPhaseKind,
+    votes: u32,
+    updates: u64,
+    steps_since_switch: u64,
+}
+
+/// Body counts at or below this use the sweep: sorting is trivial and the
+/// grid's hash bookkeeping is not worth it (1k probes: both within noise).
+const AUTO_SAP_MAX_N: usize = 512;
+/// Body counts at or above this use the grid (10k tiled: ~4–6x over SAP).
+const AUTO_GRID_MIN_N: usize = 1500;
+/// A body wider than this in its longest axis counts as coarse: the sweep
+/// degrades on axis-spanning AABBs, so the middle band routes to the grid
+/// when at least one such body is present.
+const AUTO_LARGE_EXTENT: f32 = 64.0;
+/// Grid cell size for the adaptive backend: the measured tiled-10k optimum.
+const AUTO_GRID_CELL_SIZE: f32 = 8.0;
+/// Consecutive dissenting votes required before switching backends.
+const AUTO_SWITCH_VOTES: u32 = 3;
+/// Minimum updates between backend switches (hysteresis against flapping).
+const AUTO_SWITCH_COOLDOWN: u64 = 60;
+
+fn body_max_extent(body: &RigidBody) -> f32 {
+    match &body.shape {
+        crate::shape::Shape::Sphere { radius } => radius * 2.0,
+        crate::shape::Shape::Box { half_extents } => half_extents.max_element() * 2.0,
+        crate::shape::Shape::Capsule {
+            radius,
+            half_height,
+        } => (half_height + radius) * 2.0,
+    }
+}
+
+impl AdaptiveBroadphase {
+    fn new() -> Self {
+        Self {
+            sweep: SweepAndPrune::new(),
+            grid: UniformGrid::with_cell_size(AUTO_GRID_CELL_SIZE),
+            active: BroadPhaseKind::SweepAndPrune,
+            votes: 0,
+            updates: 0,
+            steps_since_switch: 0,
+        }
+    }
+
+    fn vote(bodies: &[RigidBody]) -> BroadPhaseKind {
+        let n = bodies.len();
+        if n <= AUTO_SAP_MAX_N {
+            return BroadPhaseKind::SweepAndPrune;
+        }
+        if n >= AUTO_GRID_MIN_N {
+            return BroadPhaseKind::UniformGrid;
+        }
+        let coarse = bodies
+            .iter()
+            .any(|body| body_max_extent(body) > AUTO_LARGE_EXTENT);
+        if coarse {
+            BroadPhaseKind::UniformGrid
+        } else {
+            BroadPhaseKind::SweepAndPrune
+        }
+    }
+
+    /// Backend that served the latest update (never `Auto` itself and never
+    /// `DynamicAabbTree` in v1).
+    fn active_kind(&self) -> BroadPhaseKind {
+        self.active
+    }
+}
+
+impl BroadPhase for AdaptiveBroadphase {
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
+        let want = Self::vote(bodies);
+        self.updates += 1;
+        self.steps_since_switch += 1;
+        if self.updates == 1 {
+            self.active = want;
+            self.votes = 0;
+            self.steps_since_switch = 0;
+        } else if want == self.active {
+            self.votes = 0;
+        } else {
+            self.votes += 1;
+            if self.votes >= AUTO_SWITCH_VOTES && self.steps_since_switch >= AUTO_SWITCH_COOLDOWN {
+                self.active = want;
+                self.votes = 0;
+                self.steps_since_switch = 0;
+            }
+        }
+        match self.active {
+            BroadPhaseKind::SweepAndPrune => self.sweep.update(bodies, sub_dt),
+            _ => self.grid.update(bodies, sub_dt),
+        }
+    }
+
+    fn active(&self) -> &[(usize, usize)] {
+        match self.active {
+            BroadPhaseKind::SweepAndPrune => self.sweep.active(),
+            _ => self.grid.active(),
+        }
+    }
+
+    fn stats(&self) -> BroadPhaseStats {
+        match self.active {
+            BroadPhaseKind::SweepAndPrune => self.sweep.stats(),
+            _ => self.grid.stats(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +901,108 @@ mod tests {
         grid.update(&bodies, 0.0);
         assert!(sweep.active().is_empty());
         assert!(grid.active().is_empty());
+    }
+
+    fn giant_floor_bodies(dynamics: u32) -> Vec<RigidBody> {
+        let mut bodies = vec![RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::splat(500.0),
+            0.0,
+        )];
+        let side = (dynamics as f32).sqrt().ceil() as u32;
+        for i in 0..dynamics {
+            let gx = i % side;
+            let gz = i / side;
+            bodies.push(RigidBody::new_box(
+                Vec3::new(
+                    (gx as f32 - side as f32 / 2.0) * 2.0,
+                    1.0,
+                    (gz as f32 - side as f32 / 2.0) * 2.0,
+                ),
+                Vec3::splat(0.4),
+                1.0,
+            ));
+        }
+        bodies
+    }
+
+    fn sparse_bodies(n: u32) -> Vec<RigidBody> {
+        let mut bodies = Vec::with_capacity(n as usize);
+        let side = (n as f32).sqrt().ceil() as u32;
+        for i in 0..n {
+            bodies.push(RigidBody::new_box(
+                Vec3::new((i % side) as f32 * 20.0, 5.0, (i / side) as f32 * 20.0),
+                Vec3::splat(0.4),
+                1.0,
+            ));
+        }
+        bodies
+    }
+
+    #[test]
+    fn auto_selects_sweep_for_small_scenes_and_matches_it() {
+        let bodies = scene();
+        let mut auto = AdaptiveBroadphase::new();
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
+        let mut sweep = SweepAndPrune::new();
+        sweep.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active(), sweep.active());
+    }
+
+    #[test]
+    fn auto_selects_grid_for_giant_floor_and_matches_it() {
+        let bodies = giant_floor_bodies(2000);
+        let mut auto = AdaptiveBroadphase::new();
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
+        let mut grid = UniformGrid::with_cell_size(AUTO_GRID_CELL_SIZE);
+        grid.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active(), grid.active());
+    }
+
+    #[test]
+    fn auto_selects_grid_for_large_counts_and_matches_it() {
+        let bodies = sparse_bodies(5000);
+        let mut auto = AdaptiveBroadphase::new();
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
+        let mut grid = UniformGrid::with_cell_size(AUTO_GRID_CELL_SIZE);
+        grid.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active(), grid.active());
+    }
+
+    #[test]
+    fn auto_routing_is_stable_across_updates() {
+        let bodies = giant_floor_bodies(2000);
+        let mut auto = AdaptiveBroadphase::new();
+        for _ in 0..10 {
+            auto.update(&bodies, 1.0 / 60.0);
+            assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
+        }
+        let small = scene();
+        let mut auto_small = AdaptiveBroadphase::new();
+        for _ in 0..10 {
+            auto_small.update(&small, 1.0 / 60.0);
+            assert_eq!(auto_small.active_kind(), BroadPhaseKind::SweepAndPrune);
+        }
+    }
+
+    #[test]
+    fn auto_does_not_flap_on_transient_middle_band_votes() {
+        // 600 small bodies vote SAP; a single coarse body briefly appears and
+        // disappears. Fewer than 3 consecutive dissenting votes must not
+        // switch the backend.
+        let mut bodies = sparse_bodies(600);
+        let mut auto = AdaptiveBroadphase::new();
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
+        bodies.push(RigidBody::new_box(Vec3::ZERO, Vec3::splat(100.0), 0.0));
+        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
+        bodies.pop();
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
     }
 }

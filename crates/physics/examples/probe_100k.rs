@@ -158,11 +158,12 @@ where
 
 fn print_usage() {
     println!(
-        "Usage: probe_100k [--sweep | --grid | --tree] [--cell-size SIZE] [--scene NAME] [--bodies N] [--steps N]"
+        "Usage: probe_100k [--sweep | --grid | --tree | --auto] [--cell-size SIZE] [--scene NAME] [--bodies N] [--steps N]"
     );
     println!("  --sweep              use the Sweep-and-Prune baseline (default)");
     println!("  --grid               use UniformGrid (default cell size: 4.0)");
     println!("  --tree               use the experimental DynamicAabbTree backend");
+    println!("  --auto               analytic SweepAndPrune <-> UniformGrid routing");
     println!("  --cell-size SIZE     select UniformGrid and set its cell size");
     println!(
         "  --scene NAME         tiled | giant_floor | sparse | islands | heterogeneous (default: tiled)"
@@ -176,6 +177,7 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
         BroadPhaseKind::SweepAndPrune => "sweep_and_prune",
         BroadPhaseKind::UniformGrid => "uniform_grid",
         BroadPhaseKind::DynamicAabbTree => "dynamic_aabb_tree",
+        BroadPhaseKind::Auto => "auto",
     };
     let setup_started = Instant::now();
     let mut physics = match scene {
@@ -190,6 +192,7 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
         BroadPhaseKind::SweepAndPrune => physics.set_broadphase(BroadPhaseKind::SweepAndPrune),
         BroadPhaseKind::UniformGrid => physics.set_uniform_grid_cell_size(cell_size),
         BroadPhaseKind::DynamicAabbTree => physics.set_broadphase(BroadPhaseKind::DynamicAabbTree),
+        BroadPhaseKind::Auto => physics.set_broadphase(BroadPhaseKind::Auto),
     }
     println!(
         "probe: backend={backend_name} scene={scene} bodies={bodies} steps={steps} cell_size={cell_size}"
@@ -223,6 +226,12 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
                 stats.aabb_rejections,
                 stats.candidate_pairs,
             );
+            if backend == BroadPhaseKind::Auto {
+                println!(
+                    "auto active backend: {:?}",
+                    physics.auto_active_broadphase()
+                );
+            }
         }
     }
     if !steady.is_empty() {
@@ -253,6 +262,7 @@ fn main() {
             }
             "--grid" => backend = BroadPhaseKind::UniformGrid,
             "--tree" => backend = BroadPhaseKind::DynamicAabbTree,
+            "--auto" => backend = BroadPhaseKind::Auto,
             "--cell-size" => {
                 cell_size = Some(parse_value("--cell-size", args.next()));
                 backend = BroadPhaseKind::UniformGrid;
