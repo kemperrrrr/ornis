@@ -199,52 +199,6 @@ pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry
     }
 }
 
-/// Spell one `f32` the way the former handwritten sources did (`-1.0`,
-/// not `-1`), so generated declaration blocks stay readable.
-fn fmt_f32(x: f32) -> String {
-    if x.fract() == 0.0 {
-        format!("{x:.1}")
-    } else {
-        format!("{x}")
-    }
-}
-
-/// Build a `const NAME: array<vec4<f32>, N> = …` block from Rust data.
-pub(crate) fn const_vec4_array(name: &str, vals: &[[f32; 4]]) -> String {
-    let mut out = format!(
-        "const {name}: array<vec4<f32>, {n}> = array<vec4<f32>, {n}>(\n",
-        n = vals.len()
-    );
-    for v in vals {
-        out.push_str(&format!(
-            "    vec4<f32>({}, {}, {}, {}),\n",
-            fmt_f32(v[0]),
-            fmt_f32(v[1]),
-            fmt_f32(v[2]),
-            fmt_f32(v[3])
-        ));
-    }
-    out.push_str(");\n");
-    out
-}
-
-/// Build a `const NAME: array<vec2<f32>, N> = …` block from Rust data.
-pub(crate) fn const_vec2_array(name: &str, vals: &[[f32; 2]]) -> String {
-    let mut out = format!(
-        "const {name}: array<vec2<f32>, {n}> = array<vec2<f32>, {n}>(\n",
-        n = vals.len()
-    );
-    for v in vals {
-        out.push_str(&format!(
-            "    vec2<f32>({}, {}),\n",
-            fmt_f32(v[0]),
-            fmt_f32(v[1])
-        ));
-    }
-    out.push_str(");\n");
-    out
-}
-
 /// Fullscreen-quad corners shared by the bloom/hdr/lighting passes
 /// (triangle strip order), as Rust data.
 pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [

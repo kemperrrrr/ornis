@@ -188,11 +188,168 @@ pub fn write_module(module: &naga::Module, table: &[Resource]) -> String {
     wgsl
 }
 
+/// One `f32` literal expression in the module's global arena.
+fn f32_lit(module: &mut naga::Module, x: f32) -> naga::Handle<naga::Expression> {
+    module.global_expressions.append(
+        naga::Expression::Literal(naga::Literal::F32(x)),
+        naga::Span::default(),
+    )
+}
+
+/// Compose `vals` (already literal handles) into a vector expression.
+fn compose_vec(
+    module: &mut naga::Module,
+    width: usize,
+    parts: Vec<naga::Handle<naga::Expression>>,
+) -> (naga::Handle<naga::Type>, naga::Handle<naga::Expression>) {
+    let size = match width {
+        2 => naga::VectorSize::Bi,
+        4 => naga::VectorSize::Quad,
+        other => panic!("const vec width must be 2 or 4, got {other}"),
+    };
+    let ty = module.types.insert(
+        naga::Type {
+            name: None,
+            inner: naga::TypeInner::Vector {
+                size,
+                scalar: naga::Scalar {
+                    kind: naga::ScalarKind::Float,
+                    width: 4,
+                },
+            },
+        },
+        naga::Span::default(),
+    );
+    let expr = module.global_expressions.append(
+        naga::Expression::Compose {
+            ty,
+            components: parts,
+        },
+        naga::Span::default(),
+    );
+    (ty, expr)
+}
+
+/// Insert a named `const NAME: array<vecN<f32>, K>` over `vals`, built from
+/// literal expressions — the quad/UV data stays a Rust array.
+fn add_const_vec_array(module: &mut naga::Module, name: &str, vals: &[Vec<f32>]) {
+    let width = vals.first().map(Vec::len).unwrap_or(0);
+    let mut parts = Vec::with_capacity(vals.len());
+    for row in vals {
+        assert_eq!(row.len(), width, "const array rows must be uniform");
+        let lits = row.iter().map(|x| f32_lit(module, *x)).collect();
+        let (_, expr) = compose_vec(module, width, lits);
+        parts.push(expr);
+    }
+    // Re-fetch the element type from the first composed vector.
+    let elem_ty = match module.global_expressions[parts[0]] {
+        naga::Expression::Compose { ty, .. } => ty,
+        _ => unreachable!("compose_vec builds Compose"),
+    };
+    let stride = if width == 2 { 8 } else { 16 };
+    let arr_ty = module.types.insert(
+        naga::Type {
+            name: None,
+            inner: naga::TypeInner::Array {
+                base: elem_ty,
+                size: naga::ArraySize::Constant(
+                    std::num::NonZeroU32::new(parts.len() as u32)
+                        .expect("const array is non-empty"),
+                ),
+                stride,
+            },
+        },
+        naga::Span::default(),
+    );
+    let init = module.global_expressions.append(
+        naga::Expression::Compose {
+            ty: arr_ty,
+            components: parts,
+        },
+        naga::Span::default(),
+    );
+    module.constants.append(
+        naga::Constant {
+            name: Some(name.to_string()),
+            ty: arr_ty,
+            init,
+        },
+        naga::Span::default(),
+    );
+}
+
+/// Print one `const QUAD` + `const UVS` block from Rust quad data, via IR.
+/// Replaces the former `const_vec4_array`/`const_vec2_array` text builders:
+/// values are Rust floats, spelling is naga's.
+pub fn const_block(quad: &[[f32; 4]], uvs: &[[f32; 2]]) -> String {
+    let mut module = naga::Module::default();
+    add_const_vec_array(
+        &mut module,
+        "QUAD",
+        &quad.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+    );
+    add_const_vec_array(
+        &mut module,
+        "UVS",
+        &uvs.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+    );
+    // No resource globals in this module: print with an empty table.
+    write_module(&module, &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
     use crate::shaders::lighting_generated::LIGHTING_RESOURCES;
+
+    /// Quad/UV consts from IR: the printed block re-parses, and every
+    /// scalar reads back bit-exactly.
+    #[test]
+    fn const_block_round_trip() {
+        use super::super::{STANDARD_QUAD, STANDARD_UVS};
+        let wgsl = const_block(&STANDARD_QUAD, &STANDARD_UVS);
+        assert!(wgsl.contains("const QUAD"), "{wgsl}");
+        assert!(wgsl.contains("const UVS"), "{wgsl}");
+        let module = naga::front::wgsl::parse_str(&wgsl).expect("const block must parse");
+        fn scalars(
+            module: &naga::Module,
+            expr: naga::Handle<naga::Expression>,
+            out: &mut Vec<f32>,
+        ) {
+            match module.global_expressions[expr] {
+                naga::Expression::Literal(naga::Literal::F32(x)) => out.push(x),
+                naga::Expression::Compose { ref components, .. } => {
+                    for c in components {
+                        scalars(module, *c, out);
+                    }
+                }
+                ref other => panic!("unexpected const expr: {other:?}"),
+            }
+        }
+        let named: std::collections::HashMap<_, _> = module
+            .constants
+            .iter()
+            .filter_map(|(_, c)| c.name.clone().map(|n| (n, c.init)))
+            .collect();
+        for (name, want) in [
+            (
+                "QUAD",
+                STANDARD_QUAD.iter().flatten().copied().collect::<Vec<_>>(),
+            ),
+            (
+                "UVS",
+                STANDARD_UVS.iter().flatten().copied().collect::<Vec<_>>(),
+            ),
+        ] {
+            let mut got = Vec::new();
+            scalars(&module, named[name], &mut got);
+            assert_eq!(got.len(), want.len(), "{name} length drifted");
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "{name} value drifted");
+            }
+        }
+    }
 
     /// The full lighting declaration block from IR: 4 types + 10 globals,
     /// printed by naga — no WGSL text authored here.

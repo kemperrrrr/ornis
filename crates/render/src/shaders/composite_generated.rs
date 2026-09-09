@@ -7,9 +7,7 @@
 //! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use super::interface::UiCompositeOut as VertexOutput;
-use super::{
-    Resource, ResourceKind, const_vec2_array, const_vec4_array, resource_decls, wgsl_decl,
-};
+use super::{Resource, ResourceKind, naga_ir, resource_decls, wgsl_decl};
 use crate::shaders::math::srgb_to_linear;
 use ornis_macros::stage;
 
@@ -104,8 +102,7 @@ fn composite_wgsl_body() -> String {
     fn composite_header_rest() -> String {
         let mut out = resource_decls(&COMPOSITE_RESOURCES, &[0, 1, 2, 3]);
         out.push('\n');
-        out.push_str(&const_vec4_array("QUAD", &COMPOSITE_QUAD));
-        out.push_str(&const_vec2_array("UVS", &COMPOSITE_UVS));
+        out.push_str(&naga_ir::const_block(&COMPOSITE_QUAD, &COMPOSITE_UVS));
         out
     }
 

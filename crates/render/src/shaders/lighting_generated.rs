@@ -10,8 +10,7 @@
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array,
-    const_vec4_array, naga_ir, wgsl_decl,
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -385,12 +384,9 @@ pub fn wgsl_vertex_source() -> String {
     )
 }
 
-/// Shared quad constants for the lighting vertex stage.
+/// Shared quad constants for the lighting vertex stage, via IR.
 fn vertex_quad_uv() -> String {
-    let mut out = const_vec4_array("QUAD", &STANDARD_QUAD);
-    out.push('\n');
-    out.push_str(&const_vec2_array("UVS", &STANDARD_UVS));
-    out
+    naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS)
 }
 
 /// Static view for naga validation and snapshot tests.

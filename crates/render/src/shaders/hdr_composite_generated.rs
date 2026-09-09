@@ -12,10 +12,7 @@ use super::interface::{
     HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
 };
 use super::wgsl_decl;
-use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array, const_vec4_array,
-    resource_decls,
-};
+use super::{Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, naga_ir, resource_decls};
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
 use ornis_macros::stage;
@@ -72,13 +69,9 @@ pub fn wgsl_source_static() -> String {
     wgsl_source()
 }
 
-/// Quad constants shared by both HDR assemblies, built from the shared
-/// [`STANDARD_QUAD`]/[`STANDARD_UVS`] Rust data.
+/// Quad constants shared by both HDR assemblies, via IR.
 fn vertex_quad() -> String {
-    let mut out = const_vec4_array("QUAD", &STANDARD_QUAD);
-    out.push('\n');
-    out.push_str(&const_vec2_array("UVS", &STANDARD_UVS));
-    out
+    naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS)
 }
 
 /// Resource layout of the HDR composite pass (what `create_composite_pass`

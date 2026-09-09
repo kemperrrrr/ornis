@@ -8,8 +8,7 @@
 
 use super::interface::BloomVertexOut as BloomVertexOutput;
 use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array, const_vec4_array,
-    resource_decls, wgsl_decl,
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, naga_ir, resource_decls, wgsl_decl,
 };
 use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
@@ -88,9 +87,7 @@ fn bloom_wgsl_body() -> String {
     fn bloom_header_head() -> String {
         let mut out = resource_decls(&BLOOM_RESOURCES, &[0, 1, 2]);
         out.push('\n');
-        out.push_str(&const_vec4_array("QUAD", &STANDARD_QUAD));
-        out.push('\n');
-        out.push_str(&const_vec2_array("UVS", &STANDARD_UVS));
+        out.push_str(&naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS));
         out
     }
 
