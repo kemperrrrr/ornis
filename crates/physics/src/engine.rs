@@ -2169,9 +2169,8 @@ impl BuiltinPhysicsEngine {
     /// scene matrix: tiled / giant_floor / sparse / islands / heterogeneous).
     /// [`BroadPhaseKind::SweepAndPrune`] is retained as the compatibility
     /// baseline; [`BroadPhaseKind::DynamicAabbTree`] is experimental.
-    /// [`BroadPhaseKind::Auto`] routes analytically between sweep and grid
-    /// with hysteresis (never to the tree); see
-    /// [`BroadPhaseKind::Auto`] for the contract.
+    /// [`BroadPhaseKind::Auto`] routes analytically between sweep, grid and
+    /// tree with hysteresis; see [`BroadPhaseKind::Auto`] for the contract.
     pub fn set_broadphase(&mut self, kind: BroadPhaseKind) {
         if self.broadphase.kind() != kind {
             self.broadphase = BroadPhaseBackend::new(kind);
@@ -2185,8 +2184,8 @@ impl BuiltinPhysicsEngine {
     }
 
     /// Backend that served the latest update when
-    /// [`BroadPhaseKind::Auto`] is selected (`SweepAndPrune` or
-    /// `UniformGrid`, never `Auto` itself); `None` for explicit backend
+    /// [`BroadPhaseKind::Auto`] is selected (any of the three backends,
+    /// never `Auto` itself); `None` for explicit backend
     /// selections. Diagnostics for tuning and benchmarks, not part of the
     /// simulation contract.
     pub fn auto_active_broadphase(&self) -> Option<BroadPhaseKind> {

@@ -19,11 +19,11 @@
 //! 21.7 ms) and ties on sparse/hetero. 100k tiled: tree 759 ms vs grid-8
 //! 604 ms — same band, ~10x under the historical 8 s grid number.
 //!
-//! Stays explicit opt-in (and `Auto` never routes here yet): the tree still
-//! re-queries every dynamic proxy each update, while the incremental grid
-//! owns the settled state (~1 ms broadphase). Next: a settled-state matrix
-//! plus moved-body query skip (pair buffering), then route sparse worlds
-//! in `Auto`.
+//! Stays explicit opt-in for dense worlds; `Auto` routes sparse worlds here
+//! since pair buffering. The remaining gap vs the incremental grid is
+//! settled dense scenes (the tree rebuilds its sorted vec each update).
+
+use std::collections::HashSet;
 
 use glam::Vec3;
 
@@ -316,6 +316,19 @@ pub(crate) struct DynamicAabbTree {
     /// Reused query output buffer: one allocation total instead of one per
     /// dynamic body per update.
     scratch: Vec<usize>,
+    /// Persistent pair buffer: pairs where neither endpoint was dirty are
+    /// retained across updates without re-query (see `refresh_proxies` for
+    /// the exact dirty rule). Cleared on any body-count change, where
+    /// `swap_remove` remapping could otherwise alias identities.
+    active_set: HashSet<(usize, usize)>,
+    /// Swept box seen per body on the previous update. Dirty means the
+    /// swept box (or the filter/type meta) changed; clean pairs are
+    /// *exactly* reusable because the filter is a pure function of current
+    /// swept boxes and meta.
+    prev_swept: Vec<AABB>,
+    /// `(is_trigger, collision_layer, collision_mask)` per body, mirroring
+    /// the grid's `prev_meta` (body type lives in the proxy kind).
+    prev_filter: Vec<(bool, u32, u32)>,
 }
 
 impl DynamicAabbTree {
@@ -328,6 +341,9 @@ impl DynamicAabbTree {
             active: Vec::new(),
             stats: BroadPhaseStats::default(),
             scratch: Vec::new(),
+            active_set: HashSet::new(),
+            prev_swept: Vec::new(),
+            prev_filter: Vec::new(),
         }
     }
 
@@ -354,24 +370,36 @@ impl DynamicAabbTree {
 
 impl BroadPhase for DynamicAabbTree {
     fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
-        self.active.clear();
+        // `pair_tests` counts checks executed by THIS update (0 on a fully
+        // clean one); `candidate_pairs` always reflects the full buffered
+        // set, retained or freshly queried.
         self.stats = BroadPhaseStats {
             body_count: bodies.len(),
             ..BroadPhaseStats::default()
         };
         let swept = crate::broadphase::swept_aabbs(bodies, sub_dt);
+        // Any count change can remap body indices (`swap_remove`), which
+        // would alias buffered pair identities: drop the buffer and re-query
+        // everything, exactly like the grid's length-mismatch full rebuild.
+        let full = bodies.len() != self.proxies.len();
         self.sync_proxies(bodies.len());
-        // In Ornis every `update` runs on already-integrated poses and most
-        // awake bodies move each substep, so we re-query ALL dynamic proxies
-        // (a persistent tree still beats a full O(n) sweep on query cost).
-        // `moved` is tracked per proxy but not used to skip queries yet — it is
-        // the hook for a future sleeping-body fast path.
-        let dynamic = self.refresh_proxies(bodies, &swept);
-        self.query_dynamic(bodies, &swept, &dynamic);
+        let (dynamic, dirty, static_changed) = self.refresh_proxies(bodies, &swept);
+        if full || static_changed {
+            self.active_set.clear();
+            self.query_dynamic(bodies, &swept, &dynamic);
+        } else if !dirty.is_empty() {
+            let dirty_set: HashSet<usize> = dirty.iter().copied().collect();
+            self.active_set
+                .retain(|(a, b)| !dirty_set.contains(a) && !dirty_set.contains(b));
+            self.query_dynamic(bodies, &swept, &dirty);
+        }
+        // Else: nothing moved — the buffer already holds the exact set.
         // Drop duplicate pairs (a body may appear in several leaves) and
-        // sort for deterministic output matching the other backends.
+        // sort for deterministic output matching the other backends. (The
+        // set already dedups; the sorted vec is the contract order.)
+        self.active.clear();
+        self.active.extend(self.active_set.iter().copied());
         self.active.sort_unstable();
-        self.active.dedup();
         self.stats.candidate_pairs = self.active.len();
         for proxy in self.proxies.iter_mut().flatten() {
             proxy.moved = false;
@@ -405,20 +433,42 @@ impl DynamicAabbTree {
 
     /// Insert new bodies, re-insert escaped proxies into their own tree and
     /// migrate proxies whose body changed type. Returns the indices of every
-    /// dynamic body (the set re-queried each update — see `update` for why a
-    /// moved-only set is not yet used). Fats are built from swept boxes so
-    /// every query covers the full motion path (see `fat_aabb`).
-    fn refresh_proxies(&mut self, bodies: &[RigidBody], swept: &[AABB]) -> Vec<usize> {
+    /// dynamic body, the dirty dynamic bodies needing a (re-)query, and
+    /// whether the static set changed (new / flipped / moved statics force
+    /// a full re-query, since unmoved dynamics would otherwise never be
+    /// tested against them). Fats are built from swept boxes so every query
+    /// covers the full motion path (see `fat_aabb`).
+    ///
+    /// Dirty is exact, not tolerant: a body is dirty when its swept box or
+    /// its filter/type meta differs from the previous update. Clean pairs
+    /// are therefore exactly reusable — the pair filter is a pure function
+    /// of current swept boxes and meta.
+    fn refresh_proxies(
+        &mut self,
+        bodies: &[RigidBody],
+        swept: &[AABB],
+    ) -> (Vec<usize>, Vec<usize>, bool) {
         let mut dynamic = Vec::new();
+        let mut dirty = Vec::new();
+        let mut static_changed = false;
         for (i, body) in bodies.iter().enumerate() {
+            let filter = (body.is_trigger, body.collision_layer, body.collision_mask);
+            let want_static = body.body_type == BodyType::Static;
             if self.proxies.get(i).and_then(|p| p.as_ref()).is_none() {
                 self.insert_new(i, body.body_type, Self::fat_aabb(swept[i]));
-                if body.body_type != BodyType::Static {
+                if want_static {
+                    static_changed = true;
+                } else {
                     dynamic.push(i);
+                    dirty.push(i);
                 }
                 continue;
             }
-            let want_static = body.body_type == BodyType::Static;
+            let known = i < self.prev_swept.len() && i < self.prev_filter.len();
+            let swept_same = known
+                && self.prev_swept[i].min == swept[i].min
+                && self.prev_swept[i].max == swept[i].max;
+            let filter_same = known && self.prev_filter[i] == filter;
             // Copy out before any tree call so the proxy borrow ends first.
             let (kind, node) = {
                 let proxy = self.proxies[i].as_ref().unwrap();
@@ -432,10 +482,23 @@ impl DynamicAabbTree {
                 self.tree_of(kind).free_node(node);
                 self.proxies[i] = None;
                 self.insert_new(i, body.body_type, Self::fat_aabb(swept[i]));
-                if !want_static {
+                if want_static {
+                    static_changed = true;
+                } else {
                     dynamic.push(i);
+                    dirty.push(i);
                 }
                 continue;
+            }
+            if !swept_same || !filter_same {
+                if want_static {
+                    // Same pose but new filters: unmoved dynamics would never
+                    // be re-tested against it — take the full path instead of
+                    // risking a stale buffered pair.
+                    static_changed = true;
+                } else {
+                    dirty.push(i);
+                }
             }
             if !self.proxies[i]
                 .as_ref()
@@ -456,7 +519,20 @@ impl DynamicAabbTree {
                 dynamic.push(i);
             }
         }
-        dynamic
+        // Publish current history for the next update's dirty check.
+        self.prev_swept.resize(
+            bodies.len(),
+            AABB {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            },
+        );
+        self.prev_filter.resize(bodies.len(), (false, 0, 0));
+        for (i, body) in bodies.iter().enumerate() {
+            self.prev_swept[i] = swept[i];
+            self.prev_filter[i] = (body.is_trigger, body.collision_layer, body.collision_mask);
+        }
+        (dynamic, dirty, static_changed)
     }
 
     fn insert_new(&mut self, i: usize, kind: BodyType, fat: AABB) {
@@ -485,8 +561,9 @@ impl DynamicAabbTree {
         }
     }
 
-    /// Query every dynamic body against both trees, filter and canonicalize
-    /// pairs deterministically into `self.active`.
+    /// Query the given dynamic bodies against both trees and insert passing
+    /// pairs into the persistent buffer (duplicates collapse in the set;
+    /// `update` rebuilds the sorted contract vec from it).
     fn query_dynamic(&mut self, bodies: &[RigidBody], swept: &[AABB], dynamic: &[usize]) {
         for &a in dynamic {
             // Take the scratch buffer so the tree queries can borrow `self`
@@ -503,7 +580,7 @@ impl DynamicAabbTree {
                 self.stats.pair_tests += 1;
                 let (lo, hi) = if a < b { (a, b) } else { (b, a) };
                 if pair_allowed(bodies, swept, &mut self.stats, lo, hi) {
-                    self.active.push((lo, hi));
+                    self.active_set.insert((lo, hi));
                 }
             }
             self.scratch = candidates;
@@ -760,6 +837,84 @@ mod tests {
             "dynamic tree degenerated to depth {depth} on 2000 grid bodies"
         );
         // Balanced or not, the contract must hold exactly.
+        let mut pairs = backend.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
+    }
+
+    #[test]
+    fn dynamic_tree_skips_fully_clean_updates() {
+        let bodies = grid_scene_2k();
+        let mut backend = DynamicAabbTree::new();
+        backend.update(&bodies, 1.0 / 60.0);
+        let first = backend.active().to_vec();
+        backend.update(&bodies, 1.0 / 60.0);
+        // Nothing moved: zero pair checks, identical pairs.
+        assert_eq!(backend.stats().pair_tests, 0);
+        assert_eq!(backend.active(), first.as_slice());
+    }
+
+    #[test]
+    fn dynamic_tree_partial_updates_match_oracle() {
+        let mut bodies = grid_scene_2k();
+        let mut backend = DynamicAabbTree::new();
+        backend.update(&bodies, 1.0 / 60.0);
+        // Move three bodies (one into overlap, two across the grid).
+        bodies[0].position = Vec3::new(2.0, 1.0, 0.0);
+        bodies[100].position += Vec3::new(0.0, 3.0, 0.0);
+        bodies[1000].position += Vec3::new(5.0, 0.0, 0.0);
+        backend.update(&bodies, 1.0 / 60.0);
+        let mut pairs = backend.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
+        // Only the dirty bodies were queried — far below a full re-query of
+        // all ~2000 dynamics.
+        assert!(
+            backend.stats().pair_tests < 2000,
+            "partial update tested {} pairs",
+            backend.stats().pair_tests
+        );
+    }
+
+    #[test]
+    fn dynamic_tree_tracks_filter_changes_without_motion() {
+        let mut bodies = grid_scene_2k();
+        // Overlap bodies 0 and 1 so they pair under default filters.
+        bodies[1].position = Vec3::new(0.5, 1.0, 0.0);
+        let mut backend = DynamicAabbTree::new();
+        backend.update(&bodies, 1.0 / 60.0);
+        let mut first = backend.active().to_vec();
+        first.sort_unstable();
+        assert!(first.contains(&(0, 1)));
+        // Same poses, incompatible filters: the pair must vanish.
+        bodies[0] = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.4), 1.0)
+            .with_collision_filter(0b0001, 0b0010);
+        bodies[1] = RigidBody::new_box(Vec3::new(0.5, 1.0, 0.0), Vec3::splat(0.4), 1.0)
+            .with_collision_filter(0b0100, 0b1000);
+        backend.update(&bodies, 1.0 / 60.0);
+        let mut pairs = backend.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
+        assert!(!pairs.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn dynamic_tree_handles_add_and_swap_remove() {
+        let mut bodies = grid_scene_2k();
+        let mut backend = DynamicAabbTree::new();
+        backend.update(&bodies, 1.0 / 60.0);
+        bodies.push(RigidBody::new_box(
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::splat(0.4),
+            1.0,
+        ));
+        backend.update(&bodies, 1.0 / 60.0);
+        let mut pairs = backend.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
+        // Engine-style removal remaps indices: the buffer must not alias.
+        bodies.swap_remove(0);
+        backend.update(&bodies, 1.0 / 60.0);
         let mut pairs = backend.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));

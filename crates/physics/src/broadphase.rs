@@ -121,10 +121,10 @@ pub enum BroadPhaseKind {
     UniformGrid,
     /// Experimental persistent dynamic AABB tree.
     DynamicAabbTree,
-    /// Analytic `SweepAndPrune` ↔ `UniformGrid` routing with hysteresis
-    /// (see `AdaptiveBroadphase`). Deterministic for a given scene
-    /// trajectory; never routes to `DynamicAabbTree`, which stays
-    /// explicit opt-in until it has a 10k/100k matrix behind it.
+    /// Analytic three-way routing with hysteresis (see `AdaptiveBroadphase`):
+    /// small scenes go to `SweepAndPrune`, sparse large scenes to
+    /// `DynamicAabbTree`, dense large scenes to `UniformGrid`. Deterministic
+    /// for a given scene trajectory.
     Auto,
 }
 
@@ -147,8 +147,8 @@ pub(crate) enum BroadPhaseBackend {
     UniformGrid(UniformGrid),
     /// Experimental persistent dynamic AABB tree implementation.
     DynamicAabbTree(DynamicAabbTree),
-    /// Analytic `SweepAndPrune` ↔ `UniformGrid` routing.
-    Auto(AdaptiveBroadphase),
+    /// Analytic three-way routing (boxed: it holds all three backends).
+    Auto(Box<AdaptiveBroadphase>),
 }
 
 impl BroadPhaseBackend {
@@ -158,7 +158,7 @@ impl BroadPhaseBackend {
             BroadPhaseKind::SweepAndPrune => Self::SweepAndPrune(SweepAndPrune::new()),
             BroadPhaseKind::UniformGrid => Self::UniformGrid(UniformGrid::new()),
             BroadPhaseKind::DynamicAabbTree => Self::DynamicAabbTree(DynamicAabbTree::new()),
-            BroadPhaseKind::Auto => Self::Auto(AdaptiveBroadphase::new()),
+            BroadPhaseKind::Auto => Self::Auto(Box::new(AdaptiveBroadphase::new())),
         }
     }
 
@@ -707,21 +707,24 @@ impl BroadPhase for UniformGrid {
     }
 }
 
-/// Analytic `SweepAndPrune` ↔ `UniformGrid` routing with hysteresis.
+/// Analytic `SweepAndPrune` ↔ `UniformGrid` ↔ `DynamicAabbTree` routing with
+/// hysteresis.
 ///
 /// The vote is a cheap O(n) scan over body counts and coarse body extents
 /// (no AABBs, no wall-clock), so routing is deterministic for a given scene
-/// trajectory. Thresholds come from the 1k/10k/100k probes: both backends
-/// are within noise at ~1k, the grid wins ~4–6x at 10k tiled and ~10x at
-/// 100k, and the sweep degrades on axis-spanning AABBs (giant floor).
+/// trajectory. Thresholds come from the 1k/10k/100k probes: small scenes go
+/// to the sweep (sorting is trivial there), sparse large scenes to the tree
+/// (ties-or-better vs the grid, no hash bookkeeping), dense large scenes to
+/// the grid; the middle band uses the grid only with coarse bodies present.
 ///
-/// Only the active backend updates each step; the idle one resynchronizes
+/// Only the active backend updates each step; the idle ones resynchronize
 /// on return (`UniformGrid` falls back to a full rebuild when everything
-/// is dirty, `SweepAndPrune` rebuilds from scratch unconditionally), so the
+/// is dirty, `SweepAndPrune` rebuilds from scratch unconditionally, the
+/// tree re-queries dirty bodies against its persistent buffer), so the
 /// candidate-pair contract is identical to the explicitly selected backends.
 /// A switch needs `AUTO_SWITCH_VOTES` consecutive votes plus
 /// `AUTO_SWITCH_COOLDOWN` steps since the last switch, so oscillation never
-/// thrashes the incremental grid state. The first update snaps immediately
+/// thrashes incremental state. The first update snaps immediately
 /// (no hysteresis) to avoid serving a huge scene from the wrong backend.
 ///
 /// The grid cell is re-evaluated from scene density (never wall-clock):
@@ -735,6 +738,7 @@ impl BroadPhase for UniformGrid {
 pub(crate) struct AdaptiveBroadphase {
     sweep: SweepAndPrune,
     grid: UniformGrid,
+    tree: DynamicAabbTree,
     active: BroadPhaseKind,
     votes: u32,
     updates: u64,
@@ -770,6 +774,10 @@ const AUTO_CELL_REEVAL_INTERVAL: u64 = 60;
 const AUTO_SWITCH_VOTES: u32 = 3;
 /// Minimum updates between backend switches (hysteresis against flapping).
 const AUTO_SWITCH_COOLDOWN: u64 = 60;
+/// Density raw above this routes large scenes to the tree (sparse worlds:
+/// few pairs, cheap queries, no grid hash bookkeeping). May diverge from
+/// the grid-cell large threshold later; kept separate on purpose.
+const AUTO_TREE_MIN_RAW: f32 = 12.0;
 
 fn body_max_extent(body: &RigidBody) -> f32 {
     match &body.shape {
@@ -787,6 +795,7 @@ impl AdaptiveBroadphase {
         Self {
             sweep: SweepAndPrune::new(),
             grid: UniformGrid::with_cell_size(AUTO_GRID_CELL_SIZE),
+            tree: DynamicAabbTree::new(),
             active: BroadPhaseKind::SweepAndPrune,
             votes: 0,
             updates: 0,
@@ -801,6 +810,12 @@ impl AdaptiveBroadphase {
         if n <= AUTO_SAP_MAX_N {
             return BroadPhaseKind::SweepAndPrune;
         }
+        // Sparse large scenes favor the tree (matrix: ties-or-better vs the
+        // grid on sparse/heterogeneous, no hash bookkeeping). Checked before
+        // the count band so sparse worlds route here at any size above SAP.
+        if Self::density_raw(bodies).is_some_and(|raw| raw > AUTO_TREE_MIN_RAW) {
+            return BroadPhaseKind::DynamicAabbTree;
+        }
         if n >= AUTO_GRID_MIN_N {
             return BroadPhaseKind::UniformGrid;
         }
@@ -814,8 +829,8 @@ impl AdaptiveBroadphase {
         }
     }
 
-    /// Backend that served the latest update (never `Auto` itself and never
-    /// `DynamicAabbTree` in v1).
+    /// Backend that served the latest update (any of the three backends,
+    /// never `Auto` itself).
     fn active_kind(&self) -> BroadPhaseKind {
         self.active
     }
@@ -826,11 +841,22 @@ impl AdaptiveBroadphase {
         self.grid.cell_size
     }
 
-    /// Desired grid cell from scene density: `2 · ∛(volume / n)` over
-    /// non-coarse bodies. `8.0` is sticky (the only settled-validated cell);
-    /// only a strong signal moves it. Falls back to `AUTO_GRID_CELL_SIZE`
-    /// with no measurable bodies.
+    /// Desired grid cell from scene density: `8.0` is sticky (the only
+    /// settled-validated cell); only a strong signal moves it. Falls back
+    /// to `AUTO_GRID_CELL_SIZE` with no measurable bodies.
     fn desired_cell_size(bodies: &[RigidBody]) -> f32 {
+        match Self::density_raw(bodies) {
+            Some(raw) if raw < AUTO_CELL_SMALL_RAW => AUTO_CELL_SMALL,
+            Some(raw) if raw > AUTO_CELL_LARGE_RAW => AUTO_CELL_LARGE,
+            _ => AUTO_GRID_CELL_SIZE,
+        }
+    }
+
+    /// Raw density estimate `2 · ∛(volume / n)` over non-coarse bodies
+    /// (`None` when there is nothing measurable). Shared by the grid-cell
+    /// policy and the backend vote: sparse worlds (high raw) favor the
+    /// tree, dense packings the grid.
+    fn density_raw(bodies: &[RigidBody]) -> Option<f32> {
         let mut minimum = Vec3::splat(f32::INFINITY);
         let mut maximum = Vec3::splat(f32::NEG_INFINITY);
         let mut count = 0usize;
@@ -843,18 +869,11 @@ impl AdaptiveBroadphase {
             maximum = maximum.max(body.position);
         }
         if count == 0 {
-            return AUTO_GRID_CELL_SIZE;
+            return None;
         }
         let span = (maximum - minimum).max(Vec3::splat(1.0));
         let volume = span.x * span.y * span.z;
-        let raw = 2.0 * (volume / count as f32).cbrt();
-        if raw < AUTO_CELL_SMALL_RAW {
-            AUTO_CELL_SMALL
-        } else if raw > AUTO_CELL_LARGE_RAW {
-            AUTO_CELL_LARGE
-        } else {
-            AUTO_GRID_CELL_SIZE
-        }
+        Some(2.0 * (volume / count as f32).cbrt())
     }
 }
 
@@ -879,7 +898,7 @@ impl BroadPhase for AdaptiveBroadphase {
         }
         match self.active {
             BroadPhaseKind::SweepAndPrune => self.sweep.update(bodies, sub_dt),
-            _ => {
+            BroadPhaseKind::UniformGrid => {
                 // Re-evaluate the grid cell from scene density on the first
                 // update, at most every interval, or when the body count
                 // moves >25%. `set_cell_size` forces a full rebuild, so the
@@ -897,20 +916,23 @@ impl BroadPhase for AdaptiveBroadphase {
                 }
                 self.grid.update(bodies, sub_dt);
             }
+            _ => self.tree.update(bodies, sub_dt),
         }
     }
 
     fn active(&self) -> &[(usize, usize)] {
         match self.active {
             BroadPhaseKind::SweepAndPrune => self.sweep.active(),
-            _ => self.grid.active(),
+            BroadPhaseKind::UniformGrid => self.grid.active(),
+            _ => self.tree.active(),
         }
     }
 
     fn stats(&self) -> BroadPhaseStats {
         match self.active {
             BroadPhaseKind::SweepAndPrune => self.sweep.stats(),
-            _ => self.grid.stats(),
+            BroadPhaseKind::UniformGrid => self.grid.stats(),
+            _ => self.tree.stats(),
         }
     }
 }
@@ -1100,15 +1122,27 @@ mod tests {
     }
 
     #[test]
-    fn auto_selects_grid_for_large_counts_and_matches_it() {
+    fn auto_selects_tree_for_sparse_worlds_and_matches_it() {
         let bodies = sparse_bodies(5000);
         let mut auto = AdaptiveBroadphase::new();
         auto.update(&bodies, 1.0 / 60.0);
-        assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
-        assert_eq!(auto.grid_cell_size(), 16.0);
-        let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
-        grid.update(&bodies, 1.0 / 60.0);
-        assert_eq!(auto.active(), grid.active());
+        assert_eq!(auto.active_kind(), BroadPhaseKind::DynamicAabbTree);
+        let mut tree = DynamicAabbTree::new();
+        tree.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active(), tree.active());
+    }
+
+    #[test]
+    fn auto_selects_tree_for_middle_band_sparse_worlds() {
+        // 600 bodies vote by density, not count: sparse middle band goes to
+        // the tree, matching the explicit backend exactly.
+        let bodies = sparse_bodies(600);
+        let mut auto = AdaptiveBroadphase::new();
+        auto.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active_kind(), BroadPhaseKind::DynamicAabbTree);
+        let mut tree = DynamicAabbTree::new();
+        tree.update(&bodies, 1.0 / 60.0);
+        assert_eq!(auto.active(), tree.active());
     }
 
     /// Truly dense 3D packing: 10x10x10 boxes at spacing 1.0.
@@ -1194,10 +1228,10 @@ mod tests {
 
     #[test]
     fn auto_does_not_flap_on_transient_middle_band_votes() {
-        // 600 small bodies vote SAP; a single coarse body briefly appears and
+        // 600 dense bodies vote SAP; a single coarse body briefly appears and
         // disappears. Fewer than 3 consecutive dissenting votes must not
         // switch the backend.
-        let mut bodies = sparse_bodies(600);
+        let mut bodies = grid_bodies(600, 2.0);
         let mut auto = AdaptiveBroadphase::new();
         auto.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);

@@ -169,6 +169,7 @@ fn bench_body_scaling(c: &mut Criterion) {
     // intentionally not a production default or an adaptive policy.
     let configurations = vec![
         ("sweep_and_prune", BroadPhaseKind::SweepAndPrune, None),
+        ("dynamic_aabb_tree", BroadPhaseKind::DynamicAabbTree, None),
         (
             "uniform_grid_cell_1",
             BroadPhaseKind::UniformGrid,
