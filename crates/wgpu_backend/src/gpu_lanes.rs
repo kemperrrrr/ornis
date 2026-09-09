@@ -61,8 +61,10 @@ impl GpuLanes {
     /// `build` constructs the compute pipeline and bind group for the
     /// lane's GPU buffer; it runs only when the slot is (re)created.
     /// `cpu_work` is the CPU fallback — it also runs whenever the policy
-    /// picks CPU. Returns `None` when the store has no `T` lane.
-    /// After `Some(())` the store lane holds the result.
+    /// picks CPU. Returns `None` when the store has no `T` lane, otherwise
+    /// whether the execution completed: a GPU readback failure yields
+    /// `Some(false)` and skips the write-back, preserving the store lane
+    /// and the slot's dirty flag for retry.
     pub fn execute<T, B, C>(
         &mut self,
         store: &mut ornis_core::SmartStore,
@@ -70,7 +72,7 @@ impl GpuLanes {
         config: &DispatchConfig,
         build: B,
         cpu_work: C,
-    ) -> Option<()>
+    ) -> Option<bool>
     where
         T: bytemuck::Pod + Send + Sync + 'static,
         B: FnOnce(&wgpu::Device, &wgpu::Buffer) -> (wgpu::ComputePipeline, wgpu::BindGroup),
@@ -78,7 +80,7 @@ impl GpuLanes {
     {
         let data: Vec<T> = store.read_lane::<T>()?.data.clone();
         if data.is_empty() {
-            return Some(());
+            return Some(true);
         }
 
         let stale = self
@@ -111,12 +113,16 @@ impl GpuLanes {
             .and_then(|s| s.downcast_mut::<TypedSlot<T>>())
             .expect("slot just built");
 
-        slot.lane
+        let ok = slot
+            .lane
             .execute(sync, Some(&slot.pipeline), Some(&slot.bind_group), cpu_work);
+        if !ok {
+            return Some(false);
+        }
 
         let mut lane = store.write_lane::<T>()?;
         lane.data.copy_from_slice(slot.lane.data());
-        Some(())
+        Some(true)
     }
 }
 
@@ -249,7 +255,7 @@ mod tests {
                 }
             },
         );
-        assert_eq!(out, Some(()));
+        assert_eq!(out, Some(true));
         // 0+..+7 = 28, times 3.
         assert_eq!(lane_sum(&store), 84.0);
         assert_eq!(lanes.slot_count(), 1);
@@ -274,7 +280,7 @@ mod tests {
                 }
             },
         );
-        assert_eq!(out, Some(()));
+        assert_eq!(out, Some(true));
         // GPU kernel (x2) must win over the CPU closure (x3): 0+..+63 = 2016.
         assert_eq!(lane_sum(&store), 4032.0);
     }
@@ -296,10 +302,10 @@ mod tests {
                     }
                 })
             };
-        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(()));
+        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(true));
         assert_eq!(lanes.slot_count(), 1);
         // Same length: slot reused, values double again on GPU.
-        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(()));
+        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(true));
         assert_eq!(lanes.slot_count(), 1);
         assert_eq!(lane_sum(&store), 4032.0 * 2.0);
     }
@@ -323,13 +329,13 @@ mod tests {
                     }
                 })
             };
-        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(()));
+        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(true));
         assert_eq!(lane_sum(&store), 6.0 + 4.0);
         for _ in 0..4 {
             let e = store.create_entity();
             store.insert(e, 10.0f32);
         }
-        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(()));
+        assert_eq!(run(&mut lanes, &mut store, &mut sync), Some(true));
         assert_eq!(lanes.slot_count(), 1);
         // Old 4 grew by +1 each, new 4 went 10 -> 11.
         assert_eq!(lane_sum(&store), (6.0 + 4.0 * 2.0) + 44.0);
@@ -343,7 +349,7 @@ mod tests {
         let mut store = ornis_core::SmartStore::new();
         let mut sync = CommandSync::new(device.clone(), queue.clone());
         let mut lanes = GpuLanes::new(&device, &queue);
-        let out: Option<()> = lanes.execute::<f32, _, _>(
+        let out: Option<bool> = lanes.execute::<f32, _, _>(
             &mut store,
             &mut sync,
             &lane_config(1),
