@@ -9,6 +9,15 @@
 //!
 //! This is an experimental backend. Compare it against `SweepAndPrune` and
 //! `UniformGrid` through the physics benchmarks before choosing a default.
+//!
+//! Matrix 2026-09-09 (`probe_100k`, 10k bodies, cold): candidate pairs are
+//! identical to `UniformGrid` on all five scenes (tiled/giant_floor/sparse/
+//! islands/heterogeneous), but wall time trails the grid ~2–6x (tiled
+//! 394 vs 121 ms, sparse 86 vs 14 ms). Known causes: every dynamic proxy is
+//! re-queried each update (the `moved` hook is not yet a skip), escaped
+//! proxies pay remove+reinsert, and the tree has no rotations yet, so
+//! insertion order can degenerate query depth. Until rebalance + moved-skip
+//! land, the tree stays explicit opt-in and `Auto` never routes to it.
 
 use glam::Vec3;
 
@@ -210,6 +219,9 @@ pub(crate) struct DynamicAabbTree {
     dynamic_tree: Tree,
     active: Vec<(usize, usize)>,
     stats: BroadPhaseStats,
+    /// Reused query output buffer: one allocation total instead of one per
+    /// dynamic body per update.
+    scratch: Vec<usize>,
 }
 
 impl DynamicAabbTree {
@@ -221,14 +233,20 @@ impl DynamicAabbTree {
             dynamic_tree: Tree::default(),
             active: Vec::new(),
             stats: BroadPhaseStats::default(),
+            scratch: Vec::new(),
         }
     }
 
-    fn fat_aabb(base: AABB) -> AABB {
+    fn fat_aabb(swept: AABB) -> AABB {
+        // The fat box must cover the swept box: queries run against fats but
+        // pairs are filtered by swept overlap, so a fat narrower than the
+        // swept motion path would silently drop fast-body pairs that the
+        // other backends emit. The extra margin absorbs small velocity
+        // changes between updates without forcing a re-insert.
         let margin = Vec3::splat(HALF_SPEC_MARGIN * 4.0);
         AABB {
-            min: base.min - margin,
-            max: base.max + margin,
+            min: swept.min - margin,
+            max: swept.max + margin,
         }
     }
 
@@ -254,7 +272,7 @@ impl BroadPhase for DynamicAabbTree {
         // (a persistent tree still beats a full O(n) sweep on query cost).
         // `moved` is tracked per proxy but not used to skip queries yet — it is
         // the hook for a future sleeping-body fast path.
-        let dynamic = self.refresh_proxies(bodies);
+        let dynamic = self.refresh_proxies(bodies, &swept);
         self.query_dynamic(bodies, &swept, &dynamic);
         // Drop duplicate pairs (a body may appear in several leaves) and
         // sort for deterministic output matching the other backends.
@@ -291,34 +309,56 @@ impl DynamicAabbTree {
         }
     }
 
-    /// Insert new bodies and re-insert moved dynamic bodies into their tree.
-    /// Returns the indices of every dynamic body (the set re-queried each
-    /// update — see `update` for why a moved-only set is not yet used).
-    fn refresh_proxies(&mut self, bodies: &[RigidBody]) -> Vec<usize> {
+    /// Insert new bodies, re-insert escaped proxies into their own tree and
+    /// migrate proxies whose body changed type. Returns the indices of every
+    /// dynamic body (the set re-queried each update — see `update` for why a
+    /// moved-only set is not yet used). Fats are built from swept boxes so
+    /// every query covers the full motion path (see `fat_aabb`).
+    fn refresh_proxies(&mut self, bodies: &[RigidBody], swept: &[AABB]) -> Vec<usize> {
         let mut dynamic = Vec::new();
         for (i, body) in bodies.iter().enumerate() {
-            let base = body.shape.aabb(body.position, body.orientation);
-            let fat = Self::fat_aabb(base);
             if self.proxies.get(i).and_then(|p| p.as_ref()).is_none() {
-                self.insert_new(i, body.body_type, fat);
+                self.insert_new(i, body.body_type, Self::fat_aabb(swept[i]));
                 if body.body_type != BodyType::Static {
                     dynamic.push(i);
                 }
                 continue;
             }
-            let proxy = self.proxies[i].as_mut().unwrap();
-            if !proxy.fat.contains_aabb(&base) {
+            let want_static = body.body_type == BodyType::Static;
+            // Copy out before any tree call so the proxy borrow ends first.
+            let (kind, node) = {
+                let proxy = self.proxies[i].as_ref().unwrap();
+                (proxy.kind, proxy.node)
+            };
+            if (kind == TreeKind::Static) != want_static {
+                // Body changed type: drop from the old tree, insert into the
+                // matching one. Without this a proxy would linger in the
+                // wrong tree after a static/dynamic flip.
+                self.tree_of(kind).remove_leaf(node);
+                self.tree_of(kind).free_node(node);
+                self.proxies[i] = None;
+                self.insert_new(i, body.body_type, Self::fat_aabb(swept[i]));
+                if !want_static {
+                    dynamic.push(i);
+                }
+                continue;
+            }
+            if !self.proxies[i]
+                .as_ref()
+                .unwrap()
+                .fat
+                .contains_aabb(&swept[i])
+            {
+                let fat = Self::fat_aabb(swept[i]);
+                let proxy = self.proxies[i].as_mut().unwrap();
                 proxy.fat = fat;
                 proxy.moved = true;
-                if proxy.kind == TreeKind::Dynamic {
-                    let node = proxy.node;
-                    let tree = self.tree_of(TreeKind::Dynamic);
-                    tree.remove_leaf(node);
-                    tree.nodes[node].aabb = fat;
-                    tree.insert_leaf(node);
-                }
+                let tree = self.tree_of(kind);
+                tree.remove_leaf(node);
+                tree.nodes[node].aabb = fat;
+                tree.insert_leaf(node);
             }
-            if body.body_type != BodyType::Static {
+            if !want_static {
                 dynamic.push(i);
             }
         }
@@ -355,7 +395,10 @@ impl DynamicAabbTree {
     /// pairs deterministically into `self.active`.
     fn query_dynamic(&mut self, bodies: &[RigidBody], swept: &[AABB], dynamic: &[usize]) {
         for &a in dynamic {
-            let mut candidates = Vec::new();
+            // Take the scratch buffer so the tree queries can borrow `self`
+            // mutably; capacity is restored at the end of the iteration.
+            let mut candidates = std::mem::take(&mut self.scratch);
+            candidates.clear();
             let fat = self.proxies[a].as_ref().unwrap().fat;
             self.dynamic_tree.query(&fat, &mut candidates);
             self.static_tree.query(&fat, &mut candidates);
@@ -369,6 +412,7 @@ impl DynamicAabbTree {
                     self.active.push((lo, hi));
                 }
             }
+            self.scratch = candidates;
         }
     }
 }
@@ -483,6 +527,82 @@ mod tests {
         let mut tree_pairs = tree.active().to_vec();
         tree_pairs.sort_unstable();
         assert_eq!(tree_pairs, brute_force_pairs(&bodies));
+    }
+
+    fn moving_scene() -> Vec<RigidBody> {
+        // A fast body (30 m/s covers 0.5 m per step) heading at a static
+        // wall, plus a falling body and a fast-fast crossing pair. The wall
+        // sits at base.min 0.8: inside the swept path (swept max ~0.95) but
+        // outside any base-derived fat box (fat max 0.5), so a fat-only
+        // query would silently drop pair (0, 1).
+        let mut fast = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.4), 1.0);
+        fast.velocity = Vec3::new(30.0, 0.0, 0.0);
+        let wall = RigidBody::new_box(Vec3::new(1.2, 0.0, 0.0), Vec3::splat(0.4), 0.0);
+        let mut falling = RigidBody::new_sphere(Vec3::new(-3.0, 5.0, 0.0), 0.5, 1.0);
+        falling.velocity = Vec3::new(0.0, -20.0, 0.0);
+        let mut left = RigidBody::new_sphere(Vec3::new(-6.0, 0.0, 0.0), 0.5, 1.0);
+        left.velocity = Vec3::new(25.0, 0.0, 0.0);
+        let mut right = RigidBody::new_sphere(Vec3::new(-4.0, 0.0, 0.0), 0.5, 1.0);
+        right.velocity = Vec3::new(-25.0, 0.0, 0.0);
+        vec![fast, wall, falling, left, right]
+    }
+
+    fn tree_pairs(bodies: &[RigidBody], sub_dt: f32) -> Vec<(usize, usize)> {
+        let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
+        tree.update(bodies, sub_dt);
+        let mut pairs = tree.active().to_vec();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    #[test]
+    fn dynamic_tree_matches_oracle_with_velocities() {
+        let bodies = moving_scene();
+        // Twice: persistence state must not change the contract, and output
+        // must be deterministic across updates.
+        assert_eq!(tree_pairs(&bodies, 1.0 / 60.0), brute_force_pairs(&bodies));
+        assert_eq!(tree_pairs(&bodies, 1.0 / 60.0), brute_force_pairs(&bodies));
+    }
+
+    #[test]
+    fn dynamic_tree_keeps_fast_body_pairs_past_the_old_fat_margin() {
+        // 30 m/s * 1/60 s = 0.5 m of swept path: the wall at base.min 0.8 is
+        // inside the swept path but outside any base-derived fat box.
+        let bodies = moving_scene();
+        assert!(tree_pairs(&bodies, 1.0 / 60.0).contains(&(0, 1)));
+    }
+
+    #[test]
+    fn dynamic_tree_reinserts_teleported_static_proxies() {
+        let mut bodies = scene();
+        let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
+        tree.update(&bodies, 1.0 / 60.0);
+        // Teleport the static floor (index 4) far away: stale fats must not
+        // keep emitting its old pairs.
+        bodies[4].position = Vec3::new(500.0, -10.0, 0.0);
+        tree.update(&bodies, 1.0 / 60.0);
+        let mut pairs = tree.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
+        assert!(!pairs.iter().any(|&(a, b)| a == 4 || b == 4));
+    }
+
+    #[test]
+    fn dynamic_tree_survives_static_dynamic_type_flips() {
+        let mut bodies = scene();
+        // Flip the floor to dynamic and back: no panic, pairs track the
+        // oracle through the proxy migration.
+        bodies[4] = RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 1.0);
+        let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
+        tree.update(&bodies, 1.0 / 60.0);
+        let mut pairs = tree.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
+        bodies[4] = RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 0.0);
+        tree.update(&bodies, 1.0 / 60.0);
+        let mut pairs = tree.active().to_vec();
+        pairs.sort_unstable();
+        assert_eq!(pairs, brute_force_pairs(&bodies));
     }
 
     #[test]
