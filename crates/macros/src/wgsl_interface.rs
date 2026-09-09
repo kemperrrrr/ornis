@@ -234,7 +234,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .into();
                 }
                 if let Some(i) = interp {
-                    if !matches!(i.as_str(), "flat" | "perspective" | "linear" | "centroid" | "sample") {
+                    if !matches!(
+                        i.as_str(),
+                        "flat" | "perspective" | "linear" | "centroid" | "sample"
+                    ) {
                         return syn::Error::new(
                             field.ident.span(),
                             format!("WgslInterface: unsupported interpolation qualifier `{i}`"),

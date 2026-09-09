@@ -127,49 +127,45 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
         let Some(buffer) = self.gpu_buffer.as_ref() else {
             return false;
         };
-        {
 
-            let staging = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("smart_buffer staging"),
-                size: self._size as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("smart_buffer sync_to_cpu"),
-            });
-            encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, self._size as u64);
-            queue.submit([encoder.finish()]);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("smart_buffer staging"),
+            size: self._size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("smart_buffer sync_to_cpu"),
+        });
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, self._size as u64);
+        queue.submit([encoder.finish()]);
 
-            let buffer_slice = staging.slice(..);
-            let (sender, receiver) = std::sync::mpsc::channel();
-            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
-            device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .ok();
-            let Ok(Ok(())) = receiver.recv() else {
-                return false;
-            };
-            let Ok(view) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                buffer_slice.get_mapped_range()
-            })) else {
-                return false;
-            };
-            let downloaded: &[T] = bytemuck::cast_slice(&view);
-            if downloaded.len() != self.cpu_data.len() {
-                drop(view);
-                staging.unmap();
-                return false;
-            }
-            self.cpu_data.copy_from_slice(downloaded);
+        let buffer_slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
+        let Ok(Ok(())) = receiver.recv() else {
+            return false;
+        };
+        let Ok(view) = buffer_slice.get_mapped_range() else {
+            return false;
+        };
+        let downloaded: &[T] = bytemuck::cast_slice(&view);
+        if downloaded.len() != self.cpu_data.len() {
             drop(view);
             staging.unmap();
+            return false;
         }
+        self.cpu_data.copy_from_slice(downloaded);
+        drop(view);
+        staging.unmap();
 
         self.flags.remove(ResidencyFlags::DIRTY_GPU);
         true
