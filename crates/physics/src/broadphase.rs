@@ -792,9 +792,9 @@ impl AdaptiveBroadphase {
     }
 
     /// Desired grid cell from scene density: `2 · ∛(volume / n)` over
-    /// non-coarse bodies, quantized to `AUTO_CELL_OPTIONS` (ascending scan
-    /// with `<=` sends exact ties to the larger cell: fewer cells, less
-    /// bookkeeping). Falls back to `AUTO_GRID_CELL_SIZE` with no bodies.
+    /// non-coarse bodies. `8.0` is sticky (the only settled-validated cell);
+    /// only a strong signal moves it. Falls back to `AUTO_GRID_CELL_SIZE`
+    /// with no measurable bodies.
     fn desired_cell_size(bodies: &[RigidBody]) -> f32 {
         let mut minimum = Vec3::splat(f32::INFINITY);
         let mut maximum = Vec3::splat(f32::NEG_INFINITY);
@@ -812,17 +812,14 @@ impl AdaptiveBroadphase {
         }
         let span = (maximum - minimum).max(Vec3::splat(1.0));
         let volume = span.x * span.y * span.z;
-        let raw = (2.0 * (volume / count as f32).cbrt()).clamp(2.0, 16.0);
-        let mut best = AUTO_CELL_OPTIONS[0];
-        let mut best_distance = (best - raw).abs();
-        for &candidate in &AUTO_CELL_OPTIONS[1..] {
-            let distance = (candidate - raw).abs();
-            if distance <= best_distance {
-                best = candidate;
-                best_distance = distance;
-            }
+        let raw = 2.0 * (volume / count as f32).cbrt();
+        if raw < AUTO_CELL_SMALL_RAW {
+            AUTO_CELL_SMALL
+        } else if raw > AUTO_CELL_LARGE_RAW {
+            AUTO_CELL_LARGE
+        } else {
+            AUTO_GRID_CELL_SIZE
         }
-        best
     }
 }
 
@@ -1059,9 +1056,9 @@ mod tests {
         let mut auto = AdaptiveBroadphase::new();
         auto.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
-        // Dynamics span ~90x1x90 outside the excluded coarse floor:
-        // 2 * cbrt(8100/2000) ~ 3.2 -> cell 4.0.
-        assert_eq!(auto.grid_cell_size(), 4.0);
+        // Density raw ~3.1 sits in the sticky band around the validated
+        // default; the coarse floor is excluded from the estimate.
+        assert_eq!(auto.grid_cell_size(), 8.0);
         let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
         grid.update(&bodies, 1.0 / 60.0);
         assert_eq!(auto.active(), grid.active());
@@ -1079,18 +1076,38 @@ mod tests {
         assert_eq!(auto.active(), grid.active());
     }
 
+    /// Truly dense 3D packing: 10x10x10 boxes at spacing 1.0.
+    fn pile_bodies(side: u32) -> Vec<RigidBody> {
+        let mut bodies = Vec::with_capacity((side * side * side) as usize);
+        for x in 0..side {
+            for y in 0..side {
+                for z in 0..side {
+                    bodies.push(RigidBody::new_box(
+                        Vec3::new(x as f32, y as f32 + 5.0, z as f32),
+                        Vec3::splat(0.4),
+                        1.0,
+                    ));
+                }
+            }
+        }
+        bodies
+    }
+
     #[test]
     fn auto_cell_size_follows_scene_density() {
-        // Dense packing (spacing 2.0): 2 * cbrt(~8) ~ 4.0.
+        // Tiled-family density (raw ~3.1): sticky default, the only
+        // settled-validated cell.
         assert_eq!(
             AdaptiveBroadphase::desired_cell_size(&grid_bodies(2000, 2.0)),
-            4.0
+            8.0
         );
-        // Sparse world (spacing 20.0): raw ~14.6 -> 16.0.
+        // Sparse world (raw ~14.6): large cell.
         assert_eq!(
             AdaptiveBroadphase::desired_cell_size(&sparse_bodies(5000)),
             16.0
         );
+        // Dense 3D pile (raw ~1.8): small cell.
+        assert_eq!(AdaptiveBroadphase::desired_cell_size(&pile_bodies(10)), 2.0);
         // No measurable bodies: default optimum.
         assert_eq!(AdaptiveBroadphase::desired_cell_size(&[]), 8.0);
         assert_eq!(
@@ -1112,7 +1129,7 @@ mod tests {
         for _ in 0..70 {
             auto.update(&bodies, 1.0 / 60.0);
             assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
-            assert_eq!(auto.grid_cell_size(), 4.0);
+            assert_eq!(auto.grid_cell_size(), 8.0);
         }
         let small = scene();
         let mut auto_small = AdaptiveBroadphase::new();
