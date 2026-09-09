@@ -63,6 +63,21 @@ struct FieldLayout {
     align: proc_macro2::TokenStream,
 }
 
+/// naga IR shape of a field, computed alongside [`FieldLayout`] so the
+/// emitted `naga_add_type` constructor cannot diverge from the WGSL text.
+enum NagaField {
+    /// Plain scalar (`f32`/`u32`/`i32`/`GpuBool`), as WGSL kind name.
+    Scalar(&'static str),
+    /// Fixed vector `[T; 2..=4]`.
+    Vector { len: usize, elem: &'static str },
+    /// `mat4x4<f32>`.
+    Matrix,
+    /// Nested struct by value.
+    Nested(proc_macro2::Ident),
+    /// Array of nested structs.
+    NestedArray(proc_macro2::Ident, usize),
+}
+
 /// Scalar element mapping: (WGSL scalar name, byte size).
 fn scalar_elem(ty: &syn::Type) -> Option<(&'static str, usize)> {
     if let syn::Type::Path(tp) = ty {
@@ -96,7 +111,7 @@ fn scalar_elem(ty: &syn::Type) -> Option<(&'static str, usize)> {
 fn wgsl_field_layout(
     ty: &syn::Type,
     as_name: Option<&str>,
-) -> syn::Result<(FieldLayout, Option<proc_macro2::TokenStream>)> {
+) -> syn::Result<(FieldLayout, Option<proc_macro2::TokenStream>, NagaField)> {
     // Plain scalar: `f32` etc.
     if let Some((name, size)) = scalar_elem(ty) {
         if as_name.is_some() {
@@ -113,6 +128,7 @@ fn wgsl_field_layout(
                 align: quote! { #size_lit },
             },
             None,
+            NagaField::Scalar(name),
         ));
     }
     if let syn::Type::Array(arr) = ty {
@@ -155,6 +171,7 @@ fn wgsl_field_layout(
                     align: quote! { 16usize },
                 },
                 None,
+                NagaField::Matrix,
             ));
         }
         // Scalar vector: `[f32; 2..=4]` ↔ `vecN<f32>`.
@@ -188,6 +205,10 @@ fn wgsl_field_layout(
                     align: quote! { #align_lit },
                 },
                 None,
+                NagaField::Vector {
+                    len,
+                    elem: elem_wgsl,
+                },
             ));
         }
         // Array of nested structs: `[Inner; K]` ↔ `array<W, K>` where `W` is
@@ -211,6 +232,7 @@ fn wgsl_field_layout(
                     align: quote! { 16usize },
                 },
                 Some(quote! { #inner }),
+                NagaField::NestedArray(inner.clone(), len),
             ));
         }
         return Err(syn::Error::new(
@@ -237,6 +259,7 @@ fn wgsl_field_layout(
                 align: quote! { 16usize },
             },
             Some(quote! { #inner }),
+            NagaField::Nested(inner.clone()),
         ));
     }
     Err(syn::Error::new(
@@ -340,9 +363,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut decl_lines: Vec<String> = Vec::new();
     let mut offset_asserts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut nested: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut naga_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut naga_members: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut off: proc_macro2::TokenStream = quote! { 0usize };
     let mut max_align: proc_macro2::TokenStream = quote! { 1usize };
     let mut saw_skip = false;
+    let mut member_idx = 0usize;
 
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named field");
@@ -350,10 +376,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
             Ok(opts) => opts,
             Err(e) => return e.to_compile_error().into(),
         };
-        let (layout, nested_ty) = match wgsl_field_layout(&field.ty, opts.as_name.as_deref()) {
-            Ok(t) => t,
-            Err(e) => return e.to_compile_error().into(),
-        };
+        let (layout, nested_ty, naga_field) =
+            match wgsl_field_layout(&field.ty, opts.as_name.as_deref()) {
+                Ok(t) => t,
+                Err(e) => return e.to_compile_error().into(),
+            };
         if let Some(inner) = nested_ty {
             nested.push(inner);
         }
@@ -386,6 +413,132 @@ pub fn derive(input: TokenStream) -> TokenStream {
             offset_asserts.push(quote! {
                 const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #off) as usize];
             });
+            // The aligned cursor is this member's naga offset; the emitted
+            // constructor reuses the same symbolic expression.
+            let member_off = off.clone();
+            let member_name = wgsl_field.clone();
+            let m = quote::format_ident!("__naga_m{}", member_idx);
+            member_idx += 1;
+            let ty_stmt = match &naga_field {
+                NagaField::Scalar(kind) => {
+                    let scalar_kind = match *kind {
+                        "f32" => quote! { naga::ScalarKind::Float },
+                        "u32" => quote! { naga::ScalarKind::Uint },
+                        "i32" => quote! { naga::ScalarKind::Sint },
+                        other => {
+                            return syn::Error::new(
+                                field.ty.span(),
+                                format!("WgslStruct: no naga scalar for `{other}`"),
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                    };
+                    quote! {
+                        let #m = module.types.insert(
+                            naga::Type {
+                                name: None,
+                                inner: naga::TypeInner::Scalar(naga::Scalar {
+                                    kind: #scalar_kind,
+                                    width: 4,
+                                }),
+                            },
+                            naga::Span::default(),
+                        );
+                    }
+                }
+                NagaField::Vector { len, elem } => {
+                    let size = match len {
+                        2 => quote! { naga::VectorSize::Bi },
+                        3 => quote! { naga::VectorSize::Tri },
+                        4 => quote! { naga::VectorSize::Quad },
+                        other => {
+                            return syn::Error::new(
+                                field.ty.span(),
+                                format!("WgslStruct: no naga vector length {other}"),
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                    };
+                    let scalar_kind = match *elem {
+                        "f32" => quote! { naga::ScalarKind::Float },
+                        "u32" => quote! { naga::ScalarKind::Uint },
+                        "i32" => quote! { naga::ScalarKind::Sint },
+                        other => {
+                            return syn::Error::new(
+                                field.ty.span(),
+                                format!("WgslStruct: no naga scalar for `{other}`"),
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                    };
+                    quote! {
+                        let #m = module.types.insert(
+                            naga::Type {
+                                name: None,
+                                inner: naga::TypeInner::Vector {
+                                    size: #size,
+                                    scalar: naga::Scalar { kind: #scalar_kind, width: 4 },
+                                },
+                            },
+                            naga::Span::default(),
+                        );
+                    }
+                }
+                NagaField::Matrix => quote! {
+                    let #m = module.types.insert(
+                        naga::Type {
+                            name: None,
+                            inner: naga::TypeInner::Matrix {
+                                columns: naga::VectorSize::Quad,
+                                rows: naga::VectorSize::Quad,
+                                scalar: naga::Scalar {
+                                    kind: naga::ScalarKind::Float,
+                                    width: 4,
+                                },
+                            },
+                        },
+                        naga::Span::default(),
+                    );
+                },
+                NagaField::Nested(inner) => quote! {
+                    let #m = #inner::naga_add_type(module);
+                },
+                NagaField::NestedArray(inner, len) => {
+                    let len_lit = proc_macro2::Literal::usize_suffixed(*len);
+                    let b = quote::format_ident!("__naga_b{}", member_idx);
+                    quote! {
+                        let #b = #inner::naga_add_type(module);
+                        let #m = module.types.insert(
+                            naga::Type {
+                                name: None,
+                                inner: naga::TypeInner::Array {
+                                    base: #b,
+                                    size: naga::ArraySize::Constant(
+                                        ::core::num::NonZeroU32::new(#len_lit as u32)
+                                            .expect("array length is nonzero"),
+                                    ),
+                                    stride: (::core::mem::size_of::<#inner>()
+                                        .div_ceil(16usize) * 16usize)
+                                        as u32,
+                                },
+                            },
+                            naga::Span::default(),
+                        );
+                    }
+                }
+            };
+            naga_stmts.push(ty_stmt);
+            naga_members.push(quote! {
+                naga::StructMember {
+                    name: Some(#member_name.to_string()),
+                    ty: #m,
+                    binding: None,
+                    offset: (#member_off) as u32,
+                }
+            });
             off = quote! { (#off + #size) };
             max_align = quote! { if #max_align > #align { #max_align } else { #align } };
         }
@@ -415,6 +568,24 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// The WGSL type name of this struct (the `#[wgsl(name)]`
             /// override when present, else the Rust type name).
             pub const WGSL_NAME: &'static str = #name_lit;
+
+            /// Insert this layout into a naga IR module, building member
+            /// types from the same field walk as [`WGSL_SOURCE`](Self::WGSL_SOURCE).
+            /// Nested layouts recurse through their own `naga_add_type`, so
+            /// the IR cannot diverge from the WGSL text.
+            pub fn naga_add_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
+                #(#naga_stmts)*
+                module.types.insert(
+                    naga::Type {
+                        name: Some(#name_lit.to_string()),
+                        inner: naga::TypeInner::Struct {
+                            members: ::std::vec![#(#naga_members),*],
+                            span: (#stride) as u32,
+                        },
+                    },
+                    naga::Span::default(),
+                )
+            }
         }
 
         // Compile-time verification that the Rust layout (repr(C)) matches

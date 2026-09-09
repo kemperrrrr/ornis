@@ -13,6 +13,7 @@ pub mod helpers;
 pub mod interface;
 pub mod lighting_generated;
 pub mod math;
+pub mod naga_ir;
 pub mod pbr_generated;
 
 /// Splice a derived [`WgslStruct`](ornis_macros::WgslStruct) declaration into

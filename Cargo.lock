@@ -2472,6 +2472,7 @@ name = "ornis-macros"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "naga",
  "ornis-core",
  "proc-macro2",
  "quote",

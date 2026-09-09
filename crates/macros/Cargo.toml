@@ -15,6 +15,7 @@ proc-macro2 = "1"
 glam = { version = "0.33", optional = true }
 
 [dev-dependencies]
+naga = { version = "30", features = ["wgsl-out"] }
 ornis-core = { path = "../core" }
 glam = "0.33"
 trybuild = "1"

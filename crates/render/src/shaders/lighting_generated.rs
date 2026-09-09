@@ -11,24 +11,33 @@ use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
     OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, const_vec2_array,
-    const_vec4_array, openpbr_material_decl, resource_decl, wgsl_decl,
+    const_vec4_array, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
 use ornis_macros::stage;
 
 /// WGSL boilerplate for deferred lighting: derived layouts plus resource
-/// bindings, assembled from Rust (no handwritten WGSL remains).
+/// bindings, assembled as naga IR and printed by naga itself (see
+/// [`naga_ir`](super::naga_ir)) — no WGSL text is authored here.
 fn lighting_wgsl_header() -> String {
-    let mut out = String::new();
-    out.push_str(&wgsl_decl(CameraUniform::WGSL_SOURCE));
-    out.push_str(&wgsl_decl(GpuLight::WGSL_SOURCE));
-    out.push_str(&wgsl_decl(LightingUniform::WGSL_SOURCE));
-    out.push_str(openpbr_material_decl().as_str());
+    let mut module = naga::Module::default();
+    let cam = CameraUniform::naga_add_type(&mut module);
+    // Inserted explicitly so declaration order stays Camera, Light,
+    // Lighting (deduped when the Lighting member recurses into it).
+    let _light = GpuLight::naga_add_type(&mut module);
+    let lighting = LightingUniform::naga_add_type(&mut module);
+    let mat = naga_ir::openpbr_type(&mut module);
     for r in LIGHTING_RESOURCES {
-        out.push_str(&resource_decl(&r));
+        let ty = match r.name {
+            "camera" => cam,
+            "lighting" => lighting,
+            "materials" => mat,
+            _ => cam,
+        };
+        naga_ir::add_global(&mut module, ty, &r, false);
     }
-    out
+    naga_ir::write_module(&module, &LIGHTING_RESOURCES)
 }
 
 /// Resource layout of the deferred-lighting pass: where each resource
@@ -449,22 +458,17 @@ mod tests {
     }
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
-        use super::super::{openpbr_material_decl, wgsl_decl};
-        use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
+        // The header is built as naga IR from the same derives (drift is
+        // impossible by construction); pin declaration order and the 10
+        // resource bindings in the printed output.
         let src = wgsl_source();
-        let cam = src
-            .find(&wgsl_decl(CameraUniform::WGSL_SOURCE))
-            .expect("Camera");
-        let light = src.find(&wgsl_decl(GpuLight::WGSL_SOURCE)).expect("Light");
-        let lighting = src
-            .find(&wgsl_decl(LightingUniform::WGSL_SOURCE))
-            .expect("Lighting");
-        let mat = src.find(openpbr_material_decl().as_str()).expect("OpenPBR");
-        let b9 = src
-            .find("@group(0) @binding(9) var lighting_sampler: sampler;")
-            .expect("bindings");
+        let cam = src.find("struct Camera").expect("Camera");
+        let light = src.find("struct Light").expect("Light");
+        let lighting = src.find("struct Lighting").expect("Lighting");
+        let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
+        let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@group(0) @binding(").count(), 10);
+        assert_eq!(src.matches("@binding(").count(), 10);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer

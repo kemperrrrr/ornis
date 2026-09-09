@@ -64,6 +64,45 @@ fn wgsl_name_matches_override() {
     assert_eq!(BodyState::WGSL_NAME, "BodyState");
 }
 
+/// The derived `naga_add_type` builds the same layout in naga IR: one
+/// member per field, same names and offsets, validated by naga itself.
+#[test]
+fn naga_ir_matches_wgsl_source() {
+    let mut module = naga::Module::default();
+    let handle = BodyState::naga_add_type(&mut module);
+    let ty = &module.types[handle];
+    assert_eq!(ty.name.as_deref(), Some("BodyState"));
+    let naga::TypeInner::Struct { members, span } = &ty.inner else {
+        panic!("BodyState must lower to a naga struct");
+    };
+    assert_eq!(*span, 32);
+    let names: Vec<_> = members
+        .iter()
+        .map(|m| (m.name.as_deref().unwrap(), m.offset))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("velocity", 0),
+            ("pad_v", 12),
+            ("angular", 16),
+            ("pad_w", 28)
+        ]
+    );
+    // The IR module round-trips through naga validation.
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("declaration-only module must validate");
+    let wgsl =
+        naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+            .expect("naga WGSL writer must print the struct");
+    assert!(wgsl.contains("struct BodyState"));
+    assert!(wgsl.contains("velocity: vec3<f32>"));
+}
+
 #[test]
 fn layout_matches_wgsl_rules() {
     // These offsets are enforced at compile time by the derive; re-assert
