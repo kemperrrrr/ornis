@@ -64,6 +64,11 @@ pub struct StepTiming {
     pub solver_ms: f64,
     /// Number of substeps the timings were summed over.
     pub substeps: u32,
+    /// Time spent rebuilding islands and updating sleep state (once per step).
+    pub island_ms: f64,
+    /// Time spent rebuilding the broadphase at completed poses and
+    /// reconciling trigger overlaps (once per step).
+    pub trigger_ms: f64,
 }
 
 impl StepTiming {

@@ -3504,21 +3504,30 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         self.debug_pairs.clear();
         self.debug_pairs
             .extend(last_manifolds_snapshot.iter().map(|m| (m.body_a, m.body_b)));
+        let t_island = Instant::now();
         self.rebuild_islands(&last_manifolds_snapshot);
         self.update_sleep(dt);
+        timing.island_ms += t_island.elapsed().as_secs_f64() * 1000.0;
         self.last_step_timing = timing;
 
         // Rebuild the broadphase at the completed poses so trigger events
         // describe the state visible after this whole physics step, not the
-        // state from before the final substep's integration.
+        // state from before the final substep's integration. The rebuild
+        // itself always runs (backends key their incremental baseline off
+        // it); only the overlap detect + reconcile is gated — triggerless
+        // worlds skip it instead of scanning every pair for nothing.
+        let t_trigger = Instant::now();
         self.broadphase.update(&self.bodies, 0.0);
-        let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
-        let previous_triggers = std::mem::take(&mut self.trigger_pairs);
-        self.trigger_pairs = update_trigger_events(
-            &previous_triggers,
-            current_triggers,
-            &mut self.trigger_events,
-        );
+        if has_trigger || !self.trigger_pairs.is_empty() {
+            let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
+            let previous_triggers = std::mem::take(&mut self.trigger_pairs);
+            self.trigger_pairs = update_trigger_events(
+                &previous_triggers,
+                current_triggers,
+                &mut self.trigger_events,
+            );
+        }
+        self.last_step_timing.trigger_ms += t_trigger.elapsed().as_secs_f64() * 1000.0;
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {

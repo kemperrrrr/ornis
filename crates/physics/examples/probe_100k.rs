@@ -228,11 +228,13 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
             );
             let timing = physics.step_timing();
             println!(
-                "timing after step {}: broad={:.2}ms narrow={:.2}ms solver={:.2}ms substeps={}",
+                "timing after step {}: broad={:.2}ms narrow={:.2}ms solver={:.2}ms island={:.2}ms trigger={:.2}ms substeps={}",
                 step,
                 timing.broad_phase_ms,
                 timing.narrow_phase_ms,
                 timing.solver_ms,
+                timing.island_ms,
+                timing.trigger_ms,
                 timing.substeps,
             );
             // Sleeping-world diagnostics: chunk-sleep work starts from how
