@@ -5139,6 +5139,37 @@ mod tests {
         );
     }
 
+    /// Kinematic CCD deferred with proof: thin SLEEPING victim (4 cm) vs a
+    /// fast kinematic wall (10 m/s) at full 12 substeps. The speculative
+    /// margin provably covers travel (margin >= v*dt always), so the
+    /// discrete path already carries the victim without tunneling (rode
+    /// 7.5 m here) — a dedicated kinematic sweep would only polish
+    /// response quality, not close a capability gap.
+    #[test]
+    fn fast_kinematic_plow_carries_thin_sleeper() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let victim = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.02, 0.5, 0.5),
+            1.0,
+        ));
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(victim), "victim must sleep in zero-g");
+        let mut wall = RigidBody::new_box(Vec3::new(-3.0, 0.0, 0.0), Vec3::new(0.5, 1.0, 1.0), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        let wall_h = physics.add_body(wall);
+        for _ in 0..60 {
+            let w = physics.get_body_mut(wall_h).unwrap();
+            w.velocity = Vec3::new(10.0, 0.0, 0.0);
+            w.position.x += 10.0 / 60.0;
+            physics.step(1.0 / 60.0);
+        }
+        let vx = physics.get_body(victim).unwrap().position.x;
+        assert!(vx > 1.0, "victim must ride the plow, not tunnel (x={vx})");
+    }
+
     #[test]
     fn two_box_stack_stays_stable() {
         // G2 gate: a 2-box stack stands for 5 seconds without drift or toppling.
