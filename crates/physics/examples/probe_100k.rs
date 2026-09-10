@@ -172,7 +172,14 @@ fn print_usage() {
     println!("  --steps N             number of measured steps (default: 20)");
 }
 
-fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, steps: u32) {
+fn run_probe(
+    backend: BroadPhaseKind,
+    cell_size: f32,
+    scene: &str,
+    bodies: u32,
+    steps: u32,
+    kill_plane: bool,
+) {
     let backend_name = match backend {
         BroadPhaseKind::SweepAndPrune => "sweep_and_prune",
         BroadPhaseKind::UniformGrid => "uniform_grid",
@@ -205,6 +212,24 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
         physics.step(1.0 / 60.0);
         let elapsed = started.elapsed();
         println!("step {step}: {elapsed:?}");
+        // Kill-plane experiment (substep-tax probe): remove dynamics fallen
+        // below y=-10 so perpetual fallers stop forcing global substeps.
+        // Collect-then-remove-backwards: swap_remove shifts the tail.
+        if kill_plane {
+            let stats_now = physics.broadphase_stats();
+            let mut fallen = Vec::new();
+            for h in 0..stats_now.body_count {
+                let Some(b) = physics.get_body(h) else {
+                    continue;
+                };
+                if b.body_type == BodyType::Dynamic && b.position.y < -10.0 {
+                    fallen.push(h);
+                }
+            }
+            for h in fallen.into_iter().rev() {
+                physics.remove_body(h);
+            }
+        }
         // Skip the first step (broadphase warm-up / initial pair build).
         if step > 0 {
             steady.push(elapsed);
@@ -311,6 +336,7 @@ fn main() {
     let mut scene = "tiled".to_string();
     let mut bodies = 10_000u32;
     let mut steps = 20u32;
+    let mut kill_plane = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -329,6 +355,7 @@ fn main() {
             "--scene" => scene = parse_value("--scene", args.next()),
             "--bodies" => bodies = parse_value("--bodies", args.next()),
             "--steps" => steps = parse_value("--steps", args.next()),
+            "--kill-plane" => kill_plane = true,
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -336,5 +363,12 @@ fn main() {
             unknown => panic!("unknown argument {unknown}; use --help for usage"),
         }
     }
-    run_probe(backend, cell_size.unwrap_or(4.0), &scene, bodies, steps);
+    run_probe(
+        backend,
+        cell_size.unwrap_or(4.0),
+        &scene,
+        bodies,
+        steps,
+        kill_plane,
+    );
 }

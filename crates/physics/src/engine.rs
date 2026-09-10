@@ -2199,6 +2199,9 @@ pub struct BuiltinPhysicsEngine {
     /// Scratch buffers reused across substeps to avoid per-frame allocations.
     scratch_manifolds: Vec<Manifold>,
     scratch_pairs: Vec<(usize, usize)>,
+    /// Per-substep bucket boundaries over `scratch_pairs` (stable counting
+    /// sort by required substeps, rebuilt once per step when filtering).
+    scratch_bucket_edges: Vec<usize>,
     scratch_clamped: Vec<bool>,
     scratch_parent: Vec<usize>,
     /// Pooled narrowphase shard buffers for scheduler dispatch, taken and
@@ -2242,6 +2245,7 @@ impl BuiltinPhysicsEngine {
             wide_solver: true,
             scratch_manifolds: Vec::new(),
             scratch_pairs: Vec::new(),
+            scratch_bucket_edges: Vec::new(),
             scratch_clamped: Vec::new(),
             scratch_parent: Vec::new(),
             scratch_narrow_shards: NarrowShardPool::default(),
@@ -3410,6 +3414,93 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 Some(&body_needed)
             }
         };
+        let needs_filter = body_needed_opt.is_some() || !self.joint_pairs.is_empty();
+        // Per-substep pair buckets: stable counting sort of the candidate
+        // pairs by required substeps, once per step. Slow pairs are then
+        // visited only on the substeps that need them instead of being
+        // re-checked (and re-rejected) 12x per step. Bucket s holds exactly
+        // the pairs the old per-substep filter kept at s, in the same
+        // relative order — bit-identical narrowphase input per substep.
+        let mut sorted_pairs = std::mem::take(&mut self.scratch_pairs);
+        sorted_pairs.clear();
+        let mut bucket_edges = std::mem::take(&mut self.scratch_bucket_edges);
+        bucket_edges.clear();
+        if needs_filter {
+            let eff = eff_substeps as usize;
+            sorted_pairs.reserve(broad_active.len());
+            // Count required-substep classes, clamped to eff (over-budget
+            // pairs are needed on every substep that runs, like before).
+            // bucket_edges doubles as the counter array, then the placement
+            // cursors, then the final boundary table — no per-step
+            // allocation. Class of a pair: jointed pairs are excluded on
+            // every substep (class 0 = never visited); without per-body
+            // data every pair needs every substep (class eff).
+            bucket_edges.resize(eff + 1, 0);
+            // Fast path: no joints — skip the per-pair set lookup entirely.
+            if self.joint_pairs.is_empty() {
+                if let Some(req) = body_needed_opt {
+                    for &(a, b) in &broad_active {
+                        bucket_edges[(req[a].max(req[b]) as usize).min(eff)] += 1;
+                    }
+                } else {
+                    bucket_edges[eff] = broad_active.len();
+                }
+            } else {
+                for &(a, b) in &broad_active {
+                    let c = if self.joint_pairs.contains(&(a, b)) {
+                        0
+                    } else if let Some(req) = body_needed_opt {
+                        (req[a].max(req[b]) as usize).min(eff)
+                    } else {
+                        eff
+                    };
+                    bucket_edges[c] += 1;
+                }
+            }
+            // Exclusive prefix sums: starts[c] = #{k < c}. Forward stable
+            // placement advances them into end offsets #{k <= c} — which
+            // are exactly the bucket boundaries S_s (bucket s = suffix
+            // [S_s..N) of pairs with class > s, original relative order).
+            let mut cursor = 0;
+            for slot in bucket_edges.iter_mut() {
+                let n = *slot;
+                *slot = cursor;
+                cursor += n;
+            }
+            sorted_pairs.resize(broad_active.len(), (0, 0));
+            if self.joint_pairs.is_empty() {
+                if let Some(req) = body_needed_opt {
+                    for &(a, b) in &broad_active {
+                        let c = (req[a].max(req[b]) as usize).min(eff);
+                        let w = bucket_edges[c];
+                        sorted_pairs[w] = (a, b);
+                        bucket_edges[c] = w + 1;
+                    }
+                } else {
+                    // No per-body data, no joints: every pair needs every
+                    // substep. Counting put the whole list in class eff at
+                    // offset 0; the prefix starts are already the correct
+                    // boundaries (S_s = 0 for s < eff).
+                    sorted_pairs.copy_from_slice(&broad_active);
+                }
+            } else {
+                for &(a, b) in &broad_active {
+                    let c = if self.joint_pairs.contains(&(a, b)) {
+                        0
+                    } else if let Some(req) = body_needed_opt {
+                        (req[a].max(req[b]) as usize).min(eff)
+                    } else {
+                        eff
+                    };
+                    if c == 0 {
+                        continue;
+                    }
+                    let w = bucket_edges[c];
+                    sorted_pairs[w] = (a, b);
+                    bucket_edges[c] = w + 1;
+                }
+            }
+        }
         // Scheduler narrowphase shard pool, taken once for the whole substep
         // loop and restored after (same discipline as the other scratch).
         let mut narrow_shards = std::mem::take(&mut self.scratch_narrow_shards);
@@ -3419,36 +3510,19 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // substep instead of letting the body free-fall and snapping it
             // back (the snap is an inelastic collision and bleeds energy).
             self.integrate_velocities(sub_dt);
-            // B: per-body substeps pre-filtering — instead of doing per-pair
-            // max() checks inside the heavy SAT loop (which hurts homogeneous
-            // scenes), filter candidate pairs once per substep outside narrow.
-            // Slow pairs (need 4) are skipped on extra substeps s>=4, fast
-            // pairs (need 12) stay. This gives tiled 10k 32->13ms without
-            // penalizing many_islands (homogeneous).
-            let needs_filter = body_needed_opt.is_some() || !self.joint_pairs.is_empty();
+            // Narrowphase input: the full candidate list on homogeneous
+            // scenes, the pre-bucketed class suffix on mixed ones (see the
+            // counting sort above the substep loop).
             let t0 = Instant::now();
             let mut manifolds_buf = std::mem::take(&mut self.scratch_manifolds);
             manifolds_buf.clear();
             if needs_filter {
-                let mut filtered = std::mem::take(&mut self.scratch_pairs);
-                filtered.clear();
-                if filtered.capacity() < broad_active.len() {
-                    filtered.reserve(broad_active.len() - filtered.capacity());
-                }
-                for &(a, b) in &broad_active {
-                    if self.joint_pairs.contains(&(a, b)) {
-                        continue;
-                    }
-                    if let Some(req) = body_needed_opt
-                        && req[a].max(req[b]) <= s
-                    {
-                        continue;
-                    }
-                    filtered.push((a, b));
-                }
+                // Bucket s = suffix of pairs with class > s: exactly the
+                // set the old per-substep filter kept, same order.
+                let start = bucket_edges[s as usize];
                 detect_collisions_into_with_cache(
                     &self.bodies,
-                    &filtered,
+                    &sorted_pairs[start..],
                     &self.asleep,
                     sub_dt,
                     &mut manifolds_buf,
@@ -3458,7 +3532,6 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     Some(&self.sat_cache),
                     &mut narrow_shards,
                 );
-                self.scratch_pairs = filtered;
             } else {
                 detect_collisions_into_with_cache(
                     &self.bodies,
@@ -3499,6 +3572,8 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             self.scratch_manifolds = manifolds_buf;
         }
         self.scratch_narrow_shards = narrow_shards;
+        self.scratch_pairs = sorted_pairs;
+        self.scratch_bucket_edges = bucket_edges;
         // Diagnostics: contact-manifold partners per body from the last
         // substep (drives sleep/island debugging; tiny flat copy).
         self.debug_pairs.clear();
