@@ -22,6 +22,13 @@
 //! walk: translation itself stays `String`-based (no `Result` ripple
 //! through `WgslGen`), while wrong-arity calls fail with spanned errors
 //! instead of reaching naga (or panicking, as zero-arg `length_sq` did).
+//!
+//! [`ir`] holds the structural nodes between the Rust AST and WGSL text;
+//! [`writer`] renders them. The translator lowers `syn` → IR and prints
+//! IR → WGSL, so each side is testable without the other.
+
+pub mod ir;
+pub mod writer;
 
 use syn::visit::Visit;
 

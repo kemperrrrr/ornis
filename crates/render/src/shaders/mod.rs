@@ -167,6 +167,24 @@ pub fn resource_decl(r: &Resource) -> String {
     )
 }
 
+/// Runtime bind-group entries from a [`Resource`] table: binding numbers
+/// come from the table (single source with the WGSL decls and the BGL),
+/// so a table reorder propagates here by construction. Only the
+/// name → live resource mapping stays per call site; an unmapped row
+/// panics loudly (a table gain without a call-site update).
+pub fn bind_group_entries<'a>(
+    table: &[Resource],
+    resolve: impl Fn(&Resource) -> wgpu::BindingResource<'a>,
+) -> Vec<wgpu::BindGroupEntry<'a>> {
+    table
+        .iter()
+        .map(|r| wgpu::BindGroupEntry {
+            binding: r.binding,
+            resource: resolve(r),
+        })
+        .collect()
+}
+
 /// Ordered shader-module assembly: call sites declare WHAT goes in,
 /// [`emit`](ShaderModule::emit) owns section order and separators.
 /// WGSL needs decl-before-use; the former per-site `format!` skeletons

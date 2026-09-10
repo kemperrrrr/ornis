@@ -441,24 +441,17 @@ impl Renderer3D {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pbr bind group"),
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffers.camera.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buffers.per_object.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffers.material.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buffers.lighting.as_entire_binding(),
-                },
-            ],
+            // Binding numbers come from the table; only the name →
+            // buffer mapping lives here.
+            entries: &shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| {
+                match r.name {
+                    "camera" => buffers.camera.as_entire_binding(),
+                    "per_objects" => buffers.per_object.as_entire_binding(),
+                    "materials" => buffers.material.as_entire_binding(),
+                    "lighting" => buffers.lighting.as_entire_binding(),
+                    other => panic!("pbr bind group has no resource for `{other}`"),
+                }
+            }),
         });
 
         (bind_group_layout, bind_group)
@@ -698,20 +691,15 @@ impl Renderer3D {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gbuffer bind group"),
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
+            entries: &shaders::bind_group_entries(
+                &shaders::gbuffer_generated::GBUFFER_RESOURCES,
+                |r| match r.name {
+                    "camera" => camera_buffer.as_entire_binding(),
+                    "per_objects" => per_object_buffer.as_entire_binding(),
+                    "materials" => material_buffer.as_entire_binding(),
+                    other => panic!("gbuffer bind group has no resource for `{other}`"),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: per_object_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: material_buffer.as_entire_binding(),
-                },
-            ],
+            ),
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -918,24 +906,15 @@ impl Renderer3D {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("forward bind group"),
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: per_object_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: material_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: lighting_buffer.as_entire_binding(),
-                },
-            ],
+            entries: &shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| {
+                match r.name {
+                    "camera" => camera_buffer.as_entire_binding(),
+                    "per_objects" => per_object_buffer.as_entire_binding(),
+                    "materials" => material_buffer.as_entire_binding(),
+                    "lighting" => lighting_buffer.as_entire_binding(),
+                    other => panic!("forward bind group has no resource for `{other}`"),
+                }
+            }),
         });
 
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1492,51 +1471,29 @@ impl Renderer3D {
     ) {
         // The bind group is rebuilt per frame: gbuffer views come from the
         // render-plan pool (transient) or from persistent textures.
+        // Binding numbers come from the table; only the name → live
+        // resource mapping is written out here.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting bind group (frame)"),
             layout: &self.lighting_pass.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.camera_buffer.as_entire_binding(),
+            entries: &shaders::bind_group_entries(
+                &shaders::lighting_generated::LIGHTING_RESOURCES,
+                |r| match r.name {
+                    "camera" => self.camera_buffer.as_entire_binding(),
+                    "lighting" => self.lighting_buffer.as_entire_binding(),
+                    "materials" => self.material_buffer.as_entire_binding(),
+                    "albedo_tex" => wgpu::BindingResource::TextureView(g.albedo),
+                    "normal_tex" => wgpu::BindingResource::TextureView(g.normal),
+                    "material_id_tex" => wgpu::BindingResource::TextureView(g.material_id),
+                    "world_pos_tex" => wgpu::BindingResource::TextureView(g.world_position),
+                    "mat_params_tex" => wgpu::BindingResource::TextureView(g.material_params),
+                    "depth_tex" => wgpu::BindingResource::TextureView(g.depth),
+                    "lighting_sampler" => {
+                        wgpu::BindingResource::Sampler(&self.lighting_pass.sampler)
+                    }
+                    other => panic!("lighting bind group has no resource for `{other}`"),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.lighting_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.material_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(g.albedo),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(g.normal),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(g.material_id),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(g.world_position),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(g.material_params),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(g.depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::Sampler(&self.lighting_pass.sampler),
-                },
-            ],
+            ),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1646,30 +1603,21 @@ impl Renderer3D {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bind group"),
             layout: &self.composite_pass.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(inputs.hdr),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(inputs.hdr_fwd),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(inputs.bloom),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Buffer(
+            // Binding numbers come from the table; only the name → live
+            // resource mapping is written out here.
+            entries: &shaders::bind_group_entries(
+                &shaders::hdr_composite_generated::HDR_RESOURCES,
+                |r| match r.name {
+                    "deferred_tex" => wgpu::BindingResource::TextureView(inputs.hdr),
+                    "forward_tex" => wgpu::BindingResource::TextureView(inputs.hdr_fwd),
+                    "composite_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    "bloom_tex" => wgpu::BindingResource::TextureView(inputs.bloom),
+                    "bloom_params" => wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
                     ),
+                    other => panic!("composite bind group has no resource for `{other}`"),
                 },
-            ],
+            ),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1771,22 +1719,17 @@ impl Renderer3D {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom down bind group"),
             layout: &self.bloom_pass.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(src),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Buffer(
+            entries: &shaders::bind_group_entries(
+                &shaders::bloom_generated::BLOOM_RESOURCES,
+                |r| match r.name {
+                    "src_tex" => wgpu::BindingResource::TextureView(src),
+                    "src_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    "bloom_params" => wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
                     ),
+                    other => panic!("bloom bind group has no resource for `{other}`"),
                 },
-            ],
+            ),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom down pass"),
@@ -1822,22 +1765,17 @@ impl Renderer3D {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom up bind group"),
             layout: &self.bloom_pass.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(src),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Buffer(
+            entries: &shaders::bind_group_entries(
+                &shaders::bloom_generated::BLOOM_RESOURCES,
+                |r| match r.name {
+                    "src_tex" => wgpu::BindingResource::TextureView(src),
+                    "src_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    "bloom_params" => wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
                     ),
+                    other => panic!("bloom bind group has no resource for `{other}`"),
                 },
-            ],
+            ),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom up pass"),

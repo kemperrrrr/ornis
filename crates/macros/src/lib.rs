@@ -33,6 +33,7 @@ mod static_profile;
 mod wgsl;
 mod wgsl_context;
 mod wgsl_interface;
+mod wgsl_lower;
 mod wgsl_struct;
 
 use proc_macro::TokenStream;

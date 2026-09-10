@@ -119,24 +119,18 @@ impl CompositePass {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bind group"),
             layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(pbr_texture),
+            // Binding numbers come from the table; only the name → live
+            // resource mapping is written out here.
+            entries: &crate::shaders::bind_group_entries(
+                &crate::shaders::composite_generated::COMPOSITE_RESOURCES,
+                |r| match r.name {
+                    "pbr_tex" => wgpu::BindingResource::TextureView(pbr_texture),
+                    "pbr_sampler" => wgpu::BindingResource::Sampler(&self.sampler),
+                    "ui_tex" => wgpu::BindingResource::TextureView(ui_texture),
+                    "ui_sampler" => wgpu::BindingResource::Sampler(&self.sampler),
+                    other => panic!("composite bind group has no resource for `{other}`"),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(ui_texture),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
+            ),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
