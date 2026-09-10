@@ -13,6 +13,7 @@ ornis-macros = { path = "../macros" }
 ornis-schedule = { path = "../schedule" }
 wgpu = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
+rustc-hash = "2.1.3"
 
 [features]
 default = []

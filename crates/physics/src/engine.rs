@@ -7,7 +7,7 @@
 //! reference implementation: parallelized with rayon, with optional GPU
 //! contact solving behind the `gpu` feature.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -677,11 +677,11 @@ fn detect_trigger_overlaps(bodies: &[RigidBody], active: &[(usize, usize)]) -> V
 /// enter/exit events. Sorting keeps event order independent of broadphase
 /// sweep-axis rotation and hash-set iteration order.
 fn update_trigger_events(
-    previous: &HashSet<(usize, usize)>,
+    previous: &FxHashSet<(usize, usize)>,
     current: Vec<(usize, usize)>,
     events: &mut Vec<TriggerEvent>,
-) -> HashSet<(usize, usize)> {
-    let current_set: HashSet<(usize, usize)> = current.into_iter().collect();
+) -> FxHashSet<(usize, usize)> {
+    let current_set: FxHashSet<(usize, usize)> = current.into_iter().collect();
     let mut entered: Vec<_> = current_set.difference(previous).copied().collect();
     let mut exited: Vec<_> = previous.difference(&current_set).copied().collect();
     entered.sort_unstable();
@@ -1686,7 +1686,7 @@ struct WarmPoint {
 }
 
 /// Warm-start cache: per body pair, up to 4 matched contact points.
-type WarmCache = HashMap<(usize, usize), ([WarmPoint; 4], usize)>;
+type WarmCache = FxHashMap<(usize, usize), ([WarmPoint; 4], usize)>;
 
 /// Narrowphase cache hit test: positions within 0.1mm, rotations within ~0.06°, margin within 0.1mm.
 fn narrow_cache_hit(entry: &NarrowCacheEntry, a: &RigidBody, b: &RigidBody, margin: f32) -> bool {
@@ -1894,7 +1894,7 @@ fn detect_collisions_into_with_cache(
     out: &mut Vec<Manifold>,
     body_required: Option<&[u32]>,
     cur_substep: u32,
-    cache: &mut HashMap<(usize, usize), NarrowCacheEntry>,
+    cache: &mut FxHashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: Option<&SatCache>,
     pool: &mut NarrowShardPool,
 ) {
@@ -2002,7 +2002,7 @@ fn detect_collisions_into_with_cache(
         pool,
     );
     // Populate cache for misses.
-    let mut tmp_map: HashMap<(usize, usize), Option<Manifold>> = HashMap::new();
+    let mut tmp_map: FxHashMap<(usize, usize), Option<Manifold>> = FxHashMap::default();
     for m in &tmp {
         tmp_map.insert((m.body_a, m.body_b), Some(m.clone()));
     }
@@ -2146,7 +2146,7 @@ struct SatCacheEntry {
 /// `DashMap` shards internally, so the rayon narrowphase shares it without
 /// `try_lock` misses or a parallel bypass. Hits reuse the axis only;
 /// `box_manifold_cached` rebuilds contacts from current geometry.
-type SatCache = DashMap<(usize, usize), SatCacheEntry>;
+type SatCache = DashMap<(usize, usize), SatCacheEntry, FxBuildHasher>;
 
 #[allow(missing_docs)]
 pub struct BuiltinPhysicsEngine {
@@ -2168,7 +2168,7 @@ pub struct BuiltinPhysicsEngine {
     /// an awake neighbour's contact immediately re-wakes a per-body sleeper.
     island: Vec<u32>,
     /// Per-island sleep timers, keyed by island root handle.
-    island_timers: HashMap<u32, f32>,
+    island_timers: FxHashMap<u32, f32>,
     asleep: Vec<bool>,
     /// Persistent joint constraints with warm-start state (G5). Joints also
     /// feed the island union-find: jointed bodies sleep and wake together.
@@ -2177,11 +2177,11 @@ pub struct BuiltinPhysicsEngine {
     /// (Box2D `collide_connected = false` default): a hinge pin passes through
     /// the arm, so the parts legitimately sweep through each other's space,
     /// and contact friction there would act as a phantom brake on the joint.
-    joint_pairs: HashSet<(usize, usize)>,
+    joint_pairs: FxHashSet<(usize, usize)>,
     /// Diagnostics: (body_a, body_b) of the last substep's manifolds.
     debug_pairs: Vec<(usize, usize)>,
     /// Trigger pairs overlapping on the previous completed step.
-    trigger_pairs: HashSet<(usize, usize)>,
+    trigger_pairs: FxHashSet<(usize, usize)>,
     /// Wall-clock breakdown of the last completed `step` (diagnostics only).
     last_step_timing: StepTiming,
     /// Worst-case budget: deterministic substep shedding (see
@@ -2209,7 +2209,7 @@ pub struct BuiltinPhysicsEngine {
     /// wide path; multi-point manifolds stay on the CPU island path.
     #[cfg(feature = "gpu")]
     gpu_solver: Option<WgpuContactSolver>,
-    narrow_cache: HashMap<(usize, usize), NarrowCacheEntry>,
+    narrow_cache: FxHashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: SatCache,
 }
 
@@ -2227,14 +2227,14 @@ impl BuiltinPhysicsEngine {
             velocity_iterations: 8,
             position_iterations: 4,
             contact_softness: 0.0,
-            warm_impulses: HashMap::new(),
+            warm_impulses: FxHashMap::default(),
             island: Vec::new(),
-            island_timers: HashMap::new(),
+            island_timers: FxHashMap::default(),
             asleep: Vec::new(),
             joints: Vec::new(),
-            joint_pairs: HashSet::new(),
+            joint_pairs: FxHashSet::default(),
             debug_pairs: Vec::new(),
-            trigger_pairs: HashSet::new(),
+            trigger_pairs: FxHashSet::default(),
             last_step_timing: StepTiming::default(),
             step_budget: Some(StepBudget::default()),
             last_shed: 0,
@@ -2245,8 +2245,8 @@ impl BuiltinPhysicsEngine {
             scratch_clamped: Vec::new(),
             scratch_parent: Vec::new(),
             scratch_narrow_shards: NarrowShardPool::default(),
-            narrow_cache: HashMap::new(),
-            sat_cache: DashMap::new(),
+            narrow_cache: FxHashMap::default(),
+            sat_cache: DashMap::default(),
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
@@ -3313,7 +3313,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             let last = self.bodies.len() - 1;
             let previous_triggers = std::mem::take(&mut self.trigger_pairs);
             let mut removed_triggers = Vec::new();
-            let mut remapped_triggers = HashSet::new();
+            let mut remapped_triggers = FxHashSet::default();
             for (body_a, body_b) in previous_triggers {
                 if body_a == handle || body_b == handle {
                     removed_triggers.push((body_a, body_b));
@@ -3708,7 +3708,7 @@ mod tests {
         }
         let pairs: Vec<(usize, usize)> = (0..299).map(|i| (i, i + 1)).collect();
         let asleep = vec![false; bodies.len()];
-        let cache = SatCache::new();
+        let cache = SatCache::default();
         let mut first: Vec<Manifold> = Vec::new();
         let mut pool = NarrowShardPool::default();
         detect_collisions_into(
@@ -4480,6 +4480,162 @@ mod tests {
         for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
             assert_eq!(a, b, "body {i} diverged between 1-thread and 4-thread runs");
         }
+    }
+
+    #[test]
+    fn solver_is_deterministic_across_runs() {
+        // Same binary, two fresh engines: every hash map gets a fresh hasher
+        // state per instance, so bit-identical snapshots prove iteration
+        // order cannot leak into float state (not merely same-seed luck).
+        // Uses a small heterogeneous scene (stacked boxes, a resting
+        // sphere and a fast drop), so caches, islands and CCD all engage.
+        fn build() -> BuiltinPhysicsEngine {
+            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(10.0, 1.0, 10.0),
+                0.0,
+            ));
+            for i in 0..4 {
+                physics.add_body(RigidBody::new_box(
+                    Vec3::new(0.0, 0.5 + i as f32 * 1.02, 0.0),
+                    Vec3::splat(0.5),
+                    1.0,
+                ));
+            }
+            physics.add_body(RigidBody::new_sphere(Vec3::new(3.0, 6.0, 0.0), 0.5, 1.0));
+            let mut fast = RigidBody::new_box(Vec3::new(-3.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+            fast.velocity = Vec3::new(0.0, -30.0, 0.0);
+            physics.add_body(fast);
+            physics
+        }
+        #[allow(clippy::type_complexity)]
+        fn snapshot(
+            physics: &BuiltinPhysicsEngine,
+        ) -> Vec<([u32; 3], [u32; 4], [u32; 3], [u32; 3])> {
+            physics
+                .bodies
+                .iter()
+                .map(|b| {
+                    (
+                        b.position.to_array().map(f32::to_bits),
+                        b.orientation.to_array().map(f32::to_bits),
+                        b.velocity.to_array().map(f32::to_bits),
+                        b.angular_velocity.to_array().map(f32::to_bits),
+                    )
+                })
+                .collect()
+        }
+        let mut first = build();
+        let mut second = build();
+        for _ in 0..120 {
+            first.step(1.0 / 60.0);
+            second.step(1.0 / 60.0);
+        }
+        assert_eq!(snapshot(&first), snapshot(&second));
+    }
+
+    /// Canonical cross-platform determinism snapshot (Box3D-level claim):
+    /// a fixed heterogeneous scene (stack, sphere, fast drop, jointed
+    /// pendulum) stepped 120 times, compared bit-for-bit against the
+    /// checked-in `tests/data/determinism_snapshot.hex` generated on ARM.
+    /// CI runs this on x86_64: any float-contraction or codegen drift
+    /// (including LLVM fusing mul+add into fma, which stable rustc cannot
+    /// disable) fails loudly here instead of silently diverging.
+    /// Re-baseline ONLY for intentional solver changes: run
+    /// `determinism_snapshot_regenerate` (ignored), inspect the diff, commit.
+    fn determinism_snapshot_scene() -> BuiltinPhysicsEngine {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(10.0, 1.0, 10.0),
+            0.0,
+        ));
+        for i in 0..4 {
+            physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, 0.5 + i as f32 * 1.02, 0.0),
+                Vec3::splat(0.5),
+                1.0,
+            ));
+        }
+        physics.add_body(RigidBody::new_sphere(Vec3::new(3.0, 6.0, 0.0), 0.5, 1.0));
+        let mut fast = RigidBody::new_box(Vec3::new(-3.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        fast.velocity = Vec3::new(0.0, -30.0, 0.0);
+        physics.add_body(fast);
+        let anchor = physics.add_body(RigidBody::new_box(
+            Vec3::new(6.0, 3.0, 0.0),
+            Vec3::splat(0.5),
+            0.0,
+        ));
+        let arm = physics.add_body(RigidBody::new_box(
+            Vec3::new(6.0, 1.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        physics.add_joint(
+            anchor,
+            arm,
+            JointKind::Ball {
+                local_anchor_a: Vec3::new(0.0, -1.0, 0.0),
+                local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+            },
+        );
+        physics
+    }
+
+    fn determinism_snapshot_render(physics: &BuiltinPhysicsEngine) -> String {
+        let mut out = format!(
+            "ornis-determinism-snapshot v1 bodies={} steps=120 dt=0.0166667\n",
+            physics.bodies.len()
+        );
+        for b in &physics.bodies {
+            let mut first = true;
+            for x in b
+                .position
+                .to_array()
+                .into_iter()
+                .chain(b.orientation.to_array())
+                .chain(b.velocity.to_array())
+                .chain(b.angular_velocity.to_array())
+            {
+                if !first {
+                    out.push(' ');
+                }
+                first = false;
+                out.push_str(&format!("{:08x}", x.to_bits()));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn determinism_snapshot_matches_canonical() {
+        let mut physics = determinism_snapshot_scene();
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let expected = include_str!("../tests/data/determinism_snapshot.hex");
+        assert_eq!(
+            determinism_snapshot_render(&physics),
+            expected,
+            "simulation bits drifted: intentional solver change? re-baseline via \
+             determinism_snapshot_regenerate, else float/codegen drift"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn determinism_snapshot_regenerate() {
+        let mut physics = determinism_snapshot_scene();
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let path = format!(
+            "{}/tests/data/determinism_snapshot.hex",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::write(path, determinism_snapshot_render(&physics)).unwrap();
     }
 
     #[test]

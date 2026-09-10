@@ -7,6 +7,8 @@
 #[cfg(feature = "gpu")]
 use crate::gpu::{pack_single_point_batches, write_back_acc};
 
+use rustc_hash::FxHashMap;
+
 use super::*;
 
 /// Warm-start / restitution policy constants, shared by the CPU island path
@@ -298,7 +300,7 @@ impl BuiltinPhysicsEngine {
         }
 
         // GPU solve single-point contacts.
-        let mut gpu_warm: WarmCache = HashMap::new();
+        let mut gpu_warm: WarmCache = FxHashMap::default();
         if !single_si.is_empty() {
             let gpu = self.gpu_solver.as_mut().unwrap();
             let (batches, num_batches) =
@@ -881,7 +883,7 @@ fn persist_warm_cache(
     keys: &[(usize, usize)],
     states: &[ManifoldState],
 ) -> WarmCache {
-    let mut next: WarmCache = HashMap::new();
+    let mut next: WarmCache = FxHashMap::default();
     for st in states {
         let m = &manifolds[st.mi];
         let mut pts = [WarmPoint {

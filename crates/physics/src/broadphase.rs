@@ -5,7 +5,7 @@
 //! the opt-in uniform grid targets scenes where one large static AABB would
 //! otherwise make the baseline quadratic.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use glam::Vec3;
 
@@ -261,7 +261,7 @@ fn candidate_allowed(
 }
 
 fn add_pair(
-    pairs: &mut HashSet<(usize, usize)>,
+    pairs: &mut FxHashSet<(usize, usize)>,
     bodies: &[RigidBody],
     aabbs: &[AABB],
     stats: &mut BroadPhaseStats,
@@ -392,12 +392,12 @@ impl CellKey {
 pub(crate) struct UniformGrid {
     aabbs: Vec<AABB>,
     active: Vec<(usize, usize)>,
-    cells: HashMap<CellKey, Vec<usize>>,
+    cells: FxHashMap<CellKey, Vec<usize>>,
     large: Vec<usize>,
     cell_size: f32,
     max_cells_per_body: usize,
     stats: BroadPhaseStats,
-    scratch_pairs: HashSet<(usize, usize)>,
+    scratch_pairs: FxHashSet<(usize, usize)>,
     body_cells: Vec<Vec<CellKey>>,
     body_is_large: Vec<bool>,
     prev_meta: Vec<(bool, u32, u32, BodyType)>,
@@ -416,12 +416,12 @@ impl UniformGrid {
         Self {
             aabbs: Vec::new(),
             active: Vec::new(),
-            cells: HashMap::new(),
+            cells: FxHashMap::default(),
             large: Vec::new(),
             cell_size,
             max_cells_per_body: DEFAULT_MAX_CELLS_PER_BODY,
             stats: BroadPhaseStats::default(),
-            scratch_pairs: HashSet::new(),
+            scratch_pairs: FxHashSet::default(),
             body_cells: Vec::new(),
             body_is_large: Vec::new(),
             prev_meta: Vec::new(),
@@ -593,7 +593,7 @@ impl BroadPhase for UniformGrid {
                 bodies[d].body_type,
             );
         }
-        let dirty_set: HashSet<usize> = dirty.iter().copied().collect();
+        let dirty_set: FxHashSet<usize> = dirty.iter().copied().collect();
         // Remove dirty bodies from spatial index.
         for &d in &dirty {
             if self.body_is_large[d] {

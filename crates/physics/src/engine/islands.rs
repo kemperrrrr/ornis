@@ -3,7 +3,7 @@
 //! and the per-island velocity dispatch. Split out of `engine.rs` to keep each
 //! type's method count within the structural gate's thresholds.
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Mutex;
 
 use ornis_schedule::run_levels;
@@ -106,8 +106,8 @@ impl BuiltinPhysicsEngine {
         b.velocity.length() < LIN_SLEEP && b.angular_velocity.length() < ANG_SLEEP
     }
 
-    fn collect_quiet_islands(engine: &Self) -> HashMap<u32, bool> {
-        let mut quiet: HashMap<u32, bool> = HashMap::new();
+    fn collect_quiet_islands(engine: &Self) -> FxHashMap<u32, bool> {
+        let mut quiet: FxHashMap<u32, bool> = FxHashMap::default();
         for h in 0..engine.bodies.len() {
             if engine.island[h] == u32::MAX || engine.asleep[h] {
                 continue;
@@ -121,8 +121,8 @@ impl BuiltinPhysicsEngine {
         quiet
     }
 
-    fn collect_island_sizes(engine: &Self) -> HashMap<u32, usize> {
-        let mut m: HashMap<u32, usize> = HashMap::new();
+    fn collect_island_sizes(engine: &Self) -> FxHashMap<u32, usize> {
+        let mut m: FxHashMap<u32, usize> = FxHashMap::default();
         for &r in &engine.island {
             if r != u32::MAX {
                 *m.entry(r).or_insert(0) += 1;
@@ -155,7 +155,7 @@ impl BuiltinPhysicsEngine {
                 }
             }
         }
-        let mut group_of: HashMap<usize, usize> = HashMap::new();
+        let mut group_of: FxHashMap<usize, usize> = FxHashMap::default();
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for &mi in active {
             let m = &manifolds[mi];
@@ -209,7 +209,7 @@ impl BuiltinPhysicsEngine {
                 manifolds: island_manifolds,
                 keys,
                 states: Vec::new(),
-                warm: HashMap::new(),
+                warm: FxHashMap::default(),
             });
         }
         islands
@@ -291,7 +291,7 @@ impl BuiltinPhysicsEngine {
             isl.states = states;
             isl.warm = warm;
         });
-        let mut next: WarmCache = HashMap::new();
+        let mut next: WarmCache = FxHashMap::default();
         for isl in islands.iter() {
             for (l, &g) in isl.body_idx.iter().enumerate() {
                 if self.bodies[g].body_type == BodyType::Dynamic {
@@ -328,7 +328,7 @@ fn union_contact_edges(parent: &mut [usize], bodies: &[RigidBody], manifolds: &[
 /// O(n²) pair scan.)
 #[allow(clippy::needless_range_loop)]
 fn merge_sleeping_representations(parent: &mut [usize], asleep: &[bool], island: &[u32], n: usize) {
-    let mut asleep_rep: HashMap<u32, usize> = HashMap::new();
+    let mut asleep_rep: FxHashMap<u32, usize> = FxHashMap::default();
     for h in 0..n {
         if !asleep.get(h).copied().unwrap_or(false) {
             continue;
@@ -356,7 +356,7 @@ fn merge_sleeping_representations(parent: &mut [usize], asleep: &[bool], island:
 // Island arrays are indexed in parallel by body handle.
 #[allow(clippy::needless_range_loop)]
 fn assign_canonical_islands(engine: &mut BuiltinPhysicsEngine, parent: &mut [usize], n: usize) {
-    let mut canonical: HashMap<usize, usize> = HashMap::new();
+    let mut canonical: FxHashMap<usize, usize> = FxHashMap::default();
     for h in 0..n {
         if engine.bodies[h].body_type != BodyType::Dynamic {
             continue;
@@ -375,6 +375,6 @@ fn assign_canonical_islands(engine: &mut BuiltinPhysicsEngine, parent: &mut [usi
         };
     }
     // Drop timers of roots that no longer exist.
-    let roots: std::collections::HashSet<u32> = engine.island.iter().copied().collect();
+    let roots: FxHashSet<u32> = engine.island.iter().copied().collect();
     engine.island_timers.retain(|r, _| roots.contains(r));
 }

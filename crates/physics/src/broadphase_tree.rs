@@ -23,7 +23,7 @@
 //! since pair buffering. The remaining gap vs the incremental grid is
 //! settled dense scenes (the tree rebuilds its sorted vec each update).
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use glam::Vec3;
 
@@ -320,7 +320,7 @@ pub(crate) struct DynamicAabbTree {
     /// retained across updates without re-query (see `refresh_proxies` for
     /// the exact dirty rule). Cleared on any body-count change, where
     /// `swap_remove` remapping could otherwise alias identities.
-    active_set: HashSet<(usize, usize)>,
+    active_set: FxHashSet<(usize, usize)>,
     /// Swept box seen per body on the previous update. Dirty means the
     /// swept box (or the filter/type meta) changed; clean pairs are
     /// *exactly* reusable because the filter is a pure function of current
@@ -341,7 +341,7 @@ impl DynamicAabbTree {
             active: Vec::new(),
             stats: BroadPhaseStats::default(),
             scratch: Vec::new(),
-            active_set: HashSet::new(),
+            active_set: FxHashSet::default(),
             prev_swept: Vec::new(),
             prev_filter: Vec::new(),
         }
@@ -388,7 +388,7 @@ impl BroadPhase for DynamicAabbTree {
             self.active_set.clear();
             self.query_dynamic(bodies, &swept, &dynamic);
         } else if !dirty.is_empty() {
-            let dirty_set: HashSet<usize> = dirty.iter().copied().collect();
+            let dirty_set: FxHashSet<usize> = dirty.iter().copied().collect();
             self.active_set
                 .retain(|(a, b)| !dirty_set.contains(a) && !dirty_set.contains(b));
             self.query_dynamic(bodies, &swept, &dirty);
