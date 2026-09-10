@@ -2489,6 +2489,9 @@ impl BuiltinPhysicsEngine {
     /// Velocity half of the integration (Box3D `IntegrateVelocities`): apply
     /// gravity and pending torque so the constraint solvers below act on the
     /// velocities that the upcoming position integration will actually use.
+    /// Free spin also gains the gyroscopic correction
+    /// ([`apply_gyroscopic`]): without it anisotropic bodies cannot precess,
+    /// and spin about the intermediate inertia axis stays (wrongly) stable.
     fn integrate_velocities(&mut self, dt: f32) {
         debug_assert!(
             dt.is_finite() && dt > 0.0,
@@ -2512,7 +2515,82 @@ impl BuiltinPhysicsEngine {
                     mul_inv_inertia(body.inertia, body.orientation, torque_delta);
                 body.torque = Vec3::ZERO;
             }
+            // Gyroscopic correction, torque or not: free spinners need it.
+            Self::apply_gyroscopic(
+                body.inertia,
+                body.orientation,
+                &mut body.angular_velocity,
+                dt,
+            );
         }
+    }
+
+    /// Gyroscopic correction, Box3D-`b3IntegrateVelocitiesTask` idea with an own
+    /// diagonal-only implementation: Newton-Raphson on
+    /// `I·(w2−w1) + h·(w2×(I·w2)) = 0` in the body frame (our inertia is a body
+    /// diagonal, theirs a full local 3×3 — same equation, cheaper Jacobian).
+    /// Fixed [`GYROSCOPIC_ITERATIONS`] iterations, so the result is a pure
+    /// function of the inputs (deterministic); on non-convergence the last
+    /// iterate is kept, never NaN (the Jacobian stays diagonally dominant for
+    /// small `h`, and `solve_small` reports singularity instead of dividing).
+    ///
+    /// Skips, both exact: isotropic inertia (the term is identically zero, so
+    /// every cube/sphere test scene pays nothing) and zero spin.
+    ///
+    /// Without this, spin about the intermediate inertia axis is (wrongly)
+    /// stable and free asymmetric bodies never tumble — see the Dzhanibekov
+    /// test below.
+    const GYROSCOPIC_ITERATIONS: usize = 3;
+
+    fn apply_gyroscopic(inertia: Vec3, orientation: Quat, omega: &mut Vec3, h: f32) {
+        if *omega == Vec3::ZERO {
+            return;
+        }
+        let imax = inertia.x.max(inertia.y).max(inertia.z);
+        if !imax.is_finite() || imax <= 0.0 {
+            return;
+        }
+        let spread = (inertia.x - inertia.y)
+            .abs()
+            .max((inertia.y - inertia.z).abs())
+            .max((inertia.z - inertia.x).abs());
+        if spread <= 1e-6 * imax {
+            return;
+        }
+        let (a, b, c) = (inertia.x, inertia.y, inertia.z);
+        // To the body frame (diagonal inertia) and back with the same rotation.
+        let q = orientation;
+        let w1 = q.conjugate() * *omega;
+        let mut w2 = w1;
+        for _ in 0..Self::GYROSCOPIC_ITERATIONS {
+            // u = I·w2; residual r = I·(w2−w1) + h·(w2×u).
+            let u = Vec3::new(a * w2.x, b * w2.y, c * w2.z);
+            let cross = w2.cross(u);
+            let r = Vec3::new(
+                a * (w2.x - w1.x) + h * cross.x,
+                b * (w2.y - w1.y) + h * cross.y,
+                c * (w2.z - w1.z) + h * cross.z,
+            );
+            // Jacobian J = I + h·(skew(w2)·I − skew(u)), diagonal inertia:
+            // J[i][i] is the bare inertia (the motion term has no self-part),
+            // off-diagonals mix the spin with the inertia-weighted spin.
+            let j = [
+                [a, h * (u.z - b * w2.z), h * (c * w2.y - u.y), 0.0],
+                [h * (a * w2.z - u.z), b, h * (u.x - c * w2.x), 0.0],
+                [h * (u.y - a * w2.y), h * (b * w2.x - u.x), c, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ];
+            let Some(d) = solve_small(&j, &[-r.x, -r.y, -r.z, 0.0], 3) else {
+                break;
+            };
+            w2 += Vec3::new(d[0], d[1], d[2]);
+        }
+        let w2_world = q * w2;
+        debug_assert!(
+            vec3_finite(w2_world),
+            "gyroscopic correction diverged: inertia={inertia:?} w1={w1:?}"
+        );
+        *omega = w2_world;
     }
 
     /// Position half of the integration (Box3D `IntegratePositions`): move
@@ -3629,6 +3707,84 @@ mod tests {
             unbudgeted.broadphase_stats().candidate_pairs
         );
         assert!(budgeted.broadphase_stats().candidate_pairs > 0);
+    }
+
+    /// Dzhanibekov discriminant for the gyroscopic correction: half extents
+    /// (0.2, 0.6, 0.4) give Ix > Iz > Iy, so body Z is the intermediate
+    /// axis — spin about it must tumble end over end. Without the correction
+    /// the spin axis stays world-fixed and the body Z rides a ~1.7deg cone
+    /// (min dot ≈ 0.998), so a deep flip is unreachable by construction.
+    #[test]
+    fn gyroscopic_intermediate_axis_spin_tumbles() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::new(0.2, 0.6, 0.4), 1.0);
+        body.angular_velocity = Vec3::new(0.3, 0.0, 10.0);
+        physics.add_body(body);
+
+        let l0 = angular_momentum(&physics.bodies[0]);
+        let e0 = rotational_energy(&physics.bodies[0]);
+        let mut min_dot = 1.0f32;
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+            let z_now = physics.bodies[0].orientation * Vec3::Z;
+            min_dot = min_dot.min(z_now.dot(Vec3::Z));
+        }
+        let b = &physics.bodies[0];
+        let dl = (angular_momentum(b) - l0).length() / l0.length();
+        let de = ((rotational_energy(b) - e0) / e0).abs();
+        eprintln!("dzhanibekov: min_dot={min_dot:.3} dL/L={dl:.4} dE/E={de:.4}");
+        assert!(min_dot < -0.5, "no Dzhanibekov flip, min_dot={min_dot}");
+        // Free motion has no torques, so these only drift by discretization
+        // (measured 0.055/0.108 at 300 steps; bounds carry ~1.6x margin).
+        assert!(dl < 0.09, "angular momentum drifted, dL/L={dl}");
+        assert!(de < 0.18, "energy drifted, dE/E={de}");
+    }
+
+    /// Guard against overcorrection: spin about the major axis (body X here)
+    /// is genuinely stable and must stay aligned.
+    #[test]
+    fn gyroscopic_major_axis_spin_stays_stable() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::new(0.2, 0.6, 0.4), 1.0);
+        body.angular_velocity = Vec3::new(10.0, 0.3, 0.0);
+        physics.add_body(body);
+
+        let mut min_dot = 1.0f32;
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+            let x_now = physics.bodies[0].orientation * Vec3::X;
+            min_dot = min_dot.min(x_now.dot(Vec3::X));
+        }
+        assert!(min_dot > 0.9, "major-axis spin wandered, min_dot={min_dot}");
+    }
+
+    /// Isotropic fast path: a spinning cube must come back bit-identical —
+    /// the gyroscopic term is exactly zero there, so the skip gate fires.
+    #[test]
+    fn gyroscopic_isotropic_spin_is_untouched() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
+        body.angular_velocity = Vec3::new(1.0, 2.0, 3.0);
+        physics.add_body(body);
+
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+        assert_eq!(
+            physics.bodies[0].angular_velocity.to_array(),
+            [1.0, 2.0, 3.0],
+            "isotropic skip gate leaked"
+        );
+    }
+
+    fn angular_momentum(body: &RigidBody) -> Vec3 {
+        let w_body = body.orientation.conjugate() * body.angular_velocity;
+        body.orientation * (body.inertia * w_body)
+    }
+
+    fn rotational_energy(body: &RigidBody) -> f32 {
+        let w = body.orientation.conjugate() * body.angular_velocity;
+        0.5 * body.inertia.dot(w * w)
     }
 
     #[test]
