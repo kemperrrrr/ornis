@@ -23,6 +23,7 @@ png = "0.18"
 proptest = "1"
 wgpu = "30"
 glam = "0.33"
+ornis-shader-lang = { path = "../shader-lang" }
 criterion = { version = "0.8", features = ["rayon"] }
 
 [[bench]]

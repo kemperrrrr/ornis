@@ -2474,6 +2474,7 @@ dependencies = [
  "glam",
  "naga",
  "ornis-core",
+ "ornis-shader-lang",
  "proc-macro2",
  "quote",
  "syn 3.0.5",
@@ -2531,6 +2532,7 @@ dependencies = [
  "ornis-core",
  "ornis-macros",
  "ornis-schedule",
+ "ornis-shader-lang",
  "png",
  "pollster",
  "proptest",
@@ -2563,6 +2565,14 @@ version = "0.1.0"
 dependencies = [
  "fixedbitset",
  "rayon",
+]
+
+[[package]]
+name = "ornis-shader-lang"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.5",
 ]
 
 [[package]]

@@ -1,10 +1,10 @@
 //! Shader language registry: the explicit set of primitive types and
 //! built-in functions the DSL maps — no string-table guessing.
 //!
-//! Two enums replace six scattered match-tables in
-//! [`wgsl`](crate::wgsl) (`wgsl_type`, the scalar arms of
-//! `glam_type_to_wgsl`/`var_type`/`rust_type_to_wgsl`, `map_fn`,
-//! `named_builtin`, `renamed_unary`/`passthrough_math`/`renamed_multi`):
+//! Two enums replace six scattered match-tables in `ornis-macros`
+//! (`wgsl_type`, the scalar arms of `glam_type_to_wgsl`/`var_type`/
+//! `rust_type_to_wgsl`, `map_fn`, `named_builtin`,
+//! `renamed_unary`/`passthrough_math`/`renamed_multi`):
 //!
 //! - [`ShaderType`]: glam/scalar names → WGSL spellings. Anything else
 //!   (mirrors, bundles, markers — and bare `bool`, which is not a shader

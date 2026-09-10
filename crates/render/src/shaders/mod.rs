@@ -851,6 +851,227 @@ mod tests {
         assert!(checked >= 151, "expected field uses, found {checked}");
     }
 
+    /// Every call in translated entries resolves: built-ins via the
+    /// shared `ornis-shader-lang` registry (single source with the
+    /// translator — no second spelling), WGSL natives (texture ops) via a
+    /// short stable list, type constructors via `ShaderType`, and
+    /// kernels/helpers/mirrors via `fn`/`struct` definitions extracted
+    /// from the same assembled shader. A typo'd kernel name can no longer
+    /// slide to naga — it fails here with the entry index and callee.
+    #[test]
+    fn stage_calls_resolve() {
+        use ornis_shader_lang::{ShaderBuiltin, ShaderType};
+
+        fn callee_uses(src: &str) -> Vec<(String, usize)> {
+            // `name(` occurrences with their byte offset (for messages).
+            let mut out = Vec::new();
+            let bytes = src.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'(' {
+                    let mut j = i;
+                    while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
+                        j -= 1;
+                    }
+                    if j < i {
+                        // `@builtin(` / `@location(` are attributes, not
+                        // calls; `if (` etc. are filtered as keywords below.
+                        if j == 0 || bytes[j - 1] != b'@' {
+                            out.push((src[j..i].to_string(), j));
+                        }
+                    }
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            out
+        }
+
+        fn defined_names(assembly: &str) -> Vec<String> {
+            // `fn name` and `struct name` declared in the assembled module.
+            let mut names = Vec::new();
+            for (kw_len, kw) in [(3, "fn "), (7, "struct ")] {
+                let mut rest = assembly;
+                while let Some(pos) = rest.find(kw) {
+                    let after = &rest[pos + kw_len..];
+                    let name: String = after
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                    rest = after;
+                }
+            }
+            names
+        }
+
+        // WGSL-native spellings: prelude texture ops. Everything else
+        // function-like must come from the registry or the assembly.
+        const NATIVES: &[&str] = &[
+            "textureSample",
+            "textureSampleLevel",
+            "textureLoad",
+            "textureDimensions",
+        ];
+        const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
+        // (entry source, its assembled shader)
+        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
+        let hdr_fragment = hdr_composite_generated::wgsl_source();
+        let bloom = bloom_generated::wgsl_source();
+        let lighting = lighting_generated::wgsl_source();
+        let lighting_vertex = lighting_generated::wgsl_vertex_source();
+        let composite = composite_generated::wgsl_source();
+        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
+        let gbuffer_fragment = gbuffer_generated::wgsl_source();
+        let pbr = pbr_generated::wgsl_source();
+        let pairs: &[(&str, &str)] = &[
+            (
+                composite_generated::vs_main::wgsl_source(),
+                composite.as_str(),
+            ),
+            (
+                composite_generated::fs_main::wgsl_source(),
+                composite.as_str(),
+            ),
+            (
+                gbuffer_generated::vs_main::wgsl_source(),
+                gbuffer_vertex.as_str(),
+            ),
+            (
+                gbuffer_generated::fs_main::wgsl_source(),
+                gbuffer_fragment.as_str(),
+            ),
+            (pbr_generated::fs_main::wgsl_source(), pbr.as_str()),
+            (
+                hdr_composite_generated::vs_main::wgsl_source(),
+                hdr_vertex.as_str(),
+            ),
+            (
+                hdr_composite_generated::fs_main::wgsl_source(),
+                hdr_fragment.as_str(),
+            ),
+            (bloom_generated::vs_main::wgsl_source(), bloom.as_str()),
+            (bloom_generated::fs_main::wgsl_source(), bloom.as_str()),
+            (
+                lighting_generated::vs_main::wgsl_source(),
+                lighting_vertex.as_str(),
+            ),
+            (
+                lighting_generated::fs_main::wgsl_source(),
+                lighting.as_str(),
+            ),
+        ];
+        let mut checked = 0;
+        for (n, (entry, assembly)) in pairs.iter().enumerate() {
+            let defs = defined_names(assembly);
+            for (callee, _) in callee_uses(entry) {
+                if KEYWORDS.contains(&callee.as_str()) {
+                    continue;
+                }
+                let resolved = ShaderBuiltin::from_rust(&callee).is_some()
+                    || ShaderType::from_rust(&callee).is_some()
+                    || NATIVES.contains(&callee.as_str())
+                    || defs.iter().any(|d| d == &callee);
+                assert!(
+                    resolved,
+                    "entry {n}: unresolved call `{callee}` — typo'd kernel/helper or missing definition"
+                );
+                checked += 1;
+            }
+        }
+        // Eleven entries make 85 calls today; near-zero hits would mean
+        // the extraction broke and the test passes vacuously.
+        assert!(checked >= 85, "expected calls, found {checked}");
+    }
+
+    /// Every table-backed global an entry reads is visible at that
+    /// entry's stage. Module consts (`quad`/`uvs`) have no table rows and
+    /// are skipped here — their existence is pinned by
+    /// `stage_globals_declared`; this test pins the `visibility` column
+    /// against actual use, so a vertex entry reading a fragment-only
+    /// resource fails before any GPU ever runs.
+    #[test]
+    fn stage_resources_visible_at_stage() {
+        use wgpu::ShaderStages;
+        // (globals read by one entry, pass table, entry stage)
+        let cases: &[(&[&str], &[Resource], ShaderStages)] = &[
+            (
+                QuadContext::GLOBALS,
+                &composite_generated::COMPOSITE_RESOURCES,
+                ShaderStages::VERTEX,
+            ),
+            (
+                composite_generated::CompositeContext::GLOBALS,
+                &composite_generated::COMPOSITE_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                gbuffer_generated::GbufferVertexContext::GLOBALS,
+                &gbuffer_generated::GBUFFER_RESOURCES,
+                ShaderStages::VERTEX,
+            ),
+            (
+                gbuffer_generated::fs_main::globals(),
+                &gbuffer_generated::GBUFFER_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                pbr_generated::PbrContext::GLOBALS,
+                &pbr_generated::PBR_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                QuadContext::GLOBALS,
+                &hdr_composite_generated::HDR_RESOURCES,
+                ShaderStages::VERTEX,
+            ),
+            (
+                hdr_composite_generated::HdrContext::GLOBALS,
+                &hdr_composite_generated::HDR_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                QuadContext::GLOBALS,
+                &bloom_generated::BLOOM_RESOURCES,
+                ShaderStages::VERTEX,
+            ),
+            (
+                bloom_generated::BloomContext::GLOBALS,
+                &bloom_generated::BLOOM_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                QuadContext::GLOBALS,
+                &lighting_generated::LIGHTING_RESOURCES,
+                ShaderStages::VERTEX,
+            ),
+            (
+                lighting_generated::LightingContext::GLOBALS,
+                &lighting_generated::LIGHTING_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+        ];
+        let mut checked = 0;
+        for (globals, table, stage) in cases {
+            for global in *globals {
+                if let Some(row) = table.iter().find(|r| r.name == *global) {
+                    assert!(
+                        row.visibility.contains(*stage),
+                        "`{global}` is read at {stage:?} but bound for {:?}",
+                        row.visibility
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // 28 table-backed uses today; fewer means a table lost a row the
+        // entries still read — update deliberately.
+        assert!(checked >= 28, "expected visible resources, found {checked}");
+    }
+
     /// Parse and fully validate an assembled WGSL module with naga.
     fn assert_valid_wgsl(name: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)

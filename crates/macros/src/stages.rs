@@ -503,7 +503,7 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     // Built-in arity is validated pre-translation (spanned errors, no
     // `Result` ripple through the `String`-based translator).
-    if let Err(e) = crate::shader_lang::check_builtin_arity(&body_func) {
+    if let Err(e) = ornis_shader_lang::check_builtin_arity(&body_func) {
         return e.to_compile_error().into();
     }
     let body = crate::wgsl::wgsl_main_body(&body_func);
@@ -578,7 +578,7 @@ pub fn wgsl_fn(_args: TokenStream, input: TokenStream) -> TokenStream {
         params.push(format!("{}: {}", pi.ident, named_type(&pat_ty.ty)));
     }
 
-    let body = match crate::shader_lang::check_builtin_arity(&func) {
+    let body = match ornis_shader_lang::check_builtin_arity(&func) {
         Ok(()) => crate::wgsl::wgsl_main_body(&func),
         Err(e) => return e.to_compile_error().into(),
     };

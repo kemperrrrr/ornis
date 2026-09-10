@@ -300,10 +300,10 @@ mod wgsl_values {
 
 /// Call/method-call WGSL translation (constructors, built-in mappings,
 /// swizzles, `powi` expansion). Built-in names resolve through the
-/// [`Shader Lang registry`](crate::shader_lang); unknown names pass
+/// `ornis-shader-lang` registry; unknown names pass
 /// through verbatim (kernels/helpers share WGSL spellings by design).
 mod wgsl_calls {
-    use crate::shader_lang::ShaderBuiltin;
+    use ornis_shader_lang::ShaderBuiltin;
 
     pub(super) fn map_fn(fn_name: &str, args: &[String]) -> Option<String> {
         ShaderBuiltin::from_rust(fn_name).map(|b| b.lower(args))
@@ -350,7 +350,7 @@ mod wgsl_calls {
     }
 
     pub(super) fn wgsl_type(ty: &str) -> Option<String> {
-        crate::shader_lang::ShaderType::from_rust(ty).map(|t| t.wgsl().to_string())
+        ornis_shader_lang::ShaderType::from_rust(ty).map(|t| t.wgsl().to_string())
     }
 
     pub(super) fn method_call(m: &syn::ExprMethodCall) -> String {
@@ -366,7 +366,7 @@ mod wgsl_calls {
 
         // Swizzles become field access; registry built-ins lower;
         // anything else (kernels/helpers) passes through verbatim.
-        if crate::shader_lang::is_swizzle_method(&method) {
+        if ornis_shader_lang::is_swizzle_method(&method) {
             return format!("{receiver}.{method}");
         }
         if let Some(mapped) = map_fn(&method, &args) {
@@ -560,7 +560,7 @@ mod wgsl_flow {
             if last == "bool" {
                 return last;
             }
-            if let Some(mapped) = crate::shader_lang::ShaderType::from_rust(&last) {
+            if let Some(mapped) = ornis_shader_lang::ShaderType::from_rust(&last) {
                 return mapped.wgsl().to_string();
             }
             return last;
@@ -641,7 +641,7 @@ pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
                 Some("bool") => "bool".to_string(),
                 _ => {
                     let name = last.unwrap_or("f32");
-                    crate::shader_lang::ShaderType::from_rust(name)
+                    ornis_shader_lang::ShaderType::from_rust(name)
                         .map(|t| t.wgsl().to_string())
                         .unwrap_or_else(|| "f32".to_string())
                 }

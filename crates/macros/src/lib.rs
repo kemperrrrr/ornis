@@ -27,7 +27,6 @@ mod kernel;
 mod pack;
 mod pipeline_config;
 mod register_component;
-mod shader_lang;
 mod smart_pipeline;
 mod stages;
 mod static_profile;

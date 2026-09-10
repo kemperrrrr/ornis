@@ -166,7 +166,7 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     // Generate WGSL function source string
-    if let Err(e) = crate::shader_lang::check_builtin_arity(&func) {
+    if let Err(e) = ornis_shader_lang::check_builtin_arity(&func) {
         return TokenStream::from(e.to_compile_error());
     }
     let wgsl_fn_src = crate::wgsl::wgsl_fn_source(&func);
