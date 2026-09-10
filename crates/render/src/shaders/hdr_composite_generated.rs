@@ -26,11 +26,11 @@ use ornis_macros::stage;
 #[stage(vertex)]
 fn vs_main(
     vertex_index: super::VertexIndex,
-    ctx: Context<super::QuadContext>,
+    consts: Context<super::QuadConsts>,
 ) -> CompositeVertexOutput {
     return CompositeVertexOutput {
-        clip_position: ctx.quad[vertex_index],
-        uv: ctx.uvs[vertex_index],
+        clip_position: consts.quad[vertex_index],
+        uv: consts.uvs[vertex_index],
     };
 }
 

@@ -282,9 +282,9 @@ fn add_const_vec_array(module: &mut naga::Module, name: &str, vals: &[Vec<f32>])
 /// Replaces the former `const_vec4_array`/`const_vec2_array` text builders:
 /// values are Rust floats, spelling is naga's.
 ///
-/// Names are lowercase on purpose: entry bodies spell `ctx.quad`/`ctx.uvs`
-/// through context bundles, and the WGSL global must match the Rust field
-/// exactly — no name mapping anywhere.
+/// Names are lowercase on purpose: entry bodies spell `consts.quad`/
+/// `consts.uvs` through context bundles, and the WGSL global must match
+/// the Rust field exactly — no name mapping anywhere.
 pub fn const_block(quad: &[[f32; 4]], uvs: &[[f32; 2]]) -> String {
     let mut module = naga::Module::default();
     add_const_vec_array(

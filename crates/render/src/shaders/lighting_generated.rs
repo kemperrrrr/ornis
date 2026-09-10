@@ -156,10 +156,22 @@ fn lighting_fragment_kernels() -> String {
 /// declared via `#[wgsl(global)]`. `discard` is a bare path statement;
 /// `Vec2/3/4::new` spell WGSL constructors; `lo = lo + …` avoids `+=`,
 /// which the DSL does not cover.
-/// Deferred-lighting resources as a context bundle (`ctx.depth_tex`, …).
+/// Deferred-lighting resources as a context bundle (`maps.depth_tex`, …).
 #[allow(dead_code)]
 #[derive(ornis_macros::ShaderContext)]
 pub(crate) struct LightingContext {
+    pub materials: Vec<OpenPBRMaterial>,
+    pub camera: CameraUniform,
+    pub lighting: LightingUniform,
+}
+
+/// Sampled g-buffer maps as a separate bundle (`maps.albedo_tex`, …):
+/// seven texture/sampler globals sharing a lifetime, split out of
+/// [`LightingContext`] so the entry signature groups uniforms (ctx) and
+/// sampled maps (maps) by kind instead of one ten-field list.
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct LightingMaps {
     pub depth_tex: DepthTexture,
     pub albedo_tex: Texture2d,
     pub normal_tex: Texture2d,
@@ -167,31 +179,30 @@ pub(crate) struct LightingContext {
     pub world_pos_tex: Texture2d,
     pub mat_params_tex: Texture2d,
     pub lighting_sampler: Sampler,
-    pub materials: Vec<OpenPBRMaterial>,
-    pub camera: CameraUniform,
-    pub lighting: LightingUniform,
 }
 
 #[stage(fragment)]
 fn fs_main(
     input: QuadVertexOutput,
     ctx: Context<LightingContext>,
+    maps: Context<LightingMaps>,
 ) -> super::Location<0, glam::Vec4> {
     let depth = textureLoad(
-        ctx.depth_tex,
-        UVec2::new(input.uv * Vec2::new(textureDimensions(ctx.depth_tex))),
+        maps.depth_tex,
+        UVec2::new(input.uv * Vec2::new(textureDimensions(maps.depth_tex))),
         0,
     );
-    let albedo = textureSampleLevel(ctx.albedo_tex, ctx.lighting_sampler, input.uv, 0.0);
-    let normal_enc = textureSampleLevel(ctx.normal_tex, ctx.lighting_sampler, input.uv, 0.0);
+    let albedo = textureSampleLevel(maps.albedo_tex, maps.lighting_sampler, input.uv, 0.0);
+    let normal_enc = textureSampleLevel(maps.normal_tex, maps.lighting_sampler, input.uv, 0.0);
     let material_id = textureLoad(
-        ctx.material_id_tex,
-        UVec2::new(input.uv * Vec2::new(textureDimensions(ctx.material_id_tex))),
+        maps.material_id_tex,
+        UVec2::new(input.uv * Vec2::new(textureDimensions(maps.material_id_tex))),
         0,
     )
     .r;
-    let world_pos_enc = textureSampleLevel(ctx.world_pos_tex, ctx.lighting_sampler, input.uv, 0.0);
-    let mat_params = textureSampleLevel(ctx.mat_params_tex, ctx.lighting_sampler, input.uv, 0.0);
+    let world_pos_enc =
+        textureSampleLevel(maps.world_pos_tex, maps.lighting_sampler, input.uv, 0.0);
+    let mat_params = textureSampleLevel(maps.mat_params_tex, maps.lighting_sampler, input.uv, 0.0);
     let mat = ctx.materials[material_id];
     if albedo.a < 0.001 {
         discard;
@@ -387,10 +398,13 @@ pub fn wgsl_source() -> String {
 /// Vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `vs_main::wgsl_source()`.
 #[stage(vertex)]
-fn vs_main(vertex_index: super::VertexIndex, ctx: Context<super::QuadContext>) -> QuadVertexOutput {
+fn vs_main(
+    vertex_index: super::VertexIndex,
+    consts: Context<super::QuadConsts>,
+) -> QuadVertexOutput {
     return QuadVertexOutput {
-        clip_position: ctx.quad[vertex_index],
-        uv: ctx.uvs[vertex_index],
+        clip_position: consts.quad[vertex_index],
+        uv: consts.uvs[vertex_index],
     };
 }
 

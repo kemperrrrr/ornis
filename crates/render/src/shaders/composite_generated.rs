@@ -25,10 +25,10 @@ pub(crate) struct CompositeContext {
 /// DSL-only — replaced by `vs_main::wgsl_source()`. Uses the
 /// `var`-out form (`let mut out: T;` + field assignment).
 #[stage(vertex)]
-fn vs_main(vertex_index: super::VertexIndex, ctx: Context<super::QuadContext>) -> VertexOutput {
+fn vs_main(vertex_index: super::VertexIndex, consts: Context<super::QuadConsts>) -> VertexOutput {
     let mut out: VertexOutput;
-    out.position = ctx.quad[vertex_index];
-    out.uv = ctx.uvs[vertex_index];
+    out.position = consts.quad[vertex_index];
+    out.uv = consts.uvs[vertex_index];
     return out;
 }
 

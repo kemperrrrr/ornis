@@ -155,6 +155,19 @@ pub fn resource_decls(table: &[Resource], bindings: &[u32]) -> String {
     out
 }
 
+/// WGSL-valid rendering of an `f32` value: Rust `{}` prints the shortest
+/// round-tripping decimal, plus the `.0` fix for whole values (mirrors
+/// the lowering's `float_lit` for literal tokens). Non-finite values
+/// have no WGSL spelling — loud in debug, clamped caller's problem.
+pub(crate) fn f32_lit(v: f32) -> String {
+    debug_assert!(v.is_finite(), "non-finite f32 has no WGSL spelling");
+    let base = format!("{v}");
+    if base.contains('.') || base.contains('e') || base.contains('E') {
+        base
+    } else {
+        format!("{base}.0")
+    }
+}
 /// WGSL declaration line for one [`Resource`].
 pub fn resource_decl(r: &Resource) -> String {
     format!(
@@ -375,13 +388,15 @@ pub struct Context<T>(T);
 /// error (two sources of truth).
 pub struct Location<const N: usize, T>(T, core::marker::PhantomData<[u8; N]>);
 
-/// Quad constants as a stage-entry context bundle: five vertex entries share
-/// it (`ctx: QuadContext`, `ctx.quad[idx]`). Field names match the WGSL
-/// `const` names exactly — the `#[stage]` `context` lowering strips the
-/// `ctx.` prefix, no renaming involved.
+/// Quad constants as a stage-entry context bundle: the fullscreen-vertex
+/// entries share it (`consts: QuadConsts`, `consts.quad[idx]`). A second
+/// `Context<T>` parameter needs no new macro machinery — bundle detection
+/// is generic over the wrapper — it just names the group. Field names
+/// match the WGSL `const` names exactly; the `#[stage]` `context`
+/// lowering strips the `consts.` prefix, no renaming involved.
 #[allow(dead_code)]
 #[derive(ornis_macros::ShaderContext)]
-pub(crate) struct QuadContext {
+pub(crate) struct QuadConsts {
     pub quad: [[f32; 4]; 4],
     pub uvs: [[f32; 2]; 4],
 }
@@ -648,12 +663,12 @@ mod tests {
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
         let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
-        // (bundle/entry globals, assemblies containing them). QuadContext is
+        // (bundle/entry globals, assemblies containing them). QuadConsts is
         // shared by five vertex entries, so it pins against all five
         // assemblies carrying the quad constants.
         let pairs: &[(&[&str], Vec<String>)] = &[
             (
-                QuadContext::GLOBALS,
+                QuadConsts::GLOBALS,
                 vec![
                     hdr_vertex.clone(),
                     hdr_fragment.clone(),
@@ -667,7 +682,11 @@ mod tests {
                 vec![hdr_fragment],
             ),
             (bloom_generated::BloomContext::GLOBALS, vec![bloom]),
-            (lighting_generated::LightingContext::GLOBALS, vec![lighting]),
+            (
+                lighting_generated::LightingContext::GLOBALS,
+                vec![lighting.clone()],
+            ),
+            (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
             (
                 composite_generated::CompositeContext::GLOBALS,
                 vec![composite],
@@ -1017,7 +1036,7 @@ mod tests {
         // (globals read by one entry, pass table, entry stage)
         let cases: &[(&[&str], &[Resource], ShaderStages)] = &[
             (
-                QuadContext::GLOBALS,
+                QuadConsts::GLOBALS,
                 &composite_generated::COMPOSITE_RESOURCES,
                 ShaderStages::VERTEX,
             ),
@@ -1042,7 +1061,7 @@ mod tests {
                 ShaderStages::FRAGMENT,
             ),
             (
-                QuadContext::GLOBALS,
+                QuadConsts::GLOBALS,
                 &hdr_composite_generated::HDR_RESOURCES,
                 ShaderStages::VERTEX,
             ),
@@ -1052,7 +1071,7 @@ mod tests {
                 ShaderStages::FRAGMENT,
             ),
             (
-                QuadContext::GLOBALS,
+                QuadConsts::GLOBALS,
                 &bloom_generated::BLOOM_RESOURCES,
                 ShaderStages::VERTEX,
             ),
@@ -1062,12 +1081,17 @@ mod tests {
                 ShaderStages::FRAGMENT,
             ),
             (
-                QuadContext::GLOBALS,
+                QuadConsts::GLOBALS,
                 &lighting_generated::LIGHTING_RESOURCES,
                 ShaderStages::VERTEX,
             ),
             (
                 lighting_generated::LightingContext::GLOBALS,
+                &lighting_generated::LIGHTING_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                lighting_generated::LightingMaps::GLOBALS,
                 &lighting_generated::LIGHTING_RESOURCES,
                 ShaderStages::FRAGMENT,
             ),

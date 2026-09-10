@@ -21,9 +21,20 @@ pub const EPS: f32 = 1e-6;
 /// Single-precision 1/π, matching the former `0.31830988618` bit-wise.
 pub const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
 
-/// WGSL `const` block for the helpers, generated from the Rust constants.
+/// WGSL `const` block for the helpers, generated from the Rust constants
+/// above: the name travels via `stringify!` (rename-proof), the value via
+/// [`f32_lit`](super::f32_lit) (bit-exact, WGSL-valid). No second spelling.
 pub fn wgsl_consts() -> String {
-    format!("const PI: f32 = {PI};\nconst EPS: f32 = {EPS};\nconst INV_PI: f32 = {INV_PI};\n")
+    macro_rules! decl {
+        ($name:ident) => {
+            format!(
+                "const {}: f32 = {};\n",
+                stringify!($name),
+                super::f32_lit($name)
+            )
+        };
+    }
+    [decl!(PI), decl!(EPS), decl!(INV_PI)].concat()
 }
 
 /// Base layer: dielectric/metallic mix with anisotropic GGX + Oren-Nayar.
