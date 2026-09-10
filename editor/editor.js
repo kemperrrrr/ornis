@@ -246,15 +246,14 @@ function syncInspector() {
     buildInspector(entity);
 }
 
-function buildDetails(title, iconHref, color) {
+function buildDetails(title, iconHref, tintClass) {
     var details = el('details');
     details.open = true;
 
     var summary = el('summary');
     var left = el('div', 'left');
     left.appendChild(el('div', 'arrow'));
-    var icon = el('div', 'icon');
-    icon.style.fill = color;
+    var icon = el('div', 'icon ' + tintClass);
     icon.innerHTML = iconSvg(iconHref);
     left.appendChild(icon);
     left.appendChild(document.createTextNode(title));
@@ -360,7 +359,7 @@ function buildTransform(panel, entity) {
     if (!transform || !Array.isArray(transform.translation)) return;
 
     var translation = transform.translation.slice(0, 3);
-    var details = buildDetails('Transform', 'icons/transform-gizmo.svg#icon', '#5796e8');
+    var details = buildDetails('Transform', 'icons/transform-gizmo.svg#icon', 'tint-blue');
     var content = details.querySelector('.content');
 
     function sendNow() {
@@ -418,7 +417,7 @@ function buildMaterial(panel, entity) {
     var roughness = (typeof variant.roughness === 'number')
         ? variant.roughness : 0.5;
 
-    var details = buildDetails('Material', 'icons/shapes.svg#icon', '#a156d6');
+    var details = buildDetails('Material', 'icons/shapes.svg#icon', 'tint-purple');
     var content = details.querySelector('.content');
 
     function sendNow() {

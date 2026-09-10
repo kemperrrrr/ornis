@@ -414,6 +414,32 @@ summary .right .icon:hover {
     fill: var(--window-background);
 }
 
+/* Tint modifiers: icon SVG files carry no color (black by default),
+   paint them only through these classes. */
+.tint-blue {
+    fill: #5796e8;
+}
+
+.tint-purple {
+    fill: #a156d6;
+}
+
+.tint-yellow {
+    fill: #fcd34d;
+}
+
+.tint-orange {
+    fill: #ea7c45;
+}
+
+.tint-gray {
+    fill: var(--icons-background);
+}
+
+svg.file-icon {
+    width: 4.5rem;
+}
+
 .bottom-button {
     margin-top: 0.5rem;
 }
