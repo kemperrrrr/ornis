@@ -361,6 +361,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // trailing — a WGSL-visible member after a skip would sit at a different
     // offset than its Rust counterpart.
     let mut decl_lines: Vec<String> = Vec::new();
+    let mut field_names: Vec<String> = Vec::new();
     let mut offset_asserts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut nested: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut naga_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -400,6 +401,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         };
         if !opts.skip {
             decl_lines.push(format!("    {}: {},", wgsl_field, layout.wgsl_ty));
+            // WGSL member spellings (what DSL bodies and naga see), kept
+            // alongside the decl lines: the field-resolution test checks
+            // generated field uses against the real definitions.
+            field_names.push(wgsl_field.clone());
         }
         let size = &layout.size;
         let align = &layout.align;
@@ -568,6 +573,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// The WGSL type name of this struct (the `#[wgsl(name)]`
             /// override when present, else the Rust type name).
             pub const WGSL_NAME: &'static str = #name_lit;
+
+            /// WGSL member names in declaration order (skipped padding
+            /// excluded). The field-resolution test checks generated field
+            /// uses against the real definitions.
+            pub const FIELD_NAMES: &'static [&'static str] = &[#(#field_names),*];
 
             /// Insert this layout into a naga IR module, building member
             /// types from the same field walk as [`WGSL_SOURCE`](Self::WGSL_SOURCE).

@@ -704,6 +704,153 @@ mod tests {
         assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
     }
 
+    /// Every non-swizzle `root.field` use in translated entries resolves
+    /// against a real definition: `camera`/`lighting`/`bloom_params`
+    /// against their buffer layouts (`FIELD_NAMES`), `mat` against
+    /// `OPENPBR_SLOTS`, `obj` against `PerObjectGpu`, `input`/`output`
+    /// against the pass mirrors (`WGSL_FIELDS`, per entry below).
+    /// Anything else dotted is either a vector swizzle (x/y/z/w/r/g/b/a
+    /// combos, skipped by pattern) or a hard error: an unresolved root is
+    /// a free identifier past the bundles or a typo'd root, and a missing
+    /// field is a typo'd member. This is the field-resolution slice of
+    /// "valid Rust": no mocks, no second lowering — the oracles are the
+    /// real definitions, the text is the real output.
+    #[test]
+    fn stage_field_uses_resolve() {
+        use super::interface::{
+            BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
+            GbufferVertexOutput, HdrFragmentOut, UiCompositeOut,
+        };
+        use crate::renderer::{BloomUniform, CameraUniform, LightingUniform, PerObjectGpu};
+
+        fn is_swizzle(field: &str) -> bool {
+            field.len() <= 4 && field.chars().all(|c| "xyzwrgba".contains(c))
+        }
+
+        // (translated entry source, input mirror fields, output mirror fields)
+        struct Entry {
+            src: &'static str,
+            input: Option<&'static [&'static str]>,
+            output: Option<&'static [&'static str]>,
+        }
+        let entries = [
+            Entry {
+                src: composite_generated::vs_main::wgsl_source(),
+                input: None,
+                output: Some(UiCompositeOut::WGSL_FIELDS),
+            },
+            Entry {
+                src: composite_generated::fs_main::wgsl_source(),
+                input: Some(UiCompositeOut::WGSL_FIELDS),
+                output: None,
+            },
+            Entry {
+                src: gbuffer_generated::vs_main::wgsl_source(),
+                input: Some(GbufferVertexInput::WGSL_FIELDS),
+                output: Some(GbufferVertexOutput::WGSL_FIELDS),
+            },
+            Entry {
+                src: gbuffer_generated::fs_main::wgsl_source(),
+                input: Some(GbufferFragmentInput::WGSL_FIELDS),
+                output: Some(GbufferOutput::WGSL_FIELDS),
+            },
+            Entry {
+                src: pbr_generated::fs_main::wgsl_source(),
+                input: Some(GbufferFragmentInput::WGSL_FIELDS),
+                output: None,
+            },
+            Entry {
+                src: hdr_composite_generated::vs_main::wgsl_source(),
+                input: None,
+                output: None,
+            },
+            Entry {
+                src: hdr_composite_generated::fs_main::wgsl_source(),
+                input: Some(HdrFragmentOut::WGSL_FIELDS),
+                output: None,
+            },
+            Entry {
+                src: bloom_generated::vs_main::wgsl_source(),
+                input: None,
+                output: None,
+            },
+            Entry {
+                src: bloom_generated::fs_main::wgsl_source(),
+                input: Some(BloomVertexOut::WGSL_FIELDS),
+                output: None,
+            },
+            Entry {
+                src: lighting_generated::vs_main::wgsl_source(),
+                input: None,
+                output: None,
+            },
+            Entry {
+                src: lighting_generated::fs_main::wgsl_source(),
+                input: Some(HdrFragmentOut::WGSL_FIELDS),
+                output: None,
+            },
+        ];
+        // Shared roots: uniform buffers by layout, materials by slot list.
+        let shared: &[(&str, &[&str])] = &[
+            ("camera", CameraUniform::FIELD_NAMES),
+            ("lighting", LightingUniform::FIELD_NAMES),
+            ("bloom_params", BloomUniform::FIELD_NAMES),
+            ("mat", &OPENPBR_SLOTS),
+            ("obj", PerObjectGpu::FIELD_NAMES),
+        ];
+        let mut checked = 0;
+        for (n, entry) in entries.iter().enumerate() {
+            let mut roots: Vec<(&str, &[&str])> = shared.to_vec();
+            if let Some(fields) = entry.input {
+                roots.push(("input", fields));
+            }
+            if let Some(fields) = entry.output {
+                // `var`-out locals are spelled `out` (composite) or
+                // `output` (g-buffer); both resolve to the output mirror.
+                roots.push(("out", fields));
+                roots.push(("output", fields));
+            }
+            let mut rest = entry.src;
+            while let Some(dot) = rest.find('.') {
+                let before = &rest[..dot];
+                let root: String = before
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                let after = &rest[dot + 1..];
+                let field: String = after
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !root.is_empty() && !field.is_empty() && !is_swizzle(&field) {
+                    // Float literals (`0.0`) look like `root.field` to the
+                    // scanner; numeric roots are never field uses.
+                    if root.starts_with(|c: char| c.is_ascii_digit()) {
+                        rest = after;
+                        continue;
+                    }
+                    let (_, fields) = roots
+                        .iter()
+                        .find(|(r, _)| *r == root)
+                        .unwrap_or_else(|| panic!("entry {n}: unresolved root `{root}.{field}`"));
+                    assert!(
+                        fields.contains(&field.as_str()),
+                        "entry {n}: `{root}` has no field `{field}`"
+                    );
+                    checked += 1;
+                }
+                rest = after;
+            }
+        }
+        // Eleven entries, 151 resolved uses today; fewer means the
+        // extraction broke or coverage was dropped — update deliberately.
+        assert!(checked >= 151, "expected field uses, found {checked}");
+    }
+
     /// Parse and fully validate an assembled WGSL module with naga.
     fn assert_valid_wgsl(name: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)

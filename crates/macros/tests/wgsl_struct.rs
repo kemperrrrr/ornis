@@ -49,6 +49,14 @@ fn contact_wgsl_source() {
     assert!(src.contains("count: u32"));
 }
 
+#[test]
+fn field_names_mirror_declaration_order() {
+    assert_eq!(
+        Contact::FIELD_NAMES,
+        &["nx", "ny", "uv", "pad0", "indices", "count", "pad1"]
+    );
+}
+
 /// Renamed mirror: `WGSL_NAME` carries the override, `WGSL_SOURCE` uses it.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, WgslStruct)]
