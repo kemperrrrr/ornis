@@ -2651,25 +2651,31 @@ impl BuiltinPhysicsEngine {
             b.orientation = orientation;
             skip[h] = true;
             if hit.angular {
-                // Frictionless spin response at the swept contact: only the
-                // approach-driving spin is removed, tangential spin survives
-                // (planar impacts stop dead, exactly as before).
+                // Unified contact impulse: contact-point speed (spin counts),
+                // restitution-aware, tangential preserved. Subsumes the old
+                // split linear-bounce + spin-kill for angular hits.
                 let lever = hit.contact.map(|c| c - b.position).unwrap_or(Vec3::ZERO);
-                b.angular_velocity = remove_angular_approach(
+                let (v, w) = ccd_impact_velocity(
+                    b.velocity,
                     b.angular_velocity,
+                    b.inv_mass,
                     b.inertia,
                     b.orientation,
                     lever,
                     hit.normal,
+                    e,
                 );
-            }
-            let vn = b.velocity.dot(hit.normal);
-            if vn < 0.0 {
-                // Inelastic below the shared restitution threshold; a
-                // genuine impact bounces (one-shot, like the discrete
-                // restitution stage).
-                let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
-                b.velocity -= hit.normal * (bounce * vn);
+                b.velocity = v;
+                b.angular_velocity = w;
+            } else {
+                let vn = b.velocity.dot(hit.normal);
+                if vn < 0.0 {
+                    // Inelastic below the shared restitution threshold; a
+                    // genuine impact bounces (one-shot, like the discrete
+                    // restitution stage).
+                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
+                    b.velocity -= hit.normal * (bounce * vn);
+                }
             }
         }
     }
@@ -2806,6 +2812,34 @@ fn swept_shape_overlaps(
     }
 }
 
+/// Energy-neutral cap for a spin correction `delta`: walk back along it to
+/// the closed-form neutral point `t = (d·Iω)/E(d)` when the full correction
+/// would add rotational energy (stiff anisotropic levers). Pure arithmetic,
+/// hence deterministic; degenerate inputs return `omega` unchanged.
+fn cap_spin_correction(omega: Vec3, inertia: Vec3, orientation: Quat, delta: Vec3) -> Vec3 {
+    let out = omega - delta;
+    // Body-frame energies: E(Ω) = ½ΣIᵢwᵢ². Exact correction first; if it
+    // would inject energy, walk back along `delta` to the neutral point.
+    let qb = orientation.conjugate();
+    let wb = qb * omega;
+    let db = qb * delta;
+    let iw = inertia * wb;
+    let e_omega = 0.5 * iw.dot(wb);
+    let e_out = 0.5 * (inertia * (wb - db)).dot(wb - db);
+    if e_out <= e_omega {
+        return out;
+    }
+    let e_d = 0.5 * (inertia * db).dot(db);
+    if !e_d.is_finite() || e_d <= 0.0 {
+        return omega;
+    }
+    let t = db.dot(iw) / e_d;
+    if !t.is_finite() || t <= 0.0 {
+        return omega;
+    }
+    omega - delta * t.min(1.0)
+}
+
 /// Frictionless spin response for a CCD stop: remove exactly the spin that
 /// drives the contact point into the surface, keep the tangential spin.
 /// The correction follows a frictionless contact impulse — `Δω = J·I⁻¹m`
@@ -2815,17 +2849,14 @@ fn swept_shape_overlaps(
 /// minimum-norm projection; for planar motion with an in-plane contact
 /// normal it reduces exactly to the old full stop — the fix only changes
 /// contacts with a genuine out-of-plane lever (scrapes keep tangential
-/// spin instead of dying). No angular restitution (inelastic); friction
-/// stays with the contact/joint passes.
+/// spin instead of dying). No angular restitution here (inelastic) — the
+/// restitution-aware path is [`ccd_impact_velocity`]; friction stays with
+/// the contact/joint passes.
 ///
-/// Stiff-lever cap: for anisotropic bodies a poor lever can demand an
-/// impulse that *adds* rotational energy (thin bar, huge `I⁻¹` on one
-/// axis — physically faithful, but a blender in a game step). The
-/// correction is therefore capped at energy-neutral — closed form
-/// `t = (d·Iω)/E(d)` along the correction `d`, remainder left to the
-/// discrete solver (it sees a clean touching contact next substep thanks
-/// to the clamp+backoff). Pure arithmetic, hence deterministic. Degenerate
-/// lever or a separating contact returns `omega` unchanged (never NaN).
+/// The energy-neutral [`cap_spin_correction`] applies (see its docs).
+/// Pure arithmetic, hence deterministic. Degenerate lever or a separating
+/// contact returns `omega` unchanged (never NaN).
+#[cfg(test)]
 fn remove_angular_approach(
     omega: Vec3,
     inertia: Vec3,
@@ -2843,28 +2874,46 @@ fn remove_angular_approach(
     if !vn.is_finite() || vn >= 0.0 {
         return omega;
     }
-    let d = im * (vn / denom);
-    let out = omega - d;
-    // Body-frame energies: E(Ω) = ½ΣIᵢwᵢ². Exact projection first; if it
-    // would inject energy, walk back along `d` to the neutral point.
-    let qb = orientation.conjugate();
-    let wb = qb * omega;
-    let db = qb * d;
-    let iw = inertia * wb;
-    let e_omega = 0.5 * iw.dot(wb);
-    let e_out = 0.5 * (inertia * (wb - db)).dot(wb - db);
-    if e_out <= e_omega {
-        return out;
+    cap_spin_correction(omega, inertia, orientation, im * (vn / denom))
+}
+
+/// Unified one-shot impact for an angular CCD hit: the contact-point velocity
+/// `v_c = v + ω×r_c` (spin counts toward the approach, not just the center
+/// motion), a textbook rigid-body impulse `J = −(1+e)·vn_c/denom` with
+/// `denom = inv_mass + (I⁻¹m)·m`, restitution `e` above the shared 1 m/s
+/// contact-speed threshold (otherwise inelastic). Tangential surface motion
+/// is preserved — friction is the discrete solver's job next substep (it
+/// sees a clean touching contact thanks to the clamp+backoff), so CCD never
+/// double-applies it. The linear part applies fully (center-mass, bounded);
+/// the spin part goes through [`cap_spin_correction`]. Pure arithmetic,
+/// hence deterministic.
+#[allow(clippy::too_many_arguments)]
+fn ccd_impact_velocity(
+    velocity: Vec3,
+    omega: Vec3,
+    inv_mass: f32,
+    inertia: Vec3,
+    orientation: Quat,
+    lever: Vec3,
+    normal: Vec3,
+    restitution: f32,
+) -> (Vec3, Vec3) {
+    let contact_vel = velocity + omega.cross(lever);
+    let vn_c = contact_vel.dot(normal);
+    if !vn_c.is_finite() || vn_c >= 0.0 || !inv_mass.is_finite() || inv_mass <= 0.0 {
+        return (velocity, omega);
     }
-    let e_d = 0.5 * (inertia * db).dot(db);
-    if !e_d.is_finite() || e_d <= 0.0 {
-        return omega;
+    let e = if vn_c < -1.0 { restitution } else { 0.0 };
+    let m = lever.cross(normal);
+    let im = mul_inv_inertia(inertia, orientation, m);
+    let denom = inv_mass + im.dot(m);
+    if !denom.is_finite() || denom <= 1e-12 {
+        return (velocity, omega);
     }
-    let t = db.dot(iw) / e_d;
-    if !t.is_finite() || t <= 0.0 {
-        return omega;
-    }
-    omega - d * t.min(1.0)
+    let impulse = -(1.0 + e) * vn_c / denom;
+    let new_velocity = velocity + normal * (impulse * inv_mass);
+    let new_omega = cap_spin_correction(omega, inertia, orientation, im * -impulse);
+    (new_velocity, new_omega)
 }
 
 fn find_linear_continuous_hit(
@@ -4517,6 +4566,141 @@ mod tests {
             "cap must not worsen the approach: {} -> {}",
             approach(w),
             approach(out)
+        );
+    }
+
+    /// Unified impact, restitution: v=0, ω=(10,0,10), lever +Y, normal −Z,
+    /// e=0.5. The tip approaches at −10 m/s, bounces to +5; the impulse
+    /// couples into translation (v'=−10ẑ) and trims the driving X-spin
+    /// (ω'=(5,0,10)) while the tangential Z-spin survives. Old code: v
+    /// untouched, ω zeroed — a spinning bounce was impossible.
+    #[test]
+    fn ccd_impact_couples_spin_and_bounce() {
+        let (v, w) = ccd_impact_velocity(
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 10.0),
+            1.0,
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            Vec3::Y,
+            Vec3::NEG_Z,
+            0.5,
+        );
+        assert!(
+            (v - Vec3::new(0.0, 0.0, -10.0)).length() < 1e-5,
+            "bounce couples into translation, got {v:?}"
+        );
+        assert!(
+            (w - Vec3::new(5.0, 0.0, 10.0)).length() < 1e-5,
+            "driving spin trimmed, tangential kept, got {w:?}"
+        );
+        // Restitution identity on the contact point: vn' = −e·vn.
+        let vn_after = (v + w.cross(Vec3::Y)).dot(Vec3::NEG_Z);
+        assert!(
+            (vn_after - 5.0).abs() < 1e-4,
+            "vn' must be +5, got {vn_after}"
+        );
+    }
+
+    /// Unified impact, inelastic limit: same setup with e=0 kills the
+    /// contact approach exactly (vn' ≈ 0), dissipating total energy.
+    #[test]
+    fn ccd_impact_inelastic_kills_contact_approach() {
+        let (v, w) = ccd_impact_velocity(
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 10.0),
+            1.0,
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            Vec3::Y,
+            Vec3::NEG_Z,
+            0.0,
+        );
+        let vn_after = (v + w.cross(Vec3::Y)).dot(Vec3::NEG_Z);
+        assert!(
+            vn_after.abs() < 1e-4,
+            "inelastic must stop the approach, got {vn_after}"
+        );
+        assert!(
+            (v - Vec3::new(0.0, 0.0, -20.0 / 3.0)).length() < 1e-5,
+            "got {v:?}"
+        );
+    }
+
+    /// Unified impact, stiff lever: thin-bar inertia, e=0. The inv_mass
+    /// floor in the denominator regularizes the impulse (no blender);
+    /// total energy must drop, approach must vanish.
+    #[test]
+    fn ccd_impact_stiff_lever_dissipates() {
+        let w0 = Vec3::Z * 90.0;
+        let inertia = Vec3::new(0.0067, 0.753, 0.753);
+        let lever = Vec3::new(1.5, 0.05, 0.05);
+        let total = |v: Vec3, w: Vec3| 0.5 * v.dot(v) + 0.5 * inertia.dot(w * w);
+        let (v, w) = ccd_impact_velocity(
+            Vec3::ZERO,
+            w0,
+            1.0,
+            inertia,
+            Quat::IDENTITY,
+            lever,
+            Vec3::NEG_Y,
+            0.0,
+        );
+        assert!(v.is_finite() && w.is_finite(), "got {v:?} {w:?}");
+        assert!(
+            total(v, w) <= total(Vec3::ZERO, w0) + 1e-2,
+            "inelastic impact must dissipate: {} -> {}",
+            total(Vec3::ZERO, w0),
+            total(v, w)
+        );
+        let vn_after = (v + w.cross(lever)).dot(Vec3::NEG_Y);
+        assert!(
+            vn_after.abs() < 1e-2,
+            "approach must vanish, got {vn_after}"
+        );
+    }
+
+    /// Engine-level spin bounce: cube corner 10 cm above the floor (outside
+    /// the 5 cm speculative margin, so no discrete phantom contact
+    /// pre-empts the sweep), pure (40,0,40) spin, zero gravity, one
+    /// substep. The corner outruns the discrete phase; CCD must clamp (no
+    /// penetration) AND convert spin into an upward pop (old code:
+    /// velocity stays zero, spin dies).
+    #[test]
+    fn ccd_spin_bounce_pops_upward() {
+        let dt = 1.0 / 60.0;
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.set_substeps(1);
+        let floor_pos = Vec3::new(0.0, -1.0, 0.0);
+        let floor_half = Vec3::new(5.0, 1.0, 5.0);
+        physics.add_body(RigidBody::new_box(floor_pos, floor_half, 0.0));
+        let mover = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.6, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        physics.get_body_mut(mover).unwrap().angular_velocity = Vec3::new(40.0, 0.0, 40.0);
+
+        physics.step(dt);
+
+        let body = physics.get_body(mover).expect("mover remains alive");
+        assert!(
+            obb_sat(
+                body.position,
+                Vec3::splat(0.5),
+                body.orientation,
+                floor_pos,
+                floor_half,
+                Quat::IDENTITY,
+                1e-5
+            )
+            .is_none(),
+            "CCD must not let the corner through the floor"
+        );
+        assert!(
+            body.velocity.y > 2.0,
+            "spin bounce must pop the body up, got {:?}",
+            body.velocity
         );
     }
 
