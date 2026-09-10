@@ -7,7 +7,7 @@
 //! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
 
 use super::interface::UiCompositeOut as VertexOutput;
-use super::{Resource, ResourceKind, Sampler, Texture2d, naga_ir, resource_decls, wgsl_decl};
+use super::{Resource, ResourceKind, Sampler, ShaderModule, Texture2d, naga_ir, wgsl_decl};
 use crate::shaders::math::srgb_to_linear;
 use ornis_macros::stage;
 
@@ -91,38 +91,22 @@ pub const COMPOSITE_RESOURCES: [Resource; 4] = [
     },
 ];
 
-/// WGSL bindings + quad constants + vertex/fragment entry points.
-///
-/// Assembled at runtime as a `String`, but the source is Rust: constants and
+/// WGSL bindings + quad constants + vertex/fragment entry points, assembled
+/// from Rust via the builder: constants and
 /// `srgb_to_linear::wgsl_source()` — the single `srgb_to_linear` in the
 /// system. This removes duplication of the WGSL literal from `composite.rs`.
 fn composite_wgsl_body() -> String {
-    // Header: derived `VertexOutput` varying plus bindings, QUAD/UVS, vertex
-    // entry. Format matches the former handwritten composite; entry
-    // point names `vs`/`fs` are kept for compatibility with
-    // `CompositePass::new`.
-    let header = format!(
-        "\n{vout}\n{rest}\n{vs}",
-        vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
-        rest = composite_header_rest(),
-        vs = vs_main::wgsl_source(),
-    );
-
-    /// Bindings (0–3) from the table + quad constants, all assembled from Rust.
-    fn composite_header_rest() -> String {
-        let mut out = resource_decls(&COMPOSITE_RESOURCES, &[0, 1, 2, 3]);
-        out.push('\n');
-        out.push_str(&naga_ir::const_block(&COMPOSITE_QUAD, &COMPOSITE_UVS));
-        out
-    }
-
-    // Fragment entry: sampling + sRGB decode + mix. Translated above; the
-    // kernel (same `srgb_to_linear` name in WGSL) splices in below.
-    let fragment = fs_main::wgsl_source();
-
-    // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
-    let kernel = srgb_to_linear::wgsl_source();
-    format!("{header}\n{kernel}\n{fragment}\n")
+    // Derived `VertexOutput` varying plus bindings, quad/UVs and both
+    // entries. Entry points are `vs_main`/`fs_main` (unified ABI).
+    ShaderModule::new()
+        .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
+        .resources(&COMPOSITE_RESOURCES, &[0, 1, 2, 3])
+        .consts(naga_ir::const_block(&COMPOSITE_QUAD, &COMPOSITE_UVS))
+        .entry(vs_main::wgsl_source())
+        // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
+        .helper(srgb_to_linear::wgsl_source())
+        .entry(fs_main::wgsl_source())
+        .emit()
 }
 
 /// Full WGSL source for the composite pass, assembled from Rust.

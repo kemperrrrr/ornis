@@ -11,7 +11,7 @@ use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
     DepthTexture, OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler,
-    Texture2d, Texture2dUint, naga_ir, wgsl_decl,
+    ShaderModule, Texture2d, Texture2dUint, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -371,16 +371,17 @@ fn fs_main(
 
 /// Full WGSL source for deferred lighting, assembled from Rust.
 pub fn wgsl_source() -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        lighting_wgsl_header(),
-        wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
-        helpers::wgsl_consts(),
-        helpers::wgsl_lighting_decode(),
-        helpers::wgsl_shared_helpers(),
-        fs_main::wgsl_source(),
-        lighting_fragment_kernels(),
-    )
+    ShaderModule::new()
+        .decl(lighting_wgsl_header())
+        .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
+        .helpers([
+            helpers::wgsl_consts(),
+            helpers::wgsl_lighting_decode(),
+            helpers::wgsl_shared_helpers(),
+        ])
+        .entry(fs_main::wgsl_source())
+        .helper(lighting_fragment_kernels())
+        .emit()
 }
 
 /// Vertex entry, translated by [`stage`](ornis_macros::stage).
@@ -398,17 +399,11 @@ fn vs_main(vertex_index: super::VertexIndex, ctx: Context<super::QuadContext>) -
 /// splices the shared `QuadVertexOutput` declaration (`HdrFragmentOut`)
 /// and the entry is translated.
 pub fn wgsl_vertex_source() -> String {
-    format!(
-        "\n{quad}{qo}{body}",
-        quad = vertex_quad_uv(),
-        qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
-        body = vs_main::wgsl_source(),
-    )
-}
-
-/// Shared quad constants for the lighting vertex stage, via IR.
-fn vertex_quad_uv() -> String {
-    naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS)
+    ShaderModule::new()
+        .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
+        .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
+        .entry(vs_main::wgsl_source())
+        .emit()
 }
 
 /// Static view for naga validation and snapshot tests.

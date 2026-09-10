@@ -167,6 +167,109 @@ pub fn resource_decl(r: &Resource) -> String {
     )
 }
 
+/// Ordered shader-module assembly: call sites declare WHAT goes in,
+/// [`emit`](ShaderModule::emit) owns section order and separators.
+/// WGSL needs decl-before-use; the former per-site `format!` skeletons
+/// encoded that order by hand (and could drift) — here the order
+/// (types → resources → consts → helpers → entries) is fixed once.
+/// Pieces are taken verbatim except edge-newline normalization (leading
+/// and trailing `\n` trimmed, sections joined with single `\n`): WGSL is
+/// whitespace-insensitive, and naga plus the pixel probes pin the result.
+pub struct ShaderModule {
+    decls: Vec<String>,
+    resources: Vec<String>,
+    consts: Vec<String>,
+    helpers: Vec<String>,
+    entries: Vec<String>,
+}
+
+impl ShaderModule {
+    /// Empty assembly.
+    pub fn new() -> Self {
+        Self {
+            decls: Vec::new(),
+            resources: Vec::new(),
+            consts: Vec::new(),
+            helpers: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// One type/varying declaration block (derived `WGSL_SOURCE`,
+    /// `wgsl_decl`-wrapped or raw).
+    pub fn decl(mut self, src: impl Into<String>) -> Self {
+        self.decls.push(src.into());
+        self
+    }
+
+    /// Resource declarations from a [`Resource`] table subset (same rows
+    /// the pass layout builds its BGL from).
+    pub fn resources(mut self, table: &[Resource], bindings: &[u32]) -> Self {
+        self.resources.push(resource_decls(table, bindings));
+        self
+    }
+
+    /// One `const` block (quad corners/UVs from Rust data, via IR).
+    pub fn consts(mut self, src: impl Into<String>) -> Self {
+        self.consts.push(src.into());
+        self
+    }
+
+    /// One helper/kernel function source.
+    pub fn helper(mut self, src: impl Into<String>) -> Self {
+        self.helpers.push(src.into());
+        self
+    }
+
+    /// Several helper/kernel sources at once.
+    pub fn helpers<I, S>(mut self, srcs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.helpers.extend(srcs.into_iter().map(Into::into));
+        self
+    }
+
+    /// One entry point (translated body). A module normally carries one;
+    /// several are allowed where the legacy assembly did.
+    pub fn entry(mut self, src: impl Into<String>) -> Self {
+        self.entries.push(src.into());
+        self
+    }
+
+    /// Render the module: sections in fixed order, normalized whitespace.
+    pub fn emit(self) -> String {
+        let mut pieces: Vec<String> = Vec::new();
+        for section in [
+            self.decls,
+            self.resources,
+            self.consts,
+            self.helpers,
+            self.entries,
+        ] {
+            for piece in section {
+                let trimmed = piece.trim_matches('\n');
+                if !trimmed.is_empty() {
+                    pieces.push(trimmed.to_string());
+                }
+            }
+        }
+        let mut out = String::from("\n");
+        if !pieces.is_empty() {
+            out.push_str(&pieces.join("\n"));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+impl Default for ShaderModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// `wgpu` bind-group-layout entry for one [`Resource`]; `multisampled`
 /// threads the runtime MSAA flag through to texture resources.
 pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry {

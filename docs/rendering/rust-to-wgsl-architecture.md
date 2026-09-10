@@ -96,8 +96,13 @@ passes оптимизации/валидации.
    compile-time symbols (открывает вложенные контексты).
 4. **Декларативный pass-объект** (бывший §3): один объект вместо
    пяти рассинхронизированных мест (таблица, header, BGL, decls,
-   runtime binding). Таблицы `Resource` — первый шаг, уже сделано;
-   `#[shader_pass]`-макрос — по необходимости, не ради синтаксиса.
+   runtime binding). Выполнено первым срезом: `ShaderModule`-билдер
+   (секции types → resources → consts → helpers → entries, порядок
+   зашит в `emit`, call sites объявляют ЧТО); ручные `format!`-скелеты
+   удалены из всех 9 сборок, 7 orphan-обёрток (`vertex_bindings`,
+   `fragment_bindings` ×2, `bloom_header_head`, `composite_header_rest`,
+   `fragment_head`, `vertex_quad_uv`) инлайнены. Полный `#[shader_pass]` —
+   по необходимости, не ради синтаксиса.
 5. **Разделить lowering и печать** (`syn` строит IR, не `format!`),
    затем **собственный IR + writer для тел** — только когда 1–4 исчерпаны.
 6. **Расширять подмножество Rust** последним (`match`, массивы сверх

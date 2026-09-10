@@ -8,8 +8,8 @@
 
 use super::interface::BloomVertexOut as BloomVertexOutput;
 use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, Texture2d, naga_ir,
-    resource_decls, wgsl_decl,
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d, naga_ir,
+    wgsl_decl,
 };
 use crate::renderer::BloomUniform;
 use crate::shaders::math::luminance;
@@ -88,31 +88,17 @@ pub const BLOOM_RESOURCES: [Resource; 3] = [
 ];
 
 fn bloom_wgsl_body() -> String {
-    // Derived `BloomParams` layout and `BloomVertexOut` varying spliced into
-    // the handwritten header rest (bindings + quad + entries). Byte-identical
-    // to the previous assembly except the dropped `_pad` line
-    // (`#[wgsl(skip)]` pads are not shader-visible).
-    let header = format!(
-        "\n{bloom}\n{head}\n{vout}\n{vs}",
-        bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
-        head = bloom_header_head(),
-        vout = wgsl_decl(BloomVertexOutput::WGSL_SOURCE),
-        vs = vs_main::wgsl_source(),
-    );
-
-    /// WGSL bindings + quad constants, all assembled from Rust: the binding
-    /// lines from the table, QUAD/UVS from [`STANDARD_QUAD`]/[`STANDARD_UVS`].
-    fn bloom_header_head() -> String {
-        let mut out = resource_decls(&BLOOM_RESOURCES, &[0, 1, 2]);
-        out.push('\n');
-        out.push_str(&naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS));
-        out
-    }
-
-    let fragment = fs_main::wgsl_source();
-
-    let kernel = luminance::wgsl_source();
-    format!("{header}\n{kernel}\n{fragment}\n")
+    // Derived `BloomParams` layout and `BloomVertexOut` varying spliced
+    // into the header (bindings + quad + entries) via the builder.
+    ShaderModule::new()
+        .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
+        .resources(&BLOOM_RESOURCES, &[0, 1, 2])
+        .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
+        .decl(wgsl_decl(BloomVertexOutput::WGSL_SOURCE))
+        .entry(vs_main::wgsl_source())
+        .helper(luminance::wgsl_source())
+        .entry(fs_main::wgsl_source())
+        .emit()
 }
 
 /// Full WGSL source for the bloom pass, assembled from Rust.

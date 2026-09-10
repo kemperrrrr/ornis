@@ -13,8 +13,7 @@ use super::interface::{
 };
 use super::wgsl_decl;
 use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, Texture2d, naga_ir,
-    resource_decls,
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d, naga_ir,
 };
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
@@ -43,12 +42,11 @@ fn vs_main(
 /// constructor call; the generated entry is single-line) — pinned by
 /// `hdr_vertex_entry_matches_legacy_shape` plus naga and the pixel probes.
 pub fn wgsl_vertex_source() -> String {
-    format!(
-        "\n{quad}\n{vout}\n{body}",
-        quad = vertex_quad(),
-        vout = wgsl_decl(CompositeVertexOutput::WGSL_SOURCE),
-        body = vs_main::wgsl_source(),
-    )
+    ShaderModule::new()
+        .consts(vertex_quad())
+        .decl(wgsl_decl(CompositeVertexOutput::WGSL_SOURCE))
+        .entry(vs_main::wgsl_source())
+        .emit()
 }
 
 /// HDR composite fragment shader: deferred/forward layer mix + bloom.
@@ -57,16 +55,15 @@ pub fn wgsl_vertex_source() -> String {
 /// `QuadVertexOutput` varying, the two translated entries and the
 /// ACES/luminance kernels; entry point `fs_main` is kept.
 pub fn wgsl_source() -> String {
-    format!(
-        "\n{cam}\n{bloom}\n{head}\n{qo}\n{fs}\n{aces}\n{lum}",
-        cam = wgsl_decl(CameraUniform::WGSL_SOURCE),
-        bloom = wgsl_decl(BloomUniform::WGSL_SOURCE),
-        head = fragment_head(),
-        qo = wgsl_decl(QuadVertexOutput::WGSL_SOURCE),
-        fs = fs_main::wgsl_source(),
-        aces = aces_tonemap::wgsl_source(),
-        lum = luminance::wgsl_source()
-    )
+    ShaderModule::new()
+        .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
+        .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
+        .resources(&HDR_RESOURCES, &[0, 1, 2, 3, 4])
+        .consts(vertex_quad())
+        .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
+        .entry(fs_main::wgsl_source())
+        .helpers([aces_tonemap::wgsl_source(), luminance::wgsl_source()])
+        .emit()
 }
 
 /// Static view for naga validation in tests.
@@ -124,14 +121,6 @@ pub const HDR_RESOURCES: [Resource; 5] = [
         min_size: Some(std::mem::size_of::<BloomUniform>() as u64),
     },
 ];
-
-/// Fragment resource bindings (0–4) from the table, plus quad constants.
-fn fragment_head() -> String {
-    let mut out = resource_decls(&HDR_RESOURCES, &[0, 1, 2, 3, 4]);
-    out.push('\n');
-    out.push_str(&vertex_quad());
-    out
-}
 
 /// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
 /// deferred/forward layer mix + bloom. DSL-only — resource bundle

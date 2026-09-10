@@ -17,7 +17,7 @@ use super::interface::{
     GbufferVertexInput as VertexInput, GbufferVertexOutput as VertexOutput,
 };
 use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, openpbr_material_decl, resource_decls, wgsl_decl,
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule, openpbr_material_decl, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::math::octahedral_encode;
@@ -66,15 +66,14 @@ fn vs_main(
 /// with bare `}` (no `;`), so the layouts splice raw here instead of via
 /// [`wgsl_decl`](super::wgsl_decl).
 pub fn wgsl_vertex_source() -> String {
-    format!(
-        "\n{cam}\n{per}\n{bindings}\n{vin}\n{vout}\n{body}",
-        cam = CameraUniform::WGSL_SOURCE,
-        per = PerObjectGpu::WGSL_SOURCE,
-        bindings = vertex_bindings(),
-        vin = wgsl_decl(VertexInput::WGSL_SOURCE),
-        vout = wgsl_decl(VertexOutput::WGSL_SOURCE),
-        body = vs_main::wgsl_source(),
-    )
+    ShaderModule::new()
+        .decl(CameraUniform::WGSL_SOURCE)
+        .decl(PerObjectGpu::WGSL_SOURCE)
+        .resources(&GBUFFER_RESOURCES, &[0, 1])
+        .decl(wgsl_decl(VertexInput::WGSL_SOURCE))
+        .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
+        .entry(vs_main::wgsl_source())
+        .emit()
 }
 
 /// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
@@ -121,15 +120,14 @@ fn fs_main(
 /// the translated [`fs_main`] body and kernel; entry point `fs_main`
 /// is kept.
 pub fn wgsl_source() -> String {
-    format!(
-        "{mat}\n{bindings}\n{fin}\n{gout}\n{body}\n{kernel}",
-        mat = openpbr_material_decl(),
-        bindings = fragment_bindings(),
-        fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
-        gout = wgsl_decl(GBufferOutput::WGSL_SOURCE),
-        body = fs_main::wgsl_source(),
-        kernel = octahedral_encode::wgsl_source()
-    )
+    ShaderModule::new()
+        .decl(openpbr_material_decl())
+        .resources(&GBUFFER_RESOURCES, &[2])
+        .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
+        .decl(wgsl_decl(GBufferOutput::WGSL_SOURCE))
+        .entry(fs_main::wgsl_source())
+        .helper(octahedral_encode::wgsl_source())
+        .emit()
 }
 
 /// Static view for naga validation in tests.
@@ -165,16 +163,6 @@ pub const GBUFFER_RESOURCES: [Resource; 3] = [
         min_size: None,
     },
 ];
-
-/// Vertex resource bindings (0, 1) from the table.
-fn vertex_bindings() -> String {
-    resource_decls(&GBUFFER_RESOURCES, &[0, 1])
-}
-
-/// Fragment resource binding (2) from the table.
-fn fragment_bindings() -> String {
-    resource_decls(&GBUFFER_RESOURCES, &[2])
-}
 
 #[cfg(test)]
 mod tests {

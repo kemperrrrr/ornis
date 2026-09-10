@@ -15,7 +15,7 @@
 
 use super::interface::GbufferFragmentInput as FragmentInput;
 use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, helpers, openpbr_material_decl, resource_decls,
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule, helpers, openpbr_material_decl,
     wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
@@ -58,23 +58,18 @@ pub fn wgsl_source() -> String {
         math::subsurface_brdf::wgsl_source(),
         math::srgb_to_linear::wgsl_source(),
     ];
-    let mut src = format!(
-        "\n{cam}\n{light}\n{lighting}{mat}\n{restA}\n{fin}\n{consts}\n{helpers}\n{entry}",
-        cam = CameraUniform::WGSL_SOURCE,
-        light = wgsl_decl(GpuLight::WGSL_SOURCE),
-        lighting = wgsl_decl(LightingUniform::WGSL_SOURCE),
-        mat = openpbr_material_decl(),
-        restA = fragment_bindings(),
-        fin = wgsl_decl(FragmentInput::WGSL_SOURCE),
-        consts = helpers::wgsl_consts(),
-        helpers = helpers::wgsl_shared_helpers(),
-        entry = fs_main::wgsl_source(),
-    );
-    for k in &kernels {
-        src.push('\n');
-        src.push_str(k);
-    }
-    src
+    let module = ShaderModule::new()
+        .decl(CameraUniform::WGSL_SOURCE)
+        .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
+        .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
+        .decl(openpbr_material_decl())
+        .resources(&PBR_RESOURCES, &[0, 2, 3])
+        .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
+        .consts(helpers::wgsl_consts())
+        .helper(helpers::wgsl_shared_helpers())
+        .entry(fs_main::wgsl_source())
+        .helpers(kernels);
+    module.emit()
 }
 
 /// Forward-PBR fragment entry, translated by [`stage`](ornis_macros::stage):
@@ -308,11 +303,6 @@ pub const PBR_RESOURCES: [Resource; 4] = [
         min_size: None,
     },
 ];
-
-/// Fragment resource bindings (0, 2, 3) from the table.
-fn fragment_bindings() -> String {
-    resource_decls(&PBR_RESOURCES, &[0, 2, 3])
-}
 
 #[cfg(test)]
 mod tests {
