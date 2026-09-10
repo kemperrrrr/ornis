@@ -2651,10 +2651,17 @@ impl BuiltinPhysicsEngine {
             b.orientation = orientation;
             skip[h] = true;
             if hit.angular {
-                // The analytic angular sweep has stopped the body at the first
-                // rotational impact. A later joint/contact pass may provide
-                // a more precise angular response.
-                b.angular_velocity = Vec3::ZERO;
+                // Frictionless spin response at the swept contact: only the
+                // approach-driving spin is removed, tangential spin survives
+                // (planar impacts stop dead, exactly as before).
+                let lever = hit.contact.map(|c| c - b.position).unwrap_or(Vec3::ZERO);
+                b.angular_velocity = remove_angular_approach(
+                    b.angular_velocity,
+                    b.inertia,
+                    b.orientation,
+                    lever,
+                    hit.normal,
+                );
             }
             let vn = b.velocity.dot(hit.normal);
             if vn < 0.0 {
@@ -2703,6 +2710,9 @@ struct ContinuousHit {
     normal: Vec3,
     handle: usize,
     angular: bool,
+    /// World contact point on the mover at the hit fraction (angular hits
+    /// only): the response levers the spin off it instead of killing it.
+    contact: Option<Vec3>,
 }
 
 fn shape_min_dimension(shape: &Shape) -> f32 {
@@ -2796,6 +2806,67 @@ fn swept_shape_overlaps(
     }
 }
 
+/// Frictionless spin response for a CCD stop: remove exactly the spin that
+/// drives the contact point into the surface, keep the tangential spin.
+/// The correction follows a frictionless contact impulse — `Δω = J·I⁻¹m`
+/// with the lever `m = r_c×n̂` and `J = −vn/((I⁻¹m)·m)`, `vn = ((ω×r_c)·n̂)`
+/// the approach speed (`n̂` points from the target back toward the mover, so
+/// approach is `vn < 0`). Consequences: for isotropic inertia this is the
+/// minimum-norm projection; for planar motion with an in-plane contact
+/// normal it reduces exactly to the old full stop — the fix only changes
+/// contacts with a genuine out-of-plane lever (scrapes keep tangential
+/// spin instead of dying). No angular restitution (inelastic); friction
+/// stays with the contact/joint passes.
+///
+/// Stiff-lever cap: for anisotropic bodies a poor lever can demand an
+/// impulse that *adds* rotational energy (thin bar, huge `I⁻¹` on one
+/// axis — physically faithful, but a blender in a game step). The
+/// correction is therefore capped at energy-neutral — closed form
+/// `t = (d·Iω)/E(d)` along the correction `d`, remainder left to the
+/// discrete solver (it sees a clean touching contact next substep thanks
+/// to the clamp+backoff). Pure arithmetic, hence deterministic. Degenerate
+/// lever or a separating contact returns `omega` unchanged (never NaN).
+fn remove_angular_approach(
+    omega: Vec3,
+    inertia: Vec3,
+    orientation: Quat,
+    lever: Vec3,
+    normal: Vec3,
+) -> Vec3 {
+    let m = lever.cross(normal);
+    let im = mul_inv_inertia(inertia, orientation, m);
+    let denom = im.dot(m);
+    if !denom.is_finite() || denom <= 1e-12 {
+        return omega;
+    }
+    let vn = omega.cross(lever).dot(normal);
+    if !vn.is_finite() || vn >= 0.0 {
+        return omega;
+    }
+    let d = im * (vn / denom);
+    let out = omega - d;
+    // Body-frame energies: E(Ω) = ½ΣIᵢwᵢ². Exact projection first; if it
+    // would inject energy, walk back along `d` to the neutral point.
+    let qb = orientation.conjugate();
+    let wb = qb * omega;
+    let db = qb * d;
+    let iw = inertia * wb;
+    let e_omega = 0.5 * iw.dot(wb);
+    let e_out = 0.5 * (inertia * (wb - db)).dot(wb - db);
+    if e_out <= e_omega {
+        return out;
+    }
+    let e_d = 0.5 * (inertia * db).dot(db);
+    if !e_d.is_finite() || e_d <= 0.0 {
+        return omega;
+    }
+    let t = db.dot(iw) / e_d;
+    if !t.is_finite() || t <= 0.0 {
+        return omega;
+    }
+    omega - d * t.min(1.0)
+}
+
 fn find_linear_continuous_hit(
     bodies: &[RigidBody],
     mover_index: usize,
@@ -2841,24 +2912,30 @@ fn find_linear_continuous_hit(
         normal: hit.normal,
         handle: hit.handle,
         angular: false,
+        contact: None,
     })
 }
 
 /// Conservative-advancement first overlap for the combined linear+angular
-/// sweep.  Uses the exact distance at each pose and the uniform bound
-/// `|displacement| + max_radius*angle` per unit fraction, so the step is
-/// guaranteed not to tunnel — fully analytic, no fixed 5° sampling.
+/// sweep. Uses the exact distance at each pose and the uniform bound
+/// `|displacement| + max_radius*angle` per unit fraction.
+///
+/// Why the uniform bound is enough (and deliberately kept): the mover is
+/// rigid and the target frozen, so the gap is Lipschitz in the fraction with
+/// exactly this constant — the distance cannot change faster than the
+/// fastest surface point. A step of `gap/μ` therefore varies the gap by at
+/// most `gap`: a pass-through must land interpenetrating, never straddling,
+/// so the per-iterate overlap check plus the binary refine catch every
+/// crossing for any feature thickness. Any "tighter" witness-based bound
+/// would break this (witness switches mid-step), trading a proof for fewer
+/// iterations — not worth it; separated pairs already exit in 1–2 oracle
+/// calls, only grazing approaches walk the full 32.
 fn first_angular_overlap_fraction(
     body: &RigidBody,
     target: distance::ShapeRef<'_>,
     displacement: Vec3,
     sub_dt: f32,
-    _samples: u32,
 ) -> Option<f32> {
-    // Keep the original sampled entry point as a thin wrapper for any
-    // external caller; the real analytic path is `find_angular_continuous_hit`.
-    // Delegate to the conservative solver with the same semantics (binary
-    // refine on first overlap) so the signature stays compatible.
     if swept_shape_overlaps(body, target, displacement, sub_dt, 0.0) {
         return None;
     }
@@ -2928,9 +3005,14 @@ fn find_angular_continuous_hit(
     if body.is_trigger || !shape_rotation_sensitive(&body.shape) {
         return None;
     }
-    const MIN_ANGLE: f32 = 15.0f32.to_radians();
+    // Travel gate, mirror of the linear one (`0.5 * min_dimension` on
+    // displacement): rotation alone cannot defeat the discrete phase unless
+    // its fastest surface point moves more than half the thinnest feature
+    // within the substep. Thin bodies arm CCD at small angles (they tunnel
+    // easily); chunky bodies only at large ones — cheaper than a flat angle
+    // for cubes, stricter than one for blades.
     let angle = (body.angular_velocity * sub_dt).length();
-    if angle <= MIN_ANGLE {
+    if shape_max_radius(&body.shape) * angle <= 0.5 * shape_min_dimension(&body.shape) {
         return None;
     }
     let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
@@ -2954,8 +3036,7 @@ fn find_angular_continuous_hit(
             pos: target.position,
             rot: target.orientation,
         };
-        let Some(fraction) =
-            first_angular_overlap_fraction(body, target_ref, displacement, sub_dt, 0)
+        let Some(fraction) = first_angular_overlap_fraction(body, target_ref, displacement, sub_dt)
         else {
             continue;
         };
@@ -2968,6 +3049,7 @@ fn find_angular_continuous_hit(
             normal,
             handle,
             angular: true,
+            contact: Some(distance.point_a),
         };
         best = choose_continuous_hit(best, Some(candidate));
     }
@@ -4334,6 +4416,157 @@ mod tests {
         );
     }
 
+    /// Travel gate, thin body: 10°/substep is below the old flat 15° gate, but
+    /// R·angle = 1.51·0.175 = 0.26 > 0.5·0.2 = 0.1 arms CCD — blades tunnel
+    /// easily, so they get the sweep early. Pre-rotated to 70° so the bar
+    /// enters the target box (0, 1.1) mid-substep (separated at 70°,
+    /// centerline inside at 80°).
+    #[test]
+    fn angular_gate_fires_below_15deg_for_thin_bodies() {
+        let dt = 1.0 / 60.0;
+        let mut mover = RigidBody::new_box(Vec3::ZERO, Vec3::new(1.5, 0.1, 0.1), 1.0);
+        mover.orientation = Quat::from_rotation_z(70.0f32.to_radians());
+        mover.angular_velocity = Vec3::Z * (10.0f32.to_radians() / dt);
+        let target = RigidBody::new_box(Vec3::new(0.0, 1.1, 0.0), Vec3::new(0.2, 0.05, 0.2), 0.0);
+        let bodies = [mover, target];
+
+        let hit = find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt)
+            .expect("thin fast spinner must arm angular CCD below 15°/substep");
+        assert!(hit.angular);
+        assert!(hit.fraction > 0.0 && hit.fraction < 1.0);
+        assert!(hit.contact.is_some(), "angular hit must carry its contact");
+    }
+
+    /// Travel gate, chunky body: 20°/substep exceeds the old flat 15° gate,
+    /// but R·angle = 0.87·0.35 = 0.30 < 0.5·1.0 = 0.5 exempts the cube —
+    /// the discrete phase resolves that travel, CCD would be pure overhead.
+    #[test]
+    fn angular_gate_spares_slow_chunky_spinners() {
+        let dt = 1.0 / 60.0;
+        let mut mover = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
+        mover.angular_velocity = Vec3::Z * (20.0f32.to_radians() / dt);
+        let target = RigidBody::new_box(Vec3::new(0.0, 1.1, 0.0), Vec3::new(0.2, 0.05, 0.2), 0.0);
+        let bodies = [mover, target];
+
+        assert!(
+            find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt).is_none(),
+            "chunky slow spinner must skip angular CCD"
+        );
+    }
+
+    /// Frictionless response, true 3D: ω=(10,0,10), lever +Y, normal −Z.
+    /// The X-spin drives the approach, the Z-spin is tangential and must
+    /// survive exactly; the old full stop would return zero here.
+    #[test]
+    fn angular_response_keeps_tangential_spin_in_3d() {
+        let out = remove_angular_approach(
+            Vec3::new(10.0, 0.0, 10.0),
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            Vec3::Y,
+            Vec3::NEG_Z,
+        );
+        assert!(
+            (out - Vec3::new(0.0, 0.0, 10.0)).length() < 1e-6,
+            "tangential spin must survive, got {out:?}"
+        );
+    }
+
+    /// Frictionless response, planar head-on: exactly the old full stop
+    /// (ω ∥ lever×normal always in-plane, so the constraint eats all spin).
+    #[test]
+    fn angular_response_stops_planar_head_on() {
+        let out = remove_angular_approach(
+            Vec3::Z * 10.0,
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            Vec3::X * 1.5,
+            Vec3::NEG_Y,
+        );
+        assert!(out.length() < 1e-5, "planar head-on must stop, got {out:?}");
+    }
+
+    /// Stiff-lever cap: thin-bar inertia (huge I⁻¹ on X) with an off-axis
+    /// contact. The exact projection would demand a wall impulse that
+    /// injects spin energy (the blender); the cap holds energy neutral and
+    /// leaves the rest to the discrete solver.
+    #[test]
+    fn angular_response_caps_energy_on_stiff_levers() {
+        let w = Vec3::Z * 90.0;
+        let inertia = Vec3::new(0.0067, 0.753, 0.753);
+        let energy = |v: Vec3| 0.5 * inertia.dot(v * v);
+        let out = remove_angular_approach(
+            w,
+            inertia,
+            Quat::IDENTITY,
+            Vec3::new(1.5, 0.05, 0.05),
+            Vec3::NEG_Y,
+        );
+        assert!(out.is_finite(), "cap must never produce NaN, got {out:?}");
+        assert!(
+            energy(out) <= energy(w) + 1e-3,
+            "cap must not inject energy: {} -> {}",
+            energy(w),
+            energy(out)
+        );
+        // ...while still reducing the approach (cap walks back along the
+        // correction, never reverses it).
+        let approach = |v: Vec3| v.cross(Vec3::new(1.5, 0.05, 0.05)).dot(Vec3::NEG_Y);
+        assert!(
+            approach(out) >= approach(w),
+            "cap must not worsen the approach: {} -> {}",
+            approach(w),
+            approach(out)
+        );
+    }
+
+    /// Frictionless response, separating scrape: bit-identical passthrough.
+    #[test]
+    fn angular_response_ignores_separating_scrape() {
+        let w = Vec3::Z * 10.0;
+        let out =
+            remove_angular_approach(w, Vec3::splat(2.0), Quat::IDENTITY, Vec3::X * 1.5, Vec3::Y);
+        assert_eq!(out.to_array(), w.to_array());
+    }
+
+    /// Engine-level 3D graze: a cube corner outruns the discrete phase
+    /// (0.82 m/substep vs a 1 cm gap) with a combined (40,0,40) spin. CCD
+    /// must clamp before the wall face AND keep tangential spin (the old
+    /// response returns exactly zero here).
+    #[test]
+    fn angular_graze_keeps_tangential_spin() {
+        let dt = 1.0 / 60.0;
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.set_substeps(1);
+        let wall_half = Vec3::new(0.49, 2.0, 2.0);
+        let wall_pos = Vec3::new(1.0, 0.0, 0.0);
+        physics.add_body(RigidBody::new_box(wall_pos, wall_half, 0.0));
+        let mover = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        physics.get_body_mut(mover).unwrap().angular_velocity = Vec3::new(40.0, 0.0, 40.0);
+
+        physics.step(dt);
+
+        let body = physics.get_body(mover).expect("mover remains alive");
+        assert!(
+            obb_sat(
+                body.position,
+                Vec3::splat(0.5),
+                body.orientation,
+                wall_pos,
+                wall_half,
+                Quat::IDENTITY,
+                1e-5
+            )
+            .is_none(),
+            "CCD must not let the corner through the wall"
+        );
+        assert!(
+            body.angular_velocity.length() > 5.0,
+            "tangential spin must survive the graze, got {:?}",
+            body.angular_velocity
+        );
+    }
+
     #[test]
     fn angular_sweep_finds_rotating_box_impact() {
         let dt = 1.0 / 60.0;
@@ -4367,12 +4600,20 @@ mod tests {
         physics.get_body_mut(mover).unwrap().angular_velocity =
             Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
 
+        let e_before = rotational_energy(physics.get_body(mover).expect("mover remains alive"));
+
         physics.step(dt);
 
         let body = physics.get_body(mover).expect("mover remains alive");
+        // New contract (frictionless response + energy cap): the sweep still
+        // clamps before tunneling, but a stiff out-of-plane lever no longer
+        // dies to zero — the correction is capped at energy-neutral and the
+        // discrete solver owns the remainder next substep.
         assert!(
-            body.angular_velocity.length() < 1e-5,
-            "angular CCD must stop the rotating body"
+            rotational_energy(body) <= e_before + 1e-3,
+            "CCD response must never inject spin energy, before={e_before} after={} {:?}",
+            rotational_energy(body),
+            body.angular_velocity
         );
         assert_ne!(
             body.orientation,
