@@ -501,6 +501,11 @@ pub fn stage(args: TokenStream, input: TokenStream) -> TokenStream {
     if !renames.is_empty() {
         GlobalRenamer { map: &renames }.visit_block_mut(&mut body_func.block);
     }
+    // Built-in arity is validated pre-translation (spanned errors, no
+    // `Result` ripple through the `String`-based translator).
+    if let Err(e) = crate::shader_lang::check_builtin_arity(&body_func) {
+        return e.to_compile_error().into();
+    }
     let body = crate::wgsl::wgsl_main_body(&body_func);
     let entry_wgsl = format!(
         "@{stage}\nfn {entry}({}) -> {wgsl_ret} {{\n{body}\n}}\n",
@@ -573,7 +578,10 @@ pub fn wgsl_fn(_args: TokenStream, input: TokenStream) -> TokenStream {
         params.push(format!("{}: {}", pi.ident, named_type(&pat_ty.ty)));
     }
 
-    let body = crate::wgsl::wgsl_main_body(&func);
+    let body = match crate::shader_lang::check_builtin_arity(&func) {
+        Ok(()) => crate::wgsl::wgsl_main_body(&func),
+        Err(e) => return e.to_compile_error().into(),
+    };
     let helper_wgsl = format!(
         "fn {fn_name}({}) -> {wgsl_ret} {{\n{body}\n}}\n",
         params.join(", "),

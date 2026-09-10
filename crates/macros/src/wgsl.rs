@@ -299,28 +299,14 @@ mod wgsl_values {
 }
 
 /// Call/method-call WGSL translation (constructors, built-in mappings,
-/// swizzles, `powi` expansion).
+/// swizzles, `powi` expansion). Built-in names resolve through the
+/// [`Shader Lang registry`](crate::shader_lang); unknown names pass
+/// through verbatim (kernels/helpers share WGSL spellings by design).
 mod wgsl_calls {
+    use crate::shader_lang::ShaderBuiltin;
+
     pub(super) fn map_fn(fn_name: &str, args: &[String]) -> Option<String> {
-        match fn_name {
-            "new" => Some(args.join(", ")),
-            "dot" => Some(format!("dot({})", args.join(", "))),
-            "cross" => Some(format!("cross({})", args.join(", "))),
-            "normalize" => Some(format!("normalize({})", args.join(", "))),
-            "length" => Some(format!("length({})", args.join(", "))),
-            "clamp" => Some(format!("clamp({})", args.join(", "))),
-            "saturate" => Some(format!("saturate({})", args.join(", "))),
-            "select" => Some(format!("select({})", args.join(", "))),
-            "sqrt" | "abs" | "floor" | "ceil" | "round" | "fract" | "exp" | "log" | "sin"
-            | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "pow" | "max" | "min"
-            | "step" | "smoothstep" | "mix" | "reflect" | "refract" | "transpose"
-            | "determinant" | "inverse" | "sign" | "dpdx" | "dpdy" | "fwidth" => {
-                Some(format!("{}({})", fn_name, args.join(", ")))
-            }
-            // Rust glam `length_squared` → WGSL dot(x, x).
-            "length_sq" => Some(format!("dot({0}, {0})", args[0])),
-            _ => None,
-        }
+        ShaderBuiltin::from_rust(fn_name).map(|b| b.lower(args))
     }
 
     pub(super) fn call(c: &syn::ExprCall) -> String {
@@ -358,39 +344,13 @@ mod wgsl_calls {
     }
 
     fn named_builtin(args: &[String], p: &syn::ExprPath) -> Option<String> {
-        let ident = path_ident_str(p);
-        if ident.is_empty() {
-            return None;
-        }
-        if let Some(mapped) = map_fn(&ident, args) {
-            return Some(mapped);
-        }
-        // Known WGSL built-ins that Rust spells differently
-        match ident.as_str() {
-            "signum" => Some(format!("sign({})", args.join(", "))),
-            "stepf" => Some(format!("step({})", args.join(", "))),
-            "lerp" => Some(format!("mix({})", args.join(", "))),
-            _ => None,
-        }
+        // Renames (signum/stepf/lerp…) live in the registry alongside the
+        // free-fn table — one variant per WGSL target, no second spelling.
+        map_fn(&path_ident_str(p), args)
     }
 
     pub(super) fn wgsl_type(ty: &str) -> Option<String> {
-        match ty {
-            "Vec2" | "vec2" => Some("vec2<f32>".into()),
-            "Vec3" | "vec3" => Some("vec3<f32>".into()),
-            "Vec4" | "vec4" => Some("vec4<f32>".into()),
-            "Mat4" | "mat4" => Some("mat4x4<f32>".into()),
-            "BVec2" => Some("vec2<bool>".into()),
-            "BVec3" => Some("vec3<bool>".into()),
-            "BVec4" => Some("vec4<bool>".into()),
-            "UVec2" => Some("vec2<u32>".into()),
-            "UVec3" => Some("vec3<u32>".into()),
-            "UVec4" => Some("vec4<u32>".into()),
-            "IVec2" => Some("vec2<i32>".into()),
-            "IVec3" => Some("vec3<i32>".into()),
-            "IVec4" => Some("vec4<i32>".into()),
-            _ => None,
-        }
+        crate::shader_lang::ShaderType::from_rust(ty).map(|t| t.wgsl().to_string())
     }
 
     pub(super) fn method_call(m: &syn::ExprMethodCall) -> String {
@@ -404,10 +364,12 @@ mod wgsl_calls {
             return powi(m, &receiver, &args);
         }
 
-        if let Some(mapped) = map_fn(&method, &args) {
-            return mapped;
+        // Swizzles become field access; registry built-ins lower;
+        // anything else (kernels/helpers) passes through verbatim.
+        if crate::shader_lang::is_swizzle_method(&method) {
+            return format!("{receiver}.{method}");
         }
-        if let Some(mapped) = builtin_method(&method, &args, &receiver) {
+        if let Some(mapped) = map_fn(&method, &args) {
             return mapped;
         }
 
@@ -436,151 +398,6 @@ mod wgsl_calls {
         };
         let p = int_lit.base10_parse::<i32>().unwrap_or(0);
         u32::try_from(p).ok()
-    }
-
-    /// True for swizzle methods (`v.xyz()` etc.), which become field access.
-    fn is_swizzle(method: &str) -> bool {
-        matches!(
-            method,
-            "x" | "y"
-                | "z"
-                | "w"
-                | "r"
-                | "g"
-                | "b"
-                | "a"
-                | "xy"
-                | "xz"
-                | "xw"
-                | "yx"
-                | "yz"
-                | "yw"
-                | "zx"
-                | "zy"
-                | "zw"
-                | "wx"
-                | "wy"
-                | "wz"
-                | "xyz"
-                | "xyw"
-                | "xzy"
-                | "xzw"
-                | "yxz"
-                | "yxw"
-                | "yzx"
-                | "yzw"
-                | "zxy"
-                | "zxw"
-                | "zyx"
-                | "zyw"
-                | "wxy"
-                | "wxz"
-                | "wyz"
-                | "wzx"
-                | "wzy"
-                | "xyzw"
-                | "xywz"
-                | "xzyw"
-                | "xzwy"
-                | "xwyz"
-                | "xwzy"
-                | "yxzw"
-                | "yxwz"
-                | "yzxw"
-                | "yzwx"
-                | "ywxz"
-                | "ywzx"
-                | "zxyw"
-                | "zxwy"
-                | "zyxw"
-                | "zywx"
-                | "zwxy"
-                | "zwyx"
-                | "wxyz"
-                | "wxzy"
-                | "wyxz"
-                | "wyzx"
-                | "wzxy"
-                | "wzyx"
-                // Single-channel color aliases are covered above (r/g/b/a);
-                // multi-channel color swizzles used by render passes:
-                | "rgb"
-                | "rgba"
-        )
-    }
-
-    /// Map Rust methods to WGSL functions (swizzles, renamed built-ins,
-    /// unary/multi-argument math functions).
-    fn builtin_method(method: &str, args: &[String], receiver: &str) -> Option<String> {
-        if is_swizzle(method) {
-            // Swizzle methods - convert to field access in WGSL
-            return Some(format!("{receiver}.{method}"));
-        }
-        renamed_unary(method, args)
-            .or_else(|| passthrough_math(method, args))
-            .or_else(|| renamed_multi(method, args))
-    }
-
-    /// Built-ins whose Rust name differs and take a single argument.
-    fn renamed_unary(method: &str, args: &[String]) -> Option<String> {
-        match method {
-            "signum" => Some(format!("sign({})", args[0])),
-            _ => None,
-        }
-    }
-
-    /// Math built-ins that keep their name (single- and multi-argument).
-    fn passthrough_math(method: &str, args: &[String]) -> Option<String> {
-        const UNARY: &[&str] = &[
-            "abs",
-            "sqrt",
-            "sin",
-            "cos",
-            "tan",
-            "floor",
-            "ceil",
-            "round",
-            "fract",
-            "exp",
-            "log",
-            "normalize",
-            "length",
-            "saturate",
-            "asin",
-            "acos",
-            "atan",
-        ];
-        const MULTI: &[&str] = &[
-            "dot",
-            "cross",
-            "pow",
-            "max",
-            "min",
-            "step",
-            "smoothstep",
-            "reflect",
-            "refract",
-            "atan2",
-        ];
-        if UNARY.contains(&method) {
-            return Some(format!("{method}({})", args[0]));
-        }
-        if MULTI.contains(&method) {
-            return Some(format!("{method}({})", args.join(", ")));
-        }
-        None
-    }
-
-    /// Built-ins with argument-count or naming differences.
-    fn renamed_multi(method: &str, args: &[String]) -> Option<String> {
-        match method {
-            "clamp" => Some(format!("clamp({})", args.join(", "))),
-            // lerp maps to mix
-            "lerp" => Some(format!("mix({})", args.join(", "))),
-            "ln" => Some(format!("log({})", args.join(", "))),
-            "powf" => Some(format!("pow({})", args.join(", "))),
-            _ => None,
-        }
     }
 }
 
@@ -738,14 +555,15 @@ mod wgsl_flow {
         if let syn::Type::Path(tp) = ty
             && let Some(last) = tp.path.segments.last().map(|s| s.ident.to_string())
         {
-            return match last.as_str() {
-                "f32" | "i32" | "u32" | "bool" => last,
-                "Vec2" | "vec2" => "vec2<f32>".to_string(),
-                "Vec3" | "vec3" => "vec3<f32>".to_string(),
-                "Vec4" | "vec4" => "vec4<f32>".to_string(),
-                "Mat4" | "mat4" => "mat4x4<f32>".to_string(),
-                _ => last,
-            };
+            // Bare `bool` stays verbatim (not a shader primitive); the rest
+            // resolves through the registry, mirrors fall back to verbatim.
+            if last == "bool" {
+                return last;
+            }
+            if let Some(mapped) = crate::shader_lang::ShaderType::from_rust(&last) {
+                return mapped.wgsl().to_string();
+            }
+            return last;
         }
         crate::wgsl::rust_type_to_wgsl(ty)
     }
@@ -801,10 +619,11 @@ pub fn rust_to_wgsl(expr: &syn::Expr) -> String {
 /// Map a known scalar/glam type name to WGSL; `None` for anything else
 /// (interface/layout mirrors, whose Rust names match WGSL by convention).
 pub fn glam_type_to_wgsl(name: &str) -> Option<String> {
-    match name {
-        "f32" | "i32" | "u32" | "bool" => Some(name.to_string()),
-        _ => wgsl_calls::wgsl_type(name),
+    // Bare `bool` keeps its previous passthrough (not a shader primitive).
+    if name == "bool" {
+        return Some(name.to_string());
     }
+    wgsl_calls::wgsl_type(name)
 }
 
 pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
@@ -818,18 +637,15 @@ pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
                 .collect();
             let last = segs.last().map(|s| s.as_str());
             match last {
-                Some("f32") => "f32",
-                Some("i32") => "i32",
-                Some("u32") => "u32",
-                Some("bool") => "bool",
-                Some("Vec2") | Some("Vec2A") => "vec2<f32>",
-                Some("Vec3") | Some("Vec3A") => "vec3<f32>",
-                Some("Vec4") => "vec4<f32>",
-                Some("Mat4") => "mat4x4<f32>",
-                Some("Quat") => "vec4<f32>",
-                _ => "f32",
+                // Bare `bool` keeps its previous spelling (not a primitive).
+                Some("bool") => "bool".to_string(),
+                _ => {
+                    let name = last.unwrap_or("f32");
+                    crate::shader_lang::ShaderType::from_rust(name)
+                        .map(|t| t.wgsl().to_string())
+                        .unwrap_or_else(|| "f32".to_string())
+                }
             }
-            .to_string()
         }
         _ => "f32".to_string(),
     }
