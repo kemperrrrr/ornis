@@ -15,7 +15,6 @@ use dashmap::DashMap;
 use ornis_schedule::run_levels;
 
 use glam::{Quat, Vec3};
-use rayon::prelude::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{

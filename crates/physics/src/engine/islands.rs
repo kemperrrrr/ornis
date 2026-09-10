@@ -4,8 +4,9 @@
 //! type's method count within the structural gate's thresholds.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use rayon::prelude::*;
+use ornis_schedule::run_levels;
 
 use super::*;
 
@@ -214,11 +215,34 @@ impl BuiltinPhysicsEngine {
         islands
     }
 
-    /// Dispatch the island velocity solves (parallel via rayon when wide
+    /// Runs `f` over island work items: sequentially when `!parallel`, else
+    /// through one scheduler level with one node per island. Islands are
+    /// disjoint over dynamic bodies, so concurrent execution is race-free;
+    /// node order is fixed, so results stay deterministic for any thread
+    /// count. Each node locks only its own island reference (uncontended);
+    /// the single guard allocation is per dispatch, not per island.
+    pub(super) fn dispatch_islands<F>(islands: &mut [IslandWork], parallel: bool, f: F)
+    where
+        F: Fn(usize, &mut IslandWork) + Sync,
+    {
+        if !parallel {
+            for (idx, isl) in islands.iter_mut().enumerate() {
+                f(idx, isl);
+            }
+            return;
+        }
+        let guarded: Vec<Mutex<&mut IslandWork>> = islands.iter_mut().map(Mutex::new).collect();
+        let level = vec![(0..guarded.len()).collect::<Vec<usize>>()];
+        run_levels(&level, guarded.len(), true, |idx| {
+            f(idx, &mut guarded[idx].lock().unwrap());
+        });
+    }
+
+    /// Dispatch the island velocity solves (via the scheduler when wide
     /// enough), scatter bodies back, and merge warm caches.
     pub(super) fn dispatch_islands_velocity(
         &mut self,
-        islands: &mut Vec<IslandWork>,
+        islands: &mut [IslandWork],
         allow_restitution: bool,
         sub_dt: f32,
         dt: f32,
@@ -233,8 +257,8 @@ impl BuiltinPhysicsEngine {
         let warm_in = &self.warm_impulses;
         let base_iters = self.velocity_iterations;
         let wide_on = self.wide_solver;
-        // per-island adaptive iters: precompute outside the parallel closure
-        // so we don't borrow `self` inside `par_iter_mut` (borrow checker).
+        // per-island adaptive iters: precompute outside the dispatched closure
+        // so we don't borrow `self` inside it (borrow checker).
         let iters_per_island: Vec<u32> = islands
             .iter()
             .map(|isl| {
@@ -252,39 +276,21 @@ impl BuiltinPhysicsEngine {
                 self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
             })
             .collect();
-        if parallel {
-            islands.par_iter_mut().enumerate().for_each(|(idx, isl)| {
-                let iters = iters_per_island[idx];
-                let (states, warm) = Self::solve_island_velocity(
-                    &mut isl.bodies,
-                    &isl.manifolds,
-                    &isl.keys,
-                    warm_in,
-                    iters,
-                    allow_restitution,
-                    sub_dt,
-                    wide_on,
-                );
-                isl.states = states;
-                isl.warm = warm;
-            });
-        } else {
-            islands.iter_mut().enumerate().for_each(|(idx, isl)| {
-                let iters = iters_per_island[idx];
-                let (states, warm) = Self::solve_island_velocity(
-                    &mut isl.bodies,
-                    &isl.manifolds,
-                    &isl.keys,
-                    warm_in,
-                    iters,
-                    allow_restitution,
-                    sub_dt,
-                    wide_on,
-                );
-                isl.states = states;
-                isl.warm = warm;
-            });
-        }
+        Self::dispatch_islands(islands, parallel, |idx, isl| {
+            let iters = iters_per_island[idx];
+            let (states, warm) = Self::solve_island_velocity(
+                &mut isl.bodies,
+                &isl.manifolds,
+                &isl.keys,
+                warm_in,
+                iters,
+                allow_restitution,
+                sub_dt,
+                wide_on,
+            );
+            isl.states = states;
+            isl.warm = warm;
+        });
         let mut next: WarmCache = HashMap::new();
         for isl in islands.iter() {
             for (l, &g) in isl.body_idx.iter().enumerate() {

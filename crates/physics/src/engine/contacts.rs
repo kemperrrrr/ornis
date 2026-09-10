@@ -353,7 +353,7 @@ impl BuiltinPhysicsEngine {
     /// dispatch). Orchestrator: a sequential sleep/wake pre-pass (the only
     /// part mutating island state), a union-find partition over the FRESH
     /// manifolds, then each island solved independently by
-    /// `solve_island_velocity` — in parallel via rayon when the scene is wide
+    /// `solve_island_velocity` — via the scheduler when the scene is wide
     /// enough. Islands are disjoint over dynamic bodies by construction, so
     /// concurrent solves are race-free and bit-identical for any thread
     /// count (Strong Confluence). Returns the island work items; the position
@@ -438,29 +438,17 @@ impl BuiltinPhysicsEngine {
                 self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
             })
             .collect();
-        if islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS {
-            islands.par_iter_mut().enumerate().for_each(|(idx, isl)| {
-                let iters = iters_per_island[idx];
-                Self::solve_island_position(
-                    &mut isl.bodies,
-                    &isl.manifolds,
-                    &isl.states,
-                    iters,
-                    softness,
-                );
-            });
-        } else {
-            islands.iter_mut().enumerate().for_each(|(idx, isl)| {
-                let iters = iters_per_island[idx];
-                Self::solve_island_position(
-                    &mut isl.bodies,
-                    &isl.manifolds,
-                    &isl.states,
-                    iters,
-                    softness,
-                );
-            });
-        }
+        let parallel = islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS;
+        Self::dispatch_islands(islands, parallel, |idx, isl| {
+            let iters = iters_per_island[idx];
+            Self::solve_island_position(
+                &mut isl.bodies,
+                &isl.manifolds,
+                &isl.states,
+                iters,
+                softness,
+            );
+        });
         for isl in islands.iter() {
             for (l, &g) in isl.body_idx.iter().enumerate() {
                 if self.bodies[g].body_type == BodyType::Dynamic {
