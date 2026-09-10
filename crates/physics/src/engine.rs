@@ -2465,7 +2465,9 @@ impl BuiltinPhysicsEngine {
         self.contact_softness = softness;
     }
 
-    /// Whether the body's island is currently sleeping (G4/G7 diagnostics).
+    /// Whether the body is currently sleeping (G4/G7 diagnostics). Static
+    /// bodies report true from birth — they never move, which is exactly
+    /// what the frozen-pair skips in the narrow phase rely on.
     pub fn is_asleep(&self, handle: BodyHandle) -> bool {
         self.asleep.get(handle).copied().unwrap_or(false)
     }
@@ -3348,8 +3350,23 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             .iter()
             .enumerate()
             .any(|(h, b)| b.body_type == BodyType::Dynamic && !self.asleep[h]);
+        // Driven kinematics are never asleep by construction: a MOVING one
+        // (nonzero velocity field) keeps the world awake, otherwise a
+        // kinematic platform would ghost through sleepers with the loop
+        // skipped. Parked kinematics (zero velocity) cost nothing. Driver
+        // contract (Box2D parity): a teleported body MUST carry the matching
+        // velocity field — zero-velocity teleports are invisible to wake,
+        // margins and CCD alike.
+        let has_driven_kinematic = self.bodies.iter().any(|b| {
+            b.body_type == BodyType::Kinematic
+                && (b.velocity.length_squared() + b.angular_velocity.length_squared() > 0.0)
+        });
         let has_trigger = self.bodies.iter().any(|body| body.is_trigger);
-        if !has_awake_dynamic && !has_trigger && self.trigger_pairs.is_empty() {
+        if !has_awake_dynamic
+            && !has_driven_kinematic
+            && !has_trigger
+            && self.trigger_pairs.is_empty()
+        {
             // Fully sleeping world: no substep loop ran, so no phase work
             // happened this step.
             self.last_step_timing = StepTiming::default();
@@ -3511,9 +3528,14 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         } else {
             u32::MAX
         };
+        // World-scale sleep foundation: statics are born asleep (they never
+        // move, so every frozen-pair skip in narrowphase/scheduler applies
+        // to them from step one). Kinematics stay awake — driven bodies
+        // must wake sleepers on contact, never ghost through them.
+        let born_asleep = body.body_type == BodyType::Static;
         self.bodies.push(body);
         self.island.push(island_id);
-        self.asleep.push(false);
+        self.asleep.push(born_asleep);
         handle
     }
 
@@ -4889,6 +4911,147 @@ mod tests {
             b.velocity.length() < 0.05,
             "settled velocity: {:?}",
             b.velocity
+        );
+    }
+
+    /// World-scale sleep: statics are born asleep (they never move), dynamics
+    /// are born awake. Every frozen-pair skip keys off this from step one.
+    #[test]
+    fn statics_are_born_asleep_dynamics_awake() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let floor = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let free = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 2.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        assert!(physics.is_asleep(floor), "static must be born asleep");
+        assert!(!physics.is_asleep(free), "dynamic must be born awake");
+    }
+
+    /// World-scale sleep: a settled stack on a static floor survives a drop
+    /// impact with the floor still asleep (wake_island on statics is a
+    /// no-op) while the struck boxes wake and move.
+    #[test]
+    fn static_floor_stays_asleep_under_impact() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let floor = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let mut stack = Vec::new();
+        for i in 0..3 {
+            stack.push(physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, 0.5 + i as f32, 0.0),
+                Vec3::splat(0.5),
+                1.0,
+            )));
+        }
+        for _ in 0..150 {
+            physics.step(1.0 / 60.0);
+        }
+        for &h in &stack {
+            assert!(physics.is_asleep(h), "stack must settle before the drop");
+        }
+        let top_y = physics.get_body(stack[2]).unwrap().position.y;
+        let mut drop = RigidBody::new_box(Vec3::new(0.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        drop.velocity = Vec3::new(0.0, -20.0, 0.0);
+        physics.add_body(drop);
+        // Rigid resting stacks barely displace under load — the observable
+        // is the transient wake while the impact churns through, not the
+        // final pose (it re-sleeps where it stood).
+        let mut woke = false;
+        for _ in 0..90 {
+            physics.step(1.0 / 60.0);
+            woke |= !physics.is_asleep(stack[2]);
+        }
+        assert!(
+            physics.is_asleep(floor),
+            "static floor must stay asleep through the impact"
+        );
+        let moved = physics.get_body(stack[2]).unwrap().position.y;
+        assert!(
+            woke,
+            "struck stack must transiently wake (top {top_y} -> {moved})"
+        );
+    }
+
+    /// World-scale sleep: a driven kinematic wall plows into a sleeping box
+    /// — the sleeper must wake and be pushed, never ghosted through. (Before
+    /// the asleep-flag cleanup, kinematic contacts were dropped in the
+    /// active-manifold filter and sleepers were intangible to drivers.)
+    #[test]
+    fn kinematic_wall_wakes_and_pushes_sleeper() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let sleeper = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..90 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            physics.is_asleep(sleeper),
+            "box must settle before the plow"
+        );
+        let mut wall = RigidBody::new_box(Vec3::new(-3.0, 0.5, 0.0), Vec3::new(0.5, 1.0, 1.0), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        let wall_h = physics.add_body(wall);
+        // Driven body, done consistently: the driver sets positions AND the
+        // matching velocity field (approach wake, margins and CCD all read
+        // velocities — a zero-velocity teleport is invisible to them).
+        for _ in 0..120 {
+            let w = physics.get_body_mut(wall_h).unwrap();
+            w.velocity = Vec3::new(2.0, 0.0, 0.0);
+            w.position.x += 2.0 / 60.0;
+            physics.step(1.0 / 60.0);
+        }
+        let pushed = physics.get_body(sleeper).unwrap().position.x;
+        assert!(
+            pushed > 0.5,
+            "kinematic wall must push the sleeper (x={pushed}), not ghost through"
+        );
+    }
+
+    /// Penetration wake, isolated: a box spawned 5 cm deep inside a sleeper
+    /// with zero velocities must still wake it — the approach test is blind
+    /// here (no velocity field), overlap is the only signal. (Teleporting
+    /// drivers hit this path every frame.)
+    #[test]
+    fn teleport_overlap_wakes_sleeper_without_velocity() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let sleeper = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(sleeper), "box must sleep in zero-g");
+        // Spawn overlapping: intruder bottom 5 cm inside the sleeper top.
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 1.45, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..5 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            !physics.is_asleep(sleeper),
+            "deep overlap must wake the sleeper even at zero approach speed"
         );
     }
 

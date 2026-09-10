@@ -80,7 +80,12 @@ impl BuiltinPhysicsEngine {
 
     /// Wake the whole island containing body `h` (contact with an awake body
     /// propagates motion through the island, so partial wake is incoherent).
+    /// Non-dynamic bodies have no island (statics are asleep from birth and
+    /// never wake anything) — waking them is a no-op by construction.
     pub(super) fn wake_island(&mut self, h: usize) {
+        if self.bodies[h].body_type != BodyType::Dynamic {
+            return;
+        }
         let root = self.island[h];
         for h2 in 0..self.bodies.len() {
             if self.island[h2] == root {

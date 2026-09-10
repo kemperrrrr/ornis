@@ -18,7 +18,7 @@
 use std::time::Instant;
 
 use glam::Vec3;
-use ornis_physics::{BroadPhaseKind, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BodyType, BroadPhaseKind, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
 
 fn setup_body_grid(n: u32) -> BuiltinPhysicsEngine {
     let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
@@ -226,6 +226,59 @@ fn run_probe(backend: BroadPhaseKind, cell_size: f32, scene: &str, bodies: u32, 
                 stats.aabb_rejections,
                 stats.candidate_pairs,
             );
+            let timing = physics.step_timing();
+            println!(
+                "timing after step {}: broad={:.2}ms narrow={:.2}ms solver={:.2}ms substeps={}",
+                step,
+                timing.broad_phase_ms,
+                timing.narrow_phase_ms,
+                timing.solver_ms,
+                timing.substeps,
+            );
+            // Sleeping-world diagnostics: chunk-sleep work starts from how
+            // much of a settled scene the island sleeper actually freezes.
+            let asleep = (0..stats.body_count)
+                .filter(|&h| physics.is_asleep(h))
+                .count();
+            println!(
+                "sleep after step {step}: asleep={asleep}/{}",
+                stats.body_count
+            );
+            // Awake-dynamic survey: who keeps a settled scene at 12 substeps?
+            let mut awake_n = 0u32;
+            let mut max_v = 0.0f32;
+            let mut max_w = 0.0f32;
+            for h in 0..stats.body_count {
+                if physics.is_asleep(h) {
+                    continue;
+                }
+                let Some(b) = physics.get_body(h) else {
+                    continue;
+                };
+                if b.body_type != BodyType::Dynamic {
+                    continue;
+                }
+                awake_n += 1;
+                max_v = max_v.max(b.velocity.length());
+                max_w = max_w.max(b.angular_velocity.length());
+            }
+            println!(
+                "awake dynamics after step {step}: n={awake_n} max_v={max_v:.3} max_w={max_w:.3}"
+            );
+            let mut min_y = f32::INFINITY;
+            for h in 0..stats.body_count {
+                if physics.is_asleep(h) {
+                    continue;
+                }
+                let Some(b) = physics.get_body(h) else {
+                    continue;
+                };
+                if b.body_type != BodyType::Dynamic {
+                    continue;
+                }
+                min_y = min_y.min(b.position.y);
+            }
+            println!("awake min_y after step {step}: {min_y:.1}");
             if backend == BroadPhaseKind::Auto {
                 println!(
                     "auto active backend: {:?}",

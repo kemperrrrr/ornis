@@ -482,17 +482,28 @@ impl BuiltinPhysicsEngine {
     /// Sequential pre-pass of the contact velocity stage: sleep/wake policy +
     /// active-manifold filtering. The only part of the stage that mutates
     /// island state; runs before any parallel island work.
+    ///
+    /// Sleep rule in one place: the `asleep` flag alone decides. Statics are
+    /// asleep from birth (never wake anything); kinematics are never asleep
+    /// (driven bodies wake sleepers on contact instead of ghosting through).
+    /// Pairs with no dynamic member are the driver's business, never the
+    /// solver's — skipped exactly as before.
     fn collect_active_manifolds(&mut self, manifolds: &[Manifold]) -> Vec<usize> {
         // Sleep: a contact needs work only if at least one side is an AWAKE
-        // DYNAMIC body. Static geometry never wakes anything (a body asleep
+        // body. Static geometry never wakes anything (a body asleep
         // on the floor must stay asleep).
         const WAKE_IMPACT_SPEED: f32 = 0.5;
         let mut active: Vec<usize> = Vec::with_capacity(manifolds.len());
         for (mi, m) in manifolds.iter().enumerate() {
             let (i, j) = (m.body_a, m.body_b);
-            let ai = self.asleep[i] || self.bodies[i].body_type != BodyType::Dynamic;
-            let aj = self.asleep[j] || self.bodies[j].body_type != BodyType::Dynamic;
+            let ai = self.asleep[i];
+            let aj = self.asleep[j];
             if ai && aj {
+                continue;
+            }
+            if self.bodies[i].body_type != BodyType::Dynamic
+                && self.bodies[j].body_type != BodyType::Dynamic
+            {
                 continue;
             }
             // Wake hysteresis (G7): a sleeping island is woken only by a
@@ -500,6 +511,29 @@ impl BuiltinPhysicsEngine {
             // micro-jitter contact (vn ≈ 0) must NOT wake it.
             if (self.asleep[i] && !aj) || (self.asleep[j] && !ai) {
                 self.wake_on_impact(m, WAKE_IMPACT_SPEED);
+            }
+            // Penetration wake: teleporting drivers (and spawns) move bodies
+            // with a zero velocity field, so the approach test above is
+            // blind to them — but deepening overlap is unambiguous motion.
+            // Resting contacts sit orders of magnitude below this (NGS
+            // residuals), so sleep stays stable.
+            const WAKE_PENETRATION: f32 = 0.01;
+            if self.asleep[i] || self.asleep[j] {
+                let mut deep = false;
+                for k in 0..m.point_count {
+                    if m.points[k].penetration > WAKE_PENETRATION {
+                        deep = true;
+                        break;
+                    }
+                }
+                if deep {
+                    if self.asleep[i] {
+                        self.wake_island(i);
+                    }
+                    if self.asleep[j] {
+                        self.wake_island(j);
+                    }
+                }
             }
             // A still-sleeping body is static for the solver (its inv_mass is
             // zeroed at sleep), so sleeper+static pairs carry no work.
