@@ -46,6 +46,47 @@ pub enum JointKind {
         /// Velocity motor on the hinge axis.
         motor: Option<RevoluteMotor>,
     },
+    /// Prismatic (slider, Box2D formulation): the anchors may separate only
+    /// along the slide axis; perpendicular motion and axis misalignment are
+    /// constrained, leaving translation along the axis (plus spin about it)
+    /// free. 2 linear (perp basis) + 2 angular equality constraints, plus
+    /// optional limit/motor drive along the axis.
+    Prismatic {
+        /// Anchor point in body A's local frame (slide origin).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (slide origin).
+        local_anchor_b: Vec3,
+        /// Slide axis in each body's local frame. The axes must coincide in
+        /// world space when the joint is assembled (normalized on creation).
+        local_axis_a: Vec3,
+        /// Slide axis in body B's local frame; see `local_axis_a`.
+        local_axis_b: Vec3,
+        /// Travel window (m, relative to the assembly separation).
+        limit: Option<PrismaticLimit>,
+        /// Velocity motor along the slide axis.
+        motor: Option<PrismaticMotor>,
+    },
+}
+
+/// Linear travel window for a prismatic joint, in meters relative to the
+/// anchor separation captured at creation. Same one-sided velocity-block
+/// semantics as [`RevoluteLimit`]; requires `min <= max`.
+#[derive(Debug, Clone, Copy)]
+pub struct PrismaticLimit {
+    /// Lower bound (m, relative to the assembly separation).
+    pub min: f32,
+    /// Upper bound (m, relative to the assembly separation).
+    pub max: f32,
+}
+
+/// Velocity motor along a prismatic joint's slide axis. Same
+/// force-clamped target-speed semantics as [`RevoluteMotor`].
+#[derive(Debug, Clone, Copy)]
+pub struct PrismaticMotor {
+    /// Desired slide speed (m/s, signed about the slide axis).
+    pub target_speed: f32,
+    /// Force budget: bounds the per-substep motor impulse.
+    pub max_force: f32,
 }
 
 /// Angular travel window for a revolute joint, in radians relative to the
@@ -88,6 +129,9 @@ pub(crate) struct Joint {
     /// Hinge twist at creation (rad): limits measure travel relative to
     /// this, Box2D `m_referenceAngle` style. Ignored by ball joints.
     pub reference_angle: f32,
+    /// Anchor separation along the slide axis at creation (m): prismatic
+    /// limits measure travel relative to this. Ignored by other joints.
+    pub reference_length: f32,
     /// Accumulated one-sided limit impulse (warm start). Positive = lower
     /// bound active, negative = upper; zero when inside the window. The
     /// clamp logic self-corrects on side flips, so no side state is stored.
@@ -103,6 +147,7 @@ impl Joint {
             acc_lin: [0.0; 3],
             acc_ang: [0.0; 2],
             reference_angle: 0.0,
+            reference_length: 0.0,
             acc_limit: 0.0,
         }
     }
@@ -111,7 +156,27 @@ impl Joint {
     pub(crate) fn drive(&self) -> (Option<RevoluteLimit>, Option<RevoluteMotor>) {
         match &self.kind {
             JointKind::Revolute { limit, motor, .. } => (*limit, *motor),
-            JointKind::Ball { .. } => (None, None),
+            JointKind::Ball { .. } | JointKind::Prismatic { .. } => (None, None),
+        }
+    }
+
+    /// (limit, motor) drive of a prismatic joint; (None, None) otherwise.
+    pub(crate) fn prismatic_drive(&self) -> (Option<PrismaticLimit>, Option<PrismaticMotor>) {
+        match &self.kind {
+            JointKind::Prismatic { limit, motor, .. } => (*limit, *motor),
+            JointKind::Ball { .. } | JointKind::Revolute { .. } => (None, None),
+        }
+    }
+
+    /// Slide axis of a prismatic joint in each local frame; None otherwise.
+    pub(crate) fn prismatic_axes(&self) -> Option<(Vec3, Vec3)> {
+        match &self.kind {
+            JointKind::Prismatic {
+                local_axis_a,
+                local_axis_b,
+                ..
+            } => Some((*local_axis_a, *local_axis_b)),
+            JointKind::Ball { .. } | JointKind::Revolute { .. } => None,
         }
     }
 
@@ -123,6 +188,11 @@ impl Joint {
                 local_anchor_b,
             }
             | JointKind::Revolute {
+                local_anchor_a,
+                local_anchor_b,
+                ..
+            }
+            | JointKind::Prismatic {
                 local_anchor_a,
                 local_anchor_b,
                 ..

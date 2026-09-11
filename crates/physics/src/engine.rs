@@ -3685,7 +3685,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         if body_a == body_b || body_a >= self.bodies.len() || body_b >= self.bodies.len() {
             return None;
         }
-        // Normalize the hinge axes once, at creation.
+        // Normalize the hinge/slide axes once, at creation.
         let kind = match kind {
             JointKind::Revolute {
                 local_anchor_a,
@@ -3695,6 +3695,21 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 limit,
                 motor,
             } => JointKind::Revolute {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a: local_axis_a.normalize_or(Vec3::Z),
+                local_axis_b: local_axis_b.normalize_or(Vec3::Z),
+                limit,
+                motor,
+            },
+            JointKind::Prismatic {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a,
+                local_axis_b,
+                limit,
+                motor,
+            } => JointKind::Prismatic {
                 local_anchor_a,
                 local_anchor_b,
                 local_axis_a: local_axis_a.normalize_or(Vec3::Z),
@@ -3723,10 +3738,27 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 self.bodies[body_b].orientation,
                 *local_axis_a,
             ),
-            JointKind::Ball { .. } => 0.0,
+            JointKind::Ball { .. } | JointKind::Prismatic { .. } => 0.0,
+        };
+        // Prismatic limits measure anchor separation along the slide axis
+        // from the assembly pose.
+        let reference_length = match &kind {
+            JointKind::Prismatic {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a,
+                ..
+            } => {
+                let wa = (self.bodies[body_a].orientation * *local_axis_a).normalize_or(Vec3::Z);
+                let ra = self.bodies[body_a].orientation * *local_anchor_a;
+                let rb = self.bodies[body_b].orientation * *local_anchor_b;
+                ((self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra)).dot(wa)
+            }
+            JointKind::Ball { .. } | JointKind::Revolute { .. } => 0.0,
         };
         let mut joint = Joint::new(body_a, body_b, kind);
         joint.reference_angle = reference_angle;
+        joint.reference_length = reference_length;
         self.joints.push(joint);
         Some(self.joints.len() - 1)
     }
@@ -3807,6 +3839,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::joint::{PrismaticLimit, PrismaticMotor};
     use glam::{Mat3, Mat4};
 
     #[test]
@@ -5682,6 +5715,163 @@ mod tests {
         // Anchor stays coincident.
         let err = joint_anchor_error(&physics, anchor, arm, Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
         assert!(err < 0.05, "hinge anchor drifted: {err}");
+    }
+
+    /// Prismatic slider: block kicked along X on a horizontal rail under
+    /// gravity must travel freely along the axis while the point-to-line
+    /// constraints carry its weight (no sag) and lock the spin.
+    #[test]
+    fn prismatic_slider_travels_on_axis_without_sag() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let block = physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(0.2, 0.2, 0.2),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                block,
+                JointKind::Prismatic {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::X,
+                    local_axis_b: Vec3::X,
+                    limit: None,
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        physics.get_body_mut(block).unwrap().velocity = Vec3::new(3.0, 0.0, 0.0);
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(block).unwrap();
+        assert!(b.position.x > 1.0, "slider must travel, x={}", b.position.x);
+        assert!(
+            b.position.y.abs() < 0.05 && b.position.z.abs() < 0.05,
+            "slider must not sag off axis: {:?}",
+            b.position
+        );
+        let wx = b.orientation * Vec3::X;
+        assert!(
+            wx.dot(Vec3::X) > 0.995,
+            "slider must not twist off axis: {wx:?}"
+        );
+    }
+
+    /// Prismatic limit: a fast block stops at the window end and stays.
+    #[test]
+    fn prismatic_limit_blocks_travel_past_bounds() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let block = physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(0.2, 0.2, 0.2),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                block,
+                JointKind::Prismatic {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::X,
+                    local_axis_b: Vec3::X,
+                    limit: Some(PrismaticLimit {
+                        min: -1.0,
+                        max: 1.0,
+                    }),
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        physics.get_body_mut(block).unwrap().velocity = Vec3::new(10.0, 0.0, 0.0);
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(block).unwrap();
+        assert!(
+            (b.position.x - 1.0).abs() < 0.3,
+            "slider must stop at the upper bound, x={}",
+            b.position.x
+        );
+        assert!(
+            b.velocity.x.abs() < 1.0,
+            "limit must kill the slide speed: {:?}",
+            b.velocity
+        );
+    }
+
+    /// Prismatic motor: a resting block spins up to the target slide speed.
+    #[test]
+    fn prismatic_motor_drives_to_target_speed() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let block = physics.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(0.2, 0.2, 0.2),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                block,
+                JointKind::Prismatic {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::X,
+                    local_axis_b: Vec3::X,
+                    limit: None,
+                    motor: Some(PrismaticMotor {
+                        target_speed: 2.0,
+                        max_force: 100.0,
+                    }),
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(block).unwrap();
+        assert!(
+            (b.velocity.x - 2.0).abs() < 0.3,
+            "motor must reach target speed: {:?}",
+            b.velocity
+        );
+    }
+
+    /// Prismatic assembly with a twisted block: the axis-alignment pass
+    /// pulls the slide axis back parallel.
+    #[test]
+    fn prismatic_misaligned_axes_realign() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let mut block = RigidBody::new_box(Vec3::ZERO, Vec3::new(0.2, 0.2, 0.2), 1.0);
+        block.orientation = Quat::from_rotation_y(10.0f32.to_radians());
+        let block = physics.add_body(block);
+        physics
+            .add_joint(
+                anchor,
+                block,
+                JointKind::Prismatic {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::X,
+                    local_axis_b: Vec3::X,
+                    limit: None,
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(block).unwrap();
+        let wx = b.orientation * Vec3::X;
+        assert!(wx.dot(Vec3::X) > 0.998, "slide axes must realign: {wx:?}");
     }
 
     #[test]

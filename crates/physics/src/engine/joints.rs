@@ -8,7 +8,7 @@ use glam::Quat;
 use glam::Vec3;
 
 use super::*;
-use crate::joint::{RevoluteLimit, RevoluteMotor};
+use crate::joint::{PrismaticLimit, PrismaticMotor, RevoluteLimit, RevoluteMotor};
 
 /// Twist of B relative to A about A's hinge axis (rad, wrapped to
 /// [-PI, PI]). Decomposes `qa^-1 * qb` into twist about the axis plus
@@ -61,26 +61,46 @@ impl BuiltinPhysicsEngine {
                 continue;
             }
             let (la, lb) = joint.local_anchors();
-            let revolute_axes = revolute_axes(&joint.kind);
+            let align_axes = alignment_axes(&joint.kind);
+            let prism_axis_a = joint.prismatic_axes().map(|(axis_a, _)| axis_a);
 
             // --- Warm start: re-apply the accumulated impulses (G2b pattern).
             // Anchors are computed ONCE here and reused verbatim by the
             // iterations below (original behaviour).
             let ra = bodies[a].orientation * la;
             let rb = bodies[b].orientation * lb;
-            joint_warm_start(bodies, joint, a, b, ra, rb, revolute_axes);
+            joint_warm_start(bodies, joint, a, b, ra, rb, align_axes);
 
             // --- Velocity iterations.
             for _ in 0..*velocity_iterations {
-                joint_linear_velocity_iteration(bodies, joint, a, b, ra, rb);
-                if let Some((axis_a, _)) = revolute_axes {
+                if let Some(axis_a) = prism_axis_a {
+                    // Box2D point-to-line: constrain the two perpendicular
+                    // directions, leave the slide axis free.
+                    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
+                    let t1 = tangent_basis(wa);
+                    let t2 = wa.cross(t1).normalize_or_zero();
+                    for t in [t1, t2] {
+                        joint_prismatic_linear_iteration(bodies, joint, a, b, ra, rb, t);
+                    }
+                } else {
+                    joint_linear_velocity_iteration(bodies, joint, a, b, ra, rb);
+                }
+                if let Some((axis_a, _)) = align_axes {
                     joint_angular_velocity_iteration(bodies, joint, a, b, axis_a);
                 }
             }
-            // --- Limit/motor drive on the free hinge axis (revolute only).
-            // Motor first, then the limit wins past the bounds (Box2D order);
-            // the motor pauses while a limit is violated.
-            if let Some((axis_a, _)) = revolute_axes {
+            // --- Limit/motor drive on the free axis (revolute hinge or
+            // prismatic slide). Motor first, then the limit wins past the
+            // bounds (Box2D order); the motor pauses while a limit is
+            // violated.
+            if prism_axis_a.is_some() {
+                let (limit, motor) = joint.prismatic_drive();
+                if limit.is_some() || motor.is_some() {
+                    joint_prismatic_drive_velocity_iteration(
+                        bodies, joint, a, b, ra, rb, limit, motor, sub_dt,
+                    );
+                }
+            } else if let Some((axis_a, _)) = align_axes {
                 let (limit, motor) = joint.drive();
                 if limit.is_some() || motor.is_some() {
                     joint_drive_velocity_iteration(
@@ -113,16 +133,28 @@ impl BuiltinPhysicsEngine {
                 continue;
             }
             let (la, lb) = joint.local_anchors();
-            let revolute_axes = revolute_axes(&joint.kind);
+            let align_axes = alignment_axes(&joint.kind);
+            let prism_axis_a = joint.prismatic_axes().map(|(axis_a, _)| axis_a);
 
             for _ in 0..*position_iterations {
                 let ra = bodies[a].orientation * la;
                 let rb = bodies[b].orientation * lb;
                 let c = (bodies[b].position + rb) - (bodies[a].position + ra);
-                for dir in AXES {
-                    joint_linear_position_step(bodies, a, b, ra, rb, c.dot(dir), dir);
+                if let Some(axis_a) = prism_axis_a {
+                    // Prismatic: anchor coincidence only across the slide
+                    // (the slide direction is free by design).
+                    let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
+                    let t1 = tangent_basis(wa);
+                    let t2 = wa.cross(t1).normalize_or_zero();
+                    for dir in [t1, t2] {
+                        joint_linear_position_step(bodies, a, b, ra, rb, c.dot(dir), dir);
+                    }
+                } else {
+                    for dir in AXES {
+                        joint_linear_position_step(bodies, a, b, ra, rb, c.dot(dir), dir);
+                    }
                 }
-                if let Some((axis_a, axis_b)) = revolute_axes {
+                if let Some((axis_a, axis_b)) = align_axes {
                     joint_angular_position_pass(bodies, a, b, axis_a, axis_b);
                 }
             }
@@ -130,10 +162,17 @@ impl BuiltinPhysicsEngine {
     }
 }
 
-/// Hinge axes of a revolute joint (None for a ball joint).
-fn revolute_axes(kind: &JointKind) -> Option<(Vec3, Vec3)> {
+/// Axis-alignment equality axes of a joint with a distinguished direction
+/// (revolute hinge or prismatic slide): the two axes must stay parallel,
+/// enforced by 2 angular constraints. None for a ball joint.
+fn alignment_axes(kind: &JointKind) -> Option<(Vec3, Vec3)> {
     match kind {
         JointKind::Revolute {
+            local_axis_a,
+            local_axis_b,
+            ..
+        }
+        | JointKind::Prismatic {
             local_axis_a,
             local_axis_b,
             ..
@@ -222,6 +261,92 @@ fn joint_angular_velocity_iteration(
     }
 }
 
+/// One linear velocity iteration for a prismatic joint along a single
+/// perpendicular direction `t` (point-to-line, Box2D formulation).
+/// Equality constraint: no clamp, any sign of impulse. The impulse is
+/// accumulated into the joint's world-axis totals (frame-independent —
+/// a linear impulse is a linear impulse whatever basis it was solved in),
+/// so the shared ball-style warm start stays exact.
+#[allow(clippy::needless_range_loop)]
+fn joint_prismatic_linear_iteration(
+    bodies: &mut [RigidBody],
+    joint: &mut Joint,
+    a: usize,
+    b: usize,
+    ra: Vec3,
+    rb: Vec3,
+    t: Vec3,
+) {
+    let k_eff = effective_mass(bodies, a, b, t, ra, rb);
+    if k_eff < 1e-9 {
+        return;
+    }
+    let vrel = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(t);
+    let dl = -vrel / k_eff;
+    joint.acc_lin[0] += dl * t.x;
+    joint.acc_lin[1] += dl * t.y;
+    joint.acc_lin[2] += dl * t.z;
+    apply_impulse(bodies, a, b, t * dl, ra, rb);
+}
+
+/// Slide-axis drive: velocity motor toward its target speed, then the
+/// one-sided travel limit (Box2D order — the limit wins past the bounds).
+/// Linear mirror of [`joint_drive_velocity_iteration`]: same accumulator
+/// discipline (`acc_limit`), force clamp instead of torque clamp.
+#[allow(clippy::too_many_arguments)]
+fn joint_prismatic_drive_velocity_iteration(
+    bodies: &mut [RigidBody],
+    joint: &mut Joint,
+    a: usize,
+    b: usize,
+    ra: Vec3,
+    rb: Vec3,
+    limit: Option<PrismaticLimit>,
+    motor: Option<PrismaticMotor>,
+    sub_dt: f32,
+) {
+    const LINEAR_SLOP: f32 = 0.002;
+    let wa = (bodies[a].orientation * joint.prismatic_axes().map(|(x, _)| x).unwrap_or(Vec3::Z))
+        .normalize_or(Vec3::Z);
+    let s =
+        ((bodies[b].position + rb) - (bodies[a].position + ra)).dot(wa) - joint.reference_length;
+    let k_eff = effective_mass(bodies, a, b, wa, ra, rb);
+    if k_eff < 1e-9 {
+        return;
+    }
+    let v = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(wa);
+    let violated = match limit {
+        Some(lim) if s <= lim.min + LINEAR_SLOP => Some(true),
+        Some(lim) if s >= lim.max - LINEAR_SLOP => Some(false),
+        _ => None,
+    };
+    match violated {
+        None => {
+            joint.acc_limit = 0.0;
+            if let Some(m) = motor
+                && sub_dt > 0.0
+                && m.max_force > 0.0
+            {
+                let dl = ((m.target_speed - v) / k_eff)
+                    .clamp(-m.max_force * sub_dt, m.max_force * sub_dt);
+                apply_impulse(bodies, a, b, wa * dl, ra, rb);
+            }
+        }
+        // One-sided block: lower forbids v < 0 (accumulator >= 0), upper
+        // forbids v > 0 (accumulator <= 0). The clamp self-corrects on side
+        // flips by dumping the stale impulse in one step.
+        Some(lower) => {
+            let dl = -v / k_eff;
+            let next = if lower {
+                (joint.acc_limit + dl).max(0.0)
+            } else {
+                (joint.acc_limit + dl).min(0.0)
+            };
+            apply_impulse(bodies, a, b, wa * (next - joint.acc_limit), ra, rb);
+            joint.acc_limit = next;
+        }
+    }
+}
 /// Hinge-axis drive: velocity motor toward its target speed, then the
 /// one-sided travel limit (Box2D order — the limit wins past the bounds).
 /// The motor pauses while a limit is violated and resumes inside the window.
