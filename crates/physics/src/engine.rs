@@ -26,7 +26,9 @@ use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
 use crate::shape::Shape;
-use crate::trigger::{TriggerEvent, TriggerEventKind};
+use crate::trigger::{
+    CONTACT_BEGIN_SLOP, ContactEvent, ContactEventKind, TriggerEvent, TriggerEventKind,
+};
 use crate::wide::{SolverStep, build_solver_steps};
 
 /// Physics engine trait: a single step of simulation, plus body/joint management
@@ -69,6 +71,12 @@ pub trait PhysicsEngine: Send + Sync {
     /// the builtin engine reports canonical body-handle pairs in deterministic
     /// order.
     fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
+        Vec::new()
+    }
+    /// Drain solid-contact begin/end/hit transitions produced by completed
+    /// steps (Box3D `b3ContactEvents` parity). Empty by default; the builtin
+    /// engine reports them in deterministic pair order.
+    fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
         Vec::new()
     }
 }
@@ -2182,6 +2190,17 @@ pub struct BuiltinPhysicsEngine {
     debug_pairs: Vec<(usize, usize)>,
     /// Trigger pairs overlapping on the previous completed step.
     trigger_pairs: FxHashSet<(usize, usize)>,
+    /// Solid-contact pairs touching on the previous completed step
+    /// (canonical min/max keys). Frozen pairs retain their state — sleep
+    /// emits no transitions.
+    contact_touch: FxHashSet<(usize, usize)>,
+    /// Contact transitions waiting for the caller to drain (hits recorded
+    /// pre-solve every substep with per-step dedupe, begin/end reconciled
+    /// at step end).
+    contact_events: Vec<ContactEvent>,
+    /// Pairs that already emitted a hit this step (dedupe for sustained
+    /// crushes); cleared at s==0 of every step.
+    scratch_hit_pairs: FxHashSet<(usize, usize)>,
     /// Wall-clock breakdown of the last completed `step` (diagnostics only).
     last_step_timing: StepTiming,
     /// Worst-case budget: deterministic substep shedding (see
@@ -2238,6 +2257,9 @@ impl BuiltinPhysicsEngine {
             joint_pairs: FxHashSet::default(),
             debug_pairs: Vec::new(),
             trigger_pairs: FxHashSet::default(),
+            contact_touch: FxHashSet::default(),
+            contact_events: Vec::new(),
+            scratch_hit_pairs: FxHashSet::default(),
             last_step_timing: StepTiming::default(),
             step_budget: Some(StepBudget::default()),
             last_shed: 0,
@@ -3505,6 +3527,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // loop and restored after (same discipline as the other scratch).
         let mut narrow_shards = std::mem::take(&mut self.scratch_narrow_shards);
         for s in 0..eff_substeps {
+            // Per-step hit dedupe window opens here (see collect_active).
+            if s == 0 {
+                self.scratch_hit_pairs.clear();
+            }
             // Box3D stage order: solve velocities BEFORE moving positions, so
             // a resting contact kills gravity's velocity gain in the same
             // substep instead of letting the body free-fall and snapping it
@@ -3602,6 +3628,61 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 &mut self.trigger_events,
             );
         }
+        // Solid-contact begin/end reconcile (gameplay events): touching =
+        // penetration above the begin slop in the last substep's manifolds.
+        // Frozen pairs keep their prior state (sleep emits no transitions); stale handles
+        // (removed bodies) are dropped — removal clears the set anyway.
+        let n = self.bodies.len();
+        let mut current_touch: FxHashSet<(usize, usize)> = FxHashSet::default();
+        for m in &last_manifolds_snapshot {
+            let (a, b) = (m.body_a, m.body_b);
+            if a >= n || b >= n {
+                continue;
+            }
+            let mut touching = false;
+            for k in 0..m.point_count {
+                if m.points[k].penetration > -CONTACT_BEGIN_SLOP {
+                    touching = true;
+                    break;
+                }
+            }
+            if touching {
+                current_touch.insert((a.min(b), a.max(b)));
+            }
+        }
+        for &(a, b) in &self.contact_touch {
+            if a < n && b < n && self.asleep[a] && self.asleep[b] {
+                current_touch.insert((a, b));
+            }
+        }
+        let previous_touch = std::mem::replace(&mut self.contact_touch, current_touch);
+        let mut begins: Vec<(usize, usize)> = self
+            .contact_touch
+            .difference(&previous_touch)
+            .copied()
+            .collect();
+        let mut ends: Vec<(usize, usize)> = previous_touch
+            .difference(&self.contact_touch)
+            .copied()
+            .collect();
+        begins.sort_unstable();
+        ends.sort_unstable();
+        for (a, b) in begins {
+            self.contact_events.push(ContactEvent {
+                body_a: a,
+                body_b: b,
+                kind: ContactEventKind::Begin,
+            });
+        }
+        for (a, b) in ends {
+            self.contact_events.push(ContactEvent {
+                body_a: a,
+                body_b: b,
+                kind: ContactEventKind::End,
+            });
+        }
+        self.contact_events
+            .sort_by_key(|e| (e.body_a.min(e.body_b), e.body_a.max(e.body_b)));
         self.last_step_timing.trigger_ms += t_trigger.elapsed().as_secs_f64() * 1000.0;
     }
 
@@ -3651,6 +3732,12 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             self.bodies.swap_remove(handle);
             self.island.swap_remove(handle);
             self.asleep.swap_remove(handle);
+            // Body handles are identities: the swap remaps the tail body's
+            // index, so contact state keyed by handles is no longer valid.
+            // Drop it (Box2D parity: events may invalidate on destroy) —
+            // surviving contacts re-begin on the next step.
+            self.contact_touch.clear();
+            self.contact_events.clear();
             // swap_remove shifts the last body's index; warm-start keys are
             // body indices, so the cache is no longer valid.
             self.warm_impulses.clear();
@@ -3833,6 +3920,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 
     fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
         std::mem::take(&mut self.trigger_events)
+    }
+
+    fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
+        std::mem::take(&mut self.contact_events)
     }
 }
 
@@ -4246,6 +4337,187 @@ mod tests {
             physics.get_body(bullet).unwrap().position.y < -0.1,
             "filtered bullet should pass through the floor"
         );
+    }
+
+    /// Contact events: a dropped box begins touching the floor on impact.
+    #[test]
+    fn contact_begin_fires_on_touch() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let floor = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let klein = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        let mut begun = false;
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+            for e in physics.drain_contact_events() {
+                if matches!(e.kind, ContactEventKind::Begin)
+                    && ((e.body_a == floor && e.body_b == klein)
+                        || (e.body_a == klein && e.body_b == floor))
+                {
+                    begun = true;
+                }
+            }
+        }
+        assert!(begun, "touchdown must emit Begin");
+    }
+
+    /// Contact events: a speculative near-miss (gap inside the margin, no
+    /// touch) emits nothing — gameplay must not see begins without contact.
+    #[test]
+    fn contact_no_begin_for_speculative_gap() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        // Hovering 2 cm above the floor: inside the 5 cm speculative margin
+        // (manifolds exist), zero velocity, zero gravity — never touches.
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.52, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+            let events = physics.drain_contact_events();
+            assert!(
+                events.is_empty(),
+                "gap contact must stay silent, got {events:?}"
+            );
+        }
+    }
+
+    /// Contact events: a fast impact records a Hit with the approach speed.
+    #[test]
+    fn contact_hit_reports_approach_speed() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let mut drop = RigidBody::new_box(Vec3::new(0.0, 6.0, 0.0), Vec3::splat(0.5), 1.0);
+        drop.velocity = Vec3::new(0.0, -20.0, 0.0);
+        physics.add_body(drop);
+        let mut hit_speed = 0.0f32;
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+            for e in physics.drain_contact_events() {
+                if let ContactEventKind::Hit {
+                    approach_speed,
+                    normal,
+                    ..
+                } = e.kind
+                {
+                    hit_speed = hit_speed.max(approach_speed);
+                    assert!(
+                        normal.y.abs() > 0.9,
+                        "hit normal must be vertical, got {normal:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            hit_speed > 10.0,
+            "20 m/s impact must record a Hit, max approach {hit_speed}"
+        );
+    }
+
+    /// Contact events: launching a resting box off the floor emits End.
+    #[test]
+    fn contact_end_fires_on_separation() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let floor = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let klein = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..90 {
+            physics.step(1.0 / 60.0);
+        }
+        let _ = physics.drain_contact_events();
+        physics.get_body_mut(klein).unwrap().velocity = Vec3::new(0.0, 10.0, 0.0);
+        // Wake it: the test sets velocity directly (a driver would too).
+        physics.wake_island(klein);
+        let mut ended = false;
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+            for e in physics.drain_contact_events() {
+                if matches!(e.kind, ContactEventKind::End)
+                    && ((e.body_a == floor && e.body_b == klein)
+                        || (e.body_a == klein && e.body_b == floor))
+                {
+                    ended = true;
+                }
+            }
+        }
+        assert!(ended, "liftoff must emit End");
+    }
+
+    /// Contact events: a frozen (sleeping) contact emits no churn — sleep
+    /// retains touch state silently.
+    #[test]
+    fn contact_frozen_pair_emits_no_churn() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(5.0, 1.0, 5.0),
+            0.0,
+        ));
+        let klein = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..150 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(klein), "box must settle");
+        let _ = physics.drain_contact_events();
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+            let events = physics.drain_contact_events();
+            assert!(
+                events.is_empty(),
+                "frozen contact must stay silent, got {events:?}"
+            );
+        }
+    }
+
+    /// Contact events are deterministic run-to-run on identical scenes.
+    #[test]
+    fn contact_events_deterministic_across_runs() {
+        fn run() -> Vec<ContactEvent> {
+            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(5.0, 1.0, 5.0),
+                0.0,
+            ));
+            let mut drop = RigidBody::new_box(Vec3::new(0.5, 5.0, 0.0), Vec3::splat(0.4), 1.0);
+            drop.velocity = Vec3::new(-2.0, -15.0, 1.0);
+            physics.add_body(drop);
+            let mut all = Vec::new();
+            for _ in 0..90 {
+                physics.step(1.0 / 60.0);
+                all.extend(physics.drain_contact_events());
+            }
+            all
+        }
+        assert_eq!(run(), run(), "contact events must be run-deterministic");
     }
 
     #[test]

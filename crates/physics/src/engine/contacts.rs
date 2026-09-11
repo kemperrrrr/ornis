@@ -540,6 +540,42 @@ impl BuiltinPhysicsEngine {
             if self.bodies[i].inv_mass + self.bodies[j].inv_mass < 1e-10 {
                 continue;
             }
+            // Hit events (Gameplay, Box3D parity): the hardest-approaching
+            // point of a solved contact faster than the threshold. Recorded
+            // pre-solve on every substep (each substep's approach is physical
+            // pre-solve data); one hit per pair per step — the scratch set
+            // cleared at s==0 dedupes sustained crushes.
+            {
+                let key = (i.min(j), i.max(j));
+                if !self.scratch_hit_pairs.contains(&key) {
+                    let mut best = 0.0f32;
+                    let mut best_point = Vec3::ZERO;
+                    for k in 0..m.point_count {
+                        let p = m.points[k].world_point;
+                        let ra = p - self.bodies[i].position;
+                        let rb = p - self.bodies[j].position;
+                        let vrel = point_velocity(&self.bodies[j], rb)
+                            - point_velocity(&self.bodies[i], ra);
+                        let closing = -vrel.dot(m.normal);
+                        if closing > best {
+                            best = closing;
+                            best_point = p;
+                        }
+                    }
+                    if best > crate::trigger::CONTACT_HIT_THRESHOLD {
+                        self.scratch_hit_pairs.insert(key);
+                        self.contact_events.push(crate::trigger::ContactEvent {
+                            body_a: i,
+                            body_b: j,
+                            kind: crate::trigger::ContactEventKind::Hit {
+                                point: best_point,
+                                normal: m.normal,
+                                approach_speed: best,
+                            },
+                        });
+                    }
+                }
+            }
             active.push(mi);
         }
         active

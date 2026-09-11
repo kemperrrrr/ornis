@@ -39,4 +39,7 @@ pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
 pub use joint::{JointHandle, JointKind};
 pub use math::{AABB, Ray, RaycastHit};
 pub use shape::Shape;
-pub use trigger::{TriggerEvent, TriggerEventKind};
+pub use trigger::{
+    CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, TriggerEvent,
+    TriggerEventKind,
+};
