@@ -4,7 +4,7 @@
 //! joints are persistent equality constraints with warm-started accumulated
 //! impulses, solved as dedicated sub-solvers inside the substep loop.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::body::BodyHandle;
 
@@ -17,7 +17,7 @@ pub type JointHandle = usize;
 /// What the user supplies when creating a joint. Local anchors/axes are
 /// specified in each body's frame; the joint is satisfied when the world
 /// anchors coincide (and, for revolute, the world axes are parallel).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum JointKind {
     /// Ball-and-socket (spherical): anchor points coincide.
     /// 3 linear equality constraints along the world axes.
@@ -65,6 +65,114 @@ pub enum JointKind {
         limit: Option<PrismaticLimit>,
         /// Velocity motor along the slide axis.
         motor: Option<PrismaticMotor>,
+    },
+    /// Fixed (weld): the two bodies keep their assembly transform rigidly.
+    /// 3 linear + 3 angular equality constraints — a ball joint with the
+    /// rotation locked. Cheaper and more stable than freezing a stack with
+    /// contacts; breaks never (no breakable extension — document if added).
+    Fixed {
+        /// Anchor point in body A's local frame (weld origin).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (weld origin).
+        local_anchor_b: Vec3,
+    },
+    /// Distance (rigid rod, Box2D `b2DistanceJoint` with zero
+    /// frequency/damping): the anchor separation keeps its assembly length.
+    /// 1 linear equality constraint along the anchor delta axis; rotation
+    /// stays fully free on both ends (a rod with ball ends, not a weld).
+    Distance {
+        /// Anchor point in body A's local frame (rod end).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (rod end).
+        local_anchor_b: Vec3,
+    },
+    /// Wheel (suspension, Box2D `b2WheelJoint` formulation): a prismatic
+    /// slide along the suspension axis with a spring (frequency/damping)
+    /// instead of a rigid drive, plus free spin about a designated axle
+    /// axis with an optional motor. 2 linear (perp basis) + 2 angular
+    /// equality constraints (spin about the suspension axis and the third
+    /// axis are locked, spin about the axle is free).
+    Wheel {
+        /// Anchor point in body A's local frame (suspension origin).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (suspension origin).
+        local_anchor_b: Vec3,
+        /// Suspension axis in each body's local frame (normalized and
+        /// orthogonalized against the axle on creation).
+        local_suspension_a: Vec3,
+        /// Suspension axis in body B's local frame.
+        local_suspension_b: Vec3,
+        /// Spin axle in each body's local frame (must be non-parallel to
+        /// the suspension; orthogonalized on creation).
+        local_axle_a: Vec3,
+        /// Spin axle in body B's local frame.
+        local_axle_b: Vec3,
+        /// Spring parameters (Box2D frequency/damping semantics).
+        suspension: WheelSuspension,
+        /// Velocity motor about the axle (`None` = free-spinning wheel).
+        motor: Option<RevoluteMotor>,
+    },
+    /// Gear (Box2D `b2GearJoint` formulation): couples the coordinates of
+    /// two existing revolute/prismatic joints,
+    /// `coord_a + ratio * coord_b = const` (angles in rad, slides in m —
+    /// mixed units are the driver's responsibility, as in Box2D). The
+    /// constant is captured at creation. Holds no bodies of its own:
+    /// `Joint::body_a/body_b` mirror the first bodies of the two referenced
+    /// joints for the sleep-skip heuristic; island union resolves all four
+    /// bodies through the references.
+    Gear {
+        /// Index of the first coordinated joint in the engine's joint list.
+        joint_a: JointHandle,
+        /// Index of the second coordinated joint.
+        joint_b: JointHandle,
+        /// Transmission ratio (`coord_a + ratio * coord_b = const`).
+        ratio: f32,
+    },
+    /// Six-DOF generic (Jolt `SixDOFConstraint` idea, axis-aligned): each of
+    /// the 3 linear and 3 angular axes in body A's assembly frame is
+    /// independently free, locked, or limited. Locked axes reuse the
+    /// equality iterations, limited linear axes the one-sided drive;
+    /// limited ANGULAR axes measure per-axis twist about the assembly frame
+    /// (an axis-twist approximation, not a true swing cone — documented).
+    /// All-locked degenerates to [`JointKind::Fixed`].
+    SixDof {
+        /// Anchor point in body A's local frame (joint origin).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (joint origin).
+        local_anchor_b: Vec3,
+        /// Per-axis linear configuration in body A's assembly frame.
+        linear: [AxisConfig; 3],
+        /// Per-axis angular configuration in body A's assembly frame.
+        angular: [AxisConfig; 3],
+    },
+}
+
+/// Spring parameters of a [`JointKind::Wheel`] suspension, Box2D
+/// `b2WheelJoint` semantics: `frequency_hz` is the suspension resonance,
+/// `damping_ratio` the dimensionless damping (1 = critically damped).
+#[derive(Debug, Clone, Copy)]
+pub struct WheelSuspension {
+    /// Suspension resonance frequency (Hz, must be > 0 for a live spring).
+    pub frequency_hz: f32,
+    /// Dimensionless damping ratio (0 = undamped, 1 = critical).
+    pub damping_ratio: f32,
+}
+
+/// Per-axis configuration of a [`JointKind::SixDof`] joint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AxisConfig {
+    /// Axis moves freely (no constraint).
+    Free,
+    /// Axis is locked (equality constraint).
+    Locked,
+    /// Axis travels inside `[min, max]` measured from the assembly pose
+    /// (linear: meters along the axis; angular: radians of twist about the
+    /// axis). Requires `min <= max`; degenerate (`min == max`) locks.
+    Limited {
+        /// Lower bound (m or rad, relative to the assembly pose).
+        min: f32,
+        /// Upper bound (m or rad, relative to the assembly pose).
+        max: f32,
     },
 }
 
@@ -124,18 +232,45 @@ pub(crate) struct Joint {
     /// Accumulated linear impulses per world axis (X/Y/Z), reused as the
     /// warm start of the next substep — same pattern as the contact cache.
     pub acc_lin: [f32; 3],
-    /// Accumulated angular impulses per constraint axis (revolute only).
-    pub acc_ang: [f32; 2],
+    /// Accumulated angular impulses per constraint axis. Revolute and wheel
+    /// joints use slots 0..2 (hinge tangents / lock axes); a fixed joint
+    /// uses all three (world-axis locks).
+    pub acc_ang: [f32; 3],
     /// Hinge twist at creation (rad): limits measure travel relative to
-    /// this, Box2D `m_referenceAngle` style. Ignored by ball joints.
+    /// this, Box2D `m_referenceAngle` style. Revolute measures the hinge
+    /// twist, wheel the axle twist. Ignored by other joints.
     pub reference_angle: f32,
     /// Anchor separation along the slide axis at creation (m): prismatic
-    /// limits measure travel relative to this. Ignored by other joints.
+    /// limits and the wheel spring measure travel relative to this.
+    /// Ignored by other joints.
     pub reference_length: f32,
+    /// Anchor distance at creation (m): the distance-rod rest length, or
+    /// the gear constraint constant (`coord_a + ratio * coord_b`).
+    /// Ignored by other joints.
+    pub reference_distance: f32,
+    /// Relative orientation at creation (`qa^-1 * qb`): fixed, wheel and
+    /// six-DOF angular locks measure drift relative to this.
+    /// Ignored by other joints.
+    pub reference_quat: Quat,
+    /// Anchor separation at creation, in body A's local frame
+    /// (`qa^-1 * ((pb + rb) - (pa + ra))`): fixed, wheel and six-DOF
+    /// locked-axis position steps measure drift relative to this instead
+    /// of pulling offset assemblies into coincidence. Legacy
+    /// ball/revolute/prismatic joints assemble coincidently and ignore it.
+    pub reference_anchor_delta: Vec3,
     /// Accumulated one-sided limit impulse (warm start). Positive = lower
     /// bound active, negative = upper; zero when inside the window. The
     /// clamp logic self-corrects on side flips, so no side state is stored.
+    /// Shared by revolute/prismatic drives and the wheel spring (one
+    /// one-sided axis per joint at most).
     pub acc_limit: f32,
+    /// Accumulated rod-constraint impulse (distance joints only).
+    pub acc_dist: f32,
+    /// Accumulated gear-constraint impulse (gear joints only).
+    pub acc_gear: f32,
+    /// One-sided accumulators of six-DOF limited axes: slots 0..3 linear
+    /// (X/Y/Z), 3..6 angular. Free/locked axes never touch these.
+    pub acc_6dof: [f32; 6],
 }
 
 impl Joint {
@@ -145,18 +280,30 @@ impl Joint {
             body_b,
             kind,
             acc_lin: [0.0; 3],
-            acc_ang: [0.0; 2],
+            acc_ang: [0.0; 3],
             reference_angle: 0.0,
             reference_length: 0.0,
+            reference_distance: 0.0,
+            reference_quat: Quat::IDENTITY,
+            reference_anchor_delta: Vec3::ZERO,
             acc_limit: 0.0,
+            acc_dist: 0.0,
+            acc_gear: 0.0,
+            acc_6dof: [0.0; 6],
         }
     }
 
-    /// (limit, motor) drive of a revolute joint; (None, None) for ball.
+    /// (limit, motor) drive of a revolute joint; (None, None) for the rest.
     pub(crate) fn drive(&self) -> (Option<RevoluteLimit>, Option<RevoluteMotor>) {
         match &self.kind {
             JointKind::Revolute { limit, motor, .. } => (*limit, *motor),
-            JointKind::Ball { .. } | JointKind::Prismatic { .. } => (None, None),
+            JointKind::Ball { .. }
+            | JointKind::Prismatic { .. }
+            | JointKind::Fixed { .. }
+            | JointKind::Distance { .. }
+            | JointKind::Wheel { .. }
+            | JointKind::Gear { .. }
+            | JointKind::SixDof { .. } => (None, None),
         }
     }
 
@@ -164,7 +311,13 @@ impl Joint {
     pub(crate) fn prismatic_drive(&self) -> (Option<PrismaticLimit>, Option<PrismaticMotor>) {
         match &self.kind {
             JointKind::Prismatic { limit, motor, .. } => (*limit, *motor),
-            JointKind::Ball { .. } | JointKind::Revolute { .. } => (None, None),
+            JointKind::Ball { .. }
+            | JointKind::Revolute { .. }
+            | JointKind::Fixed { .. }
+            | JointKind::Distance { .. }
+            | JointKind::Wheel { .. }
+            | JointKind::Gear { .. }
+            | JointKind::SixDof { .. } => (None, None),
         }
     }
 
@@ -176,11 +329,45 @@ impl Joint {
                 local_axis_b,
                 ..
             } => Some((*local_axis_a, *local_axis_b)),
-            JointKind::Ball { .. } | JointKind::Revolute { .. } => None,
+            JointKind::Ball { .. }
+            | JointKind::Revolute { .. }
+            | JointKind::Fixed { .. }
+            | JointKind::Distance { .. }
+            | JointKind::Wheel { .. }
+            | JointKind::Gear { .. }
+            | JointKind::SixDof { .. } => None,
         }
     }
 
-    /// Local anchor on each body, regardless of the joint kind.
+    /// Suspension + axle axes of a wheel joint in body A's local frame plus
+    /// its spring and motor; None otherwise.
+    pub(crate) fn wheel_drive(
+        &self,
+    ) -> Option<(Vec3, Vec3, WheelSuspension, Option<RevoluteMotor>)> {
+        match &self.kind {
+            JointKind::Wheel {
+                local_suspension_a,
+                local_axle_a,
+                suspension,
+                motor,
+                ..
+            } => Some((*local_suspension_a, *local_axle_a, *suspension, *motor)),
+            _ => None,
+        }
+    }
+
+    /// (linear, angular) axis configs of a six-DOF joint; None otherwise.
+    pub(crate) fn sixdof_config(&self) -> Option<([AxisConfig; 3], [AxisConfig; 3])> {
+        match &self.kind {
+            JointKind::SixDof {
+                linear, angular, ..
+            } => Some((*linear, *angular)),
+            _ => None,
+        }
+    }
+
+    /// Local anchor on each body. Gear joints hold no anchors — returns
+    /// zeros (they coordinate other joints instead of constraining bodies).
     pub fn local_anchors(&self) -> (Vec3, Vec3) {
         match &self.kind {
             JointKind::Ball {
@@ -196,7 +383,26 @@ impl Joint {
                 local_anchor_a,
                 local_anchor_b,
                 ..
+            }
+            | JointKind::Fixed {
+                local_anchor_a,
+                local_anchor_b,
+            }
+            | JointKind::Distance {
+                local_anchor_a,
+                local_anchor_b,
+            }
+            | JointKind::Wheel {
+                local_anchor_a,
+                local_anchor_b,
+                ..
+            }
+            | JointKind::SixDof {
+                local_anchor_a,
+                local_anchor_b,
+                ..
             } => (*local_anchor_a, *local_anchor_b),
+            JointKind::Gear { .. } => (Vec3::ZERO, Vec3::ZERO),
         }
     }
 }

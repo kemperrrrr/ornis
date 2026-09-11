@@ -23,6 +23,8 @@ pub mod body;
 pub(crate) mod distance;
 /// The physics step pipeline and the [`crate::engine::PhysicsEngine`] trait.
 pub mod engine;
+/// GJK/EPA fallback narrow phase for cylinder, cone and convex hull pairs.
+pub(crate) mod gjk;
 #[cfg(feature = "gpu")]
 pub(crate) mod gpu;
 pub mod joint;
@@ -36,9 +38,12 @@ pub(crate) mod wide;
 pub use body::{BodyHandle, BodyType, RigidBody};
 pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
-pub use joint::{JointHandle, JointKind};
+pub use joint::{
+    AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, RevoluteLimit,
+    RevoluteMotor, WheelSuspension,
+};
 pub use math::{AABB, Ray, RaycastHit};
-pub use shape::Shape;
+pub use shape::{ConvexHull, Heightfield, Shape};
 pub use trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, TriggerEvent,
     TriggerEventKind,

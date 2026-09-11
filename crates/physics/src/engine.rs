@@ -18,7 +18,8 @@ use glam::{Quat, Vec3};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{
-    BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming,
+    BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats, PrevPose, StepBudget,
+    StepTiming,
 };
 use crate::distance;
 #[cfg(feature = "gpu")]
@@ -1131,7 +1132,12 @@ fn box_vs_capsule(
     if len < 1e-10 {
         return None;
     }
-    let normal = ab / len; // box → capsule
+    let mut normal = ab / len; // box → capsule
+    // Hemisphere rule (see `distance_contact`): crossed witnesses in
+    // penetration would push the pair through each other.
+    if normal.dot(cap_pos - box_pos) < 0.0 {
+        normal = -normal;
+    }
     let penetration = -d.dist;
     let contact_point = (d.point_a + d.point_b) * 0.5;
     Some(Contact {
@@ -1210,6 +1216,61 @@ fn detect_collisions(
         bodies, active, asleep, sub_dt, &mut out, None, 0, None, &mut pool,
     );
     out
+}
+
+/// Generic single contact from a pairwise distance query: covers every
+/// shape pair without a dedicated manifold builder (cylinder/cone/hull
+/// via GJK/EPA, heightfields via columns). Surface-anchored convention
+/// (see `sphere_vs_sphere`): the witness on A's surface pushed halfway
+/// into the overlap, so friction levers and torque arms stay full-length.
+/// Normal points from A to B; `penetration` is the true signed overlap
+/// (negative = speculative gap inside the margin).
+fn distance_contact(
+    i: usize,
+    j: usize,
+    a: &RigidBody,
+    b: &RigidBody,
+    margin: f32,
+) -> Option<Manifold> {
+    let d = distance::shape_distance(
+        distance::ShapeRef {
+            shape: &a.shape,
+            pos: a.position,
+            rot: a.orientation,
+        },
+        distance::ShapeRef {
+            shape: &b.shape,
+            pos: b.position,
+            rot: b.orientation,
+        },
+    );
+    if d.dist > margin {
+        return None;
+    }
+    let axis = d.point_b - d.point_a;
+    let mut normal = if axis.length_squared() > 1e-12 {
+        axis.normalize()
+    } else {
+        (b.position - a.position).normalize_or(Vec3::Y)
+    };
+    // Hemisphere rule: in penetration the witnesses can cross (the B-side
+    // point ends up above the A-side point), flipping the axis against the
+    // separating direction — the solver would then push the bodies through
+    // each other. Enforce consistency with the center delta (same class of
+    // fix as in `box_vs_capsule` below).
+    if normal.dot(b.position - a.position) < 0.0 {
+        normal = -normal;
+    }
+    let penetration = -d.dist;
+    Some(Manifold::single(
+        i,
+        j,
+        Contact {
+            normal,
+            penetration,
+            contact_point: d.point_a - normal * (penetration * 0.5),
+        },
+    ))
 }
 
 /// Base speculative margin (m): also the AABB inflation used by the
@@ -1442,6 +1503,10 @@ fn narrow_pair(
                 },
             )
         }),
+        // Every other pair (cylinder/cone/hull via GJK/EPA, heightfields
+        // via columns): generic single contact from the distance query.
+        // The analytic arms above keep their dedicated manifolds.
+        _ => distance_contact(i, j, a, b, margin),
     };
     manifold.map(|mut m| {
         m.body_a = i;
@@ -1675,6 +1740,9 @@ fn detect_collisions_into(
                     },
                 )
             }),
+            // Every other pair (cylinder/cone/hull via GJK/EPA, heightfields
+            // via columns): generic single contact from the distance query.
+            _ => distance_contact(i, j, a, b, margin),
         };
 
         if let Some(mut m) = manifold {
@@ -2202,6 +2270,20 @@ pub struct BuiltinPhysicsEngine {
     /// Per-island sleep timers, keyed by island root handle.
     island_timers: FxHashMap<u32, f32>,
     asleep: Vec<bool>,
+    /// Step-start pose per body, parallel to `bodies`. Drivers move kinematic
+    /// bodies by setting positions directly, so the velocity field alone does
+    /// not describe their motion: the broadphase sweep, the speculative
+    /// margin and the kinematic sweep read the step displacement
+    /// (`position - prev`) instead. Updated at the top of every `step`
+    /// (even on the fully-sleeping fast path, so the delta stays one step).
+    prev_pose: Vec<PrevPose>,
+    /// Driver velocity save area, parallel to `bodies` conceptually: above-
+    /// gate teleports temporarily install the implied motion into the
+    /// kinematic velocity fields for the step (margins, CCD, contacts all
+    /// read fields), then restore the driver values at step end. Only
+    /// entries for touched bodies are pushed; empty in steady state when
+    /// nobody teleports.
+    saved_driver_vel: Vec<(usize, Vec3, Vec3)>,
     /// Persistent joint constraints with warm-start state (G5). Joints also
     /// feed the island union-find: jointed bodies sleep and wake together.
     joints: Vec<Joint>,
@@ -2259,6 +2341,63 @@ pub struct BuiltinPhysicsEngine {
     sat_cache: SatCache,
 }
 
+/// Orthogonalize a wheel axle against its (already normalized) suspension
+/// axis. A near-parallel axle gets a deterministic perpendicular fallback
+/// (same `tangent_basis` the solver uses), never a NaN.
+fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {
+    let a = axle - suspension * axle.dot(suspension);
+    if a.length_squared() < 1e-6 {
+        tangent_basis(suspension)
+    } else {
+        a.normalize()
+    }
+}
+
+/// Dense joint rebuild after removals: drops the marked joints, remaps
+/// surviving gear references so they keep pointing at the same joints (a
+/// gear whose reference cannot be remapped is dropped — sound, never
+/// dangling), and recomputes the no-collide pair set (gears carry none —
+/// the underlying joints already do).
+fn rebuild_joints(
+    joints: &mut Vec<Joint>,
+    joint_pairs: &mut FxHashSet<(usize, usize)>,
+    drop_j: Vec<bool>,
+) {
+    let mut remap: Vec<Option<usize>> = vec![None; drop_j.len()];
+    let mut survivors = Vec::with_capacity(joints.len());
+    for (oi, j) in joints.drain(..).enumerate() {
+        if drop_j[oi] {
+            continue;
+        }
+        remap[oi] = Some(survivors.len());
+        survivors.push(j);
+    }
+    survivors.retain_mut(|j| {
+        if let JointKind::Gear {
+            joint_a, joint_b, ..
+        } = &mut j.kind
+        {
+            match (remap[*joint_a], remap[*joint_b]) {
+                (Some(na), Some(nb)) => {
+                    *joint_a = na;
+                    *joint_b = nb;
+                    true
+                }
+                // Reference died with its joint — drop the gear too.
+                _ => false,
+            }
+        } else {
+            true
+        }
+    });
+    *joints = survivors;
+    *joint_pairs = joints
+        .iter()
+        .filter(|j| !matches!(j.kind, JointKind::Gear { .. }))
+        .map(|j| (j.body_a.min(j.body_b), j.body_a.max(j.body_b)))
+        .collect();
+}
+
 impl BuiltinPhysicsEngine {
     /// Empty engine with the default tuning: 12 substeps, 8 velocity
     /// iterations, 4 position iterations, rigid contacts, SIMD-wide solver
@@ -2277,6 +2416,8 @@ impl BuiltinPhysicsEngine {
             island: Vec::new(),
             island_timers: FxHashMap::default(),
             asleep: Vec::new(),
+            prev_pose: Vec::new(),
+            saved_driver_vel: Vec::new(),
             joints: Vec::new(),
             joint_pairs: FxHashSet::default(),
             debug_pairs: Vec::new(),
@@ -2522,6 +2663,12 @@ impl BuiltinPhysicsEngine {
         self.asleep.get(handle).copied().unwrap_or(false)
     }
 
+    /// How many joint constraints are currently live (diagnostics for
+    /// joint creation/removal bookkeeping, including gear dependents).
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
     /// (Diagnostics) island id of the body and its current sleep timer.
     pub fn debug_island_info(&self, handle: BodyHandle) -> Option<(u32, f32)> {
         let root = *self.island.get(handle)?;
@@ -2668,6 +2815,206 @@ impl BuiltinPhysicsEngine {
         }
     }
 
+    /// Step-start driver check: reports whether any kinematic body moved
+    /// since the previous step end (`prev_pose`). The wake fast-path must
+    /// count those, or a zero-velocity teleport ghosts while the substep
+    /// loop is skipped.
+    ///
+    /// Runs at the very top of `step` (even on the fully-sleeping fast
+    /// path) and does NOT touch `prev_pose`: the broadphase union and the
+    /// kinematic sweep below both read the step-start poses, which
+    /// `sync_prev_pose` refreshes at step end.
+    fn snapshot_driver_motion(&self) -> bool {
+        for (h, b) in self.bodies.iter().enumerate() {
+            if b.body_type == BodyType::Kinematic
+                && self
+                    .prev_pose
+                    .get(h)
+                    .is_some_and(|p| p.pos != b.position || p.rot != b.orientation)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Refreshes `prev_pose` from the current poses. Runs at the very end of
+    /// every full `step` (never on the fast path — there no kinematic moved,
+    /// so there is nothing to refresh), keeping the step-start baseline
+    /// exactly one step behind.
+    fn sync_prev_pose(&mut self) {
+        let n = self.bodies.len();
+        self.prev_pose.resize(
+            n,
+            PrevPose {
+                pos: Vec3::ZERO,
+                rot: Quat::IDENTITY,
+            },
+        );
+        for (h, b) in self.bodies.iter().enumerate() {
+            self.prev_pose[h].pos = b.position;
+            self.prev_pose[h].rot = b.orientation;
+        }
+    }
+
+    /// Above-gate teleports act as the implied motion everywhere for one
+    /// step: installs (`position - prev`) / `dt` (plus the orientation-delta
+    /// spin) into the kinematic velocity fields, saving the driver values
+    /// into `saved_driver_vel`. Margins, CCD, wake and contact responses all
+    /// read fields, so this single write keeps every phase consistent;
+    /// `restore_driver_velocity` at step end puts the driver values back, so
+    /// the solver never corrupts driver-owned state.
+    ///
+    /// Below-gate teleports keep their fields (positional settle, Box2D
+    /// parity: a small nudge imparts no momentum); disciplined drivers whose
+    /// per-step segment sits below the gate see bit-identical behavior.
+    fn apply_driver_velocity(&mut self, dt: f32) {
+        self.saved_driver_vel.clear();
+        if dt <= 0.0 {
+            return;
+        }
+        for h in 0..self.bodies.len() {
+            let b = &self.bodies[h];
+            if b.body_type != BodyType::Kinematic {
+                continue;
+            }
+            let Some(prev) = self.prev_pose.get(h) else {
+                continue;
+            };
+            let displacement = b.position - prev.pos;
+            // Same travel gate as the sweep: the discrete phase owns short
+            // segments, the implied motion owns long ones.
+            if displacement.length() <= 0.5 * shape_min_dimension(&b.shape) {
+                continue;
+            }
+            let dq = b.orientation * prev.rot.conjugate();
+            let mut spin = b.angular_velocity;
+            if dq.w < 1.0 - 1e-6 {
+                let angle = 2.0 * dq.w.clamp(-1.0, 1.0).acos();
+                let axis = dq.xyz() / (1.0 - dq.w * dq.w).sqrt().max(1e-9);
+                if axis.is_finite() {
+                    spin = axis * (angle / dt);
+                }
+            }
+            self.saved_driver_vel
+                .push((h, b.velocity, b.angular_velocity));
+            let m = &mut self.bodies[h];
+            m.velocity = displacement / dt;
+            m.angular_velocity = spin;
+        }
+    }
+
+    /// Puts back the driver velocity fields saved by
+    /// [`apply_driver_velocity`](Self::apply_driver_velocity). Runs at the
+    /// end of every full `step` (after sleep), so externally observed fields
+    /// are always driver-owned.
+    fn restore_driver_velocity(&mut self) {
+        for (h, lin, ang) in self.saved_driver_vel.drain(..) {
+            if let Some(b) = self.bodies.get_mut(h) {
+                b.velocity = lin;
+                b.angular_velocity = ang;
+            }
+        }
+    }
+
+    /// Kinematic sweep (teleport CCD): each kinematic body whose step
+    /// displacement outruns the linear travel gate casts it against the
+    /// dynamic bodies via conservative advancement. A hit wakes the victim
+    /// and transfers the normal approach one-shot (kinematic-vs-dynamic
+    /// contact response with the driver's implied velocity); tangential
+    /// motion and resting penetration stay with the discrete solver.
+    ///
+    /// The driver keeps full ownership of the kinematic pose — the sweep
+    /// never moves the mover, only the victims. Rotation teleports are NOT
+    /// swept (linear cast only): a spinning driver must still carry a
+    /// matching `angular_velocity` field, same contract as before.
+    fn solve_kinematic_sweep(&mut self, dt: f32) {
+        struct SweepHit {
+            target: usize,
+            normal: Vec3,
+            driver_vel: Vec3,
+            restitution: f32,
+        }
+        let mut hits: Vec<SweepHit> = Vec::new();
+        {
+            let bodies = &self.bodies;
+            for (h, mover) in bodies.iter().enumerate() {
+                if mover.body_type != BodyType::Kinematic || mover.is_trigger {
+                    continue;
+                }
+                let Some(prev) = self.prev_pose.get(h) else {
+                    continue;
+                };
+                let displacement = mover.position - prev.pos;
+                // Travel gate, mirror of the linear CCD one: below half the
+                // thinnest feature the discrete phase + speculative margin
+                // own the contact, no sweep needed.
+                if displacement.length() <= 0.5 * shape_min_dimension(&mover.shape) {
+                    continue;
+                }
+                let mover_layer = mover.collision_layer;
+                let mover_mask = mover.collision_mask;
+                // Earliest hit across all dynamic targets (linear-CCD order:
+                // nearest wins, deterministic by body index on ties).
+                let mut best: Option<(f32, Vec3, usize)> = None;
+                for (t, target) in bodies.iter().enumerate() {
+                    if t == h
+                        || target.is_trigger
+                        || target.body_type != BodyType::Dynamic
+                        || mover_mask & target.collision_layer == 0
+                        || target.collision_mask & mover_layer == 0
+                    {
+                        continue;
+                    }
+                    let target_ref = distance::ShapeRef {
+                        shape: &target.shape,
+                        pos: target.position,
+                        rot: target.orientation,
+                    };
+                    if let Some((dist, normal)) = kinematic_cast(
+                        &mover.shape,
+                        mover.orientation,
+                        prev.pos,
+                        displacement,
+                        target_ref,
+                    ) && best.is_none_or(|(b, _, _)| dist < b)
+                    {
+                        best = Some((dist, normal, t));
+                    }
+                }
+                // No end-overlap guard: the discrete phase reads the same
+                // implied velocity (installed by `apply_driver_velocity`),
+                // so sweep and discrete responses agree — like the linear
+                // CCD clamp coexisting with the discrete contact solve.
+                if let Some((_, normal, t)) = best {
+                    let driver_vel = if dt > 0.0 {
+                        displacement / dt
+                    } else {
+                        mover.velocity
+                    };
+                    hits.push(SweepHit {
+                        target: t,
+                        normal,
+                        driver_vel,
+                        restitution: mover.restitution.min(bodies[t].restitution),
+                    });
+                }
+            }
+        }
+        for hit in hits {
+            self.wake_island(hit.target);
+            let t = &mut self.bodies[hit.target];
+            // Mirror image of the linear CCD response (which acts on the
+            // mover): here the mover is immovable, so the victim absorbs
+            // the approach. `u > 0` means closing along the sweep normal.
+            let u = (t.velocity - hit.driver_vel).dot(hit.normal);
+            if u > 0.0 {
+                let bounce = if u > 1.0 { 1.0 + hit.restitution } else { 1.0 };
+                t.velocity -= hit.normal * (bounce * u);
+            }
+        }
+    }
+
     /// Time-of-impact pass (G6, b3SolveContinuous analog): runs after the
     /// velocity solve, before positions move. Linear movers use conservative
     /// advancement; rotating boxes/capsules use the fully analytic swept-volume
@@ -2749,6 +3096,16 @@ impl BuiltinPhysicsEngine {
                 radius,
                 half_height,
             } => ray_capsule_hit(origin, direction, *radius, *half_height, max_dist),
+            Shape::Cylinder {
+                radius,
+                half_height,
+            } => ray_cylinder_hit(origin, direction, *radius, *half_height, max_dist),
+            Shape::Cone {
+                radius,
+                half_height,
+            } => ray_cone_hit(origin, direction, *radius, *half_height, max_dist),
+            Shape::ConvexHull(hull) => ray_hull_hit(origin, direction, hull, max_dist),
+            Shape::Heightfield(hf) => ray_heightfield_hit(origin, direction, hf, max_dist),
         }?;
         let (distance, local_normal) = hit;
         let point = ray.point_at(distance);
@@ -2778,6 +3135,17 @@ fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::Sphere { radius } => *radius,
         Shape::Box { half_extents } => half_extents.min_element(),
         Shape::Capsule { radius, .. } => *radius,
+        Shape::Cylinder {
+            radius,
+            half_height,
+        } => radius.min(*half_height),
+        // The apex is a point: arm CCD early (half the box rule).
+        Shape::Cone {
+            radius,
+            half_height,
+        } => 0.5 * radius.min(*half_height),
+        Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
+        Shape::Heightfield(hf) => 0.5 * hf.cell,
     }
 }
 
@@ -2789,6 +3157,20 @@ fn shape_max_radius(shape: &Shape) -> f32 {
             radius,
             half_height,
         } => half_height + radius,
+        Shape::Cylinder {
+            radius,
+            half_height,
+        } => (radius * radius + half_height * half_height).sqrt(),
+        Shape::Cone {
+            radius,
+            half_height,
+        } => (radius * radius + half_height * half_height).sqrt(),
+        Shape::ConvexHull(hull) => hull
+            .vertices
+            .iter()
+            .map(|v| v.length())
+            .fold(0.0f32, f32::max),
+        Shape::Heightfield(hf) => hf.local_extents().length() + hf.local_center().length(),
     }
 }
 
@@ -2862,6 +3244,119 @@ fn swept_shape_overlaps(
             distance.dist <= 1e-5
         }
     }
+}
+
+/// Signed separation between a mover at `mover_pos` (frozen orientation
+/// `mover_rot`) and a target. Box-box uses the SAT separation — the
+/// vertex/edge distance oracle is unsigned and cannot see overlap, so the
+/// shared `cast_shape` is blind to box-vs-box crossings and the kinematic
+/// sweep advances on this instead. Every other pair uses the exact signed
+/// distance (same oracle as the linear cast). Positive = separated.
+fn sweep_gap(
+    mover_shape: &Shape,
+    mover_pos: Vec3,
+    mover_rot: Quat,
+    target: distance::ShapeRef<'_>,
+) -> f32 {
+    if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
+        (mover_shape, target.shape)
+    {
+        let aa = [
+            mover_rot * Vec3::X,
+            mover_rot * Vec3::Y,
+            mover_rot * Vec3::Z,
+        ];
+        let ba = [
+            target.rot * Vec3::X,
+            target.rot * Vec3::Y,
+            target.rot * Vec3::Z,
+        ];
+        // Separation = max over axes of the negated overlap (Ericson,
+        // RTCD §5.1.9): positive while apart, negative while penetrating.
+        let mut sep = f32::MIN;
+        for u in aa.into_iter().chain(ba) {
+            let overlap = obb_overlap_on(mover_pos, *ha, mover_rot, target.pos, *hb, target.rot, u);
+            sep = sep.max(-overlap);
+        }
+        for ai in &aa {
+            for bi in &ba {
+                let c = ai.cross(*bi);
+                if c.length() < 1e-3 {
+                    continue;
+                }
+                let overlap = obb_overlap_on(
+                    mover_pos,
+                    *ha,
+                    mover_rot,
+                    target.pos,
+                    *hb,
+                    target.rot,
+                    c.normalize(),
+                );
+                sep = sep.max(-overlap);
+            }
+        }
+        return sep;
+    }
+    distance::shape_distance(
+        distance::ShapeRef {
+            shape: mover_shape,
+            pos: mover_pos,
+            rot: mover_rot,
+        },
+        target,
+    )
+    .dist
+}
+
+/// Conservative advancement of one kinematic step segment against one
+/// target. Tunnel-proof: every advance is bounded by the exact signed gap
+/// ([`sweep_gap`]), so no feature can be crossed mid-step; rotation is
+/// frozen, like the linear cast. Returns the absolute travel distance and
+/// the sweep normal (pointing back toward the mover, `cast_shape`
+/// convention). Touching at t=0 reports no hit — resting contact is the
+/// discrete solver's job.
+fn kinematic_cast(
+    mover_shape: &Shape,
+    mover_rot: Quat,
+    from: Vec3,
+    displacement: Vec3,
+    target: distance::ShapeRef<'_>,
+) -> Option<(f32, Vec3)> {
+    let len = displacement.length();
+    if len < 1e-9 {
+        return None;
+    }
+    let dir = displacement / len;
+    const TOUCH: f32 = 1e-3;
+    const MAX_ITERS: usize = 32;
+    let mut t = 0.0f32;
+    for _ in 0..MAX_ITERS {
+        let pos = from + dir * t;
+        let gap = sweep_gap(mover_shape, pos, mover_rot, target);
+        if gap <= TOUCH {
+            if t > 0.0 {
+                // Witnesses at the touching pose: near-zero gap, so even the
+                // unsigned OBB oracle reads a valid contact frame here.
+                let d = distance::shape_distance(
+                    distance::ShapeRef {
+                        shape: mover_shape,
+                        pos,
+                        rot: mover_rot,
+                    },
+                    target,
+                );
+                let n = (d.point_a - d.point_b).normalize_or(-dir);
+                return Some((t, n));
+            }
+            return None;
+        }
+        t += gap - TOUCH * 0.5;
+        if t >= len {
+            break;
+        }
+    }
+    None
 }
 
 /// Energy-neutral cap for a spin correction `delta`: walk back along it to
@@ -3389,8 +3884,357 @@ fn ray_capsule_hit(
     best
 }
 
+/// Ray vs a flat-capped cylinder along local +Y (local frame): curved wall
+/// quadratic plus two cap disks. Returns distance and the local normal.
+fn ray_cylinder_hit(
+    origin: Vec3,
+    direction: Vec3,
+    radius: f32,
+    half_height: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let mut best: Option<(f32, Vec3)> = None;
+    // Curved wall: |o.xz + t*d.xz|^2 = r^2.
+    let a = direction.x * direction.x + direction.z * direction.z;
+    if a > 1e-12 {
+        let half_b = origin.x * direction.x + origin.z * direction.z;
+        let c = origin.x * origin.x + origin.z * origin.z - radius * radius;
+        let disc = half_b * half_b - a * c;
+        if disc >= 0.0 {
+            let root = disc.sqrt();
+            for t in [(-half_b - root) / a, (-half_b + root) / a] {
+                if t >= 0.0 && t <= max_dist {
+                    let y = origin.y + direction.y * t;
+                    if y.abs() <= half_height {
+                        let n =
+                            Vec3::new(origin.x + direction.x * t, 0.0, origin.z + direction.z * t)
+                                .normalize_or(Vec3::X);
+                        best = keep_closest_hit(best, Some((t, n)));
+                        break; // Nearer root first.
+                    }
+                }
+            }
+        }
+    }
+    // Caps: planes y = ±half_height with a radial check.
+    if direction.y.abs() > 1e-12 {
+        for (plane_y, n) in [(half_height, Vec3::Y), (-half_height, Vec3::NEG_Y)] {
+            let t = (plane_y - origin.y) / direction.y;
+            if t >= 0.0 && t <= max_dist {
+                let px = origin.x + direction.x * t;
+                let pz = origin.z + direction.z * t;
+                if px * px + pz * pz <= radius * radius {
+                    best = keep_closest_hit(best, Some((t, n)));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Ray vs a solid cone (apex `+half_height`, base disk at `-half_height`,
+/// local frame): cone-surface quadratic plus the base cap. The apex hit
+/// reports +Y (the tip direction) — the tip normal is undefined.
+fn ray_cone_hit(
+    origin: Vec3,
+    direction: Vec3,
+    radius: f32,
+    half_height: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    // Surface: x^2 + z^2 = k^2 * (h - y)^2, k = r / (2h).
+    let k = if half_height > 1e-9 {
+        radius / (2.0 * half_height)
+    } else {
+        return None;
+    };
+    let mut best: Option<(f32, Vec3)> = None;
+    let a =
+        direction.x * direction.x + direction.z * direction.z - k * k * direction.y * direction.y;
+    let h = k * k * (half_height - origin.y) * direction.y
+        + origin.x * direction.x
+        + origin.z * direction.z;
+    let c = origin.x * origin.x + origin.z * origin.z
+        - k * k * (half_height - origin.y) * (half_height - origin.y);
+    // Quadratic a*t^2 + 2*h*t + c = 0 (linear fallback when a ~ 0).
+    let mut roots = [0.0f32; 2];
+    let n_roots = if a.abs() > 1e-12 {
+        let disc = h * h - a * c;
+        if disc < 0.0 {
+            0
+        } else {
+            let root = disc.sqrt();
+            roots = [(-h - root) / a, (-h + root) / a];
+            2
+        }
+    } else if h.abs() > 1e-12 {
+        roots = [-c / (2.0 * h), f32::INFINITY];
+        1
+    } else {
+        0
+    };
+    for t in roots.into_iter().take(n_roots) {
+        if t >= 0.0 && t <= max_dist {
+            let y = origin.y + direction.y * t;
+            if y >= -half_height && y <= half_height {
+                let px = origin.x + direction.x * t;
+                let pz = origin.z + direction.z * t;
+                // Gradient of x^2+z^2-k^2*(h-y)^2, outward.
+                let n = Vec3::new(px, k * k * (half_height - y), pz).normalize_or(Vec3::Y);
+                best = keep_closest_hit(best, Some((t, n)));
+            }
+        }
+    }
+    // Base cap disk at y = -half_height.
+    if direction.y.abs() > 1e-12 {
+        let t = (-half_height - origin.y) / direction.y;
+        if t >= 0.0 && t <= max_dist {
+            let px = origin.x + direction.x * t;
+            let pz = origin.z + direction.z * t;
+            if px * px + pz * pz <= radius * radius {
+                best = keep_closest_hit(best, Some((t, Vec3::NEG_Y)));
+            }
+        }
+    }
+    best
+}
+
+/// Ray vs a convex hull (local frame): slab test over the triangulated
+/// faces. Empty faces (over-cap hulls) report no hit — documented in
+/// [`crate::shape::ConvexHull`].
+fn ray_hull_hit(
+    origin: Vec3,
+    direction: Vec3,
+    hull: &crate::shape::ConvexHull,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    const EPS: f32 = 1e-9;
+    let mut best: Option<(f32, Vec3)> = None;
+    for f in &hull.faces {
+        let (a, b, c) = (
+            hull.vertices[f[0] as usize],
+            hull.vertices[f[1] as usize],
+            hull.vertices[f[2] as usize],
+        );
+        let n = (b - a).cross(c - a);
+        let denom = n.dot(direction);
+        if denom.abs() < EPS {
+            continue;
+        }
+        let t = n.dot(a - origin) / denom;
+        if t < 0.0 || t > max_dist {
+            continue;
+        }
+        let p = origin + direction * t;
+        // Inside-triangle edge tests (same winding as the outward face).
+        let e0 = b - a;
+        let e1 = c - b;
+        let e2 = a - c;
+        if e0.cross(p - a).dot(n) < -EPS
+            || e1.cross(p - b).dot(n) < -EPS
+            || e2.cross(p - c).dot(n) < -EPS
+        {
+            continue;
+        }
+        let normal = if denom < 0.0 {
+            n.normalize()
+        } else {
+            -n.normalize()
+        };
+        best = keep_closest_hit(best, Some((t, normal)));
+    }
+    best
+}
+
+/// Ray vs a heightfield (local frame): Amanatides–Woo DDA over the grid,
+/// each visited cell tested as a solid column box (the union entry is the
+/// minimum box entry — a point inside another box would contradict
+/// minimality). Bounded walk, deterministic order.
+fn ray_heightfield_hit(
+    origin: Vec3,
+    direction: Vec3,
+    hf: &crate::shape::Heightfield,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    if hf.rows == 0
+        || hf.cols == 0
+        || !hf.cell.is_sign_positive()
+        || hf.heights.len() != hf.rows * hf.cols
+        || max_dist < 0.0
+    {
+        return None;
+    }
+    // Local grid coordinates (float cell indices).
+    let to_cell = |x: f32, n: usize| x / hf.cell + (n - 1) as f32 * 0.5;
+    let mut cx = to_cell(origin.x, hf.cols).floor() as isize;
+    let mut cz = to_cell(origin.z, hf.rows).floor() as isize;
+    let step_x = if direction.x > 0.0 {
+        1
+    } else if direction.x < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let step_z = if direction.z > 0.0 {
+        1
+    } else if direction.z < 0.0 {
+        -1
+    } else {
+        0
+    };
+    // Parametric distance to the next cell boundary per axis.
+    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let mut t_max_x = if step_x == 0 {
+        f32::INFINITY
+    } else {
+        let boundary = x_origin + (if step_x > 0 { cx + 1 } else { cx }) as f32 * hf.cell;
+        (boundary - origin.x) / direction.x
+    };
+    let mut t_max_z = if step_z == 0 {
+        f32::INFINITY
+    } else {
+        let boundary = z_origin + (if step_z > 0 { cz + 1 } else { cz }) as f32 * hf.cell;
+        (boundary - origin.z) / direction.z
+    };
+    let t_delta_x = if step_x == 0 {
+        f32::INFINITY
+    } else {
+        (hf.cell / direction.x).abs()
+    };
+    let t_delta_z = if step_z == 0 {
+        f32::INFINITY
+    } else {
+        (hf.cell / direction.z).abs()
+    };
+    let (y_min, _) = hf.height_range();
+    // Bounded walk: at most one full grid diagonal plus margin.
+    let max_steps = 4 * (hf.rows + hf.cols) + 8;
+    let mut best: Option<(f32, Vec3)> = None;
+    // Degenerate ray (straight down the Y axis): a single cell owns the
+    // whole walk — test it and return.
+    if step_x == 0 && step_z == 0 {
+        if cx >= 0 && cx < hf.cols as isize && cz >= 0 && cz < hf.rows as isize {
+            let h = hf.heights[cz as usize * hf.cols + cx as usize].max(y_min);
+            let bmin = Vec3::new(
+                x_origin + cx as f32 * hf.cell,
+                y_min,
+                z_origin + cz as f32 * hf.cell,
+            );
+            let bmax = Vec3::new(bmin.x + hf.cell, h, bmin.z + hf.cell);
+            return ray_aabb_hit(origin, direction, bmin, bmax, max_dist);
+        }
+        return None;
+    }
+    for _ in 0..max_steps {
+        if cx >= 0 && cx < hf.cols as isize && cz >= 0 && cz < hf.rows as isize {
+            let h = hf.heights[cz as usize * hf.cols + cx as usize].max(y_min);
+            let bmin = Vec3::new(
+                x_origin + cx as f32 * hf.cell,
+                y_min,
+                z_origin + cz as f32 * hf.cell,
+            );
+            let bmax = Vec3::new(bmin.x + hf.cell, h, bmin.z + hf.cell);
+            if let Some((t, n)) = ray_aabb_hit(origin, direction, bmin, bmax, max_dist) {
+                best = keep_closest_hit(best, Some((t, n)));
+                // A hit nearer than the next cell boundary is final: later
+                // cells start farther along the ray.
+                if t <= t_max_x.min(t_max_z) {
+                    break;
+                }
+            }
+        }
+        // Advance to the next cell.
+        if t_max_x < t_max_z {
+            if t_max_x > max_dist && best.is_some() {
+                break;
+            }
+            cx += step_x;
+            t_max_x += t_delta_x;
+        } else {
+            if t_max_z > max_dist && best.is_some() {
+                break;
+            }
+            cz += step_z;
+            t_max_z += t_delta_z;
+        }
+        if t_max_x > max_dist && t_max_z > max_dist {
+            break;
+        }
+        if cx < -1 || cx > hf.cols as isize || cz < -1 || cz > hf.rows as isize {
+            break;
+        }
+    }
+    best
+}
+
+/// Ray vs an axis-aligned box given by corners (local frame). Returns
+/// distance and the entry-face normal.
+fn ray_aabb_hit(
+    origin: Vec3,
+    direction: Vec3,
+    box_min: Vec3,
+    box_max: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let mut near = 0.0f32;
+    let mut far = max_dist;
+    let mut normal = Vec3::X;
+    for (o, d, mn, mx, neg, pos) in [
+        (
+            origin.x,
+            direction.x,
+            box_min.x,
+            box_max.x,
+            Vec3::NEG_X,
+            Vec3::X,
+        ),
+        (
+            origin.y,
+            direction.y,
+            box_min.y,
+            box_max.y,
+            Vec3::NEG_Y,
+            Vec3::Y,
+        ),
+        (
+            origin.z,
+            direction.z,
+            box_min.z,
+            box_max.z,
+            Vec3::NEG_Z,
+            Vec3::Z,
+        ),
+    ] {
+        if d.abs() <= 1e-12 {
+            if o < mn || o > mx {
+                return None;
+            }
+            continue;
+        }
+        let (t0, t1, n0) = if d > 0.0 {
+            ((mn - o) / d, (mx - o) / d, neg)
+        } else {
+            ((mx - o) / d, (mn - o) / d, pos)
+        };
+        if t0 > near {
+            near = t0;
+            normal = n0;
+        }
+        far = far.min(t1);
+        if near > far {
+            return None;
+        }
+    }
+    Some((near, normal))
+}
+
 impl PhysicsEngine for BuiltinPhysicsEngine {
     fn step(&mut self, dt: f32) {
+        // Driver snapshot FIRST (even on the fast path below): the kinematic
+        // step displacement must span exactly one step, and a zero-velocity
+        // teleport still counts as driven motion for the wake check.
+        let teleported_kinematic = self.snapshot_driver_motion();
         // G7: a fully sleeping world with no trigger state cannot change —
         // skip the whole substep loop (broadphase re-sort included) instead
         // of paying to rediscover that nothing moves. Trigger-only worlds
@@ -3403,10 +4247,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // Driven kinematics are never asleep by construction: a MOVING one
         // (nonzero velocity field) keeps the world awake, otherwise a
         // kinematic platform would ghost through sleepers with the loop
-        // skipped. Parked kinematics (zero velocity) cost nothing. Driver
-        // contract (Box2D parity): a teleported body MUST carry the matching
-        // velocity field — zero-velocity teleports are invisible to wake,
-        // margins and CCD alike.
+        // skipped. Parked kinematics (zero velocity, unmoved) cost nothing.
+        // Driver contract: above-gate teleports count as driven motion (the
+        // implied motion is installed into the fields for the step), and any
+        // pose change counts via `teleported_kinematic` below.
         let has_driven_kinematic = self.bodies.iter().any(|b| {
             b.body_type == BodyType::Kinematic
                 && (b.velocity.length_squared() + b.angular_velocity.length_squared() > 0.0)
@@ -3414,6 +4258,7 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         let has_trigger = self.bodies.iter().any(|body| body.is_trigger);
         if !has_awake_dynamic
             && !has_driven_kinematic
+            && !teleported_kinematic
             && !has_trigger
             && self.trigger_pairs.is_empty()
         {
@@ -3424,6 +4269,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             return;
         }
         let eff_substeps_before_budget = self.effective_substeps(dt);
+        // Above-gate teleports become the implied motion in the kinematic
+        // fields for the rest of the step (margins, CCD, contacts); the
+        // driver values come back at step end.
+        self.apply_driver_velocity(dt);
         // Diagnostics: contact-manifold partners per body from the last
         // Reuse scratch buffers across substeps; keep capacity across frames.
         self.scratch_manifolds.clear();
@@ -3434,9 +4283,16 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // tiled 10k case: 70ms -> 6ms. Narrow still per substep because
         // contacts depend on moving poses, but candidate list is reused.
         let t0 = Instant::now();
-        self.broadphase.update(&self.bodies, dt);
+        self.broadphase
+            .update(&self.bodies, dt, Some(&self.prev_pose));
         let broad_phase_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
+        // Kinematic sweep BEFORE the substep loop: teleported/fast drivers
+        // cast their step segment against dynamics, wake victims and
+        // transfer the normal approach. Runs on final driver poses, so the
+        // woken victims join the substep solves below with adjusted
+        // velocities.
+        self.solve_kinematic_sweep(dt);
         // Worst-case budget (deterministic): shed substeps against the known
         // pair count — never pairs. `timing.substeps` records the applied
         // count; the shed count is kept in `last_shed` for observability.
@@ -3530,6 +4386,12 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     sorted_pairs.copy_from_slice(&broad_active);
                 }
             } else {
+                // Jointed pairs (class 0) are skipped: their slots stay
+                // holes, so the skipped count must become bucket boundary
+                // S_0 below — otherwise substep 0 reads the holes as (0, 0)
+                // self-pairs (a hard crash in the island solver whenever
+                // body 0 is dynamic).
+                let mut skipped = 0;
                 for &(a, b) in &broad_active {
                     let c = if self.joint_pairs.contains(&(a, b)) {
                         0
@@ -3539,12 +4401,14 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                         eff
                     };
                     if c == 0 {
+                        skipped += 1;
                         continue;
                     }
                     let w = bucket_edges[c];
                     sorted_pairs[w] = (a, b);
                     bucket_edges[c] = w + 1;
                 }
+                bucket_edges[0] = skipped;
             }
         }
         // Scheduler narrowphase shard pool, taken once for the whole substep
@@ -3642,7 +4506,8 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // it); only the overlap detect + reconcile is gated — triggerless
         // worlds skip it instead of scanning every pair for nothing.
         let t_trigger = Instant::now();
-        self.broadphase.update(&self.bodies, 0.0);
+        self.broadphase
+            .update(&self.bodies, 0.0, Some(&self.prev_pose));
         if has_trigger || !self.trigger_pairs.is_empty() {
             let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
             let previous_triggers = std::mem::take(&mut self.trigger_pairs);
@@ -3708,6 +4573,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         self.contact_events
             .sort_by_key(|e| (e.body_a.min(e.body_b), e.body_a.max(e.body_b)));
         self.last_step_timing.trigger_ms += t_trigger.elapsed().as_secs_f64() * 1000.0;
+        // Hand the velocity fields back to the driver: solver impulses must
+        // never corrupt driver-owned kinematic state across steps. Then
+        // refresh the step-start baseline for the next step's teleport cover.
+        self.restore_driver_velocity();
+        self.sync_prev_pose();
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
@@ -3722,6 +4592,10 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         // to them from step one). Kinematics stay awake — driven bodies
         // must wake sleepers on contact, never ghost through them.
         let born_asleep = body.body_type == BodyType::Static;
+        self.prev_pose.push(PrevPose {
+            pos: body.position,
+            rot: body.orientation,
+        });
         self.bodies.push(body);
         self.island.push(island_id);
         self.asleep.push(born_asleep);
@@ -3756,6 +4630,25 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             self.bodies.swap_remove(handle);
             self.island.swap_remove(handle);
             self.asleep.swap_remove(handle);
+            self.prev_pose.swap_remove(handle);
+            // Drop joints touching the removed body (gears die with their
+            // referenced joints inside the rebuild — dangling joint indices
+            // are never kept); remap the swapped-in body's index in the
+            // survivors first.
+            for j in self.joints.iter_mut() {
+                if j.body_a == last {
+                    j.body_a = handle;
+                }
+                if j.body_b == last {
+                    j.body_b = handle;
+                }
+            }
+            let drop_j: Vec<bool> = self
+                .joints
+                .iter()
+                .map(|j| j.body_a == handle || j.body_b == handle)
+                .collect();
+            rebuild_joints(&mut self.joints, &mut self.joint_pairs, drop_j);
             // Body handles are identities: the swap remaps the tail body's
             // index, so contact state keyed by handles is no longer valid.
             // Drop it (Box2D parity: events may invalidate on destroy) —
@@ -3765,38 +4658,19 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // swap_remove shifts the last body's index; warm-start keys are
             // body indices, so the cache is no longer valid.
             self.warm_impulses.clear();
-            // Drop joints touching the removed body; remap the swapped-in
-            // body's index in the survivors.
-            self.joints.retain_mut(|j| {
-                if j.body_a == handle || j.body_b == handle {
-                    return false;
-                }
-                if j.body_a == last {
-                    j.body_a = handle;
-                }
-                if j.body_b == last {
-                    j.body_b = handle;
-                }
-                true
-            });
-            self.joint_pairs = self
-                .joints
-                .iter()
-                .map(|j| (j.body_a.min(j.body_b), j.body_a.max(j.body_b)))
-                .collect();
         }
     }
 
     fn add_joint(
         &mut self,
-        body_a: BodyHandle,
-        body_b: BodyHandle,
+        mut body_a: BodyHandle,
+        mut body_b: BodyHandle,
         kind: JointKind,
     ) -> Option<JointHandle> {
         if body_a == body_b || body_a >= self.bodies.len() || body_b >= self.bodies.len() {
             return None;
         }
-        // Normalize the hinge/slide axes once, at creation.
+        // Normalize the hinge/slide/suspension axes once, at creation.
         let kind = match kind {
             JointKind::Revolute {
                 local_anchor_a,
@@ -3828,8 +4702,64 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 limit,
                 motor,
             },
+            JointKind::Wheel {
+                local_anchor_a,
+                local_anchor_b,
+                local_suspension_a,
+                local_suspension_b,
+                local_axle_a,
+                local_axle_b,
+                suspension,
+                motor,
+            } => {
+                // Suspension normalized; each axle orthogonalized against
+                // its own suspension (a parallel axle gets a deterministic
+                // perpendicular fallback, never a NaN).
+                let sa = local_suspension_a.normalize_or(Vec3::Y);
+                let sb = local_suspension_b.normalize_or(Vec3::Y);
+                JointKind::Wheel {
+                    local_anchor_a,
+                    local_anchor_b,
+                    local_suspension_a: sa,
+                    local_suspension_b: sb,
+                    local_axle_a: orthogonalize_axle(sa, local_axle_a),
+                    local_axle_b: orthogonalize_axle(sb, local_axle_b),
+                    suspension,
+                    motor,
+                }
+            }
             other => other,
         };
+        // Gear validation: both references must exist and coordinate a
+        // revolute or prismatic joint. The gear holds no bodies of its own —
+        // mirror the first bodies of the referenced joints for the
+        // sleep-skip heuristic (island union resolves all four).
+        let is_gear = matches!(kind, JointKind::Gear { .. });
+        if let JointKind::Gear {
+            joint_a,
+            joint_b,
+            ratio,
+        } = &kind
+        {
+            if !ratio.is_finite() {
+                return None;
+            }
+            let (Some(ja), Some(jb)) = (self.joints.get(*joint_a), self.joints.get(*joint_b))
+            else {
+                return None;
+            };
+            if !matches!(
+                ja.kind,
+                JointKind::Revolute { .. } | JointKind::Prismatic { .. }
+            ) || !matches!(
+                jb.kind,
+                JointKind::Revolute { .. } | JointKind::Prismatic { .. }
+            ) {
+                return None;
+            }
+            body_a = ja.body_a;
+            body_b = jb.body_a;
+        }
         // A new joint on a sleeping island changes its constraint set — wake
         // it so the joint state can settle coherently.
         for h in [body_a, body_b] {
@@ -3839,25 +4769,41 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 self.wake_island(h);
             }
         }
-        self.joint_pairs
-            .insert((body_a.min(body_b), body_a.max(body_b)));
+        // Gears coordinate other joints instead of constraining a body pair —
+        // the underlying joints already carry the no-collide entry.
+        if !is_gear {
+            self.joint_pairs
+                .insert((body_a.min(body_b), body_a.max(body_b)));
+        }
         // Limits/motors measure travel from the assembly pose (Box2D
         // `m_referenceAngle`): capture the hinge twist before the first step.
+        // Wheels capture the same twist about their axle for the motor.
         let reference_angle = match &kind {
             JointKind::Revolute { local_axis_a, .. } => crate::engine::joints::hinge_twist(
                 self.bodies[body_a].orientation,
                 self.bodies[body_b].orientation,
                 *local_axis_a,
             ),
-            JointKind::Ball { .. } | JointKind::Prismatic { .. } => 0.0,
+            JointKind::Wheel { local_axle_a, .. } => crate::engine::joints::hinge_twist(
+                self.bodies[body_a].orientation,
+                self.bodies[body_b].orientation,
+                *local_axle_a,
+            ),
+            _ => 0.0,
         };
-        // Prismatic limits measure anchor separation along the slide axis
-        // from the assembly pose.
+        // Prismatic limits and the wheel spring measure anchor separation
+        // along the slide/suspension axis from the assembly pose.
         let reference_length = match &kind {
             JointKind::Prismatic {
                 local_anchor_a,
                 local_anchor_b,
                 local_axis_a,
+                ..
+            }
+            | JointKind::Wheel {
+                local_anchor_a,
+                local_anchor_b,
+                local_suspension_a: local_axis_a,
                 ..
             } => {
                 let wa = (self.bodies[body_a].orientation * *local_axis_a).normalize_or(Vec3::Z);
@@ -3865,30 +4811,102 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 let rb = self.bodies[body_b].orientation * *local_anchor_b;
                 ((self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra)).dot(wa)
             }
-            JointKind::Ball { .. } | JointKind::Revolute { .. } => 0.0,
+            _ => 0.0,
+        };
+        // The distance rod keeps its assembly anchor distance; the gear
+        // captures its constraint constant.
+        let reference_distance = match &kind {
+            JointKind::Distance {
+                local_anchor_a,
+                local_anchor_b,
+            } => {
+                let ra = self.bodies[body_a].orientation * *local_anchor_a;
+                let rb = self.bodies[body_b].orientation * *local_anchor_b;
+                ((self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra)).length()
+            }
+            JointKind::Gear {
+                joint_a,
+                joint_b,
+                ratio,
+            } => {
+                let ca =
+                    crate::engine::joints::joint_coordinate(&self.bodies, &self.joints[*joint_a])
+                        .unwrap_or(0.0);
+                let cb =
+                    crate::engine::joints::joint_coordinate(&self.bodies, &self.joints[*joint_b])
+                        .unwrap_or(0.0);
+                ca + ratio * cb
+            }
+            _ => 0.0,
+        };
+        // Fixed, wheel and six-DOF angular locks measure drift from the
+        // assembly relative orientation.
+        let reference_quat = match &kind {
+            JointKind::Fixed { .. } | JointKind::Wheel { .. } | JointKind::SixDof { .. } => {
+                self.bodies[body_a].orientation.conjugate() * self.bodies[body_b].orientation
+            }
+            _ => Quat::IDENTITY,
+        };
+        // Fixed, wheel and six-DOF locked-axis position steps measure the
+        // anchor separation from the assembly one (in A's frame), so offset
+        // assemblies hold instead of collapsing into coincidence.
+        let reference_anchor_delta = match &kind {
+            JointKind::Fixed {
+                local_anchor_a,
+                local_anchor_b,
+            }
+            | JointKind::Wheel {
+                local_anchor_a,
+                local_anchor_b,
+                ..
+            }
+            | JointKind::SixDof {
+                local_anchor_a,
+                local_anchor_b,
+                ..
+            } => {
+                let ra = self.bodies[body_a].orientation * *local_anchor_a;
+                let rb = self.bodies[body_b].orientation * *local_anchor_b;
+                let delta =
+                    (self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra);
+                self.bodies[body_a].orientation.conjugate() * delta
+            }
+            _ => Vec3::ZERO,
         };
         let mut joint = Joint::new(body_a, body_b, kind);
         joint.reference_angle = reference_angle;
         joint.reference_length = reference_length;
+        joint.reference_distance = reference_distance;
+        joint.reference_quat = reference_quat;
+        joint.reference_anchor_delta = reference_anchor_delta;
         self.joints.push(joint);
         Some(self.joints.len() - 1)
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
-        if handle < self.joints.len() {
-            let removed = self.joints.swap_remove(handle);
-            // The pair may still be covered by another joint between the
-            // same bodies — only forget it when no joint references it.
-            let (a, b) = (removed.body_a, removed.body_b);
-            let key = (a.min(b), a.max(b));
-            if !self
-                .joints
-                .iter()
-                .any(|j| (j.body_a.min(j.body_b), j.body_a.max(j.body_b)) == key)
+        if handle >= self.joints.len() {
+            return;
+        }
+        // Joint indices shift on removal, so gear references (joint indices)
+        // are remapped through a dense rebuild: the removed joint goes, gears
+        // pointing at it go with it (dangling references are never kept),
+        // survivors keep pointing at the same joints.
+        let old_len = self.joints.len();
+        let mut drop_j = vec![false; old_len];
+        drop_j[handle] = true;
+        for (oi, j) in self.joints.iter().enumerate() {
+            if drop_j[oi] {
+                continue;
+            }
+            if let JointKind::Gear {
+                joint_a, joint_b, ..
+            } = &j.kind
+                && (*joint_a == handle || *joint_b == handle)
             {
-                self.joint_pairs.remove(&key);
+                drop_j[oi] = true;
             }
         }
+        rebuild_joints(&mut self.joints, &mut self.joint_pairs, drop_j);
     }
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
@@ -3954,7 +4972,9 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::joint::{PrismaticLimit, PrismaticMotor};
+    use crate::joint::{
+        AxisConfig, PrismaticLimit, PrismaticMotor, RevoluteMotor, WheelSuspension,
+    };
     use glam::{Mat3, Mat4};
 
     #[test]
@@ -5612,8 +6632,9 @@ mod tests {
     /// fast kinematic wall (10 m/s) at full 12 substeps. The speculative
     /// margin provably covers travel (margin >= v*dt always), so the
     /// discrete path already carries the victim without tunneling (rode
-    /// 7.5 m here) — a dedicated kinematic sweep would only polish
-    /// response quality, not close a capability gap.
+    /// 7.5 m here) — the kinematic sweep (`solve_kinematic_sweep`) only
+    /// answers for larger per-step segments (teleports), not here: each
+    /// 1/6 m step sits below the travel gate.
     #[test]
     fn fast_kinematic_plow_carries_thin_sleeper() {
         let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
@@ -5637,6 +6658,199 @@ mod tests {
         }
         let vx = physics.get_body(victim).unwrap().position.x;
         assert!(vx > 1.0, "victim must ride the plow, not tunnel (x={vx})");
+    }
+
+    /// `kinematic_cast` unit gate: a box wall sweeping 1 m across a thin
+    /// box victim reports the crossing the shared `cast_shape` cannot see
+    /// (the OBB distance oracle is unsigned). Pins hit distance and normal.
+    #[test]
+    fn kinematic_cast_finds_box_box_crossing() {
+        use crate::distance::ShapeRef;
+        let wall = Shape::Box {
+            half_extents: Vec3::new(0.5, 1.0, 1.0),
+        };
+        let victim = Shape::Box {
+            half_extents: Vec3::new(0.02, 0.5, 0.5),
+        };
+        let target = ShapeRef {
+            shape: &victim,
+            pos: Vec3::ZERO,
+            rot: Quat::IDENTITY,
+        };
+        // Start gap is the face-to-face 0.48 m (signed SAT separation).
+        let gap = sweep_gap(&wall, Vec3::new(-1.0, 0.0, 0.0), Quat::IDENTITY, target);
+        assert!((gap - 0.48).abs() < 1e-4, "signed start gap, got {gap}");
+        let (t, n) = kinematic_cast(
+            &wall,
+            Quat::IDENTITY,
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            target,
+        )
+        .expect("wall front must reach the victim mid-segment");
+        assert!((t - 0.48).abs() < 0.01, "hit travel, got {t}");
+        assert!(
+            (n - Vec3::NEG_X).length() < 1e-3,
+            "normal back toward the mover, got {n}"
+        );
+        // Touching at t=0 is resting contact, not a sweep hit.
+        assert!(
+            kinematic_cast(
+                &wall,
+                Quat::IDENTITY,
+                Vec3::new(-0.52, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                target,
+            )
+            .is_none(),
+            "starting contact must not report"
+        );
+    }
+
+    /// Kinematic sweep, pass-through case: a wall TELEPORTED 1 m per step
+    /// with a zero velocity field crosses a thin sleeping victim. The
+    /// discrete phase can never see it (no end pose overlaps within any
+    /// margin), so without the sweep the victim would stay asleep at x=0 —
+    /// this test fails on the pre-sweep code (negative control verified by
+    /// stashing the sweep). With the sweep the victim wakes and takes the
+    /// normal approach one-shot, while the driver pose stays owned by the
+    /// driver.
+    #[test]
+    fn teleported_kinematic_wall_cannot_tunnel_thin_sleeper() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let victim = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.02, 0.5, 0.5),
+            1.0,
+        ));
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(victim), "victim must sleep in zero-g");
+        let mut wall = RigidBody::new_box(Vec3::new(-3.0, 0.0, 0.0), Vec3::new(0.5, 1.0, 1.0), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        // Zero velocity field on purpose: the driver teleports only.
+        let wall_h = physics.add_body(wall);
+        for _ in 0..6 {
+            physics.get_body_mut(wall_h).unwrap().position.x += 1.0;
+            physics.step(1.0 / 60.0);
+        }
+        // Driver ownership: the sweep never moves the mover.
+        let wall_x = physics.get_body(wall_h).unwrap().position.x;
+        assert!(
+            (wall_x - 3.0).abs() < 1e-4,
+            "sweep must not move the driver (x={wall_x})"
+        );
+        assert!(
+            !physics.is_asleep(victim),
+            "teleport pass-through must wake the victim"
+        );
+        let v = physics.get_body(victim).unwrap();
+        assert!(
+            v.position.x > 1.0,
+            "victim must be carried forward, not left at x={}",
+            v.position.x
+        );
+        assert!(
+            v.velocity.x > 0.0,
+            "victim must take the normal approach (vx={})",
+            v.velocity.x
+        );
+    }
+
+    /// Kinematic sweep, below-gate case (response parity): a SMALL teleport
+    /// that ends overlapping a resting victim settles positionally — no
+    /// sweep, no temp velocity, no launch. A zero-velocity nudge into rest
+    /// imparts no momentum (Box2D parity); the penetration backstop still
+    /// wakes the victim.
+    #[test]
+    fn small_teleport_into_rest_settles_without_launch() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let victim = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(victim), "victim must sleep in zero-g");
+        let mut wall =
+            RigidBody::new_box(Vec3::new(-1.08, 0.5, 0.0), Vec3::new(0.5, 1.0, 1.0), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        let wall_h = physics.add_body(wall);
+        // 10 cm nudge (below the 25 cm travel gate) ending 2 cm deep in the
+        // victim's side (wall front at -0.48 vs victim back at -0.5).
+        physics.get_body_mut(wall_h).unwrap().position.x = -0.98;
+        for _ in 0..5 {
+            physics.step(1.0 / 60.0);
+        }
+        let v = physics.get_body(victim).unwrap();
+        assert!(
+            !physics.is_asleep(victim),
+            "overlap must wake the victim (penetration backstop)"
+        );
+        assert!(
+            v.velocity.length() < 1.0,
+            "resting nudge must not launch the victim (v={})",
+            v.velocity.length()
+        );
+    }
+
+    /// Kinematic sweep, above-gate case (impact parity): a LARGE teleport
+    /// ending inside the victim is the honest equivalent of a fast-wall
+    /// impact at the implied speed — the victim takes the hit. This pins the
+    /// gate boundary together with `small_teleport_into_rest_settles_without_launch`.
+    #[test]
+    fn large_teleport_into_rest_hits_like_fast_wall() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let victim = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..30 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(victim), "victim must sleep in zero-g");
+        let mut wall = RigidBody::new_box(Vec3::new(-3.0, 0.5, 0.0), Vec3::new(0.5, 1.0, 1.0), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        let wall_h = physics.add_body(wall);
+        // 2.02 m jump (above the 25 cm gate) ending 2 cm deep in the victim.
+        physics.get_body_mut(wall_h).unwrap().position.x = -0.98;
+        for _ in 0..5 {
+            physics.step(1.0 / 60.0);
+        }
+        let v = physics.get_body(victim).unwrap();
+        assert!(!physics.is_asleep(victim), "impact must wake the victim");
+        assert!(
+            v.velocity.x > 5.0,
+            "above-gate teleport must hit like a fast wall (vx={})",
+            v.velocity.x
+        );
+    }
+
+    /// Parked kinematics cost nothing: an unmoved zero-velocity kinematic
+    /// plus a sleeping dynamic still take the fully-sleeping fast path —
+    /// the driver snapshot must not invent phantom motion.
+    #[test]
+    fn parked_kinematic_keeps_sleeping_fast_path() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let victim = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        let mut wall = RigidBody::new_box(Vec3::new(5.0, 0.5, 0.0), Vec3::splat(0.5), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        physics.add_body(wall);
+        for _ in 0..40 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            physics.is_asleep(victim),
+            "parked driver must not disturb the sleeper"
+        );
     }
 
     #[test]
@@ -6722,5 +7936,770 @@ mod tests {
                 "solve_normal_block committed no impulse"
             );
         }
+    }
+
+    /// Bucket-sort regression: jointed pairs are class 0 (never visited) —
+    /// their slots must not leak into substep 0 as (0, 0) self-pairs (a
+    /// hard island-solver crash whenever body 0 is dynamic). Two jointed
+    /// dynamics in free fall step cleanly and report no contacts.
+    #[test]
+    fn jointed_pair_buckets_emit_no_self_pairs() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        let b = physics.add_body(RigidBody::new_box(
+            Vec3::new(1.2, 0.3, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Ball {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..10 {
+            physics.step(1.0 / 60.0);
+        }
+        assert_eq!(physics.debug_contact_count(a), 0, "no self-manifolds");
+        assert_eq!(physics.debug_contact_count(b), 0, "no self-manifolds");
+    }
+
+    /// Fixed weld: two boxes keep their assembly transform under gravity —
+    /// anchor coincidence and relative orientation both hold.
+    #[test]
+    fn fixed_weld_holds_assembly_pose() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        let mut bb = RigidBody::new_box(Vec3::new(1.2, 0.3, 0.0), Vec3::splat(0.5), 1.0);
+        bb.orientation = Quat::from_rotation_z(0.4);
+        let b = physics.add_body(bb);
+        // Coincident world anchors at assembly: the midpoint.
+        let p = Vec3::new(0.6, 0.15, 0.0);
+        let la = p - Vec3::ZERO;
+        let lb = Quat::from_rotation_z(-0.4) * (p - Vec3::new(1.2, 0.3, 0.0));
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Fixed {
+                    local_anchor_a: la,
+                    local_anchor_b: lb,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..180 {
+            physics.step(1.0 / 60.0);
+        }
+        let (pa, pb) = (physics.get_body(a).unwrap(), physics.get_body(b).unwrap());
+        let rel_pos = pb.position - pa.position;
+        assert!(
+            (rel_pos - Vec3::new(1.2, 0.3, 0.0)).length() < 0.05,
+            "weld must hold anchor offset, got {rel_pos:?}"
+        );
+        let rel = pa.orientation.conjugate() * pb.orientation;
+        let angle = 2.0 * rel.w.clamp(-1.0, 1.0).acos();
+        assert!(
+            (angle - 0.4).abs() < 0.05,
+            "weld must hold relative rotation, got {angle}"
+        );
+    }
+
+    /// Distance rod: a pendulum keeps its anchor separation under gravity
+    /// and swings through the bottom instead of stretching or freezing.
+    #[test]
+    fn distance_rod_keeps_anchor_separation() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
+        let ball = physics.add_body(RigidBody::new_sphere(Vec3::new(2.0, 0.0, 0.0), 0.3, 1.0));
+        physics
+            .add_joint(
+                anchor,
+                ball,
+                JointKind::Distance {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                },
+            )
+            .expect("valid joint");
+        // Undamped 2 m pendulum, T ≈ 2.84 s: after 0.75 s it hangs near the
+        // bottom; the rod length must hold the whole way.
+        let mut worst = 0.0f32;
+        for s in 0..45 {
+            physics.step(1.0 / 60.0);
+            let (pa, pb) = (
+                physics.get_body(anchor).unwrap(),
+                physics.get_body(ball).unwrap(),
+            );
+            worst = worst.max(((pb.position - pa.position).length() - 2.0).abs());
+            let _ = s;
+        }
+        let pb = physics.get_body(ball).unwrap();
+        assert!(worst < 0.08, "rod must keep 2 m separation, drift {worst}");
+        assert!(
+            pb.position.y < -1.0,
+            "pendulum must swing down, got {:?}",
+            pb.position
+        );
+    }
+
+    /// Wheel suspension: a sprung chassis settles near its rest length
+    /// under gravity instead of collapsing onto the wheel.
+    #[test]
+    fn wheel_suspension_holds_chassis_height() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let chassis = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.5, 0.2, 0.3),
+            2.0,
+        ));
+        let wheel = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.25, 0.25, 0.15),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                chassis,
+                wheel,
+                JointKind::Wheel {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_suspension_a: Vec3::Y,
+                    local_suspension_b: Vec3::Y,
+                    local_axle_a: Vec3::Z,
+                    local_axle_b: Vec3::Z,
+                    suspension: WheelSuspension {
+                        frequency_hz: 3.0,
+                        damping_ratio: 0.7,
+                    },
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+        }
+        let (pc, pw) = (
+            physics.get_body(chassis).unwrap(),
+            physics.get_body(wheel).unwrap(),
+        );
+        let sep = pc.position.y - pw.position.y;
+        assert!(
+            (0.5..=1.1).contains(&sep),
+            "spring must hold the chassis near rest (1.0 m), got {sep}"
+        );
+    }
+
+    /// Wheel motor: a free wheel spins up about its axle toward the target
+    /// speed in zero gravity.
+    #[test]
+    fn wheel_motor_spins_axle_to_target() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 0.0));
+        let wheel = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(0.2, 0.2, 0.1),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                anchor,
+                wheel,
+                JointKind::Wheel {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_suspension_a: Vec3::Y,
+                    local_suspension_b: Vec3::Y,
+                    local_axle_a: Vec3::Z,
+                    local_axle_b: Vec3::Z,
+                    suspension: WheelSuspension {
+                        frequency_hz: 2.0,
+                        damping_ratio: 0.5,
+                    },
+                    motor: Some(RevoluteMotor {
+                        target_speed: 6.0,
+                        max_torque: 50.0,
+                    }),
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..240 {
+            physics.step(1.0 / 60.0);
+        }
+        let w = physics.get_body(wheel).unwrap().angular_velocity;
+        assert!(
+            (w.z - 6.0).abs() < 1.5,
+            "axle must spin up toward 6 rad/s, got {w:?}"
+        );
+    }
+
+    /// Gear ratio: a motor on hinge A drives hinge B at -1/ratio speed
+    /// (`coord_a + ratio * coord_b = const`).
+    #[test]
+    fn gear_ratio_couples_hinges() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let ground = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 0.0));
+        let arm_a = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.6, 0.0),
+            Vec3::new(0.1, 0.6, 0.1),
+            1.0,
+        ));
+        let arm_b = physics.add_body(RigidBody::new_box(
+            Vec3::new(1.0, 0.6, 0.0),
+            Vec3::new(0.1, 0.6, 0.1),
+            1.0,
+        ));
+        let ja = physics
+            .add_joint(
+                ground,
+                arm_a,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::new(0.0, -0.6, 0.0),
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                    limit: None,
+                    motor: Some(RevoluteMotor {
+                        target_speed: 1.5,
+                        max_torque: 20.0,
+                    }),
+                },
+            )
+            .expect("valid joint");
+        let jb = physics
+            .add_joint(
+                ground,
+                arm_b,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::new(1.0, 0.0, 0.0),
+                    local_anchor_b: Vec3::new(0.0, -0.6, 0.0),
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                    limit: None,
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        physics
+            .add_joint(
+                arm_a,
+                arm_b,
+                JointKind::Gear {
+                    joint_a: ja,
+                    joint_b: jb,
+                    ratio: 2.0,
+                },
+            )
+            .expect("valid gear");
+        for _ in 0..180 {
+            physics.step(1.0 / 60.0);
+        }
+        let qa = physics.get_body(arm_a).unwrap().orientation;
+        let qb = physics.get_body(arm_b).unwrap().orientation;
+        let ta = crate::engine::joints::hinge_twist(Quat::IDENTITY, qa, Vec3::Z);
+        let tb = crate::engine::joints::hinge_twist(Quat::IDENTITY, qb, Vec3::Z);
+        assert!(ta.abs() > 0.5, "motor must turn hinge A, got twist {ta}");
+        // coord_a + 2 * coord_b = 0 (assembly constant) within solver drift.
+        let c = (ta + 2.0 * tb).abs();
+        assert!(
+            c < 0.35 * ta.abs().max(1.0),
+            "gear must hold a + 2b = 0, got a={ta} b={tb}"
+        );
+    }
+
+    /// Gear validation: dangling references and non-hinge joints are
+    /// rejected, and removing a referenced joint drops the gear silently.
+    #[test]
+    fn gear_validation_and_cleanup() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        let b = physics.add_body(RigidBody::new_box(Vec3::X, Vec3::splat(0.5), 1.0));
+        assert!(
+            physics
+                .add_joint(
+                    a,
+                    b,
+                    JointKind::Gear {
+                        joint_a: 7,
+                        joint_b: 9,
+                        ratio: 1.0,
+                    },
+                )
+                .is_none(),
+            "dangling gear refs must be rejected"
+        );
+        let ball = physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Ball {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                },
+            )
+            .expect("valid joint");
+        assert!(
+            physics
+                .add_joint(
+                    a,
+                    b,
+                    JointKind::Gear {
+                        joint_a: ball,
+                        joint_b: ball,
+                        ratio: 1.0,
+                    },
+                )
+                .is_none(),
+            "gear over non-hinge joints must be rejected"
+        );
+        let hinge = physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                    limit: None,
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        assert!(
+            physics
+                .add_joint(
+                    a,
+                    b,
+                    JointKind::Gear {
+                        joint_a: ball,
+                        joint_b: hinge,
+                        ratio: 1.0,
+                    },
+                )
+                .is_none(),
+            "gear over a non-hinge joint must be rejected"
+        );
+        let hinge2 = physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Revolute {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::Z,
+                    local_axis_b: Vec3::Z,
+                    limit: None,
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        let before = physics.joint_count();
+        let gear = physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Gear {
+                    joint_a: hinge,
+                    joint_b: hinge2,
+                    ratio: 1.0,
+                },
+            )
+            .expect("valid gear");
+        assert_eq!(physics.joint_count(), before + 1);
+        physics.remove_joint(hinge);
+        // The hinge plus its dependent gear are gone; the other joints stay.
+        assert_eq!(physics.joint_count(), before - 1);
+        let _ = gear;
+        for _ in 0..10 {
+            physics.step(1.0 / 60.0);
+        }
+    }
+
+    /// Six-DOF all-locked degenerates to a weld: assembly pose holds.
+    #[test]
+    fn sixdof_all_locked_behaves_like_fixed() {
+        let locked = [AxisConfig::Locked; 3];
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        let b = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 1.4, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::SixDof {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    linear: locked,
+                    angular: locked,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..180 {
+            physics.step(1.0 / 60.0);
+        }
+        let (pa, pb) = (physics.get_body(a).unwrap(), physics.get_body(b).unwrap());
+        let gap = (pb.position - pa.position).y;
+        assert!(
+            (gap - 1.4).abs() < 0.05,
+            "all-locked six-DOF must weld, got gap {gap}"
+        );
+    }
+
+    /// Six-DOF free axis: X slides under impulse while locked Y holds.
+    #[test]
+    fn sixdof_free_axis_slides_but_locked_holds() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        let b = physics.add_body(RigidBody::new_box(Vec3::X, Vec3::splat(0.5), 1.0));
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::SixDof {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    linear: [AxisConfig::Free, AxisConfig::Locked, AxisConfig::Locked],
+                    angular: [AxisConfig::Locked; 3],
+                },
+            )
+            .expect("valid joint");
+        physics.get_body_mut(b).unwrap().velocity = Vec3::new(3.0, 1.0, 0.0);
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+        let (pa, pb) = (physics.get_body(a).unwrap(), physics.get_body(b).unwrap());
+        let d = pb.position - pa.position;
+        assert!(d.x > 1.5, "free X must slide, got {d:?}");
+        assert!(d.y.abs() < 0.08, "locked Y must hold, got {d:?}");
+    }
+
+    /// Six-DOF angular limit: a fast spin about Z clamps at the window.
+    #[test]
+    fn sixdof_angular_limit_blocks_spin() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0));
+        let b = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.4), 1.0));
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::SixDof {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    linear: [AxisConfig::Locked; 3],
+                    angular: [
+                        AxisConfig::Locked,
+                        AxisConfig::Locked,
+                        AxisConfig::Limited {
+                            min: -0.2,
+                            max: 0.2,
+                        },
+                    ],
+                },
+            )
+            .expect("valid joint");
+        physics.get_body_mut(b).unwrap().angular_velocity = Vec3::new(0.0, 0.0, 8.0);
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let qb = physics.get_body(b).unwrap().orientation;
+        let tw = crate::engine::joints::hinge_twist(Quat::IDENTITY, qb, Vec3::Z);
+        assert!(
+            tw.abs() < 0.4,
+            "Z twist must clamp near the 0.2 window, got {tw}"
+        );
+    }
+
+    /// Wheel with a parallel axle still assembles (deterministic fallback)
+    /// and steps without NaN.
+    #[test]
+    fn wheel_degenerate_axle_falls_back() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+        let b = physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Wheel {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_suspension_a: Vec3::Y,
+                    local_suspension_b: Vec3::Y,
+                    // Parallel to the suspension: must fall back, not NaN.
+                    local_axle_a: Vec3::Y,
+                    local_axle_b: Vec3::Y,
+                    suspension: WheelSuspension {
+                        frequency_hz: 2.0,
+                        damping_ratio: 0.5,
+                    },
+                    motor: None,
+                },
+            )
+            .expect("valid joint");
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+        for h in [a, b] {
+            let body = physics.get_body(h).unwrap();
+            assert!(
+                body.position.is_finite() && body.velocity.is_finite(),
+                "no NaN after degenerate assembly"
+            );
+        }
+    }
+
+    /// Unit tetrahedron corners for hull rest tests (edge length 2,
+    /// centered near the origin).
+    fn tetra_vertices() -> Vec<Vec3> {
+        vec![
+            Vec3::new(1.0, 0.0, -1.0 / 2.0f32.sqrt()),
+            Vec3::new(-1.0, 0.0, -1.0 / 2.0f32.sqrt()),
+            Vec3::new(0.0, 1.0, 1.0 / 2.0f32.sqrt()),
+            Vec3::new(0.0, -1.0, 1.0 / 2.0f32.sqrt()),
+        ]
+    }
+
+    /// Cylinder (GJK/EPA path) falls onto a static floor and rests on its
+    /// flat cap: position near the rest pose AND velocity near zero (a
+    /// velocity-only assert would also pass for a body that rolled off).
+    #[test]
+    fn cylinder_rests_on_static_floor() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(5.0, 0.5, 5.0),
+            0.0,
+        ));
+        let body = physics.add_body(RigidBody::new_cylinder(
+            Vec3::new(0.0, 3.0, 0.0),
+            0.5,
+            0.5,
+            1.0,
+        ));
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(body).unwrap();
+        assert!(
+            (b.position.y - 0.5).abs() < 0.05,
+            "cylinder must rest on its cap at y=0.5, got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.15,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+    }
+
+    /// Cone dropped base-down rests on its base disk (EPA penetration
+    /// path on first contact, GJK separation after).
+    #[test]
+    fn cone_rests_on_base() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(5.0, 0.5, 5.0),
+            0.0,
+        ));
+        let body = physics.add_body(RigidBody::new_cone(Vec3::new(0.0, 3.0, 0.0), 0.5, 0.5, 1.0));
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(body).unwrap();
+        assert!(
+            (b.position.y - 0.5).abs() < 0.08,
+            "cone must rest on its base at y=0.5, got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.2,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+    }
+
+    /// Cube hull (GJK path) falls flat and rests exactly like an analytic
+    /// box: the hull of the unit-cube corners must agree with the box
+    /// oracle everywhere, including the settled state.
+    #[test]
+    fn hull_cube_rests_on_floor() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(5.0, 0.5, 5.0),
+            0.0,
+        ));
+        let body = physics.add_body(RigidBody::new_convex_hull(
+            Vec3::new(0.0, 2.0, 0.0),
+            vec![
+                Vec3::new(-0.5, -0.5, -0.5),
+                Vec3::new(0.5, -0.5, -0.5),
+                Vec3::new(-0.5, 0.5, -0.5),
+                Vec3::new(0.5, 0.5, -0.5),
+                Vec3::new(-0.5, -0.5, 0.5),
+                Vec3::new(0.5, -0.5, 0.5),
+                Vec3::new(-0.5, 0.5, 0.5),
+                Vec3::new(0.5, 0.5, 0.5),
+            ],
+            1.0,
+        ));
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(body).unwrap();
+        assert!(
+            (b.position.y - 0.5).abs() < 0.05,
+            "cube hull must rest at y=0.5, got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.15,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+    }
+
+    /// Tetrahedron dropped face-down settles on its face (hull-vs-box
+    /// through the generic distance-contact builder). Settles thanks to
+    /// the hull rolling/torsion defaults (0.2/0.05): undamped, a tetra
+    /// rocks on vertices/edges indefinitely. Vertex-first drops are still
+    /// not asserted to rest (unstable equilibrium by geometry).
+    #[test]
+    fn hull_tetrahedron_rests_on_face() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(5.0, 0.5, 5.0),
+            0.0,
+        ));
+        // Face (v1,v2,v3) has outward normal ~(-0.816,0,+0.577) (away from
+        // the apex v0): lay it flat down. Rest height = face distance
+        // 0.408 below the center.
+        let n = Vec3::new(-2.828427, 0.0, 2.0).normalize();
+        let body = physics.add_body(
+            RigidBody::new_convex_hull(Vec3::new(0.0, 1.2, 0.0), tetra_vertices(), 1.0)
+                .with_orientation(Quat::from_rotation_arc(n, Vec3::NEG_Y)),
+        );
+        for _ in 0..900 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(body).unwrap();
+        assert!(
+            (b.position.y - 0.408).abs() < 0.1,
+            "tetrahedron must rest on its face at y~0.408, got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.25,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+        assert!(
+            b.angular_velocity.length() < 0.25,
+            "resting spin near zero, got {}",
+            b.angular_velocity
+        );
+    }
+
+    /// Ball dropped onto a flat heightfield rests on the terrain surface
+    /// (column-oracle path): center height == sample height + radius.
+    #[test]
+    fn ball_rests_on_flat_heightfield() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_heightfield(
+            Vec3::ZERO,
+            vec![1.0f32; 16],
+            4,
+            4,
+            1.0,
+            0.0,
+        ));
+        let ball = physics.add_body(RigidBody::new_sphere(Vec3::new(0.4, 5.0, -0.3), 0.5, 1.0));
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(ball).unwrap();
+        assert!(
+            (b.position.y - 1.5).abs() < 0.08,
+            "ball must rest at terrain(1.0)+radius(0.5), got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.2,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+    }
+
+    /// Raycast hits the new shapes at their exact surfaces: cylinder wall,
+    /// cone wall, hull face, heightfield column top.
+    #[test]
+    fn raycast_hits_cylinder_cone_hull_heightfield() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_cylinder(Vec3::ZERO, 1.0, 1.0, 0.0));
+        let hit = physics
+            .raycast(Ray::new(Vec3::new(0.0, 0.0, -5.0), Vec3::Z), 10.0)
+            .expect("ray must hit the cylinder wall");
+        assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
+        assert!(hit.normal.dot(Vec3::NEG_Z) > 0.999);
+
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_cone(Vec3::ZERO, 1.0, 1.0, 0.0));
+        // Cone wall at y=0 has radius 0.5: ray along +X from x=-5.
+        let hit = physics
+            .raycast(Ray::new(Vec3::new(-5.0, 0.0, 0.0), Vec3::X), 10.0)
+            .expect("ray must hit the cone wall");
+        assert!((hit.distance - 4.5).abs() < 1e-4, "got {}", hit.distance);
+
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_convex_hull(
+            Vec3::ZERO,
+            vec![
+                Vec3::new(-1.0, -1.0, -1.0),
+                Vec3::new(1.0, -1.0, -1.0),
+                Vec3::new(-1.0, 1.0, -1.0),
+                Vec3::new(1.0, 1.0, -1.0),
+                Vec3::new(-1.0, -1.0, 1.0),
+                Vec3::new(1.0, -1.0, 1.0),
+                Vec3::new(-1.0, 1.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ],
+            0.0,
+        ));
+        let hit = physics
+            .raycast(Ray::new(Vec3::new(0.0, 0.0, -5.0), Vec3::Z), 10.0)
+            .expect("ray must hit the hull face");
+        assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
+        assert!(hit.normal.dot(Vec3::NEG_Z) > 0.999);
+
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_heightfield(
+            Vec3::ZERO,
+            vec![2.0f32; 9],
+            3,
+            3,
+            1.0,
+            0.0,
+        ));
+        let hit = physics
+            .raycast(Ray::new(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y), 10.0)
+            .expect("ray must hit the heightfield top");
+        assert!((hit.distance - 3.0).abs() < 1e-4, "got {}", hit.distance);
+        assert!(hit.normal.dot(Vec3::Y) > 0.999);
     }
 }

@@ -17,6 +17,14 @@ fn is_asleep_pair(physics: &BuiltinPhysicsEngine, a: usize, b: usize) -> bool {
     physics.debug_contact_count(a) > 0 && physics.debug_contact_count(b) > 0
 }
 
+/// Spin kinetic energy from public body state: E = ½ΣIᵢωᵢ² in the body
+/// frame. The angular CCD energy cap (`cap_spin_correction`) guarantees
+/// this never grows across the impact response.
+fn spin_energy(body: &RigidBody) -> f32 {
+    let wb = body.orientation.conjugate() * body.angular_velocity;
+    0.5 * (body.inertia * wb).dot(wb)
+}
+
 #[allow(dead_code)]
 fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
     (a - b).abs() <= eps
@@ -180,7 +188,13 @@ fn fast_spinning_box_toi_stops_before_tunneling() {
     // Thin long box 3.0×0.2×0.2 rotating 90° in one substep (dt) around Z.
     // Static wall just above: at 90° the box tip must hit.
     // Analytic conservative advancement must catch the first contact
-    // fraction ∈ (0,1) and clamp orientation, zeroing angular velocity.
+    // fraction ∈ (0,1) and clamp orientation (no tunneling). The spin is
+    // NOT fully zeroed by design: since the unified CCD impulse (2026-09-10)
+    // the response is a frictionless contact impulse that preserves
+    // tangential surface motion (friction owns it next substep) — the
+    // invariant is spin-energy non-increase via `cap_spin_correction`,
+    // pinned below. The old full-stop assert encoded the pre-unification
+    // contract and contradicted the documented design.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -196,33 +210,36 @@ fn fast_spinning_box_toi_stops_before_tunneling() {
     ));
     physics.get_body_mut(mover).unwrap().angular_velocity =
         Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+    let energy_before = spin_energy(physics.get_body(mover).unwrap());
 
     physics.step(dt);
 
     let body = physics.get_body(mover).unwrap();
-    // Must stop (angular CCD clamped)
+    // Clamped: rotated strictly less than the full 90° (no tunneling).
+    let angle = body.orientation.to_axis_angle().1.abs();
     assert!(
-        body.angular_velocity.length() < 1e-5,
-        "angular CCD must zero angular velocity at impact, got {:?}",
-        body.angular_velocity
+        angle > 0.05 && angle < std::f32::consts::FRAC_PI_2 - 0.05,
+        "clamped angle must be in (0, 90°), got {angle}"
     );
-    // And must not tunnel through the target
     assert_ne!(
         body.orientation,
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
         "rotating body must not tunnel through target"
     );
-    // Orientation between 0 and 90° (fraction in (0,1))
-    let angle = body.orientation.to_axis_angle().1.abs();
+    // Energy cap: the CCD response must never inject spin energy.
+    let energy_after = spin_energy(body);
     assert!(
-        angle > 0.05 && angle < std::f32::consts::FRAC_PI_2 - 0.05,
-        "clamped angle must be in (0, 90°), got {angle}"
+        energy_after <= energy_before * 1.01,
+        "CCD must not inject spin energy: before={energy_before} after={energy_after}"
     );
 }
 
 #[test]
 fn fast_spinning_capsule_toi_stops_before_tunneling() {
     // Same for a capsule: long capsule along X rotating in plane.
+    // Contract as in `fast_spinning_box_toi_stops_before_tunneling`: the
+    // clamp (no tunneling) plus spin-energy non-increase stand in for the
+    // old full-stop assert, which encoded the pre-unification response.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -237,17 +254,19 @@ fn fast_spinning_capsule_toi_stops_before_tunneling() {
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     physics.get_body_mut(mover).unwrap().angular_velocity =
         Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+    let energy_before = spin_energy(physics.get_body(mover).unwrap());
     physics.step(dt);
     let body = physics.get_body(mover).unwrap();
-    assert!(
-        body.angular_velocity.length() < 1e-5,
-        "capsule angular CCD must stop at impact"
-    );
     assert_ne!(
         body.orientation,
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
             * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
         "capsule must not tunnel"
+    );
+    let energy_after = spin_energy(body);
+    assert!(
+        energy_after <= energy_before * 1.01,
+        "CCD must not inject spin energy: before={energy_before} after={energy_after}"
     );
 }
 
@@ -290,7 +309,9 @@ fn slow_rotation_does_not_trigger_false_toi() {
 #[test]
 fn thin_feature_under_fast_rotation_does_not_tunnel() {
     // Thin wall 0.04 thick — 5° sampling could miss it, analytic must not.
-    // Rotating box with a large angle must hit, not pass through.
+    // Rotating box with a large angle must hit, not pass through. Contract
+    // as in `fast_spinning_box_toi_stops_before_tunneling`: clamp plus
+    // spin-energy non-increase instead of the old full-stop assert.
     let dt = 1.0 / 60.0;
     let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
@@ -307,13 +328,19 @@ fn thin_feature_under_fast_rotation_does_not_tunnel() {
     ));
     physics.get_body_mut(mover).unwrap().angular_velocity =
         Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt);
+    let energy_before = spin_energy(physics.get_body(mover).unwrap());
     physics.step(dt);
     let body = physics.get_body(mover).unwrap();
-    // Must be clamped, otherwise tunneled through thin wall
+    // Must be clamped, otherwise tunneled through thin wall.
+    let angle = body.orientation.to_axis_angle().1.abs();
     assert!(
-        body.angular_velocity.length() < 1e-5,
-        "thin wall must be caught by analytic swept-volume, got w={:?}",
-        body.angular_velocity
+        angle < std::f32::consts::FRAC_PI_2 - 0.05,
+        "thin wall must be caught by analytic swept-volume, angle={angle}"
+    );
+    let energy_after = spin_energy(body);
+    assert!(
+        energy_after <= energy_before * 1.01,
+        "CCD must not inject spin energy: before={energy_before} after={energy_after}"
     );
 }
 

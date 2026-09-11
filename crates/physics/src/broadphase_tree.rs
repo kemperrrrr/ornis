@@ -369,7 +369,12 @@ impl DynamicAabbTree {
 }
 
 impl BroadPhase for DynamicAabbTree {
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
+    fn update(
+        &mut self,
+        bodies: &[RigidBody],
+        sub_dt: f32,
+        prev: Option<&[crate::broadphase::PrevPose]>,
+    ) {
         // `pair_tests` counts checks executed by THIS update (0 on a fully
         // clean one); `candidate_pairs` always reflects the full buffered
         // set, retained or freshly queried.
@@ -377,7 +382,7 @@ impl BroadPhase for DynamicAabbTree {
             body_count: bodies.len(),
             ..BroadPhaseStats::default()
         };
-        let swept = crate::broadphase::swept_aabbs(bodies, sub_dt);
+        let swept = crate::broadphase::swept_aabbs(bodies, sub_dt, prev);
         // Any count change can remap body indices (`swap_remove`), which
         // would alias buffered pair identities: drop the buffer and re-query
         // everything, exactly like the grid's length-mismatch full rebuild.
@@ -666,7 +671,7 @@ mod tests {
     /// catches tree errors that a SAP comparison would mask (SAP itself drops
     /// pairs where a higher body index sorts earlier on the sweep axis).
     fn brute_force_pairs(bodies: &[RigidBody]) -> Vec<(usize, usize)> {
-        let swept = swept_aabbs(bodies, 1.0 / 60.0);
+        let swept = swept_aabbs(bodies, 1.0 / 60.0, None);
         let mut pairs = Vec::new();
         for i in 0..bodies.len() {
             for j in (i + 1)..bodies.len() {
@@ -694,7 +699,7 @@ mod tests {
     fn dynamic_tree_matches_brute_force_oracle() {
         let bodies = scene();
         let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         let mut tree_pairs = tree.active().to_vec();
         tree_pairs.sort_unstable();
         assert_eq!(tree_pairs, brute_force_pairs(&bodies));
@@ -720,7 +725,7 @@ mod tests {
 
     fn tree_pairs(bodies: &[RigidBody], sub_dt: f32) -> Vec<(usize, usize)> {
         let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
-        tree.update(bodies, sub_dt);
+        tree.update(bodies, sub_dt, None);
         let mut pairs = tree.active().to_vec();
         pairs.sort_unstable();
         pairs
@@ -747,11 +752,11 @@ mod tests {
     fn dynamic_tree_reinserts_teleported_static_proxies() {
         let mut bodies = scene();
         let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         // Teleport the static floor (index 4) far away: stale fats must not
         // keep emitting its old pairs.
         bodies[4].position = Vec3::new(500.0, -10.0, 0.0);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = tree.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));
@@ -765,12 +770,12 @@ mod tests {
         // oracle through the proxy migration.
         bodies[4] = RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 1.0);
         let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = tree.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));
         bodies[4] = RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 0.0);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = tree.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));
@@ -780,12 +785,12 @@ mod tests {
     fn dynamic_tree_reports_new_pairs_after_a_move() {
         let mut bodies = scene();
         let mut tree = BroadPhaseBackend::new(BroadPhaseKind::DynamicAabbTree);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         let mut first = tree.active().to_vec();
         first.sort_unstable();
         // Move a dynamic body into overlap with the far static floor.
         bodies[1].position = Vec3::new(0.0, -9.0, 0.0);
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         let mut second = tree.active().to_vec();
         second.sort_unstable();
         assert_ne!(first, second);
@@ -830,7 +835,7 @@ mod tests {
     fn dynamic_tree_stays_bounded_under_grid_insertion_order() {
         let bodies = grid_scene_2k();
         let mut backend = DynamicAabbTree::new();
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let depth = max_depth(&backend.dynamic_tree).max(max_depth(&backend.static_tree));
         assert!(
             depth <= 24,
@@ -846,9 +851,9 @@ mod tests {
     fn dynamic_tree_skips_fully_clean_updates() {
         let bodies = grid_scene_2k();
         let mut backend = DynamicAabbTree::new();
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let first = backend.active().to_vec();
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         // Nothing moved: zero pair checks, identical pairs.
         assert_eq!(backend.stats().pair_tests, 0);
         assert_eq!(backend.active(), first.as_slice());
@@ -858,12 +863,12 @@ mod tests {
     fn dynamic_tree_partial_updates_match_oracle() {
         let mut bodies = grid_scene_2k();
         let mut backend = DynamicAabbTree::new();
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         // Move three bodies (one into overlap, two across the grid).
         bodies[0].position = Vec3::new(2.0, 1.0, 0.0);
         bodies[100].position += Vec3::new(0.0, 3.0, 0.0);
         bodies[1000].position += Vec3::new(5.0, 0.0, 0.0);
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = backend.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));
@@ -882,7 +887,7 @@ mod tests {
         // Overlap bodies 0 and 1 so they pair under default filters.
         bodies[1].position = Vec3::new(0.5, 1.0, 0.0);
         let mut backend = DynamicAabbTree::new();
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let mut first = backend.active().to_vec();
         first.sort_unstable();
         assert!(first.contains(&(0, 1)));
@@ -891,7 +896,7 @@ mod tests {
             .with_collision_filter(0b0001, 0b0010);
         bodies[1] = RigidBody::new_box(Vec3::new(0.5, 1.0, 0.0), Vec3::splat(0.4), 1.0)
             .with_collision_filter(0b0100, 0b1000);
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = backend.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));
@@ -902,19 +907,19 @@ mod tests {
     fn dynamic_tree_handles_add_and_swap_remove() {
         let mut bodies = grid_scene_2k();
         let mut backend = DynamicAabbTree::new();
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         bodies.push(RigidBody::new_box(
             Vec3::new(1.0, 1.0, 0.0),
             Vec3::splat(0.4),
             1.0,
         ));
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = backend.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));
         // Engine-style removal remaps indices: the buffer must not alias.
         bodies.swap_remove(0);
-        backend.update(&bodies, 1.0 / 60.0);
+        backend.update(&bodies, 1.0 / 60.0, None);
         let mut pairs = backend.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, brute_force_pairs(&bodies));

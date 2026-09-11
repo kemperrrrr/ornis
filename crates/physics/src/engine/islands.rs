@@ -23,9 +23,26 @@ impl BuiltinPhysicsEngine {
         let mut parent = std::mem::take(&mut self.scratch_parent);
         union_contact_edges(&mut parent, &self.bodies, manifolds);
         // Joints are constraint-graph edges too (G5): jointed dynamic bodies
-        // belong to one island and sleep/wake together.
+        // belong to one island and sleep/wake together. Gears coordinate two
+        // other joints — union all four bodies through the (validated)
+        // references so the geared assembly sleeps and wakes as one.
         for joint in &self.joints {
             union_dynamic_pair(&mut parent, &self.bodies, joint.body_a, joint.body_b);
+            if let JointKind::Gear {
+                joint_a, joint_b, ..
+            } = &joint.kind
+            {
+                for r in [*joint_a, *joint_b] {
+                    if let Some(referenced) = self.joints.get(r) {
+                        union_dynamic_pair(
+                            &mut parent,
+                            &self.bodies,
+                            referenced.body_a,
+                            referenced.body_b,
+                        );
+                    }
+                }
+            }
         }
         merge_sleeping_representations(&mut parent, &self.asleep, &self.island, n);
         // Canonicalize island ids to the MINIMUM member index. The raw

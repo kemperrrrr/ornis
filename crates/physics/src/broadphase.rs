@@ -7,7 +7,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::body::{BodyType, RigidBody};
 use crate::broadphase_tree::DynamicAabbTree;
@@ -137,11 +137,26 @@ pub enum BroadPhaseKind {
 /// candidate pairs for the narrowphase. Backends do not solve contacts.
 pub(crate) trait BroadPhase {
     /// Rebuild candidate pairs for the current body poses and substep motion.
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32);
+    /// `prev` carries each body's pose at the previous step start so the
+    /// swept volumes cover driver teleports of kinematic bodies; `None`
+    /// keeps the legacy velocity-only sweep.
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32, prev: Option<&[PrevPose]>);
     /// Candidate body pairs, canonicalized as `(lower_handle, higher_handle)`.
     fn active(&self) -> &[(usize, usize)];
     /// Diagnostics for the latest update.
     fn stats(&self) -> BroadPhaseStats;
+}
+
+/// Step-start pose of one body, parallel to the engine's body vector.
+/// Lets the broadphase sweep cover kinematic teleports: drivers move
+/// kinematic bodies by setting positions directly, so the velocity field
+/// alone does not describe their motion between steps.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PrevPose {
+    /// World-space center of mass at the previous step start.
+    pub pos: Vec3,
+    /// Orientation at the previous step start.
+    pub rot: Quat,
 }
 
 /// Runtime-selected broadphase backend.
@@ -193,12 +208,12 @@ impl BroadPhaseBackend {
 }
 
 impl BroadPhase for BroadPhaseBackend {
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32, prev: Option<&[PrevPose]>) {
         match self {
-            Self::SweepAndPrune(backend) => backend.update(bodies, sub_dt),
-            Self::UniformGrid(backend) => backend.update(bodies, sub_dt),
-            Self::DynamicAabbTree(backend) => backend.update(bodies, sub_dt),
-            Self::Auto(backend) => backend.update(bodies, sub_dt),
+            Self::SweepAndPrune(backend) => backend.update(bodies, sub_dt, prev),
+            Self::UniformGrid(backend) => backend.update(bodies, sub_dt, prev),
+            Self::DynamicAabbTree(backend) => backend.update(bodies, sub_dt, prev),
+            Self::Auto(backend) => backend.update(bodies, sub_dt, prev),
         }
     }
 
@@ -221,11 +236,28 @@ impl BroadPhase for BroadPhaseBackend {
     }
 }
 
-pub(crate) fn swept_aabbs(bodies: &[RigidBody], sub_dt: f32) -> Vec<AABB> {
+pub(crate) fn swept_aabbs(
+    bodies: &[RigidBody],
+    sub_dt: f32,
+    prev: Option<&[PrevPose]>,
+) -> Vec<AABB> {
     bodies
         .iter()
-        .map(|body| {
+        .enumerate()
+        .map(|(h, body)| {
             let mut aabb = body.shape.aabb(body.position, body.orientation);
+            // Kinematic teleport cover: drivers move kinematic bodies by
+            // setting positions directly, so union the step-start pose.
+            // Dynamics move inside the step via the velocity sweep below;
+            // statics only ever need their rest pose.
+            if body.body_type == BodyType::Kinematic
+                && let Some(p) = prev.and_then(|p| p.get(h))
+                && (p.pos != body.position || p.rot != body.orientation)
+            {
+                let prev_aabb = body.shape.aabb(p.pos, p.rot);
+                aabb.expand(prev_aabb.min);
+                aabb.expand(prev_aabb.max);
+            }
             if body.body_type == BodyType::Dynamic {
                 let displacement = body.velocity * sub_dt;
                 aabb.expand(aabb.min + displacement);
@@ -307,8 +339,8 @@ impl SweepAndPrune {
 }
 
 impl BroadPhase for SweepAndPrune {
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
-        self.aabbs = swept_aabbs(bodies, sub_dt);
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32, prev: Option<&[PrevPose]>) {
+        self.aabbs = swept_aabbs(bodies, sub_dt, prev);
         self.sort_axis = (self.sort_axis + 1) % 3;
         self.active.clear();
 
@@ -551,8 +583,8 @@ impl UniformGrid {
 }
 
 impl BroadPhase for UniformGrid {
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
-        let new_aabbs = swept_aabbs(bodies, sub_dt);
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32, prev: Option<&[PrevPose]>) {
+        let new_aabbs = swept_aabbs(bodies, sub_dt, prev);
         // First run or topology change -> full rebuild.
         if self.aabbs.len() != new_aabbs.len()
             || self.body_cells.len() != new_aabbs.len()
@@ -792,6 +824,25 @@ fn body_max_extent(body: &RigidBody) -> f32 {
             radius,
             half_height,
         } => (half_height + radius) * 2.0,
+        crate::shape::Shape::Cylinder {
+            radius,
+            half_height,
+        } => (half_height + radius) * 2.0,
+        crate::shape::Shape::Cone {
+            radius,
+            half_height,
+        } => (half_height + radius) * 2.0,
+        crate::shape::Shape::ConvexHull(hull) => {
+            let mut m = 0.0f32;
+            for v in &hull.vertices {
+                m = m.max(v.abs().max_element());
+            }
+            m * 2.0
+        }
+        crate::shape::Shape::Heightfield(hf) => {
+            let e = hf.local_extents();
+            e.x.max(e.z).max(1.0) * 2.0
+        }
     }
 }
 
@@ -883,7 +934,7 @@ impl AdaptiveBroadphase {
 }
 
 impl BroadPhase for AdaptiveBroadphase {
-    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32) {
+    fn update(&mut self, bodies: &[RigidBody], sub_dt: f32, prev: Option<&[PrevPose]>) {
         let want = Self::vote(bodies);
         self.updates += 1;
         self.steps_since_switch += 1;
@@ -902,7 +953,7 @@ impl BroadPhase for AdaptiveBroadphase {
             }
         }
         match self.active {
-            BroadPhaseKind::SweepAndPrune => self.sweep.update(bodies, sub_dt),
+            BroadPhaseKind::SweepAndPrune => self.sweep.update(bodies, sub_dt, prev),
             BroadPhaseKind::UniformGrid => {
                 // Re-evaluate the grid cell from scene density on the first
                 // update, at most every interval, or when the body count
@@ -919,9 +970,9 @@ impl BroadPhase for AdaptiveBroadphase {
                     self.last_cell_eval = self.updates;
                     self.last_cell_n = count;
                 }
-                self.grid.update(bodies, sub_dt);
+                self.grid.update(bodies, sub_dt, prev);
             }
-            _ => self.tree.update(bodies, sub_dt),
+            _ => self.tree.update(bodies, sub_dt, prev),
         }
     }
 
@@ -955,6 +1006,43 @@ mod tests {
         ]
     }
 
+    /// Kinematic teleport cover: a driver-moved kinematic spans its whole
+    /// step segment in the swept volume, so a victim sitting mid-teleport
+    /// pairs even though neither endpoint overlaps it. Without `prev` the
+    /// same update reports no pair (legacy velocity-only sweep).
+    #[test]
+    fn kinematic_teleport_segment_pairs_mid_jump_victim() {
+        let victim = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
+        let mut wall = RigidBody::new_box(Vec3::new(3.0, 0.0, 0.0), Vec3::splat(0.5), 1.0);
+        wall.body_type = BodyType::Kinematic;
+        let bodies = vec![victim, wall];
+        let prev = vec![
+            PrevPose {
+                pos: Vec3::ZERO,
+                rot: Quat::IDENTITY,
+            },
+            PrevPose {
+                pos: Vec3::new(-3.0, 0.0, 0.0),
+                rot: Quat::IDENTITY,
+            },
+        ];
+        let mut sweep = SweepAndPrune::new();
+        sweep.update(&bodies, 1.0 / 60.0, None);
+        assert!(
+            sweep.active().is_empty(),
+            "legacy sweep sees no pair across the jump"
+        );
+        sweep.update(&bodies, 1.0 / 60.0, Some(&prev));
+        assert_eq!(
+            sweep.active(),
+            &[(0, 1)],
+            "teleport union must span the segment"
+        );
+        let mut grid = UniformGrid::new();
+        grid.update(&bodies, 1.0 / 60.0, Some(&prev));
+        assert_eq!(grid.active(), &[(0, 1)], "grid must agree with SAP");
+    }
+
     #[test]
     fn sweep_and_prune_keeps_pairs_where_higher_index_sorts_first() {
         // Regression: SAP must not skip a pair just because the body with the
@@ -967,7 +1055,7 @@ mod tests {
             RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 0.0),
         ];
         let mut sweep = SweepAndPrune::new();
-        sweep.update(&bodies, 0.0);
+        sweep.update(&bodies, 0.0, None);
         let mut pairs = sweep.active().to_vec();
         pairs.sort_unstable();
         assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)]);
@@ -978,8 +1066,8 @@ mod tests {
         let bodies = scene();
         let mut sweep = SweepAndPrune::new();
         let mut grid = UniformGrid::new();
-        sweep.update(&bodies, 1.0 / 60.0);
-        grid.update(&bodies, 1.0 / 60.0);
+        sweep.update(&bodies, 1.0 / 60.0, None);
+        grid.update(&bodies, 1.0 / 60.0, None);
         let mut sweep_pairs = sweep.active().to_vec();
         sweep_pairs.sort_unstable();
         assert_eq!(grid.active(), sweep_pairs.as_slice());
@@ -992,7 +1080,7 @@ mod tests {
             RigidBody::new_sphere(Vec3::new(0.5, 0.0, 0.0), 0.75, 1.0),
         ];
         let mut grid = UniformGrid::new();
-        grid.update(&bodies, 0.0);
+        grid.update(&bodies, 0.0, None);
         assert_eq!(grid.active(), &[(0, 1)]);
         let stats = grid.stats();
         assert_eq!(stats.body_count, 2);
@@ -1005,8 +1093,8 @@ mod tests {
         let bodies = scene();
         let mut fine = UniformGrid::with_cell_size(1.0);
         let mut coarse = UniformGrid::with_cell_size(4.0);
-        fine.update(&bodies, 0.0);
-        coarse.update(&bodies, 0.0);
+        fine.update(&bodies, 0.0, None);
+        coarse.update(&bodies, 0.0, None);
         assert_eq!(fine.active(), coarse.active());
         assert_ne!(fine.stats().occupied_cells, coarse.stats().occupied_cells);
     }
@@ -1018,7 +1106,7 @@ mod tests {
             RigidBody::new_box(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0), 0.0),
         ];
         let mut grid = UniformGrid::new();
-        grid.update(&ordinary, 0.0);
+        grid.update(&ordinary, 0.0, None);
         assert!(grid.active().is_empty());
         assert!(grid.stats().static_static_skips > 0);
 
@@ -1026,7 +1114,7 @@ mod tests {
             RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0).with_trigger(true),
             RigidBody::new_box(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0), 0.0),
         ];
-        grid.update(&trigger, 0.0);
+        grid.update(&trigger, 0.0, None);
         assert_eq!(grid.active(), &[(0, 1)]);
     }
 
@@ -1038,7 +1126,7 @@ mod tests {
             RigidBody::new_sphere(Vec3::new(300.0, 0.0, 0.0), 0.5, 1.0),
         ];
         let mut grid = UniformGrid::new();
-        grid.update(&bodies, 0.0);
+        grid.update(&bodies, 0.0, None);
         assert_eq!(grid.active(), &[(0, 1)]);
     }
 
@@ -1051,8 +1139,8 @@ mod tests {
         ];
         let mut sweep = SweepAndPrune::new();
         let mut grid = UniformGrid::new();
-        sweep.update(&bodies, 0.0);
-        grid.update(&bodies, 0.0);
+        sweep.update(&bodies, 0.0, None);
+        grid.update(&bodies, 0.0, None);
         assert!(sweep.active().is_empty());
         assert!(grid.active().is_empty());
     }
@@ -1105,10 +1193,10 @@ mod tests {
     fn auto_selects_sweep_for_small_scenes_and_matches_it() {
         let bodies = scene();
         let mut auto = AdaptiveBroadphase::new();
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
         let mut sweep = SweepAndPrune::new();
-        sweep.update(&bodies, 1.0 / 60.0);
+        sweep.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active(), sweep.active());
     }
 
@@ -1116,13 +1204,13 @@ mod tests {
     fn auto_selects_grid_for_giant_floor_and_matches_it() {
         let bodies = giant_floor_bodies(2000);
         let mut auto = AdaptiveBroadphase::new();
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
         // Density raw ~3.1 sits in the sticky band around the validated
         // default; the coarse floor is excluded from the estimate.
         assert_eq!(auto.grid_cell_size(), 8.0);
         let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
-        grid.update(&bodies, 1.0 / 60.0);
+        grid.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active(), grid.active());
     }
 
@@ -1130,10 +1218,10 @@ mod tests {
     fn auto_selects_tree_for_sparse_worlds_and_matches_it() {
         let bodies = sparse_bodies(5000);
         let mut auto = AdaptiveBroadphase::new();
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::DynamicAabbTree);
         let mut tree = DynamicAabbTree::new();
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active(), tree.active());
     }
 
@@ -1143,10 +1231,10 @@ mod tests {
         // the tree, matching the explicit backend exactly.
         let bodies = sparse_bodies(600);
         let mut auto = AdaptiveBroadphase::new();
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::DynamicAabbTree);
         let mut tree = DynamicAabbTree::new();
-        tree.update(&bodies, 1.0 / 60.0);
+        tree.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active(), tree.active());
     }
 
@@ -1201,14 +1289,14 @@ mod tests {
         let bodies = giant_floor_bodies(2000);
         let mut auto = AdaptiveBroadphase::new();
         for _ in 0..70 {
-            auto.update(&bodies, 1.0 / 60.0);
+            auto.update(&bodies, 1.0 / 60.0, None);
             assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
             assert_eq!(auto.grid_cell_size(), 8.0);
         }
         let small = scene();
         let mut auto_small = AdaptiveBroadphase::new();
         for _ in 0..70 {
-            auto_small.update(&small, 1.0 / 60.0);
+            auto_small.update(&small, 1.0 / 60.0, None);
             assert_eq!(auto_small.active_kind(), BroadPhaseKind::SweepAndPrune);
         }
     }
@@ -1218,16 +1306,16 @@ mod tests {
         let mut bodies = sparse_bodies(400);
         let mut auto = AdaptiveBroadphase::new();
         for _ in 0..70 {
-            auto.update(&bodies, 1.0 / 60.0);
+            auto.update(&bodies, 1.0 / 60.0, None);
         }
         assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
         bodies.extend(grid_bodies(3000, 2.0));
         for _ in 0..70 {
-            auto.update(&bodies, 1.0 / 60.0);
+            auto.update(&bodies, 1.0 / 60.0, None);
         }
         assert_eq!(auto.active_kind(), BroadPhaseKind::UniformGrid);
         let mut grid = UniformGrid::with_cell_size(auto.grid_cell_size());
-        grid.update(&bodies, 1.0 / 60.0);
+        grid.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active(), grid.active());
     }
 
@@ -1238,14 +1326,14 @@ mod tests {
         // switch the backend.
         let mut bodies = grid_bodies(600, 2.0);
         let mut auto = AdaptiveBroadphase::new();
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
         bodies.push(RigidBody::new_box(Vec3::ZERO, Vec3::splat(100.0), 0.0));
-        auto.update(&bodies, 1.0 / 60.0);
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
         bodies.pop();
-        auto.update(&bodies, 1.0 / 60.0);
+        auto.update(&bodies, 1.0 / 60.0, None);
         assert_eq!(auto.active_kind(), BroadPhaseKind::SweepAndPrune);
     }
 }

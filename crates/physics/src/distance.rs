@@ -274,9 +274,185 @@ fn obb_capsule(a: ShapeRef, ha: Vec3, b: ShapeRef, r: f32, hh: f32) -> Distance 
     }
 }
 
+/// Heightfield vs a convex shape: the minimum over the overlapped terrain
+/// columns, each treated as a solid box from the global minimum up to its
+/// sample height. Deterministic row-major order over the full overlapped
+/// range (no stride sampling — a skipped column could ghost a contact).
+/// Each column reuses the analytic `shape_distance` oracles through its
+/// box placement; `hf_first` selects which side owns `point_a`.
+fn heightfield_convex(
+    hf_pos: Vec3,
+    hf_rot: Quat,
+    hf: &crate::shape::Heightfield,
+    convex: ShapeRef,
+    hf_first: bool,
+) -> Distance {
+    let no_contact = || Distance {
+        dist: f32::INFINITY,
+        point_a: if hf_first { hf_pos } else { convex.pos },
+        point_b: if hf_first { convex.pos } else { hf_pos },
+    };
+    if hf.heights.len() != hf.rows * hf.cols
+        || hf.rows == 0
+        || hf.cols == 0
+        || !hf.cell.is_sign_positive()
+    {
+        return no_contact();
+    }
+    // Convex AABB into heightfield-local space for the column window.
+    let inv = hf_rot.conjugate();
+    let aabb = convex.shape.aabb(convex.pos, convex.rot);
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for i in 0..8 {
+        let corner = Vec3::new(
+            if i & 4 == 0 { aabb.min.x } else { aabb.max.x },
+            if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
+            if i & 1 == 0 { aabb.min.z } else { aabb.max.z },
+        );
+        let local = inv * (corner - hf_pos);
+        lo = lo.min(local);
+        hi = hi.max(local);
+    }
+    let col_at = |x: f32| (x / hf.cell + (hf.cols - 1) as f32 * 0.5).floor() as isize;
+    let c0 = col_at(lo.x).clamp(0, hf.cols as isize - 1);
+    let c1 = col_at(hi.x).clamp(0, hf.cols as isize - 1);
+    let r0 = col_at(lo.z).clamp(0, hf.rows as isize - 1);
+    let r1 = col_at(hi.z).clamp(0, hf.rows as isize - 1);
+    let (y_min, _) = hf.height_range();
+    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let mut best: Option<Distance> = None;
+    for row in r0..=r1 {
+        for col in c0..=c1 {
+            let h = hf.heights[row as usize * hf.cols + col as usize];
+            // Solid column from the global minimum up to the sample. Flat
+            // plains (h == y_min) would be zero-height boxes, which the
+            // box oracles read as a plane with ambiguous side: give them a
+            // one-cell skirt instead (same skirt as `closest_point`, so
+            // distance and projection agree on the volume).
+            let y_low = if h - y_min >= 1e-4 {
+                y_min
+            } else {
+                h - hf.cell.max(1e-3)
+            };
+            let local_min = Vec3::new(
+                x_origin + col as f32 * hf.cell,
+                y_low,
+                z_origin + row as f32 * hf.cell,
+            );
+            let local_max = Vec3::new(local_min.x + hf.cell, h.max(y_low), local_min.z + hf.cell);
+            let center = (local_min + local_max) * 0.5;
+            let half = ((local_max - local_min) * 0.5).max(Vec3::ZERO);
+            let column = Shape::Box { half_extents: half };
+            let d = shape_distance(
+                ShapeRef {
+                    shape: &column,
+                    pos: hf_pos + hf_rot * center,
+                    rot: hf_rot,
+                },
+                convex,
+            );
+            let better = best.is_none_or(|b: Distance| d.dist < b.dist);
+            if better {
+                best = Some(d);
+            }
+        }
+    }
+    match best {
+        None => no_contact(),
+        // Column winners already carry repaired witnesses (the column
+        // query routes through `shape_distance`, including its GJK
+        // refine arm); only the side order flips here.
+        Some(d) if hf_first => d,
+        Some(d) => Distance {
+            dist: d.dist,
+            point_a: d.point_b,
+            point_b: d.point_a,
+        },
+    }
+}
+
+/// Witness repair for fallback queries (GJK/EPA + heightfield columns):
+/// the reported plane (`normal`, `dist`) is trusted, the witnesses are
+/// re-seated by alternating closest-point projections. Needed because EPA
+/// reports the right plane but its preimage blend collapses onto box
+/// corners when the other side's supports slide (rim circle): the contact
+/// is then meters off sideways with a tilted normal — a phantom-torque
+/// sink. Two fixed sweeps (deterministic); idempotent at the fixpoint, so
+/// exact analytic witnesses pass through unchanged.
+fn refine_witnesses(
+    a: ShapeRef,
+    b: ShapeRef,
+    dist: f32,
+    normal: Vec3,
+    pa: Vec3,
+    pb: Vec3,
+) -> Distance {
+    if !dist.is_finite() {
+        return Distance {
+            dist,
+            point_a: pa,
+            point_b: pb,
+        };
+    }
+    let mut n = if normal.length_squared() > 1e-18 {
+        normal.normalize()
+    } else {
+        (b.pos - a.pos).normalize_or(Vec3::Y)
+    };
+    let depth = -dist;
+    // Start points depend on the regime: separated GJK witnesses are exact
+    // convex features (vertices, rim points) worth keeping — refine them in
+    // place. Penetrating or sub-millimeter EPA blends are not features
+    // (box-corner collapse against sliding supports can strand them
+    // off-axis, and any off-center start on overlapping face pairs sticks,
+    // spinning the body from a centered bite): restart from the centers,
+    // which projects to the centered face pair in one sweep. Sub-mm
+    // features are below solver slop anyway, so nothing is lost.
+    let (mut pa, mut pb) = if dist < 1e-3 {
+        (a.pos, b.pos)
+    } else {
+        (pa, pb)
+    };
+    for _ in 0..2 {
+        pb = b.shape.closest_point(b.pos, b.rot, pa - n * depth);
+        pa = a.shape.closest_point(a.pos, a.rot, pb - n * depth);
+        // Re-derive the axis from the re-seated witnesses so a tilted
+        // first guess cannot freeze the iteration sideways.
+        let axis = pb - pa;
+        if axis.length_squared() > 1e-18 {
+            n = axis.normalize();
+        }
+    }
+    Distance {
+        dist,
+        point_a: pa,
+        point_b: pb,
+    }
+}
+
 /// Exact surface-to-surface distance between two placed shapes. Negative
 /// distance means penetration (witnesses then are best-effort).
 pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
+    // Heightfields dispatch first (they are not convex and never enter
+    // GJK); cylinder/cone/hull pairs fall through to the GJK/EPA query;
+    // the classic sphere/box/capsule pairs keep their analytic oracles.
+    if let (Shape::Heightfield(_), Shape::Heightfield(_)) = (a.shape, b.shape) {
+        // Terrain-vs-terrain is undefined: report separation so no contact
+        // (and no cast hit) ever forms.
+        return Distance {
+            dist: f32::INFINITY,
+            point_a: a.pos,
+            point_b: b.pos,
+        };
+    }
+    if let Shape::Heightfield(hf) = a.shape {
+        return heightfield_convex(a.pos, a.rot, hf, b, true);
+    }
+    if let Shape::Heightfield(hf) = b.shape {
+        return heightfield_convex(b.pos, b.rot, hf, a, false);
+    }
     match (a.shape, b.shape) {
         (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => {
             sphere_sphere(a, *ra, b, *rb)
@@ -345,6 +521,14 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
                 half_height: hb,
             },
         ) => capsule_capsule(a, *ra, *ha, b, *rb, *hb),
+        // Cylinder/cone/hull pairs (any side): GJK separation with EPA
+        // penetration. The analytic arms above keep their oracles; this
+        // catch-all also covers future convex variants without touching
+        // the match.
+        _ => {
+            let g = crate::gjk::convex_distance(a, b);
+            refine_witnesses(a, b, g.dist, g.normal, g.point_a, g.point_b)
+        }
     }
 }
 

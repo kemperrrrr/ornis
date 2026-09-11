@@ -32,6 +32,15 @@ pub enum BodyType {
     Dynamic,
     /// Moved by setting [`RigidBody::velocity`] directly; collides with and
     /// pushes dynamic bodies but is unaffected by them.
+    ///
+    /// Driver contract: the engine never integrates kinematic bodies, the
+    /// driver sets positions. A per-step position change (teleport) above
+    /// the travel gate (half the thinnest shape feature, same gate as the
+    /// linear CCD) acts as the implied motion everywhere for that step —
+    /// broadphase sweep, speculative margin, kinematic sweep and contact
+    /// responses — with the driver velocity fields restored at step end.
+    /// Below the gate the fields rule and the teleport settles
+    /// positionally, imparting no momentum (Box2D parity for nudges).
     Kinematic,
 }
 
@@ -160,6 +169,79 @@ impl RigidBody {
                 radius,
                 half_height,
             },
+        )
+    }
+
+    /// Flat-capped cylinder body aligned to the local +Y axis,
+    /// restitution/friction 0.4.
+    pub fn new_cylinder(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
+        Self::build(
+            position,
+            mass,
+            0.4,
+            0.4,
+            Shape::Cylinder {
+                radius,
+                half_height,
+            },
+        )
+    }
+
+    /// Solid cone body (apex `+half_height` on local +Y, base at
+    /// `-half_height`), restitution 0.3, friction 0.5.
+    pub fn new_cone(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
+        Self::build(
+            position,
+            mass,
+            0.3,
+            0.5,
+            Shape::Cone {
+                radius,
+                half_height,
+            },
+        )
+    }
+
+    /// Convex-hull body from local vertices (faces triangulated at
+    /// construction), restitution 0.3, friction 0.5. Rolling/torsion
+    /// damping default to 0.2/0.05 (MuJoCo-style torque caps in meters):
+    /// hulls are debris — without rolling resistance a tetra rocks on its
+    /// vertices/edges indefinitely (measured perch at 0.52 with μr=0.1,
+    /// face settle at 0.408 with μr=0.2). Slide friction is untouched.
+    pub fn new_convex_hull(position: Vec3, vertices: Vec<Vec3>, mass: f32) -> Self {
+        let mut body = Self::build(
+            position,
+            mass,
+            0.3,
+            0.5,
+            Shape::ConvexHull(crate::shape::ConvexHull::from_vertices(vertices)),
+        );
+        body.rolling_friction = 0.2;
+        body.torsion_friction = 0.05;
+        body
+    }
+
+    /// Heightfield terrain body (static use intended: pass mass 0).
+    /// Restitution 0.3, friction 0.6.
+    pub fn new_heightfield(
+        position: Vec3,
+        heights: Vec<f32>,
+        rows: usize,
+        cols: usize,
+        cell: f32,
+        mass: f32,
+    ) -> Self {
+        Self::build(
+            position,
+            mass,
+            0.3,
+            0.6,
+            Shape::Heightfield(crate::shape::Heightfield {
+                heights,
+                rows,
+                cols,
+                cell,
+            }),
         )
     }
 
