@@ -2063,6 +2063,23 @@ pub(crate) struct ManifoldState {
     // point may close its gap within the substep but never more.
     pub target: [f32; 4],
     pub mu: f32,
+    /// Transverse Coulomb coefficient (ODE `mu2` parity): cap along `t2`
+    /// while `mu` caps `t1`. Bitwise-equal to `mu` for all default bodies,
+    /// which routes the solve through the legacy circular-cone path —
+    /// existing scenes stay bit-identical (snapshot-guarded).
+    pub mu2: f32,
+    /// Pair rolling-resistance coefficient in meters (`max` of both
+    /// bodies; MuJoCo `rolling` parity). Zero disables rolling solve.
+    pub mu_roll: f32,
+    /// Pair torsional coefficient in meters (`max`; MuJoCo parity).
+    pub mu_spin: f32,
+    /// Accumulated rolling impulses about `t1`/`t2` per point, capped by
+    /// `mu_roll × acc[k]` (torque-cap × normal-impulse, MuJoCo units).
+    pub acc_roll: [f32; 4],
+    pub acc_roll2: [f32; 4],
+    /// Accumulated torsional impulse about `n` per point, capped by
+    /// `mu_spin × acc[k]`.
+    pub acc_spin: [f32; 4],
     // Fixed tangent basis (Box2D-style): friction is solved along
     // directions derived from the contact normal ONCE, not from the
     // instantaneous slip velocity — velocity-aligned friction walks
@@ -4518,6 +4535,108 @@ mod tests {
             all
         }
         assert_eq!(run(), run(), "contact events must be run-deterministic");
+    }
+
+    /// Anisotropic floor (ODE fdir1/mu/mu2 parity): slick along X, grippy
+    /// along Z. A box kicked diagonally must keep its X slide while the Z
+    /// component dies — separate per-axis Coulomb caps, one basis.
+    #[test]
+    fn aniso_floor_channels_sliding() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut floor =
+            RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(5.0, 1.0, 5.0), 0.0);
+        floor.friction = 0.0;
+        floor.friction_transverse = 1.0;
+        floor.friction_dir = Some(Vec3::X);
+        physics.add_body(floor);
+        let mut b = RigidBody::new_box(Vec3::new(0.0, 2.0, 0.0), Vec3::splat(0.5), 1.0);
+        b.friction = 0.0;
+        b.velocity = Vec3::new(3.0, 0.0, 3.0);
+        physics.add_body(b);
+        // 60 steps ≈ 1 s: lands at ~0.55 s, then ~0.45 s of channeled
+        // slide — short enough to stay on the 10 m floor (x ≈ 3 < 5).
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+        let v = physics.bodies[1].velocity;
+        let y = physics.bodies[1].position.y;
+        eprintln!("ANISO v={v:?} y={y}");
+        assert!(v.x > 2.5, "slick axis must preserve slide, got {v:?}");
+        assert!(v.z.abs() < 0.4, "grippy axis must kill slide, got {v:?}");
+        assert!(
+            v.y.abs() < 1.0 && (y - 0.5).abs() < 0.1,
+            "box must rest ON the floor, not fall through, got {v:?} y={y}"
+        );
+    }
+
+    /// Rolling resistance (MuJoCo parity): a ball with rolling friction
+    /// must stop; the zero-coefficient control keeps rolling.
+    #[test]
+    fn rolling_resistance_stops_ball() {
+        fn run(rolling: f32) -> (Vec3, f32) {
+            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            // ±30 m floor: 120 steps at ~5 m/s stay on the slab, so both
+            // balls are measured in rolling contact, never in free fall.
+            let mut floor =
+                RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(30.0, 1.0, 30.0), 0.0);
+            floor.rolling_friction = rolling;
+            physics.add_body(floor);
+            let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 0.6, 0.0), 0.5, 1.0);
+            ball.rolling_friction = rolling;
+            // v0 = 8: after the spin-up transient (~5.7 m/s) the control
+            // stays well above the sleep threshold, so it must still be
+            // rolling at the end; the damped ball stops and sleeps at ~0.
+            ball.velocity = Vec3::new(8.0, 0.0, 0.0);
+            physics.add_body(ball);
+            for _ in 0..120 {
+                physics.step(1.0 / 60.0);
+            }
+            (physics.bodies[1].velocity, physics.bodies[1].position.y)
+        }
+        let (stopped, ys) = run(0.1);
+        let (rolling, yr) = run(0.0);
+        eprintln!("ROLL stopped={stopped:?} y={ys} control={rolling:?} y={yr}");
+        assert!(
+            stopped.length() < 1.0 && (ys - 0.5).abs() < 0.1,
+            "rolling friction must stop the ball ON the floor, got {stopped:?} y={ys}"
+        );
+        assert!(
+            rolling.x > 3.0 && rolling.y.abs() < 1.0 && (yr - 0.5).abs() < 0.1,
+            "zero rolling friction must keep it rolling on the floor, got {rolling:?} y={yr}"
+        );
+    }
+
+    /// Torsional friction (MuJoCo parity): a sphere spinning about the
+    /// contact normal (no slip, so slide friction is blind to it) must
+    /// lose its spin; the control keeps spinning.
+    #[test]
+    fn torsion_friction_kills_spin() {
+        fn run(torsion: f32) -> Vec3 {
+            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            let mut floor =
+                RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(5.0, 1.0, 5.0), 0.0);
+            floor.torsion_friction = torsion;
+            physics.add_body(floor);
+            let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 0.6, 0.0), 0.5, 1.0);
+            ball.torsion_friction = torsion;
+            ball.angular_velocity = Vec3::new(0.0, 10.0, 0.0);
+            physics.add_body(ball);
+            for _ in 0..600 {
+                physics.step(1.0 / 60.0);
+            }
+            physics.bodies[1].angular_velocity
+        }
+        let damped = run(0.05);
+        let spinning = run(0.0);
+        eprintln!("TORSION damped={damped:?} control={spinning:?}");
+        assert!(
+            damped.y.abs() < 2.0,
+            "torsion friction must kill spin, got {damped:?}"
+        );
+        assert!(
+            spinning.y.abs() > 5.0,
+            "zero torsion must preserve spin, got {spinning:?}"
+        );
     }
 
     #[test]

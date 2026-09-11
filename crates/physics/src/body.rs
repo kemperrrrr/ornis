@@ -63,6 +63,28 @@ pub struct RigidBody {
     pub restitution: f32,
     /// Coulomb friction coefficient ≥ 0 used by the contact solver.
     pub friction: f32,
+    /// Transverse friction coefficient ≥ 0 (ODE `mu2` parity): Coulomb
+    /// coefficient along the second tangent axis when
+    /// [`RigidBody::friction_dir`] fixes the first one. Initialized from
+    /// `friction` at construction — mutating `friction` later does NOT
+    /// re-mirror it, set both explicitly for anisotropic surfaces.
+    /// Ignored while `friction_dir` is `None` (isotropic contact).
+    pub friction_transverse: f32,
+    /// First friction direction in body-local frame (ODE `fdir1` parity):
+    /// fixes the manifold tangent basis `t1` (projected onto the plane
+    /// ⊥ the contact normal, orthogonalized at use). Body A wins if both
+    /// sides set one; degenerate projections fall back to the default
+    /// normal-derived basis. `None` (default) = isotropic friction.
+    pub friction_dir: Option<Vec3>,
+    /// Rolling resistance in meters (MuJoCo `rolling` parity): per-contact
+    /// torque cap = `rolling_friction × normal impulse`, opposing relative
+    /// rotation about the tangent axes. Zero (default) disables it —
+    /// existing scenes are bit-identical.
+    pub rolling_friction: f32,
+    /// Torsional (spin) friction in meters (MuJoCo `torsional` parity):
+    /// torque cap = `torsion_friction × normal impulse`, opposing relative
+    /// spin about the contact normal. Zero (default) disables it.
+    pub torsion_friction: f32,
     /// Collision primitive; also drives the derived inertia tensor.
     pub shape: Shape,
     /// Bit identifying the collision layer this body belongs to.
@@ -98,6 +120,10 @@ impl RigidBody {
             torque: Vec3::ZERO,
             restitution,
             friction,
+            friction_transverse: friction,
+            friction_dir: None,
+            rolling_friction: 0.0,
+            torsion_friction: 0.0,
             shape,
             collision_layer: 1,
             collision_mask: u32::MAX,

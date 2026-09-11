@@ -174,6 +174,48 @@ fn apply_warm_start(
 /// `m`. Shared preamble of the CPU island path (`solve_island_velocity`) and
 /// the GPU single-point path (`build_manifold_state`). `key` is the sorted
 /// global body-pair for warm-cache lookup.
+/// Anisotropic contact frame (ODE `fdir1`/`mu`/`mu2` parity): returns the
+/// pair tangent basis plus the per-axis Coulomb coefficients.
+///
+/// Each body maps to an (along, transverse) coefficient pair — a body with
+/// `friction_dir` contributes `(friction, friction_transverse)`, one
+/// without contributes `(friction, friction)` — and each axis takes the
+/// `max` across the pair (same combining as isotropic `mu`). The first
+/// body (A) with a set direction wins `t1`: its local dir goes to world
+/// and is projected onto the plane ⊥ `n`. Degenerate projections (dir ∥
+/// `n`, zero-length) fall back to the default normal-derived basis, and
+/// with no directions anywhere the basis is exactly `tangent_basis(n)`.
+///
+/// With all defaults (`friction_dir: None`, transverse mirrored from
+/// `friction`) the returned `mu == mu2`, routing the solver through the
+/// legacy circular-cone path bit-identically.
+fn anisotropic_frame(bodies: &[RigidBody], i: usize, j: usize, n: Vec3) -> (Vec3, f32, f32) {
+    let pick_dir = |b: &RigidBody| -> Option<Vec3> {
+        let local = b.friction_dir?;
+        let world = b.orientation * local;
+        let proj = world - n * world.dot(n);
+        let len2 = proj.length_squared();
+        if len2 < 1e-12 || !len2.is_finite() {
+            return None;
+        }
+        Some(proj / len2.sqrt())
+    };
+    // Body A wins (documented priority); B only if A sets nothing.
+    let t1 = pick_dir(&bodies[i])
+        .or_else(|| pick_dir(&bodies[j]))
+        .unwrap_or_else(|| tangent_basis(n));
+    let axis = |b: &RigidBody| -> (f32, f32) {
+        if b.friction_dir.is_some() {
+            (b.friction, b.friction_transverse)
+        } else {
+            (b.friction, b.friction)
+        }
+    };
+    let (a1, a2) = axis(&bodies[i]);
+    let (b1, b2) = axis(&bodies[j]);
+    (t1, a1.max(b1), a2.max(b2))
+}
+
 #[allow(clippy::needless_range_loop)]
 fn prepare_manifold_state(
     bodies: &mut [RigidBody],
@@ -206,7 +248,9 @@ fn prepare_manifold_state(
     let (warm, matched) = match_warm_points(&la, &lb, n, key, warm_in, count);
 
     let e = bodies[i].restitution.min(bodies[j].restitution);
-    let mu = bodies[i].friction.max(bodies[j].friction);
+    let (t1, mu, mu2) = anisotropic_frame(bodies, i, j, n);
+    let mu_roll = bodies[i].rolling_friction.max(bodies[j].rolling_friction);
+    let mu_spin = bodies[i].torsion_friction.max(bodies[j].torsion_friction);
     let target = speculative_targets(&pen0, count, sub_dt);
     let bias =
         compute_restitution_bias(bodies, m, &matched, &pen0, n, e, allow_restitution, sub_dt);
@@ -223,8 +267,14 @@ fn prepare_manifold_state(
         bias,
         target,
         mu,
-        t1: tangent_basis(n),
-        t2: tangent_basis(n).cross(n),
+        mu2,
+        mu_roll,
+        mu_spin,
+        acc_roll: [0.0; 4],
+        acc_roll2: [0.0; 4],
+        acc_spin: [0.0; 4],
+        t1,
+        t2: t1.cross(n),
         la,
         lb,
         pen0,
@@ -743,7 +793,10 @@ impl BuiltinPhysicsEngine {
     }
 
     /// Friction step for a single manifold (extracted to reduce
-    /// cognitive complexity of solve_scalar_velocity_step).
+    /// cognitive complexity of solve_scalar_velocity_step). Slide friction
+    /// is isotropic (legacy circular cone, verbatim) while `mu == mu2`;
+    /// anisotropic pairs take the elliptical-cone projection instead.
+    /// Rolling/torsional resistance follows in the same pass.
     #[allow(clippy::needless_range_loop)]
     pub(super) fn solve_scalar_friction(
         bodies: &mut [RigidBody],
@@ -764,33 +817,144 @@ impl BuiltinPhysicsEngine {
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
             let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
-            let max_friction = st.mu * st.acc[k];
-            let mut f_imp = Vec3::ZERO;
-            for axis in 0..2 {
-                let t = if axis == 0 { st.t1 } else { st.t2 };
-                let k_t = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, t);
-                if k_t < 1e-10 {
-                    continue;
+            if st.mu == st.mu2 {
+                // Legacy circular-cone path (isotropic): sequential
+                // per-axis clamp, bit-identical to the pre-anisotropy code.
+                let max_friction = st.mu * st.acc[k];
+                let mut f_imp = Vec3::ZERO;
+                for axis in 0..2 {
+                    let t = if axis == 0 { st.t1 } else { st.t2 };
+                    let k_t = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, t);
+                    if k_t < 1e-10 {
+                        continue;
+                    }
+                    let vt = rel.dot(t);
+                    let lambda_t = -vt / k_t;
+                    let (cur, other) = if axis == 0 {
+                        (st.acc_friction[k], st.acc_friction2[k])
+                    } else {
+                        (st.acc_friction2[k], st.acc_friction[k])
+                    };
+                    let new_t = clamp_friction_impulse(cur + lambda_t, other, max_friction);
+                    debug_assert!(new_t.is_finite(), "friction impulse overflowed");
+                    if axis == 0 {
+                        f_imp += t * (new_t - st.acc_friction[k]);
+                        st.acc_friction[k] = new_t;
+                    } else {
+                        f_imp += t * (new_t - st.acc_friction2[k]);
+                        st.acc_friction2[k] = new_t;
+                    }
                 }
-                let vt = rel.dot(t);
-                let lambda_t = -vt / k_t;
-                let (cur, other) = if axis == 0 {
-                    (st.acc_friction[k], st.acc_friction2[k])
+                if f_imp.length_squared() > 1e-24 {
+                    apply_impulse(bodies, i, j, f_imp, ra, rb);
+                }
+            } else {
+                // Elliptical cone: joint projection of both axes in the
+                // normalized constraint space (T1/mu1, T2/mu2), capped by
+                // the normal impulse. Deliberate deviation from the ODE
+                // friction pyramid (independent per-axis box clamps): the
+                // ellipse is the exact Coulomb generalization.
+                let k_t1 = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, st.t1);
+                let k_t2 = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, st.t2);
+                let lam1 = if k_t1 >= 1e-10 {
+                    -rel.dot(st.t1) / k_t1
                 } else {
-                    (st.acc_friction2[k], st.acc_friction[k])
+                    0.0
                 };
-                let new_t = clamp_friction_impulse(cur + lambda_t, other, max_friction);
-                debug_assert!(new_t.is_finite(), "friction impulse overflowed");
-                if axis == 0 {
-                    f_imp += t * (new_t - st.acc_friction[k]);
-                    st.acc_friction[k] = new_t;
+                let lam2 = if k_t2 >= 1e-10 {
+                    -rel.dot(st.t2) / k_t2
                 } else {
-                    f_imp += t * (new_t - st.acc_friction2[k]);
-                    st.acc_friction2[k] = new_t;
+                    0.0
+                };
+                let mut u1 = st.acc_friction[k] + lam1;
+                let mut u2 = st.acc_friction2[k] + lam2;
+                // A zero coefficient carries nothing along its axis.
+                if st.mu <= 0.0 {
+                    u1 = 0.0;
+                }
+                if st.mu2 <= 0.0 {
+                    u2 = 0.0;
+                }
+                let r1 = if st.mu > 0.0 { u1 / st.mu } else { 0.0 };
+                let r2 = if st.mu2 > 0.0 { u2 / st.mu2 } else { 0.0 };
+                let r_len = r1.hypot(r2);
+                let cap = st.acc[k];
+                if r_len > cap && r_len > 1e-12 {
+                    let s = cap / r_len;
+                    u1 *= s;
+                    u2 *= s;
+                }
+                debug_assert!(u1.is_finite() && u2.is_finite(), "aniso impulse overflowed");
+                let f_imp = st.t1 * (u1 - st.acc_friction[k]) + st.t2 * (u2 - st.acc_friction2[k]);
+                st.acc_friction[k] = u1;
+                st.acc_friction2[k] = u2;
+                if f_imp.length_squared() > 1e-24 {
+                    apply_impulse(bodies, i, j, f_imp, ra, rb);
                 }
             }
-            if f_imp.length_squared() > 1e-24 {
-                apply_impulse(bodies, i, j, f_imp, ra, rb);
+            // Rolling + torsional resistance (MuJoCo slide/torsion/rolling
+            // triple parity): pure couples opposing relative spin, capped
+            // by mu × normal impulse. Zero coefficients skip everything.
+            if st.mu_roll > 0.0 || st.mu_spin > 0.0 {
+                let wrel = bodies[j].angular_velocity - bodies[i].angular_velocity;
+                Self::solve_scalar_rolling(bodies, i, j, st, k, st.t1, wrel, st.mu_roll, 0);
+                Self::solve_scalar_rolling(bodies, i, j, st, k, st.t2, wrel, st.mu_roll, 1);
+                Self::solve_scalar_rolling(bodies, i, j, st, k, m.normal, wrel, st.mu_spin, 2);
+            }
+        }
+    }
+
+    /// One rolling/torsional axis for a single contact point: opposes the
+    /// relative spin about `axis` with a pure couple (no linear part —
+    /// MuJoCo contact-frame torque model), accumulated per point and
+    /// capped by `mu_axis × normal impulse`. `slot` selects the
+    /// accumulator: 0 = roll about `t1`, 1 = roll about `t2`, 2 = spin
+    /// about the normal.
+    // Nine parameters mirror the neighboring friction helpers (bodies,
+    // pair, point, axis, spin, cap, slot); packing them would hide the
+    // call-site symmetry of the three axes.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn solve_scalar_rolling(
+        bodies: &mut [RigidBody],
+        i: usize,
+        j: usize,
+        st: &mut ManifoldState,
+        k: usize,
+        axis: Vec3,
+        wrel: Vec3,
+        mu_axis: f32,
+        slot: u8,
+    ) {
+        if mu_axis <= 0.0 {
+            return;
+        }
+        let k_rot = axis.dot(mul_inv_inertia(
+            bodies[i].inertia,
+            bodies[i].orientation,
+            axis,
+        )) + axis.dot(mul_inv_inertia(
+            bodies[j].inertia,
+            bodies[j].orientation,
+            axis,
+        ));
+        if k_rot < 1e-10 {
+            return;
+        }
+        let cap = mu_axis * st.acc[k];
+        let cur = match slot {
+            0 => st.acc_roll[k],
+            1 => st.acc_roll2[k],
+            _ => st.acc_spin[k],
+        };
+        let delta = -wrel.dot(axis) / k_rot;
+        let new = (cur + delta).clamp(-cap, cap);
+        debug_assert!(new.is_finite(), "rolling impulse overflowed");
+        if new != cur {
+            apply_angular_impulse(bodies, i, j, axis * (new - cur));
+            match slot {
+                0 => st.acc_roll[k] = new,
+                1 => st.acc_roll2[k] = new,
+                _ => st.acc_spin[k] = new,
             }
         }
     }

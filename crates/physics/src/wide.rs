@@ -135,6 +135,16 @@ pub(crate) struct WideBatch {
     wb_mat: [[Vec3; 3]; 4],
     target: Fx4,
     mu: Fx4,
+    /// Transverse Coulomb coefficient per lane (ODE `mu2` parity).
+    mu2: Fx4,
+    /// Rolling / torsional coefficients per lane in meters (MuJoCo parity).
+    mu_r: Fx4,
+    mu_s: Fx4,
+    /// 1 / pure-angular effective mass about the rolling/spin axes
+    /// (0 for lanes with no rolling pair).
+    inv_k_r1: Fx4,
+    inv_k_r2: Fx4,
+    inv_k_s: Fx4,
     /// One-shot restitution bias per lane.
     bias: Fx4,
 
@@ -142,6 +152,10 @@ pub(crate) struct WideBatch {
     acc: Fx4,
     acc_f1: Fx4,
     acc_f2: Fx4,
+    /// Accumulated rolling (about t1/t2) and spin (about n) impulses.
+    acc_r1: Fx4,
+    acc_r2: Fx4,
+    acc_s: Fx4,
     va: Vec3x4,
     vb: Vec3x4,
     wa: Vec3x4,
@@ -221,10 +235,19 @@ impl WideBatch {
             wb_mat: [[Vec3::ZERO; 3]; 4],
             target: Fx4::zero(),
             mu: Fx4::zero(),
+            mu2: Fx4::zero(),
+            mu_r: Fx4::zero(),
+            mu_s: Fx4::zero(),
+            inv_k_r1: Fx4::zero(),
+            inv_k_r2: Fx4::zero(),
+            inv_k_s: Fx4::zero(),
             bias: Fx4::zero(),
             acc: Fx4::zero(),
             acc_f1: Fx4::zero(),
             acc_f2: Fx4::zero(),
+            acc_r1: Fx4::zero(),
+            acc_r2: Fx4::zero(),
+            acc_s: Fx4::zero(),
             va: Vec3x4::zero(),
             vb: Vec3x4::zero(),
             wa: Vec3x4::zero(),
@@ -271,6 +294,7 @@ impl WideBatch {
         self.t2.set_lane(l, st.t2);
         self.target.set_lane(l, st.target[0]);
         self.mu.set_lane(l, st.mu);
+        self.mu2.set_lane(l, st.mu2);
         self.bias.set_lane(l, st.bias[0]);
         self.acc.set_lane(l, st.acc[0]);
 
@@ -314,6 +338,44 @@ impl WideBatch {
         self.apply_n_b.set_lane(l, n * bb.inv_mass);
         self.apply_w_a.set_lane(l, Self::matvec(&wa, ra_n));
         self.apply_w_b.set_lane(l, Self::matvec(&wb, rb_n));
+
+        // Rolling / torsional lanes (MuJoCo parity): pure-angular effective
+        // masses about t1/t2/n, active only when the pair carries the
+        // coefficient — otherwise the inverse stays 0 and the iteration
+        // skips the lane exactly like a degenerate friction axis.
+        let mu_r = a.rolling_friction.max(bb.rolling_friction);
+        let mu_s = a.torsion_friction.max(bb.torsion_friction);
+        self.mu_r.set_lane(l, mu_r);
+        self.mu_s.set_lane(l, mu_s);
+        let k_ang =
+            |axis: Vec3| axis.dot(Self::matvec(&wa, axis)) + axis.dot(Self::matvec(&wb, axis));
+        let k_r1 = k_ang(st.t1);
+        let k_r2 = k_ang(st.t2);
+        let k_s = k_ang(n);
+        self.inv_k_r1.set_lane(
+            l,
+            if mu_r > 0.0 && k_r1 >= 1e-10 {
+                1.0 / k_r1
+            } else {
+                0.0
+            },
+        );
+        self.inv_k_r2.set_lane(
+            l,
+            if mu_r > 0.0 && k_r2 >= 1e-10 {
+                1.0 / k_r2
+            } else {
+                0.0
+            },
+        );
+        self.inv_k_s.set_lane(
+            l,
+            if mu_s > 0.0 && k_s >= 1e-10 {
+                1.0 / k_s
+            } else {
+                0.0
+            },
+        );
     }
 
     /// Refresh velocities from the body array (called at the start of every
@@ -379,6 +441,9 @@ impl WideBatch {
                     self.wb.lane(l) + Self::matvec(&self.wb_mat[l], rb.cross(f_imp)),
                 );
             }
+            // Rolling / torsional resistance after slide friction, on the
+            // fresh spin — same stage order as the scalar solver.
+            self.solve_lane_rolling(l);
         }
     }
 
@@ -410,40 +475,132 @@ impl WideBatch {
     }
 
     /// Coulomb friction for one lane along both fixed tangents; returns the
-    /// total friction impulse to apply.
+    /// total friction impulse to apply. Isotropic lanes (`mu == mu2`) run
+    /// the legacy sequential circular-cone clamp verbatim; anisotropic
+    /// lanes take the joint elliptical projection (mirrors the scalar
+    /// solver).
     fn solve_lane_friction(&mut self, l: usize, max_friction: f32) -> Vec3 {
         let rb = self.rb.lane(l);
         let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
             - point_velocity(self.va.lane(l), self.wa.lane(l), self.ra.lane(l));
         let mut f_imp = Vec3::ZERO;
 
-        // Axis 1.
-        if self.inv_k_t1.lane(l) != 0.0 {
-            let t = self.t1.lane(l);
-            let vt = rel.dot(t);
-            let lambda_t = -vt * self.inv_k_t1.lane(l);
-            let new_t = clamp_friction_impulse_wide(
-                self.acc_f1.lane(l) + lambda_t,
-                self.acc_f2.lane(l),
-                max_friction,
-            );
-            f_imp += t * (new_t - self.acc_f1.lane(l));
-            self.acc_f1.set_lane(l, new_t);
+        if self.mu.lane(l) == self.mu2.lane(l) {
+            // Axis 1.
+            if self.inv_k_t1.lane(l) != 0.0 {
+                let t = self.t1.lane(l);
+                let vt = rel.dot(t);
+                let lambda_t = -vt * self.inv_k_t1.lane(l);
+                let new_t = clamp_friction_impulse_wide(
+                    self.acc_f1.lane(l) + lambda_t,
+                    self.acc_f2.lane(l),
+                    max_friction,
+                );
+                f_imp += t * (new_t - self.acc_f1.lane(l));
+                self.acc_f1.set_lane(l, new_t);
+            }
+            // Axis 2.
+            if self.inv_k_t2.lane(l) != 0.0 {
+                let t = self.t2.lane(l);
+                let vt = rel.dot(t);
+                let lambda_t = -vt * self.inv_k_t2.lane(l);
+                let new_t = clamp_friction_impulse_wide(
+                    self.acc_f2.lane(l) + lambda_t,
+                    self.acc_f1.lane(l),
+                    max_friction,
+                );
+                f_imp += t * (new_t - self.acc_f2.lane(l));
+                self.acc_f2.set_lane(l, new_t);
+            }
+            return f_imp;
         }
-        // Axis 2.
-        if self.inv_k_t2.lane(l) != 0.0 {
-            let t = self.t2.lane(l);
-            let vt = rel.dot(t);
-            let lambda_t = -vt * self.inv_k_t2.lane(l);
-            let new_t = clamp_friction_impulse_wide(
-                self.acc_f2.lane(l) + lambda_t,
-                self.acc_f1.lane(l),
-                max_friction,
-            );
-            f_imp += t * (new_t - self.acc_f2.lane(l));
-            self.acc_f2.set_lane(l, new_t);
+
+        // Elliptical cone (see the scalar solver for the rationale).
+        let mu1 = self.mu.lane(l);
+        let mu2 = self.mu2.lane(l);
+        let lam1 = if self.inv_k_t1.lane(l) != 0.0 {
+            -rel.dot(self.t1.lane(l)) * self.inv_k_t1.lane(l)
+        } else {
+            0.0
+        };
+        let lam2 = if self.inv_k_t2.lane(l) != 0.0 {
+            -rel.dot(self.t2.lane(l)) * self.inv_k_t2.lane(l)
+        } else {
+            0.0
+        };
+        let mut u1 = self.acc_f1.lane(l) + lam1;
+        let mut u2 = self.acc_f2.lane(l) + lam2;
+        if mu1 <= 0.0 {
+            u1 = 0.0;
         }
+        if mu2 <= 0.0 {
+            u2 = 0.0;
+        }
+        let r1 = if mu1 > 0.0 { u1 / mu1 } else { 0.0 };
+        let r2 = if mu2 > 0.0 { u2 / mu2 } else { 0.0 };
+        let r_len = r1.hypot(r2);
+        let cap = self.acc.lane(l);
+        if r_len > cap && r_len > 1e-12 {
+            let s = cap / r_len;
+            u1 *= s;
+            u2 *= s;
+        }
+        f_imp += self.t1.lane(l) * (u1 - self.acc_f1.lane(l));
+        f_imp += self.t2.lane(l) * (u2 - self.acc_f2.lane(l));
+        self.acc_f1.set_lane(l, u1);
+        self.acc_f2.set_lane(l, u2);
         f_imp
+    }
+
+    /// Rolling / torsional resistance for one lane (MuJoCo parity): pure
+    /// couples about t1/t2 (rolling) and n (spin), capped by the lane
+    /// coefficient × normal impulse. Zero inverse masses skip silently.
+    fn solve_lane_rolling(&mut self, l: usize) {
+        let wrel = self.wb.lane(l) - self.wa.lane(l);
+        let acc = self.acc.lane(l);
+        // (axis, inv_k, accum, mu): 0/1 rolling, 2 spin.
+        let axes = [
+            (
+                self.t1.lane(l),
+                self.inv_k_r1.lane(l),
+                self.acc_r1.lane(l),
+                self.mu_r.lane(l),
+                0u8,
+            ),
+            (
+                self.t2.lane(l),
+                self.inv_k_r2.lane(l),
+                self.acc_r2.lane(l),
+                self.mu_r.lane(l),
+                1u8,
+            ),
+            (
+                self.n.lane(l),
+                self.inv_k_s.lane(l),
+                self.acc_s.lane(l),
+                self.mu_s.lane(l),
+                2u8,
+            ),
+        ];
+        for (axis, inv_k, cur, mu_axis, slot) in axes {
+            if inv_k == 0.0 {
+                continue;
+            }
+            let cap = mu_axis * acc;
+            let new = (cur + (-wrel.dot(axis) * inv_k)).clamp(-cap, cap);
+            let delta = new - cur;
+            if delta != 0.0 {
+                let da = Self::matvec(&self.wa_mat[l], axis);
+                let db = Self::matvec(&self.wb_mat[l], axis);
+                self.wa.set_lane(l, self.wa.lane(l) - da * delta);
+                self.wb.set_lane(l, self.wb.lane(l) + db * delta);
+                match slot {
+                    0 => self.acc_r1.set_lane(l, new),
+                    1 => self.acc_r2.set_lane(l, new),
+                    _ => self.acc_s.set_lane(l, new),
+                }
+            }
+        }
     }
 
     /// One-shot restitution stage (mirrors the scalar post-iteration pass).
@@ -589,6 +746,12 @@ mod tests {
             bias: [0.0; 4],
             target: [target; 4],
             mu: 0.3,
+            mu2: 0.3,
+            mu_roll: 0.0,
+            mu_spin: 0.0,
+            acc_roll: [0.0; 4],
+            acc_roll2: [0.0; 4],
+            acc_spin: [0.0; 4],
             t1: Vec3::X,
             t2: Vec3::Z,
             la: [Vec3::ZERO; 4],
@@ -674,6 +837,58 @@ mod tests {
             "impulses must slow the approach: v0.x = {}, v3.x = {}",
             bodies2[0].velocity.x,
             bodies2[3].velocity.x
+        );
+    }
+
+    /// Anisotropic parity: the wide elliptical-cone path must match the
+    /// scalar one lane-for-lane, and the free axis must stay untouched
+    /// while the grippy axis bites (mu along X, mu2 = 0 along Z).
+    #[test]
+    fn wide_batch_matches_scalar_anisotropic() {
+        let mut bodies = vec![
+            body_at(Vec3::new(0.0, 0.0, 0.0)),
+            body_at(Vec3::new(0.0, 1.0, 0.0)),
+        ];
+        bodies[0].velocity = Vec3::new(1.0, 0.5, 0.6);
+        bodies[1].velocity = Vec3::new(-1.0, -0.5, -0.6);
+
+        let n = Vec3::Y;
+        let manifolds = vec![manifold(0, 1, n, Vec3::new(0.0, 0.5, 0.0))];
+        let mut aniso = single_state(0, 1, n, Vec3::new(0.0, 0.5, 0.0), 0.0);
+        aniso.t1 = Vec3::X;
+        aniso.t2 = Vec3::Z;
+        aniso.mu = 0.5;
+        aniso.mu2 = 0.0;
+        let states = vec![aniso];
+
+        let mut scalar_bodies = bodies.clone();
+        let mut scalar_states = states.clone();
+        run_scalar(&mut scalar_bodies, &manifolds, &mut scalar_states, 8, false);
+
+        let items: Vec<(usize, &Manifold, &ManifoldState)> = vec![(0, &manifolds[0], &states[0])];
+        let mut batch = WideBatch::build(&items, &bodies);
+        let mut bodies2 = bodies.clone();
+        for _ in 0..8 {
+            batch.gather(&bodies2);
+            batch.solve_iteration();
+            batch.scatter(&mut bodies2);
+        }
+
+        for (h, (wide, scalar)) in bodies2.iter().zip(scalar_bodies.iter()).enumerate() {
+            let dv = (wide.velocity - scalar.velocity).length();
+            assert!(dv < 1e-4, "body {h} velocity diverged: {dv}");
+        }
+        // Free axis (Z, mu2 = 0) preserves the slip; grippy axis (X)
+        // kills it — in both paths (parity above ties them together).
+        assert!(
+            (bodies2[0].velocity.z - 0.6).abs() < 1e-3,
+            "free axis must not bite: v0.z = {}",
+            bodies2[0].velocity.z
+        );
+        assert!(
+            bodies2[0].velocity.x.abs() < 1.0,
+            "grippy axis must bite: v0.x = {}",
+            bodies2[0].velocity.x
         );
     }
 
