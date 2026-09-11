@@ -757,8 +757,15 @@ fn sphere_vs_obb(
     // Normal points from the box toward the sphere, in world space.
     let normal = box_rot * (delta / dist);
     let penetration = sphere_radius - dist;
-    // Contact point: where the sphere touches the box (midway on the normal).
-    let contact_point = (local + clamped) * 0.5;
+    // Contact point: the sphere's surface point pushed halfway into the
+    // overlap (same convention as `sphere_vs_sphere`). The old code used
+    // the midpoint of (center, closest box point), which sits at half the
+    // radius depth for a touching sphere — halving every friction lever
+    // and torque arm. Symptom (measured): a rolling ball converged to a
+    // phantom "half-rolling" equilibrium v = ω·r/2 with live slip, because
+    // the solver saw zero slip at the half-depth point.
+    let dir = delta / dist; // box frame, sphere center toward box surface
+    let contact_point = local + dir * (sphere_radius + penetration * 0.5);
     Some(Contact {
         normal,
         penetration,
@@ -4583,12 +4590,12 @@ mod tests {
             physics.add_body(floor);
             let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 0.6, 0.0), 0.5, 1.0);
             ball.rolling_friction = rolling;
-            // v0 = 8: after the spin-up transient (~5.7 m/s) the control
-            // stays well above the sleep threshold, so it must still be
-            // rolling at the end; the damped ball stops and sleeps at ~0.
+            // 240 steps: the damped ball stops (~190 steps at μr = 0.1);
+            // the control is in pure rolling (zero slip) and coasts at
+            // 8·5/7 ≈ 5.71 indefinitely — x ≈ 23 < 30 stays on the slab.
             ball.velocity = Vec3::new(8.0, 0.0, 0.0);
             physics.add_body(ball);
-            for _ in 0..120 {
+            for _ in 0..240 {
                 physics.step(1.0 / 60.0);
             }
             (physics.bodies[1].velocity, physics.bodies[1].position.y)
@@ -4636,6 +4643,44 @@ mod tests {
         assert!(
             spinning.y.abs() > 5.0,
             "zero torsion must preserve spin, got {spinning:?}"
+        );
+    }
+
+    /// Sphere-vs-box contact point (regression for the half-depth bug):
+    /// with slide friction and NO rolling resistance, a rolling ball must
+    /// converge to TRUE rolling (contact slip → 0). The old midpoint
+    /// contact sat at half the radius depth, so the solver saw zero slip
+    /// at a phantom "half-rolling" v = ω·r/2 and held it forever.
+    #[test]
+    fn rolling_converges_to_true_rolling_not_half() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(30.0, 1.0, 30.0),
+            0.0,
+        ));
+        let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 0.6, 0.0), 0.5, 1.0);
+        ball.velocity = Vec3::new(8.0, 0.0, 0.0);
+        physics.add_body(ball);
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = &physics.bodies[1];
+        // Still rolling (above the sleep threshold), so the slip below is
+        // solver-converged, not frozen.
+        assert!(
+            b.velocity.x > 3.0,
+            "ball must still be rolling, got {:?}",
+            b.velocity
+        );
+        let slip = b.velocity.x + b.angular_velocity.z * 0.5;
+        eprintln!(
+            "ROLLTRUE v={:?} w={:?} slip={slip}",
+            b.velocity, b.angular_velocity
+        );
+        assert!(
+            slip.abs() < 0.2,
+            "true rolling means zero contact slip, got {slip} (half-rolling phantom if ~v/2)"
         );
     }
 
