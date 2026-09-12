@@ -13,6 +13,8 @@ use engine_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::install_gameplay_physics_bridge;
 #[cfg(not(feature = "editor-only"))]
+use ornis_audio::AudioPlugin;
+#[cfg(not(feature = "editor-only"))]
 use ornis_core::install_gameplay;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
@@ -261,6 +263,12 @@ impl GameApp {
         install_physics(render_world.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
         install_gameplay(render_world.engine_mut());
         install_gameplay_physics_bridge(render_world.engine_mut());
+        // Audio steps in the same DAG (after motion); silently skipped when
+        // no output device is available. No showcase entity carries an
+        // AudioSource yet, so this is a no-op until content arrives.
+        if let Some(audio) = AudioPlugin::try_default() {
+            audio.install(render_world.engine_mut());
+        }
         {
             let entities = render_world.entities().to_vec();
             let store = render_world

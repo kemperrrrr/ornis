@@ -185,13 +185,15 @@ mod tests {
             .ok()
     }
 
-    fn scale_pipeline(
+    fn test_pipeline(
         device: &wgpu::Device,
         buf: &wgpu::Buffer,
+        label: &str,
+        wgsl: &str,
     ) -> (wgpu::ComputePipeline, wgpu::BindGroup) {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("auto_lane scale test"),
-            source: wgpu::ShaderSource::Wgsl(scale_lane::wgsl_source().into()),
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
@@ -276,7 +278,12 @@ mod tests {
             "gpu test",
         );
         assert_eq!(lane.platform_for(64), Platform::Gpu);
-        let (pipeline, bg) = scale_pipeline(&device, lane.gpu_buffer().expect("buffer exists"));
+        let (pipeline, bg) = test_pipeline(
+            &device,
+            lane.gpu_buffer().expect("buffer exists"),
+            "auto_lane scale test",
+            scale_lane::wgsl_source(),
+        );
         // If this ran on CPU it would multiply by 3; GPU multiplies by 2.
         lane.execute(&mut sync, Some(&pipeline), Some(&bg), |data| {
             for x in data.iter_mut() {
@@ -321,7 +328,12 @@ mod tests {
             lane_config(16),
             "round trip",
         );
-        let (pipeline, bg) = scale_pipeline(&device, lane.gpu_buffer().expect("buffer exists"));
+        let (pipeline, bg) = test_pipeline(
+            &device,
+            lane.gpu_buffer().expect("buffer exists"),
+            "auto_lane round trip test",
+            scale_lane::wgsl_source(),
+        );
         // Run 1 (GPU): 1.0 -> 2.0.
         assert!(
             lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
@@ -341,6 +353,37 @@ mod tests {
         );
         assert_eq!(lane.data()[0], 200.0);
         assert!(lane.data()[1..].iter().all(|&x| x == 4.0));
+    }
+
+    #[ornis_macros::gpu_pipeline(
+        workgroup_size = 64,
+        storage(counts: [u32; 64], read_write),
+        builtin(gid: global_invocation_id),
+    )]
+    fn double_counts() {
+        counts[gid.x] = counts[gid.x] * 2;
+    }
+
+    #[test]
+    fn gpu_verdict_supports_u32_lanes() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lane = AutoLane::new(vec![3u32; 64], &device, &queue, lane_config(16), "u32 test");
+        let (pipeline, bg) = test_pipeline(
+            &device,
+            lane.gpu_buffer().expect("buffer exists"),
+            "auto_lane u32 test",
+            double_counts::wgsl_source(),
+        );
+        // CPU would triple; GPU must double.
+        lane.execute(&mut sync, Some(&pipeline), Some(&bg), |data| {
+            for x in data.iter_mut() {
+                *x *= 3;
+            }
+        });
+        assert_eq!(lane.data(), &vec![6u32; 64]);
     }
 
     #[test]

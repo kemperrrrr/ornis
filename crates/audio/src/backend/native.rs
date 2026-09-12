@@ -32,7 +32,11 @@ enum AudioCommand {
 /// from any thread. Dropping the backend signals shutdown and joins the thread.
 pub struct AudioBackend {
     command_tx: Sender<AudioCommand>,
-    handle: Option<thread::JoinHandle<()>>,
+    /// Join handle behind a mutex (joined only on drop): this keeps the
+    /// backend `Send + Sync` so [`crate::engine::AudioEngine`] can be driven
+    /// from the unified [`Engine`](ornis_core::Engine) schedule, while the
+    /// mixer thread itself is untouched.
+    handle: Mutex<Option<thread::JoinHandle<()>>>,
     running: Arc<AtomicBool>,
 }
 
@@ -57,7 +61,7 @@ impl AudioBackend {
 
         Ok(Self {
             command_tx,
-            handle: Some(handle),
+            handle: Mutex::new(Some(handle)),
             running,
         })
     }
@@ -87,7 +91,7 @@ impl Drop for AudioBackend {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         let _ = self.command_tx.send(AudioCommand::Shutdown);
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.handle.lock().expect("audio handle lock").take() {
             let _ = handle.join();
         }
     }

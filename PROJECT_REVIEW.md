@@ -370,6 +370,10 @@ bucketing + sleep), референсные gameplay-системы зареги�
 3. **Полноценный cross-domain runtime с контентом** поверх готовых
    `GameplayPlugin` + extract-free рендера; browser physics остаётся за
    boundary намеренно.
+   ✅ **Аудио-домен заведён в DAG 2026-09-12:** `AudioPlugin`/`AudioHost`/
+   `audio_step` (`crates/audio/src/schedule.rs`, native backend стал
+   `Sync` через `Mutex<JoinHandle>`, wasm ведёт движок напрямую);
+   native showcase ставит плагин; тест `schedule_step_plays_ecs_sources_once`.
 4. **Experimental-маркеры для scripting-шва** (`ScriptEngine` + rhai/rune/python)
    и синхронизация README/`docs/quality/` с кодом.
    ✅ **Закрыто 2026-09-12:** маркеры `**Experimental — not production-ready**`

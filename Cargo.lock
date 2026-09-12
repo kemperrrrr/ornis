@@ -2409,6 +2409,7 @@ dependencies = [
  "editor-backend",
  "glam",
  "ornis-app",
+ "ornis-audio",
  "ornis-core",
  "ornis-physics",
  "ornis-render",

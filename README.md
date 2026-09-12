@@ -89,7 +89,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
   - результаты сохраняются в артефакты `target/criterion/`, сводка — в job summary;
   - workflow не влияет на основной quality gate;
   - 100k body зонд: `cargo run -p ornis-physics --release --example probe_100k -- --grid --cell-size 8` (или `--sweep`, `--bodies`, `--steps`);
-  - **Актуально на 2026-09-01 (оптимизации):** `UniformGrid cell 8.0` — default (6.18× vs SAP: `180мс` vs `1.113с` на 10k в `solver_bench`; no-alloc scratch, broadphase 1×/кадр, per-body substeps → фильтр до SAT, narrow — rayon). `tiled 10k` — `~15.8мс` / 63 FPS (`solver_bench: 17.07мс` / 58.6 FPS) vs старые `~103мс/74мс/180мс` — бюджет 60 FPS (`16.67мс`) достигнут. `many_islands`/`hetero 10k` — 61 FPS, `islands_grid 10k` — 355 FPS;
+  - **Актуально на 2026-09-09 (adaptive broadphase):** `BroadPhaseKind::Auto` — analytic SAP↔Grid↔Tree routing с гистерезисом (≤512 тел → sweep, sparse → tree, ≥1500 плотные → grid cell 8.0); `tiled 10k` → grid (~14–16мс steady-state, бюджет 60 FPS держится), `sparse 10k` → tree (10.4мс), settled `tiled 10k` tree 20.2→~12мс (бьёт grid-8 16.1мс); липкая cell 8.0 + уход по плотности (`raw<3` → 2.0, `raw>12` → 16.0). 100k tiled — вне real-time (~8 с/шаг на Grid): следующий шаг — модульные солверы (AVBD-спайк M0, см. `PLAN.md`);
   - история замеров и `BroadPhaseStats`: [`docs/quality/perf-baseline-2026-08-27.md`](docs/quality/perf-baseline-2026-08-27.md).
 
 Подробности: [`docs/quality/report-2026-08-01.md`](docs/quality/report-2026-08-01.md)

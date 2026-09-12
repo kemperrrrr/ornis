@@ -12,12 +12,15 @@ pub mod backend;
 pub mod decoder;
 /// The ECS-facing playback orchestrator ([`engine::AudioEngine`]).
 pub mod engine;
+/// Per-frame schedule driver ([`schedule::AudioPlugin`]).
+pub mod schedule;
 /// Core data types: clips, sources, listener/spatial parameters.
 pub mod source;
 
 pub use backend::AudioBackend;
 pub use decoder::{DecodeError, decode_bytes, decode_file};
 pub use engine::AudioEngine;
+pub use schedule::{AudioHost, AudioPlugin};
 pub use source::{
     AudioClip, AudioListener, AudioSource, AudioState, MixInput, SampleBuffer, SpatialParams,
 };

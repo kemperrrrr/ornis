@@ -390,6 +390,102 @@ mod tests {
     }
 
     #[test]
+    fn two_component_types_keep_separate_slots() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut store = filled_store(64);
+        for i in 0..8u32 {
+            let e = store.create_entity();
+            store.insert(e, i);
+        }
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lanes = GpuLanes::new(&device, &queue);
+        // f32 lane: GPU verdict doubles 0..63.
+        assert_eq!(
+            lanes.execute(
+                &mut store,
+                &mut sync,
+                &lane_config(16),
+                scale_pipeline,
+                |data: &mut [f32]| {
+                    for x in data.iter_mut() {
+                        *x *= 3.0;
+                    }
+                }
+            ),
+            Some(true)
+        );
+        // u32 lane: CPU verdict adds 100 — proves a second slot per TypeId.
+        assert_eq!(
+            lanes.execute(
+                &mut store,
+                &mut sync,
+                &lane_config(1_000_000),
+                scale_pipeline,
+                |data: &mut [u32]| {
+                    for x in data.iter_mut() {
+                        *x += 100;
+                    }
+                }
+            ),
+            Some(true)
+        );
+        assert_eq!(lanes.slot_count(), 2);
+        assert_eq!(lane_sum(&store), 4032.0);
+        let u32_sum: u32 = store.read_lane::<u32>().unwrap().data.iter().sum();
+        assert_eq!(u32_sum, 28 + 800);
+    }
+
+    #[test]
+    fn lane_shrink_rebuilds_slot() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        // CPU verdict throughout (avoids sizing a kernel per length); the
+        // rebuild is verdict-independent.
+        let mut lanes = GpuLanes::new(&device, &queue);
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let cfg = lane_config(1_000_000);
+        let mut store = filled_store(8);
+        assert_eq!(
+            lanes.execute(
+                &mut store,
+                &mut sync,
+                &cfg,
+                scale_pipeline,
+                |data: &mut [f32]| {
+                    for x in data.iter_mut() {
+                        *x += 1.0;
+                    }
+                }
+            ),
+            Some(true)
+        );
+        assert_eq!(lane_sum(&store), 28.0 + 8.0);
+        // Shorter lane, same type: slot must rebuild instead of running on
+        // the stale 8-element copy.
+        let mut small = filled_store(4);
+        assert_eq!(
+            lanes.execute(
+                &mut small,
+                &mut sync,
+                &cfg,
+                scale_pipeline,
+                |data: &mut [f32]| {
+                    for x in data.iter_mut() {
+                        *x += 1.0;
+                    }
+                }
+            ),
+            Some(true)
+        );
+        assert_eq!(lanes.slot_count(), 1);
+        let small_sum: f32 = small.read_lane::<f32>().unwrap().data.iter().sum();
+        assert_eq!(small_sum, 6.0 + 4.0);
+    }
+
+    #[test]
     fn missing_lane_returns_none() {
         let Some((device, queue)) = pollster::block_on(try_device()) else {
             return;
