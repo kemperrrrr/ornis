@@ -1,5 +1,7 @@
 //! Python language adapter for the [`ScriptEngine`] plugin seam (Phase 6).
 //!
+//! **Experimental — not production-ready** (see `ornis_core::script` docs).
+//!
 //! The core engine knows only [`ScriptEngine`]; this crate is the third
 //! concrete language behind it (after Rhai and Rune). Each module is
 //! compiled with `Mode::Exec` on [`ScriptEngine::load`] (and recompiled

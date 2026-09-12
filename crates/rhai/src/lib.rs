@@ -1,5 +1,7 @@
 //! Rhai language adapter for the [`ScriptEngine`] plugin seam (Phase 6).
 //!
+//! **Experimental — not production-ready** (see `ornis_core::script` docs).
+//!
 //! The core engine knows only [`ScriptEngine`]; this crate is the first
 //! concrete language behind it. Modules compile to [`rhai::AST`] on
 //! [`ScriptEngine::load`] (and recompile on

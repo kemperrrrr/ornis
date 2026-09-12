@@ -1,5 +1,7 @@
 //! Rune language adapter for the [`ScriptEngine`] plugin seam (Phase 6).
 //!
+//! **Experimental — not production-ready** (see `ornis_core::script` docs).
+//!
 //! The core engine knows only [`ScriptEngine`]; this crate is the second
 //! concrete language behind it (after `ornis-rhai`), exercising the seam
 //! for the rule-of-three check. Modules compile to [`rune::Unit`] on

@@ -372,7 +372,14 @@ bucketing + sleep), референсные gameplay-системы зареги�
    boundary намеренно.
 4. **Experimental-маркеры для scripting-шва** (`ScriptEngine` + rhai/rune/python)
    и синхронизация README/`docs/quality/` с кодом.
-
+   ✅ **Закрыто 2026-09-12:** маркеры `**Experimental — not production-ready**`
+   в `crates/core/src/script.rs` (модуль, `ScriptEngine`, `NoopScriptEngine`,
+   `ScriptHost`, `ScriptPlugin`) + шапки `crates/rhai|rune|python`; заодно
+   найден и закрыт TDD-баг `GpuLanes`: переиспользуемый слот не видел мутаций
+   стора между прогонами (негативный контроль `8064.0` vs `128.0`) —
+   `AutoLane::refresh_cpu_data` + refresh при reuse; плюс round-trip тест
+   gpu→cpu→gpu. Backend lib 35/35, clippy/fmt чисто (варнинг в physics —
+   работа M0-агента, не трогал).
 
 ---
 

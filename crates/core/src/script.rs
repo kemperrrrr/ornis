@@ -1,5 +1,9 @@
 //! Scripting plugin seam for Ornis (Phase 6, plan D1).
 //!
+//! **Experimental — not production-ready.** The [`ScriptEngine`] contract,
+//! the JSON argument/return codec, and the adapter set are still evolving;
+//! expect breaking changes before stabilization.
+//!
 //! The engine core knows only the [`ScriptEngine`] trait — concrete languages
 //! (Rhai, Rune, Python, WASM components) are adapters that implement it.
 //! Hot-path ECS loops stay typed; this trait is for tooling, FFI and
@@ -45,6 +49,9 @@ pub struct BatchResult {
 }
 
 /// Plugin trait for scripting backends.
+///
+/// **Experimental — not production-ready:** methods, codec, and hot-reload
+/// semantics may change; adapters track the trait, not vice versa.
 ///
 /// The core engine depends only on this trait; language specifics live
 /// in adapter crates (e.g. `ornis-rhai`). This keeps the hot ECS
@@ -95,6 +102,8 @@ pub trait ScriptEngine: Send + Sync {
 }
 
 /// No-op engine useful for tests and as a baseline adapter.
+///
+/// **Experimental:** mirrors the unstable [`ScriptEngine`] contract.
 #[derive(Debug, Default)]
 pub struct NoopScriptEngine {
     next_id: u64,
@@ -163,6 +172,8 @@ pub struct ScriptTickEntry {
 }
 
 /// Runtime home for a [`ScriptEngine`] inside an [`Engine`].
+///
+/// **Experimental — not production-ready** (see the module docs).
 ///
 /// The seam needs `&mut self`, but systems only receive `&Resources` —
 /// hence the engine lives behind a [`Mutex`]. Tick entries are
@@ -379,6 +390,8 @@ impl System for ScriptTickSystem {
 }
 
 /// Installs script ticking into an [`Engine`], mirroring `GameplayPlugin`.
+///
+/// **Experimental — not production-ready** (see the module docs).
 ///
 /// ```no_run
 /// # use ornis_core::script::{NoopScriptEngine, ScriptPlugin};

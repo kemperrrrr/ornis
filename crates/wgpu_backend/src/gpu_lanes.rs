@@ -106,6 +106,17 @@ impl GpuLanes {
                     bind_group,
                 }),
             );
+        } else {
+            // Same length, slot reused: the store is authoritative between
+            // runs (ECS/gameplay writes land there), so refresh the slot's
+            // CPU copy — otherwise the kernel would rerun on the previous
+            // run's result and clobber the fresh store data on write-back.
+            let slot = self
+                .slots
+                .get_mut(&TypeId::of::<T>())
+                .and_then(|s| s.downcast_mut::<TypedSlot<T>>())
+                .expect("slot present when not stale");
+            slot.lane.refresh_cpu_data(&data);
         }
         let slot = self
             .slots
@@ -339,6 +350,43 @@ mod tests {
         assert_eq!(lanes.slot_count(), 1);
         // Old 4 grew by +1 each, new 4 went 10 -> 11.
         assert_eq!(lane_sum(&store), (6.0 + 4.0 * 2.0) + 44.0);
+    }
+
+    #[test]
+    fn store_mutation_between_runs_reaches_gpu() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut store = filled_store(64);
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lanes = GpuLanes::new(&device, &queue);
+        let cfg = lane_config(16);
+        let cpu_times3 = |data: &mut [f32]| {
+            for x in data.iter_mut() {
+                *x *= 3.0;
+            }
+        };
+        // Run 1: GPU doubles 0..63 on a fresh slot.
+        assert_eq!(
+            lanes.execute(&mut store, &mut sync, &cfg, scale_pipeline, cpu_times3),
+            Some(true)
+        );
+        assert_eq!(lane_sum(&store), 4032.0);
+        // Gameplay mutates the store lane between runs (same length, so the
+        // slot is reused rather than rebuilt).
+        {
+            let mut lane = store.write_lane::<f32>().expect("lane exists");
+            for x in lane.data.iter_mut() {
+                *x = 1.0;
+            }
+        }
+        // Run 2: the GPU kernel must observe the fresh store data (1.0 -> 2.0),
+        // not the stale slot copy (which would double the previous result).
+        assert_eq!(
+            lanes.execute(&mut store, &mut sync, &cfg, scale_pipeline, cpu_times3),
+            Some(true)
+        );
+        assert_eq!(lane_sum(&store), 128.0);
     }
 
     #[test]

@@ -72,6 +72,16 @@ impl<T: bytemuck::Pod> AutoLane<T> {
         self.buf.cpu_data()
     }
 
+    /// Replace the authoritative CPU copy, marking the GPU side stale.
+    ///
+    /// Used when fresh source-side data must reach an already-built lane
+    /// (same length, so the pipeline stays reusable): the next GPU verdict
+    /// re-uploads before dispatching.
+    pub fn refresh_cpu_data(&mut self, data: &[T]) {
+        debug_assert_eq!(self.buf.cpu_data().len(), data.len());
+        self.buf.cpu_data_mut().copy_from_slice(data);
+    }
+
     /// Element count of the lane.
     pub fn len(&self) -> usize {
         self.buf.cpu_data().len()
@@ -296,6 +306,41 @@ mod tests {
             }
         });
         assert_eq!(lane.data(), &vec![6.0f32; 64]);
+    }
+
+    #[test]
+    fn gpu_cpu_gpu_round_trip_reuploads() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lane = AutoLane::new(
+            vec![1.0f32; 64],
+            &device,
+            &queue,
+            lane_config(16),
+            "round trip",
+        );
+        let (pipeline, bg) = scale_pipeline(&device, lane.gpu_buffer().expect("buffer exists"));
+        // Run 1 (GPU): 1.0 -> 2.0.
+        assert!(
+            lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
+                "must run on GPU"
+            ))
+        );
+        assert_eq!(lane.data(), &vec![2.0f32; 64]);
+        // Run 2 (CPU fallback): mutates element 0, GPU side goes stale.
+        assert!(lane.execute(&mut sync, None, None, |data| {
+            data[0] = 100.0;
+        }));
+        // Run 3 (GPU): must re-upload and see 100.0, not the stale 2.0.
+        assert!(
+            lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
+                "must run on GPU"
+            ))
+        );
+        assert_eq!(lane.data()[0], 200.0);
+        assert!(lane.data()[1..].iter().all(|&x| x == 4.0));
     }
 
     #[test]
