@@ -574,9 +574,9 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   линеаризации дестабилизируют рычаги), geometric stiffness джойнтов (без
   него spin-up через длинные рычаги), stick-gated anchor refresh, персистентные
   нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
-  rolling multi-point contact), Prismatic/Fixed/Distance/Wheel/limits/motors/
-  fracture, CCD/substeps/sleep/islands, анизотропный/rolling friction,
-  deep-catch пенетрация ~3см на ударах 5+ м/с. Strong-Confluence 1-vs-32 для
+ rolling multi-point contact), Wheel/Gear/SixDof/fracture, CCD/substeps/
+ sleep/islands, анизотропный/rolling friction,
+ deep-catch пенетрация ~3см на ударах 5+ м/с. Strong-Confluence 1-vs-32 для
   AVBD: N/A в M1 (путь single-thread, rayon нет — детерминирован
   конструктивно + run-to-run тест; харнесс `confluence_tests.rs` — про
   ECS-параллелизм; вернёмся в M2 с параллельным broadphase/sweep).

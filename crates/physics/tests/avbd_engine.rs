@@ -326,6 +326,135 @@ fn avbd_seam_fits_trait_object() {
     assert!(ya < 5.0 && yb < 5.0, "both engines integrate gravity");
 }
 
+#[test]
+fn avbd_rolling_friction_stops_ball() {
+    // Pure-roll initialization (v=1, w=-v/r) skips the slide phase and
+    // isolates rolling: slide friction is blind to no-slip roll. The
+    // single-step Δw assert proves the rows fire (isolated from whirl,
+    // which needs steps to develop anchor carry); the run-out proves
+    // function (damped stops, control coasts strictly farther).
+    fn run(rolling: f32) -> (Vec3, f32, f32, f32) {
+        let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut floor =
+            RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(30.0, 1.0, 30.0), 0.0);
+        floor.rolling_friction = rolling;
+        physics.add_body(floor);
+        let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 0.5, 0.0), 0.5, 1.0);
+        ball.rolling_friction = rolling;
+        // Pure roll toward +X (no slip => no slide-friction confound).
+        ball.velocity = Vec3::new(1.0, 0.0, 0.0);
+        ball.angular_velocity = Vec3::new(0.0, 0.0, -2.0);
+        let h = physics.add_body(ball);
+        physics.step(DT);
+        let dw = (physics.get_body(h).unwrap().angular_velocity.z + 2.0).abs();
+        for _ in 0..239 {
+            physics.step(DT);
+        }
+        let b = physics.get_body(h).unwrap();
+        (b.velocity, b.position.y, b.position.x, dw)
+    }
+    let (stopped, ys, xs, dw_damped) = run(0.1);
+    let (_, yr, xr, dw_free) = run(0.0);
+    // Step-one spin loss: the rows must bite immediately (isolated from
+    // whirl, which needs steps to develop anchor carry).
+    assert!(
+        dw_damped > dw_free + 0.01,
+        "rolling rows must bite in step one: damped {dw_damped} free {dw_free}"
+    );
+    assert!(
+        stopped.length() < 1.5 && (ys - 0.5).abs() < 0.15,
+        "rolling friction must stop the ball ON the floor, got {stopped:?} y={ys}"
+    );
+    assert!(
+        xs < xr && (yr - 0.5).abs() < 0.15,
+        "undamped ball must coast strictly farther: damped x={xs} control x={xr}"
+    );
+}
+
+#[test]
+fn avbd_torsion_friction_kills_spin() {
+    // Spinning ball (w=10 about Y, no slip so slide friction is blind).
+    // The single-step Δw assert proves the torsion rows fire (isolated from
+    // whirl, which needs steps to develop anchor carry); the run-out proves
+    // function (damped spin dies).
+    fn run(torsion: f32) -> (f32, Vec3) {
+        let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut floor =
+            RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(5.0, 1.0, 5.0), 0.0);
+        floor.torsion_friction = torsion;
+        physics.add_body(floor);
+        let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 0.5, 0.0), 0.5, 1.0);
+        ball.torsion_friction = torsion;
+        ball.angular_velocity = Vec3::new(0.0, 10.0, 0.0);
+        let h = physics.add_body(ball);
+        physics.step(DT);
+        let dw = (physics.get_body(h).unwrap().angular_velocity.y - 10.0).abs();
+        for _ in 0..599 {
+            physics.step(DT);
+        }
+        let late = physics.get_body(h).unwrap().angular_velocity;
+        (dw, late)
+    }
+    let (dw_damped, damped_late) = run(0.05);
+    let (dw_free, _) = run(0.0);
+    assert!(
+        dw_damped > dw_free + 0.01,
+        "torsion rows must bite in step one: damped {dw_damped} free {dw_free}"
+    );
+    assert!(
+        damped_late.y.abs() < 2.0,
+        "torsion friction must kill spin, got {damped_late:?}"
+    );
+}
+
+#[test]
+fn avbd_free_spin_preserved() {
+    // No contacts, no joints, no gravity: rotation kinematics alone must
+    // preserve spin (regression: chord-Euler integration lost 0.25%/step).
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    let mut ball = RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0);
+    ball.angular_velocity = Vec3::new(0.0, 10.0, 0.0);
+    let h = physics.add_body(ball);
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    let w = physics.get_body(h).unwrap().angular_velocity;
+    assert!(w.y > 9.0, "free spin must persist in air, got {w:?}");
+}
+
+#[test]
+fn avbd_anisotropic_friction_channels() {
+    // Slide decel over 10 steps along fdir1 (mu=0.1) vs transverse (mu2=1.0):
+    // expect ~10x ratio. Short run so friction torque cannot tip the box.
+    fn run(dir: Vec3) -> f32 {
+        let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        // Floor friction matches the slide axis so max-combining (builtin
+        // parity) does not contaminate the channel with the floor default.
+        let mut floor =
+            RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(5.0, 1.0, 5.0), 0.0);
+        floor.friction = 0.1;
+        physics.add_body(floor);
+        let mut b = RigidBody::new_box(Vec3::new(0.0, 0.5, 0.0), Vec3::splat(0.5), 1.0);
+        b.friction = 0.1;
+        b.friction_transverse = 1.0;
+        b.friction_dir = Some(Vec3::X);
+        b.velocity = dir * 5.0;
+        let h = physics.add_body(b);
+        for _ in 0..10 {
+            physics.step(DT);
+        }
+        physics.get_body(h).unwrap().velocity.dot(dir)
+    }
+    let vx = run(Vec3::X);
+    let vz = run(Vec3::Z);
+    let drop_x = 5.0 - vx;
+    let drop_z = 5.0 - vz;
+    assert!(
+        drop_z > 4.0 * drop_x.max(1e-6),
+        "transverse slide must decay much faster: dx={drop_x} dz={drop_z}"
+    );
+}
+
 /// Hinge twist about Z read back from a body orientation (the test-side
 /// mirror of the shared twist measurement; valid while the hinge rows keep
 /// X/Y near zero).
@@ -426,11 +555,14 @@ fn avbd_hinge_motor_spins_up() {
 
 #[test]
 fn avbd_prismatic_slider_holds_line_and_limit() {
-    // Vertical slide assembled just above its lower bound: gravity pulls
-    // the bob 10cm down the Y axis; x/z and the axis alignment must hold,
-    // and the [-2, 0] window must catch it. (Catching a multi-meter fall in
-    // one position step is outside the single-step linearization envelope
-    // — M2 substeps; the bound approach here is gradual, like the hinge.)
+    // Vertical slide: the anchor sits at the origin, the bob hangs 2.9m
+    // below (assembled 0.9m BELOW the [-2, 0] window, so the limit row
+    // carries the full gravity load from step one — a sustained-load
+    // stability test, not an approach test). Gravity pulls along -Y;
+    // x/z and the axis alignment must hold, and the window must haul the
+    // bob up to its lower bound (s = -2 ↔ bob y = -4.9) and KEEP it there
+    // for 300 steps with no limit-cycle blowup (regression: the old
+    // primal/dual chase snapped to +5.7m / ±100m after ~200 steps).
     let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.25), 0.0));
     let bob = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, -2.9, 0.0), 0.25, 1.0));
@@ -465,7 +597,7 @@ fn avbd_prismatic_slider_holds_line_and_limit() {
     }
     let b = physics.get_body(bob).unwrap();
     assert!(
-        b.position.y > -3.4 && b.position.y < -2.6,
+        b.position.y > -5.4 && b.position.y < -4.4,
         "slider did not rest at its lower limit: {:?}",
         b.position
     );

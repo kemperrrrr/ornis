@@ -28,8 +28,11 @@
 //!   (`stick`), refreshed to live geometry on slide — but never while
 //!   penetrating (support first) and never for resting pairs (empty shells
 //!   beyond `GEN_MARGIN`, no stale push, no lambda burn).
-//! - Friction is isotropic (`mu = sqrt(muA*muB)`); anisotropic/rolling/
-//!   torsional friction stays on the builtin engine (M2).
+//! - Friction is anisotropic (ODE `fdir1`/`mu`/`mu2` parity: per-axis
+//!   Coulomb coefficients on a body-A-wins frame, elliptical cone
+//!   projection) plus rolling/torsion resistance (MuJoCo triple: pure
+//!   couples capped by mu × normal force). Zero coefficients skip the rows
+//!   entirely, so default scenes pay nothing.
 //! - Joints: [`crate::joint::JointKind::Ball`], free
 //!   [`crate::joint::JointKind::Revolute`] (hinge axis via two angular rows)
 //!   with travel limits (one-sided accumulator rows, Box2D order) and
@@ -42,16 +45,18 @@
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
 //!   fast orbital motion through long levers (all bounded, tested).
-//! - Sphere-on-sphere stacking is an M1 gap: single-point contact plus free
-//!   rotation needs rolling multi-point contact (M2). Spheres rest and
-//!   settle on floors and boxes.
+//! - Sphere piles settle on floors/boxes (rolling friction helps); tall
+//!   sphere-on-sphere towers stay an M2 item (needs rolling multi-point
+//!   contact for true stacking).
 //! - No CCD, substeps, islands or sleeping: one implicit step of 10
 //!   iterations (M2). Broadphase is an O(n2) bounding-sphere prefilter.
 //!   High-speed impacts (5+ m/s) catch deep (~3cm) — exact TOI is M2.
-//! - Orientation integrates and differentiates with the official exact
-//!   quaternion operators (`normalize(q + quat(w)*q/2)`,
-//!   `2*(q*q0^-1).xyz`); per-step renormalization prevents long-term drift
-//!   (the demo never renormalizes).
+//! - Orientation integrates with the exact exponential map
+//!   (`exp(v/2)*q`, not chord Euler — the chord loses ~|w·dt|²/2 of angle
+//!   per step, i.e. 0.25%/step spin decay at 10 rad/s) and differentiates
+//!   with exact angle-axis recovery (`2*asin(|xyz|)`); per-step
+//!   renormalization prevents long-term drift (the demo never
+//!   renormalizes).
 
 use glam::{Mat3, Quat, Vec3};
 use std::collections::BTreeSet;
@@ -75,8 +80,18 @@ const ITERS: usize = 10;
 const ALPHA: f32 = 0.99;
 /// Warmstart decay for duals and penalties (Eq. 19).
 const GAMMA: f32 = 0.999;
-/// Additive penalty ramp scale (Eq. 16).
+/// Additive penalty ramp scale (Eq. 16, official `betaLin` for linear
+/// constraints AND contact rows).
 const BETA: f32 = 10000.0;
+/// Additive penalty ramp scale for angular rows (official `betaAng`).
+/// The old code used `BETA` for the hinge/limit angular rows too: at
+/// 100x the official rate an angular penalty crosses the explicit
+/// stability bound (pen*dt^2/I) in a handful of holding steps and the
+/// row diverges — the prismatic slider (whose bob hangs 1m off-axis,
+/// i.e. whose limit row IS an angular fight through the lever) held
+/// ~200 steps, then snapped to +5.7m. Contacts keep `BETA` regardless
+/// of axis (official `betaLin` covers all contact rows).
+const BETA_ANG: f32 = 100.0;
 /// Speculative contact margin folded into the normal `C0`.
 const MARGIN: f32 = 0.01;
 /// Penalty clamp range (official `PENALTY_MIN/MAX`).
@@ -112,6 +127,55 @@ const LIMIT_SLOP_ANG: f32 = 0.005;
 const LIMIT_SLOP_LIN: f32 = 0.002;
 /// Cap on contact points per pair (official manifold holds 8).
 const MAX_POINTS: usize = 8;
+
+/// Anisotropic contact frame (ODE `fdir1`/`mu`/`mu2` parity, local mirror of
+/// the builtin rule): body A wins `t1` (its local dir to world, projected
+/// onto the plane ⊥ `n`); degenerate projections fall back to the default
+/// basis. Per-axis coefficients take the `max` across the pair; a body
+/// without a direction contributes `(friction, friction)`.
+///
+/// With all defaults the frame is exactly `tangent_basis(n)` with
+/// `mu == mu2`, routing through the legacy circular cone bit-identically.
+fn friction_frame(a: &RigidBody, b: &RigidBody, n: Vec3) -> (Vec3, f32, f32) {
+    let pick_dir = |body: &RigidBody| -> Option<Vec3> {
+        let world = body.orientation * body.friction_dir?;
+        let proj = world - n * world.dot(n);
+        let len2 = proj.length_squared();
+        if len2 < 1e-12 || !len2.is_finite() {
+            return None;
+        }
+        Some(proj / len2.sqrt())
+    };
+    let t1 = pick_dir(a)
+        .or_else(|| pick_dir(b))
+        .unwrap_or_else(|| tangent_basis(n).0);
+    let axis = |body: &RigidBody| -> (f32, f32) {
+        if body.friction_dir.is_some() {
+            (body.friction, body.friction_transverse)
+        } else {
+            (body.friction, body.friction)
+        }
+    };
+    let (a1, a2) = axis(a);
+    let (b1, b2) = axis(b);
+    (t1, a1.max(b1), a2.max(b2))
+}
+
+/// Cap on limit-row penalties (explicit-servo stability): a limit holds a
+/// persistent bias (C = -F/pen, never converges to zero like contacts), so
+/// an uncapped BETA ramp crosses the explicit stability bound pen*dt^2/m
+/// (~1.4e4 for m=1) after ~150 holding steps and diverges into a growing
+/// limit cycle (a slider held 150 steps, then fell through and snapped to
+/// +5.7m). 1e4 holds 10N at 1mm penetration (inside the 2mm slop band, so
+/// the row sleeps) with stability factor 2.8. Heavier loads sag deeper but
+/// stay stable. Contacts need no cap (their C converges geometrically
+/// within the step's iterations — a stable race).
+const LIM_PEN_MAX: f32 = 1e4;
+
+/// Fixed penalty of rolling/torsion rows (no dual ramp — the torque cap,
+/// not the stiffness, shapes the resistance, mirroring the official
+/// impulse clamp).
+const ROLL_PEN: f32 = 100.0;
 
 /// Dense LDL (no pivoting) for a 6x6 SPD system. Returns `None` on breakdown.
 fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
@@ -205,29 +269,52 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-/// Proper quaternion integration (official `quat + float3`):
-/// `normalize(a + quat(w)*a*0.5)`. The naive xyz-add tried earlier breaks
-/// rotation kinematics and destabilizes every lever.
-fn quat_integrate(q: Quat, w: Vec3) -> Quat {
-    let a = q.to_array();
-    let t = quat_mul([w.x, w.y, w.z, 0.0], a);
-    Quat::from_xyzw(
-        a[0] + t[0] * 0.5,
-        a[1] + t[1] * 0.5,
-        a[2] + t[2] * 0.5,
-        a[3] + t[3] * 0.5,
-    )
-    .normalize()
+/// Rotation composition `exp(v/2) * q` for a rotation vector `v`
+/// (angle = `|v|` about `v/|v|`).
+///
+/// Exact-exponential composition (NOT first-order Euler): the old chord
+/// `q + 0.5*w*q` loses ~|w*dt|^2/2 of angle per step (measured 0.25%/
+/// step spin decay at 10 rad/s — free spin 10 -> 7.39 in 120 steps), and the
+/// loss is in the addition, not the renormalization (scaling preserves
+/// angle). The closed-form `exp(v/2)*q` has only fp error (~1e-7, unbiased),
+/// so no systematic decay; the trailing `normalize` is a pure drift guard.
+/// One sincos per body per step is negligible next to the 6x6 solves.
+fn quat_integrate(q: Quat, v: Vec3) -> Quat {
+    let theta = v.length();
+    if theta < 1e-9 {
+        return q;
+    }
+    let (s, c) = (0.5 * theta).sin_cos();
+    let k = s / theta;
+    let dq = quat_mul([v.x * k, v.y * k, v.z * k, c], q.to_array());
+    Quat::from_xyzw(dq[0], dq[1], dq[2], dq[3]).normalize()
 }
 
-/// Relative-rotation vector (official `quat - quat`):
-/// `2*(a*inverse(b)).xyz`. Linear component differences under-report spin
-/// by ~2x and mishandle large angles; this is what their Jacobians expect.
+/// Relative-rotation vector (official `quat - quat`): exact angle-axis
+/// recovery `2*asin(|xyz|)`, not the chord `2*xyz` (which under-reads by
+/// ~θ²/24 — 0.1%/step of BDF1 spin decay at 10 rad/s through warmstart
+/// feedback). Short-path convention via `w < 0` negation; identical to the
+/// chord for small angles up to fp error. Linear component differences
+/// under-report spin by ~2x and mishandle large angles; this is what their
+/// Jacobians expect.
 fn quat_diff_vec(a: Quat, b: Quat) -> Vec3 {
     let qa = a.to_array();
     let qb = b.to_array();
     let r = quat_mul(qa, [-qb[0], -qb[1], -qb[2], qb[3]]);
-    Vec3::new(2.0 * r[0], 2.0 * r[1], 2.0 * r[2])
+    // Exact angle-axis recovery `2*asin(|xyz|)`, not the chord `2*xyz`
+    // (which under-reads by ~θ²/24 — 0.1%/step of BDF1 spin decay at
+    // 10 rad/s through warmstart feedback). Short-path convention via
+    // `w < 0` negation; identical to the chord for small angles up to fp
+    // error, so Jacobian terms are unaffected.
+    let mut xyz = Vec3::new(r[0], r[1], r[2]);
+    if r[3] < 0.0 {
+        xyz = -xyz;
+    }
+    let s = xyz.length().min(1.0);
+    if s < 1e-9 {
+        return Vec3::ZERO;
+    }
+    xyz * (2.0 * s.asin() / s)
 }
 
 /// Normalized joint axes, or `None` on degenerate input.
@@ -395,6 +482,9 @@ struct AvbdPoint {
     /// Rolling/sliding points refresh anchors to live geometry (otherwise a
     /// spinning body's frozen lever orbits and pumps energy).
     stuck: bool,
+    /// Rolling/torsion dual memory `[roll_t1, roll_t2, spin_n]` (MuJoCo
+    /// triple parity; fixed penalty, torque-capped, no ramp).
+    roll_lam: [f32; 3],
 }
 
 /// Contact pair: two bodies, one normal frame, up to [`MAX_POINTS`] points.
@@ -403,7 +493,9 @@ struct AvbdPair {
     a: usize,
     b: usize,
     n: Vec3,
-    mu: f32,
+    /// Coulomb coefficients along the frame tangents `[t1, t2]`
+    /// (isotropic pairs carry `[mu, mu]`).
+    mu: [f32; 2],
     points: Vec<AvbdPoint>,
 }
 
@@ -440,6 +532,14 @@ struct AvbdJoint {
     mot: Option<[f32; 2]>,
     /// One-sided limit accumulator (mirrors the official `acc_limit`).
     acc_lim: f32,
+    /// Dual-side limit state (official joint `updateDual` discipline):
+    /// the prismatic limit force lives here (`lambda = F`: recomputed from
+    /// current positions, stored, warmstarted by the primal). The revolute
+    /// limit keeps the legacy `acc_lim` accumulator (verified by the hinge
+    /// test; unifying both rows onto this slot regressed it 0.50 → 0.63 —
+    /// the hinge window is entered ballistically, not held under load, so
+    /// the accumulator's faster bite wins there).
+    lim_dual: f32,
     lam_l: [f32; 3],
     lam_a: [f32; 3],
     pen_l: [f32; 3],
@@ -554,11 +654,6 @@ impl AvbdEngine {
                 // lambda (slow levitation); dropping the pair would burn
                 // warm duals and reload every re-touch (limit cycle).
                 let separated = d.dist > GEN_MARGIN;
-                // Anchor refresh (official `!stick` rule) is additionally
-                // gated on separation: a penetrating rolling contact must
-                // keep support (frozen C0), refreshing it re-coincides C0 to
-                // +margin and leaves only velocity damping -> slow sink.
-                let allow_refresh = d.dist > 0.0;
                 let mut normal = d.point_a - d.point_b;
                 if normal.length_squared() < 1e-16 {
                     normal = a.position - b.position;
@@ -578,13 +673,47 @@ impl AvbdEngine {
                 } else if normal.dot(a.position - b.position) < 0.0 {
                     normal = -normal;
                 }
-                let mu = (a.friction.max(0.0) * b.friction.max(0.0)).sqrt();
+                // Scalar coefficients only; the t1 direction is recomputed per
+                // solve from live orientations.
+                let mu = {
+                    let (_, mu1, mu2) = friction_frame(a, b, normal);
+                    [mu1.max(0.0), mu2.max(0.0)]
+                };
                 // Witness point plus box-corner expansion for face stability.
                 // Every point is a coincident pair on the witness plane: both
                 // anchors are material points that start at the same world
                 // position (official rA/rB semantics). Projecting a foreign
                 // corner into the other body's frame instead would glue a
                 // non-material point and pump energy (spike lesson).
+                //
+                // The gate is anchored at a CENTER witness (body centers
+                // projected onto the contact plane, midpoint shared), NOT at
+                // the raw closest-point pair: shape_distance returns CORNER
+                // witnesses for box-box (face-face has infinite closest
+                // pairs), and gating around a flickering corner admits one
+                // corner per step — churning anchors, no support accumulation
+                // (boxes fell 82m through the floor). Centers move smoothly,
+                // so the pass-set is stable.
+                //
+                // The gate is split by stability character: the NORMAL gate
+                // uses the per-side raw witness (only its PLANE matters, and
+                // the face plane is flicker-immune even when the witness
+                // slides within it); the TANGENTIAL gate uses the center
+                // witness (position-stable). Gating normal distance around
+                // the mid-gap center instead would reject gapped faces.
+                //
+                // The tangential gate is two-sided (a local patch around the
+                // center witness, scaled by the smaller body): the old
+                // normal-only gate admitted a huge floor's coplanar corners
+                // 3.5m away as phantom points — 2.5m levers whose meter-scale
+                // Ct torqued every spin to death.
+                let patch = ra.min(rb) + MARGIN;
+                let pp = (d.point_a + d.point_b) * 0.5;
+                let cw = {
+                    let pa_c = a.position - normal * (a.position - pp).dot(normal);
+                    let pb_c = b.position - normal * (b.position - pp).dot(normal);
+                    (pa_c + pb_c) * 0.5
+                };
                 let mut fresh: Vec<(Vec3, Vec3)> = Vec::new();
                 if !separated {
                     let inv_a = a.orientation.inverse();
@@ -596,6 +725,11 @@ impl AvbdEngine {
                             let world = body.position + body.orientation * corner;
                             let along = (world - witness).dot(sign * normal);
                             if along.abs() > EXPAND_SLOP + (-d.dist).max(0.0) {
+                                continue;
+                            }
+                            let rel_c = world - cw;
+                            let tang = rel_c - normal * rel_c.dot(normal);
+                            if tang.length() > patch {
                                 continue;
                             }
                             if fresh.len() >= MAX_POINTS {
@@ -615,6 +749,21 @@ impl AvbdEngine {
                         }
                     }
                 } // end corner expansion.
+                // Center point for face-like contacts (2+ corners): the gate
+                // anchor itself, shared — kills rocking. (Corners alone pin
+                // the patch; this centers it.)
+                if !separated && fresh.len() >= 2 && fresh.len() < MAX_POINTS {
+                    let inv_a = a.orientation.inverse();
+                    let inv_b = b.orientation.inverse();
+                    let ra_l = inv_a * (cw - a.position);
+                    let rb_l = inv_b * (cw - b.position);
+                    if !fresh.iter().any(|(ea, eb)| {
+                        (ea - ra_l).length() < POINT_MATCH_DIST
+                            && (eb - rb_l).length() < POINT_MATCH_DIST
+                    }) {
+                        fresh.push((ra_l, rb_l));
+                    }
+                }
                 // Witness fallback: the closest-point pair slides across faces
                 // (non-material churn that rocks stacks), so it is only used
                 // when corners give fewer than 3 points (edge/vertex and
@@ -647,10 +796,19 @@ impl AvbdEngine {
                             // Official merge: matched points carry lambda/penalty;
                             // anchors stay frozen while the grip holds
                             // (`stick`), otherwise they refresh to the live
-                            // coincident geometry (rolling without refresh
-                            // orbits a frozen lever and pumps energy) —
-                            // unless penetrating (support first).
-                            let (ra, rb) = if old.stuck || !allow_refresh {
+                            // coincident geometry.
+                            //
+                            // No rolling-aware extension: fast spin makes any
+                            // anchor stale WITHIN its own step (10 rad/s =
+                            // 9.6 deg/step of material carry), so cross-step
+                            // refresh cannot save sustained rotation — the
+                            // official headless build kills a free spin
+                            // 10 -> 0.000 in 600 steps too. This is a
+                            // position-level material-anchor limit, not a
+                            // refresh-policy bug (M2: substeps shrink the
+                            // per-step carry; velocity-level rolling rows
+                            // ignore anchors entirely).
+                            let (ra, rb) = if old.stuck {
                                 (old.ra, old.rb)
                             } else {
                                 (ra_l, rb_l)
@@ -661,6 +819,7 @@ impl AvbdEngine {
                                 lam: old.lam,
                                 pen: old.pen,
                                 stuck: old.stuck,
+                                roll_lam: old.roll_lam,
                             });
                         } else {
                             next.push(AvbdPoint {
@@ -669,6 +828,7 @@ impl AvbdEngine {
                                 lam: [0.0; 3],
                                 pen: [PENALTY_INIT; 3],
                                 stuck: true,
+                                roll_lam: [0.0; 3],
                             });
                         }
                     }
@@ -688,6 +848,7 @@ impl AvbdEngine {
                                 lam: [0.0; 3],
                                 pen: [PENALTY_INIT; 3],
                                 stuck: true,
+                                roll_lam: [0.0; 3],
                             })
                             .collect(),
                     });
@@ -722,17 +883,27 @@ impl AvbdEngine {
         (c0 * (1.0 - ALPHA) + u.dot(d_a - d_b), ra_w, rb_w)
     }
 
-    /// Clamped contact force triple: push-only normal, joint cone on tangents.
-    fn contact_force(cn: f32, pens: [f32; 3], lam: [f32; 3], ct: [f32; 2], mu: f32) -> [f32; 3] {
+    /// Clamped contact force triple: push-only normal, elliptical Coulomb
+    /// cone on the tangents (`mu` per frame axis). With `mu1 == mu2` this
+    /// is bit-identical to the legacy circular cone.
+    fn contact_force(
+        cn: f32,
+        pens: [f32; 3],
+        lam: [f32; 3],
+        ct: [f32; 2],
+        mu: [f32; 2],
+    ) -> [f32; 3] {
         let fn_c = (pens[0] * cn + lam[0]).min(0.0);
         let ft_raw = [pens[1] * ct[0] + lam[1], pens[2] * ct[1] + lam[2]];
-        let scale = (ft_raw[0] * ft_raw[0] + ft_raw[1] * ft_raw[1]).sqrt();
-        let bound = fn_c.abs() * mu;
-        let k = if scale > bound && scale > 0.0 {
-            bound / scale
+        let b1 = fn_c.abs() * mu[0];
+        let b2 = fn_c.abs() * mu[1];
+        // Elliptical projection: uniform downscale when outside the ellipse.
+        let s = if b1 > 0.0 && b2 > 0.0 {
+            (ft_raw[0] / b1) * (ft_raw[0] / b1) + (ft_raw[1] / b2) * (ft_raw[1] / b2)
         } else {
-            1.0
+            f32::INFINITY
         };
+        let k = if s > 1.0 { 1.0 / s.sqrt() } else { 1.0 };
         [fn_c, ft_raw[0] * k, ft_raw[1] * k]
     }
 
@@ -809,7 +980,13 @@ impl AvbdEngine {
                     let p = &self.pairs[pi];
                     (p.n, p.mu, p.points[qi].clone())
                 };
-                let (t1, t2) = tangent_basis(n);
+                // Anisotropic frame (live orientations); isotropic pairs get
+                // exactly `tangent_basis(n)` back.
+                let t1 = {
+                    let p = &self.pairs[pi];
+                    friction_frame(&self.bodies[p.a], &self.bodies[p.b], p.n).0
+                };
+                let t2 = t1.cross(n);
                 let (cn, r_up, r_lo) = self.row_c(&self.pairs[pi], &pt, n, self.gap_c0(pi, qi));
                 let (ct1, _, _) = self.row_c(&self.pairs[pi], &pt, t1, 0.0);
                 let (ct2, _, _) = self.row_c(&self.pairs[pi], &pt, t2, 0.0);
@@ -825,6 +1002,48 @@ impl AvbdEngine {
                     }
                     let pen = pt.pen[row];
                     Self::stamp_row(&mut lhs, &mut rhs, axis, pen, fv, r_side, sign);
+                }
+                // Rolling + torsional resistance (MuJoCo triple): pure
+                // couples opposing relative spin, capped by mu x normal
+                // force. Zero coefficients skip everything.
+                let (mu_roll, mu_spin) = {
+                    let p = &self.pairs[pi];
+                    let ba = &self.bodies[p.a];
+                    let bb = &self.bodies[p.b];
+                    (
+                        ba.rolling_friction.max(bb.rolling_friction),
+                        ba.torsion_friction.max(bb.torsion_friction),
+                    )
+                };
+                if mu_roll > 0.0 || mu_spin > 0.0 {
+                    let drot_a = quat_diff_vec(
+                        self.bodies[self.pairs[pi].a].orientation,
+                        self.rot0[self.pairs[pi].a],
+                    );
+                    let drot_b = quat_diff_vec(
+                        self.bodies[self.pairs[pi].b].orientation,
+                        self.rot0[self.pairs[pi].b],
+                    );
+                    let wrel = drot_a - drot_b;
+                    for (ax, li, mur) in [(t1, 0, mu_roll), (t2, 1, mu_roll), (n, 2, mu_spin)] {
+                        if mur <= 0.0 {
+                            continue;
+                        }
+                        let c = wrel.dot(ax);
+                        let cap = mur * f[0].abs();
+                        let fr = (ROLL_PEN * c + pt.roll_lam[li]).clamp(-cap, cap);
+                        // Pure couple: angular-only gradient, opposite senses.
+                        let g = if is_a { ax } else { -ax };
+                        let o = outer(g, g);
+                        for x in 0..3 {
+                            for y in 0..3 {
+                                lhs[3 + x][3 + y] += ROLL_PEN * o[x][y];
+                            }
+                        }
+                        rhs[3] += fr * g.x;
+                        rhs[4] += fr * g.y;
+                        rhs[5] += fr * g.z;
+                    }
                 }
             }
         }
@@ -983,6 +1202,9 @@ impl AvbdEngine {
                 _ => {}
             }
             // --- one-sided limit row (Box2D order: limit wins over motor) ---
+            // (Primal: warmstarts from `lim_dual` ONLY — dual commits in
+            // `dual_update`, never here. Writing `lim_dual` from the primal
+            // too lets the two chase each other into a limit cycle.)
             if let Some([lo, hi]) = j.lim {
                 match j.kind {
                     AvbdJointKind::Revolute => {
@@ -1019,7 +1241,9 @@ impl AvbdEngine {
                         if let Some(lower) = limit_state(s, lo, hi, LIMIT_SLOP_LIN) {
                             let c = if lower { s - lo } else { s - hi };
                             if c.abs() >= C_EPS {
-                                let f_raw = j.pen_l[2] * c + j.acc_lim;
+                                // Primal stamps the warm force (`lim_dual`
+                                // slot, dual-owned — never written here).
+                                let f_raw = j.pen_l[2] * c + j.lim_dual;
                                 let f = if lower {
                                     f_raw.min(0.0)
                                 } else {
@@ -1180,7 +1404,11 @@ impl AvbdEngine {
                 let p = &self.pairs[pi];
                 (p.n, p.mu)
             };
-            let (t1, t2) = tangent_basis(n);
+            let (t1, _, _) = {
+                let p = &self.pairs[pi];
+                friction_frame(&self.bodies[p.a], &self.bodies[p.b], p.n)
+            };
+            let t2 = t1.cross(n);
             for qi in 0..self.pairs[pi].points.len() {
                 let c0 = self.gap_c0(pi, qi);
                 let (cn, _, _) = self.row_c(&self.pairs[pi], &self.pairs[pi].points[qi], n, c0);
@@ -1191,17 +1419,41 @@ impl AvbdEngine {
                     (pt.pen, pt.lam)
                 };
                 let f = Self::contact_force(cn, pen, lam, [ct1, ct2], mu);
+                // Static-grip flag (official `stick`, manifold.cpp:173):
+                // verbatim port — set while the UNSCALED tangential force
+                // sits inside the cone (`frictionScale <= bounds`), with the
+                // absolute 1e-5 position threshold. No lever scaling: the
+                // whirl limit-cycle (±100m via the prismatic limit row) was
+                // a DUAL-gate bug (the flag was set unconditionally), not a
+                // threshold bug — fixed by gating on the cone state. The
+                // 1%-of-lever scaling tried here re-broke the prismatic
+                // limit test (anchors refreshed every step under gravity
+                // load, support never accumulated).
+                {
+                    let bnd = f[0].abs() * mu[0].max(mu[1]);
+                    let ft_u = [pen[1] * ct1 + lam[1], pen[2] * ct2 + lam[2]];
+                    let fs = (ft_u[0] * ft_u[0] + ft_u[1] * ft_u[1]).sqrt();
+                    let stuck_now = fs <= bnd && (ct1 * ct1 + ct2 * ct2).sqrt() < STICK_THRESH;
+                    self.pairs[pi].points[qi].stuck = stuck_now;
+                }
                 let pt = &mut self.pairs[pi].points[qi];
-                // Static-grip flag (official `stick`), set unconditionally.
-                pt.stuck = (ct1 * ct1 + ct2 * ct2).sqrt() < STICK_THRESH;
                 if cn.abs() >= C_EPS {
                     pt.lam[0] = f[0];
                     if f[0] < 0.0 {
                         pt.pen[0] = (pt.pen[0] + BETA * cn.abs()).min(PENALTY_MAX);
                     }
                 }
-                let t_scale = (f[1] * f[1] + f[2] * f[2]).sqrt() / (f[0].abs() * mu + 1e-12);
-                if t_scale <= 1.0 {
+                // Elliptical within-bounds gate on the UNSCALED tangential
+                // force (official `frictionScale <= bounds`).
+                let b1 = f[0].abs() * mu[0];
+                let b2 = f[0].abs() * mu[1];
+                let ft_u = [pen[1] * ct1 + lam[1], pen[2] * ct2 + lam[2]];
+                let s_ell = if b1 > 0.0 && b2 > 0.0 {
+                    (ft_u[0] / b1) * (ft_u[0] / b1) + (ft_u[1] / b2) * (ft_u[1] / b2)
+                } else {
+                    f32::INFINITY
+                };
+                if s_ell <= 1.0 {
                     if ct1.abs() >= C_EPS {
                         pt.lam[1] = f[1];
                         pt.pen[1] = (pt.pen[1] + BETA * ct1.abs()).min(PENALTY_MAX);
@@ -1209,6 +1461,32 @@ impl AvbdEngine {
                     if ct2.abs() >= C_EPS {
                         pt.lam[2] = f[2];
                         pt.pen[2] = (pt.pen[2] + BETA * ct2.abs()).min(PENALTY_MAX);
+                    }
+                }
+                // Rolling/torsion dual: same rows, torque cap from the fresh
+                // normal force. No ramp, no deadband (slow rolling needs
+                // small-C response).
+                {
+                    let p = &self.pairs[pi];
+                    let ba = &self.bodies[p.a];
+                    let bb = &self.bodies[p.b];
+                    let mu_roll = ba.rolling_friction.max(bb.rolling_friction);
+                    let mu_spin = ba.torsion_friction.max(bb.torsion_friction);
+                    if mu_roll > 0.0 || mu_spin > 0.0 {
+                        let drot_a = quat_diff_vec(self.bodies[p.a].orientation, self.rot0[p.a]);
+                        let drot_b = quat_diff_vec(self.bodies[p.b].orientation, self.rot0[p.b]);
+                        let wrel = drot_a - drot_b;
+                        let lam_n = self.pairs[pi].points[qi].lam[0].abs();
+                        let rl = self.pairs[pi].points[qi].roll_lam;
+                        for (ax, li, mur) in [(t1, 0, mu_roll), (t2, 1, mu_roll), (n, 2, mu_spin)] {
+                            if mur <= 0.0 {
+                                continue;
+                            }
+                            let c = wrel.dot(ax);
+                            let cap = mur * lam_n;
+                            let fr = (ROLL_PEN * c + rl[li]).clamp(-cap, cap);
+                            self.pairs[pi].points[qi].roll_lam[li] = fr;
+                        }
                     }
                 }
             }
@@ -1268,7 +1546,7 @@ impl AvbdEngine {
                         }
                         let f = j.pen_a[li] * c + j.lam_a[li];
                         j.lam_a[li] = f;
-                        j.pen_a[li] = (j.pen_a[li] + BETA * c.abs()).min(PENALTY_MAX);
+                        j.pen_a[li] = (j.pen_a[li] + BETA_ANG * c.abs()).min(PENALTY_MAX);
                     }
                 }
                 AvbdJointKind::Fixed => {
@@ -1280,13 +1558,20 @@ impl AvbdEngine {
                             continue;
                         }
                         j.lam_a[k] += j.pen_a[k] * c;
-                        j.pen_a[k] = (j.pen_a[k] + BETA * c.abs()).min(PENALTY_MAX);
+                        j.pen_a[k] = (j.pen_a[k] + BETA_ANG * c.abs()).min(PENALTY_MAX);
                     }
                 }
                 _ => {}
             }
             // One-sided limit accumulator (official `acc_limit` discipline:
             // clamp self-corrects on side flips; zeroed when clear).
+            // DUAL-SIDE (prismatic): this is `dual_update` (mutable joints,
+            // live bodies) — the ONLY writer of `lim_dual`. The primal only
+            // WARMS from the slot, it never writes it (both writing lets
+            // the two chase each other into a limit cycle under sustained
+            // load — the prismatic slider snapped to +5.7m / ±100m after
+            // ~200 steps). The revolute row keeps `acc_lim` (see field
+            // docs on `lim_dual`).
             if let Some([lo, hi]) = j.lim {
                 match j.kind {
                     AvbdJointKind::Revolute => {
@@ -1296,20 +1581,17 @@ impl AvbdEngine {
                             Some(lower) => {
                                 let c = if lower { angle - lo } else { angle - hi };
                                 if c.abs() >= C_EPS {
-                                    // Anti-windup: no memory in deep violation
-                                    // (proportional force only). A wound-up
-                                    // accumulator sustains push after the catch
-                                    // and limit-cycles ±100m; substeps give the
-                                    // official code this implicitly.
-                                    if c.abs() > 0.5 {
-                                        j.acc_lim = 0.0;
-                                    }
                                     let f = j.pen_a[2] * c + j.acc_lim;
                                     j.acc_lim = if lower { f.min(0.0) } else { f.max(0.0) };
-                                    j.pen_a[2] = (j.pen_a[2] + BETA * c.abs()).min(PENALTY_MAX);
+                                    // Capped (LIM_PEN_MAX): a limit holds a
+                                    // persistent bias, an uncapped ramp
+                                    // crosses explicit stability and diverges.
+                                    j.pen_a[2] = (j.pen_a[2] + BETA_ANG * c.abs()).min(LIM_PEN_MAX);
                                 }
                             }
-                            None => j.acc_lim = 0.0,
+                            None => {
+                                j.acc_lim = 0.0;
+                            }
                         }
                     }
                     AvbdJointKind::Prismatic => {
@@ -1319,15 +1601,25 @@ impl AvbdEngine {
                             Some(lower) => {
                                 let c = if lower { s - lo } else { s - hi };
                                 if c.abs() >= C_EPS {
-                                    if c.abs() > 0.5 {
-                                        j.acc_lim = 0.0;
-                                    }
-                                    let f = j.pen_l[2] * c + j.acc_lim;
-                                    j.acc_lim = if lower { f.min(0.0) } else { f.max(0.0) };
-                                    j.pen_l[2] = (j.pen_l[2] + BETA * c.abs()).min(PENALTY_MAX);
+                                    // Official `lambda = F`: recompute the
+                                    // force from CURRENT positions and STORE
+                                    // it — the primal warmstarts from this
+                                    // slot, so primal and dual agree by
+                                    // construction (no chase, no cycle).
+                                    let f_raw = j.pen_l[2] * c + j.lim_dual;
+                                    let f = if lower {
+                                        f_raw.min(0.0)
+                                    } else {
+                                        f_raw.max(0.0)
+                                    };
+                                    j.lim_dual = f;
+                                    j.pen_l[2] = (j.pen_l[2] + BETA * c.abs()).min(LIM_PEN_MAX);
                                 }
                             }
-                            None => j.acc_lim = 0.0,
+                            None => {
+                                j.acc_lim = 0.0;
+                                j.lim_dual = 0.0;
+                            }
                         }
                     }
                     _ => {}
@@ -1394,6 +1686,9 @@ impl PhysicsEngine for AvbdEngine {
                 pt.lam[0] *= ALPHA * GAMMA;
                 pt.lam[1] *= ALPHA * GAMMA;
                 pt.lam[2] *= ALPHA * GAMMA;
+                pt.roll_lam[0] *= ALPHA * GAMMA;
+                pt.roll_lam[1] *= ALPHA * GAMMA;
+                pt.roll_lam[2] *= ALPHA * GAMMA;
                 for k in 0..3 {
                     pt.pen[k] = (pt.pen[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
                 }
@@ -1534,6 +1829,7 @@ impl PhysicsEngine for AvbdEngine {
             lim: None,
             mot: None,
             acc_lim: 0.0,
+            lim_dual: 0.0,
             lam_l: [0.0; 3],
             lam_a: [0.0; 3],
             pen_l: [JOINT_PENALTY_INIT; 3],
