@@ -245,6 +245,24 @@ impl RigidBody {
         )
     }
 
+    /// Triangle-mesh collider body from a vertex soup and triangle
+    /// indices (concave meshes welcome; static use intended: pass mass
+    /// 0). Restitution 0.3, friction 0.5, rolling/torsion damping 0.2/0.05
+    /// like hull debris. Inertia is exact (Mirtich) for closed, outwardly
+    /// wound soup, bounding-box fallback otherwise.
+    pub fn new_trimesh(position: Vec3, vertices: &[Vec3], indices: &[[u32; 3]], mass: f32) -> Self {
+        let mut body = Self::build(
+            position,
+            mass,
+            0.3,
+            0.5,
+            Shape::TriMesh(crate::shape::TriMesh::from_indexed(vertices, indices)),
+        );
+        body.rolling_friction = 0.2;
+        body.torsion_friction = 0.05;
+        body
+    }
+
     /// Builder-style collision-layer and mask configuration.
     ///
     /// A pair is eligible only when both directions agree: `self`'s mask

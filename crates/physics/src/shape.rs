@@ -67,6 +67,13 @@ pub enum Shape {
     /// Intended for static bodies; colliding two heightfields reports no
     /// contact (terrain-vs-terrain is undefined).
     Heightfield(Heightfield),
+    /// Triangle-soup mesh collider in body-local space (concave meshes
+    /// welcome). Built with [`TriMesh::from_indexed`]: each triangle
+    /// becomes a prebuilt convex primitive under a median-split AABB BVH,
+    /// so narrow phase reuses the exact GJK/EPA path per triangle.
+    /// Mesh-vs-mesh reports no contact (concave-concave is undefined —
+    /// split compound colliders with `Fixed` joints instead).
+    TriMesh(TriMesh),
 }
 
 /// Explicit convex polyhedron: deduplicated local vertices plus outward
@@ -96,6 +103,52 @@ pub struct Heightfield {
     pub cols: usize,
     /// Uniform grid spacing along X and Z (m).
     pub cell: f32,
+}
+
+/// Triangle-soup mesh collider: indexed triangles in body-local space
+/// with a prebuilt AABB BVH. Each surviving triangle is stored as a
+/// centroid-relative [`Shape::ConvexHull`] (zero per-query allocation in
+/// narrow phase) under `centroids`; `nodes` accelerates both the narrow
+/// walk and raycasts. Built with [`TriMesh::from_indexed`].
+#[derive(Debug, Clone)]
+pub struct TriMesh {
+    /// One convex primitive per surviving triangle, vertices relative to
+    /// the matching entry of `centroids`.
+    pub tris: Vec<Shape>,
+    /// Triangle centroids in mesh-local space (placement origins).
+    pub centroids: Vec<Vec3>,
+    /// Median-split AABB tree over `tris` in mesh-local space.
+    pub(crate) nodes: Vec<BvhNode>,
+    /// Median-split permutation: leaves own `order[start..start+count]`
+    /// ranges into `tris`/`centroids`.
+    pub(crate) order: Vec<u32>,
+    /// Mesh-local bounding box (precomputed; transformed per query).
+    pub local_min: Vec3,
+    /// Mesh-local bounding box max (precomputed).
+    pub local_max: Vec3,
+    /// Support radius about the body origin (max vertex length).
+    pub bound_radius: f32,
+    /// Smallest triangle edge over the soup (CCD travel gate input).
+    pub min_feature: f32,
+}
+
+/// One median-split AABB BVH node in mesh-local space. Internal nodes
+/// branch to `left`/`right`; leaves (`left == u32::MAX`) own the
+/// triangle range `start..start+count`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BvhNode {
+    /// Node bounding-box min.
+    pub min: Vec3,
+    /// Node bounding-box max.
+    pub max: Vec3,
+    /// Left child index, or `u32::MAX` for leaves.
+    pub left: u32,
+    /// Right child index (leaves only: unused).
+    pub right: u32,
+    /// First triangle (leaves only).
+    pub start: u32,
+    /// Triangle count (leaves only).
+    pub count: u32,
 }
 
 impl Shape {
@@ -157,6 +210,7 @@ impl Shape {
             }
             Shape::ConvexHull(hull) => hull.aabb(position, orientation),
             Shape::Heightfield(hf) => hf.aabb(position, orientation),
+            Shape::TriMesh(mesh) => mesh.aabb(position, orientation),
         }
     }
 
@@ -229,6 +283,7 @@ impl Shape {
                 let e = hf.local_extents();
                 Shape::Box { half_extents: e }.inertia(mass)
             }
+            Shape::TriMesh(mesh) => mesh.inertia(mass),
         }
     }
 
@@ -267,6 +322,7 @@ impl Shape {
             } => closest_cone_point(*radius, *half_height, local),
             Shape::ConvexHull(hull) => closest_hull_point(hull, local),
             Shape::Heightfield(hf) => closest_heightfield_point(hf, local),
+            Shape::TriMesh(mesh) => mesh.closest_point_local(local),
         };
         pos + rot * q
     }
@@ -691,9 +747,394 @@ impl Heightfield {
     }
 }
 
+impl TriMesh {
+    /// Leaf capacity of the median-split BVH (tuned for narrow-phase
+    /// walks: few leaves visited, little per-leaf GJK fan-out).
+    const LEAF_TRIS: usize = 4;
+
+    /// Build a mesh collider from a vertex soup and triangle indices.
+    /// Degenerate triangles (area² below 1e-12) are dropped, like the
+    /// hull weld drops degenerate input; out-of-range indices panic
+    /// (programmer error, fail fast with the offending index).
+    /// Deterministic: median splits with a stable index sort, no RNG.
+    pub fn from_indexed(vertices: &[Vec3], indices: &[[u32; 3]]) -> Self {
+        let mut tris = Vec::with_capacity(indices.len());
+        let mut centroids = Vec::with_capacity(indices.len());
+        let mut local_min = Vec3::splat(f32::INFINITY);
+        let mut local_max = Vec3::splat(f32::NEG_INFINITY);
+        let mut bound_radius = 0.0f32;
+        let mut min_feature = f32::INFINITY;
+        for (t, idx) in indices.iter().enumerate() {
+            let v = [
+                *vertices.get(idx[0] as usize).unwrap_or_else(|| {
+                    panic!(
+                        "TriMesh::from_indexed: index {} of triangle {t} out of range",
+                        idx[0]
+                    )
+                }),
+                *vertices.get(idx[1] as usize).unwrap_or_else(|| {
+                    panic!(
+                        "TriMesh::from_indexed: index {} of triangle {t} out of range",
+                        idx[1]
+                    )
+                }),
+                *vertices.get(idx[2] as usize).unwrap_or_else(|| {
+                    panic!(
+                        "TriMesh::from_indexed: index {} of triangle {t} out of range",
+                        idx[2]
+                    )
+                }),
+            ];
+            if (v[1] - v[0]).cross(v[2] - v[0]).length_squared() < 1e-12 {
+                continue; // Degenerate: zero-area sliver, no collision value.
+            }
+            for (a, b) in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
+                min_feature = min_feature.min((b - a).length());
+            }
+            for p in v {
+                local_min = local_min.min(p);
+                local_max = local_max.max(p);
+                bound_radius = bound_radius.max(p.length());
+            }
+            let c = (v[0] + v[1] + v[2]) / 3.0;
+            centroids.push(c);
+            // `from_vertices` only triangulates 4+ vertices, so a lone
+            // triangle would get no faces (dead raycast, centroid-fallback
+            // closest point). Set both windings explicitly: raycasts flip
+            // the normal toward the ray and closest-point is winding-free.
+            let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c]);
+            hull.faces = vec![[0, 1, 2], [0, 2, 1]];
+            tris.push(Shape::ConvexHull(hull));
+        }
+        if tris.is_empty() {
+            local_min = Vec3::ZERO;
+            local_max = Vec3::ZERO;
+            min_feature = 0.0;
+        }
+        let (nodes, order) = Self::build_bvh(&tris, &centroids);
+        Self {
+            tris,
+            centroids,
+            nodes,
+            order,
+            local_min,
+            local_max,
+            bound_radius,
+            min_feature,
+        }
+    }
+
+    /// Median-split AABB BVH over the triangle bounds (mesh-local space).
+    /// Splits the longest axis at the centroid median; all-equal centroids
+    /// become a leaf (no empty children, no infinite recursion).
+    fn build_bvh(tris: &[Shape], centroids: &[Vec3]) -> (Vec<BvhNode>, Vec<u32>) {
+        // Per-triangle local bounds from the centroid-relative verts.
+        let mut bounds = Vec::with_capacity(tris.len());
+        for (tri, c) in tris.iter().zip(centroids.iter()) {
+            let Shape::ConvexHull(hull) = tri else {
+                continue; // Unreachable: built above as hulls.
+            };
+            let mut lo = Vec3::splat(f32::INFINITY);
+            let mut hi = Vec3::splat(f32::NEG_INFINITY);
+            for v in &hull.vertices {
+                let w = *v + *c;
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+            bounds.push((lo, hi));
+        }
+        let mut nodes = Vec::new();
+        let mut order: Vec<u32> = (0..bounds.len() as u32).collect();
+        if !order.is_empty() {
+            Self::split(&bounds, centroids, &mut order, 0, &mut nodes);
+        }
+        if nodes.is_empty() {
+            // Degenerate mesh (no surviving triangles): one empty leaf so
+            // traversals visit nothing instead of indexing nothing.
+            nodes.push(BvhNode {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+                left: u32::MAX,
+                right: 0,
+                start: 0,
+                count: 0,
+            });
+        }
+        (nodes, order)
+    }
+
+    /// Recursive median split over `order` (`base` = its offset in the root
+    /// permutation); appends nodes depth-first and returns the node index.
+    /// Partitioned in place with a stable centroid sort — deterministic for
+    /// fixed input. Leaves own `order[start..start+count]` ranges.
+    fn split(
+        bounds: &[(Vec3, Vec3)],
+        centroids: &[Vec3],
+        order: &mut [u32],
+        base: usize,
+        nodes: &mut Vec<BvhNode>,
+    ) -> u32 {
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for &t in order.iter() {
+            let (a, b) = bounds[t as usize];
+            lo = lo.min(a);
+            hi = hi.max(b);
+        }
+        let here = nodes.len() as u32;
+        nodes.push(BvhNode {
+            min: lo,
+            max: hi,
+            left: u32::MAX,
+            right: 0,
+            start: 0,
+            count: 0,
+        });
+        if order.len() <= Self::LEAF_TRIS {
+            nodes[here as usize].start = base as u32;
+            nodes[here as usize].count = order.len() as u32;
+            return here;
+        }
+        let e = hi - lo;
+        let axis = if e.x >= e.y && e.x >= e.z {
+            0
+        } else if e.y >= e.z {
+            1
+        } else {
+            2
+        };
+        order.sort_by(|&a, &b| {
+            centroids[a as usize][axis]
+                .partial_cmp(&centroids[b as usize][axis])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mid = order.len() / 2;
+        // All-equal centroids: any split is empty on one side — leaf out.
+        let (first, last) = (
+            centroids[order[0] as usize][axis],
+            centroids[order[order.len() - 1] as usize][axis],
+        );
+        if first == last {
+            nodes[here as usize].start = base as u32;
+            nodes[here as usize].count = order.len() as u32;
+            return here;
+        }
+        let (left_order, right_order) = order.split_at_mut(mid);
+        let left = Self::split(bounds, centroids, left_order, base, nodes);
+        let right = Self::split(bounds, centroids, right_order, base + mid, nodes);
+        nodes[here as usize].left = left;
+        nodes[here as usize].right = right;
+        here
+    }
+
+    /// World-space AABB from the precomputed local box (8 corners).
+    pub fn aabb(&self, position: Vec3, orientation: Quat) -> AABB {
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for i in 0..8 {
+            let corner = Vec3::new(
+                if i & 4 == 0 {
+                    self.local_min.x
+                } else {
+                    self.local_max.x
+                },
+                if i & 2 == 0 {
+                    self.local_min.y
+                } else {
+                    self.local_max.y
+                },
+                if i & 1 == 0 {
+                    self.local_min.z
+                } else {
+                    self.local_max.z
+                },
+            );
+            let w = position + orientation * corner;
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+        AABB::new(lo, hi)
+    }
+
+    /// Diagonal inertia from the triangle soup (Mirtich-style signed
+    /// tetrahedra about the body origin, same math as
+    /// [`ConvexHull::inertia`]): exact for closed, consistently wound
+    /// meshes; falls back to the local bounding box on degenerate input.
+    /// Inconsistent winding averages out instead of failing loudly — keep
+    /// soup clean (outward, manifold) for dynamic bodies.
+    pub fn inertia(&self, mass: f32) -> Vec3 {
+        if self.tris.is_empty() || mass <= 0.0 {
+            return self.fallback_inertia(mass);
+        }
+        let mut vol = 0.0f32;
+        let mut exx = 0.0f32;
+        let mut eyy = 0.0f32;
+        let mut ezz = 0.0f32;
+        for (tri, c) in self.tris.iter().zip(self.centroids.iter()) {
+            let Shape::ConvexHull(hull) = tri else {
+                continue;
+            };
+            if hull.vertices.len() < 3 {
+                continue;
+            }
+            // Mesh-frame triangle = centroid-relative verts + centroid.
+            let (a, b, cc) = (
+                hull.vertices[0] + *c,
+                hull.vertices[1] + *c,
+                hull.vertices[2] + *c,
+            );
+            let v = a.dot(b.cross(cc)) / 6.0;
+            vol += v;
+            exx += v / 10.0
+                * (a.x * a.x + b.x * b.x + cc.x * cc.x + a.x * b.x + b.x * cc.x + cc.x * a.x);
+            eyy += v / 10.0
+                * (a.y * a.y + b.y * b.y + cc.y * cc.y + a.y * b.y + b.y * cc.y + cc.y * a.y);
+            ezz += v / 10.0
+                * (a.z * a.z + b.z * b.z + cc.z * cc.z + a.z * b.z + b.z * cc.z + cc.z * a.z);
+        }
+        if vol.abs() < 1e-9 {
+            return self.fallback_inertia(mass);
+        }
+        let density = mass / vol.abs();
+        Vec3::new(
+            density * (eyy + ezz).abs(),
+            density * (ezz + exx).abs(),
+            density * (exx + eyy).abs(),
+        )
+    }
+
+    /// Bounding-box inertia fallback (degenerate/empty soup).
+    fn fallback_inertia(&self, mass: f32) -> Vec3 {
+        Shape::Box {
+            half_extents: ((self.local_max - self.local_min) * 0.5).max(Vec3::ZERO),
+        }
+        .inertia(mass)
+    }
+
+    /// Closest surface point (mesh-local): brute force over triangles.
+    /// O(T) — the hot narrow path refines per winning triangle instead
+    /// (see `distance::trimesh_convex`); this serves cold callers.
+    pub(crate) fn closest_point_local(&self, p: Vec3) -> Vec3 {
+        let mut best = p;
+        let mut bd = f32::INFINITY;
+        for (tri, c) in self.tris.iter().zip(self.centroids.iter()) {
+            let Shape::ConvexHull(hull) = tri else {
+                continue;
+            };
+            if hull.faces.is_empty() {
+                continue;
+            }
+            for f in &hull.faces {
+                let (a, b, cc) = (
+                    hull.vertices[f[0] as usize] + *c,
+                    hull.vertices[f[1] as usize] + *c,
+                    hull.vertices[f[2] as usize] + *c,
+                );
+                let (q, _, _, _) = crate::gjk::closest_triangle(a - p, b - p, cc - p);
+                let q = q + p;
+                let d = (p - q).length_squared();
+                if d < bd {
+                    best = q;
+                    bd = d;
+                }
+            }
+        }
+        best
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unit-cube mesh (outward wound, edge 1): shared by mesh tests.
+    fn cube_mesh() -> TriMesh {
+        let v = [
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+        ];
+        TriMesh::from_indexed(
+            &v,
+            &[
+                [0, 3, 1],
+                [0, 2, 3],
+                [4, 5, 7],
+                [4, 7, 6],
+                [0, 4, 6],
+                [0, 6, 2],
+                [1, 3, 7],
+                [1, 7, 5],
+                [0, 1, 5],
+                [0, 5, 4],
+                [2, 7, 3],
+                [2, 6, 7],
+            ],
+        )
+    }
+
+    #[test]
+    fn trimesh_builds_bvh_and_derived_data() {
+        let mesh = cube_mesh();
+        assert_eq!(mesh.tris.len(), 12);
+        assert_eq!(mesh.order.len(), 12);
+        assert!(!mesh.nodes.is_empty());
+        // Root bounds cover the cube.
+        assert_vec3_close(mesh.nodes[0].min, Vec3::splat(-0.5));
+        assert_vec3_close(mesh.nodes[0].max, Vec3::splat(0.5));
+        assert_vec3_close(mesh.local_min, Vec3::splat(-0.5));
+        assert_vec3_close(mesh.local_max, Vec3::splat(0.5));
+        // Support radius = half space diagonal; min feature = edge.
+        assert!(
+            (mesh.bound_radius - 0.8660254).abs() < 1e-5,
+            "{}",
+            mesh.bound_radius
+        );
+        assert!(
+            (mesh.min_feature - 1.0).abs() < 1e-5,
+            "{}",
+            mesh.min_feature
+        );
+        // Every triangle is centroid-relative: centroid + verts recover it.
+        for (tri, _) in mesh.tris.iter().zip(mesh.centroids.iter()) {
+            let Shape::ConvexHull(hull) = tri else {
+                panic!("mesh tris are hulls");
+            };
+            assert_eq!(hull.vertices.len(), 3);
+            assert_eq!(hull.faces.len(), 2);
+        }
+    }
+
+    #[test]
+    fn trimesh_cube_inertia_matches_box_golden() {
+        // Closed cube, mass 2: I = (m/12)(1²+1²) = 1/3 per axis (Mirtich).
+        let mesh = cube_mesh();
+        assert_vec3_close(mesh.inertia(2.0), Vec3::splat(1.0 / 3.0));
+    }
+
+    #[test]
+    fn trimesh_drops_degenerate_triangles() {
+        let v = [
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(2.0, 0.0, 0.0), // Collinear with the first two.
+            Vec3::Y,
+        ];
+        let mesh = TriMesh::from_indexed(&v, &[[0, 1, 2], [0, 1, 3]]);
+        assert_eq!(mesh.tris.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn trimesh_rejects_out_of_range_indices() {
+        let v = [Vec3::ZERO, Vec3::X, Vec3::Y];
+        let _ = TriMesh::from_indexed(&v, &[[0, 1, 9]]);
+    }
 
     /// `Shape` has no unit tests at all (night gate, 2026-08-24: 50 missed
     /// mutants in `Shape::inertia` alone — every arithmetic op and shape

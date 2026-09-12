@@ -843,6 +843,10 @@ fn body_max_extent(body: &RigidBody) -> f32 {
             let e = hf.local_extents();
             e.x.max(e.z).max(1.0) * 2.0
         }
+        crate::shape::Shape::TriMesh(mesh) => {
+            let e = (mesh.local_max - mesh.local_min) * 0.5;
+            e.x.max(e.y).max(e.z).max(0.5) * 2.0
+        }
     }
 }
 

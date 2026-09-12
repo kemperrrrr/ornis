@@ -3106,6 +3106,7 @@ impl BuiltinPhysicsEngine {
             } => ray_cone_hit(origin, direction, *radius, *half_height, max_dist),
             Shape::ConvexHull(hull) => ray_hull_hit(origin, direction, hull, max_dist),
             Shape::Heightfield(hf) => ray_heightfield_hit(origin, direction, hf, max_dist),
+            Shape::TriMesh(mesh) => ray_trimesh_hit(origin, direction, mesh, max_dist),
         }?;
         let (distance, local_normal) = hit;
         let point = ray.point_at(distance);
@@ -3146,6 +3147,7 @@ fn shape_min_dimension(shape: &Shape) -> f32 {
         } => 0.5 * radius.min(*half_height),
         Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
         Shape::Heightfield(hf) => 0.5 * hf.cell,
+        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature,
     }
 }
 
@@ -3171,6 +3173,7 @@ fn shape_max_radius(shape: &Shape) -> f32 {
             .map(|v| v.length())
             .fold(0.0f32, f32::max),
         Shape::Heightfield(hf) => hf.local_extents().length() + hf.local_center().length(),
+        Shape::TriMesh(mesh) => mesh.bound_radius,
     }
 }
 
@@ -4163,6 +4166,66 @@ fn ray_heightfield_hit(
         }
         if cx < -1 || cx > hf.cols as isize || cz < -1 || cz > hf.rows as isize {
             break;
+        }
+    }
+    best
+}
+
+/// Ray vs a triangle mesh (local frame): BVH walk with slab pruning,
+/// each surviving triangle tested with the hull face slab. Deterministic
+/// leaf order; nearest hit wins.
+fn ray_trimesh_hit(
+    origin: Vec3,
+    direction: Vec3,
+    mesh: &crate::shape::TriMesh,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    if mesh.tris.is_empty() || max_dist < 0.0 {
+        return None;
+    }
+    let mut best: Option<(f32, Vec3)> = None;
+    let mut limit = max_dist;
+    let mut stack = [0u32; 64];
+    let mut len = 1usize;
+    while len > 0 {
+        len -= 1;
+        let ni = stack[len] as usize;
+        if ni >= mesh.nodes.len() {
+            continue;
+        }
+        let node = &mesh.nodes[ni];
+        // Slab prune: skip subtrees entered past the best hit so far.
+        if ray_aabb_hit(origin, direction, node.min, node.max, limit).is_none() {
+            continue;
+        }
+        if node.left == u32::MAX {
+            let end = (node.start + node.count) as usize;
+            for o in node.start as usize..end.min(mesh.order.len()) {
+                let t = mesh.order[o] as usize;
+                if t >= mesh.tris.len() || t >= mesh.centroids.len() {
+                    continue;
+                }
+                let crate::shape::Shape::ConvexHull(hull) = &mesh.tris[t] else {
+                    continue;
+                };
+                // Triangle verts are centroid-relative: shift the ray.
+                let c = mesh.centroids[t];
+                if let Some((d, n)) = ray_hull_hit(origin - c, direction, hull, limit)
+                    && d < limit
+                {
+                    limit = d;
+                    best = Some((d, n));
+                }
+            }
+        } else {
+            if len + 2 > 64 {
+                break; // Depth guard: keep the best hit so far.
+            }
+            // Near-first order is irrelevant for correctness (best-tracked
+            // pruning); push right-then-left so left pops first.
+            stack[len] = node.right;
+            stack[len + 1] = node.left;
+            len += 2;
         }
     }
     best
@@ -8572,6 +8635,170 @@ mod tests {
             "resting velocity near zero, got {}",
             b.velocity
         );
+    }
+
+    /// Flat quad mesh (2 triangles, +Y wound) as a static floor: a ball
+    /// dropped on it rests at terrain + radius through the BVH triangle
+    /// loop — the concave-mesh narrow path end to end.
+    #[test]
+    fn ball_rests_on_trimesh_floor() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_trimesh(
+            Vec3::ZERO,
+            &[
+                Vec3::new(-5.0, 0.0, -5.0),
+                Vec3::new(5.0, 0.0, 5.0),
+                Vec3::new(5.0, 0.0, -5.0),
+                Vec3::new(-5.0, 0.0, 5.0),
+            ],
+            &[[0, 1, 2], [0, 3, 1]],
+            0.0,
+        ));
+        let ball = physics.add_body(RigidBody::new_sphere(Vec3::new(0.4, 4.0, -0.3), 0.5, 1.0));
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(ball).unwrap();
+        assert!(
+            (b.position.y - 0.5).abs() < 0.08,
+            "ball must rest at mesh top (0.0)+radius(0.5), got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.2,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+    }
+
+    /// Dynamic cube mesh (12 triangles, Mirtich inertia) dropped flat on a
+    /// static box floor rests like an analytic box.
+    #[test]
+    fn mesh_cube_rests_on_floor() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(5.0, 0.5, 5.0),
+            0.0,
+        ));
+        let v = [
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+        ];
+        let idx = [
+            [0, 3, 1],
+            [0, 2, 3],
+            [4, 5, 7],
+            [4, 7, 6],
+            [0, 4, 6],
+            [0, 6, 2],
+            [1, 3, 7],
+            [1, 7, 5],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 7, 3],
+            [2, 6, 7],
+        ];
+        let body = physics.add_body(RigidBody::new_trimesh(
+            Vec3::new(0.0, 2.0, 0.0),
+            &v,
+            &idx,
+            1.0,
+        ));
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(body).unwrap();
+        assert!(
+            (b.position.y - 0.5).abs() < 0.08,
+            "mesh cube must rest at y=0.5, got {}",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.2,
+            "resting velocity near zero, got {}",
+            b.velocity
+        );
+    }
+
+    /// Mesh-vs-mesh is undefined (concave-concave): overlapping meshes
+    /// produce no contact and the dynamic one keeps falling.
+    #[test]
+    fn mesh_vs_mesh_reports_no_contact() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let v = [
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+        ];
+        let idx = [
+            [0, 3, 1],
+            [0, 2, 3],
+            [4, 5, 7],
+            [4, 7, 6],
+            [0, 4, 6],
+            [0, 6, 2],
+            [1, 3, 7],
+            [1, 7, 5],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 7, 3],
+            [2, 6, 7],
+        ];
+        physics.add_body(RigidBody::new_trimesh(Vec3::ZERO, &v, &idx, 0.0));
+        let top = physics.add_body(RigidBody::new_trimesh(
+            Vec3::new(0.0, 0.4, 0.0),
+            &v,
+            &idx,
+            1.0,
+        ));
+        for _ in 0..60 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(top).unwrap();
+        assert_eq!(
+            physics.debug_contact_count(top),
+            0,
+            "mesh-vs-mesh must not contact"
+        );
+        assert!(
+            b.position.y < 0.4,
+            "unsupported pair keeps falling, got y={}",
+            b.position.y
+        );
+    }
+
+    /// Raycast hits a mesh triangle at its surface through the BVH walk.
+    #[test]
+    fn raycast_hits_trimesh() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        physics.add_body(RigidBody::new_trimesh(
+            Vec3::ZERO,
+            &[
+                Vec3::new(-5.0, 0.0, -5.0),
+                Vec3::new(5.0, 0.0, 5.0),
+                Vec3::new(5.0, 0.0, -5.0),
+                Vec3::new(-5.0, 0.0, 5.0),
+            ],
+            &[[0, 1, 2], [0, 3, 1]],
+            0.0,
+        ));
+        let hit = physics
+            .raycast(Ray::new(Vec3::new(1.0, 4.0, 2.0), Vec3::NEG_Y), 10.0)
+            .expect("ray must hit the mesh quad");
+        assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
+        assert!(hit.normal.dot(Vec3::Y) > 0.999);
     }
 
     /// Tetrahedron dropped face-down settles on its face (hull-vs-box

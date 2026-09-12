@@ -43,7 +43,7 @@ pub use joint::{
     RevoluteMotor, WheelSuspension,
 };
 pub use math::{AABB, Ray, RaycastHit};
-pub use shape::{ConvexHull, Heightfield, Shape};
+pub use shape::{ConvexHull, Heightfield, Shape, TriMesh};
 pub use trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, TriggerEvent,
     TriggerEventKind,

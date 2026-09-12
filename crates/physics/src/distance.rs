@@ -432,6 +432,108 @@ fn refine_witnesses(
     }
 }
 
+/// Triangle mesh vs a convex shape: the minimum over the BVH-overlapped
+/// triangles, each resolved through the exact GJK/EPA path (per-triangle
+/// witnesses included — the shared refine pass runs inside each triangle
+/// query against its own centroid placement). Deterministic leaf order;
+/// the full overlapped set is visited (no sampling — a skipped triangle
+/// could ghost a contact). `mesh_first` selects which side owns
+/// `point_a`. The `convex` side must not be a mesh or heightfield (the
+/// dispatcher guarantees it).
+fn trimesh_convex(
+    mesh_pos: Vec3,
+    mesh_rot: Quat,
+    mesh: &crate::shape::TriMesh,
+    convex: ShapeRef,
+    mesh_first: bool,
+) -> Distance {
+    let no_contact = || Distance {
+        dist: f32::INFINITY,
+        point_a: if mesh_first { mesh_pos } else { convex.pos },
+        point_b: if mesh_first { convex.pos } else { mesh_pos },
+    };
+    if mesh.tris.is_empty() {
+        return no_contact();
+    }
+    // Convex AABB into mesh-local space for the BVH window.
+    let inv = mesh_rot.conjugate();
+    let aabb = convex.shape.aabb(convex.pos, convex.rot);
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for i in 0..8 {
+        let corner = Vec3::new(
+            if i & 4 == 0 { aabb.min.x } else { aabb.max.x },
+            if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
+            if i & 1 == 0 { aabb.min.z } else { aabb.max.z },
+        );
+        let local = inv * (corner - mesh_pos);
+        lo = lo.min(local);
+        hi = hi.max(local);
+    }
+    let mut best: Option<Distance> = None;
+    // Explicit stack (depth 64 covers any buildable mesh); popped
+    // last-in-first-out in index order for determinism.
+    let mut stack = [0u32; 64];
+    let mut len = 1usize;
+    while len > 0 {
+        len -= 1;
+        let ni = stack[len] as usize;
+        if ni >= mesh.nodes.len() {
+            continue;
+        }
+        let node = &mesh.nodes[ni];
+        let disjoint = node.max.x < lo.x
+            || node.min.x > hi.x
+            || node.max.y < lo.y
+            || node.min.y > hi.y
+            || node.max.z < lo.z
+            || node.min.z > hi.z;
+        if disjoint {
+            continue;
+        }
+        if node.left == u32::MAX {
+            let end = (node.start + node.count) as usize;
+            for o in node.start as usize..end.min(mesh.order.len()) {
+                let t = mesh.order[o] as usize;
+                if t >= mesh.tris.len() || t >= mesh.centroids.len() {
+                    continue;
+                }
+                let d = shape_distance(
+                    ShapeRef {
+                        shape: &mesh.tris[t],
+                        pos: mesh_pos + mesh_rot * mesh.centroids[t],
+                        rot: mesh_rot,
+                    },
+                    convex,
+                );
+                let better = best.is_none_or(|b: Distance| d.dist < b.dist);
+                if better {
+                    best = Some(d);
+                }
+            }
+        } else {
+            if len + 2 > 64 {
+                break; // Depth guard: keep the best so far (deterministic).
+            }
+            stack[len] = node.left;
+            stack[len + 1] = node.right;
+            len += 2;
+        }
+    }
+    match best {
+        None => no_contact(),
+        // Triangle winners already carry repaired witnesses (the per-tri
+        // query routes through `shape_distance`, including its GJK refine
+        // arm); only the side order flips here.
+        Some(d) if mesh_first => Distance {
+            dist: d.dist,
+            point_a: d.point_b,
+            point_b: d.point_a,
+        },
+        Some(d) => d,
+    }
+}
+
 /// Exact surface-to-surface distance between two placed shapes. Negative
 /// distance means penetration (witnesses then are best-effort).
 pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
@@ -452,6 +554,20 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
     }
     if let Shape::Heightfield(hf) = b.shape {
         return heightfield_convex(b.pos, b.rot, hf, a, false);
+    }
+    // Mesh-vs-mesh is undefined (concave-concave): report separation.
+    if let (Shape::TriMesh(_), Shape::TriMesh(_)) = (a.shape, b.shape) {
+        return Distance {
+            dist: f32::INFINITY,
+            point_a: a.pos,
+            point_b: b.pos,
+        };
+    }
+    if let Shape::TriMesh(mesh) = a.shape {
+        return trimesh_convex(a.pos, a.rot, mesh, b, true);
+    }
+    if let Shape::TriMesh(mesh) = b.shape {
+        return trimesh_convex(b.pos, b.rot, mesh, a, false);
     }
     match (a.shape, b.shape) {
         (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => {

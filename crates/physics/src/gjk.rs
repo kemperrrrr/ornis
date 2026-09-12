@@ -119,6 +119,13 @@ fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
             debug_assert!(false, "heightfield has no support function");
             pos
         }
+        Shape::TriMesh(_) => {
+            // Unreachable by construction: mesh pairs dispatch to the
+            // per-triangle loop (`distance::trimesh_convex`) before GJK —
+            // triangles enter as prebuilt hull primitives, never the mesh.
+            debug_assert!(false, "mesh has no support function");
+            pos
+        }
     }
 }
 
