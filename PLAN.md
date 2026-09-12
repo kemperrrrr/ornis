@@ -552,10 +552,35 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   `step()` (сборка 6×6 → LDL → dual-update) на наши тела, прогнать стеки
   против SI: итерации до покоя, стабильность, время. Гейт: отчёт спайка;
   дальше — только если выигрыш (стабильность или итерации/сабстепы).
+  ✅ **2026-09-11 — VALIDATED** (`spikes/001-avbd-stack`, код
+  `crates/physics/examples/avbd_spike.rs`, throwaway): стек 4 боксов стоит
+  300 шагов в SI-гейтах (высоты ±6мм против ±25мм у SI, дрейф 0,
+  покой на 11-м шаге); формулировка сверена с официальными
+  `solver.cpp`/`manifold.cpp`/`maths.h`. Уроки: dual-правила только портом
+  (live-gap + рампинг ×2 дают coupling-неустойчивость); нижний якорь —
+  материальный с момента детекции (rB), иначе накачка энергии; порядок
+  sweep не влияет. M1 разблокирован.
 - **M1 — Engine-level (дешево):** `AvbdEngine: PhysicsEngine` — второй impl
   трейта; обобщения трейта по мере упора непохожей реализации; проверка шва
   «правилом трёх» (прецедент Rhai/Rune/Python). Гейт: quality-гейт целиком +
   Strong-Confluence (1-vs-32) для AVBD CPU-пути + снапшот AVBD-сцен.
+  ✅ **2026-09-12 — DONE** (`crates/physics/src/avbd.rs`, тесты
+  `crates/physics/tests/avbd_engine.rs` 10/10, clippy `-D warnings` чист,
+  physics-сьют 217+10+14 зелёный): обобщений трейта НЕ потребовалось — шов
+  держит непохожую реализацию as-is. Стек 4 боксов, маятник Ball, hinge
+  Revolute, триггеры enter/exit, contact begin/end/hit, raycast-паритет с
+  builtin, run-to-run детерминизм. По дороге дословно портированы: exact
+  quat-операторы (`normalize(q+quat(w)*q/2)`, `2*(q*q0^-1).xyz` —
+  линеаризации дестабилизируют рычаги), geometric stiffness джойнтов (без
+  него spin-up через длинные рычаги), stick-gated anchor refresh, персистентные
+  нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
+  rolling multi-point contact), Prismatic/Fixed/Distance/Wheel/limits/motors/
+  fracture, CCD/substeps/sleep/islands, анизотропный/rolling friction,
+  deep-catch пенетрация ~3см на ударах 5+ м/с. Strong-Confluence 1-vs-32 для
+  AVBD: N/A в M1 (путь single-thread, rayon нет — детерминирован
+  конструктивно + run-to-run тест; харнесс `confluence_tests.rs` — про
+  ECS-параллелизм; вернёмся в M2 с параллельным broadphase/sweep).
+  Снапшот AVBD-сцен — открыт (M2, вместе с `SolverKind`-тогглом).
 - **M2 — Intra-engine (средне):** интерфейс constraint-солвера внутри builtin
   (SI vs AVBD-primal/dual), опция `SolverKind` по образцу `BroadPhaseKind` с
   A/B-тогглом; legacy-путь под снапшотом. GPU-предусловия AVBD (см.

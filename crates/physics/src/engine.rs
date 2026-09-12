@@ -3120,6 +3120,39 @@ impl BuiltinPhysicsEngine {
     }
 }
 
+/// Shared exact ray/shape query for engine implementations: hit distance
+/// plus the surface normal in shape-local coordinates, or `None`.
+/// [`BuiltinPhysicsEngine`] and [`crate::avbd::AvbdEngine`] both route
+/// through this routine so raycasts agree by construction.
+pub(crate) fn raycast_shape_hit(
+    shape: &Shape,
+    origin: Vec3,
+    direction: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    match shape {
+        Shape::Sphere { radius } => {
+            ray_sphere_hit(origin, direction, Vec3::ZERO, *radius, max_dist)
+        }
+        Shape::Box { half_extents } => ray_obb_hit(origin, direction, *half_extents, max_dist),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => ray_capsule_hit(origin, direction, *radius, *half_height, max_dist),
+        Shape::Cylinder {
+            radius,
+            half_height,
+        } => ray_cylinder_hit(origin, direction, *radius, *half_height, max_dist),
+        Shape::Cone {
+            radius,
+            half_height,
+        } => ray_cone_hit(origin, direction, *radius, *half_height, max_dist),
+        Shape::ConvexHull(hull) => ray_hull_hit(origin, direction, hull, max_dist),
+        Shape::Heightfield(hf) => ray_heightfield_hit(origin, direction, hf, max_dist),
+        Shape::TriMesh(mesh) => ray_trimesh_hit(origin, direction, mesh, max_dist),
+    }
+}
+
 /// Candidate returned by the linear or angular continuous collision query.
 struct ContinuousHit {
     fraction: f32,

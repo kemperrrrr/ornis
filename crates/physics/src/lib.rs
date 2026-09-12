@@ -18,6 +18,9 @@
 mod broadphase;
 mod broadphase_tree;
 
+/// AVBD rigid-body engine: second [`engine::PhysicsEngine`] implementation
+/// (M1, Genesis-style engine-level modularity).
+pub mod avbd;
 /// Rigid bodies: [`RigidBody`], mass model and body handles/types.
 pub mod body;
 pub(crate) mod distance;
@@ -35,6 +38,7 @@ pub mod shape;
 pub mod trigger;
 pub(crate) mod wide;
 
+pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, RigidBody};
 pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
