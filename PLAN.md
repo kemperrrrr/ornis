@@ -536,6 +536,38 @@ pre-filter до SAT через `scratch_pairs`; no-alloc scratch
 **big_stack 925 FPS**, шум **±1.5 мс**. Бюджет **60 FPS (16.7 мс) достигнут**.
 Далее: **п1 incremental broadphase ✅ готов** (2026-09-01: `body_cells`/`prev_meta`, dirty-set, retained clean-clean, heuristic >50% → full rebuild, honest stats; 4.8→~1 мс ожидание), **п2 narrow cache ✅** (2026-09-01: `NarrowCacheEntry` + `detect_collisions_into_with_cache`, первый substep, ±1e-4, fast-path >0.5 м/с bypass) + **SAT cache ✅ 2026-09-03 (16-шард `Vec<Mutex>` try_lock-only, sequential+parallel, 8→2 без регресса 9→89 мс, `obb_sat_cached`/`box_manifold_cached` + par_iter)** к цели **~10 мс / 100 FPS**; **GPU solver 2.9 мс — не бутылка, отложен**. **box↔capsule ✅ 2026-09-01** (оба narrowphase-пути через `box_vs_capsule` + `distance::shape_distance`, analytic TOI `cast_shape` conservative advancement).
 
+**Модульные солверы, Genesis-стиль (2026-09-11, план):** три уровня, каждый —
+самостоятельный выигрыш. Референс: Genesis multi-solver (`Simulator` +
+`Solver`-подклассы + coupler'ы обмена контактами/силами); наш шов —
+`PhysicsEngine`-трейт (та же D1-философия, что `ScriptEngine`/`RenderBackend`).
+Кандидат на второй солвер — официальный AVBD (`savant117/avbd-demo3d`, MIT,
+Giles SIGGRAPH'25): rigid 6-DOF, per-body 3×3+3×3+cross LDL, primal/dual-цикл,
+10 итераций на dt=1/60, warmstart penalty+lambda. Зафиксированные рамки из
+обсуждения: детерминизм — только единая математика (shared deterministic
+CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); оркестратор —
+мультипликатор, не источник скорости (выигрыш меряем на связках
+«солвер+сцена», coupling уже экономии).
+
+- **M0 — CPU-спайк AVBD (предусловие, без DSL-работ):** портировать ядро
+  `step()` (сборка 6×6 → LDL → dual-update) на наши тела, прогнать стеки
+  против SI: итерации до покоя, стабильность, время. Гейт: отчёт спайка;
+  дальше — только если выигрыш (стабильность или итерации/сабстепы).
+- **M1 — Engine-level (дешево):** `AvbdEngine: PhysicsEngine` — второй impl
+  трейта; обобщения трейта по мере упора непохожей реализации; проверка шва
+  «правилом трёх» (прецедент Rhai/Rune/Python). Гейт: quality-гейт целиком +
+  Strong-Confluence (1-vs-32) для AVBD CPU-пути + снапшот AVBD-сцен.
+- **M2 — Intra-engine (средне):** интерфейс constraint-солвера внутри builtin
+  (SI vs AVBD-primal/dual), опция `SolverKind` по образцу `BroadPhaseKind` с
+  A/B-тогглом; legacy-путь под снапшотом. GPU-предусловия AVBD (см.
+  `gpu.rs:46-48`): `float3x3` в `ShaderType`, локальные фикс-массивы,
+  helper-inclusion в `#[gpu_pipeline]` (аналог `#[wgsl_fn]`).
+- **M3 — Multi-solver в одной сцене (дорого):** аналог `Simulator` — общий
+  реестр тел + coupling между движками; роутинг по образцу
+  `BroadPhaseKind::Auto` (analytic + гистерезис, без трешинга миграций).
+  Hard parts: владение телами движками (хендлы, удаление рвёт джойнты),
+  общая детекция коллизий между движками, налог coupling в метрике.
+  Детерминизм — канонический порядок склейки, как в scheduler narrowphase.
+
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
 

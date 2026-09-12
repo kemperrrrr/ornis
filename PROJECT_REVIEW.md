@@ -1,27 +1,116 @@
 # Ornis: текущие ограничения и план развития
 
-> **Актуальный срез: 2026-08-28.** Этот документ объединяет
+> **Актуальный срез: 2026-09-12.** Этот документ объединяет
 > аудит и план работ. Формулировки в разделах с датами —
 > исторические снимки; текущие статусы сверены ниже с кодом и
-> последующими коммитами.
+> последующими коммитами. Разделы без пометки «✅ закрыт / неактуально»
+> и без статуса 2026-09-xx — исторические, их перекрывает
+> «Актуализация 2026-09-12» ниже.
 
-## Главные ограничения сейчас
+## Актуализация 2026-09-12: что закрыто, что осталось
 
-- GPU-диспетчеризация в `core` пока фактически является заглушкой: `Dispatcher` умеет выбрать GPU, но `GpuExecutor::execute` не выполняет GPU-операцию.
-- `PhysicsEngine::shapecast` уже реализован и покрыт тестами, но физический API все еще ограничен небольшим набором форм и возможностей.
-- В `ornis-core` уже есть логический `World`-фундамент (`Resources` с
-  авторитетным `SmartStore` и запуском `Schedule`) и backend-neutral
-  `Engine` с ресурсами `Time`/`FixedTime`/`InputState`; editor-only physics и
-  native/WASM render extraction + `RenderFrame3D` уже подключены. Editor protocol
-  теперь имеет queue ACK и correlated completion events, native showcase
-  physics также подключена к общему bounded fixed host; полный cross-domain
-  runtime с gameplay consumers и browser physics во всех режимах ещё не
-  собран.
-- Scheduler вынесен в отдельный crate и хорошо протестирован, но еще
-  не стал единым runtime-планировщиком всего движка.
-- Редактор и ECS пока не образуют полностью единую live-систему: синхронизация идет через polling, а часть сценариев остается демонстрационной.
-- Проект одновременно развивает ECS, GPU compute, WASM editor, MaterialX, audio, physics и собственные макросы. Такой широкий scope увеличивает стоимость сопровождения и риск распыления усилий.
-- Native-приложение пока скорее showcase/runtime shell, чем полноценная игровая платформа.
+Срез 2026-08-28 устарел почти по всем пунктам — за две недели
+~60 коммитов (физика, шейдерный DSL, рендер, скриптинг, редактор).
+Что именно изменилось, по коду:
+
+- **Формы физики — было ограничением, больше нет.** `Shape` теперь:
+  sphere/box/capsule/cylinder/cone/convex-hull/**TriMesh**
+  (`crates/physics/src/shape.rs`); triangle-mesh с BVH-backed GJK
+  narrow phase — `2c9eae3` (2026-09-12). Формулировка «ограничен
+  небольшим набором форм» в §8 п.2 и §«Основные проблемы» п.1
+  **неактуальна**.
+- **Broadphase-масштабирование — ядро закрыто.** `BroadPhaseKind::Auto`
+  (analytic SAP↔Grid↔Tree routing с гистерезисом, `3499aca`;
+  adaptive cell size `a04892f`; tree pair buffering `2e222b6`;
+  AVL-ротации `b587d81`; swept-покрытие tree `10d0196`), incremental
+  broadphase, narrow/SAT-кэши, per-substep pair bucketing через stable
+  counting sort (`73d5617`), full step attribution + trigger-detect gate
+  со 100k-вердиктом (`35b3cf0`), world-scale sleep (statics born asleep,
+  `02edf24`). Остаток по масштабу: **100k tiled всё ещё вне real-time**
+  (~8 с/шаг на Grid по `perf-baseline-2026-09-02.md`) — следующий шаг
+  зафиксирован как **модульные солверы Genesis-стиль, план M0–M3 в
+  `PLAN.md`** (M0 — CPU-спайк AVBD как предусловие; GPU-предусловия AVBD
+  см. `crates/physics/src/gpu.rs:46-48`).
+- **CCD/контакты/трение/джойнты — закрыто.** Kinematic CCD (`c0aa7c5`,
+  deferred proof `e55857b`), unified CCD impact со spin-aware restitution
+  (`520feb0`), angular CCD travel gate (`0f2c8a6`), gyroscopic torque
+  (`3fa29d1`), anisotropic + rolling/torsional friction (`5ef33b0`),
+  solid-contact events Box3D-паритет (`74ed27c`), prismatic joint
+  (`3f990a7`) + revolute с limits/motors (`crates/physics/src/joint.rs`),
+  Box3D-level determinism discipline (`296711a`), deterministic worst-case
+  step budget (`3420f3d`).
+- **Unified scheduler — сдвиг от «не используется» к «частично единый».**
+  Narrowphase dispatch через `run_levels` (`080cb47`), island solver
+  dispatch через `run_levels` (`c4dec71`) — физика уже планирует часть
+  пайплайна общим `ornis-schedule`. Формулировка «Scheduler не стал единым
+  планировщиком» **частично неактуальна**: осталось перевести остаток
+  step-пайплайна и render/gameplay-домены на тот же DAG.
+- **Rust→WGSL — трек закрыт полностью.** Ноль рукописного WGSL в
+  `crates/render/src/shaders/` (только `*_generated.rs` + `helpers.rs`/
+  `math.rs`), общий реестр `ornis-shader-lang` (`cdb4f5c`), `#[stage]`/
+  `#[gpu_pipeline]`/`#[wgsl_fn]`, typed pass resources driving WGSL+BGL
+  (`29ee83e`), `ShaderModule` владеет порядком сборки (`142ddff`).
+  §8 п.8 и все «остатки» в нём **неактуальны**.
+- **Render extraction без копий — закрыт (S5e X1–X4, 2026-09-07).**
+  `RenderSubmit` читает лейны напрямую (X1 `403de05`), encoder context как
+  frame resource (E2 `6416dc4`), GPU mesh как свой ресурс (X2 `9fc7052`),
+  lights как world resource (X3 `42f174e`), drop `Mutex<RenderExtracted>`
+  snapshot (X4 `3b4a8c5`). Формулировка «промежуточные REST snapshots»
+  для native-пути **неактуальна** (осталась только server↔browser
+  serialization boundary — это намеренно, IDEAS §28).
+- **Gameplay consumers — каркас есть.** `crates/core/src/gameplay.rs`:
+  `player_input` → `physics_push` → `transform_update` через
+  `GameplayPlugin` в едином `Engine` schedule. Формулировка «gameplay
+  consumers ещё не собраны» **частично неактуальна**: референсные системы
+  есть, полноценного cross-domain runtime с контентом нет.
+- **Scripting фаза 6 — начата, вопреки статусу «не начата».**
+  `ScriptEngine`-шов + три адаптера (правило трёх): `crates/rhai`,
+  `crates/rune`, `crates/python` (rustpython-vm vendored, см. корень
+  `Cargo.toml`). Пометка «маркировать нечего» в §«Приоритет 4»
+  **неактуальна** — шов есть и нуждается в тех же Experimental-маркерах.
+- **GPU-диспетчеризация в core — по-прежнему stub, но это слой, а не баг.**
+  `GpuExecutor::execute` возвращает `None` (`crates/core/src/dispatcher.rs:145-163`,
+  честно помечен STUB); рабочий путь — `AutoLane` + typed `GpuLanes` в
+  `ornis-wgpu-backend` (`4440843`, `3c06af6`) и GPU bulk dispatch v2 физики
+  (`f5fa4c4`). Ограничение **актуально частично**: API-граница
+  задокументирована верно, доделывать надо не stub, а покрытие AutoLane.
+- **Редактор — WebSocket есть, polling остался fallback'ом.**
+  `serve_websocket` в `crates/editor-backend/src/remote.rs`, reconnect +
+  polling fallback в `editor/editor.js:674`. Плюс icon set (`44d4d2e`,
+  `db71ab9`). Формулировка «синхронизация идёт через polling»
+  **неактуальна как основная** — polling теперь только fallback.
+- **Quality gate: BCA → rustqual — переход завершён.** `xtask` использует
+  rustqual + `baseline.json`/`rustqual.toml`; `bca.toml` в корне отсутствует.
+  §«Quality gate: BCA → rustqual» **неактуален как план** — это факт.
+
+## Главные ограничения сейчас (переписано 2026-09-12)
+
+- ~~GPU-диспетчеризация в `core` — заглушка~~ — **переквалифицировано:**
+  core-stub остаётся намеренно (слой правильный), рабочий GPU-путь —
+  `AutoLane`/`GpuLanes` + physics bulk dispatch v2. Открыто: покрытие
+  AutoLane вне доказанных kernel'ов.
+- ~~Физический API ограничен набором форм~~ — **неактуально:**
+  8 форм включая TriMesh/BVH-GJK, CCD всех видов, джойнты с
+  limits/motors, анизотропное трение, contact events. Открыто: 100k
+  real-time (план M0–M3, AVBD-спайк первый).
+- ~~Нет gameplay consumers~~ — **частично неактуально:** референсная
+  тройка `player_input`/`physics_push`/`transform_update` зарегистрирована
+  в `Engine`; нет полноценного cross-domain runtime с контентом.
+- ~~Render идёт через промежуточные snapshots~~ — **неактуально для
+  native** (S5e extract-free); осталась намеренная server↔browser
+  boundary. Открыто: browser physics за boundary (намеренно), полный
+  gameplay-кадр во всех режимах.
+- Scheduler частично един (physics narrowphase/islands на `run_levels`),
+  но ещё не главный планировщик всего движка — **актуально, сужено**.
+- Редактор live (WebSocket + replay + `EventGap`), polling — только
+  fallback — **бывшее ограничение снято**; native остаётся showcase
+  shell — **актуально**.
+- Scope по-прежнему широк (12 крейтов + rhai/rune/python/shader-lang),
+  но теперь связан правилом трёх и общим швом `ScriptEngine` —
+  **актуально с оговоркой**.
+- Новый долг: **синхронизация доков с кодом** — этот файл, README,
+  `PLAN.md` (AVBD M0–M3 только в PLAN), `docs/quality/` отстают от кода;
+  scripting-шов без Experimental-маркеров.
 
 ## План дальнейшей работы
 
@@ -120,7 +209,12 @@
    > подтверждено кодом (убран удалённый `shader.rs`, `shapecast` реализован —
    > G6, A3.3/A3.4 закрыты). Заодно обновлён комментарий в шапке `editor/editor.js`.
 
-8. **Единый источник шейдеров: перевести render на Rust→WGSL (путь 2)**
+8. ~~**Единый источник шейдеров: перевести render на Rust→WGSL (путь 2)**~~ — ✅ **закрыт полностью 2026-09-08/09, неактуально как план (исторический текст ниже)**
+
+   > Статус 2026-09-12: ноль рукописного WGSL в `crates/render/src/shaders/`,
+   > общий реестр `ornis-shader-lang`, `#[stage]`/`#[gpu_pipeline]`/`#[wgsl_fn]`,
+   > typed pass resources, `ShaderModule` владеет сборкой. Абзац ниже —
+   > исторический снимок 2026-08-28.
 
    После удаления мёртвого `shader.rs` канонический источник render-шейдеров
    — builder'ы в `crates/render/src/shaders/`. Физика уже генерирует шейдеры
@@ -259,13 +353,25 @@
      мёртвый `shader.rs` удалён, но полный Rust→WGSL перевод render ещё не
      выполнен.
 
-## Ближайший приоритет
+## Ближайший приоритет (переписан 2026-09-12)
 
-Editor-only vertical slice уже работает поверх `ornis_core::World` и общего
-frame contract. Native/WASM render и native/editor-only physics seams также
-подключены; общий bounded fixed host теперь вынесен в `ornis_core::Engine`.
-Следующий приоритет — gameplay consumers и масштабирование broadphase, не
-создавая второй authoritative-модели состояния.
+Старый приоритет («gameplay consumers и масштабирование broadphase»)
+частично закрыт: broadphase-ядро готово (Auto + adaptive + incremental +
+bucketing + sleep), референсные gameplay-системы зарегистрированы в `Engine`.
+Новый приоритет, по коду и `PLAN.md`:
+
+1. **M0 — CPU-спайк AVBD** (предусловие всего solver-трека): портировать ядро
+   на наши тела, стеки против SI — итерации/стабильность/время. Гейт: отчёт
+   спайка; дальше — только при выигрыше. Затем M1 (AvbdEngine как второй impl
+   `PhysicsEngine`) → M2 (`SolverKind` по образцу `BroadPhaseKind`) → M3
+   (multi-solver, дорого).
+2. **Достроить единый scheduler**: остаток physics step + render/gameplay на
+   общий DAG (`run_levels` уже покрывает narrowphase/islands).
+3. **Полноценный cross-domain runtime с контентом** поверх готовых
+   `GameplayPlugin` + extract-free рендера; browser physics остаётся за
+   boundary намеренно.
+4. **Experimental-маркеры для scripting-шва** (`ScriptEngine` + rhai/rune/python)
+   и синхронизация README/`docs/quality/` с кодом.
 
 
 ---
@@ -275,7 +381,13 @@ frame contract. Native/WASM render и native/editor-only physics seams такж�
 
 ## Основные проблемы
 
-### 1. Критическая проблема производительности физики
+### 1. ~~Критическая проблема производительности физики~~ — ✅ ядро закрыто 2026-09-09, остаток: solver-масштаб 100k (M0–M3)
+
+> Статус 2026-09-12: вводный диагноз ниже — исторический снимок 2026-08-28.
+> Broadphase-ядро закрыто (`BroadPhaseKind::Auto` + adaptive cell + tree
+> buffering/rotations + bucketing + sleep + 100k-вердикт `35b3cf0`); tiled 10k
+> укладывается в бюджет кадра, 100k tiled — нет (~8 с/шаг). Следующий шаг —
+> модульные солверы (AVBD-спайк M0, см. `PLAN.md`).
 
 Это самая серьёзная техническая находка.
 
@@ -475,7 +587,11 @@ broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 
 Это не обязательно плохое архитектурное решение, но документация и API должны явно маркировать эту границу.
 
-### 3. Редактор ещё не является полностью live-системой
+### 3. ~~Редактор ещё не является полностью live-системой~~ — ✅ в основном закрыт; остаток: native showcase (ниже — исторический снимок)
+
+> Статус 2026-09-12: WebSocket server-push + reconnect + bounded replay +
+> `EventGap` работают, polling — только fallback (`editor/editor.js:674`);
+> добавлен icon set. Открыто: native runtime остаётся showcase shell.
 
 Положительные части есть:
 
@@ -782,6 +898,11 @@ browser reconnect test и полноценное чтение client close frame
 > Спекулятивных scripting-интерфейсов в коде нет (фаза 6 не начата) —
 > маркировать нечего. README-строки диспетчера и SmartBuffer уже несут
 > эти оговорки.
+>
+> ⚠️ Неактуально с 2026-09-05/06 (статус 2026-09-12): фаза 6 начата —
+> `ScriptEngine`-шов + адаптеры `crates/rhai` + `crates/rune` +
+> `crates/python` (правило трёх, JSON-кодек, hot reload). Шов нуждается
+> в тех же Experimental-маркерах; это п.4 нового «Ближайшего приоритета».
 >
 > ✅ 2026-09-08: автоматический слой появился — `AutoLane`
 > (`ornis-wgpu-backend`, политика + residency + CPU-фолбэк, доказан
