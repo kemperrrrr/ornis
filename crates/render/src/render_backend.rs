@@ -6,6 +6,7 @@
 //! factory [`create_render_backend`] returns the production implementation.
 use crate::mesh::Mesh;
 use crate::renderer::InstanceData;
+use crate::scene::LightDesc;
 use ornis_core::material::OpenPBRMaterial;
 
 use wgpu;
@@ -67,20 +68,27 @@ pub trait RenderBackend {
     /// eye position used by lighting.
     fn set_camera(&mut self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]);
 
-    /// Upload ambient RGB and directional lights as
-    /// `(direction, intensity, color)` triples.
-    fn set_lights(
-        &mut self,
-        queue: &wgpu::Queue,
-        ambient: [f32; 3],
-        lights: &[([f32; 3], f32, [f32; 3])],
-    );
+    /// Upload ambient RGB and scene lights ([`LightDesc`]); the renderer
+    /// uploads the first four of any kind.
+    fn set_lights(&mut self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]);
 
     /// Replace the material table; instance data references entries by index.
-    fn upload_materials(&mut self, queue: &wgpu::Queue, materials: &[OpenPBRMaterial]);
+    /// `device` is needed because oversized frames regrow the buffer.
+    fn upload_materials(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        materials: &[OpenPBRMaterial],
+    );
 
     /// Replace per-object instance transforms + material indices for the next draw.
-    fn upload_instances(&mut self, queue: &wgpu::Queue, instances: &[InstanceData]);
+    /// `device` is needed because oversized frames regrow the buffer.
+    fn upload_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        instances: &[InstanceData],
+    );
 
     /// Record the full deferred frame (gbuffer -> lighting -> composite) into
     /// `context`, drawing the first `instance_count` uploaded instances with `mesh`.
@@ -120,21 +128,26 @@ pub mod renderer3d_backend {
             Renderer3D::set_camera(self, queue, view_proj, camera_pos);
         }
 
-        fn set_lights(
-            &mut self,
-            queue: &wgpu::Queue,
-            ambient: [f32; 3],
-            lights: &[([f32; 3], f32, [f32; 3])],
-        ) {
+        fn set_lights(&mut self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]) {
             Renderer3D::set_lights(self, queue, ambient, lights);
         }
 
-        fn upload_materials(&mut self, queue: &wgpu::Queue, materials: &[OpenPBRMaterial]) {
-            Renderer3D::upload_materials(self, queue, materials);
+        fn upload_materials(
+            &mut self,
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            materials: &[OpenPBRMaterial],
+        ) {
+            Renderer3D::upload_materials(self, device, queue, materials);
         }
 
-        fn upload_instances(&mut self, queue: &wgpu::Queue, instances: &[InstanceData]) {
-            Renderer3D::upload_instances(self, queue, instances);
+        fn upload_instances(
+            &mut self,
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            instances: &[InstanceData],
+        ) {
+            Renderer3D::upload_instances(self, device, queue, instances);
         }
 
         fn render_scene(&self, context: RenderContext<'_>, mesh: &Mesh, instance_count: u32) {
@@ -177,6 +190,66 @@ mod tests {
         assert_eq!(config.sample_count, 1);
         assert_eq!(config.max_objects, 256);
         assert_eq!(config.max_materials, 64);
+    }
+
+    /// Uploads past the initial 256-instance / 64-material capacities grow
+    /// the storage buffers (doubling) instead of truncating the frame:
+    /// after uploading 300 instances + 70 materials the draw still sees
+    /// entry 299 / material 69.
+    #[test]
+    fn oversized_frame_grows_buffers_without_truncation() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let config = RenderBackendConfig::default();
+        let mut backend = create_render_backend(&device, &config);
+        let materials: Vec<OpenPBRMaterial> = (0..70).map(|_| OpenPBRMaterial::default()).collect();
+        backend.upload_materials(&device, &queue, &materials);
+        let instances: Vec<InstanceData> = (0..300)
+            .map(|i| InstanceData {
+                model_matrix: glam::Mat4::from_translation(glam::Vec3::new(i as f32, 0.0, 0.0)),
+                normal_matrix: glam::Mat4::IDENTITY,
+                material_index: (i % 70) as u32,
+            })
+            .collect();
+        backend.upload_instances(&device, &queue, &instances);
+
+        // The 300th instance / 70th material survive the round trip:
+        // draw them alone into a target and require non-background pixels.
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("growth probe target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mesh = crate::mesh::create_sphere(&device, 1.0, 8, 4);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("growth probe"),
+        });
+        // Re-upload just the tail entries at index 0 to prove they landed.
+        backend.upload_materials(&device, &queue, &materials[69..70]);
+        backend.upload_instances(&device, &queue, &instances[299..300]);
+        backend.render_scene(
+            RenderContext {
+                device: &device,
+                queue: &queue,
+                encoder: &mut encoder,
+                target: &view,
+            },
+            &mesh,
+            1,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// None when no adapter is available (CI without GPU and without
@@ -235,10 +308,16 @@ mod tests {
         backend.set_lights(
             &queue,
             [0.1, 0.1, 0.1],
-            &[([0.0, 1.0, 1.0], 1.0, [1.0, 1.0, 1.0])],
+            &[LightDesc::Directional {
+                direction: [0.0, 1.0, 1.0],
+                intensity: 1.0,
+                color: [1.0, 1.0, 1.0],
+                shadow: false,
+            }],
         );
-        backend.upload_materials(&queue, &[OpenPBRMaterial::default()]);
+        backend.upload_materials(&device, &queue, &[OpenPBRMaterial::default()]);
         backend.upload_instances(
+            &device,
             &queue,
             &[InstanceData {
                 model_matrix: glam::Mat4::IDENTITY,
@@ -411,20 +490,9 @@ mod tests {
                 material_index: i as u32,
             });
         }
-        backend.upload_materials(&queue, &materials);
-        backend.upload_instances(&queue, &instances);
-        let lights: Vec<([f32; 3], f32, [f32; 3])> = scene
-            .lights
-            .iter()
-            .map(|l| match l {
-                crate::scene::LightDesc::Directional {
-                    direction,
-                    intensity,
-                    color,
-                } => (*direction, *intensity, *color),
-            })
-            .collect();
-        backend.set_lights(&queue, scene.ambient, &lights);
+        backend.upload_materials(&device, &queue, &materials);
+        backend.upload_instances(&device, &queue, &instances);
+        backend.set_lights(&queue, scene.ambient, &scene.lights);
         let (view, proj) = {
             let cam = &scene.camera;
             let aspect = W as f32 / H as f32;

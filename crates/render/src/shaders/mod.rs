@@ -753,7 +753,9 @@ mod tests {
             BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
             GbufferVertexOutput, HdrFragmentOut, UiCompositeOut,
         };
-        use crate::renderer::{BloomUniform, CameraUniform, LightingUniform, PerObjectGpu};
+        use crate::renderer::{
+            BloomUniform, CameraUniform, GpuLight, LightingUniform, PerObjectGpu,
+        };
 
         fn is_swizzle(field: &str) -> bool {
             field.len() <= 4 && field.chars().all(|c| "xyzwrgba".contains(c))
@@ -823,7 +825,10 @@ mod tests {
             },
         ];
         // Shared roots: uniform buffers by layout, materials by slot list.
+        // `light` is a loop-local copy of one `Lighting.lights` element
+        // (kind-selected evaluation in both fragment entries).
         let shared: &[(&str, &[&str])] = &[
+            ("light", GpuLight::FIELD_NAMES),
             ("camera", CameraUniform::FIELD_NAMES),
             ("lighting", LightingUniform::FIELD_NAMES),
             ("bloom_params", BloomUniform::FIELD_NAMES),

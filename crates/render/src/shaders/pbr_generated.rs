@@ -136,11 +136,39 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
     let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
     for i in 0u..ctx.lighting.light_count {
-        let l = normalize(ctx.lighting.lights[i].direction.xyz);
-        let h = normalize(v + l);
-        let light_color = ctx.lighting.lights[i].color.rgb;
-        let intensity = ctx.lighting.lights[i].color.w;
-        let radiance = light_color * intensity;
+        let light = ctx.lighting.lights[i];
+        let kind = light.kind.x;
+        // Point/spot: vector from the surface to the light + range cutoff.
+        // Directionals keep the legacy infinite-light path (pixel-identical).
+        let to_light = light.position.xyz - input.world_position;
+        let dist = length(to_light);
+        let l_point = to_light / max(dist, EPS);
+        let use_point = step(0.5, kind);
+        let l_dir = normalize(mix(normalize(light.direction.xyz), l_point, use_point));
+        // smoothstep(edge0 == edge1) is undefined in WGSL — widen the
+        // cutoff edge by 1%: coshaped but defined on every driver.
+        let edge0 = light.params.x * 0.99;
+        let range_cut = mix(
+            1.0,
+            1.0 - smoothstep(edge0, light.params.x, dist),
+            use_point,
+        );
+        let l = l_dir;
+        let h = normalize(v + l + Vec3::new(0.0, 0.0, EPS));
+        let light_color = light.color.rgb;
+        let intensity = light.color.w;
+        // Spot cone (kind == 2): full inside inner, soft edge to outer.
+        let cos_theta = dot(
+            normalize(light.direction.xyz),
+            normalize(input.world_position - light.position.xyz),
+        );
+        let cone = mix(
+            1.0,
+            smoothstep(light.params.z, light.params.y, cos_theta),
+            step(1.5, kind),
+        );
+        let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
+        let radiance = light_color * intensity * attenuation * range_cut * cone;
         let nol = max(dot(n, l), EPS);
         let noh = max(dot(n, h), EPS);
         let voh = max(dot(v, h), EPS);

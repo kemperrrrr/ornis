@@ -57,7 +57,7 @@ impl Default for FrameUpload {
 pub struct RenderLights {
     /// Ambient RGB contribution.
     pub ambient: [f32; 3],
-    /// Directional sources; the renderer uploads the first four.
+    /// Scene lights of any kind; the renderer uploads the first four.
     pub lights: Vec<LightDesc>,
 }
 
@@ -69,11 +69,13 @@ const LEGACY_KEY_LIGHT: LightDesc = LightDesc::Directional {
     direction: [1.0, 1.0, 1.0],
     intensity: 0.6,
     color: [1.0, 1.0, 1.0],
+    shadow: false,
 };
 const LEGACY_FILL_LIGHT: LightDesc = LightDesc::Directional {
     direction: [-0.5, 0.5, -0.5],
     intensity: 0.3,
     color: [0.8, 0.8, 1.0],
+    shadow: false,
 };
 
 impl Default for RenderLights {
@@ -95,18 +97,10 @@ impl RenderLights {
     }
 
     /// Converts the lights into `Renderer3D::set_lights` arguments —
-    /// `(direction, intensity, color)` per directional source.
-    pub fn set_lights_args(&self) -> Vec<([f32; 3], f32, [f32; 3])> {
-        self.lights
-            .iter()
-            .map(|light| match light {
-                LightDesc::Directional {
-                    direction,
-                    intensity,
-                    color,
-                } => (*direction, *intensity, *color),
-            })
-            .collect()
+    /// the scene's [`LightDesc`] list as-is (up to four entries; the
+    /// renderer truncates any excess, same as before).
+    pub fn set_lights_args(&self) -> Vec<LightDesc> {
+        self.lights.clone()
     }
 }
 
@@ -628,13 +622,23 @@ mod tests {
         // (gate: zero pixel differences).
         let rig = RenderLights::default();
         assert_eq!(rig.ambient, [0.10, 0.10, 0.15]);
-        assert_eq!(
-            rig.set_lights_args(),
-            vec![
-                ([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]),
-                ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
-            ]
-        );
+        assert!(matches!(
+            rig.set_lights_args().as_slice(),
+            [
+                LightDesc::Directional {
+                    direction: [1.0, 1.0, 1.0],
+                    intensity: key,
+                    color: [1.0, 1.0, 1.0],
+                    shadow: false,
+                },
+                LightDesc::Directional {
+                    direction: [-0.5, 0.5, -0.5],
+                    intensity: fill,
+                    color: [0.8, 0.8, 1.0],
+                    shadow: false,
+                },
+            ] if *key == 0.6 && *fill == 0.3
+        ));
     }
 
     #[test]
@@ -646,6 +650,7 @@ mod tests {
                 direction: [0.0, -1.0, 0.0],
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
+                shadow: false,
             }],
             ambient: [0.2, 0.2, 0.2],
             ..scene()
@@ -658,9 +663,14 @@ mod tests {
             .expect("scene loader publishes RenderLights");
         assert_eq!(lights.ambient, [0.2, 0.2, 0.2]);
         assert_eq!(lights.lights.len(), 1);
-        assert_eq!(
-            lights.set_lights_args(),
-            vec![([0.0, -1.0, 0.0], 2.0, [1.0, 0.9, 0.8])]
-        );
+        assert!(matches!(
+            lights.set_lights_args().as_slice(),
+            [LightDesc::Directional {
+                direction: [0.0, -1.0, 0.0],
+                intensity: v,
+                color: [1.0, 0.9, 0.8],
+                shadow: false,
+            }] if *v == 2.0
+        ));
     }
 }

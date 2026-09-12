@@ -8,6 +8,8 @@
 //! spatialization from the listener position and submits mix inputs to the
 //! active [`backend::AudioBackendTrait`] implementation.
 pub mod backend;
+/// World↔audio bridge ([`bridge::install_gameplay_audio_bridge`]).
+pub mod bridge;
 /// Symphonia-based decoders producing clips from files or in-memory bytes.
 pub mod decoder;
 /// The ECS-facing playback orchestrator ([`engine::AudioEngine`]).

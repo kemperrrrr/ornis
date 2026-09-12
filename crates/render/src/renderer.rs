@@ -5,6 +5,7 @@
 //! for the render-graph-driven equivalent.
 
 use crate::mesh::{Mesh, Vertex};
+use crate::scene::LightDesc;
 use crate::shaders;
 use glam::Mat4;
 use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
@@ -51,15 +52,40 @@ pub struct PerObjectGpu {
 
 /// One GPU light: direction + color packed as `vec4`s.
 ///
+/// Evaluation kind of a [`GpuLight`] entry: directional, point, or spot.
+/// Float (not enum): the stage DSL compares kinds with `>`.
+pub(crate) const LIGHT_KIND_DIRECTIONAL: f32 = 0.0;
+/// Evaluation kind of a [`GpuLight`] entry: point light.
+pub(crate) const LIGHT_KIND_POINT: f32 = 1.0;
+/// Evaluation kind of a [`GpuLight`] entry: spotlight.
+pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
+
+/// GPU light entry: kind-selected evaluation in both fragment entries
+/// (deferred lighting and forward PBR share the layer evaluators).
+///
 /// The WGSL `Light` declaration is generated from this layout
 /// ([`GpuLight::WGSL_SOURCE`]). `align(16)` matches the WGSL struct alignment
 /// so the derive's nested-layout check holds (cf. physics `GpuBodyState`).
+///
+/// Layout note: `kind` is a full vec4 (kind in `x`) rather than a scalar —
+/// a bare `f32` ahead of the vec4s would insert implicit padding that
+/// `bytemuck::Pod` rejects and the derive cannot spell.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
 #[wgsl(name = "Light")]
 pub(crate) struct GpuLight {
+    /// Evaluation kind in `x`: 0.0 directional, 1.0 point, 2.0 spot.
+    kind: [f32; 4],
+    /// Direction toward the light (directional) or spot axis from the
+    /// light into the scene (spot); `[0, 0, 1, 0]` for points.
     direction: [f32; 4],
+    /// World-space position (point/spot); unused by directionals.
+    position: [f32; 4],
+    /// Emission color RGB + radiometric intensity in alpha.
     color: [f32; 4],
+    /// `(range, cos_inner, cos_outer, shadow_layer)`: range cutoff for
+    /// point/spot, spot cone cosines, shadow-map layer or -1.0.
+    params: [f32; 4],
 }
 
 /// Lighting uniform block: ambient + fixed light array + count.
@@ -155,10 +181,10 @@ pub struct LightingPass {
 pub struct ForwardPass {
     /// Lit-forward pipeline (same shading as the lighting pass).
     pipeline: wgpu::RenderPipeline,
-    /// Kept alive for the bind group.
-    _bind_group_layout: wgpu::BindGroupLayout,
-    /// Buffers bound once at construction.
-    bind_group: wgpu::BindGroup,
+    /// Bindings for the forward pipeline (layout is stable).
+    bind_group_layout: wgpu::BindGroupLayout,
+    /// Current bind group, rebuilt whenever a storage buffer grows.
+    bind_group: std::sync::RwLock<wgpu::BindGroup>,
     /// Owned HDR color attachment.
     _color_texture: wgpu::Texture,
     /// View of `_color_texture`.
@@ -249,10 +275,17 @@ struct CoreBuffers {
 /// The deferred 3D renderer: owns GPU buffers, pipelines and persistent
 /// targets; drives the hybrid deferred+forward+bloom frame via its
 /// `render_*` methods or the all-in-one [`Renderer3D::render_scene`].
+///
+/// Interior mutability note: `upload_*` may reallocate growable buffers
+/// and rebuild their bind groups, so the buffers live behind an `RwLock`
+/// — every other method only reads them, and the parallel command
+/// recording path (`Sync`) keeps working. External callers keep the plain
+/// `&self` signatures; no `&mut` threading through the schedule systems
+/// or the WASM loop was needed.
 pub struct Renderer3D {
     camera_buffer: wgpu::Buffer,
-    per_object_buffer: wgpu::Buffer,
-    material_buffer: wgpu::Buffer,
+    per_object_buffer: std::sync::RwLock<wgpu::Buffer>,
+    material_buffer: std::sync::RwLock<wgpu::Buffer>,
     lighting_buffer: wgpu::Buffer,
     _bind_group_layout: wgpu::BindGroupLayout,
     _bind_group: wgpu::BindGroup,
@@ -260,15 +293,15 @@ pub struct Renderer3D {
     pbr_texture: wgpu::Texture,
     pbr_texture_view: wgpu::TextureView,
     sample_count: u32,
-    max_objects: u32,
-    max_materials: u32,
+    max_objects: std::sync::atomic::AtomicU32,
+    max_materials: std::sync::atomic::AtomicU32,
     format: wgpu::TextureFormat,
     width: u32,
     height: u32,
     gbuffer: GBufferTextures,
     gbuffer_pipeline: wgpu::RenderPipeline,
     gbuffer_bind_group_layout: wgpu::BindGroupLayout,
-    gbuffer_bind_group: wgpu::BindGroup,
+    gbuffer_bind_group: std::sync::RwLock<wgpu::BindGroup>,
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     composite_pass: CompositePass,
@@ -281,8 +314,11 @@ pub struct Renderer3D {
 impl Renderer3D {
     /// Build every pipeline/target for `surface_config`'s format and extent.
     ///
-    /// Capacity is fixed at 256 instances / 64 materials; zero-sized extents
-    /// are clamped to 1 pixel.
+    /// Capacity starts at 256 instances / 64 materials and grows on
+    /// demand: [`upload_instances`](Self::upload_instances) and
+    /// [`upload_materials`](Self::upload_materials) reallocate (and rebind)
+    /// their buffers when a frame needs more, so scenes are never silently
+    /// truncated. Zero-sized extents are clamped to 1 pixel.
     pub fn new(
         device: &wgpu::Device,
         surface_config: &wgpu::SurfaceConfiguration,
@@ -336,8 +372,8 @@ impl Renderer3D {
 
         Self {
             camera_buffer: buffers.camera,
-            per_object_buffer: buffers.per_object,
-            material_buffer: buffers.material,
+            per_object_buffer: std::sync::RwLock::new(buffers.per_object),
+            material_buffer: std::sync::RwLock::new(buffers.material),
             lighting_buffer: buffers.lighting,
             _bind_group_layout: bind_group_layout,
             _bind_group: bind_group,
@@ -345,15 +381,15 @@ impl Renderer3D {
             pbr_texture,
             pbr_texture_view,
             sample_count,
-            max_objects,
-            max_materials,
+            max_objects: std::sync::atomic::AtomicU32::new(max_objects),
+            max_materials: std::sync::atomic::AtomicU32::new(max_materials),
             format,
             width,
             height,
             gbuffer,
             gbuffer_pipeline,
             gbuffer_bind_group_layout,
-            gbuffer_bind_group,
+            gbuffer_bind_group: std::sync::RwLock::new(gbuffer_bind_group),
             lighting_pass,
             forward_pass,
             composite_pass,
@@ -404,8 +440,11 @@ impl Renderer3D {
         let default_lighting = LightingUniform {
             ambient_color: [0.03, 0.03, 0.05, 1.0],
             lights: [GpuLight {
+                kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
                 direction: [0.0; 4],
+                position: [0.0; 4],
                 color: [0.0; 4],
+                params: [0.0, 0.0, 0.0, -1.0],
             }; 4],
             light_count: 0,
             _pad: [0; 3],
@@ -903,19 +942,21 @@ impl Renderer3D {
             entries: &bgl_entries,
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("forward bind group"),
-            layout: &bind_group_layout,
-            entries: &shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| {
-                match r.name {
-                    "camera" => camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object_buffer.as_entire_binding(),
-                    "materials" => material_buffer.as_entire_binding(),
-                    "lighting" => lighting_buffer.as_entire_binding(),
-                    other => panic!("forward bind group has no resource for `{other}`"),
-                }
-            }),
-        });
+        let bind_group =
+            std::sync::RwLock::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("forward bind group"),
+                layout: &bind_group_layout,
+                entries: &shaders::bind_group_entries(
+                    &shaders::pbr_generated::PBR_RESOURCES,
+                    |r| match r.name {
+                        "camera" => camera_buffer.as_entire_binding(),
+                        "per_objects" => per_object_buffer.as_entire_binding(),
+                        "materials" => material_buffer.as_entire_binding(),
+                        "lighting" => lighting_buffer.as_entire_binding(),
+                        other => panic!("forward bind group has no resource for `{other}`"),
+                    },
+                ),
+            }));
 
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("forward color target"),
@@ -995,7 +1036,7 @@ impl Renderer3D {
 
         ForwardPass {
             pipeline,
-            _bind_group_layout: bind_group_layout,
+            bind_group_layout,
             bind_group,
             _color_texture: color_texture,
             color_view,
@@ -1223,13 +1264,19 @@ impl Renderer3D {
                 device,
                 &self.gbuffer,
                 &self.camera_buffer,
-                &self.per_object_buffer,
-                &self.material_buffer,
+                &self
+                    .per_object_buffer
+                    .read()
+                    .expect("per-object buffer lock"),
+                &self.material_buffer.read().expect("material buffer lock"),
                 self.sample_count,
             );
         self.gbuffer_pipeline = gbuffer_pipeline;
         self.gbuffer_bind_group_layout = gbuffer_bind_group_layout;
-        self.gbuffer_bind_group = gbuffer_bind_group;
+        *self
+            .gbuffer_bind_group
+            .write()
+            .expect("gbuffer bind group lock") = gbuffer_bind_group;
 
         self.lighting_pass =
             Self::create_lighting_pass(device, &self.pbr_texture_view, self.sample_count);
@@ -1237,8 +1284,11 @@ impl Renderer3D {
         self.forward_pass = Self::create_forward_pass(
             device,
             &self.camera_buffer,
-            &self.per_object_buffer,
-            &self.material_buffer,
+            &self
+                .per_object_buffer
+                .read()
+                .expect("per-object buffer lock"),
+            &self.material_buffer.read().expect("material buffer lock"),
             &self.lighting_buffer,
             width,
             height,
@@ -1288,31 +1338,79 @@ impl Renderer3D {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    /// Upload ambient RGB plus up to four directional lights given as
-    /// `(direction, intensity, color)`; directions are normalized here and
+    /// Upload ambient RGB plus up to four scene lights of any kind;
     /// excess lights beyond four are dropped (shader-side limit).
-    pub fn set_lights(
-        &self,
-        queue: &wgpu::Queue,
-        ambient: [f32; 3],
-        lights: &[([f32; 3], f32, [f32; 3])],
-    ) {
-        let count = lights.len().min(4);
-        let mut gpu_lights = [GpuLight {
-            direction: [0.0; 4],
-            color: [0.0; 4],
-        }; 4];
-        for i in 0..count {
-            let (dir, intensity, col) = lights[i];
-            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
-            let nd = if len > 0.0 {
-                [dir[0] / len, dir[1] / len, dir[2] / len, 0.0]
+    /// Directionals map exactly as before, so directional-only scenes
+    /// render pixel-identical to the legacy rig.
+    pub fn set_lights(&self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]) {
+        /// Normalize a direction, falling back to +Z on degenerate input.
+        fn norm_dir(d: [f32; 3]) -> [f32; 4] {
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if len > 0.0 {
+                [d[0] / len, d[1] / len, d[2] / len, 0.0]
             } else {
                 [0.0, 0.0, 1.0, 0.0]
-            };
-            gpu_lights[i] = GpuLight {
-                direction: nd,
-                color: [col[0], col[1], col[2], intensity],
+            }
+        }
+        let count = lights.len().min(4);
+        let mut gpu_lights = [GpuLight {
+            kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, 1.0, 0.0],
+            position: [0.0, 0.0, 0.0, 1.0],
+            color: [0.0; 4],
+            params: [0.0, 0.0, 0.0, -1.0],
+        }; 4];
+        for (i, light) in lights.iter().take(count).enumerate() {
+            gpu_lights[i] = match light {
+                LightDesc::Directional {
+                    direction,
+                    intensity,
+                    color,
+                    ..
+                } => GpuLight {
+                    direction: norm_dir(*direction),
+                    color: [color[0], color[1], color[2], *intensity],
+                    ..gpu_lights[i]
+                },
+                LightDesc::Point {
+                    position,
+                    intensity,
+                    color,
+                    range,
+                } => GpuLight {
+                    kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
+                    position: [position[0], position[1], position[2], 1.0],
+                    color: [color[0], color[1], color[2], *intensity],
+                    params: [range.max(1e-3), 0.0, 0.0, -1.0],
+                    ..gpu_lights[i]
+                },
+                LightDesc::Spot {
+                    position,
+                    direction,
+                    intensity,
+                    color,
+                    range,
+                    inner_angle,
+                    outer_angle,
+                    ..
+                } => {
+                    // Cosineordered: inner must be the tighter cone.
+                    let ci = inner_angle.to_radians().cos();
+                    let co = outer_angle.to_radians().cos();
+                    GpuLight {
+                        kind: [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
+                        direction: norm_dir(*direction),
+                        position: [position[0], position[1], position[2], 1.0],
+                        color: [color[0], color[1], color[2], *intensity],
+                        params: [
+                            range.max(1e-3),
+                            ci.max(co),
+                            co.min(ci),
+                            // TODO(shadows): assign map layers for shadowed lights.
+                            -1.0,
+                        ],
+                    }
+                }
             };
         }
         let lighting = LightingUniform {
@@ -1324,21 +1422,164 @@ impl Renderer3D {
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&lighting));
     }
 
-    /// Replace the GPU material table (truncated to the 64-entry capacity);
+    /// Grow a storage buffer when `needed` exceeds `capacity`, doubling
+    /// until it fits (amortized O(1) across frames).
+    fn grown_storage_buffer(
+        device: &wgpu::Device,
+        label: &str,
+        old: &wgpu::Buffer,
+        element_bytes: usize,
+        needed: usize,
+        capacity: &std::sync::atomic::AtomicU32,
+    ) -> Option<wgpu::Buffer> {
+        if needed <= capacity.load(std::sync::atomic::Ordering::Relaxed) as usize {
+            return None;
+        }
+        let mut grown = capacity.load(std::sync::atomic::Ordering::Relaxed).max(1);
+        while (grown as usize) < needed {
+            grown = grown.saturating_mul(2);
+        }
+        capacity.store(grown, std::sync::atomic::Ordering::Relaxed);
+        // Destroying the buffer under a live bind group would fault the
+        // next submit; wgpu defers actual destruction until the GPU is
+        // done, so replace-then-rebind inside the same frame is safe.
+        old.destroy();
+        Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (element_bytes * grown as usize) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }))
+    }
+
+    /// Rebind every pass that reads the grown storage buffers: each pass
+    /// holds its own bind group over the same layout, so all three are
+    /// rebuilt together whenever either buffer moves.
+    fn rebind_storage_buffers(&self, device: &wgpu::Device) {
+        let per_object = self
+            .per_object_buffer
+            .read()
+            .expect("per-object buffer lock");
+        let material = self.material_buffer.read().expect("material buffer lock");
+        *self
+            .gbuffer_bind_group
+            .write()
+            .expect("gbuffer bind group lock") =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gbuffer bind group (grown)"),
+                layout: &self.gbuffer_bind_group_layout,
+                entries: &shaders::bind_group_entries(
+                    &shaders::gbuffer_generated::GBUFFER_RESOURCES,
+                    |r| match r.name {
+                        "camera" => self.camera_buffer.as_entire_binding(),
+                        "per_objects" => per_object.as_entire_binding(),
+                        "materials" => material.as_entire_binding(),
+                        other => panic!("gbuffer bind group has no resource for `{other}`"),
+                    },
+                ),
+            });
+        *self
+            .forward_pass
+            .bind_group
+            .write()
+            .expect("forward bind group lock") =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("forward bind group (grown)"),
+                layout: &self.forward_pass.bind_group_layout,
+                entries: &shaders::bind_group_entries(
+                    &shaders::pbr_generated::PBR_RESOURCES,
+                    |r| match r.name {
+                        "camera" => self.camera_buffer.as_entire_binding(),
+                        "per_objects" => per_object.as_entire_binding(),
+                        "materials" => material.as_entire_binding(),
+                        "lighting" => self.lighting_buffer.as_entire_binding(),
+                        other => panic!("forward bind group has no resource for `{other}`"),
+                    },
+                ),
+            });
+    }
+
+    /// Ensure the per-object buffer fits `needed` instances, growing and
+    /// rebinding when it does not. The lighting frame bind group is built
+    /// per frame from the live buffer, so it needs no rebuild here.
+    fn ensure_instance_capacity(&self, device: &wgpu::Device, needed: usize) {
+        let grown = {
+            let old = self
+                .per_object_buffer
+                .read()
+                .expect("per-object buffer lock");
+            Self::grown_storage_buffer(
+                device,
+                "per-object buffer (grown)",
+                &old,
+                std::mem::size_of::<PerObjectGpu>(),
+                needed,
+                &self.max_objects,
+            )
+        };
+        if let Some(buffer) = grown {
+            *self
+                .per_object_buffer
+                .write()
+                .expect("per-object buffer lock") = buffer;
+            self.rebind_storage_buffers(device);
+        }
+    }
+
+    /// Ensure the material buffer fits `needed` entries, growing and
+    /// rebinding when it does not.
+    fn ensure_material_capacity(&self, device: &wgpu::Device, needed: usize) {
+        let grown = {
+            let old = self.material_buffer.read().expect("material buffer lock");
+            Self::grown_storage_buffer(
+                device,
+                "material buffer (grown)",
+                &old,
+                OPENPBR_MATERIAL_SIZE,
+                needed,
+                &self.max_materials,
+            )
+        };
+        if let Some(buffer) = grown {
+            *self.material_buffer.write().expect("material buffer lock") = buffer;
+            self.rebind_storage_buffers(device);
+        }
+    }
+
+    /// Replace the GPU material table, growing the storage buffer (and
+    /// the passes' bind groups) when `materials` exceeds current capacity;
     /// instances reference entries by index.
-    pub fn upload_materials(&self, queue: &wgpu::Queue, materials: &[OpenPBRMaterial]) {
-        let count = materials.len().min(self.max_materials as usize);
+    pub fn upload_materials(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        materials: &[OpenPBRMaterial],
+    ) {
+        self.ensure_material_capacity(device, materials.len());
+        let count = materials.len().min(
+            self.max_materials
+                .load(std::sync::atomic::Ordering::Relaxed) as usize,
+        );
         queue.write_buffer(
-            &self.material_buffer,
+            &self.material_buffer.read().expect("material buffer lock"),
             0,
             bytemuck::cast_slice(&materials[..count]),
         );
     }
 
-    /// Convert and upload up to 256 instances (excess dropped) into the
-    /// per-object buffer used by both gbuffer and forward passes.
-    pub fn upload_instances(&self, queue: &wgpu::Queue, instances: &[InstanceData]) {
-        let count = instances.len().min(self.max_objects as usize);
+    /// Convert and upload instances into the per-object buffer used by
+    /// both gbuffer and forward passes, growing the buffer (and rebinding
+    /// the passes) when the frame needs more than the current capacity.
+    pub fn upload_instances(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        instances: &[InstanceData],
+    ) {
+        self.ensure_instance_capacity(device, instances.len());
+        let count = instances
+            .len()
+            .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
         let mut gpu_objects: Vec<PerObjectGpu> = Vec::with_capacity(count);
         for inst in instances.iter().take(count) {
             let model_arr: [[f32; 4]; 4] = inst.model_matrix.to_cols_array_2d();
@@ -1351,7 +1592,10 @@ impl Renderer3D {
             });
         }
         queue.write_buffer(
-            &self.per_object_buffer,
+            &self
+                .per_object_buffer
+                .read()
+                .expect("per-object buffer lock"),
             0,
             bytemuck::cast_slice(&gpu_objects),
         );
@@ -1454,7 +1698,13 @@ impl Renderer3D {
         });
 
         rpass.set_pipeline(&self.gbuffer_pipeline);
-        rpass.set_bind_group(0, &self.gbuffer_bind_group, &[]);
+        {
+            let bind_group = self
+                .gbuffer_bind_group
+                .read()
+                .expect("gbuffer bind group lock");
+            rpass.set_bind_group(0, &*bind_group, &[]);
+        }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
@@ -1470,9 +1720,11 @@ impl Renderer3D {
         output: &wgpu::TextureView,
     ) {
         // The bind group is rebuilt per frame: gbuffer views come from the
-        // render-plan pool (transient) or from persistent textures.
+        // render-plan pool (transient) or from persistent textures, and the
+        // material buffer may have grown since the last frame.
         // Binding numbers come from the table; only the name → live
         // resource mapping is written out here.
+        let material = self.material_buffer.read().expect("material buffer lock");
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting bind group (frame)"),
             layout: &self.lighting_pass.bind_group_layout,
@@ -1481,7 +1733,7 @@ impl Renderer3D {
                 |r| match r.name {
                     "camera" => self.camera_buffer.as_entire_binding(),
                     "lighting" => self.lighting_buffer.as_entire_binding(),
-                    "materials" => self.material_buffer.as_entire_binding(),
+                    "materials" => material.as_entire_binding(),
                     "albedo_tex" => wgpu::BindingResource::TextureView(g.albedo),
                     "normal_tex" => wgpu::BindingResource::TextureView(g.normal),
                     "material_id_tex" => wgpu::BindingResource::TextureView(g.material_id),
@@ -1571,7 +1823,14 @@ impl Renderer3D {
         });
 
         rpass.set_pipeline(&self.forward_pass.pipeline);
-        rpass.set_bind_group(0, &self.forward_pass.bind_group, &[]);
+        {
+            let bind_group = self
+                .forward_pass
+                .bind_group
+                .read()
+                .expect("forward bind group lock");
+            rpass.set_bind_group(0, &*bind_group, &[]);
+        }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);

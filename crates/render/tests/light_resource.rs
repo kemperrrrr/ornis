@@ -44,11 +44,13 @@ fn legacy_scene() -> Scene {
                 direction: [1.0, 1.0, 1.0],
                 intensity: 0.6,
                 color: [1.0, 1.0, 1.0],
+                shadow: false,
             },
             LightDesc::Directional {
                 direction: [-0.5, 0.5, -0.5],
                 intensity: 0.3,
                 color: [0.8, 0.8, 1.0],
+                shadow: false,
             },
         ],
         camera: CameraDesc {
@@ -72,8 +74,18 @@ fn world_lights_reproduce_legacy_rig_pixels() {
                 context.queue,
                 [0.10, 0.10, 0.15],
                 &[
-                    ([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]),
-                    ([-0.5, 0.5, -0.5], 0.3, [0.8, 0.8, 1.0]),
+                    LightDesc::Directional {
+                        direction: [1.0, 1.0, 1.0],
+                        intensity: 0.6,
+                        color: [1.0, 1.0, 1.0],
+                        shadow: false,
+                    },
+                    LightDesc::Directional {
+                        direction: [-0.5, 0.5, -0.5],
+                        intensity: 0.3,
+                        color: [0.8, 0.8, 1.0],
+                        shadow: false,
+                    },
                 ],
             );
             plan.render(context, &scene.renderer, &scene.mesh, 1);

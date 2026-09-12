@@ -136,19 +136,9 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
             material_index: i as u32,
         });
     }
-    renderer.upload_materials(&queue, &materials);
-    renderer.upload_instances(&queue, &instances);
-    let lights: Vec<([f32; 3], f32, [f32; 3])> = scene
-        .lights
-        .iter()
-        .map(|l| match l {
-            LightDesc::Directional {
-                direction,
-                intensity,
-                color,
-            } => (*direction, *intensity, *color),
-        })
-        .collect();
+    renderer.upload_materials(&device, &queue, &materials);
+    renderer.upload_instances(&device, &queue, &instances);
+    let lights: Vec<LightDesc> = scene.lights.clone();
     renderer.set_lights(&queue, scene.ambient, &lights);
     let cam = &scene.camera;
     let aspect = WIDTH as f32 / HEIGHT as f32;

@@ -420,20 +420,10 @@ async fn run(scene: &Scene) {
 
     // ── Scene → GPU data ──────────────────────────────────────────────
     let (mesh, materials, instances) = build_scene_data(&device, scene);
-    let lights: Vec<([f32; 3], f32, [f32; 3])> = scene
-        .lights
-        .iter()
-        .map(|l| match l {
-            LightDesc::Directional {
-                direction,
-                intensity,
-                color,
-            } => (*direction, *intensity, *color),
-        })
-        .collect();
+    let lights: Vec<LightDesc> = scene.lights.clone();
 
-    renderer.upload_materials(&queue, &materials);
-    renderer.upload_instances(&queue, &instances);
+    renderer.upload_materials(&device, &queue, &materials);
+    renderer.upload_instances(&device, &queue, &instances);
     renderer.set_lights(&queue, scene.ambient, &lights);
 
     let cam = &scene.camera;

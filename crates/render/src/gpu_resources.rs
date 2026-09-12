@@ -259,6 +259,7 @@ impl System for RenderSubmit {
             .reads::<Mutex<crate::camera::OrbitCamera>>()
             .reads::<RenderLights>()
             .writes::<Mutex<GpuFrameState>>()
+            .reads::<GpuDevice>()
             .reads::<GpuQueue>()
             .reads::<GpuSurfaceState>()
     }
@@ -274,6 +275,9 @@ impl System for RenderSubmit {
             return;
         };
         let Some(lights) = resources.get::<RenderLights>() else {
+            return;
+        };
+        let Some(device) = resources.get::<GpuDevice>() else {
             return;
         };
         let Some(queue) = resources.get::<GpuQueue>() else {
@@ -298,8 +302,10 @@ impl System for RenderSubmit {
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
         fs.renderer
             .set_lights(&queue.0, lights.ambient, &lights.set_lights_args());
-        fs.renderer.upload_materials(&queue.0, &extracted.materials);
-        fs.renderer.upload_instances(&queue.0, &extracted.instances);
+        fs.renderer
+            .upload_materials(&device.0, &queue.0, &extracted.materials);
+        fs.renderer
+            .upload_instances(&device.0, &queue.0, &extracted.instances);
     }
 }
 

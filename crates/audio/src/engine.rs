@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use glam::Vec3;
-use ornis_core::{Entity, SmartStore};
+use ornis_core::{Entity, Position, SmartStore};
 
 use crate::backend::{AudioBackend, AudioBackendTrait};
 use crate::source::{AudioClip, AudioSource, AudioState, MixInput, SpatialParams};
@@ -70,6 +70,14 @@ impl AudioEngine {
     /// applied to every source's volume (e.g. a global mute/duck).
     pub fn set_listener(&mut self, pos: Vec3, gain: f32) {
         self._listener_pos = pos;
+        self.set_gain(gain);
+    }
+
+    /// Duck the master gain without moving the listener; negative input is
+    /// clamped to 0. Used by the world↔audio bridge when only an
+    /// [`AudioListener`](crate::source::AudioListener) resource (no listener
+    /// entity) is present.
+    pub fn set_gain(&mut self, gain: f32) {
         self._listener_gain = gain.max(0.0);
     }
 
@@ -92,7 +100,17 @@ impl AudioEngine {
             None => return,
         };
 
-        let positions = store.read_lane::<Vec3>();
+        // Authoritative placement first: gameplay [`Position`] (kept fresh by
+        // `transform_update` / the physics bridge), raw `Vec3` as back-compat.
+        let pos_lane = store.read_lane::<Position>();
+        let vec_lane = store.read_lane::<Vec3>();
+        let source_pos = |entity: Entity| {
+            pos_lane
+                .as_ref()
+                .and_then(|lane| lane.get(entity))
+                .map(|p| p.0)
+                .or_else(|| vec_lane.as_ref().and_then(|lane| lane.get(entity)).copied())
+        };
         let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
 
         for i in 0..sources.data.len() {
@@ -112,23 +130,21 @@ impl AudioEngine {
                     }
 
                     let spatial = if source.spatial {
-                        positions.as_ref().and_then(|pos_lane| {
-                            pos_lane.get(entity).map(|pos| {
-                                let diff = *pos - self._listener_pos;
-                                let distance = diff.length();
-                                let azimuth = if distance > 0.001 {
-                                    (diff.x / distance).asin()
-                                } else {
-                                    0.0
-                                };
-                                SpatialParams {
-                                    distance,
-                                    azimuth,
-                                    elevation: 0.0,
-                                    rolloff_factor: 1.0,
-                                    reference_distance: 1.0,
-                                }
-                            })
+                        source_pos(entity).map(|pos| {
+                            let diff = pos - self._listener_pos;
+                            let distance = diff.length();
+                            let azimuth = if distance > 0.001 {
+                                (diff.x / distance).asin()
+                            } else {
+                                0.0
+                            };
+                            SpatialParams {
+                                distance,
+                                azimuth,
+                                elevation: 0.0,
+                                rolloff_factor: 1.0,
+                                reference_distance: 1.0,
+                            }
                         })
                     } else {
                         None

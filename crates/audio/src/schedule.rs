@@ -15,7 +15,7 @@
 use std::sync::Mutex;
 
 use glam::Vec3;
-use ornis_core::{Engine, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Engine, Position, Resources, SmartStore, System, SystemAccess};
 
 use crate::backend::AudioBackendTrait;
 use crate::engine::AudioEngine;
@@ -61,6 +61,21 @@ impl AudioHost {
     pub fn step(&self, store: &SmartStore) {
         self.engine.lock().expect("audio host lock").step(store);
     }
+
+    /// Move/listen the virtual listener (schedule-safe counterpart of
+    /// [`AudioEngine::set_listener`]); used by the world↔audio bridge.
+    pub fn set_listener(&self, pos: Vec3, gain: f32) {
+        self.engine
+            .lock()
+            .expect("audio host lock")
+            .set_listener(pos, gain);
+    }
+
+    /// Duck the master gain without moving the listener (schedule-safe
+    /// counterpart of [`AudioEngine::set_gain`]).
+    pub fn set_gain(&self, gain: f32) {
+        self.engine.lock().expect("audio host lock").set_gain(gain);
+    }
 }
 
 /// Steps the [`AudioHost`] once per frame. Declared after `transform_update`
@@ -75,8 +90,9 @@ impl System for AudioStepSystem {
     fn access(&self) -> SystemAccess {
         SystemAccess::new()
             .reads::<SmartStore>()
-            .reads::<AudioHost>()
+            .writes::<AudioHost>()
             .reads_lane::<AudioSource>()
+            .reads_lane::<Position>()
             .reads_lane::<Vec3>()
     }
 

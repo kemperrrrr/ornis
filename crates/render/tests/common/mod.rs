@@ -77,18 +77,23 @@ impl HeadlessScene {
             mat.specular.roughness(0.5);
             mat
         };
-        renderer.upload_materials(&queue, &[material]);
+        renderer.upload_materials(&device, &queue, &[material]);
         let model = Mat4::from_scale_rotation_translation(Vec3::ONE, Quat::IDENTITY, Vec3::ZERO);
         let instance = InstanceData {
             model_matrix: model,
             normal_matrix: model.inverse().transpose(),
             material_index: 0,
         };
-        renderer.upload_instances(&queue, &[instance]);
+        renderer.upload_instances(&device, &queue, &[instance]);
         renderer.set_lights(
             &queue,
             [0.1, 0.1, 0.1],
-            &[([0.3, -1.0, 0.5], 1.0, [1.0, 1.0, 1.0])],
+            &[ornis_render::scene::LightDesc::Directional {
+                direction: [0.3, -1.0, 0.5],
+                intensity: 1.0,
+                color: [1.0, 1.0, 1.0],
+                shadow: false,
+            }],
         );
 
         let view =

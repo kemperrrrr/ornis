@@ -62,7 +62,14 @@ impl Default for AudioSource {
     }
 }
 
-/// Global listener resource: master gain ducking every source equally.
+/// Global listener: master gain ducking every source equally.
+///
+/// Dual use, resolved by the world↔audio bridge
+/// ([`install_gameplay_audio_bridge`](crate::bridge::install_gameplay_audio_bridge)):
+/// as a `World` resource it supplies the master gain when no listener entity
+/// is marked; as a component it marks the listener entity (pose read from
+/// gameplay [`Position`](ornis_core::Position) on the same entity) and its
+/// gain wins over the resource.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioListener {
     /// Master multiplier applied on top of each source's volume; negative

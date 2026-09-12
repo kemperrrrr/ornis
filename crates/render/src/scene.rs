@@ -89,18 +89,57 @@ pub enum MaterialDesc {
 }
 
 /// Light source description.
+///
+/// Convention (shared by the shader evaluators): `direction` fields point
+/// *toward* the light, except spot axes, which point from the light into
+/// the scene (spotlight aim).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LightDesc {
-    /// Infinitely distant light shining along a fixed direction.
+    /// Infinitely distant light shining from a fixed direction.
     Directional {
-        /// Direction the light travels (from light toward the scene).
+        /// Direction toward the light (from the scene).
         direction: [f32; 3],
         /// Radiometric strength multiplier.
         intensity: f32,
         /// Emission color in linear space.
         color: [f32; 3],
+        /// Cast a shadow map (depth pre-pass + PCF in the evaluators).
+        /// Absent in older files — defaults to off.
+        #[serde(default)]
+        shadow: bool,
     },
-    // Future: Point, Spot
+    /// Local light with inverse-square falloff and a finite range.
+    Point {
+        /// World-space position.
+        position: [f32; 3],
+        /// Radiometric strength multiplier.
+        intensity: f32,
+        /// Emission color in linear space.
+        color: [f32; 3],
+        /// Cutoff distance in world units (must be > 0).
+        range: f32,
+    },
+    /// Local light inside a cone aimed into the scene.
+    Spot {
+        /// World-space position.
+        position: [f32; 3],
+        /// Spotlight axis, from the light into the scene.
+        direction: [f32; 3],
+        /// Radiometric strength multiplier.
+        intensity: f32,
+        /// Emission color in linear space.
+        color: [f32; 3],
+        /// Cutoff distance in world units (must be > 0).
+        range: f32,
+        /// Inner cone angle in degrees (full brightness inside).
+        inner_angle: f32,
+        /// Outer cone angle in degrees (zero outside, soft edge between).
+        outer_angle: f32,
+        /// Cast a shadow map (depth pre-pass + PCF in the evaluators).
+        /// Absent in older files — defaults to off.
+        #[serde(default)]
+        shadow: bool,
+    },
 }
 
 /// Viewing camera described look-at style.
@@ -239,11 +278,13 @@ Scene(
                 direction,
                 intensity,
                 color,
+                ..
             } => {
                 assert_eq!(*direction, [1.0, 1.0, 1.0]);
                 assert_eq!(*intensity, 0.6);
                 assert_eq!(*color, [1.0, 1.0, 1.0]);
             }
+            _ => panic!("expected the directional test light"),
         }
         assert_eq!(scene.camera.fov, 60.0);
         assert_eq!(scene.camera.near, 0.1);

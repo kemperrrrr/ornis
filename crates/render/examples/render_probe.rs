@@ -162,18 +162,8 @@ fn build_scene_data(
     (mesh, materials, instances)
 }
 
-fn lights_of(scene: &Scene) -> Vec<([f32; 3], f32, [f32; 3])> {
-    scene
-        .lights
-        .iter()
-        .map(|l| match l {
-            LightDesc::Directional {
-                direction,
-                intensity,
-                color,
-            } => (*direction, *intensity, *color),
-        })
-        .collect()
+fn lights_of(scene: &Scene) -> Vec<LightDesc> {
+    scene.lights.clone()
 }
 
 fn camera_view_proj(cam: &CameraDesc) -> (Mat4, Mat4, [[f32; 4]; 4]) {
@@ -319,8 +309,8 @@ async fn run(scene: &Scene, out_path: &str) {
 
     // ── Scene → GPU data ──────────────────────────────────────────────
     let (mesh, materials, instances) = build_scene_data(&device, scene);
-    renderer.upload_materials(&queue, &materials);
-    renderer.upload_instances(&queue, &instances);
+    renderer.upload_materials(&device, &queue, &materials);
+    renderer.upload_instances(&device, &queue, &instances);
     renderer.set_lights(&queue, scene.ambient, &lights_of(scene));
 
     // ── Camera ────────────────────────────────────────────────────────

@@ -79,18 +79,23 @@ fn bench_recording(c: &mut Criterion) {
         mat.specular.roughness(0.5);
         mat
     };
-    renderer.upload_materials(&queue, &[material]);
+    renderer.upload_materials(&device, &queue, &[material]);
     let model = Mat4::from_translation(Vec3::ZERO);
     let instance = InstanceData {
         model_matrix: model,
         normal_matrix: model.inverse().transpose(),
         material_index: 0,
     };
-    renderer.upload_instances(&queue, &[instance]);
+    renderer.upload_instances(&device, &queue, &[instance]);
     renderer.set_lights(
         &queue,
         [0.1, 0.1, 0.1],
-        &[([0.3, -1.0, 0.5], 1.0, [1.0, 1.0, 1.0])],
+        &[ornis_render::scene::LightDesc::Directional {
+            direction: [0.3, -1.0, 0.5],
+            intensity: 1.0,
+            color: [1.0, 1.0, 1.0],
+            shadow: false,
+        }],
     );
     let view = glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
     let proj = glam::camera::rh::proj::directx::perspective(60f32.to_radians(), 1.0, 0.1, 10.0);
