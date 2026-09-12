@@ -2207,7 +2207,7 @@ struct ManifoldCtx<'a> {
 
 mod contacts;
 mod islands;
-mod joints;
+pub(crate) mod joints;
 
 /// The CPU reference physics engine: sequential-impulse solver with a
 /// selectable broadphase, manifold generation, island-coherent sleeping,

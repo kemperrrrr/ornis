@@ -15,7 +15,7 @@ use crate::joint::{
 /// Twist of B relative to A about A's hinge axis (rad, wrapped to
 /// [-PI, PI]). Decomposes `qa^-1 * qb` into twist about the axis plus
 /// swing; limits, motors and their tests measure travel with this.
-pub(super) fn hinge_twist(qa: Quat, qb: Quat, axis_a: Vec3) -> f32 {
+pub(crate) fn hinge_twist(qa: Quat, qb: Quat, axis_a: Vec3) -> f32 {
     quat_twist(qa.conjugate() * qb, axis_a)
 }
 

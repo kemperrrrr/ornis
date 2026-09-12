@@ -30,11 +30,18 @@
 //!   beyond `GEN_MARGIN`, no stale push, no lambda burn).
 //! - Friction is isotropic (`mu = sqrt(muA*muB)`); anisotropic/rolling/
 //!   torsional friction stays on the builtin engine (M2).
-//! - Joints: [`crate::joint::JointKind::Ball`] and free
-//!   [`crate::joint::JointKind::Revolute`] (hinge axis enforced via two
-//!   angular rows); limits/motors and Prismatic/Fixed/Distance/Wheel return
-//!   `None`. Fracture is not implemented. Penalty joints show ~10cm dynamic
-//!   stretch at swing bottom (bounded, documented in tests).
+//! - Joints: [`crate::joint::JointKind::Ball`], free
+//!   [`crate::joint::JointKind::Revolute`] (hinge axis via two angular rows)
+//!   with travel limits (one-sided accumulator rows, Box2D order) and
+//!   deadbeat impulse motors (exact clamped velocity step, no dual state),
+//!   [`crate::joint::JointKind::Prismatic`] (2 perp + 2 angular rows, same
+//!   limit/motor drive along the slide axis),
+//!   [`crate::joint::JointKind::Fixed`] (weld: ball rows + locked assembly
+//!   rotation) and [`crate::joint::JointKind::Distance`] (single rod row).
+//!   Wheel/Gear/SixDof return `None`. Fracture is not implemented.
+//!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
+//!   under sustained load (velocity servo); ball position-servo rows damp
+//!   fast orbital motion through long levers (all bounded, tested).
 //! - Sphere-on-sphere stacking is an M1 gap: single-point contact plus free
 //!   rotation needs rolling multi-point contact (M2). Spheres rest and
 //!   settle on floors and boxes.
@@ -48,9 +55,11 @@
 
 use glam::{Mat3, Quat, Vec3};
 use std::collections::BTreeSet;
+use std::f32::consts::{PI, TAU};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
+use crate::engine::joints::hinge_twist;
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::joint::{JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
@@ -97,6 +106,10 @@ const C_EPS: f32 = 1e-7;
 /// whose tangential violation is below this kept its grip last step.
 const STICK_THRESH: f32 = 0.00001;
 
+/// Angular travel slop for revolute limits (official `ANGULAR_SLOP`).
+const LIMIT_SLOP_ANG: f32 = 0.005;
+/// Slide travel slop for prismatic limits (official `LINEAR_SLOP`).
+const LIMIT_SLOP_LIN: f32 = 0.002;
 /// Cap on contact points per pair (official manifold holds 8).
 const MAX_POINTS: usize = 8;
 
@@ -215,6 +228,32 @@ fn quat_diff_vec(a: Quat, b: Quat) -> Vec3 {
     let qb = b.to_array();
     let r = quat_mul(qa, [-qb[0], -qb[1], -qb[2], qb[3]]);
     Vec3::new(2.0 * r[0], 2.0 * r[1], 2.0 * r[2])
+}
+
+/// Normalized joint axes, or `None` on degenerate input.
+fn norm_axes(ax_a: Vec3, ax_b: Vec3) -> Option<(Vec3, Vec3)> {
+    if ax_a.length_squared() < 1e-12 || ax_b.length_squared() < 1e-12 {
+        return None;
+    }
+    Some((ax_a.normalize(), ax_b.normalize()))
+}
+
+/// Wrap an angle to [-PI, PI] (official limit bookkeeping).
+fn wrap_pi(x: f32) -> f32 {
+    (x + PI).rem_euclid(TAU) - PI
+}
+
+/// Which travel bound (if any) a joint violates: `Some(true)` = lower,
+/// `Some(false)` = upper, `None` = freely inside the window. Mirrors the
+/// official `hinge_limit_state` (one-sided velocity blocks + slop).
+fn limit_state(value: f32, lo: f32, hi: f32, slop: f32) -> Option<bool> {
+    if value <= lo + slop {
+        Some(true)
+    } else if value >= hi - slop {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Deterministic tangent frame for a normal (mirror of the GPU solver's
@@ -368,6 +407,16 @@ struct AvbdPair {
     points: Vec<AvbdPoint>,
 }
 
+/// Joint row model selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AvbdJointKind {
+    Ball,
+    Revolute,
+    Prismatic,
+    Fixed,
+    Distance,
+}
+
 /// Equality-constraint joint (ball anchor rows + optional hinge axis rows).
 /// Per-axis penalties (official float3s): sharing one penalty across rows
 /// lets the loaded row drive idle rows (via long levers) unstable.
@@ -379,11 +428,22 @@ struct AvbdJoint {
     lb: Vec3,
     ax_a: Vec3,
     ax_b: Vec3,
-    angular: bool,
+    kind: AvbdJointKind,
+    /// Travel reference: revolute reference twist (rad), prismatic reference
+    /// length (m), distance rest length (m); unused otherwise.
+    ref_val: f32,
+    /// Fixed-joint assembly relative rotation (`qa^-1 * qb` at creation).
+    q_ref: Quat,
+    /// Travel window `[min, max]` (revolute rad / prismatic m); `None` = free.
+    lim: Option<[f32; 2]>,
+    /// Servo drive `[target_speed, max_force_or_torque]`; `None` = unpowered.
+    mot: Option<[f32; 2]>,
+    /// One-sided limit accumulator (mirrors the official `acc_limit`).
+    acc_lim: f32,
     lam_l: [f32; 3],
-    lam_a: [f32; 2],
+    lam_a: [f32; 3],
     pen_l: [f32; 3],
-    pen_a: [f32; 2],
+    pen_a: [f32; 3],
 }
 
 /// AVBD rigid-body engine; see the module docs for formulation and scope.
@@ -769,7 +829,7 @@ impl AvbdEngine {
             }
         }
 
-        // Joint rows (equalities: full live violation, unclamped).
+        // Joint rows per kind (equalities; limits one-sided, motors servo).
         for ji in 0..self.joints.len() {
             let (is_a, is_b) = {
                 let j = &self.joints[ji];
@@ -788,23 +848,66 @@ impl AvbdEngine {
             let pb0 = self.pos0[j.b] + self.rot0[j.b] * j.lb;
             let live: Vec3 = pa - pb;
             let c0v: Vec3 = pa0 - pb0;
-            for k in 0..3 {
-                let axis = Vec3::from_array({
-                    let mut arr = [0.0f32; 3];
-                    arr[k] = 1.0;
-                    arr
-                });
-                let c = live[k] - ALPHA * c0v[k];
-                if c.abs() < C_EPS {
-                    continue;
+            // Live slide/hinge axis in world space (from A's side, like the
+            // official drive code).
+            let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
+            // --- linear equality rows; fl accumulates the force vector ---
+            let mut fl = Vec3::ZERO;
+            match j.kind {
+                AvbdJointKind::Ball | AvbdJointKind::Revolute | AvbdJointKind::Fixed => {
+                    for k in 0..3 {
+                        let axis = Vec3::from_array({
+                            let mut arr = [0.0f32; 3];
+                            arr[k] = 1.0;
+                            arr
+                        });
+                        let c = live[k] - ALPHA * c0v[k];
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = j.pen_l[k] * c + j.lam_l[k];
+                        let r_side = if is_a {
+                            a.orientation * j.la
+                        } else {
+                            b.orientation * j.lb
+                        };
+                        Self::stamp_row(&mut lhs, &mut rhs, axis, j.pen_l[k], f, r_side, sign);
+                        fl[k] = f;
+                    }
                 }
-                let f = j.pen_l[k] * c + j.lam_l[k];
-                let r_side = if is_a {
-                    a.orientation * j.la
-                } else {
-                    b.orientation * j.lb
-                };
-                Self::stamp_row(&mut lhs, &mut rhs, axis, j.pen_l[k], f, r_side, sign);
+                AvbdJointKind::Prismatic => {
+                    let (u, v) = tangent_basis(wa);
+                    for (ax, li) in [(u, 0), (v, 1)] {
+                        let c = (live - ALPHA * c0v).dot(ax);
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = j.pen_l[li] * c + j.lam_l[li];
+                        let r_side = if is_a {
+                            a.orientation * j.la
+                        } else {
+                            b.orientation * j.lb
+                        };
+                        Self::stamp_row(&mut lhs, &mut rhs, ax, j.pen_l[li], f, r_side, sign);
+                        fl += ax * f;
+                    }
+                }
+                AvbdJointKind::Distance => {
+                    // Single rod row along the live anchor delta.
+                    let len = live.length();
+                    let dir = if len > 1e-9 { live / len } else { Vec3::Y };
+                    let c = (len - j.ref_val) - ALPHA * (c0v.length() - j.ref_val);
+                    if c.abs() >= C_EPS {
+                        let f = j.pen_l[0] * c + j.lam_l[0];
+                        let r_side = if is_a {
+                            a.orientation * j.la
+                        } else {
+                            b.orientation * j.lb
+                        };
+                        Self::stamp_row(&mut lhs, &mut rhs, dir, j.pen_l[0], f, r_side, sign);
+                        fl = dir * f;
+                    }
+                }
             }
             // Geometric stiffness (official): the lever rotates with the
             // body, and the truncated Hessian must know. Without this the
@@ -815,12 +918,7 @@ impl AvbdEngine {
                 } else {
                     -(b.orientation * j.lb)
                 };
-                let f = Vec3::new(
-                    j.pen_l[0] * (live[0] - ALPHA * c0v[0]) + j.lam_l[0],
-                    j.pen_l[1] * (live[1] - ALPHA * c0v[1]) + j.lam_l[1],
-                    j.pen_l[2] * (live[2] - ALPHA * c0v[2]) + j.lam_l[2],
-                );
-                let fa = f.to_array();
+                let fa = fl.to_array();
                 let mut h_mat = [[0.0f32; 3]; 3];
                 for (k, fk) in fa.iter().enumerate() {
                     let g = geometric_stiffness_ball_socket(k, r);
@@ -835,33 +933,117 @@ impl AvbdEngine {
                 lhs[4][4] += hd.y;
                 lhs[5][5] += hd.z;
             }
-            if j.angular {
-                let axa = a.orientation * j.ax_a;
-                let axb = b.orientation * j.ax_b;
-                let axa0 = self.rot0[j.a] * j.ax_a;
-                let axb0 = self.rot0[j.b] * j.ax_b;
-                let (t1, t2) = tangent_basis(axa0);
-                for (t, lam, pen) in [(t1, j.lam_a[0], j.pen_a[0]), (t2, j.lam_a[1], j.pen_a[1])] {
-                    let live_c = t.dot(axa - axb);
-                    let c0_c = t.dot(axa0 - axb0);
-                    let c = live_c - ALPHA * c0_c;
-                    if c.abs() < C_EPS {
-                        continue;
+            // --- angular equality rows ---
+            match j.kind {
+                AvbdJointKind::Revolute | AvbdJointKind::Prismatic => {
+                    let axa = a.orientation * j.ax_a;
+                    let axb = b.orientation * j.ax_b;
+                    let axa0 = self.rot0[j.a] * j.ax_a;
+                    let axb0 = self.rot0[j.b] * j.ax_b;
+                    let (t1, t2) = tangent_basis(axa0);
+                    for (t, lam, pen) in
+                        [(t1, j.lam_a[0], j.pen_a[0]), (t2, j.lam_a[1], j.pen_a[1])]
+                    {
+                        let live_c = t.dot(axa - axb);
+                        let c0_c = t.dot(axa0 - axb0);
+                        let c = live_c - ALPHA * c0_c;
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = pen * c + lam;
+                        // Rotation-only rows: torque arms about the hinge axes.
+                        let g_ang = if is_a { axa.cross(t) } else { -(axb.cross(t)) };
+                        let o = outer(g_ang, g_ang);
+                        for x in 0..3 {
+                            for y in 0..3 {
+                                lhs[3 + x][3 + y] += pen * o[x][y];
+                            }
+                        }
+                        rhs[3] += f * g_ang.x;
+                        rhs[4] += f * g_ang.y;
+                        rhs[5] += f * g_ang.z;
                     }
-                    let f = pen * c + lam;
-                    // Rotation-only rows: torque arms about the hinge axes.
-                    let g_ang = if is_a { axa.cross(t) } else { -(axb.cross(t)) };
-                    let o = outer(g_ang, g_ang);
-                    for x in 0..3 {
-                        for y in 0..3 {
-                            lhs[3 + x][3 + y] += pen * o[x][y];
+                }
+                AvbdJointKind::Fixed => {
+                    // Weld: lock the assembly relative rotation. Identity
+                    // Jacobian (exact at assembly, where welds live).
+                    let diff = quat_diff_vec(a.orientation.conjugate() * b.orientation, j.q_ref);
+                    let diff0 = quat_diff_vec(self.rot0[j.a].conjugate() * self.rot0[j.b], j.q_ref);
+                    for k in 0..3 {
+                        let c = diff[k] - ALPHA * diff0[k];
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = j.pen_a[k] * c + j.lam_a[k];
+                        let g = if is_a { -1.0 } else { 1.0 };
+                        lhs[3 + k][3 + k] += j.pen_a[k];
+                        rhs[3 + k] += f * g;
+                    }
+                }
+                _ => {}
+            }
+            // --- one-sided limit row (Box2D order: limit wins over motor) ---
+            if let Some([lo, hi]) = j.lim {
+                match j.kind {
+                    AvbdJointKind::Revolute => {
+                        let angle =
+                            wrap_pi(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val);
+                        if let Some(lower) = limit_state(angle, lo, hi, LIMIT_SLOP_ANG) {
+                            let c = if lower { angle - lo } else { angle - hi };
+                            if c.abs() >= C_EPS {
+                                // One-sided: a violated lower bound needs F <= 0
+                                // (relative +wa motion grows the angle), upper
+                                // needs F >= 0. (Swapped once — verified by the
+                                // hinge-blow-through test.)
+                                let f_raw = j.pen_a[2] * c + j.acc_lim;
+                                let f = if lower {
+                                    f_raw.min(0.0)
+                                } else {
+                                    f_raw.max(0.0)
+                                };
+                                let g = if is_a { -wa } else { wa };
+                                let o = outer(g, g);
+                                for x in 0..3 {
+                                    for y in 0..3 {
+                                        lhs[3 + x][3 + y] += j.pen_a[2] * o[x][y];
+                                    }
+                                }
+                                rhs[3] += f * g.x;
+                                rhs[4] += f * g.y;
+                                rhs[5] += f * g.z;
+                            }
                         }
                     }
-                    rhs[3] += f * g_ang.x;
-                    rhs[4] += f * g_ang.y;
-                    rhs[5] += f * g_ang.z;
+                    AvbdJointKind::Prismatic => {
+                        let s = (pb - pa).dot(wa) - j.ref_val;
+                        if let Some(lower) = limit_state(s, lo, hi, LIMIT_SLOP_LIN) {
+                            let c = if lower { s - lo } else { s - hi };
+                            if c.abs() >= C_EPS {
+                                let f_raw = j.pen_l[2] * c + j.acc_lim;
+                                let f = if lower {
+                                    f_raw.min(0.0)
+                                } else {
+                                    f_raw.max(0.0)
+                                };
+                                let r_side = if is_a {
+                                    a.orientation * j.la
+                                } else {
+                                    b.orientation * j.lb
+                                };
+                                // C = (B-A).wa: gradients flip vs ball rows.
+                                let lsign = if is_a { -1.0 } else { 1.0 };
+                                Self::stamp_row(
+                                    &mut lhs, &mut rhs, wa, j.pen_l[2], f, r_side, lsign,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
+            // Motors carry no primal rows: they act as deadbeat impulses
+            // (see `motor_impulse`), not as penalty servos. A fixed-gain
+            // servo is bang-bang at single-step dt without substeps.
         }
 
         let neg = [-rhs[0], -rhs[1], -rhs[2], -rhs[3], -rhs[4], -rhs[5]];
@@ -882,6 +1064,113 @@ impl AvbdEngine {
         let pb = self.pos0[p.b] + self.rot0[p.b] * pt.rb;
         let _ = (a, b);
         p.n.dot(pa - pb) + MARGIN
+    }
+
+    /// Deadbeat motor impulses (official impulse semantics): the exact
+    /// clamped velocity step through the pair effective mass, applied to
+    /// the velocity fields BEFORE warmstart so the sweep integrates them
+    /// jointly with the joint rows. (A post-solve position nudge was tried
+    /// and reverted: the ball rows read it as anchor violation and undo
+    /// half the spin every step.) Runs once per step; motors need no
+    /// iteration and no dual state. Pauses while a limit is violated
+    /// (Box2D order).
+    fn motor_impulse(&mut self) {
+        for ji in 0..self.joints.len() {
+            let (kind, mot) = {
+                let j = &self.joints[ji];
+                (j.kind, j.mot)
+            };
+            let Some([target, max]) = mot else { continue };
+            if max <= 0.0 || self.joint_limit_violated(ji) {
+                continue;
+            }
+            let (a, b) = {
+                let j = &self.joints[ji];
+                (j.a, j.b)
+            };
+            match kind {
+                AvbdJointKind::Revolute => {
+                    let wa =
+                        (self.bodies[a].orientation * self.joints[ji].ax_a).normalize_or(Vec3::Z);
+                    let w =
+                        (self.bodies[b].angular_velocity - self.bodies[a].angular_velocity).dot(wa);
+                    let ia = self.ang_inv_wa(a, wa);
+                    let ib = self.ang_inv_wa(b, wa);
+                    let k = ia.dot(wa) + ib.dot(wa);
+                    if k < 1e-9 {
+                        continue;
+                    }
+                    let dj = ((target - w) / k).clamp(-max * DT_STEP, max * DT_STEP);
+                    if self.solvable(a) {
+                        self.bodies[a].angular_velocity += -dj * ia;
+                    }
+                    if self.solvable(b) {
+                        self.bodies[b].angular_velocity += dj * ib;
+                    }
+                }
+                AvbdJointKind::Prismatic => {
+                    let wa =
+                        (self.bodies[a].orientation * self.joints[ji].ax_a).normalize_or(Vec3::Z);
+                    let v = (self.bodies[b].velocity - self.bodies[a].velocity).dot(wa);
+                    let ka = eff_inv_mass(&self.bodies[a]);
+                    let kb = eff_inv_mass(&self.bodies[b]);
+                    let k = ka + kb;
+                    if k < 1e-9 {
+                        continue;
+                    }
+                    let dj = ((target - v) / k).clamp(-max * DT_STEP, max * DT_STEP);
+                    if self.solvable(a) {
+                        self.bodies[a].velocity += -dj * ka * wa;
+                    }
+                    if self.solvable(b) {
+                        self.bodies[b].velocity += dj * kb * wa;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// World inverse inertia times a direction (zero unless dynamic).
+    fn ang_inv_wa(&self, h: usize, wa: Vec3) -> Vec3 {
+        let b = &self.bodies[h];
+        if !self.solvable(h) {
+            return Vec3::ZERO;
+        }
+        let iw = world_inertia(b.inertia, b.orientation);
+        let iw_inv = inverse_symmetric(
+            iw,
+            Vec3::new(
+                b.inertia.x.max(0.0),
+                b.inertia.y.max(0.0),
+                b.inertia.z.max(0.0),
+            ),
+        );
+        mat3_vec(iw_inv, wa)
+    }
+
+    /// Current limit-violation state of a joint (for the motor pause rule).
+    fn joint_limit_violated(&self, ji: usize) -> bool {
+        let j = &self.joints[ji];
+        let Some([lo, hi]) = j.lim else {
+            return false;
+        };
+        let a = &self.bodies[j.a];
+        let b = &self.bodies[j.b];
+        match j.kind {
+            AvbdJointKind::Revolute => {
+                let angle = wrap_pi(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val);
+                limit_state(angle, lo, hi, LIMIT_SLOP_ANG).is_some()
+            }
+            AvbdJointKind::Prismatic => {
+                let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
+                let pa = a.position + a.orientation * j.la;
+                let pb = b.position + b.orientation * j.lb;
+                let s = (pb - pa).dot(wa) - j.ref_val;
+                limit_state(s, lo, hi, LIMIT_SLOP_LIN).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// Dual update for every pair and joint (official dual core).
@@ -933,29 +1222,118 @@ impl AvbdEngine {
             let pb0 = self.pos0[j.b] + self.rot0[j.b] * j.lb;
             let live = pa - pb;
             let c0v = pa0 - pb0;
-            for k in 0..3 {
-                let c = live[k] - ALPHA * c0v[k];
-                if c.abs() >= C_EPS {
-                    j.lam_l[k] += j.pen_l[k] * c;
-                    j.pen_l[k] = (j.pen_l[k] + BETA * c.abs()).min(PENALTY_MAX);
-                }
-            }
-            if j.angular {
-                let axa = a.orientation * j.ax_a;
-                let axb = b.orientation * j.ax_b;
-                let axa0 = self.rot0[j.a] * j.ax_a;
-                let axb0 = self.rot0[j.b] * j.ax_b;
-                let (t1, t2) = tangent_basis(axa0);
-                for (t, li) in [(t1, 0), (t2, 1)] {
-                    let c = t.dot(axa - axb) - ALPHA * t.dot(axa0 - axb0);
-                    if c.abs() < C_EPS {
-                        continue;
+            // Linear equality rows, same C as the primal per kind.
+            match j.kind {
+                AvbdJointKind::Ball | AvbdJointKind::Revolute | AvbdJointKind::Fixed => {
+                    for k in 0..3 {
+                        let c = live[k] - ALPHA * c0v[k];
+                        if c.abs() >= C_EPS {
+                            j.lam_l[k] += j.pen_l[k] * c;
+                            j.pen_l[k] = (j.pen_l[k] + BETA * c.abs()).min(PENALTY_MAX);
+                        }
                     }
-                    let f = j.pen_a[li] * c + j.lam_a[li];
-                    j.lam_a[li] = f;
-                    j.pen_a[li] = (j.pen_a[li] + BETA * c.abs()).min(PENALTY_MAX);
+                }
+                AvbdJointKind::Prismatic => {
+                    let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
+                    let (u, v) = tangent_basis(wa);
+                    for (ax, li) in [(u, 0), (v, 1)] {
+                        let c = (live - ALPHA * c0v).dot(ax);
+                        if c.abs() >= C_EPS {
+                            j.lam_l[li] += j.pen_l[li] * c;
+                            j.pen_l[li] = (j.pen_l[li] + BETA * c.abs()).min(PENALTY_MAX);
+                        }
+                    }
+                }
+                AvbdJointKind::Distance => {
+                    let len = live.length();
+                    let c = (len - j.ref_val) - ALPHA * (c0v.length() - j.ref_val);
+                    if c.abs() >= C_EPS {
+                        j.lam_l[0] += j.pen_l[0] * c;
+                        j.pen_l[0] = (j.pen_l[0] + BETA * c.abs()).min(PENALTY_MAX);
+                    }
                 }
             }
+            // Angular equality rows.
+            match j.kind {
+                AvbdJointKind::Revolute | AvbdJointKind::Prismatic => {
+                    let axa = a.orientation * j.ax_a;
+                    let axb = b.orientation * j.ax_b;
+                    let axa0 = self.rot0[j.a] * j.ax_a;
+                    let axb0 = self.rot0[j.b] * j.ax_b;
+                    let (t1, t2) = tangent_basis(axa0);
+                    for (t, li) in [(t1, 0), (t2, 1)] {
+                        let c = t.dot(axa - axb) - ALPHA * t.dot(axa0 - axb0);
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = j.pen_a[li] * c + j.lam_a[li];
+                        j.lam_a[li] = f;
+                        j.pen_a[li] = (j.pen_a[li] + BETA * c.abs()).min(PENALTY_MAX);
+                    }
+                }
+                AvbdJointKind::Fixed => {
+                    let diff = quat_diff_vec(a.orientation.conjugate() * b.orientation, j.q_ref);
+                    let diff0 = quat_diff_vec(self.rot0[j.a].conjugate() * self.rot0[j.b], j.q_ref);
+                    for k in 0..3 {
+                        let c = diff[k] - ALPHA * diff0[k];
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        j.lam_a[k] += j.pen_a[k] * c;
+                        j.pen_a[k] = (j.pen_a[k] + BETA * c.abs()).min(PENALTY_MAX);
+                    }
+                }
+                _ => {}
+            }
+            // One-sided limit accumulator (official `acc_limit` discipline:
+            // clamp self-corrects on side flips; zeroed when clear).
+            if let Some([lo, hi]) = j.lim {
+                match j.kind {
+                    AvbdJointKind::Revolute => {
+                        let angle =
+                            wrap_pi(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val);
+                        match limit_state(angle, lo, hi, LIMIT_SLOP_ANG) {
+                            Some(lower) => {
+                                let c = if lower { angle - lo } else { angle - hi };
+                                if c.abs() >= C_EPS {
+                                    // Anti-windup: no memory in deep violation
+                                    // (proportional force only). A wound-up
+                                    // accumulator sustains push after the catch
+                                    // and limit-cycles ±100m; substeps give the
+                                    // official code this implicitly.
+                                    if c.abs() > 0.5 {
+                                        j.acc_lim = 0.0;
+                                    }
+                                    let f = j.pen_a[2] * c + j.acc_lim;
+                                    j.acc_lim = if lower { f.min(0.0) } else { f.max(0.0) };
+                                    j.pen_a[2] = (j.pen_a[2] + BETA * c.abs()).min(PENALTY_MAX);
+                                }
+                            }
+                            None => j.acc_lim = 0.0,
+                        }
+                    }
+                    AvbdJointKind::Prismatic => {
+                        let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
+                        let s = (pb - pa).dot(wa) - j.ref_val;
+                        match limit_state(s, lo, hi, LIMIT_SLOP_LIN) {
+                            Some(lower) => {
+                                let c = if lower { s - lo } else { s - hi };
+                                if c.abs() >= C_EPS {
+                                    if c.abs() > 0.5 {
+                                        j.acc_lim = 0.0;
+                                    }
+                                    let f = j.pen_l[2] * c + j.acc_lim;
+                                    j.acc_lim = if lower { f.min(0.0) } else { f.max(0.0) };
+                                    j.pen_l[2] = (j.pen_l[2] + BETA * c.abs()).min(PENALTY_MAX);
+                                }
+                            }
+                            None => j.acc_lim = 0.0,
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Motors carry no dual state (fresh servo solve every primal).
         }
     }
 }
@@ -993,6 +1371,9 @@ impl PhysicsEngine for AvbdEngine {
         }
         // Contacts, triggers, and pre-step velocities for hit events.
         let trigger_now = self.generate_pairs();
+        // Deadbeat motor impulses (velocity level, before warmstart — like
+        // the official velocity stage).
+        self.motor_impulse();
         for h in 0..n {
             self.pos0[h] = self.bodies[h].position;
             self.rot0[h] = self.bodies[h].orientation;
@@ -1019,15 +1400,10 @@ impl PhysicsEngine for AvbdEngine {
             }
         }
         for j in &mut self.joints {
-            j.lam_l[0] *= ALPHA * GAMMA;
-            j.lam_l[1] *= ALPHA * GAMMA;
-            j.lam_l[2] *= ALPHA * GAMMA;
-            j.lam_a[0] *= ALPHA * GAMMA;
-            j.lam_a[1] *= ALPHA * GAMMA;
             for k in 0..3 {
+                j.lam_l[k] *= ALPHA * GAMMA;
+                j.lam_a[k] *= ALPHA * GAMMA;
                 j.pen_l[k] = (j.pen_l[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
-            }
-            for k in 0..2 {
                 j.pen_a[k] = (j.pen_a[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
             }
         }
@@ -1143,11 +1519,34 @@ impl PhysicsEngine for AvbdEngine {
         if body_a >= self.bodies.len() || body_b >= self.bodies.len() || body_a == body_b {
             return None;
         }
-        let (la, lb, ax_a, ax_b, angular) = match kind {
+        let ba = &self.bodies[body_a];
+        let bb = &self.bodies[body_b];
+        let mut joint = AvbdJoint {
+            a: body_a,
+            b: body_b,
+            la: Vec3::ZERO,
+            lb: Vec3::ZERO,
+            ax_a: Vec3::X,
+            ax_b: Vec3::X,
+            kind: AvbdJointKind::Ball,
+            ref_val: 0.0,
+            q_ref: Quat::IDENTITY,
+            lim: None,
+            mot: None,
+            acc_lim: 0.0,
+            lam_l: [0.0; 3],
+            lam_a: [0.0; 3],
+            pen_l: [JOINT_PENALTY_INIT; 3],
+            pen_a: [JOINT_PENALTY_INIT; 3],
+        };
+        match kind {
             JointKind::Ball {
                 local_anchor_a,
                 local_anchor_b,
-            } => (local_anchor_a, local_anchor_b, Vec3::X, Vec3::X, false),
+            } => {
+                joint.la = local_anchor_a;
+                joint.lb = local_anchor_b;
+            }
             JointKind::Revolute {
                 local_anchor_a,
                 local_anchor_b,
@@ -1156,40 +1555,64 @@ impl PhysicsEngine for AvbdEngine {
                 limit,
                 motor,
             } => {
-                if limit.is_some() || motor.is_some() {
-                    return None;
-                }
-                let mut ax_a = local_axis_a;
-                let mut ax_b = local_axis_b;
-                if ax_a.length_squared() < 1e-12 || ax_b.length_squared() < 1e-12 {
-                    return None;
-                }
-                ax_a = ax_a.normalize();
-                ax_b = ax_b.normalize();
-                (local_anchor_a, local_anchor_b, ax_a, ax_b, true)
+                let (ax_a, ax_b) = norm_axes(local_axis_a, local_axis_b)?;
+                joint.kind = AvbdJointKind::Revolute;
+                joint.la = local_anchor_a;
+                joint.lb = local_anchor_b;
+                joint.ax_a = ax_a;
+                joint.ax_b = ax_b;
+                joint.ref_val = hinge_twist(ba.orientation, bb.orientation, ax_a);
+                joint.lim = limit.map(|l| [l.min, l.max]);
+                joint.mot = motor.map(|m| [m.target_speed, m.max_torque]);
             }
-            // M1 gap: Prismatic/Fixed/Distance/Wheel/Gear/SixDof need their
-            // own row models (M2, intra-engine solver interface).
-            JointKind::Prismatic { .. }
-            | JointKind::Fixed { .. }
-            | JointKind::Distance { .. }
-            | JointKind::Wheel { .. }
-            | JointKind::Gear { .. }
-            | JointKind::SixDof { .. } => return None,
+            JointKind::Prismatic {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a,
+                local_axis_b,
+                limit,
+                motor,
+            } => {
+                let (ax_a, ax_b) = norm_axes(local_axis_a, local_axis_b)?;
+                joint.kind = AvbdJointKind::Prismatic;
+                joint.la = local_anchor_a;
+                joint.lb = local_anchor_b;
+                joint.ax_a = ax_a;
+                joint.ax_b = ax_b;
+                let wa0 = (ba.orientation * ax_a).normalize_or(Vec3::Z);
+                let pa0 = ba.position + ba.orientation * local_anchor_a;
+                let pb0 = bb.position + bb.orientation * local_anchor_b;
+                joint.ref_val = (pb0 - pa0).dot(wa0);
+                joint.lim = limit.map(|l| [l.min, l.max]);
+                joint.mot = motor.map(|m| [m.target_speed, m.max_force]);
+            }
+            JointKind::Fixed {
+                local_anchor_a,
+                local_anchor_b,
+            } => {
+                joint.kind = AvbdJointKind::Fixed;
+                joint.la = local_anchor_a;
+                joint.lb = local_anchor_b;
+                joint.q_ref = ba.orientation.conjugate() * bb.orientation;
+            }
+            JointKind::Distance {
+                local_anchor_a,
+                local_anchor_b,
+            } => {
+                joint.kind = AvbdJointKind::Distance;
+                joint.la = local_anchor_a;
+                joint.lb = local_anchor_b;
+                let pa0 = ba.position + ba.orientation * local_anchor_a;
+                let pb0 = bb.position + bb.orientation * local_anchor_b;
+                joint.ref_val = (pa0 - pb0).length();
+            }
+            // M2: Wheel (spring suspension), Gear (multi-body coordinates),
+            // SixDof (per-axis config) need their own row models.
+            JointKind::Wheel { .. } | JointKind::Gear { .. } | JointKind::SixDof { .. } => {
+                return None;
+            }
         };
-        self.joints.push(AvbdJoint {
-            a: body_a,
-            b: body_b,
-            la,
-            lb,
-            ax_a,
-            ax_b,
-            angular,
-            lam_l: [0.0; 3],
-            lam_a: [0.0; 2],
-            pen_l: [JOINT_PENALTY_INIT; 3],
-            pen_a: [JOINT_PENALTY_INIT; 2],
-        });
+        self.joints.push(joint);
         Some(self.joints.len() - 1)
     }
 
