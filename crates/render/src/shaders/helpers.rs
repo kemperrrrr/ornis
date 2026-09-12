@@ -273,8 +273,13 @@ fn transmission_btdf(
 #[ornis_macros::wgsl_fn]
 fn octahedral_decode(p: glam::Vec2) -> glam::Vec3 {
     let mut n = Vec3::new(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
+    // Unfold the lower hemisphere: each component shifts back by its own
+    // sign times `t` (the old code multiplied by the other component, so
+    // the whole z<0 hemisphere decoded up to ~69° off).
     let t = max(-n.z, 0.0);
-    let offset = select(-n.yx, n.yx, n.xy >= Vec2::new(0.0)) * t;
+    let neg = Vec2::new(0.0 - t, 0.0 - t);
+    let pos = Vec2::new(t, t);
+    let offset = select(pos, neg, n.xy >= Vec2::new(0.0));
     n.x = n.x + offset.x;
     n.y = n.y + offset.y;
     return normalize(n);

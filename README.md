@@ -323,6 +323,7 @@ reload сцены уже есть: editor-world следит за mtime `editor/
   - Бюджеты: `max_objects=256`, `max_materials=64`.
 - **Материалы**: `OpenPBRMaterial` (20 vec4-параметра, все BSDF) из `ornis_core`, константа `OPENPBR_MATERIAL_SIZE`.
 - **`RenderBackend`** (`render_backend.rs`) — трейт + фабрика `create_render_backend` (плагинная точка смены бэкенда).
+- **Корректность света (2026-09-12)**: `ggx_ndf_aniso` нормирован по Хейтцу (был завышен ~10⁴× — швы-терминаторы на гладких сферах), `octahedral_decode` чинен для z<0 (было до ~69°); golden-проба перебазирована (`render_probe`, Apple M1).
 - **`scene.rs`** — загрузка сцены, **`mesh.rs`** (`Mesh`/`Vertex`), **`shaders/`** (ноль рукописного WGSL: `*_generated.rs` из `#[stage]`/`#[gpu_pipeline]` + `helpers.rs`/`math.rs`), **`transform.rs`**, **`composite.rs`**.
 
 ### A2. Физический движок (`crates/physics`)

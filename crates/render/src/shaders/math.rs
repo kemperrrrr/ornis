@@ -77,10 +77,16 @@ fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
     a2 / (PI * denom * denom)
 }
 
-/// Anisotropic GGX normal distribution (Anisotropic Gloss, OpenPBR spec).
+/// Anisotropic GGX normal distribution (Heitz 2014; OpenPBR spec):
+/// `alpha_u`/`alpha_v` are the true roughness-squared axes (as returned
+/// by `openpbr_anisotropy`), used once — not squared again — with the
+/// `NoH²` term. This form integrates to 1 over the hemisphere; the
+/// previous spelling dropped `NoH²` and scaled by `1/(αu²·αv²)`,
+/// inflating specular energy ~10⁴× at roughness 0.1 and stamping hard
+/// terminator seams on smooth materials.
 #[kernel]
 fn ggx_ndf_aniso(
-    _NoH: f32,
+    NoH: f32,
     H: glam::Vec3,
     T: glam::Vec3,
     B: glam::Vec3,
@@ -89,10 +95,8 @@ fn ggx_ndf_aniso(
 ) -> f32 {
     let Hu = H.dot(T);
     let Hv = H.dot(B);
-    let a2u = alpha_u * alpha_u;
-    let a2v = alpha_v * alpha_v;
-    let denom = 1.0 + (Hu * Hu) / a2u + (Hv * Hv) / a2v;
-    1.0 / (PI * a2u * a2v * denom * denom)
+    let denom = (Hu * Hu) / (alpha_u * alpha_u) + (Hv * Hv) / (alpha_v * alpha_v) + NoH * NoH;
+    1.0 / (PI * alpha_u * alpha_v * denom * denom)
 }
 
 /// Map (roughness, anisotropy) to the alpha_u/alpha_v pair used by the
@@ -275,7 +279,7 @@ fn thin_film_modulation(
             / glam::Vec3::splat(1.0 - r0 * r0)
 }
 
-/// Octahedral mapping of a unit vector to [0,1]^2 — compact normal storage.
+/// Octahedral mapping of a unit vector to [-1,1]^2 — compact normal storage.
 #[kernel]
 fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
     let p = n.xy() / (n.x.abs() + n.y.abs() + n.z.abs());
@@ -336,6 +340,31 @@ mod tests {
     }
 
     #[test]
+    fn ggx_ndf_aniso_peak_matches_closed_form() {
+        // Peak (H == N) is exactly 1/(π·αu·αv); the old spelling
+        // (dropped Noh², 1/(αu²·αv²) scale) returned ~625× this at α=0.04.
+        let d = ggx_ndf_aniso::eval(1.0, glam::Vec3::Z, glam::Vec3::X, glam::Vec3::Y, 0.04, 0.04);
+        let expected = 1.0 / (PI * 0.04 * 0.04);
+        assert!(
+            (d - expected).abs() / expected < 1e-4,
+            "d={d} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn ggx_ndf_aniso_tilted_matches_reference() {
+        // 45° tilt in the tangent plane pins both the Noh² term and the
+        // single αu·αv scale (old value 0.317 vs correct 0.00203).
+        let h = glam::Vec3::new(
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        );
+        let d = ggx_ndf_aniso::eval(h.z, h, glam::Vec3::X, glam::Vec3::Y, 0.04, 0.04);
+        assert!((d - 0.00203).abs() / 0.00203 < 0.01, "d={d}");
+    }
+
+    #[test]
     fn smith_ggx_zero_to_one() {
         let result = smith_ggx_correlated::eval(1.0, 1.0, 0.5);
         assert!(result > 0.0 && result <= 1.0);
@@ -377,6 +406,30 @@ mod tests {
                 (n[i] - dec[i]).abs() < 0.01,
                 "mismatch at {i}: {n} vs {dec}"
             );
+        }
+    }
+
+    #[test]
+    fn octahedral_decode_covers_folded_hemisphere() {
+        // The z<0 hemisphere folds in the encoding; the decode must
+        // unfold it (regression: the old offset math erred by up to
+        // ~69° here, shading night-side normals wrong).
+        let cases = [
+            glam::Vec3::new(0.577, 0.577, 0.577),
+            glam::Vec3::new(0.124, 0.509, -0.852),
+            glam::Vec3::new(-0.6, 0.3, -0.742),
+            glam::Vec3::new(0.0, 0.0, -1.0),
+            glam::Vec3::new(0.707, -0.707, -0.001),
+            glam::Vec3::new(1.0, 0.0, 0.0),
+            glam::Vec3::new(0.0, 1.0, 0.0),
+            glam::Vec3::new(0.0, 0.0, 1.0),
+        ];
+        for n in cases {
+            let n = n.normalize();
+            let enc = octahedral_encode::eval(n);
+            let dec = crate::shaders::octahedral_decode_rust(enc);
+            let err_deg = n.dot(dec).clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(err_deg < 1.0, "n={n} dec={dec} err={err_deg}°");
         }
     }
 

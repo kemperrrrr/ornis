@@ -535,13 +535,8 @@ pub fn pbr_fragment() -> String {
 pub fn octahedral_decode_rust(p: glam::Vec2) -> glam::Vec3 {
     let mut n = glam::Vec3::new(p.x, p.y, 1.0 - p.x.abs() - p.y.abs());
     let t = (-n.z).max(0.0);
-    let offset = if n.x >= 0.0 {
-        glam::Vec2::new(n.y, n.x)
-    } else {
-        -glam::Vec2::new(n.y, n.x)
-    } * t;
-    n.x += offset.x;
-    n.y += offset.y;
+    n.x += if n.x >= 0.0 { -t } else { t };
+    n.y += if n.y >= 0.0 { -t } else { t };
     n.normalize()
 }
 
