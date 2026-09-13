@@ -574,10 +574,12 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   линеаризации дестабилизируют рычаги), geometric stiffness джойнтов (без
   него spin-up через длинные рычаги), stick-gated anchor refresh, персистентные
   нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
- rolling multi-point contact), Gear/SixDof/fracture, CCD/substeps/
+ rolling multi-point contact), fracture, CCD/substeps/
  sleep/islands, deep-catch пенетрация ~3см на ударах 5+ м/с. Закрыто после
   M1: Prismatic/Fixed/Distance + limits/motors, Wheel (пружина подвески +
-  spin-мотор, rigid-degrade), анизотропный/rolling/torsion friction,
+  spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к Box2D чем
+  velocity-only у builtin), SixDof (per-axis free/locked/limited),
+  анизотропный/rolling/torsion friction,
   exact-exp quat. Урок: pre-touch полоса пар (точки до `GEN_MARGIN`)
   load-bearing для быстрых ударов (frozen-anchor C + ramp = projection
   catch); гейтить создание/огонь по касанию нельзя (туннель + регрессии).

@@ -183,7 +183,9 @@ fn avbd_unsupported_joints_return_none() {
     let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let a = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
     let b = physics.add_body(RigidBody::new_sphere(Vec3::X, 0.5, 1.0));
-    // Gear/SixDof row models live in M2 (Wheel is implemented below).
+    // Gear/SixDof row models are implemented (see gear/sixdof tests below).
+    // Still refused: self-joints, gears with dangling references or
+    // non-hinge kinds, non-finite ratios (builtin validation parity).
     assert!(
         physics
             .add_joint(
@@ -202,28 +204,51 @@ fn avbd_unsupported_joints_return_none() {
                 b,
                 b,
                 JointKind::Gear {
-                    joint_a: 0,
-                    joint_b: 0,
+                    joint_a: 7,
+                    joint_b: 8,
                     ratio: 2.0
                 }
             )
             .is_none(),
-        "gear must be refused (M2 gap)"
+        "gear with dangling references must be refused"
     );
     assert!(
         physics
             .add_joint(
                 a,
                 b,
-                JointKind::SixDof {
-                    local_anchor_a: Vec3::ZERO,
-                    local_anchor_b: Vec3::ZERO,
-                    linear: [AxisConfig::Locked; 3],
-                    angular: [AxisConfig::Free; 3],
+                JointKind::Gear {
+                    joint_a: 0,
+                    joint_b: 1,
+                    ratio: f32::NAN,
                 },
             )
             .is_none(),
-        "sixdof must be refused (M2 gap)"
+        "gear with non-finite ratio must be refused"
+    );
+    let ball = physics
+        .add_joint(
+            a,
+            b,
+            JointKind::Ball {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::ZERO,
+            },
+        )
+        .expect("valid ball");
+    assert!(
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Gear {
+                    joint_a: ball,
+                    joint_b: ball,
+                    ratio: 1.0,
+                },
+            )
+            .is_none(),
+        "gear over non-hinge joints must be refused"
     );
 }
 
@@ -869,4 +894,182 @@ fn avbd_wheel_degenerate_axle_falls_back() {
             "no NaN after degenerate assembly"
         );
     }
+}
+
+#[test]
+fn avbd_gear_ratio_couples_hinges() {
+    // Mirror of the builtin scene: motor-driven hinge A coupled 2:1 to a
+    // free hinge B. AVBD solves the gear at position level (Box2D-style),
+    // unlike the builtin velocity-only pass.
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    let ground = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 0.0));
+    let arm_a = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 0.6, 0.0),
+        Vec3::new(0.1, 0.6, 0.1),
+        1.0,
+    ));
+    let arm_b = physics.add_body(RigidBody::new_box(
+        Vec3::new(1.0, 0.6, 0.0),
+        Vec3::new(0.1, 0.6, 0.1),
+        1.0,
+    ));
+    let ja = physics
+        .add_joint(
+            ground,
+            arm_a,
+            JointKind::Revolute {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::new(0.0, -0.6, 0.0),
+                local_axis_a: Vec3::Z,
+                local_axis_b: Vec3::Z,
+                limit: None,
+                motor: Some(RevoluteMotor {
+                    target_speed: 1.5,
+                    max_torque: 20.0,
+                }),
+            },
+        )
+        .expect("valid joint");
+    let jb = physics
+        .add_joint(
+            ground,
+            arm_b,
+            JointKind::Revolute {
+                local_anchor_a: Vec3::new(1.0, 0.0, 0.0),
+                local_anchor_b: Vec3::new(0.0, -0.6, 0.0),
+                local_axis_a: Vec3::Z,
+                local_axis_b: Vec3::Z,
+                limit: None,
+                motor: None,
+            },
+        )
+        .expect("valid joint");
+    physics
+        .add_joint(
+            arm_a,
+            arm_b,
+            JointKind::Gear {
+                joint_a: ja,
+                joint_b: jb,
+                ratio: 2.0,
+            },
+        )
+        .expect("valid gear");
+    for _ in 0..180 {
+        physics.step(DT);
+    }
+    let qa = physics.get_body(arm_a).unwrap().orientation;
+    let qb = physics.get_body(arm_b).unwrap().orientation;
+    let ta = z_twist(qa);
+    let tb = z_twist(qb);
+    assert!(ta.abs() > 0.5, "motor must turn hinge A, got twist {ta}");
+    // Wrap-aware: the deadbeat motor spins A past a full turn (4.7 rad
+    // reads back wrapped), so the constraint residual must wrap too.
+    let wrap = |x: f32| {
+        (x + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    };
+    let c = wrap(ta + 2.0 * tb).abs();
+    assert!(
+        c < 0.35 * ta.abs().max(1.0),
+        "gear must hold a + 2b = 0, got a={ta} b={tb}"
+    );
+}
+
+#[test]
+fn avbd_sixdof_all_locked_behaves_like_fixed() {
+    // Mirror of the builtin scene: all axes locked welds the pair.
+    let locked = [AxisConfig::Locked; 3];
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+    let b = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 1.4, 0.0),
+        Vec3::splat(0.5),
+        1.0,
+    ));
+    physics
+        .add_joint(
+            a,
+            b,
+            JointKind::SixDof {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::ZERO,
+                linear: locked,
+                angular: locked,
+            },
+        )
+        .expect("valid joint");
+    for _ in 0..180 {
+        physics.step(DT);
+    }
+    let (pa, pb) = (physics.get_body(a).unwrap(), physics.get_body(b).unwrap());
+    let gap = (pb.position - pa.position).y;
+    assert!(
+        (gap - 1.4).abs() < 0.05,
+        "all-locked six-DOF must weld, got gap {gap}"
+    );
+}
+
+#[test]
+fn avbd_sixdof_free_axis_slides_but_locked_holds() {
+    // Mirror of the builtin scene: X slides under impulse, Y holds.
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+    let b = physics.add_body(RigidBody::new_box(Vec3::X, Vec3::splat(0.5), 1.0));
+    physics
+        .add_joint(
+            a,
+            b,
+            JointKind::SixDof {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::ZERO,
+                linear: [AxisConfig::Free, AxisConfig::Locked, AxisConfig::Locked],
+                angular: [AxisConfig::Locked; 3],
+            },
+        )
+        .expect("valid joint");
+    physics.get_body_mut(b).unwrap().velocity = Vec3::new(3.0, 1.0, 0.0);
+    for _ in 0..60 {
+        physics.step(DT);
+    }
+    let (pa, pb) = (physics.get_body(a).unwrap(), physics.get_body(b).unwrap());
+    let d = pb.position - pa.position;
+    assert!(d.x > 1.5, "free X must slide, got {d:?}");
+    assert!(d.y.abs() < 0.08, "locked Y must hold, got {d:?}");
+}
+
+#[test]
+fn avbd_sixdof_angular_limit_blocks_spin() {
+    // Mirror of the builtin scene: fast Z spin clamps at the window.
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0));
+    let b = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.4), 1.0));
+    physics
+        .add_joint(
+            a,
+            b,
+            JointKind::SixDof {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::ZERO,
+                linear: [AxisConfig::Locked; 3],
+                angular: [
+                    AxisConfig::Locked,
+                    AxisConfig::Locked,
+                    AxisConfig::Limited {
+                        min: -0.2,
+                        max: 0.2,
+                    },
+                ],
+            },
+        )
+        .expect("valid joint");
+    physics.get_body_mut(b).unwrap().angular_velocity = Vec3::new(0.0, 0.0, 8.0);
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    let qb = physics.get_body(b).unwrap().orientation;
+    let tw = z_twist(qb);
+    assert!(
+        tw.abs() < 0.4,
+        "Z twist must clamp near the 0.2 window, got {tw}"
+    );
 }

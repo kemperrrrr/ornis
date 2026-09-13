@@ -22,7 +22,7 @@ pub(crate) fn hinge_twist(qa: Quat, qb: Quat, axis_a: Vec3) -> f32 {
 /// Twist component of a relative rotation about a local axis (rad, wrapped
 /// to [-PI, PI]): the shared core of [`hinge_twist`], also used to read the
 /// assembly twist out of a stored reference orientation.
-fn quat_twist(q: Quat, axis: Vec3) -> f32 {
+pub(crate) fn quat_twist(q: Quat, axis: Vec3) -> f32 {
     let t = 2.0 * q.xyz().dot(axis).atan2(q.w);
     (t + PI).rem_euclid(TAU) - PI
 }

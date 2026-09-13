@@ -40,13 +40,18 @@
 //!   [`crate::joint::JointKind::Prismatic`] (2 perp + 2 angular rows, same
 //!   limit/motor drive along the slide axis),
 //!   [`crate::joint::JointKind::Fixed`] (weld: ball rows + locked assembly
-//!   rotation), [`crate::joint::JointKind::Distance`] (single rod row) and
+//!   rotation), [`crate::joint::JointKind::Distance`] (single rod row),
 //!   [`crate::joint::JointKind::Wheel`] (2 perp rows + 2 angular rows about
 //!   the axle (spin about it is free) + a position-level suspension spring
 //!   from Box2D frequency/damping (fixed penalty, sag holds the load;
 //!   zero frequency degrades to a rigid slide row); deadbeat spin motor
-//!   about the axle).
-//!   Gear/SixDof return `None`. Fracture is not implemented.
+//!   about the axle), [`crate::joint::JointKind::Gear`] (position-level
+//!   equality `coord_a + ratio*coord_b = const` over hinge/slide
+//!   coordinates, closer to Box2D than the builtin velocity-only pass)
+//!   and [`crate::joint::JointKind::SixDof`] (per-axis free/locked/limited
+//!   rows in body A's live assembly frame, mirroring the builtin position
+//!   pass; limited forces in dual-owned per-axis slots).
+//!   Fracture is not implemented.
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
 //!   fast orbital motion through long levers (all bounded, tested).
@@ -80,9 +85,9 @@ use std::f32::consts::{PI, TAU};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
-use crate::engine::joints::hinge_twist;
+use crate::engine::joints::{hinge_twist, quat_twist};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
-use crate::joint::{JointHandle, JointKind};
+use crate::joint::{AxisConfig, JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit, tangent_basis};
 use crate::shape::Shape;
 use crate::trigger::{
@@ -508,7 +513,27 @@ enum AvbdJointKind {
     Fixed,
     Distance,
     Wheel,
+    Gear,
+    SixDof,
 }
+
+/// One gear side: referenced bodies, world axis, anchor levers and the
+/// live coordinate. `angular` selects torque (revolute) vs force
+/// (prismatic) gradients (mirrors the builtin `GearSideData`, minus the
+/// velocity terms AVBD doesn't need — BDF1 carries velocity).
+struct GearSide {
+    a: usize,
+    b: usize,
+    angular: bool,
+    axis: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+    coord: f32,
+}
+
+/// Assembly-frame axes for SixDof rows (body A's X/Y/Z, world-projected
+/// per solve like the builtin `FRAME`).
+const SIXDOF_FRAME: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 
 /// Equality-constraint joint (ball anchor rows + optional hinge axis rows).
 /// Per-axis penalties (official float3s): sharing one penalty across rows
@@ -548,6 +573,23 @@ struct AvbdJoint {
     /// the hinge window is entered ballistically, not held under load, so
     /// the accumulator's faster bite wins there).
     lim_dual: f32,
+    /// Gear references: indices into `joints` of the two coordinated
+    /// (revolute/prismatic) joints; `ref_val` holds the assembly constant.
+    gb: [usize; 2],
+    /// Gear transmission ratio (`coord_a + ratio * coord_b = const`).
+    gratio: f32,
+    /// SixDof per-axis config in body A's assembly frame (linear X/Y/Z).
+    six_lin: [AxisConfig; 3],
+    /// SixDof per-axis config in body A's assembly frame (angular X/Y/Z).
+    six_ang: [AxisConfig; 3],
+    /// SixDof/Fixed assembly anchor separation in A's frame
+    /// (`qa^-1 * ((pb+rb)-(pa+ra))` at creation); locked linear axes
+    /// measure drift relative to this.
+    dref: Vec3,
+    /// SixDof one-sided limit forces, dual-owned (slots 0..3 linear X/Y/Z,
+    /// 3..6 angular): warmstarted by the primal, committed by the dual —
+    /// same discipline as `lim_dual`, one slot per limited axis.
+    sacc: [f32; 6],
     lam_l: [f32; 3],
     lam_a: [f32; 3],
     pen_l: [f32; 3],
@@ -1135,6 +1177,91 @@ impl AvbdEngine {
                         fl = dir * f;
                     }
                 }
+                AvbdJointKind::Gear => {
+                    // Position-level gear row (closer to Box2D than the
+                    // builtin velocity-only pass): C = ca + ratio*cb - const
+                    // with per-body side gradients. Prismatic-side (linear)
+                    // contributions stamp here; revolute-side (angular) ones
+                    // in the angular match. Shared force/penalty on
+                    // lam_l[0]/pen_l[0] (distance-row discipline).
+                    if let Some((sa, sb)) = self.gear_sides(&j) {
+                        let c = sa.coord + j.gratio * sb.coord - j.ref_val;
+                        if c.abs() >= C_EPS {
+                            let f = j.pen_l[0] * c + j.lam_l[0];
+                            for (side, coef) in [(&sa, 1.0), (&sb, j.gratio)] {
+                                if side.angular {
+                                    continue;
+                                }
+                                if h != side.a && h != side.b {
+                                    continue;
+                                }
+                                let lsign = if h == side.a { -1.0 } else { 1.0 };
+                                let r_side = if h == side.a { side.ra } else { side.rb };
+                                let pen_c = j.pen_l[0] * coef * coef;
+                                let f_c = f * coef;
+                                Self::stamp_row(
+                                    &mut lhs, &mut rhs, side.axis, pen_c, f_c, r_side, lsign,
+                                );
+                            }
+                        }
+                    }
+                }
+                AvbdJointKind::SixDof => {
+                    // Per-axis rows in body A's live assembly frame
+                    // (mirrors the builtin position pass): locked linear =
+                    // drift from the assembly delta, limited linear =
+                    // one-sided raw separation (no ref subtraction, like the
+                    // builtin), free = nothing. Limited forces live in
+                    // `sacc` (dual-owned, `lim_dual` discipline).
+                    for (i, e) in SIXDOF_FRAME.iter().enumerate() {
+                        let dir = (a.orientation * *e).normalize_or(*e);
+                        match j.six_lin[i] {
+                            AxisConfig::Free => {}
+                            AxisConfig::Locked => {
+                                let evec = (pb - pa) - a.orientation * j.dref;
+                                let c = evec.dot(dir);
+                                if c.abs() < C_EPS {
+                                    continue;
+                                }
+                                let f = j.pen_l[i] * c + j.lam_l[i];
+                                let r_side = if is_a {
+                                    a.orientation * j.la
+                                } else {
+                                    b.orientation * j.lb
+                                };
+                                // B-minus-A measure: gradients flip vs ball rows.
+                                let lsign = if is_a { -1.0 } else { 1.0 };
+                                Self::stamp_row(
+                                    &mut lhs, &mut rhs, dir, j.pen_l[i], f, r_side, lsign,
+                                );
+                            }
+                            AxisConfig::Limited { min, max } => {
+                                let sep = (pb - pa).dot(dir);
+                                if let Some(lower) = limit_state(sep, min, max, LIMIT_SLOP_LIN) {
+                                    let c = if lower { sep - min } else { sep - max };
+                                    if c.abs() < C_EPS {
+                                        continue;
+                                    }
+                                    let f_raw = j.pen_l[i] * c + j.sacc[i];
+                                    let f = if lower {
+                                        f_raw.min(0.0)
+                                    } else {
+                                        f_raw.max(0.0)
+                                    };
+                                    let r_side = if is_a {
+                                        a.orientation * j.la
+                                    } else {
+                                        b.orientation * j.lb
+                                    };
+                                    let lsign = if is_a { -1.0 } else { 1.0 };
+                                    Self::stamp_row(
+                                        &mut lhs, &mut rhs, dir, j.pen_l[i], f, r_side, lsign,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 AvbdJointKind::Wheel => {
                     // 2 perp equality rows (suspension axis `wa` is the free
                     // slide direction) + the spring row along `wa`.
@@ -1246,6 +1373,96 @@ impl AvbdEngine {
                         rhs[3] += f * g_ang.x;
                         rhs[4] += f * g_ang.y;
                         rhs[5] += f * g_ang.z;
+                    }
+                }
+                AvbdJointKind::Gear => {
+                    // Revolute-side (angular) contributions of the shared
+                    // gear force (prismatic sides stamp in the linear
+                    // match). Gradient of a hinge twist: -axis on side A,
+                    // +axis on side B.
+                    if let Some((sa, sb)) = self.gear_sides(&j) {
+                        let c = sa.coord + j.gratio * sb.coord - j.ref_val;
+                        if c.abs() >= C_EPS {
+                            let f = j.pen_l[0] * c + j.lam_l[0];
+                            for (side, coef) in [(&sa, 1.0), (&sb, j.gratio)] {
+                                if !side.angular {
+                                    continue;
+                                }
+                                if h != side.a && h != side.b {
+                                    continue;
+                                }
+                                let g = if h == side.a { -side.axis } else { side.axis };
+                                let pen_c = j.pen_l[0] * coef * coef;
+                                let f_c = f * coef;
+                                let o = outer(g, g);
+                                for x in 0..3 {
+                                    for y in 0..3 {
+                                        lhs[3 + x][3 + y] += pen_c * o[x][y];
+                                    }
+                                }
+                                rhs[3] += f_c * g.x;
+                                rhs[4] += f_c * g.y;
+                                rhs[5] += f_c * g.z;
+                            }
+                        }
+                    }
+                }
+                AvbdJointKind::SixDof => {
+                    // Locked angular = per-axis orientation lock about the
+                    // assembly-frame axis; limited angular = one-sided
+                    // twist window (travel about the LOCAL frame axis minus
+                    // the reference twist, like the builtin). Forces for
+                    // limited axes live in `sacc[3..6]`.
+                    let qrel = a.orientation.conjugate() * b.orientation;
+                    let diff = quat_diff_vec(qrel, j.q_ref);
+                    for (i, e) in SIXDOF_FRAME.iter().enumerate() {
+                        let dir = (a.orientation * *e).normalize_or(*e);
+                        match j.six_ang[i] {
+                            AxisConfig::Free => {}
+                            AxisConfig::Locked => {
+                                let c = diff.dot(dir);
+                                if c.abs() < C_EPS {
+                                    continue;
+                                }
+                                let f = j.pen_a[i] * c + j.lam_a[i];
+                                let g = if is_a { -dir } else { dir };
+                                let o = outer(g, g);
+                                for x in 0..3 {
+                                    for y in 0..3 {
+                                        lhs[3 + x][3 + y] += j.pen_a[i] * o[x][y];
+                                    }
+                                }
+                                rhs[3] += f * g.x;
+                                rhs[4] += f * g.y;
+                                rhs[5] += f * g.z;
+                            }
+                            AxisConfig::Limited { min, max } => {
+                                let travel = hinge_twist(a.orientation, b.orientation, *e)
+                                    - quat_twist(j.q_ref, *e);
+                                if let Some(lower) = limit_state(travel, min, max, LIMIT_SLOP_ANG) {
+                                    let c = if lower { travel - min } else { travel - max };
+                                    if c.abs() < C_EPS {
+                                        continue;
+                                    }
+                                    let f_raw = j.pen_a[i] * c + j.sacc[3 + i];
+                                    let f = if lower {
+                                        f_raw.min(0.0)
+                                    } else {
+                                        f_raw.max(0.0)
+                                    };
+                                    let g = if is_a { -dir } else { dir };
+                                    let o = outer(g, g);
+                                    for x in 0..3 {
+                                        for y in 0..3 {
+                                            lhs[3 + x][3 + y] += j.pen_a[i] * o[x][y];
+                                        }
+                                    }
+                                    rhs[3] += f * g.x;
+                                    rhs[4] += f * g.y;
+                                    rhs[5] += f * g.z;
+                                }
+                            }
+                        }
                     }
                 }
                 AvbdJointKind::Wheel => {
@@ -1384,6 +1601,61 @@ impl AvbdEngine {
         let pb = self.pos0[p.b] + self.rot0[p.b] * pt.rb;
         let _ = (a, b);
         p.n.dot(pa - pb) + MARGIN
+    }
+
+    /// Gear-compatible coordinate of an AVBD joint, measured from its
+    /// assembly reference (mirrors the builtin `joint_coordinate`):
+    /// revolute twist minus `ref_val`, prismatic slide minus `ref_val`.
+    /// `None` for every other kind.
+    fn joint_coordinate(j: &AvbdJoint, a: &RigidBody, b: &RigidBody) -> Option<f32> {
+        match j.kind {
+            AvbdJointKind::Revolute => {
+                Some(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val)
+            }
+            AvbdJointKind::Prismatic => {
+                let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
+                let pa = a.position + a.orientation * j.la;
+                let pb = b.position + b.orientation * j.lb;
+                Some((pb - pa).dot(wa) - j.ref_val)
+            }
+            _ => None,
+        }
+    }
+
+    /// Live dynamics of both gear sides for a gear joint (`None` on stale
+    /// references or non-hinge/slide kinds — gears go quiet, never panic,
+    /// like the builtin validation).
+    fn gear_sides(&self, j: &AvbdJoint) -> Option<(GearSide, GearSide)> {
+        let rj = [self.joints.get(j.gb[0])?, self.joints.get(j.gb[1])?];
+        let mut sides = Vec::with_capacity(2);
+        for r in rj {
+            let (ba, bb) = (&self.bodies[r.a], &self.bodies[r.b]);
+            let coord = Self::joint_coordinate(r, ba, bb)?;
+            let (angular, axis, ra, rb) = match r.kind {
+                AvbdJointKind::Revolute => {
+                    let wa = (ba.orientation * r.ax_a).normalize_or(Vec3::Z);
+                    (true, wa, Vec3::ZERO, Vec3::ZERO)
+                }
+                AvbdJointKind::Prismatic => {
+                    let wa = (ba.orientation * r.ax_a).normalize_or(Vec3::Z);
+                    let ra = ba.orientation * r.la;
+                    let rb = bb.orientation * r.lb;
+                    (false, wa, ra, rb)
+                }
+                _ => return None,
+            };
+            sides.push(GearSide {
+                a: r.a,
+                b: r.b,
+                angular,
+                axis,
+                ra,
+                rb,
+                coord,
+            });
+        }
+        let [sa, sb] = [sides.remove(0), sides.pop()?];
+        Some((sa, sb))
     }
 
     /// Deadbeat motor impulses (official impulse semantics): the exact
@@ -1647,6 +1919,43 @@ impl AvbdEngine {
                         j.pen_l[0] = (j.pen_l[0] + BETA * c.abs()).min(PENALTY_MAX);
                     }
                 }
+                AvbdJointKind::SixDof => {
+                    // Same C as the primal per axis: locked accumulate,
+                    // limited commit into the dual-owned `sacc` (zeroed
+                    // when clear), penalties ramp capped.
+                    for (i, e) in SIXDOF_FRAME.iter().enumerate() {
+                        let dir = (a.orientation * *e).normalize_or(*e);
+                        match j.six_lin[i] {
+                            AxisConfig::Free => {}
+                            AxisConfig::Locked => {
+                                let evec = (pb - pa) - a.orientation * j.dref;
+                                let c = evec.dot(dir);
+                                if c.abs() >= C_EPS {
+                                    j.lam_l[i] += j.pen_l[i] * c;
+                                    j.pen_l[i] = (j.pen_l[i] + BETA * c.abs()).min(PENALTY_MAX);
+                                }
+                            }
+                            AxisConfig::Limited { min, max } => {
+                                let sep = (pb - pa).dot(dir);
+                                if let Some(lower) = limit_state(sep, min, max, LIMIT_SLOP_LIN) {
+                                    let c = if lower { sep - min } else { sep - max };
+                                    if c.abs() >= C_EPS {
+                                        let f = j.pen_l[i] * c + j.sacc[i];
+                                        j.sacc[i] = if lower { f.min(0.0) } else { f.max(0.0) };
+                                        j.pen_l[i] = (j.pen_l[i] + BETA * c.abs()).min(LIM_PEN_MAX);
+                                    }
+                                } else {
+                                    j.sacc[i] = 0.0;
+                                }
+                            }
+                        }
+                    }
+                }
+                AvbdJointKind::Gear => {
+                    // No per-joint dual state here: gears read other joints
+                    // (borrow conflict inside this loop) — updated in the
+                    // separate gear pass at the end of `dual_update`.
+                }
                 AvbdJointKind::Wheel => {
                     // Perp rows (same C as the primal) + the rigid-degrade
                     // equality on slot 2. The live spring carries no dual
@@ -1788,6 +2097,28 @@ impl AvbdEngine {
                 }
             }
             // Motors carry no dual state (fresh servo solve every primal).
+        }
+        // Gear dual pass (separate loop — gears read other joints while
+        // the per-joint loop above holds a mutable joint borrow).
+        // Penalty capped at LIM_PEN_MAX (explicit-servo stability: a gear
+        // holds a persistent bias like a limit, and couples four bodies).
+        for gi in 0..self.joints.len() {
+            if !matches!(self.joints[gi].kind, AvbdJointKind::Gear) {
+                continue;
+            }
+            let c = {
+                let g = &self.joints[gi];
+                let Some((sa, sb)) = self.gear_sides(g) else {
+                    continue;
+                };
+                sa.coord + g.gratio * sb.coord - g.ref_val
+            };
+            if c.abs() < C_EPS {
+                continue;
+            }
+            let g = &mut self.joints[gi];
+            g.lam_l[0] += g.pen_l[0] * c;
+            g.pen_l[0] = (g.pen_l[0] + BETA * c.abs()).min(LIM_PEN_MAX);
         }
     }
 }
@@ -1976,10 +2307,65 @@ impl PhysicsEngine for AvbdEngine {
         if body_a >= self.bodies.len() || body_b >= self.bodies.len() || body_a == body_b {
             return None;
         }
-        // M2: Gear (multi-body coordinates), SixDof (per-axis config)
-        // need their own row models.
-        if matches!(kind, JointKind::Gear { .. } | JointKind::SixDof { .. }) {
-            return None;
+        // Gear holds no bodies of its own (coordinates other joints):
+        // validate + capture the assembly constant up front; rows resolve
+        // both sides directly (mirrors the builtin validation).
+        if let JointKind::Gear {
+            joint_a,
+            joint_b,
+            ratio,
+        } = kind
+        {
+            if !ratio.is_finite() {
+                return None;
+            }
+            let (Some(ja), Some(jb)) = (self.joints.get(joint_a), self.joints.get(joint_b)) else {
+                return None;
+            };
+            if !matches!(ja.kind, AvbdJointKind::Revolute | AvbdJointKind::Prismatic)
+                || !matches!(jb.kind, AvbdJointKind::Revolute | AvbdJointKind::Prismatic)
+            {
+                return None;
+            }
+            // NOTE: coordinates read the REFERENCED joints' bodies.
+            let ca = {
+                let (x, y) = (&self.bodies[ja.a], &self.bodies[ja.b]);
+                Self::joint_coordinate(ja, x, y).unwrap_or(0.0)
+            };
+            let cb = {
+                let (x, y) = (&self.bodies[jb.a], &self.bodies[jb.b]);
+                Self::joint_coordinate(jb, x, y).unwrap_or(0.0)
+            };
+            let joint = AvbdJoint {
+                a: body_a,
+                b: body_b,
+                la: Vec3::ZERO,
+                lb: Vec3::ZERO,
+                ax_a: Vec3::X,
+                ax_b: Vec3::X,
+                bx_a: Vec3::X,
+                bx_b: Vec3::X,
+                susp: [0.0; 2],
+                kind: AvbdJointKind::Gear,
+                ref_val: ca + ratio * cb,
+                q_ref: Quat::IDENTITY,
+                lim: None,
+                mot: None,
+                acc_lim: 0.0,
+                lim_dual: 0.0,
+                gb: [joint_a, joint_b],
+                gratio: ratio,
+                six_lin: [AxisConfig::Free; 3],
+                six_ang: [AxisConfig::Free; 3],
+                dref: Vec3::ZERO,
+                sacc: [0.0; 6],
+                lam_l: [0.0; 3],
+                lam_a: [0.0; 3],
+                pen_l: [JOINT_PENALTY_INIT; 3],
+                pen_a: [JOINT_PENALTY_INIT; 3],
+            };
+            self.joints.push(joint);
+            return Some(self.joints.len() - 1);
         }
         let ba = &self.bodies[body_a];
         let bb = &self.bodies[body_b];
@@ -2010,6 +2396,12 @@ impl PhysicsEngine for AvbdEngine {
             mot: None,
             acc_lim: 0.0,
             lim_dual: 0.0,
+            gb: [0; 2],
+            gratio: 0.0,
+            six_lin: [AxisConfig::Free; 3],
+            six_ang: [AxisConfig::Free; 3],
+            dref: Vec3::ZERO,
+            sacc: [0.0; 6],
             lam_l: [0.0; 3],
             lam_a: [0.0; 3],
             pen_l: [JOINT_PENALTY_INIT; 3],
@@ -2053,8 +2445,18 @@ impl PhysicsEngine for AvbdEngine {
                 joint.susp = [suspension.frequency_hz, suspension.damping_ratio];
                 joint.mot = motor.map(|m| [m.target_speed, m.max_torque]);
             }
-            JointKind::Gear { .. } | JointKind::SixDof { .. } => {
+            JointKind::Gear { .. } => {
+                // Handled by the early gear block above; unreachable here.
                 return None;
+            }
+            JointKind::SixDof {
+                linear, angular, ..
+            } => {
+                joint.kind = AvbdJointKind::SixDof;
+                joint.six_lin = linear;
+                joint.six_ang = angular;
+                joint.q_ref = r.ref_quat;
+                joint.dref = r.ref_anchor_delta;
             }
         };
         self.joints.push(joint);
