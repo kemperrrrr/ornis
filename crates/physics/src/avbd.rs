@@ -40,8 +40,13 @@
 //!   [`crate::joint::JointKind::Prismatic`] (2 perp + 2 angular rows, same
 //!   limit/motor drive along the slide axis),
 //!   [`crate::joint::JointKind::Fixed`] (weld: ball rows + locked assembly
-//!   rotation) and [`crate::joint::JointKind::Distance`] (single rod row).
-//!   Wheel/Gear/SixDof return `None`. Fracture is not implemented.
+//!   rotation), [`crate::joint::JointKind::Distance`] (single rod row) and
+//!   [`crate::joint::JointKind::Wheel`] (2 perp rows + 2 angular rows about
+//!   the axle (spin about it is free) + a position-level suspension spring
+//!   from Box2D frequency/damping (fixed penalty, sag holds the load;
+//!   zero frequency degrades to a rigid slide row); deadbeat spin motor
+//!   about the axle).
+//!   Gear/SixDof return `None`. Fracture is not implemented.
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
 //!   fast orbital motion through long levers (all bounded, tested).
@@ -51,6 +56,17 @@
 //! - No CCD, substeps, islands or sleeping: one implicit step of 10
 //!   iterations (M2). Broadphase is an O(n2) bounding-sphere prefilter.
 //!   High-speed impacts (5+ m/s) catch deep (~3cm) — exact TOI is M2.
+//!   The pre-touch pair band (points form up to `GEN_MARGIN` before contact)
+//!   is load-bearing for fast impacts: their frozen-anchor C diverges on
+//!   touchdown and the penalty ramp turns it into a projection catch.
+//!   Gating point creation on touch was tried and reverted (fast bodies
+//!   skip the window and tunnel); gating row force on live gap was tried
+//!   and reverted (broke 4 settled scenes). Near-pass phantom force inside
+//!   the band stays an M2 item (needs pressure-gated friction rows).
+//! - The prismatic limit chase (dual/primal accumulator race, +5.7m
+//!   attractor) is knife-edge sensitive: hot-loop code motion alone flips
+//!   the slider outcome. Don't churn the limit rows cosmetically; M2 must
+//!   robustify (damp) the chase itself.
 //! - Orientation integrates with the exact exponential map
 //!   (`exp(v/2)*q`, not chord Euler — the chord loses ~|w·dt|²/2 of angle
 //!   per step, i.e. 0.25%/step spin decay at 10 rad/s) and differentiates
@@ -325,6 +341,18 @@ fn norm_axes(ax_a: Vec3, ax_b: Vec3) -> Option<(Vec3, Vec3)> {
     Some((ax_a.normalize(), ax_b.normalize()))
 }
 
+/// Wheel axle orthogonalized against its suspension (mirror of the builtin
+/// creation rule): a parallel axle gets a deterministic perpendicular
+/// fallback, never a NaN.
+fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {
+    let a = axle - suspension * axle.dot(suspension);
+    if a.length_squared() < 1e-6 {
+        tangent_basis(suspension).0
+    } else {
+        a.normalize()
+    }
+}
+
 /// Wrap an angle to [-PI, PI] (official limit bookkeeping).
 fn wrap_pi(x: f32) -> f32 {
     (x + PI).rem_euclid(TAU) - PI
@@ -507,6 +535,7 @@ enum AvbdJointKind {
     Prismatic,
     Fixed,
     Distance,
+    Wheel,
 }
 
 /// Equality-constraint joint (ball anchor rows + optional hinge axis rows).
@@ -520,6 +549,13 @@ struct AvbdJoint {
     lb: Vec3,
     ax_a: Vec3,
     ax_b: Vec3,
+    /// Wheel spin axle in each body's local frame (orthogonalized against
+    /// the suspension at creation); unused by other kinds.
+    bx_a: Vec3,
+    bx_b: Vec3,
+    /// Wheel spring `[frequency_hz, damping_ratio]` (Box2D semantics);
+    /// unused by other kinds.
+    susp: [f32; 2],
     kind: AvbdJointKind,
     /// Travel reference: revolute reference twist (rad), prismatic reference
     /// length (m), distance rest length (m); unused otherwise.
@@ -1127,6 +1163,63 @@ impl AvbdEngine {
                         fl = dir * f;
                     }
                 }
+                AvbdJointKind::Wheel => {
+                    // 2 perp equality rows (suspension axis `wa` is the free
+                    // slide direction) + the spring row along `wa`.
+                    let (u, v) = tangent_basis(wa);
+                    for (ax, li) in [(u, 0), (v, 1)] {
+                        let c = (live - ALPHA * c0v).dot(ax);
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = j.pen_l[li] * c + j.lam_l[li];
+                        let r_side = if is_a {
+                            a.orientation * j.la
+                        } else {
+                            b.orientation * j.lb
+                        };
+                        Self::stamp_row(&mut lhs, &mut rhs, ax, j.pen_l[li], f, r_side, sign);
+                        fl += ax * f;
+                    }
+                    // Suspension spring about the rest length (position
+                    // level, Box2D frequency/damping semantics): fixed
+                    // penalty, no dual state — static sag holds the load
+                    // (F = k*s), the velocity term supplies damping.
+                    // A zero/negative frequency degrades to a rigid
+                    // equality row on pen_l[2]/lam_l[2] (dual below).
+                    let s = (pb - pa).dot(wa) - j.ref_val;
+                    let r_side = if is_a {
+                        a.orientation * j.la
+                    } else {
+                        b.orientation * j.lb
+                    };
+                    // C = (B-A).wa: gradients flip vs ball rows.
+                    let lsign = if is_a { -1.0 } else { 1.0 };
+                    if j.susp[0] > 0.0 {
+                        let ka = eff_inv_mass(a);
+                        let kb = eff_inv_mass(b);
+                        let m = if ka + kb > 1e-9 { 1.0 / (ka + kb) } else { 0.0 };
+                        if m > 0.0 {
+                            let omega = TAU * j.susp[0];
+                            let stiff = m * omega * omega;
+                            let dampc = 2.0 * m * j.susp[1] * omega;
+                            let wa0 = (self.rot0[j.a] * j.ax_a).normalize_or(Vec3::Z);
+                            let s0 = (pb0 - pa0).dot(wa0) - j.ref_val;
+                            // Violation form (matches `stamp_row`: positive
+                            // `f` pushes along +nn, i.e. against +C — the
+                            // physical spring force has the opposite sign).
+                            let f = stiff * s + dampc * (s - s0) / DT_STEP;
+                            Self::stamp_row(&mut lhs, &mut rhs, wa, stiff, f, r_side, lsign);
+                        }
+                    } else {
+                        let wa0 = (self.rot0[j.a] * j.ax_a).normalize_or(Vec3::Z);
+                        let c = s - ALPHA * ((pb0 - pa0).dot(wa0) - j.ref_val);
+                        if c.abs() >= C_EPS {
+                            let f = j.pen_l[2] * c + j.lam_l[2];
+                            Self::stamp_row(&mut lhs, &mut rhs, wa, j.pen_l[2], f, r_side, lsign);
+                        }
+                    }
+                }
             }
             // Geometric stiffness (official): the lever rotates with the
             // body, and the truncated Hessian must know. Without this the
@@ -1171,6 +1264,37 @@ impl AvbdEngine {
                         }
                         let f = pen * c + lam;
                         // Rotation-only rows: torque arms about the hinge axes.
+                        let g_ang = if is_a { axa.cross(t) } else { -(axb.cross(t)) };
+                        let o = outer(g_ang, g_ang);
+                        for x in 0..3 {
+                            for y in 0..3 {
+                                lhs[3 + x][3 + y] += pen * o[x][y];
+                            }
+                        }
+                        rhs[3] += f * g_ang.x;
+                        rhs[4] += f * g_ang.y;
+                        rhs[5] += f * g_ang.z;
+                    }
+                }
+                AvbdJointKind::Wheel => {
+                    // Spin about the axle (`bx`) is free; lock the other
+                    // two axes — same row pattern as the hinge, keyed on
+                    // the axle instead of the suspension axis.
+                    let axa = a.orientation * j.bx_a;
+                    let axb = b.orientation * j.bx_b;
+                    let axa0 = self.rot0[j.a] * j.bx_a;
+                    let axb0 = self.rot0[j.b] * j.bx_b;
+                    let (t1, t2) = tangent_basis(axa0);
+                    for (t, lam, pen) in
+                        [(t1, j.lam_a[0], j.pen_a[0]), (t2, j.lam_a[1], j.pen_a[1])]
+                    {
+                        let live_c = t.dot(axa - axb);
+                        let c0_c = t.dot(axa0 - axb0);
+                        let c = live_c - ALPHA * c0_c;
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = pen * c + lam;
                         let g_ang = if is_a { axa.cross(t) } else { -(axb.cross(t)) };
                         let o = outer(g_ang, g_ang);
                         for x in 0..3 {
@@ -1348,6 +1472,27 @@ impl AvbdEngine {
                     }
                     if self.solvable(b) {
                         self.bodies[b].velocity += dj * kb * wa;
+                    }
+                }
+                AvbdJointKind::Wheel => {
+                    // Deadbeat spin about the axle (same pattern as the
+                    // hinge motor, keyed on `bx`).
+                    let wa =
+                        (self.bodies[a].orientation * self.joints[ji].bx_a).normalize_or(Vec3::Z);
+                    let w =
+                        (self.bodies[b].angular_velocity - self.bodies[a].angular_velocity).dot(wa);
+                    let ia = self.ang_inv_wa(a, wa);
+                    let ib = self.ang_inv_wa(b, wa);
+                    let k = ia.dot(wa) + ib.dot(wa);
+                    if k < 1e-9 {
+                        continue;
+                    }
+                    let dj = ((target - w) / k).clamp(-max * DT_STEP, max * DT_STEP);
+                    if self.solvable(a) {
+                        self.bodies[a].angular_velocity += -dj * ia;
+                    }
+                    if self.solvable(b) {
+                        self.bodies[b].angular_velocity += dj * ib;
                     }
                 }
                 _ => {}
@@ -1530,6 +1675,34 @@ impl AvbdEngine {
                         j.pen_l[0] = (j.pen_l[0] + BETA * c.abs()).min(PENALTY_MAX);
                     }
                 }
+                AvbdJointKind::Wheel => {
+                    // Perp rows (same C as the primal) + the rigid-degrade
+                    // equality on slot 2. The live spring carries no dual
+                    // state (fixed penalty, sag holds the load).
+                    let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
+                    let (u, v) = tangent_basis(wa);
+                    for (ax, li) in [(u, 0), (v, 1)] {
+                        let c = (live - ALPHA * c0v).dot(ax);
+                        if c.abs() >= C_EPS {
+                            j.lam_l[li] += j.pen_l[li] * c;
+                            j.pen_l[li] = (j.pen_l[li] + BETA * c.abs()).min(PENALTY_MAX);
+                        }
+                    }
+                    if j.susp[0] <= 0.0 {
+                        let wa0 = (self.rot0[j.a] * j.ax_a).normalize_or(Vec3::Z);
+                        let pa0 = self.pos0[j.a] + self.rot0[j.a] * j.la;
+                        let pb0 = self.pos0[j.b] + self.rot0[j.b] * j.lb;
+                        // Same C as the primal (`live`/`c0v` are pa-pb, so
+                        // the slide `s = (pb-pa).wa - ref` reads
+                        // `-live.wa - ref` here).
+                        let c = (-live.dot(wa) - j.ref_val)
+                            - ALPHA * (-(pa0 - pb0).dot(wa0) - j.ref_val);
+                        if c.abs() >= C_EPS {
+                            j.lam_l[2] += j.pen_l[2] * c;
+                            j.pen_l[2] = (j.pen_l[2] + BETA * c.abs()).min(LIM_PEN_MAX);
+                        }
+                    }
+                }
             }
             // Angular equality rows.
             match j.kind {
@@ -1538,6 +1711,23 @@ impl AvbdEngine {
                     let axb = b.orientation * j.ax_b;
                     let axa0 = self.rot0[j.a] * j.ax_a;
                     let axb0 = self.rot0[j.b] * j.ax_b;
+                    let (t1, t2) = tangent_basis(axa0);
+                    for (t, li) in [(t1, 0), (t2, 1)] {
+                        let c = t.dot(axa - axb) - ALPHA * t.dot(axa0 - axb0);
+                        if c.abs() < C_EPS {
+                            continue;
+                        }
+                        let f = j.pen_a[li] * c + j.lam_a[li];
+                        j.lam_a[li] = f;
+                        j.pen_a[li] = (j.pen_a[li] + BETA_ANG * c.abs()).min(PENALTY_MAX);
+                    }
+                }
+                AvbdJointKind::Wheel => {
+                    // Same pattern keyed on the axle (spin about it is free).
+                    let axa = a.orientation * j.bx_a;
+                    let axb = b.orientation * j.bx_b;
+                    let axa0 = self.rot0[j.a] * j.bx_a;
+                    let axb0 = self.rot0[j.b] * j.bx_b;
                     let (t1, t2) = tangent_basis(axa0);
                     for (t, li) in [(t1, 0), (t2, 1)] {
                         let c = t.dot(axa - axb) - ALPHA * t.dot(axa0 - axb0);
@@ -1823,6 +2013,9 @@ impl PhysicsEngine for AvbdEngine {
             lb: Vec3::ZERO,
             ax_a: Vec3::X,
             ax_b: Vec3::X,
+            bx_a: Vec3::X,
+            bx_b: Vec3::X,
+            susp: [0.0; 2],
             kind: AvbdJointKind::Ball,
             ref_val: 0.0,
             q_ref: Quat::IDENTITY,
@@ -1902,9 +2095,37 @@ impl PhysicsEngine for AvbdEngine {
                 let pb0 = bb.position + bb.orientation * local_anchor_b;
                 joint.ref_val = (pa0 - pb0).length();
             }
-            // M2: Wheel (spring suspension), Gear (multi-body coordinates),
-            // SixDof (per-axis config) need their own row models.
-            JointKind::Wheel { .. } | JointKind::Gear { .. } | JointKind::SixDof { .. } => {
+            JointKind::Wheel {
+                local_anchor_a,
+                local_anchor_b,
+                local_suspension_a,
+                local_suspension_b,
+                local_axle_a,
+                local_axle_b,
+                suspension,
+                motor,
+            } => {
+                // Mirror of the builtin creation rule: suspension normalized,
+                // each axle orthogonalized against its own suspension.
+                let sa = local_suspension_a.normalize_or(Vec3::Y);
+                let sb = local_suspension_b.normalize_or(Vec3::Y);
+                joint.kind = AvbdJointKind::Wheel;
+                joint.la = local_anchor_a;
+                joint.lb = local_anchor_b;
+                joint.ax_a = sa;
+                joint.ax_b = sb;
+                joint.bx_a = orthogonalize_axle(sa, local_axle_a);
+                joint.bx_b = orthogonalize_axle(sb, local_axle_b);
+                let wa0 = (ba.orientation * sa).normalize_or(Vec3::Z);
+                let pa0 = ba.position + ba.orientation * local_anchor_a;
+                let pb0 = bb.position + bb.orientation * local_anchor_b;
+                joint.ref_val = (pb0 - pa0).dot(wa0);
+                joint.susp = [suspension.frequency_hz, suspension.damping_ratio];
+                joint.mot = motor.map(|m| [m.target_speed, m.max_torque]);
+            }
+            // M2: Gear (multi-body coordinates), SixDof (per-axis config)
+            // need their own row models.
+            JointKind::Gear { .. } | JointKind::SixDof { .. } => {
                 return None;
             }
         };

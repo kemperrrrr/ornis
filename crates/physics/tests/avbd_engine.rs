@@ -4,8 +4,8 @@
 use glam::Vec3;
 use ornis_physics::trigger::{ContactEventKind, TriggerEventKind};
 use ornis_physics::{
-    AvbdEngine, BodyHandle, BuiltinPhysicsEngine, JointKind, PhysicsEngine, PrismaticLimit,
-    PrismaticMotor, Ray, RevoluteLimit, RevoluteMotor, RigidBody,
+    AvbdEngine, AxisConfig, BodyHandle, BuiltinPhysicsEngine, JointKind, PhysicsEngine,
+    PrismaticLimit, PrismaticMotor, Ray, RevoluteLimit, RevoluteMotor, RigidBody, WheelSuspension,
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -183,29 +183,7 @@ fn avbd_unsupported_joints_return_none() {
     let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let a = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
     let b = physics.add_body(RigidBody::new_sphere(Vec3::X, 0.5, 1.0));
-    // Wheel/Gear/SixDof row models live in M2.
-    assert!(
-        physics
-            .add_joint(
-                a,
-                b,
-                JointKind::Wheel {
-                    local_anchor_a: Vec3::ZERO,
-                    local_anchor_b: Vec3::ZERO,
-                    local_suspension_a: Vec3::Y,
-                    local_suspension_b: Vec3::Y,
-                    local_axle_a: Vec3::Z,
-                    local_axle_b: Vec3::Z,
-                    suspension: ornis_physics::WheelSuspension {
-                        frequency_hz: 2.0,
-                        damping_ratio: 0.7,
-                    },
-                    motor: None,
-                },
-            )
-            .is_none(),
-        "wheel must be refused (M2 gap)"
-    );
+    // Gear/SixDof row models live in M2 (Wheel is implemented below).
     assert!(
         physics
             .add_joint(
@@ -217,6 +195,35 @@ fn avbd_unsupported_joints_return_none() {
                 }
             )
             .is_none()
+    );
+    assert!(
+        physics
+            .add_joint(
+                b,
+                b,
+                JointKind::Gear {
+                    joint_a: 0,
+                    joint_b: 0,
+                    ratio: 2.0
+                }
+            )
+            .is_none(),
+        "gear must be refused (M2 gap)"
+    );
+    assert!(
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::SixDof {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    linear: [AxisConfig::Locked; 3],
+                    angular: [AxisConfig::Free; 3],
+                },
+            )
+            .is_none(),
+        "sixdof must be refused (M2 gap)"
     );
 }
 
@@ -722,4 +729,144 @@ fn avbd_distance_rod_holds_length() {
         swung |= b.position.y < -0.5;
     }
     assert!(swung, "rod bob never swung down");
+}
+
+#[test]
+fn avbd_wheel_suspension_holds_chassis() {
+    // Mirror of the builtin scene: sprung chassis (2kg) over a wheel (1kg),
+    // 3Hz/0.7 damping. Both free-fall; the spring must hold their relative
+    // separation near the 1.0m rest length instead of collapsing.
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let chassis = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.5, 0.2, 0.3),
+        2.0,
+    ));
+    let wheel = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.25, 0.25, 0.15),
+        1.0,
+    ));
+    assert!(
+        physics
+            .add_joint(
+                chassis,
+                wheel,
+                JointKind::Wheel {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_suspension_a: Vec3::Y,
+                    local_suspension_b: Vec3::Y,
+                    local_axle_a: Vec3::Z,
+                    local_axle_b: Vec3::Z,
+                    suspension: WheelSuspension {
+                        frequency_hz: 3.0,
+                        damping_ratio: 0.7,
+                    },
+                    motor: None,
+                },
+            )
+            .is_some()
+    );
+    for _ in 0..300 {
+        physics.step(DT);
+    }
+    let (pc, pw) = (
+        physics.get_body(chassis).unwrap(),
+        physics.get_body(wheel).unwrap(),
+    );
+    let sep = pc.position.y - pw.position.y;
+    assert!(
+        (0.5..=1.1).contains(&sep),
+        "spring must hold the chassis near rest (1.0 m), got {sep}"
+    );
+}
+
+#[test]
+fn avbd_wheel_motor_spins_axle() {
+    // Mirror of the builtin scene: free wheel about its Z axle in zero
+    // gravity spins up toward 6 rad/s.
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 0.0));
+    let wheel = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, -0.5, 0.0),
+        Vec3::new(0.2, 0.2, 0.1),
+        1.0,
+    ));
+    assert!(
+        physics
+            .add_joint(
+                anchor,
+                wheel,
+                JointKind::Wheel {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_suspension_a: Vec3::Y,
+                    local_suspension_b: Vec3::Y,
+                    local_axle_a: Vec3::Z,
+                    local_axle_b: Vec3::Z,
+                    suspension: WheelSuspension {
+                        frequency_hz: 2.0,
+                        damping_ratio: 0.5,
+                    },
+                    motor: Some(RevoluteMotor {
+                        target_speed: 6.0,
+                        max_torque: 50.0,
+                    }),
+                },
+            )
+            .is_some()
+    );
+    for _ in 0..240 {
+        physics.step(DT);
+    }
+    let w = physics.get_body(wheel).unwrap().angular_velocity;
+    assert!(
+        (w.z - 6.0).abs() < 1.5,
+        "axle must spin up toward 6 rad/s, got {w:?}"
+    );
+}
+
+#[test]
+fn avbd_wheel_degenerate_axle_falls_back() {
+    // Parallel axle must orthogonalize deterministically (no NaN), mirror
+    // of the builtin fallback test.
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
+    let b = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::splat(0.5),
+        1.0,
+    ));
+    assert!(
+        physics
+            .add_joint(
+                a,
+                b,
+                JointKind::Wheel {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    local_suspension_a: Vec3::Y,
+                    local_suspension_b: Vec3::Y,
+                    local_axle_a: Vec3::Y,
+                    local_axle_b: Vec3::Y,
+                    suspension: WheelSuspension {
+                        frequency_hz: 2.0,
+                        damping_ratio: 0.5,
+                    },
+                    motor: None,
+                },
+            )
+            .is_some()
+    );
+    for _ in 0..60 {
+        physics.step(DT);
+    }
+    for h in [a, b] {
+        let body = physics.get_body(h).unwrap();
+        assert!(
+            body.position.is_finite() && body.velocity.is_finite(),
+            "no NaN after degenerate assembly"
+        );
+    }
 }
