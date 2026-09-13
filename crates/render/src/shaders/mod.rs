@@ -49,8 +49,12 @@ pub enum ResourceKind {
     TextureUint,
     /// `var name: texture_depth_2d`.
     TextureDepth,
+    /// `var name: texture_depth_2d_array` (shadow-map layers).
+    TextureDepthArray,
     /// `var name: sampler`.
     Sampler,
+    /// `var name: sampler_comparison` (shadow PCF).
+    SamplerComparison,
 }
 
 impl ResourceKind {
@@ -64,7 +68,9 @@ impl ResourceKind {
             Self::TextureFloat => "texture_2d<f32>".to_string(),
             Self::TextureUint => "texture_2d<u32>".to_string(),
             Self::TextureDepth => "texture_depth_2d".to_string(),
+            Self::TextureDepthArray => "texture_depth_2d_array".to_string(),
             Self::Sampler => "sampler".to_string(),
+            Self::SamplerComparison => "sampler_comparison".to_string(),
         }
     }
 
@@ -74,7 +80,12 @@ impl ResourceKind {
             Self::Uniform(_) => "var<uniform>",
             Self::StorageRead(_) | Self::StorageReadArray(_) => "var<storage, read>",
             Self::StorageRw(_) => "var<storage, read_write>",
-            Self::TextureFloat | Self::TextureUint | Self::TextureDepth | Self::Sampler => "var",
+            Self::TextureFloat
+            | Self::TextureUint
+            | Self::TextureDepth
+            | Self::TextureDepthArray
+            | Self::Sampler
+            | Self::SamplerComparison => "var",
         }
     }
 
@@ -112,7 +123,15 @@ impl ResourceKind {
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled,
             },
+            Self::TextureDepthArray => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled,
+            },
             Self::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            Self::SamplerComparison => {
+                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)
+            }
         }
     }
 }
@@ -356,8 +375,12 @@ pub struct Texture2d;
 pub struct Texture2dUint;
 /// Depth-texture handle marker; see [`Texture2d`].
 pub struct DepthTexture;
+/// Depth-texture-array handle marker (shadow-map layers); see [`Texture2d`].
+pub struct DepthTextureArray;
 /// Sampler handle marker; see [`Texture2d`].
 pub struct Sampler;
+/// Comparison-sampler handle marker (shadow PCF); see [`Texture2d`].
+pub struct ComparisonSampler;
 
 /// Builtin index newtypes: a bare `u32` cannot say *which* index it is
 /// (`vertex_index`, `instance_index`, `@location(0)` and a plain local are
@@ -950,6 +973,7 @@ mod tests {
         const NATIVES: &[&str] = &[
             "textureSample",
             "textureSampleLevel",
+            "textureSampleCompare",
             "textureLoad",
             "textureDimensions",
         ];

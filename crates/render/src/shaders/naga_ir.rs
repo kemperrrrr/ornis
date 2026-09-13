@@ -63,6 +63,9 @@ fn image_class(kind: &ResourceKind, multisampled: bool) -> naga::ImageClass {
         ResourceKind::TextureDepth => naga::ImageClass::Depth {
             multi: multisampled,
         },
+        ResourceKind::TextureDepthArray => {
+            panic!("image_class: depth arrays need arrayed:true — use image_class_arrayed")
+        }
         _ => panic!("image_class: buffer/sampler resource has no image class"),
     }
 }
@@ -114,11 +117,37 @@ pub fn add_global(
             );
             (naga::AddressSpace::Handle, image)
         }
+        ResourceKind::TextureDepthArray => {
+            let image = module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Image {
+                        dim: naga::ImageDimension::D2,
+                        arrayed: true,
+                        class: naga::ImageClass::Depth {
+                            multi: multisampled,
+                        },
+                    },
+                },
+                naga::Span::default(),
+            );
+            (naga::AddressSpace::Handle, image)
+        }
         ResourceKind::Sampler => {
             let sampler = module.types.insert(
                 naga::Type {
                     name: None,
                     inner: naga::TypeInner::Sampler { comparison: false },
+                },
+                naga::Span::default(),
+            );
+            (naga::AddressSpace::Handle, sampler)
+        }
+        ResourceKind::SamplerComparison => {
+            let sampler = module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Sampler { comparison: true },
                 },
                 naga::Span::default(),
             );

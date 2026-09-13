@@ -286,9 +286,15 @@ fn octahedral_decode(p: glam::Vec2) -> glam::Vec3 {
 }
 
 /// World-position reconstruction from depth (lighting-only).
+///
+/// Depth is stored DirectX-style (NDC z in [0, 1], matching
+/// `glam::camera::rh::proj::directx`), so it maps to clip space
+/// directly — NOT `depth * 2.0 - 1.0` (that OpenGL-style remap halves
+/// distances and breaks every absolute-position use: spot cones,
+/// point falloff, shadow projection).
 #[ornis_macros::wgsl_fn]
 fn reconstruct_world_pos(uv: glam::Vec2, depth: f32, camera: Camera) -> glam::Vec3 {
-    let ndc = Vec3::new(uv * 2.0 - 1.0, depth * 2.0 - 1.0);
+    let ndc = Vec3::new(uv * 2.0 - 1.0, depth);
     let clip = Vec4::new(ndc, 1.0);
     let view = camera.inv_view_proj * clip;
     return view.xyz / view.w;

@@ -80,6 +80,7 @@ use ornis_rhai::RhaiScriptEngine;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
 use ornis_app::install_gameplay_physics_bridge;
+use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
@@ -159,6 +160,12 @@ impl Default for EditorWorld {
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
         install_gameplay(&mut engine);
         install_gameplay_physics_bridge(&mut engine);
+        // Audio mirrors the showcase runtime: real output when a device
+        // exists, silent otherwise; the bridge is a no-op without a host.
+        if let Some(audio) = AudioPlugin::try_default() {
+            audio.install(&mut engine);
+        }
+        install_gameplay_audio_bridge(&mut engine);
         // Rhai is the default editor scripting engine (PLAN phase 6: the
         // primary adapter and the WASM fallback). Scripts stay idle until
         // `script_load` registers tick entries — an empty host is one

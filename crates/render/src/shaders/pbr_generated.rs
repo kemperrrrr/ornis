@@ -15,8 +15,8 @@
 
 use super::interface::GbufferFragmentInput as FragmentInput;
 use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule, helpers, openpbr_material_decl,
-    wgsl_decl,
+    ComparisonSampler, DepthTextureArray, OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule,
+    helpers, openpbr_material_decl, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
@@ -63,7 +63,7 @@ pub fn wgsl_source() -> String {
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
-        .resources(&PBR_RESOURCES, &[0, 2, 3])
+        .resources(&PBR_RESOURCES, &[0, 2, 3, 4, 5])
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .consts(helpers::wgsl_consts())
         .helper(helpers::wgsl_shared_helpers())
@@ -84,6 +84,8 @@ pub(crate) struct PbrContext {
     pub materials: Vec<OpenPBRMaterial>,
     pub camera: CameraUniform,
     pub lighting: LightingUniform,
+    pub shadow_tex: DepthTextureArray,
+    pub shadow_sampler: ComparisonSampler,
 }
 
 #[stage(fragment)]
@@ -168,7 +170,31 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
             step(1.5, kind),
         );
         let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
-        let radiance = light_color * intensity * attenuation * range_cut * cone;
+        let mut radiance = light_color * intensity * attenuation * range_cut * cone;
+        // Shadow: project into the light's clip space and compare
+        // against its map layer (hardware 2x2 PCF via the comparison
+        // sampler). Unshadowed lights keep `params.w = -1.0` and skip
+        // the lookup; single-mip depth needs no LOD, so the branch is
+        // safe in non-uniform control flow.
+        if light.params.w >= 0.0 {
+            let shadow_clip = light.shadow_vp
+                * Vec4::new(
+                    input.world_position.x,
+                    input.world_position.y,
+                    input.world_position.z,
+                    1.0,
+                );
+            let shadow_ndc = shadow_clip.xyz / shadow_clip.w;
+            let shadow_uv = shadow_ndc.xy * 0.5 + Vec2::new(0.5, 0.5);
+            radiance = radiance
+                * textureSampleCompare(
+                    ctx.shadow_tex,
+                    ctx.shadow_sampler,
+                    shadow_uv,
+                    i32(light.params.w),
+                    shadow_ndc.z - 0.002,
+                );
+        }
         let nol = max(dot(n, l), EPS);
         let noh = max(dot(n, h), EPS);
         let voh = max(dot(v, h), EPS);
@@ -297,7 +323,7 @@ pub fn wgsl_source_static() -> String {
 /// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
 /// Shared by `create_pbr_bind_group` and `create_forward_pass`, whose
 /// handwritten layouts were identical. Type names come from the Rust side.
-pub const PBR_RESOURCES: [Resource; 4] = [
+pub const PBR_RESOURCES: [Resource; 6] = [
     Resource {
         group: 0,
         binding: 0,
@@ -328,6 +354,22 @@ pub const PBR_RESOURCES: [Resource; 4] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "lighting",
         kind: ResourceKind::Uniform(LightingUniform::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 4,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "shadow_tex",
+        kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 5,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "shadow_sampler",
+        kind: ResourceKind::SamplerComparison,
         min_size: None,
     },
 ];
@@ -408,7 +450,7 @@ mod tests {
     fn pbr_resources_cover_stages_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         let src = wgsl_vertex_source() + &wgsl_source();
-        assert_eq!(PBR_RESOURCES.len(), 4);
+        assert_eq!(PBR_RESOURCES.len(), 6);
         for r in PBR_RESOURCES {
             assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
             let e = bgl_entry(&r, false);

@@ -190,6 +190,12 @@ impl FramePass for LightingPass {
             material_params,
             depth,
         };
+        frame.renderer.render_shadows(
+            frame.device,
+            frame.encoder,
+            frame.mesh,
+            frame.instance_count,
+        );
         frame
             .renderer
             .render_lighting(frame.device, frame.encoder, &g, hdr);

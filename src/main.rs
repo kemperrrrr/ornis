@@ -15,6 +15,8 @@ use ornis_app::install_gameplay_physics_bridge;
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
+use ornis_audio::bridge::install_gameplay_audio_bridge;
+#[cfg(not(feature = "editor-only"))]
 use ornis_core::install_gameplay;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
@@ -269,6 +271,8 @@ impl GameApp {
         if let Some(audio) = AudioPlugin::try_default() {
             audio.install(render_world.engine_mut());
         }
+        // Listener pose/gain sync; no-op until a host is installed.
+        install_gameplay_audio_bridge(render_world.engine_mut());
         {
             let entities = render_world.entities().to_vec();
             let store = render_world
