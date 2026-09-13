@@ -284,7 +284,7 @@ impl GpuBatch {
         l3(&mut self.rb_nx, &mut self.rb_ny, &mut self.rb_nz, rb_n);
 
         // Tangent basis.
-        let t1 = tangent_basis(n);
+        let t1 = crate::math::tangent_basis(n).0;
         let t2 = t1.cross(n);
         l3(&mut self.t1x, &mut self.t1y, &mut self.t1z, t1);
         l3(&mut self.t2x, &mut self.t2y, &mut self.t2z, t2);
@@ -391,12 +391,6 @@ impl GpuBatch {
         self.inv_k_t1[lane] = if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 };
         self.inv_k_t2[lane] = if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 };
     }
-}
-
-#[inline]
-fn tangent_basis(n: Vec3) -> Vec3 {
-    let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-    n.cross(axis).normalize_or(Vec3::Z)
 }
 
 /// World inverse inertia as `[row0, row1, row2]` (3 Vec3 columns → row-major).

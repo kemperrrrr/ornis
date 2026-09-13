@@ -31,7 +31,7 @@ fn quat_twist(q: Quat, axis: Vec3) -> f32 {
 /// fixed tangent pair (the plane the angular correction lives in).
 fn hinge_frame(orientation: Quat, axis: Vec3) -> (Vec3, Vec3, Vec3) {
     let wa = (orientation * axis).normalize_or(Vec3::Z);
-    let t1 = tangent_basis(wa);
+    let t1 = crate::math::tangent_basis(wa).0;
     let t2 = wa.cross(t1).normalize_or_zero();
     (wa, t1, t2)
 }
@@ -96,7 +96,7 @@ impl BuiltinPhysicsEngine {
                     // Box2D point-to-line: constrain the two perpendicular
                     // directions, leave the slide axis free.
                     let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
-                    let t1 = tangent_basis(wa);
+                    let t1 = crate::math::tangent_basis(wa).0;
                     let t2 = wa.cross(t1).normalize_or_zero();
                     for t in [t1, t2] {
                         joint_prismatic_linear_iteration(bodies, joint, a, b, ra, rb, t);
@@ -178,7 +178,7 @@ impl BuiltinPhysicsEngine {
                     // Prismatic: anchor coincidence only across the slide
                     // (the slide direction is free by design).
                     let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
-                    let t1 = tangent_basis(wa);
+                    let t1 = crate::math::tangent_basis(wa).0;
                     let t2 = wa.cross(t1).normalize_or_zero();
                     for dir in [t1, t2] {
                         joint_linear_position_step(bodies, a, b, ra, rb, c.dot(dir), dir);
@@ -561,7 +561,7 @@ fn joint_angular_position_pass(
     // sign matters, a flipped sign turns the correction into an exponential
     // pump). The error lives in the plane ⟂ wa.
     let e = wa.cross(wb);
-    let t1 = tangent_basis(wa);
+    let t1 = crate::math::tangent_basis(wa).0;
     let t2 = wa.cross(t1).normalize_or_zero();
     for t in [t1, t2] {
         let err = e.dot(t).clamp(-MAX_ANG_CORRECTION, MAX_ANG_CORRECTION);
@@ -1037,7 +1037,7 @@ fn solve_new_joint_velocity(
             let qa = bodies[a].orientation;
             let ws = (qa * susp_a).normalize_or(Vec3::Y);
             let wx = (qa * axle_a).normalize_or(Vec3::Z);
-            let third = ws.cross(wx).normalize_or(tangent_basis(ws));
+            let third = ws.cross(wx).normalize_or(crate::math::tangent_basis(ws).0);
             let lock = [ws, third];
             joint_warm_start(bodies, joint, a, b, ra, rb, None);
             joint_angular_lock_warm_start(bodies, &joint.acc_ang, a, b, &lock);
@@ -1046,7 +1046,7 @@ fn solve_new_joint_velocity(
                 apply_impulse(bodies, a, b, ws * joint.acc_limit, ra, rb);
             }
             for _ in 0..iterations {
-                let t1 = tangent_basis(ws);
+                let t1 = crate::math::tangent_basis(ws).0;
                 let t2 = ws.cross(t1).normalize_or_zero();
                 for t in [t1, t2] {
                     joint_prismatic_linear_iteration(bodies, joint, a, b, ra, rb, t);
@@ -1196,8 +1196,8 @@ fn solve_new_joint_position(
                 let qa = bodies[a].orientation;
                 let ws = (qa * susp_a).normalize_or(Vec3::Y);
                 let wx = (qa * axle_a).normalize_or(Vec3::Z);
-                let third = ws.cross(wx).normalize_or(tangent_basis(ws));
-                let t1 = tangent_basis(ws);
+                let third = ws.cross(wx).normalize_or(crate::math::tangent_basis(ws).0);
+                let t1 = crate::math::tangent_basis(ws).0;
                 let t2 = ws.cross(t1).normalize_or_zero();
                 for dir in [t1, t2] {
                     joint_linear_position_step(bodies, a, b, ra, rb, e.dot(dir), dir);

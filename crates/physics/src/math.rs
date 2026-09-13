@@ -121,6 +121,29 @@ pub struct RaycastHit {
     pub distance: f32,
 }
 
+/// Deterministic tangent frame for a unit normal: `t1` is the normal
+/// crossed with a fixed reference axis (no exact-equality branches, so
+/// near-axis normals don't flicker), `t2` completes the frame. The single
+/// canonical copy — the engine, AVBD and GPU-batch solvers previously
+/// carried their own identical versions.
+pub fn tangent_basis(n: Vec3) -> (Vec3, Vec3) {
+    let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let t1 = n.cross(axis).normalize_or(Vec3::Z);
+    (t1, t1.cross(n))
+}
+
+/// Wheel/joint axle orthogonalized against its reference axis (builtin
+/// creation rule): a near-parallel axle gets a deterministic
+/// perpendicular fallback from [`tangent_basis`], never a NaN.
+pub fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {
+    let a = axle - suspension * axle.dot(suspension);
+    if a.length_squared() < 1e-6 {
+        tangent_basis(suspension).0
+    } else {
+        a.normalize()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

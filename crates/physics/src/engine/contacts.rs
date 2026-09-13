@@ -203,7 +203,7 @@ fn anisotropic_frame(bodies: &[RigidBody], i: usize, j: usize, n: Vec3) -> (Vec3
     // Body A wins (documented priority); B only if A sets nothing.
     let t1 = pick_dir(&bodies[i])
         .or_else(|| pick_dir(&bodies[j]))
-        .unwrap_or_else(|| tangent_basis(n));
+        .unwrap_or_else(|| crate::math::tangent_basis(n).0);
     let axis = |b: &RigidBody| -> (f32, f32) {
         if b.friction_dir.is_some() {
             (b.friction, b.friction_transverse)

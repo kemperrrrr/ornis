@@ -25,7 +25,7 @@ use crate::distance;
 #[cfg(feature = "gpu")]
 use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
-use crate::math::{Ray, RaycastHit};
+use crate::math::{Ray, RaycastHit, orthogonalize_axle};
 use crate::shape::Shape;
 use crate::trigger::{
     CONTACT_BEGIN_SLOP, ContactEvent, ContactEventKind, TriggerEvent, TriggerEventKind,
@@ -395,13 +395,6 @@ pub(crate) fn point_velocity(body: &RigidBody, r: Vec3) -> Vec3 {
 #[inline]
 fn make_soft(k: f32, cfm: f32) -> f32 {
     k + cfm
-}
-
-/// Any unit vector perpendicular to `n` — the fixed tangent frame for
-/// friction. Deterministic so warm-start and iterations stay consistent.
-fn tangent_basis(n: Vec3) -> Vec3 {
-    let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-    n.cross(axis).normalize_or(Vec3::Z)
 }
 
 /// Apply a positional (pseudo) impulse to the body pair: moves positions and
@@ -2339,18 +2332,6 @@ pub struct BuiltinPhysicsEngine {
     gpu_solver: Option<WgpuContactSolver>,
     narrow_cache: FxHashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: SatCache,
-}
-
-/// Orthogonalize a wheel axle against its (already normalized) suspension
-/// axis. A near-parallel axle gets a deterministic perpendicular fallback
-/// (same `tangent_basis` the solver uses), never a NaN.
-fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {
-    let a = axle - suspension * axle.dot(suspension);
-    if a.length_squared() < 1e-6 {
-        tangent_basis(suspension)
-    } else {
-        a.normalize()
-    }
 }
 
 /// Dense joint rebuild after removals: drops the marked joints, remaps

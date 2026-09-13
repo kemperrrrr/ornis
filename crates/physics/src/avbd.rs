@@ -83,7 +83,7 @@ use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::joints::hinge_twist;
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::joint::{JointHandle, JointKind};
-use crate::math::{Ray, RaycastHit};
+use crate::math::{Ray, RaycastHit, orthogonalize_axle, tangent_basis};
 use crate::shape::Shape;
 use crate::trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, TriggerEvent,
@@ -341,18 +341,6 @@ fn norm_axes(ax_a: Vec3, ax_b: Vec3) -> Option<(Vec3, Vec3)> {
     Some((ax_a.normalize(), ax_b.normalize()))
 }
 
-/// Wheel axle orthogonalized against its suspension (mirror of the builtin
-/// creation rule): a parallel axle gets a deterministic perpendicular
-/// fallback, never a NaN.
-fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {
-    let a = axle - suspension * axle.dot(suspension);
-    if a.length_squared() < 1e-6 {
-        tangent_basis(suspension).0
-    } else {
-        a.normalize()
-    }
-}
-
 /// Wrap an angle to [-PI, PI] (official limit bookkeeping).
 fn wrap_pi(x: f32) -> f32 {
     (x + PI).rem_euclid(TAU) - PI
@@ -369,14 +357,6 @@ fn limit_state(value: f32, lo: f32, hi: f32, slop: f32) -> Option<bool> {
     } else {
         None
     }
-}
-
-/// Deterministic tangent frame for a normal (mirror of the GPU solver's
-/// basis: fixed axis choice, no exact-equality branches).
-fn tangent_basis(n: Vec3) -> (Vec3, Vec3) {
-    let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-    let t1 = n.cross(axis).normalize_or(Vec3::Z);
-    (t1, t1.cross(n))
 }
 
 /// World-space inertia tensor from a body-frame diagonal and orientation.
