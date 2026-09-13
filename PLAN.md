@@ -574,14 +574,20 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   линеаризации дестабилизируют рычаги), geometric stiffness джойнтов (без
   него spin-up через длинные рычаги), stick-gated anchor refresh, персистентные
   нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
- rolling multi-point contact), fracture, CCD/islands
- (ост. M2: CCD/TOI, island-wake propagation), deep-catch
+ rolling multi-point contact для высоких башен), fracture, islands
+ (ост. M2: angular CCD, island-wake propagation), deep-catch
  пенетрация ~3см на ударах 5+ м/с. Закрыто после M1: SolverKind/Engine-оркестратор (переключение builtin↔AVBD с миграцией
-  тел/джойнтов 1:1, рантайм держит Engine), Prismatic/Fixed/Distance + limits/motors, Wheel (пружина подвески +
-  spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к Box2D чем
-  velocity-only у builtin), SixDof (per-axis free/locked/limited),
-  анизотропный/rolling/torsion friction,
-  exact-exp quat. Урок: pre-touch полоса пар (точки до `GEN_MARGIN`)
+ тел/джойнтов 1:1, рантайм держит Engine; миграция пробуждает — warm-start
+ не мигрирует), Prismatic/Fixed/Distance + limits/motors, Wheel (пружина
+ подвески + spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к
+ Box2D чем velocity-only у builtin), SixDof (per-axis
+ free/locked/limited), sleep (per-body, builtin-паритет 0.15 м/с + 0.5 c,
+ пробуждение impact-gated 0.5 м/с / 1 см overlap), substeps
+ (fixed-step аккумулятор: произвольный host dt → точные шаги 1/60 с, кап
+ 4 шага против spiral of death), linear TOI (`cast_shape`-clamp +
+ one-shot bounce, jointed-партнёры исключены), sphere-tower
+ (corrupted 3-stack + dimple pocket держат на паритете с builtin),
+ анизотропный/rolling/torsion friction, exact-exp quat. Урок: pre-touch полоса пар (точки до `GEN_MARGIN`)
   load-bearing для быстрых ударов (frozen-anchor C + ramp = projection
   catch); гейтить создание/огонь по касанию нельзя (туннель + регрессии).
   Strong-Confluence 1-vs-32 для
