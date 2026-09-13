@@ -25,7 +25,7 @@ use crate::distance;
 #[cfg(feature = "gpu")]
 use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
-use crate::math::{Ray, RaycastHit, orthogonalize_axle};
+use crate::math::{Ray, RaycastHit};
 use crate::shape::Shape;
 use crate::trigger::{
     CONTACT_BEGIN_SLOP, ContactEvent, ContactEventKind, TriggerEvent, TriggerEventKind,
@@ -4747,60 +4747,74 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         if body_a == body_b || body_a >= self.bodies.len() || body_b >= self.bodies.len() {
             return None;
         }
-        // Normalize the hinge/slide/suspension axes once, at creation.
+        // Resolve frames + assembly references once (shared with AVBD —
+        // see `joint::resolve_joint`): axis normalization, axle
+        // orthogonalization and Box2D-style reference capture live there.
+        // Gear coordinates other joints (needs the joint list) and is
+        // handled below; it resolves to `None` here.
+        let resolved = if matches!(kind, JointKind::Gear { .. }) {
+            None
+        } else {
+            crate::joint::resolve_joint(
+                &kind,
+                self.bodies[body_a].position,
+                self.bodies[body_a].orientation,
+                self.bodies[body_b].position,
+                self.bodies[body_b].orientation,
+            )
+        };
+        // Write the normalized frames back into the stored kind (the
+        // solvers read axes from `JointKind`).
         let kind = match kind {
             JointKind::Revolute {
                 local_anchor_a,
                 local_anchor_b,
-                local_axis_a,
-                local_axis_b,
                 limit,
                 motor,
-            } => JointKind::Revolute {
-                local_anchor_a,
-                local_anchor_b,
-                local_axis_a: local_axis_a.normalize_or(Vec3::Z),
-                local_axis_b: local_axis_b.normalize_or(Vec3::Z),
-                limit,
-                motor,
-            },
+                ..
+            } => {
+                let r = resolved.as_ref().expect("non-gear kinds resolve");
+                JointKind::Revolute {
+                    local_anchor_a,
+                    local_anchor_b,
+                    local_axis_a: r.ax_a,
+                    local_axis_b: r.ax_b,
+                    limit,
+                    motor,
+                }
+            }
             JointKind::Prismatic {
                 local_anchor_a,
                 local_anchor_b,
-                local_axis_a,
-                local_axis_b,
                 limit,
                 motor,
-            } => JointKind::Prismatic {
-                local_anchor_a,
-                local_anchor_b,
-                local_axis_a: local_axis_a.normalize_or(Vec3::Z),
-                local_axis_b: local_axis_b.normalize_or(Vec3::Z),
-                limit,
-                motor,
-            },
+                ..
+            } => {
+                let r = resolved.as_ref().expect("non-gear kinds resolve");
+                JointKind::Prismatic {
+                    local_anchor_a,
+                    local_anchor_b,
+                    local_axis_a: r.ax_a,
+                    local_axis_b: r.ax_b,
+                    limit,
+                    motor,
+                }
+            }
             JointKind::Wheel {
                 local_anchor_a,
                 local_anchor_b,
-                local_suspension_a,
-                local_suspension_b,
-                local_axle_a,
-                local_axle_b,
                 suspension,
                 motor,
+                ..
             } => {
-                // Suspension normalized; each axle orthogonalized against
-                // its own suspension (a parallel axle gets a deterministic
-                // perpendicular fallback, never a NaN).
-                let sa = local_suspension_a.normalize_or(Vec3::Y);
-                let sb = local_suspension_b.normalize_or(Vec3::Y);
+                let r = resolved.as_ref().expect("non-gear kinds resolve");
                 JointKind::Wheel {
                     local_anchor_a,
                     local_anchor_b,
-                    local_suspension_a: sa,
-                    local_suspension_b: sb,
-                    local_axle_a: orthogonalize_axle(sa, local_axle_a),
-                    local_axle_b: orthogonalize_axle(sb, local_axle_b),
+                    local_suspension_a: r.ax_a,
+                    local_suspension_b: r.ax_b,
+                    local_axle_a: r.bx_a,
+                    local_axle_b: r.bx_b,
                     suspension,
                     motor,
                 }
@@ -4853,54 +4867,16 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                 .insert((body_a.min(body_b), body_a.max(body_b)));
         }
         // Limits/motors measure travel from the assembly pose (Box2D
-        // `m_referenceAngle`): capture the hinge twist before the first step.
+        // `m_referenceAngle`): captured in `resolved` above.
         // Wheels capture the same twist about their axle for the motor.
-        let reference_angle = match &kind {
-            JointKind::Revolute { local_axis_a, .. } => crate::engine::joints::hinge_twist(
-                self.bodies[body_a].orientation,
-                self.bodies[body_b].orientation,
-                *local_axis_a,
-            ),
-            JointKind::Wheel { local_axle_a, .. } => crate::engine::joints::hinge_twist(
-                self.bodies[body_a].orientation,
-                self.bodies[body_b].orientation,
-                *local_axle_a,
-            ),
-            _ => 0.0,
-        };
+        let reference_angle = resolved.map(|r| r.ref_angle).unwrap_or(0.0);
         // Prismatic limits and the wheel spring measure anchor separation
         // along the slide/suspension axis from the assembly pose.
-        let reference_length = match &kind {
-            JointKind::Prismatic {
-                local_anchor_a,
-                local_anchor_b,
-                local_axis_a,
-                ..
-            }
-            | JointKind::Wheel {
-                local_anchor_a,
-                local_anchor_b,
-                local_suspension_a: local_axis_a,
-                ..
-            } => {
-                let wa = (self.bodies[body_a].orientation * *local_axis_a).normalize_or(Vec3::Z);
-                let ra = self.bodies[body_a].orientation * *local_anchor_a;
-                let rb = self.bodies[body_b].orientation * *local_anchor_b;
-                ((self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra)).dot(wa)
-            }
-            _ => 0.0,
-        };
+        let reference_length = resolved.map(|r| r.ref_length).unwrap_or(0.0);
         // The distance rod keeps its assembly anchor distance; the gear
         // captures its constraint constant.
         let reference_distance = match &kind {
-            JointKind::Distance {
-                local_anchor_a,
-                local_anchor_b,
-            } => {
-                let ra = self.bodies[body_a].orientation * *local_anchor_a;
-                let rb = self.bodies[body_b].orientation * *local_anchor_b;
-                ((self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra)).length()
-            }
+            JointKind::Distance { .. } => resolved.map(|r| r.ref_distance).unwrap_or(0.0),
             JointKind::Gear {
                 joint_a,
                 joint_b,
@@ -4918,38 +4894,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         };
         // Fixed, wheel and six-DOF angular locks measure drift from the
         // assembly relative orientation.
-        let reference_quat = match &kind {
-            JointKind::Fixed { .. } | JointKind::Wheel { .. } | JointKind::SixDof { .. } => {
-                self.bodies[body_a].orientation.conjugate() * self.bodies[body_b].orientation
-            }
-            _ => Quat::IDENTITY,
-        };
+        let reference_quat = resolved.map(|r| r.ref_quat).unwrap_or(Quat::IDENTITY);
         // Fixed, wheel and six-DOF locked-axis position steps measure the
         // anchor separation from the assembly one (in A's frame), so offset
         // assemblies hold instead of collapsing into coincidence.
-        let reference_anchor_delta = match &kind {
-            JointKind::Fixed {
-                local_anchor_a,
-                local_anchor_b,
-            }
-            | JointKind::Wheel {
-                local_anchor_a,
-                local_anchor_b,
-                ..
-            }
-            | JointKind::SixDof {
-                local_anchor_a,
-                local_anchor_b,
-                ..
-            } => {
-                let ra = self.bodies[body_a].orientation * *local_anchor_a;
-                let rb = self.bodies[body_b].orientation * *local_anchor_b;
-                let delta =
-                    (self.bodies[body_b].position + rb) - (self.bodies[body_a].position + ra);
-                self.bodies[body_a].orientation.conjugate() * delta
-            }
-            _ => Vec3::ZERO,
-        };
+        let reference_anchor_delta = resolved.map(|r| r.ref_anchor_delta).unwrap_or(Vec3::ZERO);
         let mut joint = Joint::new(body_a, body_b, kind);
         joint.reference_angle = reference_angle;
         joint.reference_length = reference_length;

@@ -43,8 +43,8 @@ pub use body::{BodyHandle, BodyType, RigidBody};
 pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
 pub use joint::{
-    AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, RevoluteLimit,
-    RevoluteMotor, WheelSuspension,
+    AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, ResolvedJoint,
+    RevoluteLimit, RevoluteMotor, WheelSuspension, resolve_joint,
 };
 pub use math::{AABB, Ray, RaycastHit};
 pub use shape::{ConvexHull, Heightfield, Shape, TriMesh};

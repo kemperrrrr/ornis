@@ -83,7 +83,7 @@ use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::joints::hinge_twist;
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::joint::{JointHandle, JointKind};
-use crate::math::{Ray, RaycastHit, orthogonalize_axle, tangent_basis};
+use crate::math::{Ray, RaycastHit, tangent_basis};
 use crate::shape::Shape;
 use crate::trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, TriggerEvent,
@@ -331,14 +331,6 @@ fn quat_diff_vec(a: Quat, b: Quat) -> Vec3 {
         return Vec3::ZERO;
     }
     xyz * (2.0 * s.asin() / s)
-}
-
-/// Normalized joint axes, or `None` on degenerate input.
-fn norm_axes(ax_a: Vec3, ax_b: Vec3) -> Option<(Vec3, Vec3)> {
-    if ax_a.length_squared() < 1e-12 || ax_b.length_squared() < 1e-12 {
-        return None;
-    }
-    Some((ax_a.normalize(), ax_b.normalize()))
 }
 
 /// Wrap an angle to [-PI, PI] (official limit bookkeeping).
@@ -1984,17 +1976,32 @@ impl PhysicsEngine for AvbdEngine {
         if body_a >= self.bodies.len() || body_b >= self.bodies.len() || body_a == body_b {
             return None;
         }
+        // M2: Gear (multi-body coordinates), SixDof (per-axis config)
+        // need their own row models.
+        if matches!(kind, JointKind::Gear { .. } | JointKind::SixDof { .. }) {
+            return None;
+        }
         let ba = &self.bodies[body_a];
         let bb = &self.bodies[body_b];
+        // Frames + assembly references, resolved once in the shared
+        // `joint::resolve_joint` (same values the builtin engine captures).
+        let r = crate::joint::resolve_joint(
+            &kind,
+            ba.position,
+            ba.orientation,
+            bb.position,
+            bb.orientation,
+        )
+        .expect("non-gear/sixdof kinds resolve");
         let mut joint = AvbdJoint {
             a: body_a,
             b: body_b,
-            la: Vec3::ZERO,
-            lb: Vec3::ZERO,
-            ax_a: Vec3::X,
-            ax_b: Vec3::X,
-            bx_a: Vec3::X,
-            bx_b: Vec3::X,
+            la: r.la,
+            lb: r.lb,
+            ax_a: r.ax_a,
+            ax_b: r.ax_b,
+            bx_a: r.bx_a,
+            bx_b: r.bx_b,
             susp: [0.0; 2],
             kind: AvbdJointKind::Ball,
             ref_val: 0.0,
@@ -2009,102 +2016,43 @@ impl PhysicsEngine for AvbdEngine {
             pen_a: [JOINT_PENALTY_INIT; 3],
         };
         match kind {
-            JointKind::Ball {
-                local_anchor_a,
-                local_anchor_b,
-            } => {
-                joint.la = local_anchor_a;
-                joint.lb = local_anchor_b;
-            }
-            JointKind::Revolute {
-                local_anchor_a,
-                local_anchor_b,
-                local_axis_a,
-                local_axis_b,
-                limit,
-                motor,
-            } => {
-                let (ax_a, ax_b) = norm_axes(local_axis_a, local_axis_b)?;
+            JointKind::Ball { .. } => {}
+            JointKind::Revolute { limit, motor, .. } => {
+                // Admission policy: degenerate hinge axes reject (the
+                // builtin substitutes a fallback instead).
+                if r.degenerate {
+                    return None;
+                }
                 joint.kind = AvbdJointKind::Revolute;
-                joint.la = local_anchor_a;
-                joint.lb = local_anchor_b;
-                joint.ax_a = ax_a;
-                joint.ax_b = ax_b;
-                joint.ref_val = hinge_twist(ba.orientation, bb.orientation, ax_a);
+                joint.ref_val = r.ref_angle;
                 joint.lim = limit.map(|l| [l.min, l.max]);
                 joint.mot = motor.map(|m| [m.target_speed, m.max_torque]);
             }
-            JointKind::Prismatic {
-                local_anchor_a,
-                local_anchor_b,
-                local_axis_a,
-                local_axis_b,
-                limit,
-                motor,
-            } => {
-                let (ax_a, ax_b) = norm_axes(local_axis_a, local_axis_b)?;
+            JointKind::Prismatic { limit, motor, .. } => {
+                if r.degenerate {
+                    return None;
+                }
                 joint.kind = AvbdJointKind::Prismatic;
-                joint.la = local_anchor_a;
-                joint.lb = local_anchor_b;
-                joint.ax_a = ax_a;
-                joint.ax_b = ax_b;
-                let wa0 = (ba.orientation * ax_a).normalize_or(Vec3::Z);
-                let pa0 = ba.position + ba.orientation * local_anchor_a;
-                let pb0 = bb.position + bb.orientation * local_anchor_b;
-                joint.ref_val = (pb0 - pa0).dot(wa0);
+                joint.ref_val = r.ref_length;
                 joint.lim = limit.map(|l| [l.min, l.max]);
                 joint.mot = motor.map(|m| [m.target_speed, m.max_force]);
             }
-            JointKind::Fixed {
-                local_anchor_a,
-                local_anchor_b,
-            } => {
+            JointKind::Fixed { .. } => {
                 joint.kind = AvbdJointKind::Fixed;
-                joint.la = local_anchor_a;
-                joint.lb = local_anchor_b;
-                joint.q_ref = ba.orientation.conjugate() * bb.orientation;
+                joint.q_ref = r.ref_quat;
             }
-            JointKind::Distance {
-                local_anchor_a,
-                local_anchor_b,
-            } => {
+            JointKind::Distance { .. } => {
                 joint.kind = AvbdJointKind::Distance;
-                joint.la = local_anchor_a;
-                joint.lb = local_anchor_b;
-                let pa0 = ba.position + ba.orientation * local_anchor_a;
-                let pb0 = bb.position + bb.orientation * local_anchor_b;
-                joint.ref_val = (pa0 - pb0).length();
+                joint.ref_val = r.ref_distance;
             }
             JointKind::Wheel {
-                local_anchor_a,
-                local_anchor_b,
-                local_suspension_a,
-                local_suspension_b,
-                local_axle_a,
-                local_axle_b,
-                suspension,
-                motor,
+                suspension, motor, ..
             } => {
-                // Mirror of the builtin creation rule: suspension normalized,
-                // each axle orthogonalized against its own suspension.
-                let sa = local_suspension_a.normalize_or(Vec3::Y);
-                let sb = local_suspension_b.normalize_or(Vec3::Y);
                 joint.kind = AvbdJointKind::Wheel;
-                joint.la = local_anchor_a;
-                joint.lb = local_anchor_b;
-                joint.ax_a = sa;
-                joint.ax_b = sb;
-                joint.bx_a = orthogonalize_axle(sa, local_axle_a);
-                joint.bx_b = orthogonalize_axle(sb, local_axle_b);
-                let wa0 = (ba.orientation * sa).normalize_or(Vec3::Z);
-                let pa0 = ba.position + ba.orientation * local_anchor_a;
-                let pb0 = bb.position + bb.orientation * local_anchor_b;
-                joint.ref_val = (pb0 - pa0).dot(wa0);
+                joint.ref_val = r.ref_length;
                 joint.susp = [suspension.frequency_hz, suspension.damping_ratio];
                 joint.mot = motor.map(|m| [m.target_speed, m.max_torque]);
             }
-            // M2: Gear (multi-body coordinates), SixDof (per-axis config)
-            // need their own row models.
             JointKind::Gear { .. } | JointKind::SixDof { .. } => {
                 return None;
             }
