@@ -57,6 +57,10 @@
 //!   Substeps (M2): fixed-step accumulator — the tuned core always advances
 //!   in exact 1/60 s increments (120 Hz hosts alternate sim/skip, hitches
 //!   replay whole steps, debt past 4 steps clamps to slow motion).
+//!   TOI (M2, builtin linear parity — angular sweep stays discrete: a body
+//!   whose step displacement exceeds half its smallest dimension sweeps
+//!   `cast_shape` and clamps to the first hit; jointed partners are excluded
+//!   so joint swings never self-clamp).
 //!   Fracture is not implemented.
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
@@ -64,9 +68,10 @@
 //! - Sphere piles settle on floors/boxes (rolling friction helps); tall
 //!   sphere-on-sphere towers stay an M2 item (needs rolling multi-point
 //!   contact for true stacking).
-//! - No CCD, substeps, islands or sleeping: one implicit step of 10
+//! - No islands or angular CCD: one implicit step of 10
 //!   iterations (M2). Broadphase is an O(n2) bounding-sphere prefilter.
-//!   High-speed impacts (5+ m/s) catch deep (~3cm) — exact TOI is M2.
+//!   Joint swings and spinning bodies rely on the discrete phase (angular
+//!   sweep stays an M2 item, same as the builtin's linear-cast limit).
 //!   The pre-touch pair band (points form up to `GEN_MARGIN` before contact)
 //!   is load-bearing for fast impacts: their frozen-anchor C diverges on
 //!   touchdown and the penalty ramp turns it into a projection catch.
@@ -157,6 +162,11 @@ const STICK_THRESH: f32 = 0.00001;
 const SLEEP_LIN: f32 = 0.15;
 const SLEEP_ANG: f32 = 0.15;
 const SLEEP_TIME: f32 = 0.5;
+/// Gated-wake thresholds (builtin `wake_on_impact` + penetration-wake
+/// parity): a NEW pair wakes its sleepers only on 0.5 m/s approach or a
+/// fresh overlap deeper than 1 cm.
+const WAKE_IMPACT_SPEED: f32 = 0.5;
+const WAKE_PENETRATION: f32 = 0.01;
 
 /// Angular travel slop for revolute limits (official `ANGULAR_SLOP`).
 const LIMIT_SLOP_ANG: f32 = 0.005;
@@ -480,6 +490,28 @@ fn pair_allowed(a: &RigidBody, b: &RigidBody) -> bool {
     (a.collision_layer & b.collision_mask) != 0 && (b.collision_layer & a.collision_mask) != 0
 }
 
+/// Smallest shape dimension (builtin TOI parity): a body whose step
+/// displacement exceeds HALF of this sweeps `cast_shape` instead of moving
+/// blindly. Apex-point shapes (cone/hull/heightfield/trimesh) halve again.
+fn shape_min_dimension(shape: &Shape) -> f32 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        Shape::Box { half_extents } => half_extents.min_element(),
+        Shape::Capsule { radius, .. } => *radius,
+        Shape::Cylinder {
+            radius,
+            half_height,
+        } => radius.min(*half_height),
+        Shape::Cone {
+            radius,
+            half_height,
+        } => 0.5 * radius.min(*half_height),
+        Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
+        Shape::Heightfield(hf) => 0.5 * hf.cell,
+        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature,
+    }
+}
+
 /// Effective inverse mass: only true dynamics participate in the solve.
 fn eff_inv_mass(b: &RigidBody) -> f32 {
     if b.body_type == BodyType::Dynamic {
@@ -734,6 +766,87 @@ impl AvbdEngine {
             let torque = std::mem::replace(&mut b.torque, Vec3::ZERO);
             b.angular_velocity += mat3_vec(iw_inv, torque) * DT_STEP;
         }
+        // Continuous clamp (builtin TOI parity, linear only): a dynamic body
+        // whose step displacement exceeds half its smallest dimension sweeps
+        // `cast_shape` along the motion and clamps to the first hit (+1mm),
+        // with a one-shot bounce above the restitution threshold — otherwise
+        // thin walls tunnel (10 m/s × 1/60 = 17 cm > 4 cm wall).
+        for h in 0..n {
+            if !self.solvable(h) || self.asleep[h] {
+                continue;
+            }
+            let disp = self.bodies[h].velocity * DT_STEP;
+            // TOI skip (builtin parity): the cast is only meaningful against
+            // OTHER bodies — a jointed partner sweeping through the mover's
+            // own swing (ball-pendulum anchors, hinge arcs) is not a wall.
+            // Partners joined to the mover are excluded from the targets.
+            if disp.length() <= 0.5 * shape_min_dimension(&self.bodies[h].shape) {
+                continue;
+            }
+            let mover = ShapeRef {
+                shape: &self.bodies[h].shape,
+                pos: self.bodies[h].position,
+                rot: self.bodies[h].orientation,
+            };
+            let hit = {
+                let joined: Vec<usize> = self
+                    .joints
+                    .iter()
+                    .filter_map(|j| {
+                        if j.a == h {
+                            Some(j.b)
+                        } else if j.b == h {
+                            Some(j.a)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let targets = (0..n)
+                    .filter(|&o| {
+                        o != h
+                            && !self.bodies[o].is_trigger
+                            && pair_allowed(&self.bodies[h], &self.bodies[o])
+                            && !joined.contains(&o)
+                    })
+                    .map(|o| {
+                        (
+                            o,
+                            ShapeRef {
+                                shape: &self.bodies[o].shape,
+                                pos: self.bodies[o].position,
+                                rot: self.bodies[o].orientation,
+                            },
+                        )
+                    });
+                cast_shape(mover, disp, targets)
+            };
+            if let Some(hit) = hit {
+                let len = disp.length().max(1e-9);
+                // `cast_shape` stops at first TOUCH (1 mm gap): stop AT the
+                // reported pose — never step into it (the gap is the clean
+                // touching contact the pair pass below owns) — and bound the
+                // post-clamp travel to the generic creation margin, so a
+                // far-wall report on a pass-through course still catches the
+                // contact in the pair pass.
+                let frac = (hit.t / len).clamp(0.0, 1.0);
+                let e = self.bodies[h]
+                    .restitution
+                    .min(self.bodies[hit.handle].restitution);
+                let b = &mut self.bodies[h];
+                b.position += disp * frac;
+                let vn = b.velocity.dot(hit.normal);
+                if vn < 0.0 {
+                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
+                    b.velocity -= hit.normal * (bounce * vn);
+                }
+                self.wake_body(hit.handle);
+                // Any sleeper now touching this relocated body feels the
+                // impact next pair pass (fresh-contact rule); its velocity
+                // field is authoritative below, so freeze it now.
+                self.sleep_timer[h] = 0.0;
+            }
+        }
         // Contacts, triggers, and pre-step velocities for hit events.
         let trigger_now = self.generate_pairs();
         // Deadbeat motor impulses (velocity level, before warmstart — like
@@ -895,7 +1008,10 @@ impl AvbdEngine {
         let mut seen = vec![false; self.pairs.len()];
         let mut trigger_now = BTreeSet::new();
         // Bodies of brand-new pairs wake (below, after the scan borrows end):
-        // a fresh touch is the one disturbance a sleeper must react to.
+        // a fresh touch is the one disturbance a sleeper must react to — but
+        // only a genuine impact (builtin `wake_on_impact` semantics, threshold
+        // 0.5 m/s approach): resting micro-jitter and warm-pair re-gating at
+        // GEN_MARGIN must NOT wake a sleeper.
         let mut wake: Vec<(usize, usize)> = Vec::new();
         for ia in 0..n {
             for ib in (ia + 1)..n {
@@ -1119,7 +1235,28 @@ impl AvbdEngine {
                     pair.points = next;
                 } else {
                     seen.push(true);
-                    wake.push((ia, ib));
+                    // Gated wake (builtin `wake_on_impact` parity, threshold
+                    // 0.5 m/s approach): a NEW pair wakes its sleepers only on
+                    // a genuine impact or a deep fresh overlap (spawn /
+                    // teleport driver, blind to the velocity test). Resting
+                    // micro-jitter and GEN_MARGIN re-gating stay asleep.
+                    let fresh_pen = d.dist < -WAKE_PENETRATION;
+                    let mut impact = fresh_pen;
+                    if !impact {
+                        for (s, o, sign) in [(ia, ib, 1.0f32), (ib, ia, -1.0f32)] {
+                            if self.asleep[s] {
+                                let approach = (self.bodies[o].velocity - self.bodies[s].velocity)
+                                    .dot(sign * normal);
+                                if approach > WAKE_IMPACT_SPEED {
+                                    impact = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if impact {
+                        wake.push((ia, ib));
+                    }
                     self.pairs.push(AvbdPair {
                         a: ia,
                         b: ib,

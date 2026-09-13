@@ -881,7 +881,7 @@ fn avbd_sleep_freezes_settled_stack_and_wakes_on_touch() {
         .iter()
         .map(|h| physics.get_body(*h).unwrap().position.y)
         .collect();
-    // A dropped box wakes the sleeper it touches; the pile holds.
+    // A dropped box wakes the pile on impact; the pile holds.
     let dropped = physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, 3.0, 0.0),
         Vec3::splat(0.25),
@@ -895,7 +895,7 @@ fn avbd_sleep_freezes_settled_stack_and_wakes_on_touch() {
             break;
         }
     }
-    assert!(woke, "fresh touch must wake the sleeper");
+    assert!(woke, "fresh impact must wake the sleeper");
     for _ in 0..600 {
         physics.step(DT);
     }
@@ -975,6 +975,89 @@ fn avbd_substeps_honor_host_dt() {
     assert!(
         y_stall > 4.9,
         "capped debt must not free-fall a full second, got {y_stall}"
+    );
+}
+
+#[test]
+fn avbd_sphere_tower_holds_like_builtin() {
+    // Sphere towers need no multi-point contact in the stable regime: a
+    // perturbed 3-stack and a dimple pocket settle and hold at builtin
+    // parity (measured: same offsets, both asleep).
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(5.0, 1.0, 5.0),
+        0.0,
+    ));
+    let mut hs = Vec::new();
+    for i in 0..3 {
+        let mut b = RigidBody::new_sphere(
+            Vec3::new(if i == 2 { 0.05 } else { 0.0 }, 0.5 + i as f32 * 1.0, 0.0),
+            0.5,
+            1.0,
+        );
+        b.rolling_friction = 0.3;
+        hs.push(physics.add_body(b));
+    }
+    for _ in 0..600 {
+        physics.step(DT);
+    }
+    for (h, y0) in hs.iter().zip([0.5, 1.5, 2.5]) {
+        let b = physics.get_body(*h).unwrap();
+        assert!(
+            (b.position.y - y0).abs() < 0.05 && b.position.x.abs() < 0.1,
+            "tower must hold its levels"
+        );
+    }
+    // Dimple pocket: a dropped sphere settles between two base spheres.
+    let mut pocket = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    pocket.add_body(RigidBody::new_box(
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(5.0, 1.0, 5.0),
+        0.0,
+    ));
+    for x in [-0.5, 0.5] {
+        let mut b = RigidBody::new_sphere(Vec3::new(x, 0.5, 0.0), 0.5, 1.0);
+        b.rolling_friction = 0.3;
+        pocket.add_body(b);
+    }
+    let mut t = RigidBody::new_sphere(Vec3::new(0.0, 2.5, 0.0), 0.5, 1.0);
+    t.rolling_friction = 0.3;
+    let th = pocket.add_body(t);
+    for _ in 0..900 {
+        pocket.step(DT);
+    }
+    let tb = pocket.get_body(th).unwrap();
+    assert!(
+        tb.velocity.length() < 0.05
+            && tb.position.x.abs() < 0.05
+            && (tb.position.y - 1.37).abs() < 0.1,
+        "dropped sphere must rest in the pocket"
+    );
+}
+
+#[test]
+fn avbd_fast_box_stops_at_thin_wall() {
+    // G6 parity: a 0.5 m box at 10 m/s (17 cm/step) against a 4 cm wall —
+    // without the TOI clamp it tunnels; with it, it rests on the face
+    // (restitution 0: the test is about tunneling, not bouncing).
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    physics.add_body(RigidBody::new_box(
+        Vec3::new(5.0, 0.0, 0.0),
+        Vec3::new(0.02, 2.0, 2.0),
+        0.0,
+    ));
+    let mut b = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.25), 1.0);
+    b.velocity = Vec3::new(10.0, 0.0, 0.0);
+    b.restitution = 0.0;
+    let h = physics.add_body(b);
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    let x = physics.get_body(h).unwrap().position.x;
+    assert!(
+        x < 5.0 && x > 4.0,
+        "fast box must rest on the wall face, got {x}"
     );
 }
 
