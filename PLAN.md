@@ -576,7 +576,8 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
  rolling multi-point contact), fracture, CCD/substeps/
  sleep/islands, deep-catch пенетрация ~3см на ударах 5+ м/с. Закрыто после
-  M1: Prismatic/Fixed/Distance + limits/motors, Wheel (пружина подвески +
+  M1: SolverKind/Engine-оркестратор (переключение builtin↔AVBD с миграцией
+  тел/джойнтов 1:1, рантайм держит Engine), Prismatic/Fixed/Distance + limits/motors, Wheel (пружина подвески +
   spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к Box2D чем
   velocity-only у builtin), SixDof (per-axis free/locked/limited),
   анизотропный/rolling/torsion friction,

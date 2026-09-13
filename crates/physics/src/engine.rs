@@ -2380,6 +2380,20 @@ fn rebuild_joints(
 }
 
 impl BuiltinPhysicsEngine {
+    /// Bodies in handle order, cloned for solver migration (`Engine`
+    /// re-registers them 1:1, so handles stay valid across the switch).
+    pub(crate) fn bodies_snapshot(&self) -> Vec<RigidBody> {
+        self.bodies.clone()
+    }
+
+    /// Joint specs in handle order `(body_a, body_b, kind)` for migration.
+    pub(crate) fn joint_specs(&self) -> Vec<(BodyHandle, BodyHandle, JointKind)> {
+        self.joints
+            .iter()
+            .map(|j| (j.body_a, j.body_b, j.kind))
+            .collect()
+    }
+
     /// Empty engine with the default tuning: 12 substeps, 8 velocity
     /// iterations, 4 position iterations, rigid contacts, SIMD-wide solver
     /// on, no gravity until set here. `gravity` is a constant world-space

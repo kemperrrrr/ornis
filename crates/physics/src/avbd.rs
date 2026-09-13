@@ -554,6 +554,9 @@ struct AvbdJoint {
     /// unused by other kinds.
     susp: [f32; 2],
     kind: AvbdJointKind,
+    /// Original joint spec (mirrors the builtin stored `kind`): lets the
+    /// `Engine` orchestrator migrate joints across solvers without loss.
+    spec: JointKind,
     /// Travel reference: revolute reference twist (rad), prismatic reference
     /// length (m), distance rest length (m); unused otherwise.
     ref_val: f32,
@@ -619,6 +622,17 @@ pub struct AvbdEngine {
 }
 
 impl AvbdEngine {
+    /// Bodies in handle order, cloned for solver migration (`Engine`
+    /// re-registers them 1:1, so handles stay valid across the switch).
+    pub(crate) fn bodies_snapshot(&self) -> Vec<RigidBody> {
+        self.bodies.clone()
+    }
+
+    /// Joint specs in handle order `(body_a, body_b, kind)` for migration.
+    pub(crate) fn joint_specs(&self) -> Vec<(BodyHandle, BodyHandle, JointKind)> {
+        self.joints.iter().map(|j| (j.a, j.b, j.spec)).collect()
+    }
+
     /// Empty engine; `gravity` is a constant world-space acceleration
     /// applied to dynamic bodies each step.
     pub fn new(gravity: Vec3) -> Self {
@@ -2347,6 +2361,7 @@ impl PhysicsEngine for AvbdEngine {
                 bx_b: Vec3::X,
                 susp: [0.0; 2],
                 kind: AvbdJointKind::Gear,
+                spec: kind,
                 ref_val: ca + ratio * cb,
                 q_ref: Quat::IDENTITY,
                 lim: None,
@@ -2390,6 +2405,7 @@ impl PhysicsEngine for AvbdEngine {
             bx_b: r.bx_b,
             susp: [0.0; 2],
             kind: AvbdJointKind::Ball,
+            spec: kind,
             ref_val: 0.0,
             q_ref: Quat::IDENTITY,
             lim: None,

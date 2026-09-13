@@ -16,7 +16,7 @@ use glam::{Quat, Vec3};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
-use ornis_physics::{BodyHandle, BodyType, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BodyHandle, BodyType, PhysicsEngine, RigidBody, SolverKind};
 #[cfg(test)]
 use ornis_render::extract_render_data;
 use ornis_render::scene::TransformDesc;
@@ -32,7 +32,7 @@ use ornis_render::scene::{MaterialDesc, MeshDesc};
 /// render-frame time and invokes this domain at a bounded fixed 60 Hz
 /// timestep.
 pub struct PhysicsRuntime {
-    solver: BuiltinPhysicsEngine,
+    solver: ornis_physics::Engine,
     bindings: HashMap<Entity, BodyHandle>,
     changed: bool,
 }
@@ -41,7 +41,7 @@ impl PhysicsRuntime {
     /// Creates a physics runtime with world-space gravity.
     pub fn new(gravity: Vec3) -> Self {
         Self {
-            solver: BuiltinPhysicsEngine::new(gravity),
+            solver: ornis_physics::Engine::new(SolverKind::Builtin, gravity),
             bindings: HashMap::new(),
             changed: false,
         }
