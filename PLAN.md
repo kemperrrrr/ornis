@@ -574,8 +574,8 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   линеаризации дестабилизируют рычаги), geometric stiffness джойнтов (без
   него spin-up через длинные рычаги), stick-gated anchor refresh, персистентные
   нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
- rolling multi-point contact), fracture, CCD/substeps/islands
- (ост. M2: substeps, CCD/TOI, island-wake propagation), deep-catch
+ rolling multi-point contact), fracture, CCD/islands
+ (ост. M2: CCD/TOI, island-wake propagation), deep-catch
  пенетрация ~3см на ударах 5+ м/с. Закрыто после M1: SolverKind/Engine-оркестратор (переключение builtin↔AVBD с миграцией
   тел/джойнтов 1:1, рантайм держит Engine), Prismatic/Fixed/Distance + limits/motors, Wheel (пружина подвески +
   spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к Box2D чем

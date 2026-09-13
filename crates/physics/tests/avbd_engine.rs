@@ -920,6 +920,65 @@ fn avbd_sleep_freezes_settled_stack_and_wakes_on_touch() {
     );
 }
 #[test]
+fn avbd_substeps_honor_host_dt() {
+    // Reference: 60 steps at the native 1/60 s.
+    let mut ref_physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let r = ref_physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 5.0, 0.0),
+        Vec3::splat(0.25),
+        1.0,
+    ));
+    for _ in 0..60 {
+        ref_physics.step(DT);
+    }
+    let y_ref = ref_physics.get_body(r).unwrap().position.y;
+    // 120 Hz host: alternate sim/skip must reproduce the reference.
+    let mut fast = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let f = fast.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 5.0, 0.0),
+        Vec3::splat(0.25),
+        1.0,
+    ));
+    for _ in 0..120 {
+        fast.step(DT / 2.0);
+    }
+    let y_fast = fast.get_body(f).unwrap().position.y;
+    assert!(
+        (y_fast - y_ref).abs() < 1e-4,
+        "120 Hz must match the 60 Hz reference: {y_fast} vs {y_ref}"
+    );
+    // Hitch frame (1/30 s) replays two whole steps.
+    let mut hitch = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let hh = hitch.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 5.0, 0.0),
+        Vec3::splat(0.25),
+        1.0,
+    ));
+    for _ in 0..30 {
+        hitch.step(2.0 * DT);
+    }
+    let y_hitch = hitch.get_body(hh).unwrap().position.y;
+    assert!(
+        (y_hitch - y_ref).abs() < 1e-4,
+        "hitch frames must match the reference: {y_hitch} vs {y_ref}"
+    );
+    // Spiral guard: a 1 s debt simulates at most MAX_SUBSTEPS, never the
+    // full fall (slow motion instead of explosion).
+    let mut stall = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let s = stall.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 5.0, 0.0),
+        Vec3::splat(0.25),
+        1.0,
+    ));
+    stall.step(1.0);
+    let y_stall = stall.get_body(s).unwrap().position.y;
+    assert!(
+        y_stall > 4.9,
+        "capped debt must not free-fall a full second, got {y_stall}"
+    );
+}
+
+#[test]
 fn avbd_wheel_degenerate_axle_falls_back() {
     // Parallel axle must orthogonalize deterministically (no NaN), mirror
     // of the builtin fallback test.

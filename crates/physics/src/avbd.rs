@@ -54,6 +54,9 @@
 //!   Sleep (M2): quiet dynamics freeze per body (builtin 0.15 m/s + 0.5 s
 //!   parity) and wake on fresh pairs/joint edits/velocity kicks; no islands
 //!   — wake does not propagate through *existing* pairs (M3 gap).
+//!   Substeps (M2): fixed-step accumulator — the tuned core always advances
+//!   in exact 1/60 s increments (120 Hz hosts alternate sim/skip, hitches
+//!   replay whole steps, debt past 4 steps clamps to slow motion).
 //!   Fracture is not implemented.
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
@@ -635,6 +638,11 @@ pub struct AvbdEngine {
     /// Per-body sleep timers (seconds below thresholds) and frozen flags.
     sleep_timer: Vec<f32>,
     asleep: Vec<bool>,
+    /// Fixed-step accumulator (seconds of host time awaiting simulation):
+    /// the core always advances in exact `DT_STEP` increments, so 120 Hz
+    /// hosts alternate sim/skip and hitch frames catch up — wall speed is
+    /// exact on average without touching the tuned single-step dynamics.
+    time_debt: f32,
 }
 
 impl AvbdEngine {
@@ -702,6 +710,141 @@ impl AvbdEngine {
         }
     }
 
+    /// One fixed `DT_STEP` advance. Hit/contact events emit only on the
+    /// host step's last substep (earlier ones only advance state).
+    fn step_inner(&mut self, emit: bool) {
+        self.ensure_scratch();
+        let n = self.bodies.len();
+        // Consume torques into angular velocity (cleared each step, like the
+        // builtin engine); gravity folds into the inertial position below.
+        for h in 0..n {
+            if !self.solvable(h) {
+                continue;
+            }
+            let b = &mut self.bodies[h];
+            let iw = world_inertia(b.inertia, b.orientation);
+            let iw_inv = inverse_symmetric(
+                iw,
+                Vec3::new(
+                    if b.inertia.x > 0.0 { b.inertia.x } else { 0.0 },
+                    if b.inertia.y > 0.0 { b.inertia.y } else { 0.0 },
+                    if b.inertia.z > 0.0 { b.inertia.z } else { 0.0 },
+                ),
+            );
+            let torque = std::mem::replace(&mut b.torque, Vec3::ZERO);
+            b.angular_velocity += mat3_vec(iw_inv, torque) * DT_STEP;
+        }
+        // Contacts, triggers, and pre-step velocities for hit events.
+        let trigger_now = self.generate_pairs();
+        // Deadbeat motor impulses (velocity level, before warmstart — like
+        // the official velocity stage).
+        self.motor_impulse();
+        // External wake: torques, deadbeat motors and host edits write the
+        // velocity fields directly, so a sleeper above thresholds wakes
+        // before warmstart (teleports surface next step via BDF1).
+        for h in 0..n {
+            if self.asleep[h] {
+                let b = &self.bodies[h];
+                if b.velocity.length() > SLEEP_LIN || b.angular_velocity.length() > SLEEP_ANG {
+                    self.wake_body(h);
+                }
+            }
+        }
+        for h in 0..n {
+            self.pos0[h] = self.bodies[h].position;
+            self.rot0[h] = self.bodies[h].orientation;
+            self.pre_vel[h] = self.bodies[h].velocity;
+            if !self.solvable(h) {
+                self.inertial[h] = self.bodies[h].position;
+                self.inertial_rot[h] = self.bodies[h].orientation;
+                continue;
+            }
+            let b = &self.bodies[h];
+            self.inertial[h] =
+                b.position + b.velocity * DT_STEP + self.gravity * (DT_STEP * DT_STEP);
+            self.inertial_rot[h] = quat_integrate(b.orientation, b.angular_velocity * DT_STEP);
+        }
+        // Eq. 19 warmstart decay.
+        for pair in &mut self.pairs {
+            for pt in &mut pair.points {
+                pt.lam[0] *= ALPHA * GAMMA;
+                pt.lam[1] *= ALPHA * GAMMA;
+                pt.lam[2] *= ALPHA * GAMMA;
+                pt.roll_lam[0] *= ALPHA * GAMMA;
+                pt.roll_lam[1] *= ALPHA * GAMMA;
+                pt.roll_lam[2] *= ALPHA * GAMMA;
+                for k in 0..3 {
+                    pt.pen[k] = (pt.pen[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
+                }
+            }
+        }
+        for j in &mut self.joints {
+            for k in 0..3 {
+                j.lam_l[k] *= ALPHA * GAMMA;
+                j.lam_a[k] *= ALPHA * GAMMA;
+                j.pen_l[k] = (j.pen_l[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
+                j.pen_a[k] = (j.pen_a[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
+            }
+        }
+        // Warmstarted positions (official adaptive weight is unity on free
+        // fall; proper quaternion integration like the demo).
+        for h in 0..n {
+            if !self.solvable(h) || self.asleep[h] {
+                continue;
+            }
+            self.bodies[h].position = self.inertial[h];
+            self.bodies[h].orientation = self.inertial_rot[h];
+        }
+        // Main loop: primal sweep in reverse handle order (official sweeps
+        // its body list head-first, i.e. reverse creation order), then duals.
+        for _ in 0..ITERS {
+            for h in (0..n).rev() {
+                if self.solvable(h) && !self.asleep[h] {
+                    self.solve_body(h);
+                }
+            }
+            self.dual_update();
+        }
+        // BDF1 velocities + orientation renormalization (deviation from the
+        // demo, which never renormalizes: prevents long-term quat drift).
+        for h in 0..n {
+            if !self.solvable(h) || self.asleep[h] {
+                // Sleepers keep their zeroed velocity fields.
+                continue;
+            }
+            let b = &mut self.bodies[h];
+            b.velocity = (b.position - self.pos0[h]) / DT_STEP;
+            // Official relative-rotation velocity `2*(q*q0^-1).xyz`, with a
+            // rest deadband (positions are O(1) f32: sub-epsilon spin is dust).
+            let spin = quat_diff_vec(b.orientation, self.rot0[h]);
+            b.angular_velocity = if spin.length() < 1e-9 {
+                Vec3::ZERO
+            } else {
+                spin / DT_STEP
+            };
+            b.orientation = b.orientation.normalize();
+        }
+        // Sleep bookkeeping (builtin parity, per body instead of per island):
+        // slow dynamics accumulate quiet time and freeze; motion resets.
+        for h in 0..n {
+            if !self.solvable(h) || self.asleep[h] {
+                continue;
+            }
+            let b = &self.bodies[h];
+            if b.velocity.length() < SLEEP_LIN && b.angular_velocity.length() < SLEEP_ANG {
+                self.sleep_timer[h] += DT_STEP;
+                if self.sleep_timer[h] >= SLEEP_TIME {
+                    self.sleep_body(h);
+                }
+            } else {
+                self.sleep_timer[h] = 0.0;
+            }
+        }
+        if emit {
+            self.emit_events(trigger_now);
+        }
+    }
+
     /// Empty engine; `gravity` is a constant world-space acceleration
     /// applied to dynamic bodies each step.
     pub fn new(gravity: Vec3) -> Self {
@@ -721,6 +864,7 @@ impl AvbdEngine {
             pre_vel: Vec::new(),
             sleep_timer: Vec::new(),
             asleep: Vec::new(),
+            time_debt: 0.0,
         }
     }
 
@@ -2221,143 +2365,29 @@ impl AvbdEngine {
 /// Fixed step used by the solver tuning (the formulation is dt-parametric
 /// through the mass terms; the iteration count is tuned for 1/60).
 const DT_STEP: f32 = 1.0 / 60.0;
+/// Fixed-step accumulator cap: at most this many 1/60 s substeps per
+/// `step` call; larger host debts clamp (slow motion under extreme load
+/// instead of the spiral of death). Matches the builtin spirit (12
+/// substeps of its own loop) while keeping AVBD's core single-step.
+const MAX_SUBSTEPS: usize = 4;
 
 impl PhysicsEngine for AvbdEngine {
     fn step(&mut self, dt: f32) {
         if !dt.is_finite() || dt <= 0.0 {
             return;
         }
-        let _ = dt;
-        self.ensure_scratch();
-        let n = self.bodies.len();
-        // Consume torques into angular velocity (cleared each step, like the
-        // builtin engine); gravity folds into the inertial position below.
-        for h in 0..n {
-            if !self.solvable(h) {
-                continue;
-            }
-            let b = &mut self.bodies[h];
-            let iw = world_inertia(b.inertia, b.orientation);
-            let iw_inv = inverse_symmetric(
-                iw,
-                Vec3::new(
-                    if b.inertia.x > 0.0 { b.inertia.x } else { 0.0 },
-                    if b.inertia.y > 0.0 { b.inertia.y } else { 0.0 },
-                    if b.inertia.z > 0.0 { b.inertia.z } else { 0.0 },
-                ),
-            );
-            let torque = std::mem::replace(&mut b.torque, Vec3::ZERO);
-            b.angular_velocity += mat3_vec(iw_inv, torque) * DT_STEP;
+        // Fixed-step accumulator: catch up in exact `DT_STEP` increments so
+        // 120 Hz hosts alternate sim/skip and hitch frames replay whole
+        // steps; past the cap the debt clamps (slow motion, never spiral).
+        self.time_debt = (self.time_debt + dt).min(DT_STEP * MAX_SUBSTEPS as f32);
+        let mut n = 0;
+        while self.time_debt >= DT_STEP && n < MAX_SUBSTEPS {
+            self.time_debt -= DT_STEP;
+            n += 1;
+            let last = self.time_debt < DT_STEP || n == MAX_SUBSTEPS;
+            self.step_inner(last);
         }
-        // Contacts, triggers, and pre-step velocities for hit events.
-        let trigger_now = self.generate_pairs();
-        // Deadbeat motor impulses (velocity level, before warmstart — like
-        // the official velocity stage).
-        self.motor_impulse();
-        // External wake: torques, deadbeat motors and host edits write the
-        // velocity fields directly, so a sleeper above thresholds wakes
-        // before warmstart (teleports surface next step via BDF1).
-        for h in 0..n {
-            if self.asleep[h] {
-                let b = &self.bodies[h];
-                if b.velocity.length() > SLEEP_LIN || b.angular_velocity.length() > SLEEP_ANG {
-                    self.wake_body(h);
-                }
-            }
-        }
-        for h in 0..n {
-            self.pos0[h] = self.bodies[h].position;
-            self.rot0[h] = self.bodies[h].orientation;
-            self.pre_vel[h] = self.bodies[h].velocity;
-            if !self.solvable(h) {
-                self.inertial[h] = self.bodies[h].position;
-                self.inertial_rot[h] = self.bodies[h].orientation;
-                continue;
-            }
-            let b = &self.bodies[h];
-            self.inertial[h] =
-                b.position + b.velocity * DT_STEP + self.gravity * (DT_STEP * DT_STEP);
-            self.inertial_rot[h] = quat_integrate(b.orientation, b.angular_velocity * DT_STEP);
-        }
-        // Eq. 19 warmstart decay.
-        for pair in &mut self.pairs {
-            for pt in &mut pair.points {
-                pt.lam[0] *= ALPHA * GAMMA;
-                pt.lam[1] *= ALPHA * GAMMA;
-                pt.lam[2] *= ALPHA * GAMMA;
-                pt.roll_lam[0] *= ALPHA * GAMMA;
-                pt.roll_lam[1] *= ALPHA * GAMMA;
-                pt.roll_lam[2] *= ALPHA * GAMMA;
-                for k in 0..3 {
-                    pt.pen[k] = (pt.pen[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
-                }
-            }
-        }
-        for j in &mut self.joints {
-            for k in 0..3 {
-                j.lam_l[k] *= ALPHA * GAMMA;
-                j.lam_a[k] *= ALPHA * GAMMA;
-                j.pen_l[k] = (j.pen_l[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
-                j.pen_a[k] = (j.pen_a[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
-            }
-        }
-        // Warmstarted positions (official adaptive weight is unity on free
-        // fall; proper quaternion integration like the demo).
-        for h in 0..n {
-            if !self.solvable(h) || self.asleep[h] {
-                continue;
-            }
-            self.bodies[h].position = self.inertial[h];
-            self.bodies[h].orientation = self.inertial_rot[h];
-        }
-        // Main loop: primal sweep in reverse handle order (official sweeps
-        // its body list head-first, i.e. reverse creation order), then duals.
-        for _ in 0..ITERS {
-            for h in (0..n).rev() {
-                if self.solvable(h) && !self.asleep[h] {
-                    self.solve_body(h);
-                }
-            }
-            self.dual_update();
-        }
-        // BDF1 velocities + orientation renormalization (deviation from the
-        // demo, which never renormalizes: prevents long-term quat drift).
-        for h in 0..n {
-            if !self.solvable(h) || self.asleep[h] {
-                // Sleepers keep their zeroed velocity fields.
-                continue;
-            }
-            let b = &mut self.bodies[h];
-            b.velocity = (b.position - self.pos0[h]) / DT_STEP;
-            // Official relative-rotation velocity `2*(q*q0^-1).xyz`, with a
-            // rest deadband (positions are O(1) f32: sub-epsilon spin is dust).
-            let spin = quat_diff_vec(b.orientation, self.rot0[h]);
-            b.angular_velocity = if spin.length() < 1e-9 {
-                Vec3::ZERO
-            } else {
-                spin / DT_STEP
-            };
-            b.orientation = b.orientation.normalize();
-        }
-        // Sleep bookkeeping (builtin parity, per body instead of per island):
-        // slow dynamics accumulate quiet time and freeze; motion resets.
-        for h in 0..n {
-            if !self.solvable(h) || self.asleep[h] {
-                continue;
-            }
-            let b = &self.bodies[h];
-            if b.velocity.length() < SLEEP_LIN && b.angular_velocity.length() < SLEEP_ANG {
-                self.sleep_timer[h] += dt;
-                if self.sleep_timer[h] >= SLEEP_TIME {
-                    self.sleep_body(h);
-                }
-            } else {
-                self.sleep_timer[h] = 0.0;
-            }
-        }
-        self.emit_events(trigger_now);
     }
-
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
         self.bodies.push(body);
         self.bodies.len() - 1
