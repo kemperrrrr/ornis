@@ -853,6 +853,73 @@ fn avbd_wheel_motor_spins_axle() {
 }
 
 #[test]
+fn avbd_sleep_freezes_settled_stack_and_wakes_on_touch() {
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let floor = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(5.0, 1.0, 5.0),
+        0.0,
+    ));
+    let _ = floor;
+    let mut boxes = Vec::new();
+    for i in 0..3 {
+        boxes.push(physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.25 + i as f32 * 0.5, 0.0),
+            Vec3::splat(0.25),
+            1.0,
+        )));
+    }
+    for _ in 0..600 {
+        physics.step(DT);
+    }
+    assert_eq!(
+        physics.sleeping_count(),
+        3,
+        "settled stack must sleep as a whole"
+    );
+    let tops: Vec<f32> = boxes
+        .iter()
+        .map(|h| physics.get_body(*h).unwrap().position.y)
+        .collect();
+    // A dropped box wakes the sleeper it touches; the pile holds.
+    let dropped = physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, 3.0, 0.0),
+        Vec3::splat(0.25),
+        1.0,
+    ));
+    let mut woke = false;
+    for _ in 0..180 {
+        physics.step(DT);
+        if physics.sleeping_count() < 3 {
+            woke = true;
+            break;
+        }
+    }
+    assert!(woke, "fresh touch must wake the sleeper");
+    for _ in 0..600 {
+        physics.step(DT);
+    }
+    for (h, y0) in boxes.iter().zip(tops.iter()) {
+        let y = physics.get_body(*h).unwrap().position.y;
+        assert!(
+            (y - y0).abs() < 0.05,
+            "pile must hold through wake + resettle"
+        );
+    }
+    let dy = physics.get_body(dropped).unwrap().position.y;
+    assert!(
+        (dy - 1.75).abs() < 0.15,
+        "dropped box must rest on the pile, got {dy}"
+    );
+    // An externally set velocity wakes immediately.
+    physics.get_body_mut(boxes[0]).unwrap().velocity = Vec3::new(2.0, 0.0, 0.0);
+    physics.step(DT);
+    assert!(
+        physics.sleeping_count() < 4,
+        "velocity kick must wake the sleeper"
+    );
+}
+#[test]
 fn avbd_wheel_degenerate_axle_falls_back() {
     // Parallel axle must orthogonalize deterministically (no NaN), mirror
     // of the builtin fallback test.

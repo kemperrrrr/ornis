@@ -51,6 +51,9 @@
 //!   and [`crate::joint::JointKind::SixDof`] (per-axis free/locked/limited
 //!   rows in body A's live assembly frame, mirroring the builtin position
 //!   pass; limited forces in dual-owned per-axis slots).
+//!   Sleep (M2): quiet dynamics freeze per body (builtin 0.15 m/s + 0.5 s
+//!   parity) and wake on fresh pairs/joint edits/velocity kicks; no islands
+//!   — wake does not propagate through *existing* pairs (M3 gap).
 //!   Fracture is not implemented.
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
@@ -141,6 +144,16 @@ const C_EPS: f32 = 1e-7;
 /// Static-friction position threshold (official `STICK_THRESH`): a point
 /// whose tangential violation is below this kept its grip last step.
 const STICK_THRESH: f32 = 0.00001;
+/// Sleep thresholds (builtin parity: islands sleep below 0.15 m/s and
+/// 0.15 rad/s): a dynamic body slower than both for [`SLEEP_TIME`] seconds
+/// freezes — skipped by the sweep and BDF1, static for the solver — and
+/// wakes on new contact pairs, joint add/remove, or an externally set
+/// velocity. No islands: AVBD wakes per body (a settled stack sleeps as
+/// individual frozen supports; a bulldozer push through an *existing* pair
+/// does not propagate wake — documented M3 gap).
+const SLEEP_LIN: f32 = 0.15;
+const SLEEP_ANG: f32 = 0.15;
+const SLEEP_TIME: f32 = 0.5;
 
 /// Angular travel slop for revolute limits (official `ANGULAR_SLOP`).
 const LIMIT_SLOP_ANG: f32 = 0.005;
@@ -619,18 +632,74 @@ pub struct AvbdEngine {
     inertial: Vec<Vec3>,
     inertial_rot: Vec<Quat>,
     pre_vel: Vec<Vec3>,
+    /// Per-body sleep timers (seconds below thresholds) and frozen flags.
+    sleep_timer: Vec<f32>,
+    asleep: Vec<bool>,
 }
 
 impl AvbdEngine {
     /// Bodies in handle order, cloned for solver migration (`Engine`
     /// re-registers them 1:1, so handles stay valid across the switch).
     pub(crate) fn bodies_snapshot(&self) -> Vec<RigidBody> {
-        self.bodies.clone()
+        // Sleepers migrate awake with their mass model restored (warm-start
+        // state never migrates anyway, and a zeroed inverse mass must not
+        // leak into the new engine).
+        self.bodies
+            .iter()
+            .enumerate()
+            .map(|(h, b)| {
+                let mut c = b.clone();
+                if self.asleep[h] && c.body_type == BodyType::Dynamic {
+                    c.inv_mass = 1.0 / c.mass;
+                    c.inertia = c.shape.inertia(c.mass);
+                }
+                c
+            })
+            .collect()
     }
 
     /// Joint specs in handle order `(body_a, body_b, kind)` for migration.
     pub(crate) fn joint_specs(&self) -> Vec<(BodyHandle, BodyHandle, JointKind)> {
         self.joints.iter().map(|j| (j.a, j.b, j.spec)).collect()
+    }
+
+    /// Dynamic bodies currently frozen by sleep (observability for tests
+    /// and the 16.7 ms budget: sleepers skip the sweep and BDF1).
+    pub fn sleeping_count(&self) -> usize {
+        self.asleep.iter().filter(|&&s| s).count()
+    }
+
+    /// Freeze body `h` (builtin sleep semantics: static for the solver —
+    /// zero inverse mass/inertia so contacts treat it as immovable and no
+    /// invisible velocity can accumulate and detonate on wake).
+    fn sleep_body(&mut self, h: usize) {
+        if h >= self.asleep.len() || self.bodies[h].body_type != BodyType::Dynamic {
+            return;
+        }
+        let b = &mut self.bodies[h];
+        b.velocity = Vec3::ZERO;
+        b.angular_velocity = Vec3::ZERO;
+        b.inv_mass = 0.0;
+        b.inertia = Vec3::ZERO;
+        self.asleep[h] = true;
+    }
+
+    /// Wake body `h`, restoring its mass model (mirrors the builtin
+    /// `wake_island` restore: `1/mass` + shape inertia). No-op for
+    /// non-dynamics and awake bodies.
+    fn wake_body(&mut self, h: usize) {
+        // No-op before the first step (scratch not sized yet: everything is
+        // awake with zeroed timers by construction) and for awake bodies.
+        if h >= self.asleep.len() || !self.asleep[h] {
+            return;
+        }
+        self.asleep[h] = false;
+        self.sleep_timer[h] = 0.0;
+        let b = &mut self.bodies[h];
+        if b.body_type == BodyType::Dynamic {
+            b.inv_mass = 1.0 / b.mass;
+            b.inertia = b.shape.inertia(b.mass);
+        }
     }
 
     /// Empty engine; `gravity` is a constant world-space acceleration
@@ -650,6 +719,8 @@ impl AvbdEngine {
             inertial: Vec::new(),
             inertial_rot: Vec::new(),
             pre_vel: Vec::new(),
+            sleep_timer: Vec::new(),
+            asleep: Vec::new(),
         }
     }
 
@@ -669,6 +740,8 @@ impl AvbdEngine {
         self.inertial.resize(n, Vec3::ZERO);
         self.inertial_rot.resize(n, Quat::IDENTITY);
         self.pre_vel.resize(n, Vec3::ZERO);
+        self.sleep_timer.resize(n, 0.0);
+        self.asleep.resize(n, false);
     }
 
     /// Generate/persist contact pairs for this step. Returns the set of
@@ -677,6 +750,9 @@ impl AvbdEngine {
         let n = self.bodies.len();
         let mut seen = vec![false; self.pairs.len()];
         let mut trigger_now = BTreeSet::new();
+        // Bodies of brand-new pairs wake (below, after the scan borrows end):
+        // a fresh touch is the one disturbance a sleeper must react to.
+        let mut wake: Vec<(usize, usize)> = Vec::new();
         for ia in 0..n {
             for ib in (ia + 1)..n {
                 let (a, b) = (&self.bodies[ia], &self.bodies[ib]);
@@ -899,6 +975,7 @@ impl AvbdEngine {
                     pair.points = next;
                 } else {
                     seen.push(true);
+                    wake.push((ia, ib));
                     self.pairs.push(AvbdPair {
                         a: ia,
                         b: ib,
@@ -923,6 +1000,10 @@ impl AvbdEngine {
             if !seen[idx] {
                 self.pairs.swap_remove(idx);
             }
+        }
+        for (a, b) in wake {
+            self.wake_body(a);
+            self.wake_body(b);
         }
         trigger_now
     }
@@ -2173,6 +2254,17 @@ impl PhysicsEngine for AvbdEngine {
         // Deadbeat motor impulses (velocity level, before warmstart — like
         // the official velocity stage).
         self.motor_impulse();
+        // External wake: torques, deadbeat motors and host edits write the
+        // velocity fields directly, so a sleeper above thresholds wakes
+        // before warmstart (teleports surface next step via BDF1).
+        for h in 0..n {
+            if self.asleep[h] {
+                let b = &self.bodies[h];
+                if b.velocity.length() > SLEEP_LIN || b.angular_velocity.length() > SLEEP_ANG {
+                    self.wake_body(h);
+                }
+            }
+        }
         for h in 0..n {
             self.pos0[h] = self.bodies[h].position;
             self.rot0[h] = self.bodies[h].orientation;
@@ -2212,7 +2304,7 @@ impl PhysicsEngine for AvbdEngine {
         // Warmstarted positions (official adaptive weight is unity on free
         // fall; proper quaternion integration like the demo).
         for h in 0..n {
-            if !self.solvable(h) {
+            if !self.solvable(h) || self.asleep[h] {
                 continue;
             }
             self.bodies[h].position = self.inertial[h];
@@ -2222,7 +2314,7 @@ impl PhysicsEngine for AvbdEngine {
         // its body list head-first, i.e. reverse creation order), then duals.
         for _ in 0..ITERS {
             for h in (0..n).rev() {
-                if self.solvable(h) {
+                if self.solvable(h) && !self.asleep[h] {
                     self.solve_body(h);
                 }
             }
@@ -2231,7 +2323,8 @@ impl PhysicsEngine for AvbdEngine {
         // BDF1 velocities + orientation renormalization (deviation from the
         // demo, which never renormalizes: prevents long-term quat drift).
         for h in 0..n {
-            if !self.solvable(h) {
+            if !self.solvable(h) || self.asleep[h] {
+                // Sleepers keep their zeroed velocity fields.
                 continue;
             }
             let b = &mut self.bodies[h];
@@ -2245,6 +2338,22 @@ impl PhysicsEngine for AvbdEngine {
                 spin / DT_STEP
             };
             b.orientation = b.orientation.normalize();
+        }
+        // Sleep bookkeeping (builtin parity, per body instead of per island):
+        // slow dynamics accumulate quiet time and freeze; motion resets.
+        for h in 0..n {
+            if !self.solvable(h) || self.asleep[h] {
+                continue;
+            }
+            let b = &self.bodies[h];
+            if b.velocity.length() < SLEEP_LIN && b.angular_velocity.length() < SLEEP_ANG {
+                self.sleep_timer[h] += dt;
+                if self.sleep_timer[h] >= SLEEP_TIME {
+                    self.sleep_body(h);
+                }
+            } else {
+                self.sleep_timer[h] = 0.0;
+            }
         }
         self.emit_events(trigger_now);
     }
@@ -2302,6 +2411,15 @@ impl PhysicsEngine for AvbdEngine {
         }
         self.prev_trigger = remapped;
         self.contact_events.clear();
+        // Sleep vecs stay parallel; indices shifted, so wake everything
+        // (removal is rare and correctness beats one quiet timer).
+        if handle < self.sleep_timer.len() {
+            self.sleep_timer.swap_remove(handle);
+            self.asleep.swap_remove(handle);
+        }
+        for h in 0..self.bodies.len() {
+            self.wake_body(h);
+        }
     }
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
@@ -2318,6 +2436,11 @@ impl PhysicsEngine for AvbdEngine {
         body_b: BodyHandle,
         kind: JointKind,
     ) -> Option<JointHandle> {
+        // A new constraint disturbs both assemblies (builtin wakes the
+        // island; AVBD wakes per body). Spurious wake on rejected specs is
+        // harmless — one quiet timer restarts.
+        self.wake_body(body_a);
+        self.wake_body(body_b);
         if body_a >= self.bodies.len() || body_b >= self.bodies.len() || body_a == body_b {
             return None;
         }
@@ -2481,6 +2604,9 @@ impl PhysicsEngine for AvbdEngine {
 
     fn remove_joint(&mut self, handle: JointHandle) {
         if handle < self.joints.len() {
+            let (a, b) = (self.joints[handle].a, self.joints[handle].b);
+            self.wake_body(a);
+            self.wake_body(b);
             self.joints.swap_remove(handle);
         }
     }
