@@ -18,6 +18,13 @@
 pub const PI: f32 = std::f32::consts::PI;
 /// Epsilon guard against division by zero (former `1e-6`).
 pub const EPS: f32 = 1e-6;
+/// Reference-depth bias subtracted in the shadow evaluators (former
+/// `0.002` literal, now shared by the 2D and cube branches of both
+/// entries): keeps the lit surface's own texels on the lit side of
+/// the compare. Larger values erode small blobs uniformly; smaller
+/// values risk acne (guarded by
+/// `shadowed_directional_without_occluder_has_no_acne`).
+pub const SHADOW_REF_BIAS: f32 = 0.001;
 /// Single-precision 1/π, matching the former `0.31830988618` bit-wise.
 pub const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
 
@@ -34,7 +41,7 @@ pub fn wgsl_consts() -> String {
             )
         };
     }
-    [decl!(PI), decl!(EPS), decl!(INV_PI)].concat()
+    [decl!(PI), decl!(EPS), decl!(INV_PI), decl!(SHADOW_REF_BIAS)].concat()
 }
 
 /// Base layer: dielectric/metallic mix with anisotropic GGX + Oren-Nayar.

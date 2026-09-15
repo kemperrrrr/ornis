@@ -201,7 +201,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
                         ctx.shadow_sampler,
                         shadow_uv,
                         i32(light.params.w),
-                        shadow_ndc.z - 0.002,
+                        shadow_ndc.z - SHADOW_REF_BIAS,
                     );
             }
             if is_point > 0.5 {
@@ -214,7 +214,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
                 let major = max(max(abs(to_frag.x), abs(to_frag.y)), abs(to_frag.z));
                 let far = max(light.params.x, 1.0);
                 let denom = far - 0.1;
-                let cube_ref = (far / denom) - (0.1 * far) / (denom * major) - 0.002;
+                let cube_ref = (far / denom) - (0.1 * far) / (denom * major) - SHADOW_REF_BIAS;
                 radiance = radiance
                     * textureSampleCompare(
                         ctx.shadow_cube_tex,

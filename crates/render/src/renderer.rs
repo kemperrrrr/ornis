@@ -74,6 +74,14 @@ pub const SHADOW_SIZE: u32 = 1024;
 pub const SHADOW_ORTHO_HALF: f32 = 12.0;
 const SHADOW_DIR_DIST: f32 = 30.0;
 
+/// Depth-bias pair for the shadow pre-pass (2D layers and cube faces
+/// share it). The constant term is negligible on `Depth32Float`; the
+/// slope term dominates on curved surfaces — large values erode small
+/// occluder blobs in the map, small values risk acne (guarded by
+/// `shadowed_directional_without_occluder_has_no_acne`).
+const SHADOW_DEPTH_BIAS_CONSTANT: i32 = 2;
+const SHADOW_DEPTH_BIAS_SLOPE: f32 = 1.0;
+
 /// Point-light shadow cubes (one depth cube per slot) and resolution.
 ///
 /// 512² × 6 faces × 2 cubes ≈ 12 MiB. Sampling is analytic: the
@@ -1149,8 +1157,8 @@ impl Renderer3D {
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
+                    constant: SHADOW_DEPTH_BIAS_CONSTANT,
+                    slope_scale: SHADOW_DEPTH_BIAS_SLOPE,
                     clamp: 0.0,
                 },
             }),
