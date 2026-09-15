@@ -61,6 +61,12 @@
 //!   whose step displacement exceeds half its smallest dimension sweeps
 //!   `cast_shape` and clamps to the first hit; jointed partners are excluded
 //!   so joint swings never self-clamp).
+//!   No-collide for pin joints (builtin `joint_pairs` parity, narrowed to
+//!   Ball/Revolute/Prismatic/Distance/Wheel): jointed bodies skip contact
+//!   discovery — a hinge pin passes through its mount, and contact
+//!   friction there is a phantom brake on the joint. Fixed/SixDof are
+//!   excluded (weld-like assemblies whose tests bury boxes by
+//!   construction; there the contact is structural).
 //!   Fracture is not implemented.
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
@@ -1155,6 +1161,37 @@ impl AvbdEngine {
         if !pair_allowed(a, b) {
             return None;
         }
+        // No-collide for pin-jointed bodies (builtin `joint_pairs`
+        // parity, narrowed: Ball/Revolute/Prismatic/Distance/Wheel — a
+        // hinge pin passes through its mount, so contact friction there
+        // is a phantom brake on the joint. Measured: a motor-driven
+        // hinge buried 0.2 in its mount never turned — the mount's spin
+        // friction saturated the motor. Triggers still report overlap
+        // below; gears carry no entry, so geared bodies keep colliding
+        // like in the builtin.
+        //
+        // Fixed/SixDof are EXCLUDED (weld-like assemblies): their tests
+        // bury boxes by construction and the joint rows alone do not
+        // hold the assembly (measured: SixDof spin-clamp overshoots 4x
+        // without its contact) — there the contact is structural, not
+        // a brake. (A SixDof with free axes sliding through overlap
+        // would want no-collide too; no such scene exists — revisit if
+        // one appears.)
+        if !a.is_trigger
+            && !b.is_trigger
+            && self.joints.iter().any(|j| {
+                matches!(
+                    j.kind,
+                    AvbdJointKind::Ball
+                        | AvbdJointKind::Revolute
+                        | AvbdJointKind::Prismatic
+                        | AvbdJointKind::Distance
+                        | AvbdJointKind::Wheel
+                ) && ((j.a == ia && j.b == ib) || (j.a == ib && j.b == ia))
+            })
+        {
+            return None;
+        }
         let ra = bound_radius(&a.shape);
         let rb = bound_radius(&b.shape);
         if (a.position - b.position).length() > ra + rb + GEN_MARGIN {
@@ -1216,6 +1253,14 @@ impl AvbdEngine {
         // pairs keep their stored direction (spike/official lesson:
         // the contact frame must be stable, like collide() face
         // normals, not a live witness direction).
+        //
+        // NOTE: no deep-penetration center fallback here. Buried
+        // witnesses can be orthogonal garbage (a hinge arm buried 0.2
+        // in its mount was born with a +X normal), but snapping them
+        // to body centers was ablated: it breaks resting sphere
+        // contacts. The garbage only ever mattered for jointed pairs,
+        // and those no longer collide (no-collide below), so the
+        // fallback's cure was worse than the disease.
         if let Some(old) = self.pairs.iter().find(|p| p.a == ia && p.b == ib) {
             if normal.dot(old.n) < 0.0 {
                 normal = -normal;
@@ -1278,17 +1323,26 @@ impl AvbdEngine {
         // Ct torqued every spin to death.
         let patch = ra.min(rb) + MARGIN;
         let pp = (d.point_a + d.point_b) * 0.5;
-        let cw = {
-            let pa_c = a.position - normal * (a.position - pp).dot(normal);
-            let pb_c = b.position - normal * (b.position - pp).dot(normal);
-            (pa_c + pb_c) * 0.5
-        };
+        // Per-body patch centers: each body's own center projected onto
+        // the contact plane. Centers move smoothly (the anti-flicker
+        // property the shared midpoint was built for), and each stays
+        // under its own body — the shared midpoint of two centers drifts
+        // off the contact patch under lateral offset (small box far from
+        // a huge floor's center: measured, its true face corners gated
+        // out 1.5 m away, single-point catch, 30 m/s retouch tunneled
+        // while the centered twin held) while still rejecting the big
+        // body's far corners around its own center.
+        let pa_c = a.position - normal * (a.position - pp).dot(normal);
+        let pb_c = b.position - normal * (b.position - pp).dot(normal);
         let mut fresh: Vec<(Vec3, Vec3)> = Vec::new();
         if !separated {
             let inv_a = a.orientation.inverse();
             let inv_b = b.orientation.inverse();
             // Box corners first: stable material support for faces.
-            for (h, witness, sign) in [(ia, d.point_a, 1.0f32), (ib, d.point_b, -1.0f32)] {
+            for (h, witness, sign, pc) in [
+                (ia, d.point_a, 1.0f32, pa_c),
+                (ib, d.point_b, -1.0f32, pb_c),
+            ] {
                 let body = &self.bodies[h];
                 for corner in box_corners(&body.shape) {
                     let world = body.position + body.orientation * corner;
@@ -1296,7 +1350,7 @@ impl AvbdEngine {
                     if along.abs() > EXPAND_SLOP + (-signed).max(0.0) {
                         continue;
                     }
-                    let rel_c = world - cw;
+                    let rel_c = world - pc;
                     let tang = rel_c - normal * rel_c.dot(normal);
                     if tang.length() > patch {
                         continue;
@@ -1318,14 +1372,19 @@ impl AvbdEngine {
                 }
             }
         } // end corner expansion.
-        // Center point for face-like contacts (2+ corners): the gate
-        // anchor itself, shared — kills rocking. (Corners alone pin
-        // the patch; this centers it.)
+        // Center point for face-like contacts (2+ corners): the shared
+        // projected-center midpoint, as before — it moves smoothly with
+        // the bodies even when the admitted corner set flickers, so it
+        // never churns the solver (a centroid of the admitted set was
+        // tried: it inherits admission flicker and rocks stacks).
+        // Under lateral offset it can sit off the admitted patch; the
+        // admitted corners still do the catching, this only centers.
         if !separated && fresh.len() >= 2 && fresh.len() < MAX_POINTS {
             let inv_a = a.orientation.inverse();
             let inv_b = b.orientation.inverse();
-            let ra_l = inv_a * (cw - a.position);
-            let rb_l = inv_b * (cw - b.position);
+            let mid = (pa_c + pb_c) * 0.5;
+            let ra_l = inv_a * (mid - a.position);
+            let rb_l = inv_b * (mid - b.position);
             if !fresh.iter().any(|(ea, eb)| {
                 (ea - ra_l).length() < POINT_MATCH_DIST && (eb - rb_l).length() < POINT_MATCH_DIST
             }) {

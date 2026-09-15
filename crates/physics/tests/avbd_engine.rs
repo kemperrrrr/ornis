@@ -1538,3 +1538,43 @@ fn avbd_confluence_one_vs_many_threads() {
         );
     }
 }
+
+#[test]
+fn avbd_bounced_retouch_catches_at_offset() {
+    // Second impact past a 30 m/s bounce: the box bounces off the floor,
+    // falls back at ~9.5 m/s and must be caught — including under lateral
+    // offset from the floor center, where per-body patch centers keep the
+    // small body's true face corners admitted (a shared body-center
+    // midpoint drifts off the patch, gates corners out 1.5 m away and
+    // tunnels). Asserts contact state (rest pose AND near-zero velocity),
+    // never velocity alone.
+    for x0 in [-3.0, 0.0] {
+        let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(10.0, 1.0, 10.0),
+            0.0,
+        ));
+        let mut falling = RigidBody::new_box(Vec3::new(x0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        falling.velocity = Vec3::new(0.0, -30.0, 0.0);
+        let h = physics.add_body(falling);
+        let mut min_y = f32::INFINITY;
+        for _ in 0..300 {
+            physics.step(DT);
+            min_y = min_y.min(physics.get_body(h).unwrap().position.y);
+        }
+        let b = physics.get_body(h).unwrap();
+        assert!(
+            min_y > 0.0,
+            "retouch at x={x0} must not tunnel, min_y={min_y}"
+        );
+        assert!(
+            (b.position.y - 0.4).abs() < 0.05
+                && (b.position.x - x0).abs() < 0.15
+                && b.velocity.length() < 0.5,
+            "retouch at x={x0} must rest on the floor, got pos={:?} v={:?}",
+            b.position,
+            b.velocity
+        );
+    }
+}
