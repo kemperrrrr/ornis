@@ -74,6 +74,36 @@ pub const SHADOW_SIZE: u32 = 1024;
 pub const SHADOW_ORTHO_HALF: f32 = 12.0;
 const SHADOW_DIR_DIST: f32 = 30.0;
 
+/// Point-light shadow cubes (one depth cube per slot) and resolution.
+///
+/// 512² × 6 faces × 2 cubes ≈ 12 MiB. Sampling is analytic: the
+/// hardware picks the face from the fragment→light vector's major
+/// axis, and the reference depth uses the same 90° perspective
+/// formula as the face renders (near plane [`SHADOW_CUBE_NEAR`], far
+/// plane = light range, so no new uniforms are needed).
+pub const POINT_SHADOW_CUBES: usize = 2;
+/// Face resolution of one point-shadow cube.
+pub const SHADOW_CUBE_SIZE: u32 = 512;
+/// Near plane shared by the cube-face renders and the analytic
+/// sampling formula — change both together.
+pub const SHADOW_CUBE_NEAR: f32 = 0.1;
+/// Cube-face axes (direction from the light) with the ups that reproduce
+/// the hardware cube-sampling frame (OpenGL/Metal convention: +X: (−z,−y),
+/// −X: (+z,−y), +Y: (+x,+z), −Y: (+x,−z), +Z: (+x,−y), −Z: (−x,−y)).
+/// The U direction matches by construction; the V match needs the
+/// projection Y-mirror in [`point_cube_face_vp`] (rasterization puts
+/// NDC y+1 at texture row 0, the sampler reads v=0 from the top).
+/// Keep both together: correct depths at mirrored texels are what the
+/// sampler then misses (all-lit point shadows).
+const CUBE_FACES: [([f32; 3], [f32; 3]); 6] = [
+    ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
+    ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
+    ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+    ([0.0, -1.0, 0.0], [0.0, 0.0, -1.0]),
+    ([0.0, 0.0, 1.0], [0.0, -1.0, 0.0]),
+    ([0.0, 0.0, -1.0], [0.0, -1.0, 0.0]),
+];
+
 /// GPU light entry: kind-selected evaluation in both fragment entries
 /// (deferred lighting and forward PBR share the layer evaluators).
 ///
@@ -339,6 +369,19 @@ pub struct Renderer3D {
     /// Shadow-casting lights assigned by the last
     /// [`set_lights`](Self::set_lights) call (layers `0..count`).
     shadow_count: std::sync::atomic::AtomicU32,
+    /// Point-light shadow cubes: one depth cube per slot (6 faces),
+    /// per-face views, sampling array view, per-face VP uniforms, and
+    /// the active cube count. `params.w` on a point light indexes the
+    /// cube slot (a separate index space from the 2D layers above —
+    /// the evaluator picks the pool by light kind).
+    shadow_cube_maps: wgpu::Texture,
+    shadow_cube_views: [wgpu::TextureView; POINT_SHADOW_CUBES * 6],
+    shadow_cube_array_view: wgpu::TextureView,
+    shadow_cube_vp_buffers: [wgpu::Buffer; POINT_SHADOW_CUBES * 6],
+    /// Mirrored depth-only pipeline for the cube faces (their VPs
+    /// mirror NDC y — see [`point_cube_face_vp`] — so winding flips).
+    shadow_cube_pipeline: wgpu::RenderPipeline,
+    point_shadow_count: std::sync::atomic::AtomicU32,
 }
 
 /// Pick an up vector non-parallel to the given shadow axis.
@@ -391,6 +434,41 @@ fn spot_shadow_vp(
     (proj * view).to_cols_array_2d()
 }
 
+/// Light-space clip matrix for one cube face of a shadowed point
+/// light: 90° perspective (aspect 1) from the light position along
+/// the face axis, far plane at the light range. Matches the analytic
+/// sampling formula (`SHADOW_CUBE_NEAR`, `range.max(1.0)`).
+///
+/// The Y row of the projection is negated: rasterization maps NDC y+1
+/// to texture row 0 (top), while the hardware cube-sampling frame
+/// reads v=0 from the top with the GL axis convention (`CUBE_FACES`),
+/// so an unmirrored render lands V-flipped versus the sampler (small
+/// centered occluders vanish, large blobs only partly overlap). The
+/// negation is a reflection — winding flips, so cube faces render
+/// through the mirrored shadow pipeline (`front_face: Cw`).
+fn point_cube_face_vp(position: [f32; 3], range: f32, face: usize) -> [[f32; 4]; 4] {
+    let (dir, up) = CUBE_FACES[face % 6];
+    let eye = glam::Vec3::from_array(position);
+    let view = glam::camera::rh::view::look_at_mat4(
+        eye,
+        eye + glam::Vec3::from_array(dir),
+        glam::Vec3::from_array(up),
+    );
+    let proj = glam::camera::rh::proj::directx::perspective(
+        std::f32::consts::FRAC_PI_2,
+        1.0,
+        SHADOW_CUBE_NEAR,
+        range.max(1.0),
+    );
+    let mut vp = (proj * view).to_cols_array_2d();
+    // Mirror NDC y (whole row 1 — a single element would distort,
+    // not reflect).
+    for col in vp.iter_mut() {
+        col[1] = -col[1];
+    }
+    vp
+}
+
 impl Renderer3D {
     /// Build every pipeline/target for `surface_config`'s format and extent.
     ///
@@ -413,8 +491,15 @@ impl Renderer3D {
         let buffers = Self::create_core_buffers(device, max_objects, max_materials);
         let (shadow_maps, shadow_views, shadow_array_view, shadow_vp_buffers, shadow_sampler) =
             Self::create_shadow_targets(device);
-        let (bind_group_layout, bind_group) =
-            Self::create_pbr_bind_group(device, &buffers, &shadow_array_view, &shadow_sampler);
+        let (shadow_cube_maps, shadow_cube_views, shadow_cube_array_view, shadow_cube_vp_buffers) =
+            Self::create_shadow_cube_targets(device);
+        let (bind_group_layout, bind_group) = Self::create_pbr_bind_group(
+            device,
+            &buffers,
+            &shadow_array_view,
+            &shadow_sampler,
+            &shadow_cube_array_view,
+        );
         let pipeline =
             Self::create_pbr_pipeline(device, surface_config, sample_count, &bind_group_layout);
         let (pbr_texture, pbr_texture_view) =
@@ -430,7 +515,10 @@ impl Renderer3D {
                 &buffers.material,
                 sample_count,
             );
-        let shadow_pipeline = Self::create_shadow_pipeline(device, &gbuffer_bind_group_layout);
+        let shadow_pipeline =
+            Self::create_shadow_pipeline(device, &gbuffer_bind_group_layout, false);
+        let shadow_cube_pipeline =
+            Self::create_shadow_pipeline(device, &gbuffer_bind_group_layout, true);
         let lighting_pass = Self::create_lighting_pass(device, &pbr_texture_view, sample_count);
         let forward_pass = Self::create_forward_pass(
             device,
@@ -440,6 +528,7 @@ impl Renderer3D {
             &buffers.lighting,
             &shadow_array_view,
             &shadow_sampler,
+            &shadow_cube_array_view,
             width,
             height,
             sample_count,
@@ -488,6 +577,12 @@ impl Renderer3D {
             shadow_pipeline,
             shadow_sampler,
             shadow_count: std::sync::atomic::AtomicU32::new(0),
+            shadow_cube_maps,
+            shadow_cube_views,
+            shadow_cube_array_view,
+            shadow_cube_vp_buffers,
+            shadow_cube_pipeline,
+            point_shadow_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -567,6 +662,7 @@ impl Renderer3D {
         buffers: &CoreBuffers,
         shadow_array_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
+        shadow_cube_array_view: &wgpu::TextureView,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
         // Layout entries come from the pass resource table.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> = shaders::pbr_generated::PBR_RESOURCES
@@ -591,6 +687,7 @@ impl Renderer3D {
                     "lighting" => buffers.lighting.as_entire_binding(),
                     "shadow_tex" => wgpu::BindingResource::TextureView(shadow_array_view),
                     "shadow_sampler" => wgpu::BindingResource::Sampler(shadow_sampler),
+                    "shadow_cube_tex" => wgpu::BindingResource::TextureView(shadow_cube_array_view),
                     other => panic!("pbr bind group has no resource for `{other}`"),
                 }
             }),
@@ -1004,9 +1101,14 @@ impl Renderer3D {
     /// binds its light-space VP buffer into the `camera` slot, so no
     /// new shader or layout is needed. A depth bias (constant + slope)
     /// fights acne; the evaluator adds a small reference bias on top.
+    ///
+    /// `mirror_y` selects the cube-face variant (`front_face: Cw`):
+    /// cube VPs mirror NDC y (see [`point_cube_face_vp`]), which flips
+    /// winding, so faces must cull the mirrored side.
     fn create_shadow_pipeline(
         device: &wgpu::Device,
         gbuffer_bind_group_layout: &wgpu::BindGroupLayout,
+        mirror_y: bool,
     ) -> wgpu::RenderPipeline {
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow vertex"),
@@ -1031,7 +1133,11 @@ impl Renderer3D {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
+                front_face: if mirror_y {
+                    wgpu::FrontFace::Cw
+                } else {
+                    wgpu::FrontFace::Ccw
+                },
                 cull_mode: Some(wgpu::Face::Back),
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
@@ -1058,6 +1164,66 @@ impl Renderer3D {
         })
     }
 
+    /// Allocate the point-shadow cube array, per-face views, the
+    /// sampling cube-array view and per-face VP uniform buffers.
+    /// Rendering reuses the depth-only shadow pipeline (same gbuffer
+    /// vertex layout); only the bound VP buffer and target view change
+    /// per face.
+    #[allow(clippy::type_complexity)]
+    fn create_shadow_cube_targets(
+        device: &wgpu::Device,
+    ) -> (
+        wgpu::Texture,
+        [wgpu::TextureView; POINT_SHADOW_CUBES * 6],
+        wgpu::TextureView,
+        [wgpu::Buffer; POINT_SHADOW_CUBES * 6],
+    ) {
+        let shadow_cube_maps = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("point shadow cubes"),
+            size: wgpu::Extent3d {
+                width: SHADOW_CUBE_SIZE,
+                height: SHADOW_CUBE_SIZE,
+                depth_or_array_layers: (POINT_SHADOW_CUBES * 6) as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let shadow_cube_views = std::array::from_fn(|layer| {
+            shadow_cube_maps.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("point shadow cube face"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        let shadow_cube_array_view = shadow_cube_maps.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("point shadow cube array"),
+            dimension: Some(wgpu::TextureViewDimension::CubeArray),
+            ..Default::default()
+        });
+        let shadow_cube_vp_buffers = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("point shadow face VP buffer"),
+                size: std::mem::size_of::<CameraUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        (
+            shadow_cube_maps,
+            shadow_cube_views,
+            shadow_cube_array_view,
+            shadow_cube_vp_buffers,
+        )
+    }
+
     /// Render depth pre-passes for the `0..shadow_count` layers assigned
     /// by [`set_lights`](Self::set_lights); a no-op without shadowed
     /// lights. Runs before lighting/forward in every frame path
@@ -1070,50 +1236,102 @@ impl Renderer3D {
         mesh: &Mesh,
         instance_count: u32,
     ) {
+        if instance_count == 0 {
+            return;
+        }
         let count = self
             .shadow_count
             .load(std::sync::atomic::Ordering::Relaxed)
             .min(SHADOW_LAYERS as u32);
-        if count == 0 || instance_count == 0 {
+        let cubes = self
+            .point_shadow_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(POINT_SHADOW_CUBES as u32);
+        if count == 0 && cubes == 0 {
             return;
         }
         let per_object = self.per_object_buffer.read().unwrap();
         let material = self.material_buffer.read().unwrap();
         for layer in 0..count as usize {
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("shadow bind group"),
-                layout: &self.gbuffer_bind_group_layout,
-                entries: &shaders::bind_group_entries(
-                    &shaders::gbuffer_generated::GBUFFER_RESOURCES,
-                    |r| match r.name {
-                        "camera" => self.shadow_vp_buffers[layer].as_entire_binding(),
-                        "per_objects" => per_object.as_entire_binding(),
-                        "materials" => material.as_entire_binding(),
-                        other => panic!("shadow bind group has no resource for `{other}`"),
-                    },
-                ),
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_views[layer],
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.shadow_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+            self.render_shadow_layer(
+                device,
+                encoder,
+                mesh,
+                instance_count,
+                &self.shadow_pipeline,
+                &self.shadow_vp_buffers[layer],
+                &self.shadow_views[layer],
+                &per_object,
+                &material,
+            );
         }
+        for cube in 0..cubes as usize {
+            for face in 0..6 {
+                let idx = cube * 6 + face;
+                self.render_shadow_layer(
+                    device,
+                    encoder,
+                    mesh,
+                    instance_count,
+                    &self.shadow_cube_pipeline,
+                    &self.shadow_cube_vp_buffers[idx],
+                    &self.shadow_cube_views[idx],
+                    &per_object,
+                    &material,
+                );
+            }
+        }
+    }
+
+    /// One depth-only draw into a shadow view with the given light-space
+    /// VP bound into the gbuffer `camera` slot. Shared by 2D layers and
+    /// cube faces (same layout, mirrored pipeline for faces).
+    #[allow(clippy::too_many_arguments)]
+    fn render_shadow_layer(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mesh: &Mesh,
+        instance_count: u32,
+        pipeline: &wgpu::RenderPipeline,
+        vp_buffer: &wgpu::Buffer,
+        view: &wgpu::TextureView,
+        per_object: &wgpu::Buffer,
+        material: &wgpu::Buffer,
+    ) {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow bind group"),
+            layout: &self.gbuffer_bind_group_layout,
+            entries: &shaders::bind_group_entries(
+                &shaders::gbuffer_generated::GBUFFER_RESOURCES,
+                |r| match r.name {
+                    "camera" => vp_buffer.as_entire_binding(),
+                    "per_objects" => per_object.as_entire_binding(),
+                    "materials" => material.as_entire_binding(),
+                    other => panic!("shadow bind group has no resource for `{other}`"),
+                },
+            ),
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("shadow pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
     }
 
     fn create_lighting_pass(
@@ -1220,6 +1438,7 @@ impl Renderer3D {
         lighting_buffer: &wgpu::Buffer,
         shadow_array_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
+        shadow_cube_array_view: &wgpu::TextureView,
         width: u32,
         height: u32,
         sample_count: u32,
@@ -1247,6 +1466,9 @@ impl Renderer3D {
                         "lighting" => lighting_buffer.as_entire_binding(),
                         "shadow_tex" => wgpu::BindingResource::TextureView(shadow_array_view),
                         "shadow_sampler" => wgpu::BindingResource::Sampler(shadow_sampler),
+                        "shadow_cube_tex" => {
+                            wgpu::BindingResource::TextureView(shadow_cube_array_view)
+                        }
                         other => panic!("forward bind group has no resource for `{other}`"),
                     },
                 ),
@@ -1586,6 +1808,7 @@ impl Renderer3D {
             &self.lighting_buffer,
             &self.shadow_array_view,
             &self.shadow_sampler,
+            &self.shadow_cube_array_view,
             width,
             height,
             self.sample_count,
@@ -1601,7 +1824,7 @@ impl Renderer3D {
 
     /// Bytes allocated by the persistent textures of the legacy path
     /// (5 g-buffer MRTs + g-buffer depth + lighting target + forward color
-    /// + shadow-map array).
+    /// + shadow-map array + point-shadow cubes).
     pub fn texture_budget(&self) -> u64 {
         let bpp = crate::transient_pool::format_bytes_per_pixel;
         let w = self.width as u64;
@@ -1623,9 +1846,72 @@ impl Renderer3D {
             * shadow_size.width as u64
             * shadow_size.height as u64
             * shadow_size.depth_or_array_layers as u64;
-        gbuffer + pbr + forward + shadow
+        let cube_size = self.shadow_cube_maps.size();
+        let cubes = bpp(wgpu::TextureFormat::Depth32Float) as u64
+            * cube_size.width as u64
+            * cube_size.height as u64
+            * cube_size.depth_or_array_layers as u64;
+        gbuffer + pbr + forward + shadow + cubes
     }
 
+    /// Upload the camera uniform: view-projection, its inverse (computed here)
+    /// and eye position. Call once per frame before rendering.
+    /// Test-only readback of one 2D shadow layer as row-major depths
+    /// (row 0 first): regression pin for the raster↔sampler V convention.
+    #[cfg(test)]
+    pub(crate) fn read_shadow_layer_for_tests(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layer: u32,
+    ) -> Vec<f32> {
+        let size = SHADOW_SIZE;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test shadow layer readback"),
+            size: (size * size * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test shadow layer readback"),
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.shadow_maps,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size * 4),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(enc.finish()));
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let data = slice.get_mapped_range().expect("range");
+        let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        buf.unmap();
+        out
+    }
     /// Upload the camera uniform: view-projection, its inverse (computed here)
     /// and eye position. Call once per frame before rendering.
     pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]) {
@@ -1687,6 +1973,10 @@ impl Renderer3D {
             shadow_vp: NO_SHADOW,
         }; 4];
         let mut shadow_count = 0u32;
+        let mut cube_count = 0u32;
+        // (position, range, cube slot) for shadowed point lights, in
+        // assignment order; face VPs are published below.
+        let mut cube_lights: Vec<([f32; 3], f32, usize)> = Vec::new();
         /// Assign the next shadow layer, or -1.0 when `wants` is false
         /// or the array is full. Returns `(layer, clip_matrix)`.
         macro_rules! shadow_layer {
@@ -1724,13 +2014,26 @@ impl Renderer3D {
                     intensity,
                     color,
                     range,
-                } => GpuLight {
-                    kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
-                    position: [position[0], position[1], position[2], 1.0],
-                    color: [color[0], color[1], color[2], *intensity],
-                    params: [range.max(1e-3), 0.0, 0.0, -1.0],
-                    ..gpu_lights[i]
-                },
+                    shadow,
+                } => {
+                    // Cube slots live in a separate index space from the
+                    // 2D layers (the evaluator picks the pool by kind).
+                    let slot = if *shadow && (cube_count as usize) < POINT_SHADOW_CUBES {
+                        let s = cube_count as usize;
+                        cube_count += 1;
+                        cube_lights.push((*position, *range, s));
+                        s as f32
+                    } else {
+                        -1.0
+                    };
+                    GpuLight {
+                        kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
+                        position: [position[0], position[1], position[2], 1.0],
+                        color: [color[0], color[1], color[2], *intensity],
+                        params: [range.max(1e-3), 0.0, 0.0, slot],
+                        ..gpu_lights[i]
+                    }
+                }
                 LightDesc::Spot {
                     position,
                     direction,
@@ -1780,6 +2083,24 @@ impl Renderer3D {
         }
         self.shadow_count
             .store(shadow_count, std::sync::atomic::Ordering::Relaxed);
+        // Publish the cube-face VPs (as camera uniforms, like the 2D
+        // layers) and the active cube count.
+        for (position, range, slot) in &cube_lights {
+            for face in 0..6 {
+                let vp = CameraUniform {
+                    view_proj: point_cube_face_vp(*position, *range, face),
+                    inv_view_proj: NO_SHADOW,
+                    camera_pos: [0.0, 0.0, 0.0, 1.0],
+                };
+                queue.write_buffer(
+                    &self.shadow_cube_vp_buffers[slot * 6 + face],
+                    0,
+                    bytemuck::bytes_of(&vp),
+                );
+            }
+        }
+        self.point_shadow_count
+            .store(cube_count, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Grow a storage buffer when `needed` exceeds `capacity`, doubling
@@ -1855,6 +2176,9 @@ impl Renderer3D {
                         "lighting" => self.lighting_buffer.as_entire_binding(),
                         "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
                         "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        "shadow_cube_tex" => {
+                            wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                        }
                         other => panic!("forward bind group has no resource for `{other}`"),
                     },
                 ),
@@ -2107,6 +2431,9 @@ impl Renderer3D {
                     }
                     "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
                     "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    "shadow_cube_tex" => {
+                        wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                    }
                     other => panic!("lighting bind group has no resource for `{other}`"),
                 },
             ),
@@ -2475,5 +2802,99 @@ mod tests {
         // the shadow frame maps world X onto NDC Y here).
         let side = ndc_of(vp, [5.0, 0.0, 0.0]);
         assert!(side[0].abs().max(side[1].abs()) > 1.0, "{side:?}");
+    }
+
+    #[test]
+    fn point_cube_face_vp_centers_its_axis() {
+        // Light at origin-ish, range 20: each face centers its axis
+        // with directx depth order (nearer = smaller).
+        let pos = [2.0, 3.0, 4.0];
+        let axes = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for (face, axis) in axes.iter().enumerate() {
+            let vp = point_cube_face_vp(pos, 20.0, face);
+            let target = [
+                pos[0] + axis[0] * 5.0,
+                pos[1] + axis[1] * 5.0,
+                pos[2] + axis[2] * 5.0,
+            ];
+            let hit = ndc_of(vp, target);
+            assert!(
+                hit[0].abs() < 1e-4 && hit[1].abs() < 1e-4,
+                "face {face}: {hit:?}"
+            );
+            assert!((0.0..=1.0).contains(&hit[2]), "face {face}: {hit:?}");
+            // Nearer along the axis = smaller depth (matches the
+            // analytic sampling formula's monotonicity).
+            let near = ndc_of(
+                vp,
+                [
+                    pos[0] + axis[0] * 2.0,
+                    pos[1] + axis[1] * 2.0,
+                    pos[2] + axis[2] * 2.0,
+                ],
+            )[2];
+            let far = ndc_of(
+                vp,
+                [
+                    pos[0] + axis[0] * 10.0,
+                    pos[1] + axis[1] * 10.0,
+                    pos[2] + axis[2] * 10.0,
+                ],
+            )[2];
+            assert!(
+                near < hit[2] && hit[2] < far,
+                "face {face}: {near} {hit:?} {far}"
+            );
+        }
+    }
+
+    #[test]
+    fn point_cube_face_vp_matches_sampler_frame() {
+        // Texel placement must match the hardware cube-sampling frame
+        // (GL convention: +X: (−z,−y), −X: (+z,−y), +Y: (+x,+z),
+        // −Y: (+x,−z), +Z: (+x,−y), −Z: (−x,−y)). Rasterization maps
+        // NDC y+1 onto texture row 0 while the sampler reads v=0 from
+        // the top, so a +u-source offset lands at positive NDC x and a
+        // +v-source offset at NEGATIVE NDC y (the V-mirror in
+        // `point_cube_face_vp`). Regression pin: without the mirror
+        // the sampler reads mirrored texels (all-lit point shadows).
+        let pos = [2.0, 3.0, 4.0];
+        let axes: [[[f32; 3]; 2]; 6] = [
+            [[0.0, 0.0, -1.0], [0.0, -1.0, 0.0]],
+            [[0.0, 0.0, 1.0], [0.0, -1.0, 0.0]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0]],
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+        ];
+        let face_axis = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for (face, ([u, v], axis)) in axes.iter().zip(face_axis.iter()).enumerate() {
+            let vp = point_cube_face_vp(pos, 20.0, face);
+            let base = [
+                pos[0] + axis[0] * 5.0,
+                pos[1] + axis[1] * 5.0,
+                pos[2] + axis[2] * 5.0,
+            ];
+            let pu = [base[0] + u[0], base[1] + u[1], base[2] + u[2]];
+            let pv = [base[0] + v[0], base[1] + v[1], base[2] + v[2]];
+            let nu = ndc_of(vp, pu);
+            let nv = ndc_of(vp, pv);
+            assert!(nu[0] > 0.05, "face {face}: +u offset -> {nu:?}");
+            assert!(nv[1] < -0.05, "face {face}: +v offset -> {nv:?}");
+        }
     }
 }

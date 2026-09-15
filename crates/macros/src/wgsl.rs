@@ -117,6 +117,54 @@ pub fn wgsl_main_body(func: &ItemFn) -> String {
     convert_body_to_wgsl(func)
 }
 
+/// Vertex-shim body for render pipelines (`var out; out.position =
+/// QUAD[idx]; out.uv = UVS[idx]; return out;`), built from the same IR
+/// statements as user code — the entry signature stays framing (like
+/// every `wgsl_main_body` caller), the body prints via the writer.
+pub fn wgsl_quad_vs_body() -> String {
+    use ornis_shader_lang::ir::{IrBlock, IrExpr, IrStmt};
+    fn path(name: &str) -> IrExpr {
+        IrExpr::Path(vec![name.to_string()])
+    }
+    fn field(base: IrExpr, member: &str) -> IrExpr {
+        IrExpr::Field {
+            base: Box::new(base),
+            member: member.to_string(),
+        }
+    }
+    fn index(base: &str, idx: &str) -> IrExpr {
+        IrExpr::Index {
+            base: Box::new(path(base)),
+            index: Box::new(path(idx)),
+        }
+    }
+    let out = || path("out");
+    let body: IrBlock = vec![
+        IrStmt::Let {
+            name: "out".to_string(),
+            mutable: true,
+            init: None,
+            decl_ty: Some("VertexOutput".to_string()),
+        },
+        IrStmt::Flow {
+            expr: IrExpr::Assign {
+                left: Box::new(field(out(), "position")),
+                right: Box::new(index("QUAD", "idx")),
+            },
+            semi: true,
+        },
+        IrStmt::Flow {
+            expr: IrExpr::Assign {
+                left: Box::new(field(out(), "uv")),
+                right: Box::new(index("UVS", "idx")),
+            },
+            semi: true,
+        },
+        IrStmt::Tail(out()),
+    ];
+    ornis_shader_lang::writer::print_block(&body)
+}
+
 /// Generate the full WGSL function signature + body as a string.
 pub fn wgsl_fn_source(func: &ItemFn) -> String {
     let fn_name = func.sig.ident.to_string();

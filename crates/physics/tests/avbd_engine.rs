@@ -1037,6 +1037,47 @@ fn avbd_sphere_tower_holds_like_builtin() {
 }
 
 #[test]
+fn avbd_tall_tower_drop_settle_holds() {
+    // Tall-tower regime (past the stable 3-stack): a settled 3-stack
+    // takes three more spheres dropped from ~1 m above their rest pose
+    // one at a time; the 6-stack settles and holds. Asserts contact
+    // state (rest pose AND near-zero velocity), never velocity alone.
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(5.0, 1.0, 5.0),
+        0.0,
+    ));
+    let mut hs = Vec::new();
+    for i in 0..3 {
+        let mut b = RigidBody::new_sphere(Vec3::new(0.0, 0.5 + i as f32, 0.0), 0.5, 1.0);
+        b.rolling_friction = 0.3;
+        hs.push(physics.add_body(b));
+    }
+    for _ in 0..600 {
+        physics.step(DT);
+    }
+    for i in 3..6 {
+        let rest = 0.5 + i as f32;
+        let mut t = RigidBody::new_sphere(Vec3::new(0.0, rest + 1.2, 0.0), 0.5, 1.0);
+        t.rolling_friction = 0.3;
+        hs.push(physics.add_body(t));
+        for _ in 0..900 {
+            physics.step(DT);
+        }
+    }
+    for (k, (h, y0)) in hs.iter().zip([0.5, 1.5, 2.5, 3.5, 4.5, 5.5]).enumerate() {
+        let b = physics.get_body(*h).unwrap();
+        assert!(
+            (b.position.y - y0).abs() < 0.1
+                && b.position.x.abs() < 0.15
+                && b.velocity.length() < 0.1,
+            "tower level {k} must hold its rest pose"
+        );
+    }
+}
+
+#[test]
 fn avbd_fast_box_stops_at_thin_wall() {
     // G6 parity: a 0.5 m box at 10 m/s (17 cm/step) against a 4 cm wall —
     // without the TOI clamp it tunnels; with it, it rests on the face
@@ -1281,4 +1322,219 @@ fn avbd_sixdof_angular_limit_blocks_spin() {
         tw.abs() < 0.4,
         "Z twist must clamp near the 0.2 window, got {tw}"
     );
+}
+
+/// Canonical cross-platform determinism snapshot for AVBD (mirrors the builtin `determinism_snapshot_*` scene 1:1): floor, 4-box
+/// stack, dropped sphere, fast box, ball-jointed pendulum — stepped 120
+/// times, hashed bit-for-bit against `data/avbd_snapshot.hex` generated on
+/// ARM. AVBD is single-threaded by construction, so this pins codegen/float
+/// drift (fma fusion, libm) rather than thread scheduling; run-to-run
+/// scheduling independence is already covered by
+/// `avbd_determinism_run_to_run`. Re-baseline ONLY for intentional solver
+/// changes: run `avbd_snapshot_regenerate` (ignored), inspect the diff.
+fn avbd_snapshot_scene() -> (AvbdEngine, Vec<BodyHandle>) {
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut handles = Vec::new();
+    handles.push(physics.add_body(RigidBody::new_box(
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(10.0, 1.0, 10.0),
+        0.0,
+    )));
+    for i in 0..4 {
+        handles.push(physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 0.5 + i as f32 * 1.02, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        )));
+    }
+    handles.push(physics.add_body(RigidBody::new_sphere(Vec3::new(3.0, 6.0, 0.0), 0.5, 1.0)));
+    let mut fast = RigidBody::new_box(Vec3::new(-3.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+    fast.velocity = Vec3::new(0.0, -30.0, 0.0);
+    handles.push(physics.add_body(fast));
+    let anchor = physics.add_body(RigidBody::new_box(
+        Vec3::new(6.0, 3.0, 0.0),
+        Vec3::splat(0.5),
+        0.0,
+    ));
+    let arm = physics.add_body(RigidBody::new_box(
+        Vec3::new(6.0, 1.0, 0.0),
+        Vec3::splat(0.5),
+        1.0,
+    ));
+    handles.push(anchor);
+    handles.push(arm);
+    assert!(
+        physics
+            .add_joint(
+                anchor,
+                arm,
+                JointKind::Ball {
+                    local_anchor_a: Vec3::new(0.0, -1.0, 0.0),
+                    local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+                },
+            )
+            .is_some(),
+        "snapshot pendulum joint must build"
+    );
+    (physics, handles)
+}
+
+fn avbd_snapshot_render(physics: &AvbdEngine, handles: &[BodyHandle]) -> String {
+    let mut out = format!(
+        "ornis-avbd-snapshot v1 bodies={} steps=120 dt=0.0166667\n",
+        handles.len()
+    );
+    for &h in handles {
+        let b = physics.get_body(h).unwrap();
+        let mut first = true;
+        for x in b
+            .position
+            .to_array()
+            .into_iter()
+            .chain(b.orientation.to_array())
+            .chain(b.velocity.to_array())
+            .chain(b.angular_velocity.to_array())
+        {
+            if !first {
+                out.push(' ');
+            }
+            first = false;
+            out.push_str(&format!("{:08x}", x.to_bits()));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn avbd_snapshot_matches_canonical() {
+    let (mut physics, handles) = avbd_snapshot_scene();
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    let expected = include_str!("data/avbd_snapshot.hex");
+    assert_eq!(
+        avbd_snapshot_render(&physics, &handles),
+        expected,
+        "AVBD bits drifted: intentional solver change? re-baseline via \
+         avbd_snapshot_regenerate, else float/codegen drift"
+    );
+}
+
+#[test]
+#[ignore]
+fn avbd_snapshot_regenerate() {
+    let (mut physics, handles) = avbd_snapshot_scene();
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    let path = format!(
+        "{}/tests/data/avbd_snapshot.hex",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(path, avbd_snapshot_render(&physics, &handles)).unwrap();
+}
+
+#[test]
+fn avbd_confluence_one_vs_many_threads() {
+    // Thread-schedule independence: parallel pair discovery must not leak
+    // the thread schedule into the simulation. A heterogeneous scene above the 256-body
+    // parallel threshold (tiled boxes + stack + sphere + fast drop +
+    // pendulum) runs 120 steps under 1-thread and 32-thread rayon pools;
+    // full states must match bit-for-bit. The sweep stays
+    // single-threaded (Gauss-Seidel order is load-bearing), so this pins
+    // discovery determinism: pure bundles in, canonical ordered merge.
+    type Snapshot = ([u32; 3], [u32; 4], [u32; 3], [u32; 3]);
+    fn build() -> (AvbdEngine, Vec<BodyHandle>) {
+        let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut handles = Vec::new();
+        handles.push(physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(10.0, 1.0, 10.0),
+            0.0,
+        )));
+        for gx in 0..16 {
+            for gz in 0..16 {
+                handles.push(physics.add_body(RigidBody::new_box(
+                    Vec3::new(gx as f32 * 1.1 - 8.25, 0.5, gz as f32 * 1.1 - 8.25),
+                    Vec3::splat(0.5),
+                    1.0,
+                )));
+            }
+        }
+        for i in 0..4 {
+            handles.push(physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, 0.5 + i as f32 * 1.02, 0.0),
+                Vec3::splat(0.5),
+                1.0,
+            )));
+        }
+        handles.push(physics.add_body(RigidBody::new_sphere(Vec3::new(3.0, 6.0, 0.0), 0.5, 1.0)));
+        let mut fast = RigidBody::new_box(Vec3::new(-3.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        fast.velocity = Vec3::new(0.0, -30.0, 0.0);
+        handles.push(physics.add_body(fast));
+        let anchor = physics.add_body(RigidBody::new_box(
+            Vec3::new(6.0, 3.0, 0.0),
+            Vec3::splat(0.5),
+            0.0,
+        ));
+        let arm = physics.add_body(RigidBody::new_box(
+            Vec3::new(6.0, 1.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        handles.push(anchor);
+        handles.push(arm);
+        physics
+            .add_joint(
+                anchor,
+                arm,
+                JointKind::Ball {
+                    local_anchor_a: Vec3::new(0.0, -1.0, 0.0),
+                    local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+                },
+            )
+            .expect("valid joint");
+        (physics, handles)
+    }
+    fn snapshot(physics: &AvbdEngine, handles: &[BodyHandle]) -> Vec<Snapshot> {
+        handles
+            .iter()
+            .map(|&h| {
+                let b = physics.get_body(h).unwrap();
+                (
+                    b.position.to_array().map(f32::to_bits),
+                    b.orientation.to_array().map(f32::to_bits),
+                    b.velocity.to_array().map(f32::to_bits),
+                    b.angular_velocity.to_array().map(f32::to_bits),
+                )
+            })
+            .collect()
+    }
+    fn run(threads: usize) -> Vec<Snapshot> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let (mut physics, handles) = build();
+            assert!(
+                handles.len() > 256,
+                "confluence scene must engage the parallel path"
+            );
+            for _ in 0..120 {
+                physics.step(DT);
+            }
+            snapshot(&physics, &handles)
+        })
+    }
+    let single = run(1);
+    let multi = run(32);
+    assert_eq!(single.len(), multi.len(), "body count differs between runs");
+    for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "body {i} diverged between 1-thread and 32-thread runs"
+        );
+    }
 }

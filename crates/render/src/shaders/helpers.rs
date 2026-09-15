@@ -292,9 +292,15 @@ fn octahedral_decode(p: glam::Vec2) -> glam::Vec3 {
 /// directly — NOT `depth * 2.0 - 1.0` (that OpenGL-style remap halves
 /// distances and breaks every absolute-position use: spot cones,
 /// point falloff, shadow projection).
+///
+/// NDC y is `1.0 - uv.y * 2.0`: rasterization puts NDC y+1 at texture
+/// row 0 (the fullscreen quad pairs clip (+1,+1) with uv (1,0)), so a
+/// plain `uv * 2.0 - 1.0` reconstructs the vertically mirrored pixel —
+/// every world-space use in deferred lighting (falloff, cones, shadow
+/// lookups) silently overturns.
 #[ornis_macros::wgsl_fn]
 fn reconstruct_world_pos(uv: glam::Vec2, depth: f32, camera: Camera) -> glam::Vec3 {
-    let ndc = Vec3::new(uv * 2.0 - 1.0, depth);
+    let ndc = Vec3::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth);
     let clip = Vec4::new(ndc, 1.0);
     let view = camera.inv_view_proj * clip;
     return view.xyz / view.w;

@@ -7,7 +7,122 @@
 //! below and by the translator's exact-string suites upstream.
 
 use crate::ShaderType;
-use crate::ir::{IrBinOp, IrBlock, IrCallee, IrElse, IrExpr, IrStmt, IrUnOp, UNSUPPORTED_MARKER};
+use crate::ir::{
+    IrBinOp, IrBlock, IrCallee, IrElse, IrExpr, IrFieldAttr, IrGlobal, IrItem, IrStmt, IrTexture,
+    IrType, IrUnOp, UNSUPPORTED_MARKER,
+};
+
+/// Render a lowered type. The single place owning the `array<T, N>`
+/// spelling (lowering builds [`IrType`] structurally, never strings).
+pub fn print_ty(t: &IrType) -> String {
+    match t {
+        IrType::Scalar(s) => s.wgsl().to_string(),
+        IrType::Bool => "bool".to_string(),
+        IrType::Custom(name) => name.clone(),
+        IrType::Array { elem, len } => format!("array<{}, {len}>", print_ty(elem)),
+        IrType::RuntimeArray(elem) => format!("array<{}>", print_ty(elem)),
+    }
+}
+
+/// Render one entry-point parameter. The type follows the semantic:
+/// index builtins (`vertex_index`, `instance_index`) are scalar `u32`,
+/// every invocation builtin (`workgroup_id`, ...) is a `vec3<u32>`.
+/// The semantic travels lexically, the type from this table, never from
+/// a parse-side string.
+pub fn print_builtin_param(name: &str, semantic: &str) -> String {
+    let ty = match semantic {
+        "vertex_index" | "instance_index" => "u32",
+        _ => "vec3<u32>",
+    };
+    format!("@builtin({semantic}) {name}: {ty}")
+}
+
+/// Render one module-scope item. Items join with newlines at assembly;
+/// bodies inside (there are none yet — entries stay framing) would print
+/// through [`print_block`] like every other body.
+pub fn print_item(item: &IrItem) -> String {
+    match item {
+        IrItem::Global(g) => print_global(g),
+        IrItem::Struct { name, fields } => {
+            let mut out = format!("struct {name} {{\n");
+            for f in fields {
+                let attr = match &f.attr {
+                    Some(IrFieldAttr::Builtin(sem)) => format!("@builtin({sem}) "),
+                    Some(IrFieldAttr::Location(n)) => format!("@location({n}) "),
+                    None => String::new(),
+                };
+                out.push_str(&format!("    {attr}{}: {},\n", f.name, print_ty(&f.ty)));
+            }
+            out.push_str("};");
+            out
+        }
+    }
+}
+
+fn print_global(g: &IrGlobal) -> String {
+    match g {
+        IrGlobal::Storage {
+            group,
+            binding,
+            name,
+            elem,
+            read_only,
+        } => {
+            let access = if *read_only { "" } else { ", read_write" };
+            format!(
+                "@group({group}) @binding({binding}) var<storage{access}> {name}: array<{}>;",
+                print_ty(elem)
+            )
+        }
+        IrGlobal::Uniform {
+            group,
+            binding,
+            name,
+            ty,
+        } => format!(
+            "@group({group}) @binding({binding}) var<uniform> {name}: {};",
+            print_ty(ty)
+        ),
+        IrGlobal::Texture {
+            group,
+            binding,
+            name,
+            kind,
+        } => format!(
+            "@group({group}) @binding({binding}) var {name}: {};",
+            print_texture(*kind)
+        ),
+        IrGlobal::Sampler {
+            group,
+            binding,
+            name,
+            comparison,
+        } => {
+            let ty = if *comparison {
+                "sampler_comparison"
+            } else {
+                "sampler"
+            };
+            format!("@group({group}) @binding({binding}) var {name}: {ty};")
+        }
+        IrGlobal::Private { name, ty, init } => format!(
+            "var<private> {name}: {} = {};",
+            print_ty(ty),
+            print_expr(init)
+        ),
+    }
+}
+
+fn print_texture(kind: IrTexture) -> &'static str {
+    match kind {
+        IrTexture::Tex2dF32 => "texture_2d<f32>",
+        IrTexture::Tex2dU32 => "texture_2d<u32>",
+        IrTexture::Tex2dI32 => "texture_2d<i32>",
+        IrTexture::Depth2d => "texture_depth_2d",
+        IrTexture::Depth2dArray => "texture_depth_2d_array",
+        IrTexture::DepthCubeArray => "texture_depth_cube_array",
+    }
+}
 
 /// Render one expression.
 pub fn print_expr(e: &IrExpr) -> String {
@@ -56,6 +171,15 @@ pub fn print_expr(e: &IrExpr) -> String {
         IrExpr::Continue => "continue".to_string(),
         IrExpr::Break => "break".to_string(),
         IrExpr::Cast(inner) => print_expr(inner),
+        IrExpr::Array { elem, items } => {
+            let rendered: Vec<String> = items.iter().map(print_expr).collect();
+            format!(
+                "array<{}, {}>({})",
+                print_ty(elem),
+                items.len(),
+                rendered.join(", ")
+            )
+        }
         IrExpr::Verbatim(s) => s.clone(),
         IrExpr::Unsupported => UNSUPPORTED_MARKER.to_string(),
     }
@@ -71,12 +195,13 @@ pub fn print_stmt(s: &IrStmt) -> String {
             decl_ty,
         } => {
             let kw = if *mutable { "var" } else { "let" };
-            if let Some(init_val) = init {
-                format!("{kw} {name} = {}; ", print_expr(init_val))
-            } else if let Some(ty) = decl_ty {
-                format!("{kw} {name}: {ty}; ")
-            } else {
-                format!("{kw} {name}; ")
+            match (init, decl_ty) {
+                (Some(init_val), Some(ty)) => {
+                    format!("{kw} {name}: {ty} = {}; ", print_expr(init_val))
+                }
+                (Some(init_val), None) => format!("{kw} {name} = {}; ", print_expr(init_val)),
+                (None, Some(ty)) => format!("{kw} {name}: {ty}; "),
+                (None, None) => format!("{kw} {name}; "),
             }
         }
         IrStmt::For {
@@ -134,7 +259,7 @@ pub fn print_block(stmts: &IrBlock) -> String {
 fn print_call(target: &IrCallee, args: &[IrExpr]) -> String {
     let rendered: Vec<String> = args.iter().map(print_expr).collect();
     match target {
-        IrCallee::Constructor { wgsl_ty } => format!("{wgsl_ty}({})", rendered.join(", ")),
+        IrCallee::Constructor { ty } => format!("{}({})", ty.wgsl(), rendered.join(", ")),
         IrCallee::Builtin(b) => b.lower(&rendered),
         IrCallee::Verbatim(callee) => format!("{callee}({})", rendered.join(", ")),
         IrCallee::Expr(callee) => format!("{}({})", print_expr(callee), rendered.join(", ")),
@@ -182,6 +307,16 @@ fn print_path(segs: &[String]) -> String {
             };
             if let Some(value) = value {
                 return format!("vec{dim}<f32>({value})");
+            }
+        }
+        // Matrix constants (AVBD Hessian assembly needs both spellings;
+        // column-major order, matching the mat3x3 constructor).
+        if parent == "Mat3" {
+            if last == "ZERO" {
+                return "mat3x3<f32>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)".to_string();
+            }
+            if last == "IDENTITY" {
+                return "mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)".to_string();
             }
         }
     }

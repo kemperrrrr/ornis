@@ -12,8 +12,9 @@
 use ornis_shader_lang::ShaderBuiltin;
 use ornis_shader_lang::ShaderType;
 use ornis_shader_lang::ir::{
-    IrBinOp, IrBlock, IrCallee, IrElse, IrExpr, IrStmt, IrUnOp, UNSUPPORTED_MARKER,
+    IrBinOp, IrBlock, IrCallee, IrElse, IrExpr, IrStmt, IrType, IrUnOp, UNSUPPORTED_MARKER,
 };
+use ornis_shader_lang::writer::print_ty;
 use syn::{Block, ExprForLoop, Local, Pat, Stmt};
 
 /// Lower one expression.
@@ -78,6 +79,8 @@ pub fn lower_expr(e: &syn::Expr) -> IrExpr {
         // type from context, so the cast itself is dropped.
         Cast(c) => lower_expr(&c.expr),
         Return(r) => IrExpr::Return(r.expr.as_ref().map(|e| Box::new(lower_expr(e)))),
+        Array(a) => lower_array_literal(a, None),
+        Repeat(r) => lower_array_repeat(r, None),
         _ => IrExpr::Verbatim(
             syn::Error::new_spanned(e, "expression not supported in WGSL kernel")
                 .to_compile_error()
@@ -226,14 +229,16 @@ fn lower_call(c: &syn::ExprCall) -> IrExpr {
     if let syn::Expr::Path(p) = c.func.as_ref() {
         let segs: Vec<_> = p.path.segments.iter().collect();
         let ident = segs.last().map(|s| s.ident.to_string()).unwrap_or_default();
-        // Constructors: glam::Vec3::new(a,b,c) / Vec3::splat(1.0).
-        if (ident == "new" || ident == "splat")
+        // Constructors: glam::Vec3::new(a,b,c) / Vec3::splat(1.0) /
+        // Mat3::from_cols(c0,c1,c2) (column order is the WGSL
+        // mat3x3 constructor order; from_rows has no direct spelling
+        // and stays loud below).
+        if (ident == "new" || ident == "splat" || ident == "from_cols")
             && let Some(type_seg) = segs.iter().rev().nth(1)
-            && let Some(ty) =
-                ShaderType::from_rust(&type_seg.ident.to_string()).map(|t| t.wgsl().to_string())
+            && let Some(ty) = ShaderType::from_rust(&type_seg.ident.to_string())
         {
             return IrExpr::Call {
-                target: IrCallee::Constructor { wgsl_ty: ty },
+                target: IrCallee::Constructor { ty },
                 args,
             };
         }
@@ -373,6 +378,157 @@ fn lower_block(block: &Block) -> IrBlock {
     lower_body(&block.stmts)
 }
 
+/// Expansion cap for `[e; N]` repeats (solver scratch needs ≤ 81; 1024
+/// leaves an order of magnitude of headroom while a typo'd length fails
+/// loudly instead of blowing macro memory).
+const MAX_REPEAT: usize = 1024;
+
+/// Lowered element type for a Rust array element type: registry scalars /
+/// vectors / matrices, or a nested fixed array — structurally, so the
+/// writer owns every spelling. `None` for anything else (heap types,
+/// structs — loud at the call site).
+fn array_ir_ty(ty: &syn::Type) -> Option<IrType> {
+    match ty {
+        syn::Type::Path(tp) => {
+            let last = tp.path.segments.last()?.ident.to_string();
+            if last == "bool" {
+                // Registry-excluded for call classification, printable
+                // as an explicit array element type.
+                return Some(IrType::Bool);
+            }
+            ShaderType::from_rust(&last).map(IrType::Scalar)
+        }
+        syn::Type::Array(arr) => {
+            let len = array_len(&arr.len)?;
+            let inner = array_ir_ty(&arr.elem)?;
+            Some(IrType::Array {
+                elem: Box::new(inner),
+                len,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Integer length of `[T; N]`: plain integer literals only (a Rust
+/// `const` length has no WGSL spelling at macro time — loud instead).
+fn array_len(len: &syn::Expr) -> Option<usize> {
+    if let syn::Expr::Lit(lit) = len
+        && let syn::Lit::Int(i) = &lit.lit
+    {
+        return i.base10_parse::<usize>().ok();
+    }
+    None
+}
+
+/// Infer an element type for an UNANNOTATED array value from its first
+/// item (literals only). Anything else is loud — annotate the `let`.
+fn infer_lit_ty(e: &syn::Expr) -> Option<IrType> {
+    match e {
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Float(_) => Some(IrType::Scalar(ShaderType::F32)),
+            syn::Lit::Int(i) => match i.suffix() {
+                "u32" | "u64" | "usize" | "u16" | "u8" => Some(IrType::Scalar(ShaderType::U32)),
+                _ => Some(IrType::Scalar(ShaderType::I32)),
+            },
+            syn::Lit::Bool(_) => Some(IrType::Bool),
+            _ => None,
+        },
+        syn::Expr::Repeat(r) => infer_lit_ty(&r.expr),
+        syn::Expr::Array(a) => a.elems.first().and_then(infer_lit_ty),
+        _ => None,
+    }
+}
+
+fn loud_array(msg: &str, span: proc_macro2::Span) -> IrExpr {
+    IrExpr::Verbatim(syn::Error::new(span, msg).to_compile_error().to_string())
+}
+
+/// Lower `[e; N]` with a known element type (`Some`, the annotation's own
+/// level) or an inferred one (`None`). The element must be a literal, a
+/// path (constant), or a nested array shape: anything effectful
+/// (`[foo(); 3]`) would evaluate N times after expansion instead of
+/// once — loud, never silently reordered. Nested repeats descend one
+/// annotation level per layer, so `[[f32; 3]; 3]` keeps the inner
+/// `array<f32, 3>` instead of smearing the outer type inward.
+fn lower_array_repeat(r: &syn::ExprRepeat, elem_ty: Option<IrType>) -> IrExpr {
+    use syn::spanned::Spanned;
+    let Some(len) = array_len(&r.len) else {
+        return loud_array(
+            "array repeat length must be an integer literal in WGSL kernels",
+            r.len.span(),
+        );
+    };
+    if len > MAX_REPEAT {
+        return loud_array(
+            "array repeat length exceeds the 1024-element macro cap",
+            r.len.span(),
+        );
+    }
+    let elem: &syn::Expr = &r.expr;
+    let one: Option<IrExpr> = match elem {
+        syn::Expr::Lit(_) | syn::Expr::Path(_) => Some(lower_expr(elem)),
+        syn::Expr::Array(a) => {
+            // Nested literal: lower items directly (each appears once).
+            let items: Vec<IrExpr> = a.elems.iter().map(lower_expr).collect();
+            let ty = elem_ty.clone().or_else(|| infer_lit_ty(elem));
+            ty.map(|ty| IrExpr::Array { elem: ty, items })
+        }
+        syn::Expr::Repeat(inner) => {
+            let inner: &syn::ExprRepeat = inner;
+            let sub = match &elem_ty {
+                Some(IrType::Array { elem, .. }) => Some(elem.as_ref().clone()),
+                _ => None,
+            };
+            Some(lower_array_repeat(inner, sub))
+        }
+        _ => None,
+    };
+    let Some(one) = one else {
+        return loud_array(
+            "array repeat elements must be literals, constants or nested array shapes in WGSL kernels",
+            r.expr.span(),
+        );
+    };
+    let Some(ty) = elem_ty.or_else(|| infer_lit_ty(elem)) else {
+        return loud_array(
+            "cannot infer the array element type; annotate the `let` binding",
+            r.span(),
+        );
+    };
+    IrExpr::Array {
+        elem: ty,
+        items: std::iter::repeat_n(one, len).collect(),
+    }
+}
+
+/// Lower `[a, b, ..]` with a known element type (`Some`, from the `let`
+/// annotation) or an inferred one (`None`). Literal items evaluate once
+/// each, in order — no effect restriction needed.
+fn lower_array_literal(a: &syn::ExprArray, elem_ty: Option<IrType>) -> IrExpr {
+    use syn::spanned::Spanned;
+    let items: Vec<IrExpr> = a.elems.iter().map(lower_expr).collect();
+    let Some(ty) = elem_ty.or_else(|| a.elems.first().and_then(infer_lit_ty)) else {
+        return loud_array(
+            "cannot infer the array element type; annotate the `let` binding",
+            a.span(),
+        );
+    };
+    IrExpr::Array { elem: ty, items }
+}
+
+/// Lower an initializer KNOWN to sit under a `[T; N]` annotation with the
+/// annotation's element type. Returns `None` for non-array shapes (the
+/// caller keeps the historical path); unexpandable array shapes come
+/// back loud via the callees, never silently dropped.
+fn lower_typed_array(elem_ty: IrType, init: &syn::Expr) -> Option<IrExpr> {
+    match init {
+        syn::Expr::Array(a) => Some(lower_array_literal(a, Some(elem_ty))),
+        syn::Expr::Repeat(r) => Some(lower_array_repeat(r, Some(elem_ty))),
+        _ => None,
+    }
+}
+
 /// `for i in start..end` / `start..=end` → range loop over `u32`.
 /// Anything else (iterators, steps, patterns) is loud via [`IrExpr::Unsupported`].
 fn lower_for_range(f: &ExprForLoop) -> Vec<IrStmt> {
@@ -460,6 +616,28 @@ fn lower_local(local: &Local) -> Vec<IrStmt> {
         },
         _ => (pat_name(&local.pat), false),
     };
+    // Annotated fixed-size scratch (`let mut d: [f32; 6] = [0.0; 6];`):
+    // the annotation drives the element type, the value its length.
+    // Anything else keeps the historical annotation-blind path below.
+    if let (Some(init), syn::Pat::Type(pt)) = (&local.init, &local.pat)
+        && let syn::Type::Array(arr) = pt.ty.as_ref()
+        && let Some(elem_ty) = array_ir_ty(&arr.elem)
+        && let Some(array) = lower_typed_array(elem_ty, &init.expr)
+    {
+        let decl_ty = match &array {
+            IrExpr::Array { elem, items } => Some(print_ty(&IrType::Array {
+                elem: Box::new(elem.clone()),
+                len: items.len(),
+            })),
+            _ => None,
+        };
+        return vec![IrStmt::Let {
+            name,
+            mutable: is_mut,
+            init: Some(array),
+            decl_ty,
+        }];
+    }
     let init = local.init.as_ref().map(|init| lower_expr(&init.expr));
     // Rust `let mut` becomes WGSL `var` — the only WGSL binding kind that
     // can be reassigned.

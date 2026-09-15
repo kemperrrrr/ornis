@@ -51,6 +51,8 @@ pub enum ResourceKind {
     TextureDepth,
     /// `var name: texture_depth_2d_array` (shadow-map layers).
     TextureDepthArray,
+    /// `var name: texture_depth_cube_array` (point-light shadow cubes).
+    TextureDepthCubeArray,
     /// `var name: sampler`.
     Sampler,
     /// `var name: sampler_comparison` (shadow PCF).
@@ -69,6 +71,7 @@ impl ResourceKind {
             Self::TextureUint => "texture_2d<u32>".to_string(),
             Self::TextureDepth => "texture_depth_2d".to_string(),
             Self::TextureDepthArray => "texture_depth_2d_array".to_string(),
+            Self::TextureDepthCubeArray => "texture_depth_cube_array".to_string(),
             Self::Sampler => "sampler".to_string(),
             Self::SamplerComparison => "sampler_comparison".to_string(),
         }
@@ -84,6 +87,7 @@ impl ResourceKind {
             | Self::TextureUint
             | Self::TextureDepth
             | Self::TextureDepthArray
+            | Self::TextureDepthCubeArray
             | Self::Sampler
             | Self::SamplerComparison => "var",
         }
@@ -126,6 +130,11 @@ impl ResourceKind {
             Self::TextureDepthArray => wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Depth,
                 view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled,
+            },
+            Self::TextureDepthCubeArray => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::CubeArray,
                 multisampled,
             },
             Self::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
@@ -377,6 +386,8 @@ pub struct Texture2dUint;
 pub struct DepthTexture;
 /// Depth-texture-array handle marker (shadow-map layers); see [`Texture2d`].
 pub struct DepthTextureArray;
+/// Depth-cube-array handle marker (point-light shadow cubes); see [`Texture2d`].
+pub struct DepthTextureCubeArray;
 /// Sampler handle marker; see [`Texture2d`].
 pub struct Sampler;
 /// Comparison-sampler handle marker (shadow PCF); see [`Texture2d`].

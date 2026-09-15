@@ -16,6 +16,107 @@ use crate::{ShaderBuiltin, ShaderType};
 /// (`no definition in scope`), never to pass silently.
 pub const UNSUPPORTED_MARKER: &str = "__wgsl_dsl_unsupported_statement__()";
 
+/// A lowered type: what the value IS, not how it prints. Scalar
+/// spellings come from the [`ShaderType`] registry; `Bool` is separate
+/// because the registry deliberately excludes it (call classification,
+/// not printing); arrays compose structurally so the writer owns the
+/// single `array<T, N>` spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrType {
+    Scalar(ShaderType),
+    Bool,
+    /// Opaque named type (struct mirrors): lexical, like [`IrExpr::Path`]
+    /// segments — never a spelling.
+    Custom(String),
+    Array {
+        elem: Box<IrType>,
+        len: usize,
+    },
+    /// Runtime-sized `array<T>` (storage buffers document capacity in
+    /// Rust, WGSL sizes at bind time).
+    RuntimeArray(Box<IrType>),
+}
+
+/// Module-scope declaration: what the item IS, not how it prints.
+/// Expression-level [`IrExpr`] never carries these spellings; the
+/// writer prints items and bodies from the same nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrItem {
+    Global(IrGlobal),
+    Struct {
+        name: String,
+        fields: Vec<IrStructField>,
+    },
+}
+
+/// A module-scope `var`: address space and type travel structurally,
+/// `@group`/`@binding` numbers stay data (today always group 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrGlobal {
+    Storage {
+        group: u32,
+        binding: u32,
+        name: String,
+        elem: IrType,
+        read_only: bool,
+    },
+    Uniform {
+        group: u32,
+        binding: u32,
+        name: String,
+        ty: IrType,
+    },
+    Texture {
+        group: u32,
+        binding: u32,
+        name: String,
+        kind: IrTexture,
+    },
+    Sampler {
+        group: u32,
+        binding: u32,
+        name: String,
+        comparison: bool,
+    },
+    /// Module-scope `var<private>` with initializer (the only mutable
+    /// module scope; also the address space for lookup tables: `const`
+    /// arrays reject dynamic indices, `private` allows them).
+    Private {
+        name: String,
+        ty: IrType,
+        init: IrExpr,
+    },
+}
+
+/// Closed texture world (mirrors the render `ResourceKind` set): a
+/// free-form token paste cannot produce a spelling the validator never
+/// sees — unknown shapes are loud at parse, not at naga.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrTexture {
+    Tex2dF32,
+    Tex2dU32,
+    Tex2dI32,
+    Depth2d,
+    Depth2dArray,
+    DepthCubeArray,
+}
+
+/// One `struct` field with its WGSL attribute, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrStructField {
+    pub attr: Option<IrFieldAttr>,
+    pub name: String,
+    pub ty: IrType,
+}
+
+/// Field attributes: a builtin semantic (lexical ident) or a location
+/// number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrFieldAttr {
+    Builtin(String),
+    Location(u32),
+}
+
 /// A lowered expression: what the value IS, not how it prints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrExpr {
@@ -98,6 +199,13 @@ pub enum IrExpr {
     /// `e as T`: a type-coercion hint for the DSL; WGSL infers the type
     /// from context, so the cast itself is dropped (transparent).
     Cast(Box<IrExpr>),
+    /// Fixed-size array value with a structural element type:
+    /// `array<f32, 6>(0.0, …)`. Built from Rust `[T; N]` literals and
+    /// repeats (see lowering); the writer derives `N` from the items.
+    Array {
+        elem: IrType,
+        items: Vec<IrExpr>,
+    },
     /// Pre-rendered escape hatch: `syn::Error::to_compile_error` output
     /// for truly unsupported nodes (carries the message into the WGSL
     /// text, where naga reports it). No new uses — prefer [`IrExpr::Unsupported`].
@@ -152,10 +260,10 @@ pub enum IrUnOp {
 /// A classified call target: resolved once at lowering, printed dumbly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrCallee {
-    /// `glam::Vec3::new(..)` / `Vec3::splat(..)` → `vec3<f32>(..)`.
-    /// The WGSL spelling resolves at lowering (name mapping); the writer
-    /// only applies it.
-    Constructor { wgsl_ty: String },
+    /// A type constructor (`Vec3::new` / `Mat3::from_cols` classified at
+    /// lowering): the type travels as a registry variant, spelled by the
+    /// writer — never a pre-rendered string.
+    Constructor { ty: ShaderType },
     /// A registry built-in: applied by the writer via [`ShaderBuiltin::lower`].
     Builtin(ShaderBuiltin),
     /// Kernels/helpers: WGSL shares the spelling by design.

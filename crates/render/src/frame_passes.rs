@@ -300,6 +300,9 @@ pub trait ForwardMode: Sized + 'static {
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
     /// `true` when this technique clears the depth buffer itself.
     const OWNS_DEPTH: bool;
+    /// `true` when this pass must render the shadow pre-pass itself:
+    /// only forward-only (no `LightingPass` runs its own).
+    const OWNS_SHADOWS: bool;
 }
 
 /// Forward-only technique: the pass owns (clears) the depth buffer.
@@ -311,6 +314,7 @@ impl ForwardMode for OwnsDepth {
         WriteClear<HdrFwd, ClearTransparent>,
     );
     const OWNS_DEPTH: bool = true;
+    const OWNS_SHADOWS: bool = true;
 }
 
 /// Hybrid technique: the gbuffer pass owns the depth buffer.
@@ -319,6 +323,7 @@ impl ForwardMode for SharedDepth {
     type Reads = (Read<Depth>,);
     type Writes = (WriteClear<HdrFwd, ClearTransparent>,);
     const OWNS_DEPTH: bool = false;
+    const OWNS_SHADOWS: bool = false;
 }
 
 /// The forward pass; `M` selects the depth-ownership mode.
@@ -342,6 +347,17 @@ impl<M: ForwardMode> FramePass for Forward<M> {
         "forward"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+        // Forward-only owns its shadow pre-pass too: no LightingPass
+        // runs in that technique, so without this the shadow maps stay
+        // at texture-init zero and every shadowed light goes fully dark.
+        if M::OWNS_SHADOWS {
+            frame.renderer.render_shadows(
+                frame.device,
+                frame.encoder,
+                frame.mesh,
+                frame.instance_count,
+            );
+        }
         frame.renderer.render_forward(
             frame.encoder,
             views.get::<Depth>(),

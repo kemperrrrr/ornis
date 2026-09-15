@@ -44,11 +44,16 @@
 //! rolling coefficients stay CPU-only).
 //!
 //! A true AVBD port (affine bodies, per-body Hessian assembly + LDL in the
-//! shader) is a separate step: it needs matrix-factorization and scratch
-//! helpers in the kernel DSL that do not exist yet.
+//! shader) is a separate step; its DSL preconditions are closed:
+//! `ShaderType::Mat3` (`mat3x3<f32>`, `Mat3::from_cols` constructor,
+//! `Mat3::IDENTITY`/`ZERO`), local fixed-size scratch arrays (incl.
+//! nested Hessian shapes; effectful repeats rejected loudly), and
+//! `helpers(...)` inclusion in `#[gpu_pipeline]` (stitches
+//! `#[wgsl_fn]`/`#[kernel]` sources ahead of the entry). Pinned by
+//! `macros/tests/compute_dsl.rs` and `helpers_stitch_ahead_of_main_and_validate`.
 
 use glam::Vec3;
-use ornis_macros::{WgslStruct, gpu_pipeline};
+use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
 use std::sync::Arc;
 
 use crate::body::RigidBody;
@@ -1152,6 +1157,78 @@ mod tests {
         validator
             .validate(&module)
             .unwrap_or_else(|e| panic!("generated WGSL must validate: {e}"));
+    }
+
+    /// Solver-grade kernel preconditions end to end: a 3x3 LDL
+    /// factor-and-solve helper written with `mat3x3` + fixed-size scratch
+    /// arrays, stitched into a pipeline via `helpers(...)`. The stitched
+    /// source must carry the helper ahead of `main` and naga-validate —
+    /// this is the exact shape a per-body Hessian solve will take.
+    #[wgsl_fn]
+    fn avbd_ldl_3x3(c0: Vec3, c1: Vec3, c2: Vec3, rhs: Vec3) -> Vec3 {
+        let a = Mat3::from_cols(c0, c1, c2);
+        let mut l: [[f32; 3]; 3] = [[0.0; 3]; 3];
+        let mut d: [f32; 3] = [0.0; 3];
+        l[0][0] = 1.0;
+        l[1][1] = 1.0;
+        l[2][2] = 1.0;
+        d[0] = a[0][0];
+        l[1][0] = a[1][0] / d[0];
+        l[2][0] = a[2][0] / d[0];
+        d[1] = a[1][1] - l[1][0] * l[1][0] * d[0];
+        l[2][1] = (a[2][1] - l[2][0] * l[1][0] * d[0]) / d[1];
+        d[2] = a[2][2] - l[2][0] * l[2][0] * d[0] - l[2][1] * l[2][1] * d[1];
+        let y0 = rhs[0];
+        let y1 = rhs[1] - l[1][0] * y0;
+        let y2 = rhs[2] - l[2][0] * y0 - l[2][1] * y1;
+        let z0 = y0 / d[0];
+        let z1 = y1 / d[1];
+        let z2 = y2 / d[2];
+        let x2 = z2;
+        let x1 = z1 - l[2][1] * x2;
+        let x0 = z0 - l[1][0] * x1 - l[2][0] * x2;
+        return Vec3::new(x0, x1, x2);
+    }
+
+    #[gpu_pipeline(
+        workgroup_size = 4,
+        storage(hess: [[f32; 3]; 64], read_write),
+        uniform(params: [u32; 4]),
+        builtin(gid: workgroup_id),
+        helpers(avbd_ldl_3x3),
+    )]
+    fn avbd_hessian_solve() {
+        if gid.x >= params.x {
+            return;
+        }
+        let c = hess[gid.x];
+        let r = avbd_ldl_3x3(c, c, c, Vec3::new(1.0, 1.0, 1.0));
+        hess[gid.x] = r;
+    }
+
+    #[test]
+    fn helpers_stitch_ahead_of_main_and_validate() {
+        let source = avbd_hessian_solve::wgsl_source();
+        let helper_pos = source
+            .find("fn avbd_ldl_3x3(")
+            .expect("stitched source must contain the helper");
+        let main_pos = source
+            .find("fn main(")
+            .expect("stitched source must contain main");
+        assert!(helper_pos < main_pos, "helper must be declared before use");
+        assert!(source.contains("mat3x3<f32>(c0, c1, c2)"));
+        assert!(source.contains("var l: array<array<f32, 3>, 3>"));
+        assert!(source.contains("var d: array<f32, 3>"));
+        assert!(source.contains("let r = avbd_ldl_3x3(c, c, c, vec3<f32>(1.0, 1.0, 1.0));"));
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("stitched WGSL must parse: {e}"));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("stitched WGSL must validate: {e}"));
     }
 
     /// Create a wgpu device/queue for tests. Returns `None` when no adapter

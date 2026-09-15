@@ -490,6 +490,69 @@ fn pair_allowed(a: &RigidBody, b: &RigidBody) -> bool {
     (a.collision_layer & b.collision_mask) != 0 && (b.collision_layer & a.collision_mask) != 0
 }
 
+/// Signed gap between two oriented boxes (SAT, 15 axes): positive =
+/// separation, negative = -penetration depth. The vertex/face `obb_obb`
+/// oracle is UNSIGNED (overlap bottoms out at zero witness distance, and
+/// shallow burial even reads back as growing separation), so it cannot
+/// drive creation or touch gates for box pairs — a fast body band-skips
+/// from "no pair" into "deep pair with fresh penalties" and tunnels, and
+/// buried pairs flip to the separated path. Every other shape arm in
+/// `shape_distance` is already signed (sphere/capsule core arithmetic,
+/// GJK+EPA), so only Box-Box needs this. Fixed axis order, no early-out:
+/// the max over all axes is order-independent anyway.
+fn box_box_signed_gap(
+    a_pos: Vec3,
+    a_rot: Quat,
+    ha: Vec3,
+    b_pos: Vec3,
+    b_rot: Quat,
+    hb: Vec3,
+) -> f32 {
+    let ra = Mat3::from_quat(a_rot);
+    let rb = Mat3::from_quat(b_rot);
+    let delta = b_pos - a_pos;
+    let mut axes = [Vec3::ZERO; 15];
+    axes[0] = ra.x_axis;
+    axes[1] = ra.y_axis;
+    axes[2] = ra.z_axis;
+    axes[3] = rb.x_axis;
+    axes[4] = rb.y_axis;
+    axes[5] = rb.z_axis;
+    let mut n = 6;
+    for i in 0..3 {
+        let a = [ra.x_axis, ra.y_axis, ra.z_axis][i];
+        for j in 0..3 {
+            let b = [rb.x_axis, rb.y_axis, rb.z_axis][j];
+            let c = a.cross(b);
+            // Parallel face axes: the cross is degenerate and carries no
+            // information (face axes already cover it).
+            axes[n] = if c.length_squared() > 1e-12 {
+                c.normalize()
+            } else {
+                Vec3::ZERO
+            };
+            n += 1;
+        }
+    }
+    let mut signed = f32::NEG_INFINITY;
+    for ax in axes {
+        if ax == Vec3::ZERO {
+            continue;
+        }
+        let r_a = ha.x * ax.dot(ra.x_axis).abs()
+            + ha.y * ax.dot(ra.y_axis).abs()
+            + ha.z * ax.dot(ra.z_axis).abs();
+        let r_b = hb.x * ax.dot(rb.x_axis).abs()
+            + hb.y * ax.dot(rb.y_axis).abs()
+            + hb.z * ax.dot(rb.z_axis).abs();
+        let s = delta.dot(ax).abs() - r_a - r_b;
+        if s > signed {
+            signed = s;
+        }
+    }
+    signed
+}
+
 /// Smallest shape dimension (builtin TOI parity): a body whose step
 /// displacement exceeds HALF of this sweeps `cast_shape` instead of moving
 /// blindly. Apex-point shapes (cone/hull/heightfield/trimesh) halve again.
@@ -549,6 +612,10 @@ struct AvbdPair {
     /// Coulomb coefficients along the frame tangents `[t1, t2]`
     /// (isotropic pairs carry `[mu, mu]`).
     mu: [f32; 2],
+    /// Pre-step witness gap (`shape_distance`, signed: negative =
+    /// penetrating). Drives the separated-damper rule: open pairs react
+    /// with velocity only, touching pairs with the full Taylor spring.
+    gap: f32,
     points: Vec<AvbdPoint>,
 }
 
@@ -647,6 +714,22 @@ struct AvbdJoint {
     pen_a: [f32; 3],
 }
 
+/// Read-only discovery bundle for one candidate pair: everything the
+/// sequential merge needs, nothing it writes. Discovery is a pure
+/// function of the step-top state, so the thread schedule cannot leak
+/// into the pairs (the M2 Strong-Confluence claim for AVBD).
+struct Discovered {
+    ia: usize,
+    ib: usize,
+    trigger: bool,
+    exists: bool,
+    normal: Vec3,
+    mu: [f32; 2],
+    signed: f32,
+    fresh: Vec<(Vec3, Vec3)>,
+    wake_vote: bool,
+}
+
 /// AVBD rigid-body engine; see the module docs for formulation and scope.
 ///
 /// Bodies are stored in handle order (`swap_remove` on removal, exactly like
@@ -670,6 +753,13 @@ pub struct AvbdEngine {
     /// Per-body sleep timers (seconds below thresholds) and frozen flags.
     sleep_timer: Vec<f32>,
     asleep: Vec<bool>,
+    /// Post-step poses of the previous substep (driver baseline): the
+    /// engine never integrates kinematic bodies, so any change here is a
+    /// driver teleport. `step_inner` rewinds kinematic `pos0`/`rot0` to
+    /// these so contact/joint rows see driver motion as within-step `dq`
+    /// at full strength.
+    prev_pos: Vec<Vec3>,
+    prev_rot: Vec<Quat>,
     /// Fixed-step accumulator (seconds of host time awaiting simulation):
     /// the core always advances in exact `DT_STEP` increments, so 120 Hz
     /// hosts alternate sim/skip and hitch frames catch up — wall speed is
@@ -864,8 +954,21 @@ impl AvbdEngine {
             }
         }
         for h in 0..n {
-            self.pos0[h] = self.bodies[h].position;
-            self.rot0[h] = self.bodies[h].orientation;
+            // Driver baseline (Box2D-parity driver contract): the engine
+            // never integrates kinematic bodies, so any pose change since
+            // the last substep is a driver teleport — rewind its baseline
+            // to the pre-teleport pose so contact/joint rows see driver
+            // motion as within-step `dq` at full strength. Without this
+            // only the (1-alpha)-diluted C0 residue couples, and a 2 m/s
+            // pusher ghosts through its target (measured). TOI and pair
+            // geometry above already ran on the true post-teleport poses.
+            if self.bodies[h].body_type == BodyType::Kinematic {
+                self.pos0[h] = self.prev_pos[h];
+                self.rot0[h] = self.prev_rot[h];
+            } else {
+                self.pos0[h] = self.bodies[h].position;
+                self.rot0[h] = self.bodies[h].orientation;
+            }
             self.pre_vel[h] = self.bodies[h].velocity;
             if !self.solvable(h) {
                 self.inertial[h] = self.bodies[h].position;
@@ -939,8 +1042,30 @@ impl AvbdEngine {
         }
         // Sleep bookkeeping (builtin parity, per body instead of per island):
         // slow dynamics accumulate quiet time and freeze; motion resets.
-        for h in 0..n {
+        // Support rule: only a body with a TOUCHING pair (signed gap) or a
+        // joint may freeze. A damper shell is not support — without this a
+        // caught arrival creeps to damper-terminal velocity (below the
+        // sleep threshold) and freezes mid-air instead of touching down
+        // (measured: 5 m/s drop froze +3cm up with zeroed velocity).
+        // Joints count as support (a pendulum at rest hangs on its joint
+        // with no contact pairs); empty shells do not.
+        let mut supported = vec![false; n];
+        for pair in &self.pairs {
+            if pair.gap <= 0.0 && !pair.points.is_empty() {
+                supported[pair.a] = true;
+                supported[pair.b] = true;
+            }
+        }
+        for j in &self.joints {
+            supported[j.a] = true;
+            supported[j.b] = true;
+        }
+        for (h, &sup) in supported.iter().enumerate() {
             if !self.solvable(h) || self.asleep[h] {
+                continue;
+            }
+            if !sup {
+                self.sleep_timer[h] = 0.0;
                 continue;
             }
             let b = &self.bodies[h];
@@ -955,6 +1080,12 @@ impl AvbdEngine {
         }
         if emit {
             self.emit_events(trigger_now);
+        }
+        // Refresh the driver baseline (end-of-step poses for the next
+        // substep's teleport detection).
+        for h in 0..n {
+            self.prev_pos[h] = self.bodies[h].position;
+            self.prev_rot[h] = self.bodies[h].orientation;
         }
     }
 
@@ -977,6 +1108,8 @@ impl AvbdEngine {
             pre_vel: Vec::new(),
             sleep_timer: Vec::new(),
             asleep: Vec::new(),
+            prev_pos: Vec::new(),
+            prev_rot: Vec::new(),
             time_debt: 0.0,
         }
     }
@@ -992,6 +1125,7 @@ impl AvbdEngine {
 
     fn ensure_scratch(&mut self) {
         let n = self.bodies.len();
+        let old = self.pos0.len();
         self.pos0.resize(n, Vec3::ZERO);
         self.rot0.resize(n, Quat::IDENTITY);
         self.inertial.resize(n, Vec3::ZERO);
@@ -999,282 +1133,431 @@ impl AvbdEngine {
         self.pre_vel.resize(n, Vec3::ZERO);
         self.sleep_timer.resize(n, 0.0);
         self.asleep.resize(n, false);
+        // New indices start life with no teleport: baseline = current pose.
+        self.prev_pos.resize(n, Vec3::ZERO);
+        self.prev_rot.resize(n, Quat::IDENTITY);
+        for h in old.min(n)..n {
+            self.prev_pos[h] = self.bodies[h].position;
+            self.prev_rot[h] = self.bodies[h].orientation;
+        }
+    }
+
+    /// Body count above which pair discovery runs on the rayon pool.
+    /// Below it the sequential loop is cheaper than task dispatch; both
+    /// feed the same ordered merge, so results are identical either way.
+    const PAR_DISCOVERY_BODIES: usize = 256;
+
+    /// Pure per-pair discovery (no `&mut`, safe under rayon): prefilter,
+    /// witness distance, signed gap, frame, manifold points and the wake
+    /// vote. Returns `None` for pairs that stay unknown this step.
+    fn discover_pair(&self, ia: usize, ib: usize) -> Option<Discovered> {
+        let (a, b) = (&self.bodies[ia], &self.bodies[ib]);
+        if !pair_allowed(a, b) {
+            return None;
+        }
+        let ra = bound_radius(&a.shape);
+        let rb = bound_radius(&b.shape);
+        if (a.position - b.position).length() > ra + rb + GEN_MARGIN {
+            return None;
+        }
+        let d = shape_distance(
+            ShapeRef {
+                shape: &a.shape,
+                pos: a.position,
+                rot: a.orientation,
+            },
+            ShapeRef {
+                shape: &b.shape,
+                pos: b.position,
+                rot: b.orientation,
+            },
+        );
+        // Signed gap: the vertex/face box oracle is UNSIGNED
+        // (overlap bottoms out at zero, shallow burial reads back
+        // as separation), so Box-Box pairs use the SAT gap here.
+        // Every other arm is already signed. All gates below
+        // (trigger, creation, shell, wake backstop, touch) read
+        // this, never the raw oracle distance.
+        let signed = match (&a.shape, &b.shape) {
+            (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) => {
+                box_box_signed_gap(
+                    a.position,
+                    a.orientation,
+                    *ha,
+                    b.position,
+                    b.orientation,
+                    *hb,
+                )
+            }
+            _ => d.dist,
+        };
+        if a.is_trigger || b.is_trigger {
+            return Some(Discovered {
+                ia,
+                ib,
+                trigger: true,
+                exists: false,
+                normal: Vec3::Y,
+                mu: [0.0; 2],
+                signed,
+                fresh: Vec::new(),
+                wake_vote: false,
+            });
+        }
+        let mut normal = d.point_a - d.point_b;
+        if normal.length_squared() < 1e-16 {
+            normal = a.position - b.position;
+        }
+        let mut normal = normal.normalize_or(Vec3::Y);
+        // Persistent normal per pair: witness directions flip sign at
+        // first touch (separated vs penetrating closest points), which
+        // would turn a compressive lambda tensile and catapult the
+        // bodies. New pairs orient by body centers (B -> A); live
+        // pairs keep their stored direction (spike/official lesson:
+        // the contact frame must be stable, like collide() face
+        // normals, not a live witness direction).
+        if let Some(old) = self.pairs.iter().find(|p| p.a == ia && p.b == ib) {
+            if normal.dot(old.n) < 0.0 {
+                normal = -normal;
+            }
+        } else if normal.dot(a.position - b.position) < 0.0 {
+            normal = -normal;
+        }
+        let exists = self.pairs.iter().any(|p| p.a == ia && p.b == ib);
+        // Swept creation: a fast approach covers `approach*dt`
+        // this step, so the pair must exist (as a damper shell)
+        // before burial — otherwise the body band-skips from "no
+        // pair" into a deep spring pair with fresh penalties and
+        // tunnels (measured: 10 m/s vs the floor). Slow pairs keep
+        // the old near-touch gate bit-identically.
+        let approach = (b.velocity - a.velocity).dot(normal).max(0.0);
+        let reach = GEN_MARGIN + approach * DT_STEP;
+        if signed > reach && !exists {
+            // Creation gate: new pairs form near touch.
+            return None;
+        }
+        // Separated live pairs keep an EMPTY shell (official: manifold
+        // persists while spheres overlap, zero contacts when apart).
+        // Keeping stale points would push bodies apart with dead
+        // lambda (slow levitation); dropping the pair would burn
+        // warm duals and reload every re-touch (limit cycle).
+        let separated = signed > reach;
+        // Scalar coefficients only; the t1 direction is recomputed per
+        // solve from live orientations.
+        let mu = {
+            let (_, mu1, mu2) = friction_frame(a, b, normal);
+            [mu1.max(0.0), mu2.max(0.0)]
+        };
+        // Witness point plus box-corner expansion for face stability.
+        // Every point is a coincident pair on the witness plane: both
+        // anchors are material points that start at the same world
+        // position (official rA/rB semantics). Projecting a foreign
+        // corner into the other body's frame instead would glue a
+        // non-material point and pump energy (spike lesson).
+        //
+        // The gate is anchored at a CENTER witness (body centers
+        // projected onto the contact plane, midpoint shared), NOT at
+        // the raw closest-point pair: shape_distance returns CORNER
+        // witnesses for box-box (face-face has infinite closest
+        // pairs), and gating around a flickering corner admits one
+        // corner per step — churning anchors, no support accumulation
+        // (boxes fell 82m through the floor). Centers move smoothly,
+        // so the pass-set is stable.
+        //
+        // The gate is split by stability character: the NORMAL gate
+        // uses the per-side raw witness (only its PLANE matters, and
+        // the face plane is flicker-immune even when the witness
+        // slides within it); the TANGENTIAL gate uses the center
+        // witness (position-stable). Gating normal distance around
+        // the mid-gap center instead would reject gapped faces.
+        //
+        // The tangential gate is two-sided (a local patch around the
+        // center witness, scaled by the smaller body): the old
+        // normal-only gate admitted a huge floor's coplanar corners
+        // 3.5m away as phantom points — 2.5m levers whose meter-scale
+        // Ct torqued every spin to death.
+        let patch = ra.min(rb) + MARGIN;
+        let pp = (d.point_a + d.point_b) * 0.5;
+        let cw = {
+            let pa_c = a.position - normal * (a.position - pp).dot(normal);
+            let pb_c = b.position - normal * (b.position - pp).dot(normal);
+            (pa_c + pb_c) * 0.5
+        };
+        let mut fresh: Vec<(Vec3, Vec3)> = Vec::new();
+        if !separated {
+            let inv_a = a.orientation.inverse();
+            let inv_b = b.orientation.inverse();
+            // Box corners first: stable material support for faces.
+            for (h, witness, sign) in [(ia, d.point_a, 1.0f32), (ib, d.point_b, -1.0f32)] {
+                let body = &self.bodies[h];
+                for corner in box_corners(&body.shape) {
+                    let world = body.position + body.orientation * corner;
+                    let along = (world - witness).dot(sign * normal);
+                    if along.abs() > EXPAND_SLOP + (-signed).max(0.0) {
+                        continue;
+                    }
+                    let rel_c = world - cw;
+                    let tang = rel_c - normal * rel_c.dot(normal);
+                    if tang.length() > patch {
+                        continue;
+                    }
+                    if fresh.len() >= MAX_POINTS {
+                        break;
+                    }
+                    // Coincident plane point shared by both anchors.
+                    let pw = world - sign * normal * along;
+                    let ra_l = inv_a * (pw - a.position);
+                    let rb_l = inv_b * (pw - b.position);
+                    if fresh.iter().any(|(ea, eb)| {
+                        (ea - ra_l).length() < POINT_MATCH_DIST
+                            && (eb - rb_l).length() < POINT_MATCH_DIST
+                    }) {
+                        continue;
+                    }
+                    fresh.push((ra_l, rb_l));
+                }
+            }
+        } // end corner expansion.
+        // Center point for face-like contacts (2+ corners): the gate
+        // anchor itself, shared — kills rocking. (Corners alone pin
+        // the patch; this centers it.)
+        if !separated && fresh.len() >= 2 && fresh.len() < MAX_POINTS {
+            let inv_a = a.orientation.inverse();
+            let inv_b = b.orientation.inverse();
+            let ra_l = inv_a * (cw - a.position);
+            let rb_l = inv_b * (cw - b.position);
+            if !fresh.iter().any(|(ea, eb)| {
+                (ea - ra_l).length() < POINT_MATCH_DIST && (eb - rb_l).length() < POINT_MATCH_DIST
+            }) {
+                fresh.push((ra_l, rb_l));
+            }
+        }
+        // Witness fallback: the closest-point pair slides across faces
+        // (non-material churn that rocks stacks), so it is only used
+        // when corners give fewer than 3 points (edge/vertex and
+        // non-box contacts).
+        if !separated && fresh.len() < 3 {
+            let inv_a = a.orientation.inverse();
+            let inv_b = b.orientation.inverse();
+            let ra_l = inv_a * (d.point_a - a.position);
+            let rb_l = inv_b * (d.point_b - b.position);
+            if !fresh.iter().any(|(ea, eb)| {
+                (ea - ra_l).length() < POINT_MATCH_DIST && (eb - rb_l).length() < POINT_MATCH_DIST
+            }) {
+                fresh.push((ra_l, rb_l));
+            }
+        }
+        // Wake vote (evaluated by the merge): new pairs wake on
+        // genuine impact or deep fresh overlap; live pairs wake on
+        // the same 1cm penetration backstop (island-wake parity
+        // without islands — a slow burrow never trips the impact
+        // gate). All inputs are step-top state, hence schedule-free.
+        let wake_vote = if exists {
+            (self.asleep[ia] || self.asleep[ib]) && signed < -WAKE_PENETRATION
+        } else {
+            // Gated wake (builtin `wake_on_impact` parity, threshold
+            // 0.5 m/s approach): a NEW pair wakes its sleepers only on
+            // a genuine impact or a deep fresh overlap (spawn /
+            // teleport driver, blind to the velocity test). Resting
+            // micro-jitter and GEN_MARGIN re-gating stay asleep.
+            let fresh_pen = signed < -WAKE_PENETRATION;
+            let mut impact = fresh_pen;
+            if !impact {
+                for (s, o, sign) in [(ia, ib, 1.0f32), (ib, ia, -1.0f32)] {
+                    if self.asleep[s] {
+                        let app =
+                            (self.bodies[o].velocity - self.bodies[s].velocity).dot(sign * normal);
+                        if app > WAKE_IMPACT_SPEED {
+                            impact = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            impact
+        };
+        Some(Discovered {
+            ia,
+            ib,
+            trigger: false,
+            exists,
+            normal,
+            mu,
+            signed,
+            fresh,
+            wake_vote,
+        })
     }
 
     /// Generate/persist contact pairs for this step. Returns the set of
-    /// trigger-overlapping pairs (canonical order).
+    /// overlapping trigger pairs (canonical order).
+    ///
+    /// Two phases: discovery (pure per-pair bundles, sequential below
+    /// [`Self::PAR_DISCOVERY_BODIES`] bodies, rayon above) and a
+    /// sequential merge in canonical `(ia, ib)` order — the ONLY writer
+    /// of pair state. The sweep itself stays single-threaded
+    /// (Gauss-Seidel order is load-bearing), so thread count cannot leak
+    /// into the simulation anywhere: 1-vs-N threads is bit-identical.
     fn generate_pairs(&mut self) -> BTreeSet<(usize, usize)> {
         let n = self.bodies.len();
+        let mut discovered: Vec<Discovered> = if n > Self::PAR_DISCOVERY_BODIES {
+            use rayon::prelude::*;
+            (0..n)
+                .into_par_iter()
+                .flat_map(|ia| {
+                    let mut out = Vec::new();
+                    for ib in (ia + 1)..n {
+                        if let Some(d) = self.discover_pair(ia, ib) {
+                            out.push(d);
+                        }
+                    }
+                    out
+                })
+                .collect()
+        } else {
+            let mut out = Vec::new();
+            for ia in 0..n {
+                for ib in (ia + 1)..n {
+                    if let Some(d) = self.discover_pair(ia, ib) {
+                        out.push(d);
+                    }
+                }
+            }
+            out
+        };
+        discovered.sort_by_key(|d| (d.ia, d.ib));
         let mut seen = vec![false; self.pairs.len()];
         let mut trigger_now = BTreeSet::new();
-        // Bodies of brand-new pairs wake (below, after the scan borrows end):
-        // a fresh touch is the one disturbance a sleeper must react to — but
-        // only a genuine impact (builtin `wake_on_impact` semantics, threshold
-        // 0.5 m/s approach): resting micro-jitter and warm-pair re-gating at
-        // GEN_MARGIN must NOT wake a sleeper.
+        // Bodies of brand-new pairs wake in the merge below: a fresh touch
+        // is the one disturbance a sleeper must react to — but only a
+        // genuine impact (see the discovery vote).
         let mut wake: Vec<(usize, usize)> = Vec::new();
-        for ia in 0..n {
-            for ib in (ia + 1)..n {
-                let (a, b) = (&self.bodies[ia], &self.bodies[ib]);
-                if !pair_allowed(a, b) {
-                    continue;
+        for d in discovered {
+            let (ia, ib) = (d.ia, d.ib);
+            if d.trigger {
+                if d.signed <= 0.0 {
+                    trigger_now.insert((ia, ib));
                 }
-                let ra = bound_radius(&a.shape);
-                let rb = bound_radius(&b.shape);
-                if (a.position - b.position).length() > ra + rb + GEN_MARGIN {
-                    continue;
+                continue;
+            }
+            // Persist duals by matching material anchors (5cm window).
+            if d.exists {
+                let idx = self
+                    .pairs
+                    .iter()
+                    .position(|p| p.a == ia && p.b == ib)
+                    .expect("discovery saw this pair a few microseconds ago on the same state");
+                seen[idx] = true;
+                let pair = &mut self.pairs[idx];
+                pair.n = d.normal;
+                pair.mu = d.mu;
+                pair.gap = d.signed;
+                // Wake propagation through LIVE pairs (island-wake
+                // parity without islands): a slow burrow never trips
+                // the 0.5 m/s impact gate, so deepening overlap past
+                // the 1cm backstop wakes — same rule as the creation
+                // backstop, one consistent threshold. Resting contacts
+                // sit an order of magnitude shallower (mm), settled
+                // piles stay asleep; chains wake ring-by-ring as the
+                // push advances (measured: a 0.2 m/s pusher ghosted
+                // 40cm through its target with no wake at all).
+                if d.wake_vote {
+                    wake.push((ia, ib));
                 }
-                let trigger = a.is_trigger || b.is_trigger;
-                let d = shape_distance(
-                    ShapeRef {
-                        shape: &a.shape,
-                        pos: a.position,
-                        rot: a.orientation,
-                    },
-                    ShapeRef {
-                        shape: &b.shape,
-                        pos: b.position,
-                        rot: b.orientation,
-                    },
-                );
-                if trigger {
-                    if d.dist <= 0.0 {
-                        trigger_now.insert((ia, ib));
-                    }
-                    continue;
-                }
-                let pair_exists = self.pairs.iter().any(|p| p.a == ia && p.b == ib);
-                if d.dist > GEN_MARGIN && !pair_exists {
-                    // Creation gate: new pairs form near touch.
-                    continue;
-                }
-                // Separated live pairs keep an EMPTY shell (official: manifold
-                // persists while spheres overlap, zero contacts when apart).
-                // Keeping stale points would push bodies apart with dead
-                // lambda (slow levitation); dropping the pair would burn
-                // warm duals and reload every re-touch (limit cycle).
-                let separated = d.dist > GEN_MARGIN;
-                let mut normal = d.point_a - d.point_b;
-                if normal.length_squared() < 1e-16 {
-                    normal = a.position - b.position;
-                }
-                let mut normal = normal.normalize_or(Vec3::Y);
-                // Persistent normal per pair: witness directions flip sign at
-                // first touch (separated vs penetrating closest points), which
-                // would turn a compressive lambda tensile and catapult the
-                // bodies. New pairs orient by body centers (B -> A); live
-                // pairs keep their stored direction (spike/official lesson:
-                // the contact frame must be stable, like collide() face
-                // normals, not a live witness direction).
-                if let Some(old) = self.pairs.iter().find(|p| p.a == ia && p.b == ib) {
-                    if normal.dot(old.n) < 0.0 {
-                        normal = -normal;
-                    }
-                } else if normal.dot(a.position - b.position) < 0.0 {
-                    normal = -normal;
-                }
-                // Scalar coefficients only; the t1 direction is recomputed per
-                // solve from live orientations.
-                let mu = {
-                    let (_, mu1, mu2) = friction_frame(a, b, normal);
-                    [mu1.max(0.0), mu2.max(0.0)]
-                };
-                // Witness point plus box-corner expansion for face stability.
-                // Every point is a coincident pair on the witness plane: both
-                // anchors are material points that start at the same world
-                // position (official rA/rB semantics). Projecting a foreign
-                // corner into the other body's frame instead would glue a
-                // non-material point and pump energy (spike lesson).
-                //
-                // The gate is anchored at a CENTER witness (body centers
-                // projected onto the contact plane, midpoint shared), NOT at
-                // the raw closest-point pair: shape_distance returns CORNER
-                // witnesses for box-box (face-face has infinite closest
-                // pairs), and gating around a flickering corner admits one
-                // corner per step — churning anchors, no support accumulation
-                // (boxes fell 82m through the floor). Centers move smoothly,
-                // so the pass-set is stable.
-                //
-                // The gate is split by stability character: the NORMAL gate
-                // uses the per-side raw witness (only its PLANE matters, and
-                // the face plane is flicker-immune even when the witness
-                // slides within it); the TANGENTIAL gate uses the center
-                // witness (position-stable). Gating normal distance around
-                // the mid-gap center instead would reject gapped faces.
-                //
-                // The tangential gate is two-sided (a local patch around the
-                // center witness, scaled by the smaller body): the old
-                // normal-only gate admitted a huge floor's coplanar corners
-                // 3.5m away as phantom points — 2.5m levers whose meter-scale
-                // Ct torqued every spin to death.
-                let patch = ra.min(rb) + MARGIN;
-                let pp = (d.point_a + d.point_b) * 0.5;
-                let cw = {
-                    let pa_c = a.position - normal * (a.position - pp).dot(normal);
-                    let pb_c = b.position - normal * (b.position - pp).dot(normal);
-                    (pa_c + pb_c) * 0.5
-                };
-                let mut fresh: Vec<(Vec3, Vec3)> = Vec::new();
-                if !separated {
-                    let inv_a = a.orientation.inverse();
-                    let inv_b = b.orientation.inverse();
-                    // Box corners first: stable material support for faces.
-                    for (h, witness, sign) in [(ia, d.point_a, 1.0f32), (ib, d.point_b, -1.0f32)] {
-                        let body = &self.bodies[h];
-                        for corner in box_corners(&body.shape) {
-                            let world = body.position + body.orientation * corner;
-                            let along = (world - witness).dot(sign * normal);
-                            if along.abs() > EXPAND_SLOP + (-d.dist).max(0.0) {
-                                continue;
-                            }
-                            let rel_c = world - cw;
-                            let tang = rel_c - normal * rel_c.dot(normal);
-                            if tang.length() > patch {
-                                continue;
-                            }
-                            if fresh.len() >= MAX_POINTS {
-                                break;
-                            }
-                            // Coincident plane point shared by both anchors.
-                            let pw = world - sign * normal * along;
-                            let ra_l = inv_a * (pw - a.position);
-                            let rb_l = inv_b * (pw - b.position);
-                            if fresh.iter().any(|(ea, eb)| {
-                                (ea - ra_l).length() < POINT_MATCH_DIST
-                                    && (eb - rb_l).length() < POINT_MATCH_DIST
-                            }) {
-                                continue;
-                            }
-                            fresh.push((ra_l, rb_l));
-                        }
-                    }
-                } // end corner expansion.
-                // Center point for face-like contacts (2+ corners): the gate
-                // anchor itself, shared — kills rocking. (Corners alone pin
-                // the patch; this centers it.)
-                if !separated && fresh.len() >= 2 && fresh.len() < MAX_POINTS {
-                    let inv_a = a.orientation.inverse();
-                    let inv_b = b.orientation.inverse();
-                    let ra_l = inv_a * (cw - a.position);
-                    let rb_l = inv_b * (cw - b.position);
-                    if !fresh.iter().any(|(ea, eb)| {
-                        (ea - ra_l).length() < POINT_MATCH_DIST
-                            && (eb - rb_l).length() < POINT_MATCH_DIST
-                    }) {
-                        fresh.push((ra_l, rb_l));
-                    }
-                }
-                // Witness fallback: the closest-point pair slides across faces
-                // (non-material churn that rocks stacks), so it is only used
-                // when corners give fewer than 3 points (edge/vertex and
-                // non-box contacts).
-                if !separated && fresh.len() < 3 {
-                    let inv_a = a.orientation.inverse();
-                    let inv_b = b.orientation.inverse();
-                    let ra_l = inv_a * (d.point_a - a.position);
-                    let rb_l = inv_b * (d.point_b - b.position);
-                    if !fresh.iter().any(|(ea, eb)| {
-                        (ea - ra_l).length() < POINT_MATCH_DIST
-                            && (eb - rb_l).length() < POINT_MATCH_DIST
-                    }) {
-                        fresh.push((ra_l, rb_l));
-                    }
-                }
-                // Persist duals by matching material anchors (5cm window).
-                if let Some(idx) = self.pairs.iter().position(|p| p.a == ia && p.b == ib) {
-                    seen[idx] = true;
-                    let pair = &mut self.pairs[idx];
-                    pair.n = normal;
-                    pair.mu = mu;
-                    let mut next: Vec<AvbdPoint> = Vec::with_capacity(fresh.len());
-                    for (ra_l, rb_l) in fresh {
-                        if let Some(old) = pair
-                            .points
-                            .iter()
-                            .find(|p| (p.ra - ra_l).length() < LAMBDA_MATCH_DIST)
-                        {
-                            // Official merge: matched points carry lambda/penalty;
-                            // anchors stay frozen while the grip holds
-                            // (`stick`), otherwise they refresh to the live
-                            // coincident geometry.
-                            //
-                            // No rolling-aware extension: fast spin makes any
-                            // anchor stale WITHIN its own step (10 rad/s =
-                            // 9.6 deg/step of material carry), so cross-step
-                            // refresh cannot save sustained rotation — the
-                            // official headless build kills a free spin
-                            // 10 -> 0.000 in 600 steps too. This is a
-                            // position-level material-anchor limit, not a
-                            // refresh-policy bug (M2: substeps shrink the
-                            // per-step carry; velocity-level rolling rows
-                            // ignore anchors entirely).
-                            let (ra, rb) = if old.stuck {
-                                (old.ra, old.rb)
-                            } else {
-                                (ra_l, rb_l)
-                            };
-                            next.push(AvbdPoint {
-                                ra,
-                                rb,
-                                lam: old.lam,
-                                pen: old.pen,
-                                stuck: old.stuck,
-                                roll_lam: old.roll_lam,
-                            });
+                let mut next: Vec<AvbdPoint> = Vec::with_capacity(d.fresh.len());
+                for (ra_l, rb_l) in d.fresh {
+                    if let Some(old) = pair
+                        .points
+                        .iter()
+                        .find(|p| (p.ra - ra_l).length() < LAMBDA_MATCH_DIST)
+                    {
+                        // Official merge: matched points carry lambda/penalty;
+                        // anchors stay frozen while the grip holds
+                        // (`stick`), otherwise they refresh to the live
+                        // coincident geometry. PLUS the separation rule:
+                        // anchors refresh while the witness gap is open
+                        // (`d.dist > 0`), no matter the grip flag — a
+                        // frozen band-entry anchor encodes a stale C0
+                        // (gap + margin at creation), and the Taylor row
+                        // then treats the stale offset as a live
+                        // violation: the pair levitates (measured: a
+                        // 5 m/s drop stopped +7mm above the floor and
+                        // rose on phantom support instead of touching
+                        // down) and burrowing drivers meet only the
+                        // (1-alpha)-diluted residue (measured: a 2 m/s
+                        // kinematic pusher ghosted through its target).
+                        // Refreshing keeps C0 honest (live gap +
+                        // margin), so the row fires on the full
+                        // within-step approach J*dq — the fast-impact
+                        // catch survives (it never needed stale
+                        // anchors), while phantom support cannot form.
+                        // Freeze starts at first touch, like resting
+                        // pairs always did (signed gap: the raw oracle
+                        // is unsigned for box pairs and would never
+                        // freeze them).
+                        let touching = d.signed <= 0.0;
+                        let (ra, rb) = if old.stuck && touching {
+                            (old.ra, old.rb)
                         } else {
-                            next.push(AvbdPoint {
-                                ra: ra_l,
-                                rb: rb_l,
-                                lam: [0.0; 3],
-                                pen: [PENALTY_INIT; 3],
-                                stuck: true,
-                                roll_lam: [0.0; 3],
-                            });
-                        }
+                            (ra_l, rb_l)
+                        };
+                        //
+                        // No rolling-aware extension: fast spin makes any
+                        // anchor stale WITHIN its own step (10 rad/s =
+                        // 9.6 deg/step of material carry), so cross-step
+                        // refresh cannot save sustained rotation — the
+                        // official headless build kills a free spin
+                        // 10 -> 0.000 in 600 steps too. This is a
+                        // position-level material-anchor limit, not a
+                        // refresh-policy bug (finer substeps shrink the
+                        // per-step carry; velocity-level rolling rows
+                        // ignore anchors entirely).
+                        next.push(AvbdPoint {
+                            ra,
+                            rb,
+                            lam: old.lam,
+                            pen: old.pen,
+                            stuck: old.stuck,
+                            roll_lam: old.roll_lam,
+                        });
+                    } else {
+                        next.push(AvbdPoint {
+                            ra: ra_l,
+                            rb: rb_l,
+                            lam: [0.0; 3],
+                            pen: [PENALTY_INIT; 3],
+                            stuck: true,
+                            roll_lam: [0.0; 3],
+                        });
                     }
-                    pair.points = next;
-                } else {
-                    seen.push(true);
-                    // Gated wake (builtin `wake_on_impact` parity, threshold
-                    // 0.5 m/s approach): a NEW pair wakes its sleepers only on
-                    // a genuine impact or a deep fresh overlap (spawn /
-                    // teleport driver, blind to the velocity test). Resting
-                    // micro-jitter and GEN_MARGIN re-gating stay asleep.
-                    let fresh_pen = d.dist < -WAKE_PENETRATION;
-                    let mut impact = fresh_pen;
-                    if !impact {
-                        for (s, o, sign) in [(ia, ib, 1.0f32), (ib, ia, -1.0f32)] {
-                            if self.asleep[s] {
-                                let approach = (self.bodies[o].velocity - self.bodies[s].velocity)
-                                    .dot(sign * normal);
-                                if approach > WAKE_IMPACT_SPEED {
-                                    impact = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if impact {
-                        wake.push((ia, ib));
-                    }
-                    self.pairs.push(AvbdPair {
-                        a: ia,
-                        b: ib,
-                        n: normal,
-                        mu,
-                        points: fresh
-                            .into_iter()
-                            .map(|(ra_l, rb_l)| AvbdPoint {
-                                ra: ra_l,
-                                rb: rb_l,
-                                lam: [0.0; 3],
-                                pen: [PENALTY_INIT; 3],
-                                stuck: true,
-                                roll_lam: [0.0; 3],
-                            })
-                            .collect(),
-                    });
                 }
+                pair.points = next;
+            } else {
+                seen.push(true);
+                // Gated wake for NEW pairs (vote computed in discovery
+                // from step-top state: impact or deep fresh overlap).
+                if d.wake_vote {
+                    wake.push((ia, ib));
+                }
+                self.pairs.push(AvbdPair {
+                    a: ia,
+                    b: ib,
+                    n: d.normal,
+                    mu: d.mu,
+                    gap: d.signed,
+                    points: d
+                        .fresh
+                        .into_iter()
+                        .map(|(ra_l, rb_l)| AvbdPoint {
+                            ra: ra_l,
+                            rb: rb_l,
+                            lam: [0.0; 3],
+                            pen: [PENALTY_INIT; 3],
+                            stuck: true,
+                            roll_lam: [0.0; 3],
+                        })
+                        .collect(),
+                });
             }
         }
         for idx in (0..seen.len()).rev() {
@@ -1406,6 +1689,56 @@ impl AvbdEngine {
                     let p = &self.pairs[pi];
                     (p.n, p.mu, p.points[qi].clone())
                 };
+                // Separated-damper rule: an open pair (`gap > 0`) reacts
+                // with a velocity-only normal row (no C0 spring term, no
+                // friction, no dual memory — committed in `dual_update`
+                // by the same gate). A spring strong enough to catch an
+                // impact can hold weight forever, so any C0-backed support
+                // while separated levitates arrivals (measured: a 5 m/s
+                // drop hovered +7mm and rose) and dilutes burrowing
+                // drivers 100x via (1-alpha) (measured: a 2 m/s pusher
+                // ghosted). The damper kills approach velocity within the
+                // step at full J strength and cannot hold a static load,
+                // so arrivals touch down and drivers are tracked. Touching
+                // pairs keep the full Taylor spring bit-identically.
+                let touching = self.pairs[pi].gap <= 0.0;
+                let c0 = if touching { self.gap_c0(pi, qi) } else { 0.0 };
+                let (cn, r_up, r_lo) = self.row_c(&self.pairs[pi], &pt, n, c0);
+                let r_side = if is_a { r_up } else { r_lo };
+                if !touching {
+                    // Imminence gate: damper rows fire only when the pair
+                    // will touch down within this step (predicted gap <= 0
+                    // from the center approach rate). A grazing pass has a
+                    // large normal approach yet never lands — firing on it
+                    // turns a 4cm clean miss into a meter-scale launch
+                    // (measured: +4m lift, 8 -> 5.9 m/s). The shell stays
+                    // (warm state, wake), only the rows stay quiet; slow
+                    // burrows still land via the spring below once the
+                    // signed gap closes.
+                    let a_vel = self.bodies[self.pairs[pi].a].velocity;
+                    let b_vel = self.bodies[self.pairs[pi].b].velocity;
+                    let approach = (b_vel - a_vel).dot(n).max(0.0);
+                    if self.pairs[pi].gap - approach * DT_STEP > 0.0 {
+                        continue;
+                    }
+                    // One-step velocity kill, normalized per PAIR (not per
+                    // point): five corner rows must not drag 5x harder than
+                    // one witness row, or the catch strength depends on
+                    // manifold size. pen_d totals 2*m/dt^2 across the pair:
+                    // twice the exact one-step stopping force (margin for
+                    // heavy/fast arrivals), implicit hence stable, capped
+                    // for fp safety. Push-only (min): separating pairs
+                    // exert nothing. No dual memory here (gated in
+                    // `dual_update`): a damper that remembers holds weight
+                    // and levitates arrivals.
+                    if cn.abs() >= C_EPS {
+                        let npts = self.pairs[pi].points.len().max(1) as f32;
+                        let pen_d = (2.0 * m_dt2 / npts).min(PENALTY_MAX);
+                        let f_d = (pen_d * cn).min(0.0);
+                        Self::stamp_row(&mut lhs, &mut rhs, n, pen_d, f_d, r_side, sign);
+                    }
+                    continue;
+                }
                 // Anisotropic frame (live orientations); isotropic pairs get
                 // exactly `tangent_basis(n)` back.
                 let t1 = {
@@ -1413,11 +1746,9 @@ impl AvbdEngine {
                     friction_frame(&self.bodies[p.a], &self.bodies[p.b], p.n).0
                 };
                 let t2 = t1.cross(n);
-                let (cn, r_up, r_lo) = self.row_c(&self.pairs[pi], &pt, n, self.gap_c0(pi, qi));
                 let (ct1, _, _) = self.row_c(&self.pairs[pi], &pt, t1, 0.0);
                 let (ct2, _, _) = self.row_c(&self.pairs[pi], &pt, t2, 0.0);
                 let f = Self::contact_force(cn, pt.pen, pt.lam, [ct1, ct2], mu);
-                let r_side = if is_a { r_up } else { r_lo };
                 for (row, (axis, cv, fv)) in [(n, cn, f[0]), (t1, ct1, f[1]), (t2, ct2, f[2])]
                     .into_iter()
                     .enumerate()
@@ -2175,7 +2506,12 @@ impl AvbdEngine {
             };
             let t2 = t1.cross(n);
             for qi in 0..self.pairs[pi].points.len() {
-                let c0 = self.gap_c0(pi, qi);
+                // Separated-damper gate (mirror of the primal rule): open
+                // pairs commit no dual memory — support must be earned by
+                // touch, never stored from a hover. The `stuck` update
+                // below still runs (slide detection for the transition).
+                let touching = self.pairs[pi].gap <= 0.0;
+                let c0 = if touching { self.gap_c0(pi, qi) } else { 0.0 };
                 let (cn, _, _) = self.row_c(&self.pairs[pi], &self.pairs[pi].points[qi], n, c0);
                 let (ct1, _, _) = self.row_c(&self.pairs[pi], &self.pairs[pi].points[qi], t1, 0.0);
                 let (ct2, _, _) = self.row_c(&self.pairs[pi], &self.pairs[pi].points[qi], t2, 0.0);
@@ -2202,7 +2538,7 @@ impl AvbdEngine {
                     self.pairs[pi].points[qi].stuck = stuck_now;
                 }
                 let pt = &mut self.pairs[pi].points[qi];
-                if cn.abs() >= C_EPS {
+                if touching && cn.abs() >= C_EPS {
                     pt.lam[0] = f[0];
                     if f[0] < 0.0 {
                         pt.pen[0] = (pt.pen[0] + BETA * cn.abs()).min(PENALTY_MAX);
@@ -2218,7 +2554,7 @@ impl AvbdEngine {
                 } else {
                     f32::INFINITY
                 };
-                if s_ell <= 1.0 {
+                if touching && s_ell <= 1.0 {
                     if ct1.abs() >= C_EPS {
                         pt.lam[1] = f[1];
                         pt.pen[1] = (pt.pen[1] + BETA * ct1.abs()).min(PENALTY_MAX);
@@ -2237,7 +2573,7 @@ impl AvbdEngine {
                     let bb = &self.bodies[p.b];
                     let mu_roll = ba.rolling_friction.max(bb.rolling_friction);
                     let mu_spin = ba.torsion_friction.max(bb.torsion_friction);
-                    if mu_roll > 0.0 || mu_spin > 0.0 {
+                    if touching && (mu_roll > 0.0 || mu_spin > 0.0) {
                         let drot_a = quat_diff_vec(self.bodies[p.a].orientation, self.rot0[p.a]);
                         let drot_b = quat_diff_vec(self.bodies[p.b].orientation, self.rot0[p.b]);
                         let wrel = drot_a - drot_b;
@@ -2448,12 +2784,20 @@ impl AvbdEngine {
                             Some(lower) => {
                                 let c = if lower { s - lo } else { s - hi };
                                 if c.abs() >= C_EPS {
-                                    // Official `lambda = F`: recompute the
-                                    // force from CURRENT positions and STORE
-                                    // it — the primal warmstarts from this
-                                    // slot, so primal and dual agree by
-                                    // construction (no chase, no cycle).
-                                    let f_raw = j.pen_l[2] * c + j.lim_dual;
+                                    // Official `lambda = F`, ASSIGNED (never
+                                    // accumulated): the force tracks the
+                                    // CURRENT violation. Accumulating
+                                    // (`pen*c + lim_dual`) ratchets 10x per
+                                    // step (dual runs per iteration) — under
+                                    // sustained load a slip drives the slot
+                                    // to ±1e6, and the stale warmstart then
+                                    // catapults the body on return (measured:
+                                    // vy=±100, escape after ~1300 steps). The
+                                    // primal warmstarts from this slot, so
+                                    // both agree by construction, and the
+                                    // slot decays with `c` instead of
+                                    // outliving it.
+                                    let f_raw = j.pen_l[2] * c;
                                     let f = if lower {
                                         f_raw.min(0.0)
                                     } else {
@@ -2583,6 +2927,10 @@ impl PhysicsEngine for AvbdEngine {
         if handle < self.sleep_timer.len() {
             self.sleep_timer.swap_remove(handle);
             self.asleep.swap_remove(handle);
+        }
+        if handle < self.prev_pos.len() {
+            self.prev_pos.swap_remove(handle);
+            self.prev_rot.swap_remove(handle);
         }
         for h in 0..self.bodies.len() {
             self.wake_body(h);

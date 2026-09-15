@@ -79,3 +79,21 @@ pub struct ContactEvent {
     /// What happened: begin, end, or hard hit (with impact data).
     pub kind: ContactEventKind,
 }
+
+/// A body split by the [`crate::Engine`] fracture pass, drained after the
+/// step like [`TriggerEvent`]. Fracture is orchestrator policy (uniform
+/// across solvers): a dynamic box whose [`crate::body::RigidBody`]'s
+/// `fracture_impact_speed` is reached by a [`ContactEventKind::Hit`]
+/// approach speed splits along its longest axis into two halves with
+/// conserved mass, velocity and material. Joints on the parent are
+/// dropped (same discipline as body removal); the halves inherit the
+/// threshold and may fracture again. Reported in deterministic event
+/// order; the parent handle is stale after the split (its slot is
+/// recycled by the removal), the pieces are the live bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FractureEvent {
+    /// Pre-split handle of the fractured body (stale after the event).
+    pub parent: BodyHandle,
+    /// Handles of the two halves (live, in split order).
+    pub pieces: [BodyHandle; 2],
+}

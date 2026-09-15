@@ -110,6 +110,15 @@ pub struct RigidBody {
     /// When true, the body reports overlap transitions but never applies
     /// contact or CCD impulses. Triggers still obey collision filters.
     pub is_trigger: bool,
+    /// Impact speed (m/s) at which the [`crate::Engine`] fracture pass
+    /// splits this body, compared against [`ContactEventKind::Hit`]
+    /// approach speeds after each step. `INFINITY` (default) never
+    /// fractures — existing scenes are bit-identical. Only dynamic boxes
+    /// split (along the longest axis, halves inherit everything incl.
+    /// this threshold); other shapes and static bodies ignore it.
+    /// Values below the Hit emission floor (1 m/s) behave as 1 m/s: no
+    /// Hit event exists to trigger on.
+    pub fracture_impact_speed: f32,
     /// Simulation role; derived from mass at construction, settable after.
     pub body_type: BodyType,
 }
@@ -137,6 +146,7 @@ impl RigidBody {
             collision_layer: 1,
             collision_mask: u32::MAX,
             is_trigger: false,
+            fracture_impact_speed: f32::INFINITY,
             body_type: if mass > 0.0 {
                 BodyType::Dynamic
             } else {

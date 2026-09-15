@@ -10,9 +10,9 @@
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
-    ComparisonSampler, DepthTexture, DepthTextureArray, OPENPBR_WGSL_NAME, Resource, ResourceKind,
-    STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d, Texture2dUint, naga_ir,
-    wgsl_decl,
+    ComparisonSampler, DepthTexture, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME,
+    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d,
+    Texture2dUint, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -45,7 +45,7 @@ fn lighting_wgsl_header() -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 12] = [
+pub const LIGHTING_RESOURCES: [Resource; 13] = [
     Resource {
         group: 0,
         binding: 0,
@@ -142,6 +142,14 @@ pub const LIGHTING_RESOURCES: [Resource; 12] = [
         kind: ResourceKind::SamplerComparison,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 12,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "shadow_cube_tex",
+        kind: ResourceKind::TextureDepthCubeArray,
+        min_size: None,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
@@ -183,7 +191,7 @@ pub(crate) struct LightingContext {
 }
 
 /// Sampled g-buffer maps as a separate bundle (`maps.albedo_tex`, …):
-/// nine texture/sampler globals sharing a lifetime, split out of
+/// ten texture/sampler globals sharing a lifetime, split out of
 /// [`LightingContext`] so the entry signature groups uniforms (ctx) and
 /// sampled maps (maps) by kind instead of one ten-field list.
 #[allow(dead_code)]
@@ -198,6 +206,7 @@ pub(crate) struct LightingMaps {
     pub lighting_sampler: Sampler,
     pub shadow_tex: DepthTextureArray,
     pub shadow_sampler: ComparisonSampler,
+    pub shadow_cube_tex: DepthTextureCubeArray,
 }
 
 #[stage(fragment)]
@@ -307,24 +316,53 @@ fn fs_main(
         );
         let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
         let mut radiance = light_color * intensity * attenuation * range_cut * cone;
+        // Point lights (kind == 1) sample the cube pool; dir/spot use
+        // the 2D layers. `params.w` indexes the active pool.
+        let is_point = step(0.5, kind) * (1.0 - step(1.5, kind));
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
         // the lookup; single-mip depth needs no LOD, so the branch is
         // safe in non-uniform control flow.
         if light.params.w >= 0.0 {
-            let shadow_clip =
-                light.shadow_vp * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
-            let shadow_ndc = shadow_clip.xyz / shadow_clip.w;
-            let shadow_uv = shadow_ndc.xy * 0.5 + Vec2::new(0.5, 0.5);
-            radiance = radiance
-                * textureSampleCompare(
-                    maps.shadow_tex,
-                    maps.shadow_sampler,
-                    shadow_uv,
-                    i32(light.params.w),
-                    shadow_ndc.z - 0.002,
-                );
+            if is_point <= 0.5 {
+                let shadow_clip =
+                    light.shadow_vp * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+                let shadow_ndc = shadow_clip.xyz / shadow_clip.w;
+                // V is mirrored: rasterization puts NDC y+1 at texture
+                // row 0 while `shadow_uv` v=0 reads from the top, so an
+                // unmirrored lookup samples the mirrored texel (shadows
+                // land overturned — darkness tests are blind to it).
+                let shadow_uv = Vec2::new(shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5);
+                radiance = radiance
+                    * textureSampleCompare(
+                        maps.shadow_tex,
+                        maps.shadow_sampler,
+                        shadow_uv,
+                        i32(light.params.w),
+                        shadow_ndc.z - 0.002,
+                    );
+            }
+            if is_point > 0.5 {
+                // Cube sample: the hardware picks the face from the
+                // fragment→light vector's major axis; the reference is
+                // the 90°-perspective depth for that axis
+                // (`SHADOW_CUBE_NEAR`, far = light range — the same
+                // formula the face renders use, so no VP uniform).
+                let to_frag = world_pos - light.position.xyz;
+                let major = max(max(abs(to_frag.x), abs(to_frag.y)), abs(to_frag.z));
+                let far = max(light.params.x, 1.0);
+                let denom = far - 0.1;
+                let cube_ref = (far / denom) - (0.1 * far) / (denom * major) - 0.002;
+                radiance = radiance
+                    * textureSampleCompare(
+                        maps.shadow_cube_tex,
+                        maps.shadow_sampler,
+                        to_frag,
+                        i32(light.params.w),
+                        cube_ref,
+                    );
+            }
         }
         let nol = max(dot(n, l), EPS);
         let noh = max(dot(n, h), EPS);
@@ -527,7 +565,7 @@ mod tests {
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 12);
+        assert_eq!(LIGHTING_RESOURCES.len(), 13);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -552,7 +590,7 @@ mod tests {
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
         // The header is built as naga IR from the same derives (drift is
-        // impossible by construction); pin declaration order and the 12
+        // impossible by construction); pin declaration order and the 13
         // resource bindings in the printed output.
         let src = wgsl_source();
         let cam = src.find("struct Camera").expect("Camera");
@@ -561,7 +599,7 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 12);
+        assert_eq!(src.matches("@binding(").count(), 13);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer

@@ -573,10 +573,10 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   quat-операторы (`normalize(q+quat(w)*q/2)`, `2*(q*q0^-1).xyz` —
   линеаризации дестабилизируют рычаги), geometric stiffness джойнтов (без
   него spin-up через длинные рычаги), stick-gated anchor refresh, персистентные
-  нормали/пары, reverse sweep. M1 gaps (M2): sphere-sphere stacking (нужен
- rolling multi-point contact для высоких башен), fracture, islands
- (ост. M2: angular CCD, island-wake propagation), deep-catch
- пенетрация ~3см на ударах 5+ м/с. Закрыто после M1: SolverKind/Engine-оркестратор (переключение builtin↔AVBD с миграцией
+ нормали/пары, reverse sweep. M1 gaps закрыты в M2 (2026-09-15, см. ниже):
+ sphere-stacking держит 6 сфер без rolling multi-point, fracture на уровне
+ Engine, island-wake propagation через живые пары, deep-catch до ~10 м/с
+ одиночных ударов, angular CCD закрыт замером. Закрыто после M1: SolverKind/Engine-оркестратор (переключение builtin↔AVBD с миграцией
  тел/джойнтов 1:1, рантайм держит Engine; миграция пробуждает — warm-start
  не мигрирует), Prismatic/Fixed/Distance + limits/motors, Wheel (пружина
  подвески + spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к
@@ -594,12 +594,49 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   AVBD: N/A в M1 (путь single-thread, rayon нет — детерминирован
   конструктивно + run-to-run тест; харнесс `confluence_tests.rs` — про
   ECS-параллелизм; вернёмся в M2 с параллельным broadphase/sweep).
-  Снапшот AVBD-сцен — открыт (M2, вместе с `SolverKind`-тогглом).
-- **M2 — Intra-engine (средне):** интерфейс constraint-солвера внутри builtin
-  (SI vs AVBD-primal/dual), опция `SolverKind` по образцу `BroadPhaseKind` с
-  A/B-тогглом; legacy-путь под снапшотом. GPU-предусловия AVBD (см.
-  `gpu.rs:46-48`): `float3x3` в `ShaderType`, локальные фикс-массивы,
-  helper-inclusion в `#[gpu_pipeline]` (аналог `#[wgsl_fn]`).
+  ✅ **2026-09-15 — снапшот AVBD-сцен закрыт**
+  (`crates/physics/tests/avbd_engine.rs::avbd_snapshot_matches_canonical`,
+  канон `tests/data/avbd_snapshot.hex`, сгенерирован на ARM64): та же
+  гетерогенная сцена 1:1, что builtin `determinism_snapshot_scene` (пол,
+  стек 4, сфера, быстрый бокс, маятник Ball), 120 шагов, побитовое
+  сравнение полных состояний (pos/quat/vel/angvel); ре-baseline только
+  через ignored `avbd_snapshot_regenerate`. В тот же день ре-baseline
+  под намеренные изменения солвера (prismatic-assign, separated-damper,
+  SAT-signed gap, sleep-support, wake-propagation, imminence-gate,
+  параллельный discovery): стек sub-mm, сфера медленнее сеттлится
+  (транзиент, сходимость доказана до 1200 шагов), fast-box/маятник
+  побитово те же. ✅ Strong-Confluence 1-vs-32 закрыт
+  (`avbd_confluence_one_vs_many_threads`: 268 тел, discovery на rayon-пуле,
+  sweep однопоточный Gauss-Seidel — бит-идентично).
+- **M2 — Intra-engine (средне) → M3:** интерфейс constraint-солвера внутри
+  builtin (SI vs AVBD-primal/dual) отложен; вместо него запинен
+  Engine-level паритет (`solver_kind.rs::engine_kinds_agree_on_drop_settle`:
+  оба оркестрированных солвера сеттлят одну сцену в те же позы покоя;
+  толерантность поведенческая, не побитовая — реализации различаются
+  конструктивно). GPU-предусловия AVBD закрыты (M2): `Mat3` в `ShaderType`
+  (`mat3x3<f32>`, `Mat3::from_cols`, `IDENTITY`/`ZERO`), локальные
+  фикс-массивы (включая вложенные под гессиан; эффектные repeat громко),
+  `helpers(...)` в `#[gpu_pipeline]` (стыковка `wgsl_source()` впереди
+  entry). Пины: `macros/tests/compute_dsl.rs` (6, вкл. naga-валидацию LDL
+  3x3), юниты парсинга `helpers`, physics `helpers_stitch_ahead_of_main_and_validate`
+  (gpu-фича; локально не линкуется — OOM на 16 ГБ даже с debuginfo=0,
+  покроется в CI quality-гейтом `cargo test -p ornis-physics --features gpu`;
+  shapes сверены с исходниками и call sites в том же файле, трансляция —
+  через `compute_dsl.rs`).
+- **M2-остатки AVBD закрыты 2026-09-15:** prismatic limit-chase (assign
+  вместо accumulate, 3000 шагов); separated-damper + SAT-signed gap +
+  swept creation + sleep-support (hover/bulldozer/deepcatch до ~10 м/с
+  одиночных ударов); wake propagation через живые пары (1 см backstop);
+  driver baseline для кинематики; imminence-gate (nearpass
+  ballistic-exact); angular CCD закрыт замером (туннеля нет до 60 рад/с,
+  свип не понадобился); tall tower — 6 сфер drop-settle держит
+  (`avbd_tall_tower_drop_settle_holds`, rolling multi-point не понадобился);
+  fracture на уровне Engine через contact events (оба солвера,
+  `tests/fracture.rs`). Открыто за горизонтом: второй удар после баунса
+  (−30 м/с, реституция 0.3, повторный удар ~9 м/с) тоннелирует, но
+  контейнится (доказано предсуществующим через stash-бисекцию: без
+  изменений сессии одиночный 8 м/с тонул, сейчас стоит); режим 30 м/с —
+  вне M2.
 - **M3 — Multi-solver в одной сцене (дорого):** аналог `Simulator` — общий
   реестр тел + coupling между движками; роутинг по образцу
   `BroadPhaseKind::Auto` (analytic + гистерезис, без трешинга миграций).

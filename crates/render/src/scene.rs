@@ -118,6 +118,11 @@ pub enum LightDesc {
         color: [f32; 3],
         /// Cutoff distance in world units (must be > 0).
         range: f32,
+        /// Cast a shadow cube (6 depth faces + analytic major-axis
+        /// sample in the evaluators).
+        /// Absent in older files — defaults to off.
+        #[serde(default)]
+        shadow: bool,
     },
     /// Local light inside a cone aimed into the scene.
     Spot {
