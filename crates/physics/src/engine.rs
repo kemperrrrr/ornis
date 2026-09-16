@@ -80,6 +80,11 @@ pub trait PhysicsEngine: Send + Sync {
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
         Vec::new()
     }
+    /// Wake a sleeping body/island (default: no-op). Host edits through
+    /// [`PhysicsEngine::get_body_mut`] do not wake every solver by
+    /// themselves — the M3 orchestrator wakes edited bodies explicitly
+    /// before stepping. Must be a no-op for invalid handles.
+    fn wake_body(&mut self, _handle: BodyHandle) {}
 }
 
 struct Contact {
@@ -5006,6 +5011,12 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
         std::mem::take(&mut self.contact_events)
+    }
+
+    fn wake_body(&mut self, handle: BodyHandle) {
+        if handle < self.bodies.len() {
+            self.wake_island(handle);
+        }
     }
 }
 

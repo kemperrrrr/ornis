@@ -815,7 +815,10 @@ impl AvbdEngine {
             .enumerate()
             .map(|(h, b)| {
                 let mut c = b.clone();
-                if self.asleep[h] && c.body_type == BodyType::Dynamic {
+                // `asleep` may lag `bodies` (it only grows on sleep
+                // transitions) — a missing entry means awake.
+                if self.asleep.get(h).copied().unwrap_or(false) && c.body_type == BodyType::Dynamic
+                {
                     c.inv_mass = 1.0 / c.mass;
                     c.inertia = c.shape.inertia(c.mass);
                 }
@@ -3380,6 +3383,10 @@ impl PhysicsEngine for AvbdEngine {
 
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
         std::mem::take(&mut self.contact_events)
+    }
+
+    fn wake_body(&mut self, handle: BodyHandle) {
+        self.wake_body(handle);
     }
 }
 
