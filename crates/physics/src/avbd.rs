@@ -2468,13 +2468,20 @@ impl AvbdEngine {
             let raw = {
                 let g = &self.joints[gi];
                 let mut out = [0.0f32; 2];
+                // Unwrap is angular-only: a prismatic raw coordinate is
+                // meters, and `wrap_pi` on meters teleports the ratio
+                // residual by 2*PI (audit round 2: 0 -> 4 m read as -2.28).
+                let mut ang = [false; 2];
                 let mut ok = true;
                 for (k, gb) in [g.gb[0], g.gb[1]].into_iter().enumerate() {
                     match self.joints.get(gb) {
                         Some(r) => {
                             let (ba, bb) = (&self.bodies[r.a], &self.bodies[r.b]);
                             match Self::joint_coordinate(r, ba, bb) {
-                                Some(c) => out[k] = c,
+                                Some(c) => {
+                                    out[k] = c;
+                                    ang[k] = matches!(r.kind, AvbdJointKind::Revolute);
+                                }
                                 None => {
                                     ok = false;
                                     break;
@@ -2490,14 +2497,23 @@ impl AvbdEngine {
                 if !ok {
                     continue;
                 }
-                out
+                (out, ang)
             };
+            let (raw, ang) = raw;
             self.joints[gi].gear_mem = Some(match self.joints[gi].gear_mem {
                 Some((prev_raw, prev_cont)) => (
                     raw,
                     [
-                        prev_cont[0] + wrap_pi(raw[0] - prev_raw[0]),
-                        prev_cont[1] + wrap_pi(raw[1] - prev_raw[1]),
+                        if ang[0] {
+                            prev_cont[0] + wrap_pi(raw[0] - prev_raw[0])
+                        } else {
+                            raw[0]
+                        },
+                        if ang[1] {
+                            prev_cont[1] + wrap_pi(raw[1] - prev_raw[1])
+                        } else {
+                            raw[1]
+                        },
                     ],
                 ),
                 None => (raw, raw),
@@ -2514,13 +2530,6 @@ impl AvbdEngine {
         for (k, r) in rj.into_iter().enumerate() {
             let (ba, bb) = (&self.bodies[r.a], &self.bodies[r.b]);
             let raw = Self::joint_coordinate(r, ba, bb)?;
-            // Continuous coordinate: unwrap the live raw value against the
-            // step-start memory (see `update_gear_mem`). Without this a
-            // hinge crossing PI teleports the ratio residual by 2*PI.
-            let coord = match j.gear_mem {
-                Some((prev_raw, prev_cont)) => prev_cont[k] + wrap_pi(raw - prev_raw[k]),
-                None => raw,
-            };
             let (angular, axis, ra, rb) = match r.kind {
                 AvbdJointKind::Revolute => {
                     let wa = (ba.orientation * r.ax_a).normalize_or(Vec3::Z);
@@ -2533,6 +2542,14 @@ impl AvbdEngine {
                     (false, wa, ra, rb)
                 }
                 _ => return None,
+            };
+            // Continuous coordinate: unwrap the live raw value against the
+            // step-start memory (see `update_gear_mem`). Without this a
+            // hinge crossing PI teleports the ratio residual by 2*PI.
+            // Linear sides skip the unwrap: meters wrap to garbage.
+            let coord = match j.gear_mem {
+                Some((prev_raw, prev_cont)) if angular => prev_cont[k] + wrap_pi(raw - prev_raw[k]),
+                _ => raw,
             };
             sides.push(GearSide {
                 a: r.a,

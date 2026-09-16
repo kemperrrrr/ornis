@@ -812,6 +812,73 @@ fn avbd_prismatic_motor_drives() {
 }
 
 #[test]
+fn avbd_gear_linear_sides_no_wrap_teleport() {
+    // Audit round 2: `wrap_pi` on a prismatic raw coordinate (meters)
+    // teleported 0 -> 4 m to -2.28. Two motor-linked sliders (ratio -1.0
+    // for co-directional travel: the contract is ca + ratio*cb = const)
+    // must travel meters together, never wrap to +/-PI.
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.25), 0.0));
+    let mut mk_slider = |x: f32, motor: bool| {
+        let bob = physics.add_body(RigidBody::new_sphere(Vec3::new(x, 0.0, 0.0), 0.25, 1.0));
+        let j = physics
+            .add_joint(
+                anchor,
+                bob,
+                JointKind::Prismatic {
+                    local_anchor_a: Vec3::new(x, 0.0, 0.0),
+                    local_anchor_b: Vec3::ZERO,
+                    local_axis_a: Vec3::X,
+                    local_axis_b: Vec3::X,
+                    limit: None,
+                    motor: motor.then_some(PrismaticMotor {
+                        target_speed: 2.0,
+                        max_force: 50.0,
+                    }),
+                },
+            )
+            .expect("valid prismatic");
+        (bob, j)
+    };
+    let (bob_a, ja) = mk_slider(1.0, true);
+    let (bob_b, jb) = mk_slider(3.0, false);
+    physics
+        .add_joint(
+            bob_a,
+            bob_b,
+            JointKind::Gear {
+                joint_a: ja,
+                joint_b: jb,
+                ratio: -1.0,
+            },
+        )
+        .expect("valid gear");
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    // Host teleport: a > PI jump inside one memory interval. With `wrap_pi`
+    // on meters this corrupts the ratio residual by -2*PI permanently;
+    // without the unwrap fix the gear drags B ~6.28 m off.
+    physics.get_body_mut(bob_a).unwrap().position.x += 4.0;
+    for _ in 0..120 {
+        physics.step(DT);
+    }
+    let (pa, pb) = (
+        physics.get_body(bob_a).unwrap().position,
+        physics.get_body(bob_b).unwrap().position,
+    );
+    let (sa, sb) = (pa.x - 1.0, pb.x - 3.0);
+    assert!(
+        sa > 2.0 && sb > 2.0,
+        "sliders must travel meters, got {sa}/{sb}"
+    );
+    assert!(
+        (sa - sb).abs() < 0.6,
+        "ratio-1 gear must couple slides: {sa} vs {sb}"
+    );
+}
+
+#[test]
 fn avbd_fixed_weld_holds() {
     // Two welded boxes dropped together: separation and relative rotation
     // must survive free fall and landing.
