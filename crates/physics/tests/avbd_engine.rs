@@ -636,6 +636,53 @@ fn avbd_prismatic_slider_holds_line_and_limit() {
 }
 
 #[test]
+fn avbd_prismatic_limit_sustained_no_ratchet() {
+    // Long-horizon guard for the accumulating `lim_dual` discipline
+    // (`pen*c + lim_dual`, like the revolute `acc_lim` row): under a
+    // sustained limit load the slot must settle, not ratchet 10x/step
+    // into a stale catapult on return (regression history: vy=±100,
+    // escape after ~1300 steps). Same rig as the 300-step slider test,
+    // extended to 1500 steps with velocity sanity.
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.25), 0.0));
+    let bob = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, -2.9, 0.0), 0.25, 1.0));
+    let lb = Vec3::new(0.0, 1.0, 0.0);
+    assert!(
+        physics
+            .add_joint(
+                anchor,
+                bob,
+                JointKind::Prismatic {
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: lb,
+                    local_axis_a: Vec3::Y,
+                    local_axis_b: Vec3::Y,
+                    limit: Some(PrismaticLimit {
+                        min: -2.0,
+                        max: 0.0
+                    }),
+                    motor: None,
+                },
+            )
+            .is_some()
+    );
+    for _ in 0..1500 {
+        physics.step(DT);
+    }
+    let b = physics.get_body(bob).unwrap();
+    assert!(
+        b.position.y > -5.6 && b.position.y < -4.2,
+        "slider escaped its lower limit over 1500 steps: {:?}",
+        b.position
+    );
+    assert!(
+        b.velocity.length() < 1.0,
+        "slider carries stale catapult velocity: {:?}",
+        b.velocity
+    );
+}
+
+#[test]
 fn avbd_prismatic_motor_drives() {
     // Horizontal slide: no gravity along the drive axis (a velocity servo
     // droops under sustained load), gravity transverse (perp rows carry it).

@@ -148,11 +148,12 @@ const EXPAND_SLOP: f32 = 0.005;
 const POINT_MATCH_DIST: f32 = 0.03;
 /// Dual-memory match distance for persistent points across steps.
 const LAMBDA_MATCH_DIST: f32 = 0.05;
-/// Constraint satisfaction tolerance: a row with `|C|` below this is
-/// exactly satisfied — no force, no dual memory, no penalty ramp. Positions
-/// are O(1) in f32 (eps ~1.2e-7), so anything smaller is rounding dust, and
-/// stamping stiffness for dust lets idle rows (via long levers) ratchet
-/// lambda and penalty into a slow runaway.
+/// Constraint satisfaction tolerance: a row with `|C|` below this carries
+/// no fresh violation — no dual accumulation, no penalty ramp. Positions
+/// are O(1) in f32 (eps ~1.2e-7), so anything smaller is rounding dust.
+/// A dust violation with a live warm force still stamps (see `row_live`):
+/// only dust force on dust violation is skipped, so idle rows cannot
+/// ratchet lambda or penalty into a slow runaway.
 const C_EPS: f32 = 1e-7;
 
 /// Static-friction position threshold (official `STICK_THRESH`): a point
@@ -588,6 +589,23 @@ fn eff_inv_mass(b: &RigidBody) -> f32 {
     } else {
         0.0
     }
+}
+
+/// A primal row is live when the violation is significant OR the warm force
+/// it carries is: at `C ≈ 0` with `λ ≠ 0` the reaction `F = K·C + λ` still
+/// constrains the body, so skipping the row drops a live holding force.
+/// Force below the row's own dust resolution (`pen * C_EPS`) is rounding.
+///
+/// Currently applied to CONTACT rows only. The same change for JOINT rows
+/// is deferred (measured): with warm-force stamping on every joint row the
+/// motor-driven gear scene hard-stalls (hinge twist −0.37 after 180 steps
+/// vs free spin), while the executed-path analysis shows the hinge rows
+/// carrying no force there (on-axis anchors, `c ≡ 0`) — the stall is not
+/// attributable to a stale holding force through any live row, so landing
+/// joint `row_live` needs a dedicated holding-force validation task first
+/// (e.g. static joint sag under load), not a drive-by.
+fn row_live(c: f32, f: f32, pen: f32) -> bool {
+    c.abs() >= C_EPS || f.abs() > pen * C_EPS
 }
 
 /// A single contact point: material anchors on both bodies plus the dual
@@ -1633,6 +1651,17 @@ impl AvbdEngine {
 
     /// Taylor row value `C = C0*(1-alpha) + u.(dA - dB)` plus the live lever
     /// arms, for constraint row direction `u` (A-side).
+    //
+    // NOTE (residual/Jacobian mismatch, measured): the anchor displacement
+    // above already rotates the lever (`Δθ × r` at small angles), and the
+    // appended Taylor term adds the same rotation a second time, while the
+    // stamped Jacobian counts it once. Removing the second term is the
+    // formula-correct alignment, but it was measured to destabilize tuned
+    // contact scenes (rolling whirl pumps energy into a freely rolling
+    // ball; a 9.5 m/s retouch rests sunk 0.24 m) — the surrounding tuning
+    // (penalty ramp, stick thresholds, anchor-freeze discipline) absorbs
+    // the doubled scaling at convergence. Do not delete the term without
+    // a contact-model re-tune plus re-baselined thresholds.
     fn row_c(&self, pair: &AvbdPair, pt: &AvbdPoint, u: Vec3, c0: f32) -> (f32, Vec3, Vec3) {
         let a = &self.bodies[pair.a];
         let b = &self.bodies[pair.b];
@@ -1790,6 +1819,18 @@ impl AvbdEngine {
                     // exert nothing. No dual memory here (gated in
                     // `dual_update`): a damper that remembers holds weight
                     // and levitates arrivals.
+                    //
+                    // NOTE (deferred, measured): `m_dt2` is the CURRENT
+                    // body's mass, so a pair stamps a different K into A's
+                    // and B's 6x6 for unequal masses (a scalar two-mass
+                    // reproduction pumps kinetic energy with no external
+                    // work). The pair-consistent form (`m_red` from the
+                    // reduced mass, identical on both sides) is deferred
+                    // until a dedicated in-engine two-mass impact test
+                    // lands: in isolation it flips the knife-edge gear
+                    // scene (twist 0.41 vs 4.7) where no contact pair
+                    // exists, so its in-engine benefit is unverified and
+                    // the flip is unexplained. Re-land with that test.
                     if cn.abs() >= C_EPS {
                         let npts = self.pairs[pi].points.len().max(1) as f32;
                         let pen_d = (2.0 * m_dt2 / npts).min(PENALTY_MAX);
@@ -1812,11 +1853,12 @@ impl AvbdEngine {
                     .into_iter()
                     .enumerate()
                 {
-                    // Dust guard: an exactly-satisfied row stamps nothing.
-                    if cv.abs() < C_EPS {
+                    let pen = pt.pen[row];
+                    // Dust guard keeps the warm holding force: only dust
+                    // force on dust violation skips (`row_live`).
+                    if !row_live(cv, fv, pen) {
                         continue;
                     }
-                    let pen = pt.pen[row];
                     Self::stamp_row(&mut lhs, &mut rhs, axis, pen, fv, r_side, sign);
                 }
                 // Rolling + torsional resistance (MuJoCo triple): pure
@@ -2613,14 +2655,20 @@ impl AvbdEngine {
                 } else {
                     f32::INFINITY
                 };
-                if touching && s_ell <= 1.0 {
-                    if ct1.abs() >= C_EPS {
-                        pt.lam[1] = f[1];
-                        pt.pen[1] = (pt.pen[1] + BETA * ct1.abs()).min(PENALTY_MAX);
-                    }
-                    if ct2.abs() >= C_EPS {
-                        pt.lam[2] = f[2];
-                        pt.pen[2] = (pt.pen[2] + BETA * ct2.abs()).min(PENALTY_MAX);
+                // The bounded force commits on every touching step, in-cone
+                // or sliding: freezing `lam` outside the cone drops the
+                // sliding reaction. Only the penalty ramp is gated on the
+                // within-bounds ellipse (official `frictionScale <= bounds`).
+                if touching {
+                    pt.lam[1] = f[1];
+                    pt.lam[2] = f[2];
+                    if s_ell <= 1.0 {
+                        if ct1.abs() >= C_EPS {
+                            pt.pen[1] = (pt.pen[1] + BETA * ct1.abs()).min(PENALTY_MAX);
+                        }
+                        if ct2.abs() >= C_EPS {
+                            pt.pen[2] = (pt.pen[2] + BETA * ct2.abs()).min(PENALTY_MAX);
+                        }
                     }
                 }
                 // Rolling/torsion dual: same rows, torque cap from the fresh
@@ -2843,20 +2891,14 @@ impl AvbdEngine {
                             Some(lower) => {
                                 let c = if lower { s - lo } else { s - hi };
                                 if c.abs() >= C_EPS {
-                                    // Official `lambda = F`, ASSIGNED (never
-                                    // accumulated): the force tracks the
-                                    // CURRENT violation. Accumulating
-                                    // (`pen*c + lim_dual`) ratchets 10x per
-                                    // step (dual runs per iteration) — under
-                                    // sustained load a slip drives the slot
-                                    // to ±1e6, and the stale warmstart then
-                                    // catapults the body on return (measured:
-                                    // vy=±100, escape after ~1300 steps). The
-                                    // primal warmstarts from this slot, so
-                                    // both agree by construction, and the
-                                    // slot decays with `c` instead of
-                                    // outliving it.
-                                    let f_raw = j.pen_l[2] * c;
+                                    // Official `lambda = F`, ASSIGNED from
+                                    // the warm-inclusive force: the primal
+                                    // stamps `pen*c + lim_dual`, so the dual
+                                    // must read the same sum — storing bare
+                                    // `pen*c` drops `λ_old` (the revolute
+                                    // `acc_lim` row next door accumulates,
+                                    // this one must too).
+                                    let f_raw = j.pen_l[2] * c + j.lim_dual;
                                     let f = if lower {
                                         f_raw.min(0.0)
                                     } else {
