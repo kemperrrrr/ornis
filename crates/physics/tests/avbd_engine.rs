@@ -637,12 +637,13 @@ fn avbd_prismatic_slider_holds_line_and_limit() {
 
 #[test]
 fn avbd_prismatic_limit_sustained_no_ratchet() {
-    // Long-horizon guard for the accumulating `lim_dual` discipline
-    // (`pen*c + lim_dual`, like the revolute `acc_lim` row): under a
-    // sustained limit load the slot must settle, not ratchet 10x/step
-    // into a stale catapult on return (regression history: vy=±100,
-    // escape after ~1300 steps). Same rig as the 300-step slider test,
-    // extended to 1500 steps with velocity sanity.
+    // Long-horizon guard for the proportional `lim_dual` discipline
+    // (`clamp(pen*c)`, assigned — deliberately NOT accumulated like the
+    // revolute `acc_lim` row: per-iteration accumulation against a capped
+    // penalty winds up on the persistent slop residual and escapes).
+    // Under a sustained limit load the slot must settle: regression
+    // history is vy=±100 with escape after ~1300 steps, reproduced at
+    // vy=272 by the accumulating form before it was reverted.
     let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.25), 0.0));
     let bob = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, -2.9, 0.0), 0.25, 1.0));
@@ -666,8 +667,21 @@ fn avbd_prismatic_limit_sustained_no_ratchet() {
             )
             .is_some()
     );
-    for _ in 0..1500 {
+    for i in 0..1500 {
         physics.step(DT);
+        // Trajectory guard (sustained phase only — the first ~200 steps
+        // are the initial haul-up transient): an intermediate
+        // spike-and-return would pass end-of-run asserts while hiding the
+        // ratchet. The historical failure hit ±100 m/s; anything above
+        // 10 m/s here is the same class reappearing.
+        if i >= 200 {
+            let v = physics.get_body(bob).unwrap().velocity.length();
+            assert!(
+                v < 10.0,
+                "slider velocity spiked mid-run: {v:?} at {:?}",
+                physics.get_body(bob).unwrap().position
+            );
+        }
     }
     let b = physics.get_body(bob).unwrap();
     assert!(
@@ -679,6 +693,79 @@ fn avbd_prismatic_limit_sustained_no_ratchet() {
         b.velocity.length() < 1.0,
         "slider carries stale catapult velocity: {:?}",
         b.velocity
+    );
+}
+
+#[test]
+fn avbd_degenerate_friction_ellipse_keeps_live_axis() {
+    // A6: mu=(0, 0.5) must lock the zero axis and clamp the live one to
+    // its own bound — not zero both. Box A slides along the live axis
+    // (must brake), box B along the locked axis (must coast).
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut floor = RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(10.0, 1.0, 10.0), 0.0);
+    floor.friction = 0.0;
+    floor.friction_transverse = 0.5;
+    floor.friction_dir = Some(Vec3::Z);
+    physics.add_body(floor);
+    let mut a = RigidBody::new_box(Vec3::new(0.0, 0.5, 0.0), Vec3::splat(0.5), 1.0);
+    a.velocity = Vec3::new(5.0, 0.0, 0.0);
+    a.friction = 0.0;
+    a.friction_transverse = 0.5;
+    a.friction_dir = Some(Vec3::Z);
+    let ha = physics.add_body(a);
+    let mut b = RigidBody::new_box(Vec3::new(6.0, 0.5, 0.0), Vec3::splat(0.5), 1.0);
+    b.velocity = Vec3::new(0.0, 0.0, 5.0);
+    b.friction = 0.0;
+    b.friction_transverse = 0.5;
+    b.friction_dir = Some(Vec3::Z);
+    let hb = physics.add_body(b);
+    // 100 steps: B (5 m/s) stays on the 20 m floor (exits at ~step 114),
+    // A must be braked to rest by then.
+    for _ in 0..100 {
+        physics.step(DT);
+    }
+    let va = physics.get_body(ha).unwrap().velocity.length();
+    let vb = physics.get_body(hb).unwrap().velocity.length();
+    assert!(
+        va < 1.0,
+        "live friction axis must brake the slide, got speed {va}"
+    );
+    assert!(
+        vb > 4.5,
+        "locked zero-mu axis must let it coast, got speed {vb}"
+    );
+}
+
+#[test]
+fn avbd_speculative_pair_does_not_create_momentum() {
+    // A2: a separated-but-closing pair must see ONE pair-consistent
+    // stiffness, not per-body K. Mixed masses 1 vs 100 kg, zero gravity
+    // (pure damper interaction): momentum must survive the step and no
+    // kinetic energy may appear from nothing.
+    let mut physics = AvbdEngine::new(Vec3::ZERO);
+    let mut a = RigidBody::new_sphere(Vec3::new(1.01, 0.0, 0.0), 0.5, 1.0);
+    a.velocity = Vec3::NEG_X;
+    a.friction = 0.0;
+    a.restitution = 0.0;
+    let mut b = RigidBody::new_sphere(Vec3::ZERO, 0.5, 100.0);
+    b.friction = 0.0;
+    b.restitution = 0.0;
+    let ha = physics.add_body(a);
+    let hb = physics.add_body(b);
+    physics.step(DT);
+    let a = physics.get_body(ha).unwrap();
+    let b = physics.get_body(hb).unwrap();
+    let momentum = a.mass * a.velocity + b.mass * b.velocity;
+    assert!(momentum.is_finite());
+    assert!(
+        (momentum - Vec3::NEG_X).length() < 0.05,
+        "speculative damper created momentum: {momentum:?}"
+    );
+    let energy =
+        0.5 * (a.mass * a.velocity.length_squared() + b.mass * b.velocity.length_squared());
+    assert!(
+        energy <= 0.51,
+        "speculative damper created energy: {energy}"
     );
 }
 
@@ -1252,23 +1339,36 @@ fn avbd_gear_ratio_couples_hinges() {
             },
         )
         .expect("valid gear");
-    for _ in 0..180 {
-        physics.step(DT);
-    }
-    let qa = physics.get_body(arm_a).unwrap().orientation;
-    let qb = physics.get_body(arm_b).unwrap().orientation;
-    let ta = z_twist(qa);
-    let tb = z_twist(qb);
-    assert!(ta.abs() > 0.5, "motor must turn hinge A, got twist {ta}");
-    // Wrap-aware: the deadbeat motor spins A past a full turn (4.7 rad
-    // reads back wrapped), so the constraint residual must wrap too.
+    // Multi-turn aware: the motor spins A past PI. The z_twist readout
+    // (2*asin) FOLDS past PI (it cannot distinguish th/2 from PI-th/2),
+    // so accumulate an atan2-based twist instead — same folding-free
+    // measure the solver uses (quat_twist). Same gate on the true residual.
     let wrap = |x: f32| {
         (x + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
     };
-    let c = wrap(ta + 2.0 * tb).abs();
+    let atan_twist = |q: glam::Quat| 2.0 * q.z.atan2(q.w);
+    let (mut ua, mut ub) = (0.0f32, 0.0f32);
+    let (mut pa, mut pb) = (0.0f32, 0.0f32);
+    for i in 0..180 {
+        physics.step(DT);
+        let xa = atan_twist(physics.get_body(arm_a).unwrap().orientation);
+        let xb = atan_twist(physics.get_body(arm_b).unwrap().orientation);
+        if i == 0 {
+            pa = xa;
+            pb = xb;
+        }
+        ua += wrap(xa - pa);
+        ub += wrap(xb - pb);
+        pa = xa;
+        pb = xb;
+    }
+    let qa = physics.get_body(arm_a).unwrap().orientation;
+    let ta = z_twist(qa);
+    assert!(ta.abs() > 0.5, "motor must turn hinge A, got twist {ta}");
+    let c = (ua + 2.0 * ub).abs();
     assert!(
-        c < 0.35 * ta.abs().max(1.0),
-        "gear must hold a + 2b = 0, got a={ta} b={tb}"
+        c < 0.35 * ua.abs().max(1.0),
+        "gear must hold a + 2b = 0, got a={ua} b={ub}"
     );
 }
 
