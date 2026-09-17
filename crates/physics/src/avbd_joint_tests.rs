@@ -335,8 +335,7 @@ fn small_inertia_keeps_balanced_warm_torque() {
                 let torque = 1e-4;
                 e.joints[0].pen_a[i] = 1e4;
                 e.joints[0].lam_a[i] = -torque;
-                e.inertial_rot[1] =
-                    quat_integrate(Quat::IDENTITY, -axis * (torque / inertia_dt2));
+                e.inertial_rot[1] = quat_integrate(Quat::IDENTITY, -axis * (torque / inertia_dt2));
                 e.solve_body(1);
                 let movement = quat_diff_vec(e.bodies[1].orientation, Quat::IDENTITY).length();
                 assert!(

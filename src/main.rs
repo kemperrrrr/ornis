@@ -284,6 +284,8 @@ impl GameApp {
                 let description = &scene.entities[index];
                 let radius = match &description.mesh {
                     ornis_render::scene::MeshDesc::Sphere { radius, .. } => *radius,
+                    // Custom meshes need an explicit validated collider recipe.
+                    ornis_render::scene::MeshDesc::Custom { .. } => continue,
                 };
                 let mass = if index == 0 { 1.0 } else { 0.0 };
                 store.insert(
