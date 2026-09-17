@@ -729,9 +729,17 @@ impl WgpuContactSolver {
                     binding: 1,
                     resource: batch_buf.as_entire_binding(),
                 },
+                // Bind a single params-table entry, not the whole buffer: the
+                // binding size is what the dynamic offset may slide within, so
+                // an entire-buffer binding left zero headroom and any pass
+                // offset > 0 overran the buffer (wgpu validation error).
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: uniform_buf.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform_buf,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(param_stride),
+                    }),
                 },
             ],
         });

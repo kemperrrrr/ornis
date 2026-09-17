@@ -400,14 +400,12 @@ fn limit_state(value: f32, lo: f32, hi: f32, slop: f32) -> Option<bool> {
 /// even after the pose re-enters the window. Dropping it immediately is
 /// an artificial bounce/limit cycle, not the augmented update.
 fn warm_limit_state(value: f32, lo: f32, hi: f32, slop: f32, force: f32) -> Option<bool> {
-    limit_state(value, lo, hi, slop).or_else(|| {
-        if force < 0.0 {
-            Some(true)
-        } else if force > 0.0 {
-            Some(false)
-        } else {
-            None
-        }
+    limit_state(value, lo, hi, slop).or(if force < 0.0 {
+        Some(true)
+    } else if force > 0.0 {
+        Some(false)
+    } else {
+        None
     })
 }
 

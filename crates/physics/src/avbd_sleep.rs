@@ -24,6 +24,7 @@ impl AvbdEngine {
             })
     }
 
+    // qual:allow(iosp) reason: per-kind residual dispatcher — anchor delta precompute feeds one match; splitting per kind would scatter the assembly-error definition across six fragments.
     fn joint_rest_error(&self, j: &AvbdJoint) -> f32 {
         let (a, b) = (&self.bodies[j.a], &self.bodies[j.b]);
         let delta = (b.position + b.orientation * j.lb) - (a.position + a.orientation * j.la);
@@ -60,6 +61,7 @@ impl AvbdEngine {
         }
     }
 
+    // qual:allow(iosp) reason: six-axis residual fold — loop over lin/ang axis configs plus quat_diff_vec; a pure-logic split would duplicate the config match per axis.
     fn sixdof_rest_error(&self, j: &AvbdJoint, delta: Vec3) -> f32 {
         let (a, b) = (&self.bodies[j.a], &self.bodies[j.b]);
         let linear = a.orientation.conjugate() * delta - j.dref;
@@ -79,6 +81,7 @@ impl AvbdEngine {
     }
 
     /// Wake changed inputs and propagate wake through complete joint components.
+    // qual:allow(iosp) reason: wake orchestrator — one joint walk both decides and applies wakes; separating decision from application would double the traversal.
     pub(super) fn wake_joint_motion(&mut self) {
         let mut awake: Vec<bool> = self
             .bodies
@@ -111,6 +114,7 @@ impl AvbdEngine {
         }
     }
 
+    // qual:allow(iosp) reason: sleep-readiness orchestrator — same joint-component walk as wake_joint_motion with inverted flag folding; splitting would duplicate the propagation contract.
     pub(super) fn joint_sleep_ready(&self) -> Vec<bool> {
         let mut ready = vec![true; self.bodies.len()];
         for j in &self.joints {
