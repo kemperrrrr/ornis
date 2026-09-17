@@ -26,6 +26,7 @@ use crate::distance;
 use crate::gpu::WgpuContactSolver;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
+use crate::migration::{JointReference, JointSnapshot};
 use crate::shape::Shape;
 use crate::trigger::{
     CONTACT_BEGIN_SLOP, ContactEvent, ContactEventKind, TriggerEvent, TriggerEventKind,
@@ -2349,34 +2350,17 @@ fn rebuild_joints(
     joint_pairs: &mut FxHashSet<(usize, usize)>,
     drop_j: Vec<bool>,
 ) {
-    let mut remap: Vec<Option<usize>> = vec![None; drop_j.len()];
-    let mut survivors = Vec::with_capacity(joints.len());
-    for (oi, j) in joints.drain(..).enumerate() {
-        if drop_j[oi] {
-            continue;
+    let kinds: Vec<_> = joints.iter().map(|j| j.kind).collect();
+    let remap = crate::migration::joint_remap(&kinds, drop_j);
+    let mut old = 0;
+    joints.retain_mut(|j| {
+        let keep = remap[old].is_some();
+        old += 1;
+        if keep {
+            crate::migration::remap_gear(&mut j.kind, &remap);
         }
-        remap[oi] = Some(survivors.len());
-        survivors.push(j);
-    }
-    survivors.retain_mut(|j| {
-        if let JointKind::Gear {
-            joint_a, joint_b, ..
-        } = &mut j.kind
-        {
-            match (remap[*joint_a], remap[*joint_b]) {
-                (Some(na), Some(nb)) => {
-                    *joint_a = na;
-                    *joint_b = nb;
-                    true
-                }
-                // Reference died with its joint — drop the gear too.
-                _ => false,
-            }
-        } else {
-            true
-        }
+        keep
     });
-    *joints = survivors;
     *joint_pairs = joints
         .iter()
         .filter(|j| !matches!(j.kind, JointKind::Gear { .. }))
@@ -2391,12 +2375,89 @@ impl BuiltinPhysicsEngine {
         self.bodies.clone()
     }
 
-    /// Joint specs in handle order `(body_a, body_b, kind)` for migration.
-    pub(crate) fn joint_specs(&self) -> Vec<(BodyHandle, BodyHandle, JointKind)> {
+    /// Number of registered bodies (dense handles).
+    pub fn body_count(&self) -> usize {
+        self.bodies.len()
+    }
+
+    /// Driver baselines are physical step history, not discardable warm impulses.
+    pub(crate) fn body_baselines(&self) -> Vec<PrevPose> {
+        self.prev_pose.clone()
+    }
+
+    /// Restore a driver's within-step motion baseline after rebuilding.
+    pub(crate) fn restore_body_baseline(&mut self, h: usize, pose: PrevPose) {
+        if let Some(old) = self.prev_pose.get_mut(h) {
+            *old = pose;
+        }
+    }
+
+    /// Completed-step event baseline for transparent solver migration.
+    pub(crate) fn event_state(&self) -> crate::migration::EventState {
+        crate::migration::EventState {
+            contacts: self.contact_touch.iter().copied().collect(),
+            triggers: self.trigger_pairs.iter().copied().collect(),
+        }
+    }
+
+    /// Seed a rebuilt solver without manufacturing a new contact/trigger begin.
+    pub(crate) fn restore_event_state(&mut self, state: crate::migration::EventState) {
+        self.contact_touch = state.contacts.into_iter().collect();
+        self.trigger_pairs = state.triggers.into_iter().collect();
+    }
+
+    /// Number of live joints in dense handle order.
+    pub(crate) fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// Physical joint state in handle order, independent of warm impulses.
+    pub(crate) fn joint_snapshots(&self) -> Vec<JointSnapshot> {
         self.joints
             .iter()
-            .map(|j| (j.body_a, j.body_b, j.kind))
+            .map(|j| {
+                let mut reference = JointReference {
+                    angle: j.reference_angle,
+                    length: j.reference_length,
+                    distance: j.reference_distance,
+                    rotation: j.reference_quat,
+                    anchor_delta: j.reference_anchor_delta,
+                };
+                if let JointKind::Gear {
+                    joint_a,
+                    joint_b,
+                    ratio,
+                } = j.kind
+                {
+                    let offset = |h: usize, k: usize| {
+                        let side = &self.joints[h];
+                        let raw = joints::joint_coordinate(&self.bodies, side).unwrap_or(0.0);
+                        let angular = matches!(side.kind, JointKind::Revolute { .. });
+                        let memory = j.gear_mem.map(|(r, c)| (r[k], c[k]));
+                        crate::migration::gear_coordinate(raw, angular, memory) - raw
+                    };
+                    reference.distance -= offset(joint_a, 0) + ratio * offset(joint_b, 1);
+                }
+                JointSnapshot {
+                    a: j.body_a,
+                    b: j.body_b,
+                    spec: j.kind,
+                    reference,
+                }
+            })
             .collect()
+    }
+
+    /// Restore physical assembly references after a solver migration.
+    pub(crate) fn restore_joint_reference(&mut self, h: JointHandle, r: JointReference) {
+        let Some(j) = self.joints.get_mut(h) else {
+            return;
+        };
+        j.reference_angle = r.angle;
+        j.reference_length = r.length;
+        j.reference_distance = r.distance;
+        j.reference_quat = r.rotation;
+        j.reference_anchor_delta = r.anchor_delta;
     }
 
     /// Empty engine with the default tuning: 12 substeps, 8 velocity
@@ -4731,6 +4792,11 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             // referenced joints inside the rebuild — dangling joint indices
             // are never kept); remap the swapped-in body's index in the
             // survivors first.
+            let drop_j: Vec<bool> = self
+                .joints
+                .iter()
+                .map(|j| j.body_a == handle || j.body_b == handle)
+                .collect();
             for j in self.joints.iter_mut() {
                 if j.body_a == last {
                     j.body_a = handle;
@@ -4739,11 +4805,6 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
                     j.body_b = handle;
                 }
             }
-            let drop_j: Vec<bool> = self
-                .joints
-                .iter()
-                .map(|j| j.body_a == handle || j.body_b == handle)
-                .collect();
             rebuild_joints(&mut self.joints, &mut self.joint_pairs, drop_j);
             // Body handles are identities: the swap remaps the tail body's
             // index, so contact state keyed by handles is no longer valid.
@@ -4759,10 +4820,13 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
 
     fn add_joint(
         &mut self,
-        mut body_a: BodyHandle,
-        mut body_b: BodyHandle,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         kind: JointKind,
     ) -> Option<JointHandle> {
+        if !crate::migration::valid_joint(&kind) {
+            return None;
+        }
         if body_a == body_b || body_a >= self.bodies.len() || body_b >= self.bodies.len() {
             return None;
         }
@@ -4842,8 +4906,8 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
         };
         // Gear validation: both references must exist and coordinate a
         // revolute or prismatic joint. The gear holds no bodies of its own —
-        // mirror the first bodies of the referenced joints for the
-        // sleep-skip heuristic (island union resolves all four).
+        // keep the caller's distinct metadata endpoints. The gear pass
+        // and island union resolve all four coordinate participants.
         let is_gear = matches!(kind, JointKind::Gear { .. });
         if let JointKind::Gear {
             joint_a,
@@ -4867,8 +4931,6 @@ impl PhysicsEngine for BuiltinPhysicsEngine {
             ) {
                 return None;
             }
-            body_a = ja.body_a;
-            body_b = jb.body_a;
         }
         // A new joint on a sleeping island changes its constraint set — wake
         // it so the joint state can settle coherently.
@@ -5151,18 +5213,23 @@ mod tests {
         assert_eq!(budgeted.step_timing().substeps, 4);
         assert_eq!(budgeted.last_substep_shed(), 8);
 
-        // Same trajectory without a budget: full count runs, and the pair
-        // set is identical — shedding never drops contacts.
+        // Same initial state, not the same final trajectory. The backend
+        // stats are overwritten by end-of-step trigger/CCD queries; compare
+        // the complete frame candidate input retained by the bucket builder.
         let mut unbudgeted = dense_shedding_scene();
         unbudgeted.set_step_budget(None);
         unbudgeted.step(1.0 / 60.0);
         assert_eq!(unbudgeted.step_timing().substeps, 12);
         assert_eq!(unbudgeted.last_substep_shed(), 0);
+        let mut budget_pairs = budgeted.scratch_pairs.clone();
+        let mut full_pairs = unbudgeted.scratch_pairs.clone();
+        budget_pairs.sort_unstable();
+        full_pairs.sort_unstable();
+        assert!(!budget_pairs.is_empty());
         assert_eq!(
-            budgeted.broadphase_stats().candidate_pairs,
-            unbudgeted.broadphase_stats().candidate_pairs
+            budget_pairs, full_pairs,
+            "budget must retain every candidate pair"
         );
-        assert!(budgeted.broadphase_stats().candidate_pairs > 0);
     }
 
     /// Dzhanibekov discriminant for the gyroscopic correction: half extents

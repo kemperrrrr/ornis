@@ -449,6 +449,8 @@ pub(crate) struct Joint {
     pub acc_dist: f32,
     /// Accumulated gear-constraint impulse (gear joints only).
     pub acc_gear: f32,
+    /// Raw and continuous coordinates of the gear's two referenced joints.
+    pub gear_mem: Option<([f32; 2], [f32; 2])>,
     /// One-sided accumulators of six-DOF limited axes: slots 0..3 linear
     /// (X/Y/Z), 3..6 angular. Free/locked axes never touch these.
     pub acc_6dof: [f32; 6],
@@ -470,6 +472,7 @@ impl Joint {
             acc_limit: 0.0,
             acc_dist: 0.0,
             acc_gear: 0.0,
+            gear_mem: None,
             acc_6dof: [0.0; 6],
         }
     }

@@ -77,3 +77,11 @@ editor-only = []
 
 [lints]
 workspace = true
+
+# Large scripting/GPU dependencies otherwise exhaust hosted-runner memory.
+# Keep line tables and all debug assertions; only type-level DWARF is reduced.
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

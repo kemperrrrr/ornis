@@ -1,3 +1,8 @@
 [alias]
 xtask = "run --package xtask --"
 editor = "run --package xtask -- editor"
+
+# Keep compiler/linker memory bounded on CI runners. Runtime physics
+# parallelism is independent of Cargo's compilation job count.
+[build]
+jobs = 2

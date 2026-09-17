@@ -17,6 +17,11 @@
 
 mod broadphase;
 mod broadphase_tree;
+mod migration;
+mod split;
+
+#[cfg(test)]
+mod engine_policy_tests;
 
 /// AVBD rigid-body engine: second [`engine::PhysicsEngine`] implementation
 /// (M1, Genesis-style engine-level modularity).
@@ -37,6 +42,9 @@ pub mod shape;
 /// Trigger overlap event types emitted by the builtin physics engine.
 pub mod trigger;
 pub(crate) mod wide;
+
+use migration::{JointSnapshot, SceneSnapshot};
+use split::{SplitBody, SplitJoint, SplitOwner, SplitState};
 
 pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, RigidBody};
@@ -77,6 +85,19 @@ pub enum RoutingKind {
     Islands,
 }
 
+/// Wall-clock cost of the last Islands host step (diagnostic only).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SplitTiming {
+    /// Conservative island discovery and ownership decisions.
+    pub routing: std::time::Duration,
+    /// Body/joint/event-baseline reconstruction.
+    pub rebuild: std::time::Duration,
+    /// Time inside AVBD, summed over completed fixed substeps.
+    pub avbd: std::time::Duration,
+    /// Time inside the builtin solver, summed over completed fixed substeps.
+    pub builtin: std::time::Duration,
+}
+
 /// M3 coupling metrics: the coupling tax, in the books per PLAN M3.
 /// `None` from [`Engine::split_metrics`] outside Islands routing.
 #[derive(Debug, Clone, Copy, Default)]
@@ -88,18 +109,15 @@ pub struct SplitMetrics {
     pub avbd_bodies: usize,
     /// Dynamic bodies currently owned by Builtin.
     pub builtin_bodies: usize,
+    /// All rebuilds, including structural edits and initial construction.
+    pub rebuilds: u64,
+    /// Number of bodies whose owner changed (not just rebuild count).
+    pub migrated_bodies: u64,
+    /// Completed common 1/60 s simulation steps since Islands was enabled.
+    pub simulation_steps: u64,
+    /// Last host call's measured cost; never an input to routing.
+    pub timing: SplitTiming,
 }
-
-/// Sleep-routing thresholds (spike-validated): the AVBD rest velocity
-/// floor sits at ~g*dt (0.16), so the calm band must clear it.
-const SPLIT_SLEEP_V: f32 = 0.2;
-/// Any body faster than this wakes its island to AVBD immediately.
-const SPLIT_WAKE_V: f32 = 0.5;
-/// Consecutive calm steps before an island migrates down.
-const SPLIT_SLEEP_STEPS: u32 = 30;
-/// Proximity band glued onto AABBs for island linkage (pre-touch band,
-/// same order as the pair creation distance).
-const SPLIT_LINK_MARGIN: f32 = 0.05;
 
 /// Solver orchestrator: owns one engine behind the [`PhysicsEngine`] seam
 /// and migrates the full scene (bodies 1:1 in handle order, then joints)
@@ -122,6 +140,8 @@ pub struct Engine {
     /// (the fracture pass consumes the inner queue, so the orchestrator
     /// re-serves them here — see `drain_contact_events`).
     contact_events: Vec<ContactEvent>,
+    /// Globally remapped trigger transitions, independent of rebuilt locals.
+    trigger_events: Vec<TriggerEvent>,
     /// Solver used in [`RoutingKind::Single`] (and the collapse target
     /// when leaving Islands). Unchanged by routing.
     single_kind: SolverKind,
@@ -163,6 +183,7 @@ impl Engine {
             inner,
             fracture_events: Vec::new(),
             contact_events: Vec::new(),
+            trigger_events: Vec::new(),
             gravity,
             single_kind: kind,
             routing: RoutingKind::Single,
@@ -199,39 +220,24 @@ impl Engine {
             migrations: self.migrations,
             avbd_bodies: av,
             builtin_bodies: bu,
+            rebuilds: s.rebuilds,
+            migrated_bodies: s.migrated_bodies,
+            simulation_steps: s.steps,
+            timing: s.timing,
         })
     }
 
     /// Switch the active solver, migrating bodies and joints 1:1 (handles
-    /// stay valid). Pending trigger/contact/fracture events are dropped
-    /// with the old engine. No-op when already on `kind`. Under Islands
+    /// stay valid). Physical rest state, driver baselines and pending events
+    /// survive; numerical warm starts are discarded. No-op for the same
+    /// kind and gravity. Under Islands
     /// routing this collapses the split registry into a fresh `Single`
     /// engine (global order, then joints).
     pub fn set_solver_kind(&mut self, kind: SolverKind, gravity: glam::Vec3) {
-        if self.routing == RoutingKind::Islands {
-            self.collapse_to_single(kind, gravity);
+        if self.routing == RoutingKind::Single && self.kind() == kind && self.gravity == gravity {
             return;
         }
-        if self.kind() == kind {
-            return;
-        }
-        let (bodies, joints) = match &self.inner {
-            EngineInner::Builtin(e) => (e.bodies_snapshot(), e.joint_specs()),
-            EngineInner::Avbd(e) => (e.bodies_snapshot(), e.joint_specs()),
-        };
-        let mut next = Self::new(kind, gravity);
-        for body in bodies {
-            next.add_body(body);
-        }
-        for (a, b, spec) in joints {
-            // Gears reference joint handles, which are dense 0..n on both
-            // sides here (re-added in order), so specs migrate verbatim.
-            // A spec the target solver rejects (AVBD has no row model gap
-            // left at M1-close, but future kinds may) is skipped, never
-            // fatal — same discipline as stale gear references.
-            let _ = next.add_joint(a, b, spec);
-        }
-        *self = next;
+        self.collapse_to_single(kind, gravity);
     }
 
     /// Switch the routing policy. `Single` collapses any live split
@@ -243,85 +249,130 @@ impl Engine {
         if self.routing == routing {
             return;
         }
-        match routing {
-            RoutingKind::Single => {
-                let kind = self.single_kind;
-                let gravity = self
-                    .split
-                    .as_ref()
-                    .map(|s| s.gravity)
-                    .unwrap_or(glam::Vec3::ZERO);
-                self.collapse_to_single(kind, gravity);
-            }
-            RoutingKind::Islands => {
-                let gravity = self.gravity;
-                let mut split = Box::new(SplitState::new(gravity));
-                // Bodies in handle order: global == local on entry.
-                let bodies = match &self.inner {
-                    EngineInner::Builtin(e) => e.bodies_snapshot(),
-                    EngineInner::Avbd(e) => e.bodies_snapshot(),
-                };
-                for body in bodies {
-                    let owner = SplitOwner::of(&body);
-                    split.bodies.push(SplitBody {
-                        body,
-                        owner,
-                        local_avbd: None,
-                        local_builtin: None,
-                        sleepy: 0,
-                    });
-                }
-                // Joints reference dense locals == globals here.
-                let specs: Vec<(BodyHandle, BodyHandle, JointKind)> = match &self.inner {
-                    EngineInner::Builtin(e) => e.joint_specs(),
-                    EngineInner::Avbd(e) => e.joint_specs(),
-                };
-                for (a, b, spec) in specs {
-                    split.joints.push(SplitJoint {
-                        a,
-                        b,
-                        spec,
-                        local_avbd: None,
-                        local_builtin: None,
-                    });
-                }
-                split.rebuild();
-                self.split = Some(split);
-                self.routing = RoutingKind::Islands;
-                self.migrations = 0;
-                self.structural_dirty = false;
-                self.wake_set.clear();
-            }
+        if routing == RoutingKind::Single {
+            self.collapse_to_single(self.single_kind, self.gravity);
+            return;
         }
+        let snapshot = self.snapshot();
+        let triggers = self.drain_trigger_events();
+        let mut split = Box::new(SplitState::new(self.gravity));
+        for (h, body) in snapshot.bodies.into_iter().enumerate() {
+            let mut record = SplitBody::new(body, self.single_kind);
+            record.previous = snapshot.previous[h];
+            split.bodies.push(record);
+        }
+        split.joints = snapshot.joints.into_iter().map(SplitJoint::new).collect();
+        split.events = snapshot.events;
+        split.route(split::DT, false, &self.wake_set);
+        split.rebuild();
+        self.split = Some(split);
+        self.routing = RoutingKind::Islands;
+        self.migrations = 0;
+        self.structural_dirty = false;
+        self.wake_set.clear();
+        self.trigger_events.extend(triggers);
     }
 
     /// Collapse Islands routing into a fresh `Single(kind)` engine from
     /// the registry (global order, then joints with verbatim specs —
     /// globals equal dense locals on a fresh engine).
     fn collapse_to_single(&mut self, kind: SolverKind, gravity: glam::Vec3) {
+        let snapshot = self.snapshot();
+        let triggers = self.drain_trigger_events();
         let mut next = Self::new(kind, gravity);
-        if let Some(s) = self.split.as_ref() {
-            for b in &s.bodies {
-                next.add_body(b.body.clone());
-            }
-            for j in &s.joints {
-                let _ = next.add_joint(j.a, j.b, j.spec);
-            }
-        } else {
-            let (bodies, joints) = match &self.inner {
-                EngineInner::Builtin(e) => (e.bodies_snapshot(), e.joint_specs()),
-                EngineInner::Avbd(e) => (e.bodies_snapshot(), e.joint_specs()),
-            };
-            for body in bodies {
-                next.add_body(body);
-            }
-            for (a, b, spec) in joints {
-                let _ = next.add_joint(a, b, spec);
+        for body in snapshot.bodies {
+            next.add_body(body);
+        }
+        next.restore_joints(snapshot.joints);
+        for (h, pose) in snapshot.previous.into_iter().enumerate() {
+            match &mut next.inner {
+                EngineInner::Builtin(e) => e.restore_body_baseline(h, pose),
+                EngineInner::Avbd(e) => e.restore_body_baseline(h, pose),
             }
         }
-        // `*self = next` resets all orchestrator bookkeeping (events drop
-        // with the old engine, same as the M2 switch above).
+        match &mut next.inner {
+            EngineInner::Builtin(e) => e.restore_event_state(snapshot.events),
+            EngineInner::Avbd(e) => e.restore_event_state(snapshot.events),
+        }
+        next.contact_events = std::mem::take(&mut self.contact_events);
+        next.fracture_events = std::mem::take(&mut self.fracture_events);
+        next.trigger_events = triggers;
         *self = next;
+    }
+
+    /// Number of registered bodies. Removing one swaps the last into its slot.
+    pub fn body_count(&self) -> usize {
+        if let Some(s) = &self.split {
+            return s.bodies.len();
+        }
+        match &self.inner {
+            EngineInner::Builtin(e) => e.body_count(),
+            EngineInner::Avbd(e) => e.body_count(),
+        }
+    }
+
+    /// Number of live joints, including gears, in global handle order.
+    pub fn joint_count(&self) -> usize {
+        if let Some(s) = &self.split {
+            return s.joints.len();
+        }
+        match &self.inner {
+            EngineInner::Builtin(e) => e.joint_count(),
+            EngineInner::Avbd(e) => e.joint_count(),
+        }
+    }
+
+    /// Current owner of a dynamic body. Non-dynamics live in both solvers
+    /// under Islands routing and return `None`, as do invalid handles.
+    pub fn body_solver(&self, handle: BodyHandle) -> Option<SolverKind> {
+        if let Some(s) = &self.split {
+            return match s.bodies.get(handle)?.owner {
+                SplitOwner::Static => None,
+                SplitOwner::Avbd => Some(SolverKind::Avbd),
+                SplitOwner::Builtin => Some(SolverKind::Builtin),
+            };
+        }
+        (self.get_body(handle)?.body_type == BodyType::Dynamic).then_some(self.single_kind)
+    }
+
+    fn snapshot(&self) -> SceneSnapshot {
+        if let Some(s) = &self.split {
+            return SceneSnapshot {
+                bodies: s.bodies.iter().map(|b| b.body.clone()).collect(),
+                joints: s.joint_snapshots(),
+                previous: s.bodies.iter().map(|b| b.previous).collect(),
+                events: s.events.clone(),
+            };
+        }
+        match &self.inner {
+            EngineInner::Builtin(e) => SceneSnapshot {
+                bodies: e.bodies_snapshot(),
+                joints: e.joint_snapshots(),
+                previous: e.body_baselines(),
+                events: e.event_state(),
+            },
+            EngineInner::Avbd(e) => SceneSnapshot {
+                bodies: e.bodies_snapshot(),
+                joints: e.joint_snapshots(),
+                previous: e.body_baselines(),
+                events: e.event_state(),
+            },
+        }
+    }
+
+    fn restore_joints(&mut self, joints: Vec<JointSnapshot>) {
+        let mut remap = vec![None; joints.len()];
+        for (old, mut j) in joints.into_iter().enumerate() {
+            migration::remap_gear(&mut j.spec, &remap);
+            let h = self
+                .add_joint(j.a, j.b, j.spec)
+                .expect("validated migrating joint");
+            match &mut self.inner {
+                EngineInner::Builtin(e) => e.restore_joint_reference(h, j.reference),
+                EngineInner::Avbd(e) => e.restore_joint_reference(h, j.reference),
+            }
+            remap[old] = Some(h);
+        }
     }
 
     /// Drain fracture reports since the last call (see [`FractureEvent`]).
@@ -332,181 +383,56 @@ impl Engine {
     /// Rebuild split engines from the registry when structural changes
     /// (add/remove) are pending. Cheap flag check on the hot path.
     fn split_ensure_built(&mut self) {
-        if self.routing != RoutingKind::Islands {
-            return;
-        }
         if self.structural_dirty {
-            if let Some(s) = self.split.as_mut() {
+            if let Some(s) = &mut self.split {
+                s.route(split::DT, false, &self.wake_set);
                 s.rebuild();
             }
             self.structural_dirty = false;
         }
     }
 
-    /// One Islands step: wake host dirties, step both engines in fixed
-    /// order (AVBD then Builtin — determinism needs a fixed order, either
-    /// would do), pull registry truth, route islands (rebuild + count on
-    /// change), then the split fracture pass.
+    /// Accumulate host time; each common tick routes swept islands first,
+    /// steps AVBD and Builtin, then captures events before fracture/rebuild.
     fn split_step(&mut self, dt: f32) {
-        self.split_ensure_built();
-        let dirties: Vec<BodyHandle> = std::mem::take(&mut self.wake_set).into_iter().collect();
-        let changed: bool;
-        if let Some(s) = self.split.as_mut() {
-            for g in dirties {
-                s.push_global(g);
-            }
-            s.avbd.step(dt);
-            s.builtin.step(dt);
-            s.pull();
-            if s.route() {
+        let Some(s) = &mut self.split else { return };
+        s.timing = SplitTiming::default();
+        s.time_debt =
+            (s.time_debt + f64::from(dt)).min(f64::from(split::DT) * split::MAX_STEPS as f64);
+        let mut steps = 0;
+        while self
+            .split
+            .as_ref()
+            .is_some_and(|s| s.time_debt >= f64::from(split::DT))
+            && steps < split::MAX_STEPS
+        {
+            self.split_ensure_built();
+            let edited = std::mem::take(&mut self.wake_set);
+            let s = self.split.as_mut().expect("Islands state");
+            s.time_debt -= f64::from(split::DT);
+            if s.route(split::DT, true, &edited) > 0 {
                 s.rebuild();
-                changed = true;
-            } else {
-                changed = false;
+                self.migrations += 1;
             }
-        } else {
-            return;
-        }
-        if changed {
-            self.migrations += 1;
-        }
-        self.fracture_split();
-    }
-
-    /// Inverse maps local engine handle -> global, sized tightly.
-    fn split_inverse(s: &SplitState) -> (Vec<Option<BodyHandle>>, Vec<Option<BodyHandle>>) {
-        let mut av = vec![None; s.bodies.len()];
-        let mut bu = vec![None; s.bodies.len()];
-        for (g, b) in s.bodies.iter().enumerate() {
-            if let Some(h) = b.local_avbd
-                && h < av.len()
-            {
-                av[h] = Some(g);
+            for h in edited {
+                s.push_global(h);
             }
-            if let Some(h) = b.local_builtin
-                && h < bu.len()
-            {
-                bu[h] = Some(g);
-            }
-        }
-        // Compact to dense local ranges (rebuilds add in global order, so
-        // locals are dense 0..k per engine; truncate defensively).
-        let trim = |v: &mut Vec<Option<BodyHandle>>| {
-            while v.last() == Some(&None) {
-                v.pop();
-            }
-        };
-        trim(&mut av);
-        trim(&mut bu);
-        (av, bu)
-    }
-
-    fn contact_kind_rank(kind: &ContactEventKind) -> u8 {
-        match kind {
-            ContactEventKind::Begin => 0,
-            ContactEventKind::End => 1,
-            ContactEventKind::Hit { .. } => 2,
+            let (contacts, triggers) = s.step();
+            self.trigger_events.extend(triggers);
+            self.fracture_split(&contacts);
+            self.contact_events.extend(contacts);
+            steps += 1;
         }
     }
 
-    /// Query both engines, remap hit handles to globals, nearest wins.
-    /// Bodies with pending (unbuilt) structural changes are invisible —
-    /// step first after add/remove for exact queries.
-    fn split_raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
-        let s = self.split.as_ref()?;
-        let (ia, ib) = Self::split_inverse(s);
-        let global = |hit: RaycastHit, inv: &[Option<BodyHandle>]| -> Option<RaycastHit> {
-            let g = inv.get(hit.handle).copied().flatten()?;
-            Some(RaycastHit { handle: g, ..hit })
-        };
-        let ha = s.avbd.raycast(ray, max_dist).and_then(|h| global(h, &ia));
-        let hb = s
-            .builtin
-            .raycast(ray, max_dist)
-            .and_then(|h| global(h, &ib));
-        match (ha, hb) {
-            (Some(a), Some(b)) => Some(if a.distance <= b.distance { a } else { b }),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
-    }
-
-    fn split_shapecast(
-        &self,
-        shape: &Shape,
-        from: glam::Vec3,
-        to: glam::Vec3,
-    ) -> Option<RaycastHit> {
-        let s = self.split.as_ref()?;
-        let (ia, ib) = Self::split_inverse(s);
-        let global = |hit: RaycastHit, inv: &[Option<BodyHandle>]| -> Option<RaycastHit> {
-            let g = inv.get(hit.handle).copied().flatten()?;
-            Some(RaycastHit { handle: g, ..hit })
-        };
-        let ha = s
-            .avbd
-            .shapecast(shape, from, to)
-            .and_then(|h| global(h, &ia));
-        let hb = s
-            .builtin
-            .shapecast(shape, from, to)
-            .and_then(|h| global(h, &ib));
-        match (ha, hb) {
-            (Some(a), Some(b)) => Some(if a.distance <= b.distance { a } else { b }),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
-    }
-
-    /// Split fracture pass: drain both engines, remap to globals, merge in
-    /// canonical order, then run the shared Hit logic on the registry
-    /// (parent removed, halves appended, immediate rebuild so halves step
-    /// next round — same timing as the single-engine pass).
-    fn fracture_split(&mut self) {
-        let Some(s) = self.split.as_mut() else {
-            return;
-        };
-        let (ia, ib) = Self::split_inverse(s);
-        let mut contacts: Vec<ContactEvent> = Vec::new();
-        for ev in s.avbd.drain_contact_events() {
-            if let (Some(a), Some(b)) = (
-                ia.get(ev.body_a).copied().flatten(),
-                ia.get(ev.body_b).copied().flatten(),
-            ) {
-                contacts.push(ContactEvent {
-                    body_a: a,
-                    body_b: b,
-                    kind: ev.kind,
-                });
-            }
-        }
-        for ev in s.builtin.drain_contact_events() {
-            if let (Some(a), Some(b)) = (
-                ib.get(ev.body_a).copied().flatten(),
-                ib.get(ev.body_b).copied().flatten(),
-            ) {
-                contacts.push(ContactEvent {
-                    body_a: a,
-                    body_b: b,
-                    kind: ev.kind,
-                });
-            }
-        }
-        contacts.sort_by(|a, b| {
-            (a.body_a, a.body_b, Self::contact_kind_rank(&a.kind)).cmp(&(
-                b.body_a,
-                b.body_b,
-                Self::contact_kind_rank(&b.kind),
-            ))
-        });
-        // Hit logic on globals (mirrors `fracture_pass` candidate rules).
+    /// Fracture uses globally mapped hits captured before any rebuild.
+    fn fracture_split(&mut self, contacts: &[ContactEvent]) {
+        let Some(s) = self.split.as_mut() else { return };
         let mut candidates = std::collections::BTreeSet::new();
-        for ev in &contacts {
-            if let ContactEventKind::Hit { approach_speed, .. } = ev.kind {
-                for h in [ev.body_a, ev.body_b] {
-                    if let Some(body) = s.bodies.get(h).map(|r| &r.body)
+        for event in contacts {
+            if let ContactEventKind::Hit { approach_speed, .. } = event.kind {
+                for h in [event.body_a, event.body_b] {
+                    if let Some(body) = s.bodies.get(h).map(|b| &b.body)
                         && body.body_type == BodyType::Dynamic
                         && approach_speed >= body.fracture_impact_speed
                     {
@@ -515,89 +441,92 @@ impl Engine {
                 }
             }
         }
-        let mut ordered: Vec<BodyHandle> = candidates.into_iter().collect();
-        ordered.sort_unstable_by(|a, b| b.cmp(a));
-        let fractured = !ordered.is_empty();
-        for parent in ordered {
-            let Some(body) = s.bodies.get(parent).map(|r| r.body.clone()) else {
+        let start = self.fracture_events.len();
+        for parent in candidates.into_iter().rev() {
+            let Some(body) = s.bodies.get(parent).map(|b| b.body.clone()) else {
                 continue;
             };
-            let Some([pa, pb]) = Self::split_box(&body) else {
+            let Some(halves) = Self::split_box(&body) else {
                 continue;
             };
+            let last = s.bodies.len() - 1;
+            Self::remap_fracture_pieces(&mut self.fracture_events[start..], parent, last);
             Self::split_remove_body(s, parent);
-            // Halves inherit the parent's owner (same island by proximity).
-            let owner = SplitOwner::of(&pa);
-            for half in [pa, pb] {
-                s.bodies.push(SplitBody {
-                    body: half,
-                    owner,
-                    local_avbd: None,
-                    local_builtin: None,
-                    sleepy: 0,
-                });
+            for half in halves {
+                s.bodies.push(SplitBody::new(half, SolverKind::Avbd));
             }
             let n = s.bodies.len();
             self.fracture_events.push(FractureEvent {
                 parent,
                 pieces: [n - 2, n - 1],
             });
+            self.structural_dirty = true;
         }
-        if fractured {
-            // Halves must exist before the next step: rebuild eagerly so
-            // the fresh pieces report sane locals immediately (the lazy
-            // `split_ensure_built` would also catch it).
-            s.rebuild();
-        }
-        self.contact_events.extend(contacts);
     }
 
     /// Registry body removal with joint remap (swap_remove discipline,
     /// same as the engines: later handles shift, refs are patched).
     fn split_remove_body(s: &mut SplitState, handle: BodyHandle) {
-        let n = s.bodies.len();
-        if handle >= n {
+        if handle >= s.bodies.len() {
             return;
         }
-        // Drop joints touching the removed body; patch refs to the moved one.
-        let mut j = 0;
-        while j < s.joints.len() {
-            let (a, b) = (s.joints[j].a, s.joints[j].b);
-            if a == handle || b == handle {
-                Self::split_remove_joint(s, j);
-            } else {
-                if a == n - 1 {
-                    s.joints[j].a = handle;
-                }
-                if b == n - 1 {
-                    s.joints[j].b = handle;
-                }
-                j += 1;
-            }
+        let last = s.bodies.len() - 1;
+        let removed = s
+            .joints
+            .iter()
+            .map(|j| j.state.a == handle || j.state.b == handle)
+            .collect();
+        Self::split_retain_joints(s, removed);
+        let map = |h| if h == last { handle } else { h };
+        for j in &mut s.joints {
+            j.state.a = map(j.state.a);
+            j.state.b = map(j.state.b);
         }
         s.bodies.swap_remove(handle);
+        let remap = |set: &std::collections::BTreeSet<(usize, usize)>| {
+            set.iter()
+                .filter_map(|&(a, b)| {
+                    if a == handle || b == handle {
+                        None
+                    } else {
+                        Some((map(a).min(map(b)), map(a).max(map(b))))
+                    }
+                })
+                .collect()
+        };
+        s.events.contacts = remap(&s.events.contacts);
+        s.events.triggers = remap(&s.events.triggers);
     }
 
     /// Registry joint removal with gear-ref remap.
     fn split_remove_joint(s: &mut SplitState, handle: usize) {
-        let n = s.joints.len();
-        if handle >= n {
+        if handle >= s.joints.len() {
             return;
         }
-        s.joints.swap_remove(handle);
-        // Patch gear references to the moved joint (n-1 -> handle).
-        for j in &mut s.joints {
-            if let JointKind::Gear {
-                joint_a,
-                joint_b,
-                ratio: _,
-            } = &mut j.spec
-            {
-                if *joint_a == n - 1 {
-                    *joint_a = handle;
-                }
-                if *joint_b == n - 1 {
-                    *joint_b = handle;
+        let mut removed = vec![false; s.joints.len()];
+        removed[handle] = true;
+        Self::split_retain_joints(s, removed);
+    }
+
+    fn split_retain_joints(s: &mut SplitState, removed: Vec<bool>) {
+        let kinds: Vec<_> = s.joints.iter().map(|j| j.state.spec).collect();
+        let remap = migration::joint_remap(&kinds, removed);
+        let mut old = 0;
+        s.joints.retain_mut(|j| {
+            let keep = remap[old].is_some();
+            old += 1;
+            if keep {
+                migration::remap_gear(&mut j.state.spec, &remap);
+            }
+            keep
+        });
+    }
+
+    fn remap_fracture_pieces(events: &mut [FractureEvent], removed: usize, last: usize) {
+        for event in events {
+            for h in &mut event.pieces {
+                if *h == last {
+                    *h = removed;
                 }
             }
         }
@@ -635,6 +564,7 @@ impl Engine {
         for (half, s) in halves.iter_mut().zip([-1.0, 1.0]) {
             half.shape = Shape::Box { half_extents: h2 };
             half.position = parent.position + off * s;
+            half.velocity = parent.velocity + parent.angular_velocity.cross(off * s);
             half.mass = parent.mass * 0.5;
             half.inv_mass = 1.0 / half.mass;
             half.inertia = half.shape.inertia(half.mass);
@@ -652,6 +582,7 @@ impl Engine {
     fn fracture_pass(&mut self) {
         use ContactEventKind::Hit;
         let mut candidates = std::collections::BTreeSet::new();
+        let event_start = self.fracture_events.len();
         let inner = &mut self.inner;
         // The inner queue is consumed here, so every event is stashed for
         // re-serve: fracture must never swallow the host's contact stream.
@@ -692,6 +623,11 @@ impl Engine {
             let Some([pa, pb]) = Self::split_box(&body) else {
                 continue;
             };
+            let last = match inner {
+                EngineInner::Builtin(e) => e.body_count() - 1,
+                EngineInner::Avbd(e) => e.body_count() - 1,
+            };
+            Self::remap_fracture_pieces(&mut self.fracture_events[event_start..], parent, last);
             match inner {
                 EngineInner::Builtin(e) => e.remove_body(parent),
                 EngineInner::Avbd(e) => e.remove_body(parent),
@@ -710,6 +646,9 @@ impl Engine {
 
 impl PhysicsEngine for Engine {
     fn step(&mut self, dt: f32) {
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
         if self.routing == RoutingKind::Islands {
             self.split_step(dt);
             return;
@@ -722,17 +661,9 @@ impl PhysicsEngine for Engine {
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
-        if self.routing == RoutingKind::Islands {
-            let s = self.split.as_mut().expect("split state live under Islands");
+        if let Some(s) = &mut self.split {
             let h = s.bodies.len();
-            let owner = SplitOwner::of(&body);
-            s.bodies.push(SplitBody {
-                body,
-                owner,
-                local_avbd: None,
-                local_builtin: None,
-                sleepy: 0,
-            });
+            s.bodies.push(SplitBody::new(body, SolverKind::Avbd));
             self.structural_dirty = true;
             return h;
         }
@@ -743,16 +674,25 @@ impl PhysicsEngine for Engine {
     }
 
     fn remove_body(&mut self, handle: BodyHandle) {
-        if self.routing == RoutingKind::Islands {
-            if let Some(s) = self.split.as_mut() {
-                let n = s.bodies.len();
-                Self::split_remove_body(s, handle);
-                // swap_remove shifts globals: the deleted handle's entry
-                // dies, the moved tail (n-1 -> handle) keeps its entry.
-                self.wake_set.remove(&handle);
-                if handle < n.saturating_sub(1) && self.wake_set.remove(&(n - 1)) {
-                    self.wake_set.insert(handle);
+        if handle >= self.body_count() {
+            return;
+        }
+        self.contact_events.clear();
+        if let Some(s) = &mut self.split {
+            let last = s.bodies.len() - 1;
+            for &(a, b) in &s.events.triggers {
+                if a == handle || b == handle {
+                    self.trigger_events.push(TriggerEvent {
+                        body_a: a,
+                        body_b: b,
+                        kind: TriggerEventKind::Exited,
+                    });
                 }
+            }
+            Self::split_remove_body(s, handle);
+            self.wake_set.remove(&handle);
+            if handle != last && self.wake_set.remove(&last) {
+                self.wake_set.insert(handle);
             }
             self.structural_dirty = true;
             return;
@@ -794,28 +734,11 @@ impl PhysicsEngine for Engine {
         body_b: BodyHandle,
         kind: JointKind,
     ) -> Option<JointHandle> {
-        if self.routing == RoutingKind::Islands {
-            let s = self.split.as_mut().expect("split state live under Islands");
-            // Validate globals (gear refs must be live global joint ids).
-            if body_a >= s.bodies.len() || body_b >= s.bodies.len() || body_a == body_b {
-                return None;
-            }
-            if let JointKind::Gear {
-                joint_a, joint_b, ..
-            } = &kind
-                && (*joint_a >= s.joints.len() || *joint_b >= s.joints.len())
-            {
-                return None;
-            }
-            let h = s.joints.len();
-            s.joints.push(SplitJoint {
-                a: body_a,
-                b: body_b,
-                spec: kind,
-                local_avbd: None,
-                local_builtin: None,
-            });
+        if let Some(s) = &mut self.split {
+            let h = s.add_joint(body_a, body_b, kind)?;
             self.structural_dirty = true;
+            self.wake_set.insert(body_a);
+            self.wake_set.insert(body_b);
             return Some(h);
         }
         match &mut self.inner {
@@ -825,10 +748,14 @@ impl PhysicsEngine for Engine {
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
-        if self.routing == RoutingKind::Islands {
-            if let Some(s) = self.split.as_mut() {
-                Self::split_remove_joint(s, handle);
-            }
+        if handle >= self.joint_count() {
+            return;
+        }
+        if let Some(s) = &mut self.split {
+            let j = s.joints[handle].state;
+            self.wake_set.insert(j.a);
+            self.wake_set.insert(j.b);
+            Self::split_remove_joint(s, handle);
             self.structural_dirty = true;
             return;
         }
@@ -839,12 +766,8 @@ impl PhysicsEngine for Engine {
     }
 
     fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
-        if self.routing == RoutingKind::Islands {
-            // Pending structural changes would hide new bodies: build first
-            // (read path; `&self` so clone-on-write is overkill — the next
-            // step rebuilds anyway. Bodies added but not yet built are
-            // invisible to this query, documented).
-            return self.split_raycast(ray, max_dist);
+        if let Some(s) = &self.split {
+            return s.raycast(ray, max_dist);
         }
         match &self.inner {
             EngineInner::Builtin(e) => e.raycast(ray, max_dist),
@@ -853,8 +776,8 @@ impl PhysicsEngine for Engine {
     }
 
     fn shapecast(&self, shape: &Shape, from: glam::Vec3, to: glam::Vec3) -> Option<RaycastHit> {
-        if self.routing == RoutingKind::Islands {
-            return self.split_shapecast(shape, from, to);
+        if let Some(s) = &self.split {
+            return s.shapecast(shape, from, to);
         }
         match &self.inner {
             EngineInner::Builtin(e) => e.shapecast(shape, from, to),
@@ -863,47 +786,14 @@ impl PhysicsEngine for Engine {
     }
 
     fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
-        if self.routing == RoutingKind::Islands {
-            // Stale engines would misreport: build pending structure first.
-            self.split_ensure_built();
-            if let Some(s) = self.split.as_mut() {
-                let (ia, ib) = Self::split_inverse(s);
-                let mut out = Vec::new();
-                for ev in s.avbd.drain_trigger_events() {
-                    if let (Some(a), Some(b)) = (
-                        ia.get(ev.body_a).copied().flatten(),
-                        ia.get(ev.body_b).copied().flatten(),
-                    ) {
-                        out.push(TriggerEvent {
-                            body_a: a,
-                            body_b: b,
-                            kind: ev.kind,
-                        });
-                    }
-                }
-                for ev in s.builtin.drain_trigger_events() {
-                    if let (Some(a), Some(b)) = (
-                        ib.get(ev.body_a).copied().flatten(),
-                        ib.get(ev.body_b).copied().flatten(),
-                    ) {
-                        out.push(TriggerEvent {
-                            body_a: a,
-                            body_b: b,
-                            kind: ev.kind,
-                        });
-                    }
-                }
-                out.sort_by(|a, b| {
-                    (a.body_a, a.body_b, a.kind as u8).cmp(&(b.body_a, b.body_b, b.kind as u8))
-                });
-                return out;
-            }
-            return Vec::new();
+        let mut events = std::mem::take(&mut self.trigger_events);
+        if self.routing == RoutingKind::Single {
+            events.extend(match &mut self.inner {
+                EngineInner::Builtin(e) => e.drain_trigger_events(),
+                EngineInner::Avbd(e) => e.drain_trigger_events(),
+            });
         }
-        match &mut self.inner {
-            EngineInner::Builtin(e) => e.drain_trigger_events(),
-            EngineInner::Avbd(e) => e.drain_trigger_events(),
-        }
+        events
     }
 
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
@@ -913,8 +803,9 @@ impl PhysicsEngine for Engine {
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {
-        if self.routing == RoutingKind::Islands {
-            if let Some(s) = self.split.as_mut() {
+        if let Some(s) = &mut self.split {
+            if handle < s.bodies.len() {
+                self.wake_set.insert(handle);
                 s.wake_global(handle);
             }
             return;
@@ -923,370 +814,5 @@ impl PhysicsEngine for Engine {
             EngineInner::Builtin(e) => e.wake_body(handle),
             EngineInner::Avbd(e) => e.wake_body(handle),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// M3 Islands routing: fixed-order global registry, both engines alive.
-// ---------------------------------------------------------------------------
-
-/// Which solver owns a registry body. Statics live natively in both
-/// engines and never migrate or need proxies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SplitOwner {
-    Static,
-    Avbd,
-    Builtin,
-}
-
-impl SplitOwner {
-    fn of(body: &RigidBody) -> Self {
-        if body.body_type == BodyType::Dynamic {
-            // New bodies arrive awake (the always-correct fallback is AVBD;
-            // calm islands migrate down from there).
-            SplitOwner::Avbd
-        } else {
-            SplitOwner::Static
-        }
-    }
-}
-
-/// One global body: index in [`SplitState::bodies`] IS the global
-/// [`BodyHandle`], stable across rebuild migrations.
-struct SplitBody {
-    body: RigidBody,
-    owner: SplitOwner,
-    local_avbd: Option<BodyHandle>,
-    local_builtin: Option<BodyHandle>,
-    sleepy: u32,
-}
-
-/// One global joint: `a`/`b` are global body handles, gear references
-/// are global JOINT ids (remapped to fresh locals on every rebuild).
-struct SplitJoint {
-    a: BodyHandle,
-    b: BodyHandle,
-    spec: JointKind,
-    local_avbd: Option<JointHandle>,
-    local_builtin: Option<JointHandle>,
-}
-
-/// Live M3 registry (Newton-style explicit ownership over a shared body
-/// set). Bodies never move slots; engines are rebuilt deterministically
-/// from it, so global handles survive migrations.
-struct SplitState {
-    builtin: BuiltinPhysicsEngine,
-    avbd: AvbdEngine,
-    gravity: glam::Vec3,
-    bodies: Vec<SplitBody>,
-    joints: Vec<SplitJoint>,
-}
-
-fn split_find(root: &mut [usize], x: usize) -> usize {
-    if root[x] != x {
-        root[x] = split_find(root, root[x]);
-    }
-    root[x]
-}
-
-/// Restore the mass model of a snapshot body (zombie rule): bodies
-/// pulled from a sleeping engine carry zeroed inverse mass/inertia, and
-/// a fresh engine starts them awake — unrestored they are unsolvable
-/// forever (or tumble on zero inertia). Mirrors `wake_body`.
-fn split_restore_mass(body: &mut RigidBody) {
-    if body.body_type == BodyType::Dynamic && body.inv_mass <= 0.0 {
-        body.inv_mass = 1.0 / body.mass;
-        body.inertia = body.shape.inertia(body.mass);
-    }
-}
-
-impl SplitState {
-    fn new(gravity: glam::Vec3) -> Self {
-        Self {
-            builtin: BuiltinPhysicsEngine::new(gravity),
-            avbd: AvbdEngine::new(gravity),
-            gravity,
-            bodies: Vec::new(),
-            joints: Vec::new(),
-        }
-    }
-
-    /// Deterministic rebuild from the registry (global order): statics go
-    /// to both engines, dynamics to their owner; joints re-added in global
-    /// order with remapped local references.
-    fn rebuild(&mut self) {
-        self.avbd = AvbdEngine::new(self.gravity);
-        self.builtin = BuiltinPhysicsEngine::new(self.gravity);
-        for b in &mut self.bodies {
-            b.local_avbd = None;
-            b.local_builtin = None;
-        }
-        for (g, b) in self.bodies.iter_mut().enumerate() {
-            let _ = g;
-            match b.owner {
-                SplitOwner::Static => {
-                    b.local_avbd = Some(self.avbd.add_body(b.body.clone()));
-                    b.local_builtin = Some(self.builtin.add_body(b.body.clone()));
-                }
-                SplitOwner::Avbd => {
-                    b.local_avbd = Some(self.avbd.add_body(b.body.clone()));
-                }
-                SplitOwner::Builtin => {
-                    b.local_builtin = Some(self.builtin.add_body(b.body.clone()));
-                }
-            }
-        }
-        for j in &mut self.joints {
-            j.local_avbd = None;
-            j.local_builtin = None;
-        }
-        for ji in 0..self.joints.len() {
-            let (a, b, spec) = {
-                let j = &self.joints[ji];
-                (j.a, j.b, j.spec)
-            };
-            // Endpoints pinned to one island share one solver by
-            // construction (joint links join the union-find); a split
-            // joint is skipped, never fatal (M2 discipline).
-            let on_avbd = self
-                .bodies
-                .get(a)
-                .is_some_and(|x| x.owner != SplitOwner::Builtin)
-                && self
-                    .bodies
-                    .get(b)
-                    .is_some_and(|x| x.owner != SplitOwner::Builtin);
-            let on_builtin = self
-                .bodies
-                .get(a)
-                .is_some_and(|x| x.owner != SplitOwner::Avbd)
-                && self
-                    .bodies
-                    .get(b)
-                    .is_some_and(|x| x.owner != SplitOwner::Avbd);
-            if on_avbd && !on_builtin {
-                let la = self.bodies[a].local_avbd.unwrap();
-                let lb = self.bodies[b].local_avbd.unwrap();
-                let local_spec = match spec {
-                    JointKind::Gear {
-                        joint_a,
-                        joint_b,
-                        ratio,
-                    } => {
-                        let la_ref = self.joints.get(joint_a).and_then(|j| j.local_avbd);
-                        let lb_ref = self.joints.get(joint_b).and_then(|j| j.local_avbd);
-                        match (la_ref, lb_ref) {
-                            (Some(x), Some(y)) => JointKind::Gear {
-                                joint_a: x,
-                                joint_b: y,
-                                ratio,
-                            },
-                            _ => continue,
-                        }
-                    }
-                    other => other,
-                };
-                // A rejected spec keeps later gear refs dangling-safe:
-                // gear remap above yields None and skips (same discipline
-                // as stale references).
-                self.joints[ji].local_avbd = self.avbd.add_joint(la, lb, local_spec);
-            } else if on_builtin && !on_avbd {
-                let la = self.bodies[a].local_builtin.unwrap();
-                let lb = self.bodies[b].local_builtin.unwrap();
-                let local_spec = match spec {
-                    JointKind::Gear {
-                        joint_a,
-                        joint_b,
-                        ratio,
-                    } => {
-                        let la_ref = self.joints.get(joint_a).and_then(|j| j.local_builtin);
-                        let lb_ref = self.joints.get(joint_b).and_then(|j| j.local_builtin);
-                        match (la_ref, lb_ref) {
-                            (Some(x), Some(y)) => JointKind::Gear {
-                                joint_a: x,
-                                joint_b: y,
-                                ratio,
-                            },
-                            _ => continue,
-                        }
-                    }
-                    other => other,
-                };
-                self.joints[ji].local_builtin = self.builtin.add_joint(la, lb, local_spec);
-            }
-        }
-    }
-
-    /// Pull engine truth back into the registry (per-owner locals).
-    fn pull(&mut self) {
-        for b in &mut self.bodies {
-            let src = match b.owner {
-                SplitOwner::Static | SplitOwner::Avbd => {
-                    b.local_avbd.and_then(|h| self.avbd.get_body(h).cloned())
-                }
-                SplitOwner::Builtin => b
-                    .local_builtin
-                    .and_then(|h| self.builtin.get_body(h).cloned()),
-            };
-            if let Some(mut live) = src {
-                // Zombie rule: a sleeping engine may zero inverse mass on
-                // its copy — never let that poison registry truth.
-                split_restore_mass(&mut live);
-                b.body = live;
-            }
-        }
-    }
-
-    /// Push registry truth into the owning engine copy and wake it (host
-    /// edits land on the registry; without this the engines would step
-    /// stale copies and `pull` would clobber the edit — the spike-002
-    /// "host writes into a sleeping engine" trap, fixed structurally).
-    fn push_global(&mut self, global: BodyHandle) {
-        let Some(rec) = self.bodies.get(global) else {
-            return;
-        };
-        let (owner, body) = (rec.owner, rec.body.clone());
-        match owner {
-            SplitOwner::Avbd => {
-                if let Some(h) = rec.local_avbd {
-                    if let Some(dst) = self.avbd.get_body_mut(h) {
-                        *dst = body;
-                    }
-                    self.avbd.wake_body(h);
-                }
-            }
-            SplitOwner::Builtin => {
-                if let Some(h) = rec.local_builtin {
-                    if let Some(dst) = self.builtin.get_body_mut(h) {
-                        *dst = body;
-                    }
-                    self.builtin.wake_body(h);
-                }
-            }
-            SplitOwner::Static => {
-                // Statics live in both engines natively; push to both.
-                if let Some(h) = rec.local_avbd
-                    && let Some(dst) = self.avbd.get_body_mut(h)
-                {
-                    *dst = body.clone();
-                }
-                if let Some(h) = rec.local_builtin
-                    && let Some(dst) = self.builtin.get_body_mut(h)
-                {
-                    *dst = body;
-                }
-            }
-        }
-    }
-
-    /// Wake a global body in its owning engine (no-op for statics and
-    /// unknown globals).
-    fn wake_global(&mut self, global: BodyHandle) {
-        let Some(b) = self.bodies.get(global) else {
-            return;
-        };
-        match b.owner {
-            SplitOwner::Avbd => {
-                if let Some(h) = b.local_avbd {
-                    self.avbd.wake_body(h);
-                }
-            }
-            SplitOwner::Builtin => {
-                if let Some(h) = b.local_builtin {
-                    self.builtin.wake_body(h);
-                }
-            }
-            SplitOwner::Static => {}
-        }
-    }
-
-    /// Contact islands over the registry: dynamic–dynamic AABB overlap
-    /// (statics never link — they live in both engines anyway) plus
-    /// joint links (a joint pins its endpoints to one solver, so
-    /// cross-solver joint rows never exist). Returns true when any owner
-    /// changed (caller rebuilds and counts a migration).
-    fn route(&mut self) -> bool {
-        let n = self.bodies.len();
-        let mut root: Vec<usize> = (0..n).collect();
-        let link = |root: &mut Vec<usize>, a: usize, b: usize| {
-            let (ra, rb) = (split_find(root, a), split_find(root, b));
-            root[ra] = rb;
-        };
-        let aabbs: Vec<Option<AABB>> = self
-            .bodies
-            .iter()
-            .map(|b| {
-                if b.owner == SplitOwner::Static {
-                    return None;
-                }
-                let mut ab = b.body.shape.aabb(b.body.position, b.body.orientation);
-                let m = glam::Vec3::splat(SPLIT_LINK_MARGIN);
-                ab.min -= m;
-                ab.max += m;
-                Some(ab)
-            })
-            .collect();
-        for (a, ab) in aabbs.iter().enumerate() {
-            let Some(ab) = ab else { continue };
-            for (b, bb) in aabbs.iter().enumerate().skip(a + 1) {
-                let Some(bb) = bb else { continue };
-                if ab.overlaps(bb) {
-                    link(&mut root, a, b);
-                }
-            }
-        }
-        for j in &self.joints {
-            if j.a < n && j.b < n {
-                link(&mut root, j.a, j.b);
-            }
-        }
-        // Per-body calm counters (hysteresis history, rides on the record
-        // so removals never desync it).
-        for b in self.bodies.iter_mut() {
-            if b.owner == SplitOwner::Static {
-                continue;
-            }
-            let v = b.body.velocity.length();
-            if v > SPLIT_WAKE_V {
-                b.sleepy = 0;
-            } else if v < SPLIT_SLEEP_V {
-                b.sleepy += 1;
-            } else {
-                b.sleepy = 0;
-            }
-        }
-        // Island calm <=> every dynamic member sleepy long enough. Wake
-        // is per-body immediate; sleep is per-island unanimous (a calm
-        // body never drags an awake island down, an awake body never
-        // lets a calm island migrate).
-        let mut changed = false;
-        for g in 0..n {
-            if self.bodies[g].owner == SplitOwner::Static {
-                continue;
-            }
-            let r = split_find(&mut root, g);
-            let mut calm = true;
-            for h in 0..n {
-                if self.bodies[h].owner != SplitOwner::Static
-                    && split_find(&mut root, h) == r
-                    && self.bodies[h].sleepy < SPLIT_SLEEP_STEPS
-                {
-                    calm = false;
-                    break;
-                }
-            }
-            let want = if self.bodies[g].body.velocity.length() > SPLIT_WAKE_V {
-                SplitOwner::Avbd
-            } else if calm {
-                SplitOwner::Builtin
-            } else {
-                SplitOwner::Avbd
-            };
-            if want != self.bodies[g].owner {
-                self.bodies[g].owner = want;
-                changed = true;
-            }
-        }
-        changed
     }
 }

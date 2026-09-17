@@ -228,6 +228,17 @@ impl BuiltinPhysicsEngine {
             ) else {
                 continue;
             };
+            let raw = [sa.coord, sb.coord];
+            let angular = [sa.angular, sb.angular];
+            let previous = self.joints[gi].gear_mem;
+            let continuous = std::array::from_fn(|k| {
+                crate::migration::gear_coordinate(
+                    raw[k],
+                    angular[k],
+                    previous.map(|(r, c)| (r[k], c[k])),
+                )
+            });
+            self.joints[gi].gear_mem = Some((raw, continuous));
             // All four bodies asleep = frozen assembly.
             if self.asleep[sa.a] && self.asleep[sa.b] && self.asleep[sb.a] && self.asleep[sb.b] {
                 continue;
@@ -245,7 +256,7 @@ impl BuiltinPhysicsEngine {
             ) else {
                 continue;
             };
-            let c = (sa.coord + ratio * sb.coord - c0).clamp(-MAX_C, MAX_C);
+            let c = (continuous[0] + ratio * continuous[1] - c0).clamp(-MAX_C, MAX_C);
             let k = sa.eff + ratio * ratio * sb.eff;
             if k < 1e-9 || sub_dt <= 0.0 {
                 continue;
@@ -646,9 +657,6 @@ fn gear_side_data(bodies: &[RigidBody], joint: &Joint) -> Option<GearSideData> {
             let (ba, bb) = (&bodies[a], &bodies[b]);
             let eff = mul_inv_inertia(ba.inertia, ba.orientation, wa).dot(wa)
                 + mul_inv_inertia(bb.inertia, bb.orientation, wa).dot(wa);
-            if eff < 1e-9 {
-                return None;
-            }
             Some(GearSideData {
                 a,
                 b,
@@ -672,9 +680,6 @@ fn gear_side_data(bodies: &[RigidBody], joint: &Joint) -> Option<GearSideData> {
             let ra = bodies[a].orientation * *local_anchor_a;
             let rb = bodies[b].orientation * *local_anchor_b;
             let eff = effective_mass(bodies, a, b, wa, ra, rb);
-            if eff < 1e-9 {
-                return None;
-            }
             Some(GearSideData {
                 a,
                 b,
@@ -761,8 +766,11 @@ fn joint_angular_lock_position_pass(
     const BETA: f32 = 0.2;
     const MAX_ANG_CORRECTION: f32 = 0.5;
     let (qa, qb) = (bodies[a].orientation, bodies[b].orientation);
-    let q_err = (qa.conjugate() * qb) * reference.conjugate();
-    let angle = 2.0 * q_err.w.clamp(-1.0, 1.0).acos();
+    let mut q_err = (qa.conjugate() * qb) * reference.conjugate();
+    if q_err.w < 0.0 {
+        q_err = -q_err;
+    }
+    let angle = 2.0 * q_err.xyz().length().atan2(q_err.w);
     if angle < 1e-6 {
         return;
     }
@@ -1108,7 +1116,7 @@ fn solve_new_joint_velocity(
                         ra,
                         rb,
                         dir,
-                        delta.dot(dir),
+                        delta.dot(dir) - joint.reference_anchor_delta.dot(*e),
                         min,
                         max,
                     );

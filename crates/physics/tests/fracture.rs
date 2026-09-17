@@ -69,17 +69,18 @@ fn fracture_splits_box_on_hard_hit_both_solvers() {
                 "{kind:?}: threshold inherits"
             );
         }
-        // Split along X by half a meter, identical inherited velocities.
+        // Split along X by half a meter, preserving the rigid velocity field.
         let span = pb.position - pa.position;
         assert!(
             (span.length() - 0.5).abs() < 0.05 && span.x.abs() > 0.4,
             "{kind:?}: halves straddle X, span {span:?}"
         );
+        let center = (pa.position + pb.position) * 0.5;
+        let va = pa.velocity + pa.angular_velocity.cross(center - pa.position);
+        let vb = pb.velocity + pb.angular_velocity.cross(center - pb.position);
         assert!(
-            (pa.velocity - pb.velocity).length() < 1e-6,
-            "{kind:?}: velocity continuity {:?} vs {:?}",
-            pa.velocity,
-            pb.velocity
+            (va - vb).length() < 1e-5,
+            "{kind:?}: rigid velocity continuity {va:?} vs {vb:?}"
         );
         // Joint died with the parent: freeze fracture, drop 120 steps —
         // free halves fall away from the anchor (a live Ball would hold

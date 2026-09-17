@@ -181,8 +181,13 @@ cargo xtask quality            # регресс-гейт: падает толь�
 relative errors in body A's frame and apply torques/Hessians in world space
 (SixDof and Fixed). Nonzero warm reactions are never discarded by a
 mass-scaled epsilon; regression tests cover world-frame covariance and
-small-inertia equilibria. Full verification and M3 lifecycle hardening are
-in progress through the PR's `cargo xtask quality --ci` gate.
+small-inertia equilibria. M3 lifecycle hardening now routes swept contact/joint components before a
+common fixed step, preserves joint rest state and driver/event baselines across
+rebuilds, exposes per-solver/coupling timings, and queries the current global
+registry even before a pending rebuild. Dense handles are stable across migration;
+removal swaps the last body into the removed slot. Full verification remains
+in progress through PR #12's `cargo xtask quality --ci` gate. CI builds use two
+compiler jobs and line-table debug info (debug assertions stay enabled).
 
 ### Не начато
 

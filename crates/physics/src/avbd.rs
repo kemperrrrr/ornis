@@ -110,6 +110,7 @@ use crate::engine::joints::{hinge_twist, quat_twist};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::joint::{AxisConfig, JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit, tangent_basis};
+use crate::migration::{JointReference, JointSnapshot};
 use crate::shape::Shape;
 use crate::trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, TriggerEvent,
@@ -819,9 +820,119 @@ impl AvbdEngine {
             .collect()
     }
 
-    /// Joint specs in handle order `(body_a, body_b, kind)` for migration.
-    pub(crate) fn joint_specs(&self) -> Vec<(BodyHandle, BodyHandle, JointKind)> {
-        self.joints.iter().map(|j| (j.a, j.b, j.spec)).collect()
+    /// Driver poses at the previous completed step (new bodies use their pose).
+    pub(crate) fn body_baselines(&self) -> Vec<crate::broadphase::PrevPose> {
+        self.bodies
+            .iter()
+            .enumerate()
+            .map(|(h, b)| crate::broadphase::PrevPose {
+                pos: self.prev_pos.get(h).copied().unwrap_or(b.position),
+                rot: self.prev_rot.get(h).copied().unwrap_or(b.orientation),
+            })
+            .collect()
+    }
+
+    /// Restore a driver's within-step motion baseline after rebuilding.
+    pub(crate) fn restore_body_baseline(&mut self, h: usize, pose: crate::broadphase::PrevPose) {
+        self.ensure_scratch();
+        if h < self.bodies.len() {
+            self.prev_pos[h] = pose.pos;
+            self.prev_rot[h] = pose.rot;
+        }
+    }
+
+    /// Completed-step event baseline for transparent solver migration.
+    pub(crate) fn event_state(&self) -> crate::migration::EventState {
+        crate::migration::EventState {
+            contacts: self.prev_touch.iter().copied().collect(),
+            triggers: self.prev_trigger.iter().copied().collect(),
+        }
+    }
+
+    /// Seed a rebuilt solver without manufacturing a new contact/trigger begin.
+    pub(crate) fn restore_event_state(&mut self, state: crate::migration::EventState) {
+        self.prev_touch = state.contacts.into_iter().collect();
+        self.prev_trigger = state.triggers.into_iter().collect();
+    }
+
+    /// Number of live joints in dense handle order.
+    pub(crate) fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// Physical joint state in handle order; numerical warm starts stay local.
+    pub(crate) fn joint_snapshots(&self) -> Vec<JointSnapshot> {
+        self.joints
+            .iter()
+            .map(|j| {
+                let mut reference = JointReference {
+                    rotation: j.q_ref,
+                    anchor_delta: j.dref,
+                    ..JointReference::default()
+                };
+                match j.kind {
+                    AvbdJointKind::Revolute => reference.angle = j.ref_val,
+                    AvbdJointKind::Prismatic | AvbdJointKind::Wheel => reference.length = j.ref_val,
+                    AvbdJointKind::Distance | AvbdJointKind::Gear => reference.distance = j.ref_val,
+                    _ => {}
+                }
+                if j.kind == AvbdJointKind::Gear
+                    && let Some((a, b)) = self.gear_sides(j)
+                {
+                    // Rebase continuous gear phase into the new engine's raw
+                    // chart without changing the current constraint error.
+                    let raw = |r: usize| {
+                        let side = &self.joints[r];
+                        Self::joint_coordinate(side, &self.bodies[side.a], &self.bodies[side.b])
+                            .unwrap_or(0.0)
+                    };
+                    reference.distance -=
+                        (a.coord - raw(j.gb[0])) + j.gratio * (b.coord - raw(j.gb[1]));
+                }
+                JointSnapshot {
+                    a: j.a,
+                    b: j.b,
+                    spec: j.spec,
+                    reference,
+                }
+            })
+            .collect()
+    }
+
+    /// Restore the assembly pose after creating a migrated joint.
+    pub(crate) fn restore_joint_reference(&mut self, h: JointHandle, r: JointReference) {
+        let Some(j) = self.joints.get_mut(h) else {
+            return;
+        };
+        j.q_ref = r.rotation;
+        j.dref = r.anchor_delta;
+        j.ref_val = match j.kind {
+            AvbdJointKind::Revolute => r.angle,
+            AvbdJointKind::Prismatic | AvbdJointKind::Wheel => r.length,
+            AvbdJointKind::Distance | AvbdJointKind::Gear => r.distance,
+            _ => j.ref_val,
+        };
+    }
+
+    /// Dense removal also removes dependent gears before remapping survivors.
+    fn retain_joints(&mut self, removed: Vec<bool>) {
+        let kinds: Vec<_> = self.joints.iter().map(|j| j.spec).collect();
+        let remap = crate::migration::joint_remap(&kinds, removed);
+        let mut old = 0;
+        self.joints.retain_mut(|j| {
+            let keep = remap[old].is_some();
+            old += 1;
+            if keep {
+                crate::migration::remap_gear(&mut j.spec, &remap);
+                if let JointKind::Gear {
+                    joint_a, joint_b, ..
+                } = j.spec
+                {
+                    j.gb = [joint_a, joint_b];
+                }
+            }
+            keep
+        });
     }
 
     /// Dynamic bodies currently frozen by sleep (observability for tests
@@ -2034,7 +2145,7 @@ impl AvbdEngine {
                 let j = &self.joints[ji];
                 (j.a == h, j.b == h)
             };
-            if !is_a && !is_b {
+            if !is_a && !is_b && self.joints[ji].kind != AvbdJointKind::Gear {
                 continue;
             }
             let sign = if is_a { 1.0 } else { -1.0 };
@@ -2060,13 +2171,24 @@ impl AvbdEngine {
                             arr[k] = 1.0;
                             arr
                         });
-                        let c = live[k] - ALPHA * c0v[k];
+                        let (live, initial) = if j.kind == AvbdJointKind::Fixed {
+                            (live + a.orientation * j.dref, c0v + self.rot0[j.a] * j.dref)
+                        } else {
+                            (live, c0v)
+                        };
+                        let c = live[k] - ALPHA * initial[k];
                         let f = j.pen_l[k] * c + j.lam_l[k];
                         if !row_live(c, f) {
                             continue;
                         }
                         let r_side = if is_a {
-                            a.orientation * j.la
+                            a.orientation
+                                * (j.la
+                                    + if j.kind == AvbdJointKind::Fixed {
+                                        j.dref
+                                    } else {
+                                        Vec3::ZERO
+                                    })
                         } else {
                             b.orientation * j.lb
                         };
@@ -2166,7 +2288,7 @@ impl AvbdEngine {
                                 );
                             }
                             AxisConfig::Limited { min, max } => {
-                                let sep = (pb - pa).dot(dir);
+                                let sep = ((pb - pa) - a.orientation * j.dref).dot(dir);
                                 if let Some(lower) = limit_state(sep, min, max, LIMIT_SLOP_LIN) {
                                     let c = if lower { sep - min } else { sep - max };
                                     let f_raw = j.pen_l[i] * c + j.sacc[i];
@@ -2255,7 +2377,13 @@ impl AvbdEngine {
             // joint spins up through long levers (see module docs).
             {
                 let r = if is_a {
-                    a.orientation * j.la
+                    a.orientation
+                        * (j.la
+                            + if j.kind == AvbdJointKind::Fixed {
+                                j.dref
+                            } else {
+                                Vec3::ZERO
+                            })
                 } else {
                     -(b.orientation * j.lb)
                 };
@@ -2908,7 +3036,12 @@ impl AvbdEngine {
             match j.kind {
                 AvbdJointKind::Ball | AvbdJointKind::Revolute | AvbdJointKind::Fixed => {
                     for k in 0..3 {
-                        let c = live[k] - ALPHA * c0v[k];
+                        let (live, initial) = if j.kind == AvbdJointKind::Fixed {
+                            (live + a.orientation * j.dref, c0v + self.rot0[j.a] * j.dref)
+                        } else {
+                            (live, c0v)
+                        };
+                        let c = live[k] - ALPHA * initial[k];
                         if c.abs() >= C_EPS {
                             j.lam_l[k] += j.pen_l[k] * c;
                             j.pen_l[k] = (j.pen_l[k] + BETA * c.abs()).min(PENALTY_MAX);
@@ -2951,7 +3084,7 @@ impl AvbdEngine {
                                 }
                             }
                             AxisConfig::Limited { min, max } => {
-                                let sep = (pb - pa).dot(dir);
+                                let sep = ((pb - pa) - a.orientation * j.dref).dot(dir);
                                 if let Some(lower) = limit_state(sep, min, max, LIMIT_SLOP_LIN) {
                                     let c = if lower { sep - min } else { sep - max };
                                     if c.abs() >= C_EPS {
@@ -3233,14 +3366,16 @@ impl PhysicsEngine for AvbdEngine {
             p.b = map(p.b);
             true
         });
-        self.joints.retain_mut(|j| {
-            if j.a == handle || j.b == handle {
-                return false;
-            }
+        let removed = self
+            .joints
+            .iter()
+            .map(|j| j.a == handle || j.b == handle)
+            .collect();
+        self.retain_joints(removed);
+        for j in &mut self.joints {
             j.a = map(j.a);
             j.b = map(j.b);
-            true
-        });
+        }
         // Handle-keyed state is stale after the swap (builtin parity).
         self.prev_touch.clear();
         self.prev_trigger
@@ -3280,6 +3415,9 @@ impl PhysicsEngine for AvbdEngine {
         body_b: BodyHandle,
         kind: JointKind,
     ) -> Option<JointHandle> {
+        if !crate::migration::valid_joint(&kind) {
+            return None;
+        }
         // A new constraint disturbs both assemblies (builtin wakes the
         // island; AVBD wakes per body). Spurious wake on rejected specs is
         // harmless — one quiet timer restarts.
@@ -3375,7 +3513,7 @@ impl PhysicsEngine for AvbdEngine {
             kind: AvbdJointKind::Ball,
             spec: kind,
             ref_val: 0.0,
-            q_ref: Quat::IDENTITY,
+            q_ref: r.ref_quat,
             lim: None,
             mot: None,
             acc_lim: 0.0,
@@ -3385,7 +3523,7 @@ impl PhysicsEngine for AvbdEngine {
             gear_mem: None,
             six_lin: [AxisConfig::Free; 3],
             six_ang: [AxisConfig::Free; 3],
-            dref: Vec3::ZERO,
+            dref: r.ref_anchor_delta,
             sacc: [0.0; 6],
             lam_l: [0.0; 3],
             lam_a: [0.0; 3],
@@ -3453,7 +3591,9 @@ impl PhysicsEngine for AvbdEngine {
             let (a, b) = (self.joints[handle].a, self.joints[handle].b);
             self.wake_body(a);
             self.wake_body(b);
-            self.joints.swap_remove(handle);
+            let mut removed = vec![false; self.joints.len()];
+            removed[handle] = true;
+            self.retain_joints(removed);
         }
     }
 
