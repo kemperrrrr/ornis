@@ -7,6 +7,16 @@ use std::process::Command;
 /// Emit complete bounded UTF-8 chunks through the existing annotations API.
 /// No tokens or network access are required by the quality process.
 pub(super) fn attachment(label: &str, text: &str) {
+    emit("notice", label, text);
+}
+
+/// Baseline exports use the separate warning budget; keep notice slots for
+/// actionable compiler/test failures (GitHub caps each kind per step).
+pub(super) fn baseline(text: &str) {
+    emit("warning", "rustqual-current", text);
+}
+
+fn emit(level: &str, label: &str, text: &str) {
     let mut parts = Vec::new();
     let mut start = 0;
     while start < text.len() {
@@ -23,7 +33,7 @@ pub(super) fn attachment(label: &str, text: &str) {
             .replace('%', "%25")
             .replace('\r', "%0D")
             .replace('\n', "%0A");
-        eprintln!("::notice title=quality-data-{label}::{}", escaped);
+        eprintln!("::{level} title=quality-data-{label}::{}", escaped);
     }
 }
 
@@ -95,6 +105,59 @@ fn measure_reference(root: &Path) -> Result<(String, String), String> {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     let json = std::fs::read_to_string(&result).map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let mut value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("violation_details");
+    }
     Ok((revision, value.to_string()))
+}
+
+/// Stream both pipes while retaining complete diagnostics. Waiting for an
+/// entire cold build before printing hides the last command on runner shutdown.
+pub(super) fn run_streamed(
+    command: &mut Command,
+) -> std::io::Result<(std::process::ExitStatus, String)> {
+    use std::process::Stdio;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("missing stdout pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("missing stderr pipe"))?;
+    let out = std::thread::spawn(move || pump(stdout, false));
+    let err = std::thread::spawn(move || pump(stderr, true));
+    let status = child.wait()?;
+    let stdout = out
+        .join()
+        .map_err(|_| std::io::Error::other("stdout reader panicked"))??;
+    let stderr = err
+        .join()
+        .map_err(|_| std::io::Error::other("stderr reader panicked"))??;
+    Ok((status, format!("{stdout}{stderr}")))
+}
+
+fn pump(reader: impl std::io::Read, stderr: bool) -> std::io::Result<String> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(reader);
+    let mut buffer = Vec::new();
+    let mut log = String::new();
+    loop {
+        buffer.clear();
+        if reader.read_until(b'\n', &mut buffer)? == 0 {
+            break;
+        }
+        let line = String::from_utf8_lossy(&buffer);
+        let printable = line.replace("::error", "::·error");
+        if stderr {
+            eprint!("{printable}");
+        } else {
+            print!("{printable}");
+        }
+        log.push_str(&line);
+    }
+    Ok(log)
 }

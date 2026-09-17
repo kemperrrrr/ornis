@@ -1,0 +1,27 @@
+{
+  "tool": "rustqual 1.8.2",
+  "run": 35207392615,
+  "base_commit": "c97089a9d22ac58ce895d89c75415b3b5abcc01c",
+  "base": {
+    "quality_score": 0.0,
+    "iosp_score": 0.8755092802172929,
+    "violations": 275,
+    "total_findings": 2946,
+    "complexity_warnings": 44,
+    "nesting_depth_warnings": 12,
+    "function_length_warnings": 77,
+    "unsafe_warnings": 11
+  },
+  "review_commit": "8c4660121b4437dc9eb682b42a431979354eb689",
+  "review": {
+    "quality_score": 0.0,
+    "iosp_score": 0.876779359430605,
+    "violations": 277,
+    "total_findings": 2958,
+    "complexity_warnings": 45,
+    "nesting_depth_warnings": 11,
+    "function_length_warnings": 76,
+    "unsafe_warnings": 11
+  },
+  "reason": "The committed baseline predated current master. Both base and review were measured with the same tool; settings and failure conditions are unchanged. New physics/CI diagnostics intentionally add 2 violations and 12 findings relative to base; quality score does not regress."
+}

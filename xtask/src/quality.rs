@@ -249,7 +249,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
                     let regressed = quality_regressed || findings_regressed || violations_regressed;
                     if regressed {
                         if ci_annotations() {
-                            diagnostics::attachment("rustqual-current", &cur_v.to_string());
+                            diagnostics::baseline(&cur_v.to_string());
                             diagnostics::reference_rustqual(stages.root);
                         }
                         let mut reasons = Vec::new();
@@ -342,8 +342,8 @@ fn level1(stages: &mut StageList<'_>) {
 
     stages.run(
         "test",
-        "cargo test --workspace",
-        stages.cargo(&["test", "--workspace"]),
+        "cargo test --workspace --no-fail-fast",
+        stages.cargo(&["test", "--workspace", "--no-fail-fast"]),
         false,
     );
 
@@ -354,8 +354,19 @@ fn level1(stages: &mut StageList<'_>) {
     // so the gate stays green on machines without GPU drivers.
     stages.run(
         "test (physics gpu)",
-        "cargo test -p ornis-physics --features gpu",
-        stages.cargo(&["test", "-p", "ornis-physics", "--features", "gpu"]),
+        "cargo test -p ornis-physics --features gpu -j 1 --no-fail-fast -- --test-threads=1",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-physics",
+            "--features",
+            "gpu",
+            "-j",
+            "1",
+            "--no-fail-fast",
+            "--",
+            "--test-threads=1",
+        ]),
         false,
     );
 
@@ -700,17 +711,7 @@ fn run_stage(
     // annotations API is the transport that always works). Locally the
     // stages keep streaming.
     let ran = if ci_annotations() {
-        command.output().map(|out| {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            // Re-printing child output verbatim re-emits the child's
-            // workflow commands (::error …): rustqual floods annotations and
-            // crowds out this gate's curated diagnostics. Break the command
-            // prefix in the re-print — the gate emits its own annotations.
-            print!("{}", stdout.replace("::error", "::·error"));
-            eprint!("{}", stderr.replace("::error", "::·error"));
-            (out.status, format!("{stdout}{stderr}"))
-        })
+        diagnostics::run_streamed(&mut command)
     } else {
         command.status().map(|status| (status, String::new()))
     };
@@ -777,11 +778,18 @@ fn annotate_stage_failure(name: &str, log: &str) {
     let clean = strip_ansi(log);
     // Preserve full failure context independently of short UI annotations
     // and post-failure workflow steps (which a stopped runner may not run).
-    let mut tail = clean.len().saturating_sub(120_000);
-    while !clean.is_char_boundary(tail) {
-        tail += 1;
-    }
-    diagnostics::attachment(&format!("stage-{}", name.replace(' ', "-")), &clean[tail..]);
+    let detail = if let Some(start) = clean.find("failures:\n") {
+        let rest = &clean[start..];
+        let end = rest.find("test result:").unwrap_or(rest.len());
+        &rest[..end]
+    } else {
+        let mut tail = clean.len().saturating_sub(18_000);
+        while !clean.is_char_boundary(tail) {
+            tail += 1;
+        }
+        &clean[tail..]
+    };
+    diagnostics::attachment(&format!("stage-{}", name.replace(' ', "-")), detail);
     let is_match = |l: &str| {
         let t = l.trim_start();
         let lower = t.to_ascii_lowercase();
