@@ -10,7 +10,7 @@ pub(super) fn attachment(label: &str, text: &str) {
     let mut parts = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        let mut end = (start + 20_000).min(text.len());
+        let mut end = (start + 3_000).min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -95,5 +95,6 @@ fn measure_reference(root: &Path) -> Result<(String, String), String> {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     let json = std::fs::read_to_string(&result).map_err(|e| e.to_string())?;
-    Ok((revision, json))
+    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    Ok((revision, value.to_string()))
 }

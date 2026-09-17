@@ -415,3 +415,76 @@ fn contact_events_are_still_available_after_structural_changes() {
         "resting contact must not re-begin when routing changes"
     );
 }
+
+#[test]
+fn a_contained_sphere_is_a_trigger_overlap_in_every_solver() {
+    for kind in KINDS {
+        for route in ROUTES {
+            let mut e = Engine::new(kind, Vec3::ZERO);
+            let mut trigger = RigidBody::new_box(Vec3::ZERO, Vec3::ONE, 0.0).with_trigger(true);
+            trigger.orientation = Quat::from_rotation_y(0.7);
+            e.add_body(trigger);
+            e.add_body(sphere(Vec3::ZERO, 1.0));
+            e.set_routing(route);
+            e.step(DT);
+            let events = e.drain_trigger_events();
+            assert_eq!(
+                events.len(),
+                1,
+                "{kind:?}/{route:?}: containment was invisible"
+            );
+            assert_eq!(events[0].kind, TriggerEventKind::Entered);
+        }
+    }
+}
+
+#[test]
+fn coincident_dynamic_spheres_do_not_remain_ghosted() {
+    for kind in KINDS {
+        let mut e = Engine::new(kind, Vec3::ZERO);
+        let a = e.add_body(sphere(Vec3::ZERO, 1.0));
+        let b = e.add_body(sphere(Vec3::ZERO, 1.0));
+        for _ in 0..180 {
+            e.step(DT);
+        }
+        let pa = e.get_body(a).unwrap().position;
+        let pb = e.get_body(b).unwrap().position;
+        assert!(pa.is_finite() && pb.is_finite());
+        assert!(
+            (pa - pb).length() > 0.3,
+            "{kind:?}: concentric spheres stayed coincident"
+        );
+    }
+}
+
+#[test]
+fn contained_boxes_and_face_crossing_capsules_are_not_missing_overlaps() {
+    for kind in KINDS {
+        for shape in [
+            Shape::Box {
+                half_extents: Vec3::splat(0.2),
+            },
+            Shape::Capsule {
+                radius: 0.1,
+                half_height: 0.2,
+            },
+            Shape::Capsule {
+                radius: 0.1,
+                half_height: 3.0,
+            },
+        ] {
+            let mut e = Engine::new(kind, Vec3::ZERO);
+            e.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::ONE, 0.0).with_trigger(true));
+            let mut body = sphere(Vec3::ZERO, 1.0);
+            body.shape = shape;
+            body.inertia = body.shape.inertia(body.mass);
+            e.add_body(body);
+            e.step(DT);
+            assert_eq!(
+                e.drain_trigger_events().len(),
+                1,
+                "{kind:?}: solid overlap was missed"
+            );
+        }
+    }
+}

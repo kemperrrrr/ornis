@@ -13,6 +13,10 @@ use glam::{Quat, Vec3};
 
 use crate::shape::Shape;
 
+#[path = "distance_box.rs"]
+mod boxes;
+pub(crate) use boxes::box_box_signed_gap;
+
 /// A placed shape: geometry plus world transform.
 #[derive(Clone, Copy)]
 pub(crate) struct ShapeRef<'a> {
@@ -160,9 +164,23 @@ fn sphere_obb(a: ShapeRef, r: f32, b: ShapeRef, half: Vec3) -> Distance {
     let pb = point_obb_closest(a.pos, b.pos, half, b.rot);
     let d_vec = a.pos - pb;
     let core = d_vec.length();
-    let n = d_vec.normalize_or(Vec3::X); // from box surface toward sphere
+    let local = b.rot.conjugate() * (a.pos - b.pos);
+    let inside = local.abs().cmple(half).all();
+    let n = if inside {
+        let clearance = half - local.abs();
+        let axis = if clearance.x <= clearance.y && clearance.x <= clearance.z {
+            Vec3::X * local.x.signum()
+        } else if clearance.y <= clearance.z {
+            Vec3::Y * local.y.signum()
+        } else {
+            Vec3::Z * local.z.signum()
+        };
+        (pb - a.pos).normalize_or(b.rot * axis)
+    } else {
+        d_vec.normalize_or(Vec3::X)
+    };
     Distance {
-        dist: core - r,
+        dist: if inside { -core - r } else { core - r },
         point_a: a.pos - n * r,
         point_b: pb,
     }
@@ -194,83 +212,6 @@ fn capsule_capsule(a: ShapeRef, ra: f32, ha: f32, b: ShapeRef, rb: f32, hb: f32)
         dist: core - ra - rb,
         point_a: ca + n * ra,
         point_b: cb - n * rb,
-    }
-}
-
-/// OBB (a) vs OBB (b): exact convex-polyhedra distance via the complete
-/// feature set — vertex→face both ways plus all edge-edge pairs.
-fn obb_obb(a: ShapeRef, ha: Vec3, b: ShapeRef, hb: Vec3) -> Distance {
-    let ca = obb_corners(a.pos, ha, a.rot);
-    let cb = obb_corners(b.pos, hb, b.rot);
-    let mut best = f32::MAX;
-    let (mut pa, mut pb) = (Vec3::ZERO, Vec3::ZERO);
-    let mut consider = |x: Vec3, y: Vec3| {
-        let d = (y - x).length_squared();
-        if d < best {
-            best = d;
-            pa = x;
-            pb = y;
-        }
-    };
-    // Vertex → face (both directions).
-    for &c in &ca {
-        let q = point_obb_closest(c, b.pos, hb, b.rot);
-        consider(c, q);
-    }
-    for &c in &cb {
-        let q = point_obb_closest(c, a.pos, ha, a.rot);
-        consider(q, c);
-    }
-    // Edge → edge.
-    for &(i0, i1) in &OBB_EDGES {
-        for &(j0, j1) in &OBB_EDGES {
-            let (x, y) = seg_seg_closest(ca[i0], ca[i1], cb[j0], cb[j1]);
-            consider(x, y);
-        }
-    }
-    Distance {
-        dist: best.sqrt(),
-        point_a: pa,
-        point_b: pb,
-    }
-}
-
-/// OBB (a) vs capsule (b): box features vs the capsule core segment,
-/// radius subtracted at the end.
-fn obb_capsule(a: ShapeRef, ha: Vec3, b: ShapeRef, r: f32, hh: f32) -> Distance {
-    let (s0, s1) = capsule_segment(b.pos, hh, b.rot);
-    let corners = obb_corners(a.pos, ha, a.rot);
-    let mut best = f32::MAX;
-    let (mut pa, mut pb_core) = (Vec3::ZERO, Vec3::ZERO);
-    let mut consider = |x: Vec3, y: Vec3| {
-        let d = (y - x).length_squared();
-        if d < best {
-            best = d;
-            pa = x;
-            pb_core = y;
-        }
-    };
-    // Capsule endpoints → box, box corners → capsule core segment.
-    for &p in &[s0, s1] {
-        let q = point_obb_closest(p, a.pos, ha, a.rot);
-        consider(q, p);
-    }
-    for &c in &corners {
-        let q = point_segment_closest(c, s0, s1);
-        consider(c, q);
-    }
-    // Box edges vs the capsule core segment.
-    for &(i0, i1) in &OBB_EDGES {
-        let (x, y) = seg_seg_closest(corners[i0], corners[i1], s0, s1);
-        consider(x, y);
-    }
-    let d_vec = pb_core - pa;
-    let core = d_vec.length();
-    let n = d_vec.normalize_or(Vec3::X); // from box toward capsule core
-    Distance {
-        dist: core - r,
-        point_a: pa,
-        point_b: pb_core - n * r,
     }
 }
 
@@ -604,7 +545,7 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
             }
         }
         (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) => {
-            obb_obb(a, *ha, b, *hb)
+            boxes::box_box(a, *ha, b, *hb)
         }
         (
             Shape::Box { half_extents: h },
@@ -612,7 +553,7 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
                 radius: r,
                 half_height: hh,
             },
-        ) => obb_capsule(a, *h, b, *r, *hh),
+        ) => boxes::box_capsule(a, *h, b, *r, *hh),
         (
             Shape::Capsule {
                 radius: r,
@@ -620,7 +561,7 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
             },
             Shape::Box { half_extents: h },
         ) => {
-            let d = obb_capsule(b, *h, a, *r, *hh);
+            let d = boxes::box_capsule(b, *h, a, *r, *hh);
             Distance {
                 dist: d.dist,
                 point_a: d.point_b,
@@ -931,12 +872,12 @@ mod tests {
 
     #[test]
     fn sphere_box_center_inside() {
-        // Interior point is pushed to the nearest face, so the query reports
-        // (face distance - radius) — positive here, i.e. depth, not a signed
-        // penetration. Documents current behavior for CCD.
+        // Containment is overlap: escaping through the closest face needs
+        // the center-to-face distance PLUS the sphere radius.
         let (s, b) = (sphere(0.25), cuboid(Vec3::ONE));
         let d = shape_distance(at(&s, Vec3::new(0.5, 0.0, 0.0)), at(&b, Vec3::ZERO));
-        assert!((d.dist - 0.25).abs() < EPS);
+        assert!((d.dist + 0.75).abs() < EPS);
+        assert_vec3_close(d.point_a, Vec3::new(0.25, 0.0, 0.0));
         assert_vec3_close(d.point_b, Vec3::X);
     }
 
@@ -1071,11 +1012,10 @@ mod tests {
 
     #[test]
     fn box_box_overlapping() {
-        // Overlap: vertex-inside-face snaps to the surface, distance bottoms
-        // out at zero (penetration witnesses are documented as best-effort).
+        // SAT overlap depth remains signed, even for containment.
         let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::ONE));
         let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::new(1.0, 0.0, 0.0)));
-        assert!(d.dist.abs() < EPS);
+        assert!((d.dist + 1.0).abs() < EPS);
     }
 
     // ── box vs capsule ─────────────────────────────────────────────────

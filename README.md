@@ -186,8 +186,11 @@ common fixed step, preserves joint rest state and driver/event baselines across
 rebuilds, exposes per-solver/coupling timings, and queries the current global
 registry even before a pending rebuild. Dense handles are stable across migration;
 removal swaps the last body into the removed slot. Full verification remains
-in progress through PR #12's `cargo xtask quality --ci` gate. CI builds use two
-compiler jobs and line-table debug info (debug assertions stay enabled).
+in progress through PR #12's `cargo xtask quality --ci` gate. Box inertia now
+uses full side lengths (fixing a factor-of-four error); fracture preserves the
+rigid velocity field, and contained/crossing primitive queries keep signed
+overlap rather than reporting false separation. CI builds use two compiler
+jobs and line-table debug info (debug assertions stay enabled).
 
 ### Не начато
 

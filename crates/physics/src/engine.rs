@@ -722,11 +722,11 @@ fn sphere_vs_sphere(
     let diff = pos_b - pos_a;
     let dist_sq = diff.length_squared();
     let radius_sum = radius_a + radius_b + margin;
-    if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
+    if dist_sq > radius_sum * radius_sum {
         return None;
     }
     let dist = dist_sq.sqrt();
-    let normal = diff / dist;
+    let normal = diff.normalize_or(Vec3::X);
     let penetration = radius_sum - dist - margin;
     Some(Contact {
         normal,
@@ -1132,6 +1132,9 @@ fn box_vs_capsule(
         return None;
     }
     let mut normal = ab / len; // box → capsule
+    if d.dist < 0.0 {
+        normal = -normal;
+    }
     // Hemisphere rule (see `distance_contact`): crossed witnesses in
     // penetration would push the pair through each other.
     if normal.dot(cap_pos - box_pos) < 0.0 {
@@ -8308,13 +8311,19 @@ mod tests {
                 },
             )
             .expect("valid gear");
+        let (mut ta, mut tb) = (0.0, 0.0);
+        let (mut old_a, mut old_b) = (0.0, 0.0);
         for _ in 0..180 {
             physics.step(1.0 / 60.0);
+            let qa = physics.get_body(arm_a).unwrap().orientation;
+            let qb = physics.get_body(arm_b).unwrap().orientation;
+            let raw_a = crate::engine::joints::hinge_twist(Quat::IDENTITY, qa, Vec3::Z);
+            let raw_b = crate::engine::joints::hinge_twist(Quat::IDENTITY, qb, Vec3::Z);
+            ta = crate::migration::gear_coordinate(raw_a, true, Some((old_a, ta)));
+            tb = crate::migration::gear_coordinate(raw_b, true, Some((old_b, tb)));
+            old_a = raw_a;
+            old_b = raw_b;
         }
-        let qa = physics.get_body(arm_a).unwrap().orientation;
-        let qb = physics.get_body(arm_b).unwrap().orientation;
-        let ta = crate::engine::joints::hinge_twist(Quat::IDENTITY, qa, Vec3::Z);
-        let tb = crate::engine::joints::hinge_twist(Quat::IDENTITY, qb, Vec3::Z);
         assert!(ta.abs() > 0.5, "motor must turn hinge A, got twist {ta}");
         // coord_a + 2 * coord_b = 0 (assembly constant) within solver drift.
         let c = (ta + 2.0 * tb).abs();

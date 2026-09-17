@@ -105,7 +105,7 @@ use std::collections::BTreeSet;
 use std::f32::consts::{PI, TAU};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
-use crate::distance::{ShapeRef, cast_shape, shape_distance};
+use crate::distance::{ShapeRef, box_box_signed_gap, cast_shape, shape_distance};
 use crate::engine::joints::{hinge_twist, quat_twist};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::joint::{AxisConfig, JointHandle, JointKind};
@@ -500,69 +500,6 @@ fn box_corners(shape: &Shape) -> Vec<Vec3> {
 /// Whether the pair may ever produce force (layer/mask mutual filter).
 fn pair_allowed(a: &RigidBody, b: &RigidBody) -> bool {
     (a.collision_layer & b.collision_mask) != 0 && (b.collision_layer & a.collision_mask) != 0
-}
-
-/// Signed gap between two oriented boxes (SAT, 15 axes): positive =
-/// separation, negative = -penetration depth. The vertex/face `obb_obb`
-/// oracle is UNSIGNED (overlap bottoms out at zero witness distance, and
-/// shallow burial even reads back as growing separation), so it cannot
-/// drive creation or touch gates for box pairs — a fast body band-skips
-/// from "no pair" into "deep pair with fresh penalties" and tunnels, and
-/// buried pairs flip to the separated path. Every other shape arm in
-/// `shape_distance` is already signed (sphere/capsule core arithmetic,
-/// GJK+EPA), so only Box-Box needs this. Fixed axis order, no early-out:
-/// the max over all axes is order-independent anyway.
-fn box_box_signed_gap(
-    a_pos: Vec3,
-    a_rot: Quat,
-    ha: Vec3,
-    b_pos: Vec3,
-    b_rot: Quat,
-    hb: Vec3,
-) -> f32 {
-    let ra = Mat3::from_quat(a_rot);
-    let rb = Mat3::from_quat(b_rot);
-    let delta = b_pos - a_pos;
-    let mut axes = [Vec3::ZERO; 15];
-    axes[0] = ra.x_axis;
-    axes[1] = ra.y_axis;
-    axes[2] = ra.z_axis;
-    axes[3] = rb.x_axis;
-    axes[4] = rb.y_axis;
-    axes[5] = rb.z_axis;
-    let mut n = 6;
-    for i in 0..3 {
-        let a = [ra.x_axis, ra.y_axis, ra.z_axis][i];
-        for j in 0..3 {
-            let b = [rb.x_axis, rb.y_axis, rb.z_axis][j];
-            let c = a.cross(b);
-            // Parallel face axes: the cross is degenerate and carries no
-            // information (face axes already cover it).
-            axes[n] = if c.length_squared() > 1e-12 {
-                c.normalize()
-            } else {
-                Vec3::ZERO
-            };
-            n += 1;
-        }
-    }
-    let mut signed = f32::NEG_INFINITY;
-    for ax in axes {
-        if ax == Vec3::ZERO {
-            continue;
-        }
-        let r_a = ha.x * ax.dot(ra.x_axis).abs()
-            + ha.y * ax.dot(ra.y_axis).abs()
-            + ha.z * ax.dot(ra.z_axis).abs();
-        let r_b = hb.x * ax.dot(rb.x_axis).abs()
-            + hb.y * ax.dot(rb.y_axis).abs()
-            + hb.z * ax.dot(rb.z_axis).abs();
-        let s = delta.dot(ax).abs() - r_a - r_b;
-        if s > signed {
-            signed = s;
-        }
-    }
-    signed
 }
 
 /// Smallest shape dimension (builtin TOI parity): a body whose step
@@ -1379,6 +1316,12 @@ impl AvbdEngine {
             });
         }
         let mut normal = d.point_a - d.point_b;
+        // Penetration witnesses point opposite the separating normal. This
+        // also resolves coincident-center containment without relying on
+        // the otherwise ambiguous center-to-center direction.
+        if d.dist < 0.0 {
+            normal = -normal;
+        }
         if normal.length_squared() < 1e-16 {
             normal = a.position - b.position;
         }

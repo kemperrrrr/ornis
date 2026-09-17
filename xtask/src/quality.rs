@@ -7,6 +7,8 @@
 
 #[path = "quality_diagnostics.rs"]
 mod diagnostics;
+#[path = "quality_smoke.rs"]
+mod smoke;
 
 use std::path::Path;
 use std::process::{exit, Command};
@@ -247,7 +249,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
                     let regressed = quality_regressed || findings_regressed || violations_regressed;
                     if regressed {
                         if ci_annotations() {
-                            diagnostics::attachment("rustqual-current", &cur_s);
+                            diagnostics::attachment("rustqual-current", &cur_v.to_string());
                             diagnostics::reference_rustqual(stages.root);
                         }
                         let mut reasons = Vec::new();
@@ -955,95 +957,31 @@ fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult
     }
 }
 
-/// Smoke: `cargo run --features editor-only` must compile, bind 127.0.0.1:3420 and stay alive.
-/// ponytail: 90s ceiling — cold CI-cache-miss cargo build dominates (cargo run includes compile).
-/// Poll TcpStream every 300ms, no curl/timeout dep; collect child stderr on timeout for diagnostics.
+/// Compile separately so cold-build time is not confused with app readiness.
+/// Startup still has the same 90-second deadline and must leave a live server.
 fn smoke_stage(stages: &mut StageList<'_>) {
-    use std::net::TcpStream;
-    use std::time::{Duration, Instant};
     stages.n += 1;
-    let (idx, total) = (stages.n, stages.total);
-    let name = "smoke (editor-only)";
-    let desc = "cargo run --features editor-only (bind 127.0.0.1:3420, 90s)";
-    eprintln!();
-    eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
-    let mut child = match Command::new("cargo")
-        .args(["run", "--features", "editor-only"])
-        .current_dir(stages.root)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let r = StageResult {
-                name: name.into(),
-                status: Status::Fail,
-                note: format!("spawn: {e}"),
-            };
-            eprintln!("── {name}: FAIL (spawn: {e}) ──");
-            stages.results.push(r);
-            return;
+    eprintln!(
+        "═══ [{}/{}] smoke (editor-only): build + 90s readiness ═══",
+        stages.n, stages.total
+    );
+    let (status, note) = match smoke::check(stages.root) {
+        Ok(()) => (Status::Pass, String::new()),
+        Err(log) => {
+            annotate_stage_failure("smoke", &log);
+            eprintln!("{log}");
+            (
+                Status::Fail,
+                log.lines().next().unwrap_or("smoke failed").to_string(),
+            )
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(90);
-    let mut ok = false;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().ok().flatten() {
-            // Child exited before binding — drain stderr for the real error.
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut s| {
-                    use std::io::Read;
-                    let mut buf = vec![0u8; 4096];
-                    let n = s.read(&mut buf).unwrap_or(0);
-                    String::from_utf8_lossy(&buf[..n]).into_owned()
-                })
-                .unwrap_or_default();
-            let note = if stderr.trim().is_empty() {
-                format!("exited early: {status}")
-            } else {
-                let tail = stderr.lines().last().unwrap_or("").trim();
-                format!("exited early: {status} — {tail}")
-            };
-            eprintln!("── {name}: FAIL ({note}) ──");
-            stages.results.push(StageResult {
-                name: name.into(),
-                status: Status::Fail,
-                note,
-            });
-            return;
-        }
-        if TcpStream::connect("127.0.0.1:3420").is_ok() {
-            ok = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    // Give OS time to release port for next run.
-    std::thread::sleep(Duration::from_millis(200));
-    if ok {
-        eprintln!("── {name}: PASS ──");
-        stages.results.push(StageResult {
-            name: name.into(),
-            status: Status::Pass,
-            note: String::new(),
-        });
-    } else {
-        let note = "timeout 90s: 127.0.0.1:3420 not reachable".to_string();
-        eprintln!("── {name}: FAIL ({note}) ──");
-        if ci_annotations() {
-            annotate(format!("quality-{}", name.replace(' ', "-")), &note);
-        }
-        stages.results.push(StageResult {
-            name: name.into(),
-            status: Status::Fail,
-            note,
-        });
-    }
+    eprintln!("── smoke (editor-only): {} ──", status.label());
+    stages.results.push(StageResult {
+        name: "smoke (editor-only)".into(),
+        status,
+        note,
+    });
 }
 
 /// Whether the wasm32-unknown-unknown target is installed for the

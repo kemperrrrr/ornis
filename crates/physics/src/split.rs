@@ -430,8 +430,8 @@ impl SplitState {
             .collect();
         for a in 0..n {
             let Some(aa) = &bounds[a] else { continue };
-            for b in a + 1..n {
-                let Some(bb) = &bounds[b] else { continue };
+            for (b, bound) in bounds.iter().enumerate().skip(a + 1) {
+                let Some(bb) = bound else { continue };
                 let (x, y) = (&self.bodies[a].body, &self.bodies[b].body);
                 if x.collision_layer & y.collision_mask != 0
                     && y.collision_layer & x.collision_mask != 0
