@@ -191,7 +191,9 @@ uses full side lengths (fixing a factor-of-four error); fracture preserves the
 rigid velocity field, and contained/crossing primitive queries keep signed
 overlap rather than reporting false separation. Joint sleep also requires a small
 constraint residual; limit reactions unwind before deactivation, and CCD hits
-are recorded before velocity clamping so fracture cannot lose them. CI builds use two compiler
+are recorded before velocity clamping so fracture cannot lose them. GPU
+layout constants are now shared named items rather than exponentially nested
+expressions, so wide GPU contact buffers can compile within bounded resources. CI builds use two compiler
 jobs and line-table debug info (debug assertions stay enabled).
 
 ### Не начато

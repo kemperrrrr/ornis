@@ -363,6 +363,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut decl_lines: Vec<String> = Vec::new();
     let mut field_names: Vec<String> = Vec::new();
     let mut offset_asserts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut layout_consts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut nested: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut naga_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut naga_members: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -371,7 +372,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut saw_skip = false;
     let mut member_idx = 0usize;
 
-    for field in &named.named {
+    for (field_index, field) in named.named.iter().enumerate() {
         let ident = field.ident.as_ref().expect("named field");
         let opts = match field_opts(&field.attrs) {
             Ok(opts) => opts,
@@ -408,13 +409,28 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         let size = &layout.size;
         let align = &layout.align;
+        let start_const = quote::format_ident!("__ORNIS_WGSL_START_{}", field_index);
+        let end_const = quote::format_ident!("__ORNIS_WGSL_END_{}", field_index);
+        let align_const = quote::format_ident!("__ORNIS_WGSL_ALIGN_{}", field_index);
         if opts.skip {
-            offset_asserts.push(quote! {
-                const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #off) as usize];
+            layout_consts.push(quote! {
+                const #start_const: usize = #off;
+                const #end_const: usize = #name::#start_const + #size;
             });
-            off = quote! { (#off + #size) };
+            offset_asserts.push(quote! {
+                const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #name::#start_const) as usize];
+            });
+            off = quote! { #name::#end_const };
         } else {
-            off = quote! { (#off.div_ceil(#align) * #align) };
+            layout_consts.push(quote! {
+                const #start_const: usize = #off.div_ceil(#align) * #align;
+                const #end_const: usize = #name::#start_const + #size;
+                const #align_const: usize = {
+                    let previous = #max_align;
+                    if previous > #align { previous } else { #align }
+                };
+            });
+            off = quote! { #name::#start_const };
             offset_asserts.push(quote! {
                 const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #off) as usize];
             });
@@ -544,8 +560,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     offset: (#member_off) as u32,
                 }
             });
-            off = quote! { (#off + #size) };
-            max_align = quote! { if #max_align > #align { #max_align } else { #align } };
+            // References, not recursively substituted expressions: duplicating
+            // the previous max twice per field grows as 2^N on wide GPU structs.
+            off = quote! { #name::#end_const };
+            max_align = quote! { #name::#align_const };
         }
     }
     let stride = quote! { (#off.div_ceil(#max_align) * #max_align) };
@@ -564,6 +582,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl #name {
+            #(#layout_consts)*
+
             /// The WGSL struct declaration generated from this Rust layout.
             ///
             /// The field list is the single source of truth for the GPU
