@@ -5,6 +5,9 @@
 //! the run continues after a failed stage and prints a summary table at
 //! the end; the exit code is 1 if any stage FAILs.
 
+#[path = "quality_diagnostics.rs"]
+mod diagnostics;
+
 use std::path::Path;
 use std::process::{exit, Command};
 
@@ -243,6 +246,10 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
                     );
                     let regressed = quality_regressed || findings_regressed || violations_regressed;
                     if regressed {
+                        if ci_annotations() {
+                            diagnostics::attachment("rustqual-current", &cur_s);
+                            diagnostics::reference_rustqual(stages.root);
+                        }
                         let mut reasons = Vec::new();
                         if quality_regressed {
                             reasons.push(format!("quality {base_q:.4}→{cur_q:.4}"));
@@ -766,6 +773,13 @@ fn annotate_stage_failure(name: &str, log: &str) {
     // CI sets CARGO_TERM_COLOR=always: strip ANSI codes before matching,
     // otherwise colored diagnostics break the prefix checks below.
     let clean = strip_ansi(log);
+    // Preserve full failure context independently of short UI annotations
+    // and post-failure workflow steps (which a stopped runner may not run).
+    let mut tail = clean.len().saturating_sub(120_000);
+    while !clean.is_char_boundary(tail) {
+        tail += 1;
+    }
+    diagnostics::attachment(&format!("stage-{}", name.replace(' ', "-")), &clean[tail..]);
     let is_match = |l: &str| {
         let t = l.trim_start();
         let lower = t.to_ascii_lowercase();

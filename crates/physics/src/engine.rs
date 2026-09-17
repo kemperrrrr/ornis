@@ -2406,11 +2406,6 @@ impl BuiltinPhysicsEngine {
         self.trigger_pairs = state.triggers.into_iter().collect();
     }
 
-    /// Number of live joints in dense handle order.
-    pub(crate) fn joint_count(&self) -> usize {
-        self.joints.len()
-    }
-
     /// Physical joint state in handle order, independent of warm impulses.
     pub(crate) fn joint_snapshots(&self) -> Vec<JointSnapshot> {
         self.joints
