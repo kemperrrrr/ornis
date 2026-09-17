@@ -441,6 +441,11 @@ mod tests {
                 segments,
                 rings,
             } => crate::mesh::create_sphere(&device, *radius, *segments, *rings),
+            // The golden probe renders Sphere-only scenes; Custom soups
+            // have no upload path here yet.
+            crate::scene::MeshDesc::Custom { .. } => {
+                panic!("Custom mesh not supported by this probe")
+            }
         };
         let mut materials = Vec::new();
         let mut instances = Vec::new();

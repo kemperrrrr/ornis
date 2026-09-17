@@ -217,6 +217,43 @@ Deferred/Forward hybrid рендер и B1-R7 уже реализованы; п�
 План миграции и целевая архитектура:
 [`docs/rendering/rust-to-wgsl-architecture.md`](docs/rendering/rust-to-wgsl-architecture.md).
 
+### h. Runtime mesh editing — `MeshData` (решение 2026-09-16, реализовано 2026-09-17)
+
+Ядро портировать не надо: `manifold-rust` (чистый Rust-порт Manifold,
+crates.io, Apache-2.0 — разрешён `deny.toml` без исключений) уже даёт
+booleans / `extrude` / `revolve` / `level_set`. Объём работ — только
+Ornis-сторона. Решения: имя канонического типа — `MeshData` (не `CpuMesh`:
+ложная симметрия с `GpuMesh`; `TriMesh` занят физикой); scope первой
+итерации — полный редактор (booleans + экструд, фаска, subdivision);
+реалтайм — честный (каждый кадр когерентный preview ≤0.5–1 мс, точный
+boolean сходится фоном за N кадров, подмена по `seq`).
+
+✅ Реализовано (проверено: `cargo test -p ornis-mesh-editor` 19/19,
+`clippy --all-targets -D warnings` чисто, `fmt --check` чисто;
+`cargo test -p ornis-render` зелёный, старый `scene.ron` грузится):
+1. Крейт `crates/mesh-editor` (+ `members` в workspace): `MeshData`
+   (валидация + `unit_box`/`from_positions`/`with_computed_normals`),
+   мост ↔ `MeshGL` (f32, weld/`merge`, CCW, проверка `status()`),
+   `EditOp`/`BooleanKind`, `MeshDirty`-флаги, `EditableMesh`
+   (transform O(n) / extrude с боковыми стенками / midpoint-subdivide /
+   commit-cancel), `ExactWorker` (dedicated thread, newest-wins `seq`,
+   boolean + BevelAll через Minkowski-сумму со сферой — скругление всех
+   рёбер с ростом габаритов на `r`), `FrameStats`,
+   `to_physics_arrays` под `TriMesh::from_indexed`. Ядро без `wgpu`.
+   Фаски 3D в ядре нет (только 2D `offset`), subdivision — midpoint.
+2. `crates/render/src/mesh_upload.rs`: `to_vertices` (чистая, тесты) +
+   `upload_mesh_data` (Result, без паники); тангенс — ортогональный
+   фолбэк (`any_orthonormal_vector`, не MikkTSpace — в доках).
+   Ребро одностороннее render→mesh-editor, цикла нет.
+3. `MeshDesc::Custom { positions, indices }` (additive, старые файлы
+   грузятся): парсинг-тесты в `wasm/scene_api.rs`, `editor-backend`
+   менять не пришлось (generic `set_component`). В `extract_render_data`
+   Custom пока скипается — общего per-entity GPU-upload супов нет.
+4. In-crate provenance в `mesh-editor/src/lib.rs`; `///`/`//!` везде.
+Открыто: per-entity Custom в `RenderMesh` (сейчас общий `GpuMesh` —
+сфера), трединг exact (один thread vs пул), undo (опсы vs снапшоты),
+бюджет рефита коллайдера, критерий подмены exact.
+
 ### g. Unified Scheduler (IDEAS §28, долгосрочно)
 
 Эволюция render graph в «третий путь» (scheduler как у Bevy + lifetime/aliasing
@@ -657,6 +694,22 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   Hard parts: владение телами движками (хендлы, удаление рвёт джойнты),
   общая детекция коллизий между движками, налог coupling в метрике.
   Детерминизм — канонический порядок склейки, как в scheduler narrowphase.
+  **Дизайн 2026-09-16 (спайки 001–004, `spikes/`):** роутинг по ОСТРОВАМ,
+  а не по телам — контактная компонента всегда шагает в одном солвере,
+  cross-пар нет как класса (001 доказал, что staggered kinematic-зеркала
+  бульдозят: тихий side-eject; односторонний coupling без переноса веса).
+  Фиксированный глобальный реестр (стабильные хендлы, Newton-style
+  global↔local), миграция rebuild-ом из снапшота с восстановлением
+  mass model (зомби-правило: спящий снапшот несёт inv_mass=0; M2
+  `bodies_snapshot` это уже делает), статика живёт в обоих движках
+  нативно, джойнты пинят остров (концы всегда в одном солвере —
+  cross-joint rows не нужны), гистерезис unanimous-calm→Builtin /
+  immediate-wake→AVBD (003: 19 rebuild за 900 шагов/10 циклов, треша
+  нет), покой инвариантен к начальному роутингу (004). Host-правки в
+  спящий движок виснут (нужен явный wake-трек в `Engine::step`).
+  Налог coupling — счётчик миграций + per-solver тайминги в метрику.
+  Вне скоупа v1: cross-solver joints, разные частоты сабстепов,
+  O(n²) cross-AABB для больших сцен (v1 наивно, только cross-пары).
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

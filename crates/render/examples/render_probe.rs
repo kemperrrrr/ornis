@@ -136,6 +136,9 @@ fn build_scene_data(
             segments,
             rings,
         } => ornis_render::create_sphere(device, *radius, *segments, *rings),
+        // This probe renders Sphere-only scenes; Custom soups have no
+        // upload path here yet.
+        MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),
     };
     println!(
         "mesh: {} vertices, {} indices",

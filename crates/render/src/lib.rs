@@ -21,6 +21,8 @@ pub mod frame_passes;
 pub mod gpu_resources;
 /// GPU mesh representation and primitive generation.
 pub mod mesh;
+/// Upload of `ornis-mesh-editor` mesh data to the GPU.
+pub mod mesh_upload;
 /// Backend-neutral rendering trait plus its factory.
 pub mod render_backend;
 /// The deferred [`renderer::Renderer3D`] and its passes.
@@ -47,6 +49,7 @@ pub use extraction::{
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};
+pub use mesh_upload::{UploadError, to_vertices, upload_mesh_data};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Unified explicit-ordering edge error (Phase A, audit §4.2); the same type
 /// `ornis_core` re-exports for systems.

@@ -493,6 +493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipper2-rust"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fd663fe209e7030c956e3be4c051dcc20cdb73da794f31466762cff12ca11bf"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -780,6 +789,38 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
+]
+
+[[package]]
+name = "dashu-base"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a64b04cdfc4c8533100fe00304eb9687173bda47b1f1dac8af12ba13712ed49d"
+
+[[package]]
+name = "dashu-int"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6ee98721d5d223e5b64b642dd9588b79d9ef415554b13720308b77d628c3be6"
+dependencies = [
+ "cfg-if",
+ "dashu-base",
+ "num-modular",
+ "num-traits",
+ "rustversion",
+ "static_assertions",
+]
+
+[[package]]
+name = "dashu-ratio"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "727613e0312d442301147d9e45eb2e7c2797230fc6d223a2c51ecf0e98dfeb5e"
+dependencies = [
+ "dashu-base",
+ "dashu-int",
+ "num-traits",
+ "rustversion",
 ]
 
 [[package]]
@@ -1651,6 +1692,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "manifold-rust"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "895f10126b206ed4e9427f337e3a6d1c586ce7c9cd76c0ac8bca83a4f5f9eb7c"
+dependencies = [
+ "clipper2-rust",
+ "dashu-int",
+ "dashu-ratio",
+ "num-traits",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
 name = "manyhow"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1946,6 +2000,12 @@ dependencies = [
  "num-integer",
  "num-traits",
 ]
+
+[[package]]
+name = "num-modular"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd8e500409e6cd603b03e477c26a6caecdc27ac58979a53e881c75eafc079f44"
 
 [[package]]
 name = "num-rational"
@@ -2497,6 +2557,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-mesh-editor"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "manifold-rust",
+]
+
+[[package]]
 name = "ornis-physics"
 version = "0.1.0"
 dependencies = [
@@ -2532,6 +2600,7 @@ dependencies = [
  "naga",
  "ornis-core",
  "ornis-macros",
+ "ornis-mesh-editor",
  "ornis-schedule",
  "ornis-shader-lang",
  "png",

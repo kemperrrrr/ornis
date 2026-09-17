@@ -209,10 +209,68 @@ mod tests {
         ));
         // Radii differ between entities — the GPU builder must not assume a
         // single shared radius.
-        let MeshDesc::Sphere { radius: r0, .. } = live.scene.entities[0].mesh;
-        let MeshDesc::Sphere { radius: r1, .. } = live.scene.entities[1].mesh;
+        let (r0, r1) = match (&live.scene.entities[0].mesh, &live.scene.entities[1].mesh) {
+            (MeshDesc::Sphere { radius: r0, .. }, MeshDesc::Sphere { radius: r1, .. }) => {
+                (*r0, *r1)
+            }
+            (a, b) => panic!("expected spheres, got {a:?} and {b:?}"),
+        };
         assert!((r0 - 2.0).abs() < f32::EPSILON);
         assert!((r1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parses_custom_mesh_variant() {
+        let json = r#"{
+            "version": 2,
+            "entities": [{
+                "components": {
+                    "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                    "Mesh": {"Custom": {"positions": [[0,0,0],[1,0,0],[0,1,0]], "indices": [0,1,2]}},
+                    "Material": {"Dielectric": {"base_color":[1,1,1],"roughness":0.5}}
+                }
+            }],
+            "lights": [],
+            "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}
+        }"#;
+        let live = parse_scene_json(json).expect("Custom mesh must parse");
+        let MeshDesc::Custom { positions, indices } = &live.scene.entities[0].mesh else {
+            panic!(
+                "expected Custom mesh, got {:?}",
+                live.scene.entities[0].mesh
+            );
+        };
+        assert_eq!(positions.len(), 3);
+        assert_eq!(*indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn custom_mesh_with_bad_indices_still_parses() {
+        // Shape checks live in mesh-editor validation, not in the scene
+        // transport: the scene must parse even when `indices` is not a
+        // multiple of 3 (the exact condition `MeshData::validate`
+        // rejects with `IndexCountNotMultipleOfThree`).
+        let json = r#"{
+            "version": 2,
+            "entities": [{
+                "components": {
+                    "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                    "Mesh": {"Custom": {"positions": [[0,0,0],[1,0,0],[0,1,0]], "indices": [0,1]}},
+                    "Material": {"Dielectric": {"base_color":[1,1,1],"roughness":0.5}}
+                }
+            }],
+            "lights": [],
+            "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}
+        }"#;
+        let live = parse_scene_json(json).expect("transport must not shape-check");
+        let MeshDesc::Custom { positions, indices } = &live.scene.entities[0].mesh else {
+            panic!(
+                "expected Custom mesh, got {:?}",
+                live.scene.entities[0].mesh
+            );
+        };
+        assert_eq!(positions.len(), 3);
+        assert!(!indices.len().is_multiple_of(3));
     }
 
     #[test]

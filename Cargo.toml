@@ -16,6 +16,7 @@ members = [
     "crates/rhai",
     "crates/rune",
     "crates/python",
+    "crates/mesh-editor",
     "xtask",
 ]
 # Vendored upstream crates (patched via [patch.crates-io] below) are NOT
