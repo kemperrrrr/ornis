@@ -601,10 +601,8 @@ mod tests {
         const MAX_UNMATCHED: usize = 64;
         assert_eq!(pixels.len(), gold_pixels.len());
         let row = W as usize;
-        let pixel_at = |buf: &[u8], x: usize, y: usize| {
-            let o = (y * row + x) * bpp as usize;
-            &buf[o..o + bpp as usize]
-        };
+        let ch = bpp as usize;
+        let off = |x: usize, y: usize| (y * row + x) * ch;
         let within_tol = |pix: &[u8], gold: &[u8]| -> bool {
             pix.iter()
                 .zip(gold.iter())
@@ -619,8 +617,8 @@ mod tests {
         let mut first_unmatched: Vec<(usize, usize, Vec<u8>, Vec<u8>)> = Vec::new();
         for y in 0..H as usize {
             for x in 0..W as usize {
-                let pix = pixel_at(&pixels, x, y);
-                if within_tol(pix, pixel_at(&gold_pixels, x, y)) {
+                let pix = &pixels[off(x, y)..off(x, y) + ch];
+                if within_tol(pix, &gold_pixels[off(x, y)..off(x, y) + ch]) {
                     continue;
                 }
                 let x_lo = x.saturating_sub(1);
@@ -628,7 +626,9 @@ mod tests {
                 let y_lo = y.saturating_sub(1);
                 let y_hi = (y + 1).min(H as usize - 1);
                 let shifted = (y_lo..=y_hi).any(|yy| {
-                    (x_lo..=x_hi).any(|xx| within_tol(pix, pixel_at(&gold_pixels, xx, yy)))
+                    (x_lo..=x_hi).any(|xx| {
+                        within_tol(pix, &gold_pixels[off(xx, yy)..off(xx, yy) + ch])
+                    })
                 });
                 if shifted {
                     shifted_matches += 1;
@@ -639,7 +639,7 @@ mod tests {
                             x,
                             y,
                             pix.to_vec(),
-                            pixel_at(&gold_pixels, x, y).to_vec(),
+                            gold_pixels[off(x, y)..off(x, y) + ch].to_vec(),
                         ));
                     }
                 }
