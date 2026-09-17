@@ -614,16 +614,10 @@ impl<'a> FrameState<'a> {
             self.mesh = gpu.mesh;
             self.mesh_params = gpu.mesh_params;
         }
-        self.renderer.upload_materials(
-            &self.device,
-            &self.queue,
-            &gpu.extracted.materials,
-        );
-        self.renderer.upload_instances(
-            &self.device,
-            &self.queue,
-            &gpu.extracted.instances,
-        );
+        self.renderer
+            .upload_materials(&self.device, &self.queue, &gpu.extracted.materials);
+        self.renderer
+            .upload_instances(&self.device, &self.queue, &gpu.extracted.instances);
         self.renderer
             .set_lights(&self.queue, live.scene.ambient, &gpu.lights);
         self.instance_count = gpu.extracted.instances.len() as u32;
@@ -863,16 +857,8 @@ fn spawn_render_loop(
     gpu_scene: GpuScene,
     initial_version: u64,
 ) -> Result<(), JsValue> {
-    renderer.upload_materials(
-        &ctx.device,
-        &ctx.queue,
-        &gpu_scene.extracted.materials,
-    );
-    renderer.upload_instances(
-        &ctx.device,
-        &ctx.queue,
-        &gpu_scene.extracted.instances,
-    );
+    renderer.upload_materials(&ctx.device, &ctx.queue, &gpu_scene.extracted.materials);
+    renderer.upload_instances(&ctx.device, &ctx.queue, &gpu_scene.extracted.instances);
     renderer.set_lights(&ctx.queue, gpu_scene.ambient, &gpu_scene.lights);
 
     let applied_version = Rc::new(Cell::new(initial_version));

@@ -1,0 +1,13 @@
+[package]
+name = "ornis-mesh-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = "0.33"
+manifold-rust = "0.13"
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@ naga = { version = "30", features = ["wgsl-out"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 ornis-core = { path = "../core" }
+ornis-mesh-editor = { path = "../mesh-editor" }
 ornis-macros = { path = "../macros" }
 # Phase A (audit §7): shared engine for levels/edges/OrderError.
 ornis-schedule = { path = "../schedule" }

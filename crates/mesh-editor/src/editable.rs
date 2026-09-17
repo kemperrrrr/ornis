@@ -1,0 +1,304 @@
+//! Interactive preview mesh: cheap edits applied every frame.
+//!
+//! [`EditableMesh`] keeps the committed `base` plus an optional `preview`
+//! copy. Preview ops (transform, extrude, subdivide) run incrementally on
+//! the CPU inside the frame budget; exact ops (boolean, full bevel) run on
+//! [`crate::ExactWorker`] and land via [`EditableMesh::commit`]/`cancel`.
+
+use std::collections::HashMap;
+use std::time::Instant;
+
+/// Base mesh plus optional in-progress preview and dirty tracking.
+#[derive(Debug)]
+pub struct EditableMesh {
+    /// Last committed (exact) version.
+    pub base: crate::MeshData,
+    /// Working copy shown while an edit is in flight.
+    pub preview: Option<crate::MeshData>,
+    /// Sequence of the current preview (bumped per preview op).
+    pub preview_seq: u64,
+    /// Sequence of the last committed base.
+    pub base_seq: u64,
+    /// What changed since the last GPU upload.
+    pub dirty: crate::MeshDirty,
+    /// Frame-budget telemetry of the split.
+    pub stats: crate::FrameStats,
+}
+
+impl EditableMesh {
+    /// Wrap a committed mesh with no pending preview.
+    pub fn new(base: crate::MeshData) -> Self {
+        Self {
+            base,
+            preview: None,
+            preview_seq: 0,
+            base_seq: 0,
+            dirty: crate::MeshDirty::new(),
+            stats: crate::FrameStats::default(),
+        }
+    }
+
+    /// Currently displayed mesh: preview when present, else base.
+    pub fn view(&self) -> &crate::MeshData {
+        self.preview.as_ref().unwrap_or(&self.base)
+    }
+
+    /// Apply a rigid transform incrementally (`O(n)` over vertices).
+    ///
+    /// Positions go through the full matrix, normals through its rotation
+    /// part only (translation-free, renormalized).
+    pub fn apply_transform(&mut self, matrix: glam::Mat4) {
+        let started = Instant::now();
+        let mesh = self.preview_or_clone();
+        let rotation = glam::Mat3::from_mat4(matrix);
+        for (p, n) in mesh.positions.iter_mut().zip(mesh.normals.iter_mut()) {
+            let v = matrix.transform_point3(glam::Vec3::new(p[0], p[1], p[2]));
+            *p = [v.x, v.y, v.z];
+            let w = rotation * glam::Vec3::new(n[0], n[1], n[2]);
+            let w = w.normalize_or_zero();
+            *n = [w.x, w.y, w.z];
+        }
+        self.finish_preview(
+            crate::MeshDirty::VERTS | crate::MeshDirty::NORMALS,
+            &[],
+            started,
+        );
+    }
+
+    /// Push faces along their face normals, building side walls.
+    ///
+    /// Each extruded face is duplicated (new vertices shifted by
+    /// `depth` along the face normal) and stitched to the original loop
+    /// with side-wall quads, so the result stays a closed shell.
+    pub fn apply_extrude(&mut self, faces: &[u32], depth: f32) {
+        let started = Instant::now();
+        let mesh = self.preview_or_clone();
+        let tri_count = mesh.triangle_count();
+        let mut affected: Vec<u32> = Vec::new();
+        for &f in faces {
+            let f = f as usize;
+            if f >= tri_count {
+                continue;
+            }
+            let [a, b, c] = [
+                mesh.indices[3 * f],
+                mesh.indices[3 * f + 1],
+                mesh.indices[3 * f + 2],
+            ];
+            let normal = face_normal(mesh, a, b, c);
+            // Duplicate the loop, shifted along the face normal.
+            let mut loop_new = [0u32; 3];
+            for (k, v) in [a, b, c].iter().enumerate() {
+                let p = mesh.positions[*v as usize];
+                mesh.positions.push([
+                    p[0] + normal[0] * depth,
+                    p[1] + normal[1] * depth,
+                    p[2] + normal[2] * depth,
+                ]);
+                mesh.normals.push(mesh.normals[*v as usize]);
+                mesh.uvs.push(mesh.uvs[*v as usize]);
+                loop_new[k] = mesh.positions.len() as u32 - 1;
+            }
+            // Cap becomes the shifted loop.
+            mesh.indices[3 * f..3 * f + 3].copy_from_slice(&loop_new);
+            // Side walls: one quad (two triangles) per loop edge.
+            let old = [a, b, c];
+            for e in 0..3 {
+                let o0 = old[e];
+                let o1 = old[(e + 1) % 3];
+                let n0 = loop_new[e];
+                let n1 = loop_new[(e + 1) % 3];
+                affected.push(mesh.triangle_count() as u32);
+                mesh.indices.extend([o0, o1, n1, o0, n1, n0]);
+            }
+            affected.push(f as u32);
+        }
+        crate::recompute_normals(mesh, None);
+        self.finish_preview(
+            crate::MeshDirty::TOPO | crate::MeshDirty::NORMALS,
+            &affected,
+            started,
+        );
+    }
+
+    /// Midpoint subdivision: every triangle becomes 4 per level.
+    ///
+    /// Edge midpoints are deduplicated through a hash map so shared edges
+    /// stay welded; shading normals are rebuilt afterwards.
+    pub fn apply_subdivide(&mut self, levels: u32) {
+        let started = Instant::now();
+        let mut affected: Vec<u32> = Vec::new();
+        for _ in 0..levels {
+            let mesh = self.preview_or_clone();
+            let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
+            let mut new_indices = Vec::with_capacity(mesh.indices.len() * 4);
+            let tris = mesh.triangle_count();
+            for f in 0..tris {
+                let [a, b, c] = [
+                    mesh.indices[3 * f],
+                    mesh.indices[3 * f + 1],
+                    mesh.indices[3 * f + 2],
+                ];
+                let mab = midpoint_vertex(mesh, &mut midpoints, a, b);
+                let mbc = midpoint_vertex(mesh, &mut midpoints, b, c);
+                let mca = midpoint_vertex(mesh, &mut midpoints, c, a);
+                new_indices.extend([a, mab, mca, mab, b, mbc, mca, mbc, c, mab, mbc, mca]);
+            }
+            mesh.indices = new_indices;
+            crate::recompute_normals(mesh, None);
+            affected.extend(0..mesh.triangle_count() as u32);
+        }
+        self.finish_preview(
+            crate::MeshDirty::TOPO | crate::MeshDirty::NORMALS,
+            &affected,
+            started,
+        );
+    }
+
+    /// Accept the preview as the new base version.
+    pub fn commit(&mut self) {
+        if let Some(mesh) = self.preview.take() {
+            self.base = mesh;
+            self.base_seq = self.preview_seq;
+        }
+        self.dirty.clear();
+        self.refresh_stats();
+    }
+
+    /// Drop the preview, keep the base version.
+    pub fn cancel(&mut self) {
+        self.preview = None;
+        self.dirty.clear();
+        self.refresh_stats();
+    }
+
+    /// Preview working copy, cloning the base on first edit of a session.
+    fn preview_or_clone(&mut self) -> &mut crate::MeshData {
+        if self.preview.is_none() {
+            self.preview = Some(self.base.clone());
+        }
+        self.preview.as_mut().expect("preview just created")
+    }
+
+    /// Bump the preview sequence, record dirty flags and frame time.
+    fn finish_preview(&mut self, flags: u8, faces: &[u32], started: Instant) {
+        self.preview_seq += 1;
+        let flags = flags | crate::MeshDirty::GPU_UPLOAD;
+        self.dirty.set(flags, faces);
+        self.refresh_stats();
+        self.stats.preview_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    }
+
+    /// Refresh displayed vertex/triangle counters.
+    fn refresh_stats(&mut self) {
+        let view = self.preview.as_ref().unwrap_or(&self.base);
+        self.stats.verts = view.vertex_count();
+        self.stats.tris = view.triangle_count();
+    }
+}
+
+/// Unit face normal of triangle (`a`, `b`, `c`).
+fn face_normal(mesh: &crate::MeshData, a: u32, b: u32, c: u32) -> [f32; 3] {
+    let pa = mesh.positions[a as usize];
+    let pb = mesh.positions[b as usize];
+    let pc = mesh.positions[c as usize];
+    let ab = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    let ac = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+    let n = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > f32::EPSILON {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
+}
+
+/// Midpoint vertex of edge (`a`, `b`), reused across adjacent triangles.
+fn midpoint_vertex(
+    mesh: &mut crate::MeshData,
+    cache: &mut HashMap<(u32, u32), u32>,
+    a: u32,
+    b: u32,
+) -> u32 {
+    let key = (a.min(b), a.max(b));
+    if let Some(&v) = cache.get(&key) {
+        return v;
+    }
+    let pa = mesh.positions[a as usize];
+    let pb = mesh.positions[b as usize];
+    mesh.positions.push([
+        (pa[0] + pb[0]) * 0.5,
+        (pa[1] + pb[1]) * 0.5,
+        (pa[2] + pb[2]) * 0.5,
+    ]);
+    let na = mesh.normals[a as usize];
+    let nb = mesh.normals[b as usize];
+    mesh.normals.push([
+        (na[0] + nb[0]) * 0.5,
+        (na[1] + nb[1]) * 0.5,
+        (na[2] + nb[2]) * 0.5,
+    ]);
+    let ua = mesh.uvs[a as usize];
+    let ub = mesh.uvs[b as usize];
+    mesh.uvs
+        .push([(ua[0] + ub[0]) * 0.5, (ua[1] + ub[1]) * 0.5]);
+    let v = mesh.positions.len() as u32 - 1;
+    cache.insert(key, v);
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transform_shifts_box() {
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        edit.apply_transform(glam::Mat4::from_translation(glam::Vec3::new(1.0, 0.0, 0.0)));
+        let view = edit.view();
+        assert!(
+            view.positions.iter().all(|p| p[0] >= 0.5 - 1e-5),
+            "box moved +x"
+        );
+        assert!(!edit.dirty.is_clean());
+        edit.commit();
+        assert!(edit.preview.is_none());
+        assert!(edit.dirty.is_clean());
+    }
+
+    #[test]
+    fn subdivide_quadruples_triangles() {
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        let before = edit.view().triangle_count();
+        edit.apply_subdivide(1);
+        assert_eq!(edit.view().triangle_count(), before * 4);
+        edit.cancel();
+        assert_eq!(edit.view().triangle_count(), before);
+    }
+
+    #[test]
+    fn extrude_grows_triangle_count() {
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        let before = edit.view().triangle_count();
+        edit.apply_extrude(&[0], 0.25);
+        assert!(edit.view().triangle_count() > before);
+        assert!(edit.dirty.contains(crate::MeshDirty::TOPO));
+        assert!(edit.dirty.contains(crate::MeshDirty::NORMALS));
+        assert!(!edit.dirty.affected.is_empty());
+    }
+
+    #[test]
+    fn boolean_union_through_bridge() {
+        let a = crate::MeshData::unit_box();
+        let mut b = crate::MeshData::unit_box();
+        for p in &mut b.positions {
+            p[0] += 0.5;
+        }
+        let out = crate::boolean(&a, &b, crate::BooleanKind::Union).expect("union works");
+        assert!(out.triangle_count() > 0);
+    }
+}

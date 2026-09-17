@@ -229,11 +229,18 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
         let Some(material) = materials.get(entity) else {
             continue;
         };
+        // Custom soups have no shared-GPU-mesh upload path yet (the
+        // renderer draws one sphere mesh for all instances) — skip until
+        // per-entity geometry upload lands. Materials stay in lockstep
+        // with instances because both pushes happen below.
         let MeshDesc::Sphere {
             radius,
             segments,
             rings,
-        } = mesh;
+        } = mesh
+        else {
+            continue;
+        };
         extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
         extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
         let model = Mat4::from_scale_rotation_translation(
@@ -275,11 +282,12 @@ pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
         // Complete entities only: all three render components present.
         .filter(|&&entity| meshes.get(entity).is_some() && materials.get(entity).is_some())
         .filter_map(|&entity| meshes.get(entity))
-        .fold(DEFAULT_MESH_PARAMS, |params, mesh| {
-            let MeshDesc::Sphere {
+        .fold(DEFAULT_MESH_PARAMS, |params, mesh| match mesh {
+            MeshDesc::Sphere {
                 segments, rings, ..
-            } = mesh;
-            (params.0.max(*segments), params.1.max(*rings))
+            } => (params.0.max(*segments), params.1.max(*rings)),
+            // Custom soups don't feed the shared sphere tessellation.
+            MeshDesc::Custom { .. } => params,
         })
 }
 

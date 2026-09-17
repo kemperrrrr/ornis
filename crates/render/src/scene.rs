@@ -57,7 +57,17 @@ pub enum MeshDesc {
         /// Latitude divisions (minimum 2 at generation time).
         rings: u32,
     },
-    // Future: Box, Plane, Cylinder, Custom { path: String }
+    /// Inline vertex soup: positions plus a triangle index list.
+    /// Shading normals are NOT stored — recompute them at load (see
+    /// `MeshData::from_positions` + `with_computed_normals` in the mesh
+    /// editor); shape checks also live there, not in the transport.
+    Custom {
+        /// Vertex positions in engine units.
+        positions: Vec<[f32; 3]>,
+        /// Triangle index list (`u32`, triples, CCW from outside).
+        indices: Vec<u32>,
+    },
+    // Future: Box, Plane, Cylinder
 }
 
 /// Material preset mapped onto the engine's OpenPBR surface model.
@@ -274,6 +284,9 @@ Scene(
                 assert_eq!(*segments, 16);
                 assert_eq!(*rings, 8);
             }
+            // New variants must extend this assertion, not break it: old
+            // files stay Sphere-only.
+            other => panic!("expected Sphere, got {other:?}"),
         }
         assert_eq!(scene.entities[0].transform.translation, [1.0, 2.0, 3.0]);
         assert_eq!(scene.entities[0].transform.rotation, [0.0, 0.0, 0.0, 1.0]);
