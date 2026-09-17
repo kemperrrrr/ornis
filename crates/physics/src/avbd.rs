@@ -99,6 +99,8 @@
 #[cfg(test)]
 #[path = "avbd_contact_tests.rs"]
 mod contact_tests;
+#[path = "avbd_sleep.rs"]
+mod sleep;
 
 use glam::{Mat3, Quat, Vec3};
 use std::collections::BTreeSet;
@@ -392,6 +394,21 @@ fn limit_state(value: f32, lo: f32, hi: f32, slop: f32) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// A projected inequality remains active while its multiplier unwinds,
+/// even after the pose re-enters the window. Dropping it immediately is
+/// an artificial bounce/limit cycle, not the augmented update.
+fn warm_limit_state(value: f32, lo: f32, hi: f32, slop: f32, force: f32) -> Option<bool> {
+    limit_state(value, lo, hi, slop).or_else(|| {
+        if force < 0.0 {
+            Some(true)
+        } else if force > 0.0 {
+            Some(false)
+        } else {
+            None
+        }
+    })
 }
 
 /// World-space inertia tensor from a body-frame diagonal and orientation.
@@ -915,8 +932,11 @@ impl AvbdEngine {
     /// host step's last substep (earlier ones only advance state).
     fn step_inner(&mut self, emit: bool) {
         self.ensure_scratch();
+        self.wake_joint_motion();
         self.update_gear_mem();
         let n = self.bodies.len();
+        let event_start = self.contact_events.len();
+        let mut ccd_hits = Vec::new();
         // Consume torques into angular velocity (cleared each step, like the
         // builtin engine); gravity folds into the inertial position below.
         for h in 0..n {
@@ -936,13 +956,17 @@ impl AvbdEngine {
             let torque = std::mem::replace(&mut b.torque, Vec3::ZERO);
             b.angular_velocity += mat3_vec(iw_inv, torque) * DT_STEP;
         }
+        self.motor_impulse();
+        for (velocity, body) in self.pre_vel.iter_mut().zip(&self.bodies) {
+            *velocity = body.velocity;
+        }
         // Continuous clamp (builtin TOI parity, linear only): a dynamic body
         // whose step displacement exceeds half its smallest dimension sweeps
         // `cast_shape` along the motion and clamps to the first hit (+1mm),
         // with a one-shot bounce above the restitution threshold — otherwise
         // thin walls tunnel (10 m/s × 1/60 = 17 cm > 4 cm wall).
         for h in 0..n {
-            if !self.solvable(h) || self.asleep[h] {
+            if !self.solvable(h) || self.asleep[h] || self.bodies[h].is_trigger {
                 continue;
             }
             let disp = self.bodies[h].velocity * DT_STEP;
@@ -962,6 +986,7 @@ impl AvbdEngine {
                 let joined: Vec<usize> = self
                     .joints
                     .iter()
+                    .filter(|j| j.kind != AvbdJointKind::Gear)
                     .filter_map(|j| {
                         if j.a == h {
                             Some(j.b)
@@ -1003,6 +1028,23 @@ impl AvbdEngine {
                 let e = self.bodies[h]
                     .restitution
                     .min(self.bodies[hit.handle].restitution);
+                let approach = -(self.pre_vel[h] - self.pre_vel[hit.handle]).dot(hit.normal);
+                if approach > CONTACT_HIT_THRESHOLD {
+                    let (a, b, normal) = if h < hit.handle {
+                        (h, hit.handle, -hit.normal)
+                    } else {
+                        (hit.handle, h, hit.normal)
+                    };
+                    ccd_hits.push(ContactEvent {
+                        body_a: a,
+                        body_b: b,
+                        kind: ContactEventKind::Hit {
+                            point: hit.point,
+                            normal,
+                            approach_speed: approach,
+                        },
+                    });
+                }
                 let b = &mut self.bodies[h];
                 b.position += disp * frac;
                 let vn = b.velocity.dot(hit.normal);
@@ -1019,9 +1061,7 @@ impl AvbdEngine {
         }
         // Contacts, triggers, and pre-step velocities for hit events.
         let trigger_now = self.generate_pairs();
-        // Deadbeat motor impulses (velocity level, before warmstart — like
-        // the official velocity stage).
-        self.motor_impulse();
+        self.wake_joint_motion();
         // External wake: torques, deadbeat motors and host edits write the
         // velocity fields directly, so a sleeper above thresholds wakes
         // before warmstart (teleports surface next step via BDF1).
@@ -1049,7 +1089,6 @@ impl AvbdEngine {
                 self.pos0[h] = self.bodies[h].position;
                 self.rot0[h] = self.bodies[h].orientation;
             }
-            self.pre_vel[h] = self.bodies[h].velocity;
             if !self.solvable(h) {
                 self.inertial[h] = self.bodies[h].position;
                 self.inertial_rot[h] = self.bodies[h].orientation;
@@ -1140,26 +1179,43 @@ impl AvbdEngine {
             supported[j.a] = true;
             supported[j.b] = true;
         }
+        let joint_ready = self.joint_sleep_ready();
+        let mut freeze = self.asleep.clone();
         for (h, &sup) in supported.iter().enumerate() {
             if !self.solvable(h) || self.asleep[h] {
                 continue;
             }
-            if !sup {
+            if !sup || !joint_ready[h] {
                 self.sleep_timer[h] = 0.0;
                 continue;
             }
             let b = &self.bodies[h];
             if b.velocity.length() < SLEEP_LIN && b.angular_velocity.length() < SLEEP_ANG {
                 self.sleep_timer[h] += DT_STEP;
-                if self.sleep_timer[h] >= SLEEP_TIME {
-                    self.sleep_body(h);
-                }
+                freeze[h] = self.sleep_timer[h] >= SLEEP_TIME;
             } else {
                 self.sleep_timer[h] = 0.0;
             }
         }
+        self.propagate_joint_flags(&mut freeze, false);
+        for (h, freeze) in freeze.into_iter().enumerate() {
+            if freeze && !self.asleep[h] {
+                self.sleep_body(h);
+            }
+        }
         if emit {
             self.emit_events(trigger_now);
+        }
+        // A solved TOI is an impact even when the separated contact shell
+        // never acquired a discrete penetration. Preserve it for fracture.
+        for hit in ccd_hits {
+            if !self.contact_events[event_start..].iter().any(|e| {
+                e.body_a == hit.body_a
+                    && e.body_b == hit.body_b
+                    && matches!(e.kind, ContactEventKind::Hit { .. })
+            }) {
+                self.contact_events.push(hit);
+            }
         }
         // Refresh the driver baseline (end-of-step poses for the next
         // substep's teleport detection).
@@ -2232,7 +2288,9 @@ impl AvbdEngine {
                             }
                             AxisConfig::Limited { min, max } => {
                                 let sep = ((pb - pa) - a.orientation * j.dref).dot(dir);
-                                if let Some(lower) = limit_state(sep, min, max, LIMIT_SLOP_LIN) {
+                                if let Some(lower) =
+                                    warm_limit_state(sep, min, max, LIMIT_SLOP_LIN, j.sacc[i])
+                                {
                                     let c = if lower { sep - min } else { sep - max };
                                     let f_raw = j.pen_l[i] * c + j.sacc[i];
                                     let f = if lower {
@@ -2440,7 +2498,13 @@ impl AvbdEngine {
                             AxisConfig::Limited { min, max } => {
                                 let travel = hinge_twist(a.orientation, b.orientation, *e)
                                     - quat_twist(j.q_ref, *e);
-                                if let Some(lower) = limit_state(travel, min, max, LIMIT_SLOP_ANG) {
+                                if let Some(lower) = warm_limit_state(
+                                    travel,
+                                    min,
+                                    max,
+                                    LIMIT_SLOP_ANG,
+                                    j.sacc[3 + i],
+                                ) {
                                     let c = if lower { travel - min } else { travel - max };
                                     let f_raw = j.pen_a[i] * c + j.sacc[3 + i];
                                     let f = if lower {
@@ -2524,7 +2588,9 @@ impl AvbdEngine {
                     AvbdJointKind::Revolute => {
                         let angle =
                             wrap_pi(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val);
-                        if let Some(lower) = limit_state(angle, lo, hi, LIMIT_SLOP_ANG) {
+                        if let Some(lower) =
+                            warm_limit_state(angle, lo, hi, LIMIT_SLOP_ANG, j.acc_lim)
+                        {
                             let c = if lower { angle - lo } else { angle - hi };
                             let f_raw = j.pen_a[2] * c + j.acc_lim;
                             let f = if lower {
@@ -2548,7 +2614,8 @@ impl AvbdEngine {
                     }
                     AvbdJointKind::Prismatic => {
                         let s = (pb - pa).dot(wa) - j.ref_val;
-                        if let Some(lower) = limit_state(s, lo, hi, LIMIT_SLOP_LIN) {
+                        if let Some(lower) = warm_limit_state(s, lo, hi, LIMIT_SLOP_LIN, j.lim_dual)
+                        {
                             let c = if lower { s - lo } else { s - hi };
                             let f_raw = j.pen_l[2] * c + j.lim_dual;
                             let f = if lower {
@@ -3028,7 +3095,9 @@ impl AvbdEngine {
                             }
                             AxisConfig::Limited { min, max } => {
                                 let sep = ((pb - pa) - a.orientation * j.dref).dot(dir);
-                                if let Some(lower) = limit_state(sep, min, max, LIMIT_SLOP_LIN) {
+                                if let Some(lower) =
+                                    warm_limit_state(sep, min, max, LIMIT_SLOP_LIN, j.sacc[i])
+                                {
                                     let c = if lower { sep - min } else { sep - max };
                                     if c.abs() >= C_EPS {
                                         let f = j.pen_l[i] * c + j.sacc[i];
@@ -3059,7 +3128,13 @@ impl AvbdEngine {
                             AxisConfig::Limited { min, max } => {
                                 let travel = hinge_twist(a.orientation, b.orientation, *e)
                                     - quat_twist(j.q_ref, *e);
-                                if let Some(lower) = limit_state(travel, min, max, LIMIT_SLOP_ANG) {
+                                if let Some(lower) = warm_limit_state(
+                                    travel,
+                                    min,
+                                    max,
+                                    LIMIT_SLOP_ANG,
+                                    j.sacc[3 + i],
+                                ) {
                                     let c = if lower { travel - min } else { travel - max };
                                     if c.abs() >= C_EPS {
                                         let f = j.pen_a[i] * c + j.sacc[3 + i];
@@ -3171,7 +3246,7 @@ impl AvbdEngine {
                     AvbdJointKind::Revolute => {
                         let angle =
                             wrap_pi(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val);
-                        match limit_state(angle, lo, hi, LIMIT_SLOP_ANG) {
+                        match warm_limit_state(angle, lo, hi, LIMIT_SLOP_ANG, j.acc_lim) {
                             Some(lower) => {
                                 let c = if lower { angle - lo } else { angle - hi };
                                 if c.abs() >= C_EPS {
@@ -3191,7 +3266,7 @@ impl AvbdEngine {
                     AvbdJointKind::Prismatic => {
                         let wa = (a.orientation * j.ax_a).normalize_or(Vec3::Z);
                         let s = (pb - pa).dot(wa) - j.ref_val;
-                        match limit_state(s, lo, hi, LIMIT_SLOP_LIN) {
+                        match warm_limit_state(s, lo, hi, LIMIT_SLOP_LIN, j.lim_dual) {
                             Some(lower) => {
                                 let c = if lower { s - lo } else { s - hi };
                                 if c.abs() >= C_EPS {

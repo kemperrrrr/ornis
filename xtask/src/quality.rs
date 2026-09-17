@@ -316,6 +316,49 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // Physics is the active hardening target: fail diagnostically here
+    // before building the unrelated scripting/editor workspace. All original
+    // stages still run and retain their strict failure status.
+    stages.run(
+        "clippy (physics gpu)",
+        "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
+        stages.cargo(&[
+            "clippy",
+            "-p",
+            "ornis-physics",
+            "--features",
+            "gpu",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        false,
+    );
+
+    // Physics GPU solver (feature `gpu`): the shader is generated from Rust
+    // via ornis-macros. This stage validates the generated WGSL with naga and
+    // runs the solver against the CPU reference on a software adapter
+    // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
+    // so the gate stays green on machines without GPU drivers.
+    stages.run(
+        "test (physics gpu)",
+        "cargo test -p ornis-physics --features gpu -j 1 --no-fail-fast -- --test-threads=1",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-physics",
+            "--features",
+            "gpu",
+            "-j",
+            "1",
+            "--no-fail-fast",
+            "--",
+            "--test-threads=1",
+        ]),
+        false,
+    );
+
     stages.run(
         "clippy",
         "cargo clippy --workspace --all-targets -- -D warnings",
@@ -344,46 +387,6 @@ fn level1(stages: &mut StageList<'_>) {
         "test",
         "cargo test --workspace --no-fail-fast",
         stages.cargo(&["test", "--workspace", "--no-fail-fast"]),
-        false,
-    );
-
-    // Physics GPU solver (feature `gpu`): the shader is generated from Rust
-    // via ornis-macros. This stage validates the generated WGSL with naga and
-    // runs the solver against the CPU reference on a software adapter
-    // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
-    // so the gate stays green on machines without GPU drivers.
-    stages.run(
-        "test (physics gpu)",
-        "cargo test -p ornis-physics --features gpu -j 1 --no-fail-fast -- --test-threads=1",
-        stages.cargo(&[
-            "test",
-            "-p",
-            "ornis-physics",
-            "--features",
-            "gpu",
-            "-j",
-            "1",
-            "--no-fail-fast",
-            "--",
-            "--test-threads=1",
-        ]),
-        false,
-    );
-
-    stages.run(
-        "clippy (physics gpu)",
-        "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
-        stages.cargo(&[
-            "clippy",
-            "-p",
-            "ornis-physics",
-            "--features",
-            "gpu",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ]),
         false,
     );
 

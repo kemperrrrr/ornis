@@ -465,7 +465,7 @@ impl Engine {
     }
 
     /// Registry body removal with joint remap (swap_remove discipline,
-    /// same as the engines: later handles shift, refs are patched).
+    /// same as the engines: the tail moves into the hole, refs are patched).
     fn split_remove_body(s: &mut SplitState, handle: BodyHandle) {
         if handle >= s.bodies.len() {
             return;

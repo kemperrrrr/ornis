@@ -42,8 +42,9 @@ pub trait PhysicsEngine: Send + Sync {
     fn step(&mut self, dt: f32);
     /// Register a body and return its stable handle.
     fn add_body(&mut self, body: RigidBody) -> BodyHandle;
-    /// Remove a body; handles of later bodies shift down, so cached handles
-    /// may become stale. Joints touching the removed body are destroyed too.
+    /// Remove a body, swapping the final body into its slot. The moved body's
+    /// handle changes; joints on the removed body and their dependent gears
+    /// are destroyed. Invalid handles are a no-op.
     fn remove_body(&mut self, handle: BodyHandle);
     /// Read-only access to a body, or `None` for an invalid handle.
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody>;

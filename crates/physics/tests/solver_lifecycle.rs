@@ -68,7 +68,11 @@ fn removing_an_unrelated_body_preserves_the_moved_tails_joint() {
             for _ in 0..600 {
                 e.step(DT);
             }
-            assert!((e.get_body(spare).unwrap().position.y - 2.0).abs() < 0.04);
+            let body = e.get_body(spare).unwrap();
+            assert!(
+                (body.position.y - 2.0).abs() < 0.04,
+                "{kind:?}/{route:?}: {body:?}"
+            );
         }
     }
 }
@@ -155,7 +159,8 @@ fn assembly_rest_length_survives_repeated_solver_and_routing_switches() {
         }
         assert!(
             (e.get_body(b).unwrap().position.x - 2.0).abs() < 0.04,
-            "rest state was recaptured"
+            "rest state was recaptured: {:?}",
+            e.get_body(b).unwrap()
         );
     }
 }

@@ -4,8 +4,8 @@
 //! collision [`Shape`]; [`BodyType`] decides which solver terms apply. The
 //! solver reads only inverse quantities, so `mass` and `inv_mass` must stay
 //! consistent when mutated directly. [`BodyHandle`] is a plain vector index:
-//! removal shifts later handles, so handles must not be cached across
-//! removals.
+//! removal swaps the last body into the removed slot. Handles survive
+//! solver migrations, but callers must remap the moved body after removal.
 
 use glam::{Quat, Vec3};
 
@@ -13,9 +13,9 @@ use crate::shape::Shape;
 
 /// Stable index of a body inside its owning [`BuiltinPhysicsEngine`](crate::engine::BuiltinPhysicsEngine).
 ///
-/// Handles stay valid until the body is explicitly removed; removal shifts
-/// subsequent handles because this is a plain vector index, so callers should
-/// not cache handles across removals.
+/// Solver/routing migrations preserve handles. Removal swaps the final body
+/// into the removed slot; only that surviving body's handle changes. A removed
+/// slot can be reused, so these are not generational entity identifiers.
 pub type BodyHandle = usize;
 
 /// How a body participates in simulation.
