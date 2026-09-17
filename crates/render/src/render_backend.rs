@@ -626,9 +626,8 @@ mod tests {
                 let y_lo = y.saturating_sub(1);
                 let y_hi = (y + 1).min(H as usize - 1);
                 let shifted = (y_lo..=y_hi).any(|yy| {
-                    (x_lo..=x_hi).any(|xx| {
-                        within_tol(pix, &gold_pixels[off(xx, yy)..off(xx, yy) + ch])
-                    })
+                    (x_lo..=x_hi)
+                        .any(|xx| within_tol(pix, &gold_pixels[off(xx, yy)..off(xx, yy) + ch]))
                 });
                 if shifted {
                     shifted_matches += 1;
