@@ -363,12 +363,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut decl_lines: Vec<String> = Vec::new();
     let mut field_names: Vec<String> = Vec::new();
     let mut offset_asserts: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut layout_consts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut layout_steps: Vec<proc_macro2::TokenStream> = Vec::new();
+    let field_count = named.named.len();
     let mut nested: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut naga_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut naga_members: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut off: proc_macro2::TokenStream = quote! { 0usize };
-    let mut max_align: proc_macro2::TokenStream = quote! { 1usize };
     let mut saw_skip = false;
     let mut member_idx = 0usize;
 
@@ -409,34 +408,22 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         let size = &layout.size;
         let align = &layout.align;
-        let start_const = quote::format_ident!("__ORNIS_WGSL_START_{}", field_index);
-        let end_const = quote::format_ident!("__ORNIS_WGSL_END_{}", field_index);
-        let align_const = quote::format_ident!("__ORNIS_WGSL_ALIGN_{}", field_index);
+        let member_off = quote! { #name::__ORNIS_WGSL_LAYOUT.0[#field_index] };
+        offset_asserts.push(quote! {
+            const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #member_off) as usize];
+        });
         if opts.skip {
-            layout_consts.push(quote! {
-                const #start_const: usize = #off;
-                const #end_const: usize = #name::#start_const + #size;
+            layout_steps.push(quote! {
+                offsets[#field_index] = cursor;
+                cursor += #size;
             });
-            offset_asserts.push(quote! {
-                const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #name::#start_const) as usize];
-            });
-            off = quote! { #name::#end_const };
         } else {
-            layout_consts.push(quote! {
-                const #start_const: usize = #off.div_ceil(#align) * #align;
-                const #end_const: usize = #name::#start_const + #size;
-                const #align_const: usize = {
-                    let previous = #max_align;
-                    if previous > #align { previous } else { #align }
-                };
+            layout_steps.push(quote! {
+                cursor = cursor.div_ceil(#align) * #align;
+                offsets[#field_index] = cursor;
+                cursor += #size;
+                if #align > maximum { maximum = #align; }
             });
-            off = quote! { #name::#start_const };
-            offset_asserts.push(quote! {
-                const _: [(); 1] = [(); (::core::mem::offset_of!(#name, #ident) == #off) as usize];
-            });
-            // The aligned cursor is this member's naga offset; the emitted
-            // constructor reuses the same symbolic expression.
-            let member_off = off.clone();
             let member_name = wgsl_field.clone();
             let m = quote::format_ident!("__naga_m{}", member_idx);
             member_idx += 1;
@@ -560,13 +547,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     offset: (#member_off) as u32,
                 }
             });
-            // References, not recursively substituted expressions: duplicating
-            // the previous max twice per field grows as 2^N on wide GPU structs.
-            off = quote! { #name::#end_const };
-            max_align = quote! { #name::#align_const };
         }
     }
-    let stride = quote! { (#off.div_ceil(#max_align) * #max_align) };
+    let stride = quote! { #name::__ORNIS_WGSL_LAYOUT.1 };
 
     let decl_text = format!("struct {wgsl_name} {{\n{}\n}}\n", decl_lines.join("\n"));
     let decl_lit = proc_macro2::Literal::string(&decl_text);
@@ -582,7 +565,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl #name {
-            #(#layout_consts)*
+            // One iterative const evaluation: no exponential syntax tree and
+            // no field-to-field const query chain exceeding recursion limits.
+            const __ORNIS_WGSL_LAYOUT: ([usize; #field_count], usize) = {
+                let mut offsets = [0usize; #field_count];
+                let mut cursor = 0usize;
+                let mut maximum = 1usize;
+                #(#layout_steps)*
+                (offsets, cursor.div_ceil(maximum) * maximum)
+            };
 
             /// The WGSL struct declaration generated from this Rust layout.
             ///

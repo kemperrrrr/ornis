@@ -53,7 +53,7 @@
 //! `macros/tests/compute_dsl.rs` and `helpers_stitch_ahead_of_main_and_validate`.
 
 use glam::Vec3;
-use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
+use ornis_macros::{WgslStruct, gpu_pipeline};
 use std::sync::Arc;
 
 use crate::body::RigidBody;
@@ -1164,7 +1164,7 @@ mod tests {
     /// arrays, stitched into a pipeline via `helpers(...)`. The stitched
     /// source must carry the helper ahead of `main` and naga-validate —
     /// this is the exact shape a per-body Hessian solve will take.
-    #[wgsl_fn]
+    #[ornis_macros::wgsl_fn]
     fn avbd_ldl_3x3(c0: Vec3, c1: Vec3, c2: Vec3, rhs: Vec3) -> Vec3 {
         let a = Mat3::from_cols(c0, c1, c2);
         let mut l: [[f32; 3]; 3] = [[0.0; 3]; 3];

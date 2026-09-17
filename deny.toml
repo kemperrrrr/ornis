@@ -57,6 +57,10 @@ confidence-threshold = 0.8
 exceptions = [
     # libfuzzer-sys: (MIT OR Apache-2.0) AND NCSA — NCSA is effectively equivalent to MIT.
     { allow = ["NCSA"], crate = "libfuzzer-sys" },
+    # Existing manifold-rust -> clipper2-rust dependency from mesh-editor.
+    # Boost Software License 1.0 is permissive; this exception is crate-scoped,
+    # not a blanket license bypass. Keep upstream notices on redistribution.
+    { allow = ["BSL-1.0"], crate = "clipper2-rust" },
 ]
 # Workspace crates are not published; license.workspace=true not set yet —
 # recommendation from the baseline report.

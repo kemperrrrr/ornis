@@ -411,6 +411,14 @@ fn warm_limit_state(value: f32, lo: f32, hi: f32, slop: f32, force: f32) -> Opti
     })
 }
 
+/// Relax only pre-existing penetration, not free travel inside a limit.
+/// Correcting all old error instantly converts residual error into rebound.
+fn regularized_limit(value: f32, initial: f32, bound: f32, lower: bool) -> f32 {
+    let old = initial - bound;
+    let violation = if lower { old.min(0.0) } else { old.max(0.0) };
+    value - bound - ALPHA * violation
+}
+
 /// World-space inertia tensor from a body-frame diagonal and orientation.
 fn world_inertia(inertia: Vec3, rot: Quat) -> [[f32; 3]; 3] {
     let r = Mat3::from_quat(rot);
@@ -2291,7 +2299,15 @@ impl AvbdEngine {
                                 if let Some(lower) =
                                     warm_limit_state(sep, min, max, LIMIT_SLOP_LIN, j.sacc[i])
                                 {
-                                    let c = if lower { sep - min } else { sep - max };
+                                    let axis0 = (self.rot0[j.a] * *e).normalize_or(*e);
+                                    let initial =
+                                        ((pb0 - pa0) - self.rot0[j.a] * j.dref).dot(axis0);
+                                    let c = regularized_limit(
+                                        sep,
+                                        initial,
+                                        if lower { min } else { max },
+                                        lower,
+                                    );
                                     let f_raw = j.pen_l[i] * c + j.sacc[i];
                                     let f = if lower {
                                         f_raw.min(0.0)
@@ -2505,7 +2521,14 @@ impl AvbdEngine {
                                     LIMIT_SLOP_ANG,
                                     j.sacc[3 + i],
                                 ) {
-                                    let c = if lower { travel - min } else { travel - max };
+                                    let initial = hinge_twist(self.rot0[j.a], self.rot0[j.b], *e)
+                                        - quat_twist(j.q_ref, *e);
+                                    let c = regularized_limit(
+                                        travel,
+                                        initial,
+                                        if lower { min } else { max },
+                                        lower,
+                                    );
                                     let f_raw = j.pen_a[i] * c + j.sacc[3 + i];
                                     let f = if lower {
                                         f_raw.min(0.0)
@@ -2591,7 +2614,15 @@ impl AvbdEngine {
                         if let Some(lower) =
                             warm_limit_state(angle, lo, hi, LIMIT_SLOP_ANG, j.acc_lim)
                         {
-                            let c = if lower { angle - lo } else { angle - hi };
+                            let initial = wrap_pi(
+                                hinge_twist(self.rot0[j.a], self.rot0[j.b], j.ax_a) - j.ref_val,
+                            );
+                            let c = regularized_limit(
+                                angle,
+                                initial,
+                                if lower { lo } else { hi },
+                                lower,
+                            );
                             let f_raw = j.pen_a[2] * c + j.acc_lim;
                             let f = if lower {
                                 f_raw.min(0.0)
@@ -2616,7 +2647,10 @@ impl AvbdEngine {
                         let s = (pb - pa).dot(wa) - j.ref_val;
                         if let Some(lower) = warm_limit_state(s, lo, hi, LIMIT_SLOP_LIN, j.lim_dual)
                         {
-                            let c = if lower { s - lo } else { s - hi };
+                            let axis0 = (self.rot0[j.a] * j.ax_a).normalize_or(Vec3::Z);
+                            let initial = (pb0 - pa0).dot(axis0) - j.ref_val;
+                            let c =
+                                regularized_limit(s, initial, if lower { lo } else { hi }, lower);
                             let f_raw = j.pen_l[2] * c + j.lim_dual;
                             let f = if lower {
                                 f_raw.min(0.0)
@@ -3098,7 +3132,15 @@ impl AvbdEngine {
                                 if let Some(lower) =
                                     warm_limit_state(sep, min, max, LIMIT_SLOP_LIN, j.sacc[i])
                                 {
-                                    let c = if lower { sep - min } else { sep - max };
+                                    let axis0 = (self.rot0[j.a] * *e).normalize_or(*e);
+                                    let initial =
+                                        ((pb0 - pa0) - self.rot0[j.a] * j.dref).dot(axis0);
+                                    let c = regularized_limit(
+                                        sep,
+                                        initial,
+                                        if lower { min } else { max },
+                                        lower,
+                                    );
                                     if c.abs() >= C_EPS {
                                         let f = j.pen_l[i] * c + j.sacc[i];
                                         j.sacc[i] = if lower { f.min(0.0) } else { f.max(0.0) };
@@ -3135,7 +3177,14 @@ impl AvbdEngine {
                                     LIMIT_SLOP_ANG,
                                     j.sacc[3 + i],
                                 ) {
-                                    let c = if lower { travel - min } else { travel - max };
+                                    let initial = hinge_twist(self.rot0[j.a], self.rot0[j.b], *e)
+                                        - quat_twist(j.q_ref, *e);
+                                    let c = regularized_limit(
+                                        travel,
+                                        initial,
+                                        if lower { min } else { max },
+                                        lower,
+                                    );
                                     if c.abs() >= C_EPS {
                                         let f = j.pen_a[i] * c + j.sacc[3 + i];
                                         j.sacc[3 + i] = if lower { f.min(0.0) } else { f.max(0.0) };
@@ -3248,7 +3297,15 @@ impl AvbdEngine {
                             wrap_pi(hinge_twist(a.orientation, b.orientation, j.ax_a) - j.ref_val);
                         match warm_limit_state(angle, lo, hi, LIMIT_SLOP_ANG, j.acc_lim) {
                             Some(lower) => {
-                                let c = if lower { angle - lo } else { angle - hi };
+                                let initial = wrap_pi(
+                                    hinge_twist(self.rot0[j.a], self.rot0[j.b], j.ax_a) - j.ref_val,
+                                );
+                                let c = regularized_limit(
+                                    angle,
+                                    initial,
+                                    if lower { lo } else { hi },
+                                    lower,
+                                );
                                 if c.abs() >= C_EPS {
                                     let f = j.pen_a[2] * c + j.acc_lim;
                                     j.acc_lim = if lower { f.min(0.0) } else { f.max(0.0) };
@@ -3268,7 +3325,14 @@ impl AvbdEngine {
                         let s = (pb - pa).dot(wa) - j.ref_val;
                         match warm_limit_state(s, lo, hi, LIMIT_SLOP_LIN, j.lim_dual) {
                             Some(lower) => {
-                                let c = if lower { s - lo } else { s - hi };
+                                let axis0 = (self.rot0[j.a] * j.ax_a).normalize_or(Vec3::Z);
+                                let initial = (pb0 - pa0).dot(axis0) - j.ref_val;
+                                let c = regularized_limit(
+                                    s,
+                                    initial,
+                                    if lower { lo } else { hi },
+                                    lower,
+                                );
                                 if c.abs() >= C_EPS {
                                     // Project the same warm-inclusive force as the
                                     // primal. At zero C the multiplier carries the

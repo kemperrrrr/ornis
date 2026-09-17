@@ -819,6 +819,20 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
         .iter()
         .map(|path| quote!(#path::wgsl_source()))
         .collect();
+    // Resolve helper paths in the attribute's caller module, not inside
+    // the generated pipeline module (where a bare sibling path is wrong).
+    let helper_loader = quote::format_ident!("__ornis_{}_helper_sources", fn_name);
+    let helper_loader_fn = if helper_sources.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn #helper_loader() -> String {
+                let mut source = String::new();
+                #(source.push_str(&#helper_sources); source.push('\n');)*
+                source
+            }
+        }
+    };
     let wgsl_source_fn = if helper_sources.is_empty() {
         quote! {
             #[allow(dead_code)]
@@ -830,7 +844,7 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             #[allow(dead_code)]
             pub fn wgsl_source() -> String {
-                [#(#helper_sources),*].join("\n") + "\n" + #wgsl_lit
+                super::#helper_loader() + #wgsl_lit
             }
         }
     };
@@ -859,6 +873,7 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
+        #helper_loader_fn
         pub mod #fn_name {
             #[allow(dead_code)]
             pub fn pipeline_label() -> &'static str {

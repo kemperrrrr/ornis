@@ -590,6 +590,45 @@ mod tests {
         }
         let bad_pct = bad as f64 / pixels.len() as f64 * 100.0;
         eprintln!("golden probe: max_diff={max_diff} bad>2={bad} ({bad_pct:.4}%)");
+        if bad_pct >= 0.01 {
+            let mut edge_like = 0usize;
+            let mut unmatched = Vec::new();
+            for y in 1..H as usize - 1 {
+                for x in 1..W as usize - 1 {
+                    let offset = (y * W as usize + x) * bpp as usize;
+                    let pixel = &pixels[offset..offset + 4];
+                    if pixel
+                        .iter()
+                        .zip(&gold_pixels[offset..offset + 4])
+                        .all(|(a, b)| a.abs_diff(*b) <= 2)
+                    {
+                        continue;
+                    }
+                    let neighbor = (y - 1..=y + 1).any(|yy| {
+                        (x - 1..=x + 1).any(|xx| {
+                            let g = (yy * W as usize + xx) * bpp as usize;
+                            pixel
+                                .iter()
+                                .zip(&gold_pixels[g..g + 4])
+                                .all(|(a, b)| a.abs_diff(*b) <= 2)
+                        })
+                    });
+                    if neighbor {
+                        edge_like += 1;
+                    } else if unmatched.len() < 12 {
+                        unmatched.push((
+                            x,
+                            y,
+                            pixel.to_vec(),
+                            gold_pixels[offset..offset + 4].to_vec(),
+                        ));
+                    }
+                }
+            }
+            eprintln!(
+                "golden diagnostics: neighbor-matching pixels={edge_like}; first unmatched={unmatched:?}"
+            );
+        }
         assert!(
             bad_pct < 0.01,
             "golden frame drifted: {bad} bytes diff >2 ({bad_pct:.4}%); max_diff={max_diff} — update tests/data/golden_probe_1280x720.png via render_probe if change is intentional"
