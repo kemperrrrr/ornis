@@ -601,12 +601,14 @@ mod tests {
         const MAX_UNMATCHED: usize = 64;
         assert_eq!(pixels.len(), gold_pixels.len());
         let row = W as usize;
-        let pixel_at = |buf: &[u8], x: usize, y: usize| -> &[u8] {
+        let pixel_at = |buf: &[u8], x: usize, y: usize| {
             let o = (y * row + x) * bpp as usize;
             &buf[o..o + bpp as usize]
         };
         let within_tol = |pix: &[u8], gold: &[u8]| -> bool {
-            pix.iter().zip(gold.iter()).all(|(a, b)| a.abs_diff(*b) <= TOL)
+            pix.iter()
+                .zip(gold.iter())
+                .all(|(a, b)| a.abs_diff(*b) <= TOL)
         };
         let mut max_diff: u8 = 0;
         for (a, b) in pixels.iter().zip(gold_pixels.iter()) {
