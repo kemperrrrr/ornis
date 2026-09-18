@@ -152,6 +152,18 @@ mod tests {
         buf[gid.x] = buf[gid.x] * 2.0;
     }
 
+    /// Second proven kernel: fused multiply-add. It exercises a different
+    /// ALU shape than [`scale_lane`] so AutoLane coverage is not tied to a
+    /// single codegen path.
+    #[ornis_macros::gpu_pipeline(
+        workgroup_size = 64,
+        storage(buf: [f32; 64], read_write),
+        builtin(gid: global_invocation_id),
+    )]
+    fn madd_lane() {
+        buf[gid.x] = buf[gid.x] * 2.0 + 1.0;
+    }
+
     /// Adapter if the machine has one; `None` (skip the test) otherwise.
     /// Unlike [`WgpuContext::new_blocking`](crate::context::WgpuContext::new_blocking),
     /// this never panics, so GPU-path tests degrade to no-ops on headless CI.
@@ -353,6 +365,124 @@ mod tests {
         );
         assert_eq!(lane.data()[0], 200.0);
         assert!(lane.data()[1..].iter().all(|&x| x == 4.0));
+    }
+
+    #[test]
+    fn gpu_verdict_dispatches_madd_kernel() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lane = AutoLane::new(
+            vec![1.0f32; 64],
+            &device,
+            &queue,
+            lane_config(16),
+            "madd test",
+        );
+        assert_eq!(lane.platform_for(64), Platform::Gpu);
+        let (pipeline, bg) = test_pipeline(
+            &device,
+            lane.gpu_buffer().expect("buffer exists"),
+            "auto_lane madd test",
+            madd_lane::wgsl_source(),
+        );
+        // If this ran on CPU it would multiply by 5; GPU must do x*2+1.
+        lane.execute(&mut sync, Some(&pipeline), Some(&bg), |data| {
+            for x in data.iter_mut() {
+                *x *= 5.0;
+            }
+        });
+        assert_eq!(lane.data(), &vec![3.0f32; 64]);
+    }
+
+    #[test]
+    fn madd_kernel_gpu_cpu_gpu_round_trip() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lane = AutoLane::new(
+            vec![1.0f32; 64],
+            &device,
+            &queue,
+            lane_config(16),
+            "madd round trip",
+        );
+        let (pipeline, bg) = test_pipeline(
+            &device,
+            lane.gpu_buffer().expect("buffer exists"),
+            "auto_lane madd round trip test",
+            madd_lane::wgsl_source(),
+        );
+        // Run 1 (GPU): 1.0 -> 3.0.
+        assert!(
+            lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
+                "must run on GPU"
+            ))
+        );
+        assert_eq!(lane.data(), &vec![3.0f32; 64]);
+        // Run 2 (CPU fallback): mutates element 0, GPU side goes stale.
+        assert!(lane.execute(&mut sync, None, None, |data| {
+            data[0] = 100.0;
+        }));
+        // Run 3 (GPU): must re-upload and see 100.0, not the stale 3.0.
+        assert!(
+            lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
+                "must run on GPU"
+            ))
+        );
+        assert_eq!(lane.data()[0], 201.0);
+        assert!(lane.data()[1..].iter().all(|&x| x == 7.0));
+    }
+
+    /// CPU vs GPU agreement is by tolerance, never bit-identical.
+    ///
+    /// The GPU path makes no bit-identical promise (different ALU order and
+    /// precision vs the CPU closure), so this test pins *agreement within
+    /// tolerance* instead of exact equality. Skips without an adapter;
+    /// on macOS it runs on the real Metal adapter.
+    #[test]
+    fn cpu_and_gpu_agree_within_tolerance_not_bit_identical() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let input: Vec<f32> = (0..64).map(|i| i as f32 * 0.25 - 4.0).collect();
+        let mut expected = input.clone();
+        for x in expected.iter_mut() {
+            *x = *x * 2.0 + 1.0;
+        }
+        let mut sync = CommandSync::new(device.clone(), queue.clone());
+        let mut lane = AutoLane::new(input, &device, &queue, lane_config(16), "cpu vs gpu");
+        let (pipeline, bg) = test_pipeline(
+            &device,
+            lane.gpu_buffer().expect("buffer exists"),
+            "auto_lane cpu-vs-gpu test",
+            madd_lane::wgsl_source(),
+        );
+        assert!(
+            lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
+                "must run on GPU"
+            ))
+        );
+        assert_eq!(lane.data().len(), expected.len());
+        for (gpu, cpu) in lane.data().iter().zip(expected.iter()) {
+            let diff = (gpu - cpu).abs();
+            let tol = 1e-5 * cpu.abs().max(1.0);
+            assert!(
+                diff <= tol,
+                "gpu {gpu} vs cpu {cpu}: diff {diff} exceeds tol {tol}"
+            );
+        }
+        // Checksums agree within tolerance too: order-sensitive reductions
+        // are where CPU/GPU divergence would show first.
+        let gpu_sum: f32 = lane.data().iter().sum();
+        let cpu_sum: f32 = expected.iter().sum();
+        let sum_tol = 1e-3 * cpu_sum.abs().max(1.0);
+        assert!(
+            (gpu_sum - cpu_sum).abs() <= sum_tol,
+            "gpu sum {gpu_sum} vs cpu sum {cpu_sum}"
+        );
     }
 
     #[ornis_macros::gpu_pipeline(

@@ -329,7 +329,9 @@ reload сцены уже есть: editor-world следит за mtime `editor/
 ---
 ## Приложение A — Движок рендеринга и физический движок
 
-> Сверено с кодом (`crates/render`, `crates/physics`) 2026-09-01.
+> Сверено с кодом (`crates/render`, `crates/physics`) 2026-09-01;
+> M3 Islands + hardening — 2026-09-18 (`RoutingKind::Islands`,
+> `SplitMetrics`, `split.rs`/`migration.rs`/`avbd.rs`).
 
 ### A1. Движок рендеринга (`crates/render`)
 

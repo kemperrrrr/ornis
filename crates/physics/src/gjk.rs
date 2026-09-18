@@ -114,15 +114,17 @@ fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
         }
         Shape::Heightfield(_) => {
             // Unreachable by construction: heightfield pairs dispatch to
-            // the column loop before GJK. A wrong dispatch must fail loudly
-            // in tests, never silently collide.
+            // the column loop before GJK (`distance::shape_distance`;
+            // `Shape::has_gjk_support` is false for this variant). A wrong
+            // dispatch must fail loudly in tests, never silently collide.
             debug_assert!(false, "heightfield has no support function");
             pos
         }
         Shape::TriMesh(_) => {
             // Unreachable by construction: mesh pairs dispatch to the
             // per-triangle loop (`distance::trimesh_convex`) before GJK —
-            // triangles enter as prebuilt hull primitives, never the mesh.
+            // triangles enter as prebuilt hull primitives, never the mesh
+            // (`Shape::has_gjk_support` is false for this variant).
             debug_assert!(false, "mesh has no support function");
             pos
         }

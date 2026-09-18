@@ -999,6 +999,50 @@ mod integration_tests {
     }
 
     #[test]
+    fn scene_snapshot_replace_scene_extracts_without_browser() {
+        // Contract fallback for the browser visual e2e (snapshot → WASM):
+        // a live pixel run needs a browser + WebGPU, which CI has not.
+        // This pins the same chain headlessly instead — `/api/scene` JSON
+        // → `RenderWorld::replace_scene` → `run_frame` → `RenderExtract`
+        // (`frame_upload`), with lights published as the shared resource.
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        let mut render_world = RenderWorld::new();
+        render_world.replace_scene(&live.scene);
+        assert_eq!(render_world.entity_count(), live.scene.entities.len());
+        render_world.run_frame(0.0);
+
+        let snapshot = render_world.frame_upload();
+        let direct = ornis_render::extract_render_data(
+            render_world.engine().world().store().expect("store"),
+        );
+        assert_eq!(snapshot.mesh_params, (32, 24));
+        assert_eq!(snapshot.instances.len(), live.scene.entities.len());
+        assert_eq!(snapshot.materials.len(), live.scene.entities.len());
+        assert_eq!(direct.instances.len(), snapshot.instances.len());
+        assert_eq!(
+            direct.instances[0].model_matrix,
+            snapshot.instances[0].model_matrix
+        );
+        let lights = render_world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("replace_scene publishes scene lighting");
+        assert_eq!(lights.lights.len(), live.scene.lights.len());
+
+        // Replacing with an empty scene destroys the previous entities
+        // before the next extraction — no stale instances survive.
+        let mut empty = live.scene.clone();
+        empty.entities.clear();
+        render_world.replace_scene(&empty);
+        render_world.run_frame(0.0);
+        assert_eq!(render_world.entity_count(), 0);
+        assert!(render_world.frame_upload().instances.is_empty());
+    }
+
+    #[test]
     fn stale_live_snapshot_versions_are_rejected() {
         assert!(!accept_live_scene_version(5, None, 4));
         assert!(!accept_live_scene_version(5, Some(7), 6));

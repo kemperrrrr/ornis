@@ -5162,6 +5162,9 @@ mod tests {
         // Tiled-10k-cold scale stays untouched under the default budget.
         assert_eq!(physics.apply_step_budget(12, 14_161), (12, 0));
         assert_eq!(physics.apply_step_budget(12, 1_000_000), (4, 8));
+        // 100k-tiled operating point (100k candidates × 12 requested):
+        // the budget sheds to the floor instead of running away.
+        assert_eq!(physics.apply_step_budget(12, 100_000), (4, 8));
         // The floor is never shed, even under extreme load.
         assert_eq!(physics.apply_step_budget(4, 1_000_000), (4, 0));
         physics.set_step_budget(None);

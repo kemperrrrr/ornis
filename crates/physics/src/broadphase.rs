@@ -54,6 +54,14 @@ pub struct BroadPhaseStats {
 /// Diagnostics for benchmarks only; not part of the simulation contract.
 /// Per-substep phases are summed across the substep loop, so totals reflect
 /// the whole step rather than the last substep.
+///
+/// 100k verdict (`probe_100k` tiled Grid-8, `--release`, 2026-09-18):
+/// the solver phase dominates — ~1.08 s of ~1.35 s/step at 100k candidates
+/// × 4 substeps (broad ~7 ms, narrow ~81 ms, island/trigger ~15 ms each).
+/// Broadphase is not the bottle. Next: solver-per-pair cost under settled
+/// sleep (100k dynamics stayed awake over the short probe; the 10k probe
+/// shows contact jitter regrowing max_v 0.09→0.25 m/s, which gates sleep) —
+/// island sleep + per-island iteration scaling, not candidate generation.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct StepTiming {
     /// Time spent rebuilding swept AABBs and candidate pairs.

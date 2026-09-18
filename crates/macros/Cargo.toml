@@ -20,6 +20,7 @@ naga = { version = "30", features = ["wgsl-in", "wgsl-out"] }
 ornis-core = { path = "../core" }
 glam = "0.33"
 trybuild = "1"
+wgpu = "30"
 
 [lints]
 workspace = true

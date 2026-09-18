@@ -408,3 +408,69 @@ fn remote_editor_bind_failure_is_safe() {
     second.stop();
     first.stop();
 }
+
+/// Write one masked client frame (RFC 6455 §5.3): FIN set, 4-byte mask,
+/// payload XORed. Server replies are unmasked; client sends masked.
+fn send_masked_client_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) {
+    assert!(payload.len() <= 125, "test payloads stay in the short form");
+    let mask = [0x12_u8, 0x34, 0x56, 0x78];
+    let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
+    frame.extend_from_slice(&mask);
+    for (i, b) in payload.iter().enumerate() {
+        frame.push(b ^ mask[i % 4]);
+    }
+    stream.write_all(&frame).expect("write masked client frame");
+}
+
+/// Read one unmasked server close frame, returning (code, reason).
+fn read_server_close(stream: &mut TcpStream) -> (u16, Vec<u8>) {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).expect("read close header");
+    assert_eq!(header[0], 0x88, "server must echo a final close frame");
+    assert_eq!(header[1] & 0x80, 0, "server frames are not masked");
+    let len = usize::from(header[1] & 0x7f);
+    assert!(len >= 2, "close echo carries at least a status code");
+    let mut payload = vec![0_u8; len];
+    stream.read_exact(&mut payload).expect("read close payload");
+    (
+        u16::from_be_bytes([payload[0], payload[1]]),
+        payload[2..].to_vec(),
+    )
+}
+
+#[test]
+fn remote_editor_websocket_client_close_is_echoed_and_closes() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (_ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Close with a code + reason: the server must echo both back, then
+    // drop the connection (no further frames, read hits EOF).
+    let mut stream = websocket_connect(port, "/api/events?after=0");
+    let mut payload = 1000_u16.to_be_bytes().to_vec();
+    payload.extend_from_slice(b"bye");
+    send_masked_client_frame(&mut stream, 0x8, &payload);
+    let (code, reason) = read_server_close(&mut stream);
+    assert_eq!(code, 1000);
+    assert_eq!(reason, b"bye");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .expect("short read timeout");
+    let mut byte = [0_u8; 1];
+    assert!(
+        stream.read_exact(&mut byte).is_err(),
+        "connection must close after the close handshake"
+    );
+
+    // Empty client close (no status code): the server synthesizes
+    // code 1000 instead of panicking or hanging.
+    let mut stream = websocket_connect(port, "/api/events?after=0");
+    send_masked_client_frame(&mut stream, 0x8, &[]);
+    let (code, reason) = read_server_close(&mut stream);
+    assert_eq!(code, 1000);
+    assert!(reason.is_empty());
+
+    editor.stop();
+}

@@ -2540,6 +2540,7 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "trybuild",
+ "wgpu",
 ]
 
 [[package]]

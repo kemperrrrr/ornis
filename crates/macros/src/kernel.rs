@@ -150,8 +150,22 @@ impl<'ast> Visit<'ast> for KernelValidator {
     }
 }
 
+/// Validate the optional dispatch id: `#[kernel]` takes no attribute or a
+/// single integer literal; anything else (e.g. a string) is rejected
+/// instead of being silently ignored.
+fn validate_kernel_args(args: TokenStream) -> syn::Result<()> {
+    if args.is_empty() {
+        return Ok(());
+    }
+    let literal: syn::LitInt = syn::parse2(args.into())?;
+    let _dispatch_id: u64 = literal.base10_parse()?;
+    Ok(())
+}
+
 pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
-    let _attr_args = args;
+    if let Err(error) = validate_kernel_args(args) {
+        return TokenStream::from(error.to_compile_error());
+    }
     let func = parse_macro_input!(input as ItemFn);
     let fn_name = &func.sig.ident;
 

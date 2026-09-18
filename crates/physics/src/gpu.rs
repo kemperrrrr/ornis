@@ -56,8 +56,9 @@ use glam::Vec3;
 use ornis_macros::{WgslStruct, gpu_pipeline};
 use std::sync::Arc;
 
+use crate::avbd::AvbdEngine;
 use crate::body::RigidBody;
-use crate::engine::{Manifold, ManifoldState};
+use crate::engine::{Manifold, ManifoldState, PhysicsEngine};
 use bytemuck::Zeroable;
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1028,105 @@ pub fn write_back_acc(
 }
 
 // ---------------------------------------------------------------------------
+// STUB spike-interface: GPU AVBD solver (no device path yet)
+// ---------------------------------------------------------------------------
+
+/// STUB dispatch seam for a future GPU AVBD solver.
+///
+/// Only the contract is pinned here: the DSL preconditions for per-body
+/// Hessian work are closed (see the module docs), but no Hessian assembly
+/// or LDL solve runs on device yet. Stepping always falls back to the CPU
+/// [`AvbdEngine`]; the kernel below is a wiring-only copy pass that moves
+/// no physics state. Honest by construction: `runs_on_device` returns
+/// `false` until a real solve lands.
+///
+/// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
+#[allow(dead_code)]
+pub trait GpuAvbdDispatch {
+    /// Advance `engine` by `dt`. CPU fallback until the device path lands.
+    fn step_avbd(&self, engine: &mut AvbdEngine, dt: f32);
+    /// Whether stepping touches the device. `false` while the stub falls back.
+    fn runs_on_device(&self) -> bool;
+}
+
+/// STUB GPU AVBD solver: config + CPU fallback, no device path.
+///
+/// Holds only the buffer-size bound a future dispatch will need. Pair with
+/// [`avbd_stub_wgsl`] for the wiring-only kernel source.
+///
+/// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
+#[allow(dead_code)]
+pub struct GpuAvbdStub {
+    /// Maximum bodies one future dispatch covers (buffer-size bound only,
+    /// not a physics bound — mirrors the `WgpuContactSolver` caps).
+    pub max_bodies: usize,
+}
+
+impl GpuAvbdStub {
+    /// Describe a stub dispatch for up to `max_bodies` bodies.
+    #[allow(dead_code)]
+    pub fn new(max_bodies: usize) -> Self {
+        Self { max_bodies }
+    }
+
+    /// Whether stepping touches the device. Always `false` on the stub.
+    pub fn runs_on_device(&self) -> bool {
+        false
+    }
+
+    /// Honest CPU fallback: steps the CPU AVBD engine in place.
+    pub fn step_cpu(&self, engine: &mut AvbdEngine, dt: f32) {
+        engine.step(dt);
+    }
+}
+
+impl GpuAvbdDispatch for GpuAvbdStub {
+    fn step_avbd(&self, engine: &mut AvbdEngine, dt: f32) {
+        self.step_cpu(engine, dt);
+    }
+
+    fn runs_on_device(&self) -> bool {
+        self.runs_on_device()
+    }
+}
+
+/// STUB AVBD device kernel: wiring-only copy pass over body state.
+///
+/// Moves no physics state (each velocity is read back onto itself) — it
+/// only proves the buffer/bindings/dispatch shape a future per-body Hessian
+/// solve will reuse. No invented physics: assembled Hessian + LDL stay
+/// future work (DSL preconditions pinned by
+/// `helpers_stitch_ahead_of_main_and_validate`).
+#[gpu_pipeline(
+    workgroup_size = 64,
+    storage(avbd_stub_bodies: [GpuBodyState; 64], read_write),
+    uniform(avbd_stub_params: [u32; 4]),
+    builtin(gid: workgroup_id),
+)]
+fn avbd_stub_kernel() {
+    if gid.x >= avbd_stub_params.x {
+        return;
+    }
+    let mut b = avbd_stub_bodies[gid.x];
+    let v = b.velocity;
+    b.velocity = v;
+    avbd_stub_bodies[gid.x].velocity = b.velocity;
+}
+
+/// STUB kernel WGSL source: struct layout + wiring-only entry (no physics).
+/// Pure (no device) so tests pin it without an adapter.
+///
+/// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
+#[allow(dead_code)]
+pub fn avbd_stub_wgsl() -> String {
+    format!(
+        "{}\n{}",
+        GpuBodyState::WGSL_SOURCE,
+        avbd_stub_kernel::wgsl_source()
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1378,5 +1478,49 @@ mod tests {
                 bg.velocity
             );
         }
+    }
+
+    /// STUB contract: the kernel source carries the Rust-authored layout
+    /// and a wiring-only entry (no physics), and naga-validates without a
+    /// device.
+    #[test]
+    fn avbd_stub_kernel_validates_with_naga() {
+        let source = avbd_stub_wgsl();
+        assert!(source.contains("struct GpuBodyState"));
+        assert!(source.contains("fn main("));
+        assert!(source.contains("avbd_stub_bodies[gid.x].velocity = b.velocity;"));
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("stub WGSL must parse: {e}"));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("stub WGSL must validate: {e}"));
+    }
+
+    /// STUB contract: stepping falls back to the CPU AVBD engine (gravity
+    /// integrates velocity) and never claims the device.
+    #[test]
+    fn avbd_stub_cpu_fallback_advances() {
+        use crate::avbd::AvbdEngine;
+        use crate::engine::PhysicsEngine;
+
+        fn runs_on_device_via_seam(stub: &GpuAvbdStub) -> bool {
+            crate::gpu::GpuAvbdDispatch::runs_on_device(stub)
+        }
+
+        let stub = GpuAvbdStub::new(8);
+        assert!(!stub.runs_on_device());
+        assert!(!runs_on_device_via_seam(&stub));
+        let mut engine = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        engine.add_body(RigidBody::new_sphere(Vec3::new(0.0, 5.0, 0.0), 0.5, 1.0));
+        stub.step_avbd(&mut engine, 1.0 / 60.0);
+        let v = engine
+            .get_body(0)
+            .expect("stub scene keeps its body")
+            .velocity;
+        assert!(v.y < 0.0, "CPU fallback must integrate gravity, got {v:?}");
     }
 }

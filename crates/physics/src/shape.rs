@@ -285,6 +285,19 @@ impl Shape {
         }
     }
 
+    /// Whether the shape answers GJK support queries (`gjk` module).
+    ///
+    /// Only convex primitives answer directly: heightfields collide
+    /// column-wise and triangle meshes resolve per triangle (see
+    /// `distance::shape_distance`), so both report `false` here and their
+    /// `support` arms are unreachable-by-construction fallbacks. A custom
+    /// render soup has no implicit collider: hosts must build it explicitly
+    /// with [`TriMesh::from_indexed`] (`RigidBody::new_trimesh` for bodies)
+    /// — physics never substitutes a sphere placeholder.
+    pub fn has_gjk_support(&self) -> bool {
+        !matches!(self, Shape::Heightfield(_) | Shape::TriMesh(_))
+    }
+
     /// Closest surface point (world) to `p` for a placed shape. Exact for
     /// sphere/box/capsule/cylinder; cone picks the nearest of the wall,
     /// base-disk and apex candidates; hull scans its triangles; the
@@ -1222,5 +1235,53 @@ mod tests {
         // Along Y: half_height + radius. On X/Z: just the radius shell.
         assert_vec3_close(aabb.min, Vec3::new(-0.5, -2.5, -0.5));
         assert_vec3_close(aabb.max, Vec3::new(0.5, 2.5, 0.5));
+    }
+
+    #[test]
+    fn custom_mesh_has_no_implicit_collider_contract() {
+        // Convex primitives answer GJK support directly; heightfields and
+        // triangle meshes opt out (they dispatch before GJK — see
+        // `Shape::has_gjk_support`). A custom render soup must be built
+        // explicitly: an empty soup is an empty mesh (no contact), never a
+        // fallback sphere.
+        for shape in [
+            Shape::Sphere { radius: 0.5 },
+            Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+            Shape::Capsule {
+                radius: 0.3,
+                half_height: 0.5,
+            },
+            Shape::Cylinder {
+                radius: 0.3,
+                half_height: 0.5,
+            },
+            Shape::Cone {
+                radius: 0.3,
+                half_height: 0.5,
+            },
+            Shape::ConvexHull(ConvexHull::from_vertices(vec![
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                Vec3::Z,
+            ])),
+        ] {
+            assert!(shape.has_gjk_support(), "{shape:?} must answer GJK support");
+        }
+        let terrain = Shape::Heightfield(Heightfield {
+            heights: vec![0.0],
+            rows: 1,
+            cols: 1,
+            cell: 1.0,
+        });
+        assert!(!terrain.has_gjk_support());
+        let empty = TriMesh::from_indexed(&[], &[]);
+        assert!(
+            empty.tris.is_empty(),
+            "empty soup builds an empty mesh, never a placeholder"
+        );
+        assert!(!Shape::TriMesh(empty).has_gjk_support());
     }
 }

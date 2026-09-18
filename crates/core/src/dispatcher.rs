@@ -5,23 +5,28 @@
 //! to CPU or GPU executors, falling back to CPU whenever no GPU executor is
 //! wired up or the `gpu` feature is off.
 //!
-//! # Boundary: working GPU path vs unfinished auto-GPU
+//! # Boundary: working GPU path vs core STUB
 //!
-//! * **Working GPU path (stable):** `ornis-wgpu-backend::CommandSync`
-//!   — records `wgpu::ComputePipeline` dispatches and CPU closures, then
-//!   `flush()` submits them to the `Device`/`Queue`. Covered by the
-//!   `gpu_dispatch_records_and_flushes` test and used in `crates/wgpu_backend`.
+//! * **Working GPU path (stable):** `ornis-wgpu-backend` — `CommandSync`
+//!   records `wgpu::ComputePipeline` dispatches and CPU closures, then
+//!   `flush()` submits them to the `Device`/`Queue`. `AutoLane` resolves the
+//!   CPU/GPU verdict from the element count and drives `SmartBuffer`
+//!   residency itself (upload-if-dirty → dispatch → flush →
+//!   download-if-dirty) with CPU fallback, and `GpuLanes` bridges
+//!   `SmartStore` component lanes to `AutoLane` with per-type slot reuse.
+//!   Covered by the backend test suite (GPU tests skip without an adapter).
 //!   The CPU sends commands to where the data lives — no eager PCIe copies.
-//! * **Unfinished auto-GPU (STUB):** `GpuExecutor` and the GPU branch of
-//!   `SmartDispatcher` in this crate — a reserved extension point.
+//! * **STUB in this crate:** `GpuExecutor` and the GPU branch of
+//!   `SmartDispatcher` — a reserved extension point.
 //!   `GpuExecutor::execute` always returns `None` and performs no GPU work;
 //!   `SmartDispatcher` silently falls back to `CpuExecutor` on
 //!   `ExecutionTarget::Gpu`. Do not use as a working GPU executor.
 //!
-//! **Status:** the GPU route is a reserved extension point — `GpuExecutor`
-//! is an experimental stub that performs no GPU work, so every dispatch
-//! effectively executes on CPU today. Working GPU compute dispatch lives in
-//! `ornis-wgpu-backend` (`CommandSync`).
+//! **Status:** the GPU route in this crate is a reserved extension point —
+//! `GpuExecutor` is an experimental stub that performs no GPU work, so every
+//! dispatch through `SmartDispatcher` effectively executes on CPU today.
+//! Working GPU compute dispatch lives in `ornis-wgpu-backend`
+//! (`CommandSync`, `AutoLane`, `GpuLanes`).
 use crate::component_store::ComponentStore;
 use crate::pipeline::PipelineConfig;
 use crate::smart_store::SmartStore;
@@ -171,8 +176,9 @@ impl GpuExecutor {
 /// [`ExecutionTarget::Gpu`] the work silently falls back to the CPU executor
 /// with a runtime warning, so `SmartDispatcher` is effectively CPU-only today.
 /// Working GPU compute dispatch: `ornis-wgpu-backend::CommandSync`
-/// (`dispatch_gpu`/`dispatch_auto`/`flush`) — stable and tested; the auto
-/// ECS→GPU routing here is the unfinished part.
+/// (`dispatch_gpu`/`dispatch_auto`/`flush`) — stable and tested; the finished
+/// automatic ECS→GPU routing is `ornis-wgpu-backend::AutoLane`/`GpuLanes`,
+/// the GPU branch here stays a stub.
 pub struct SmartDispatcher {
     dispatcher: Dispatcher,
     #[cfg(feature = "gpu")]

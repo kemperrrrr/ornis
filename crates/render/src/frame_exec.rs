@@ -105,8 +105,19 @@ impl FrameExecutor {
         self.pool.iter().flatten().map(|t| t.bytes).sum()
     }
 
-    /// Executes `layout`: for each pass in order, `run` receives the encoder
-    /// and a [`PassViews`] resolver for the live resources.
+    /// Executes `layout` in DAG level order: level by level from the shared
+    /// `ornis-schedule` plan (`FrameLayout::levels`), `run` receives the
+    /// encoder and a [`PassViews`] resolver for the live resources.
+    ///
+    /// The sequential sibling of [`execute_parallel`](Self::execute_parallel):
+    /// levels come from the same [`bitset_level_plan`](ornis_schedule::bitset_level_plan)
+    /// engine that levels `core::Schedule` systems, and passes within a
+    /// level are independent by construction — so the flattened order is a
+    /// valid topological order. On every production wiring
+    /// ([`RenderFrame3D`]) it coincides with registration order (pinned by
+    /// `sequential_execute_matches_registration_on_production_plans`), making
+    /// the default path structurally identical to the E1 schedule-driven
+    /// [`render_schedule`](RenderFrame3D::render_schedule) order.
     pub fn execute<'a>(
         &'a mut self,
         device: &wgpu::Device,
@@ -118,16 +129,18 @@ impl FrameExecutor {
         let pool = &self.pool;
         let externals = &self.external_views;
         let mut run = run;
-        for index in 0..layout.passes.len() {
-            run(
-                encoder,
-                PassViews {
-                    layout,
-                    pool,
-                    externals,
-                    index,
-                },
-            );
+        for level in layout.levels() {
+            for index in level {
+                run(
+                    encoder,
+                    PassViews {
+                        layout,
+                        pool,
+                        externals,
+                        index,
+                    },
+                );
+            }
         }
     }
 
@@ -1103,6 +1116,57 @@ mod tests {
             format_bytes_per_pixel(spec.format) as u64 * 1280 * 720,
             7_372_800
         );
+    }
+
+    // ── Unified scheduler: sequential execute follows DAG levels ──────
+
+    #[test]
+    fn sequential_execute_matches_registration_on_production_plans() {
+        // `FrameExecutor::execute` iterates the flattened `layout.levels()`
+        // from the shared `bitset_level_plan` engine. On every production
+        // wiring that order must coincide with registration order —
+        // otherwise the default `render()` path would reorder passes.
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            for bloom in [false, true] {
+                let mut plan = RenderFrame3D::new_with(fmt, (32, 32), technique, bloom);
+                let layout = plan.systems.build();
+                let flat: Vec<usize> = layout.levels().iter().flatten().copied().collect();
+                let registration: Vec<usize> = (0..layout.passes.len()).collect();
+                assert_eq!(
+                    flat, registration,
+                    "technique {technique:?} bloom {bloom}: DAG order != registration order"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dag_levels_pull_independent_passes_forward() {
+        // A diamond the shared level engine must expose: `p2` is independent
+        // of the `p0 → p1` chain, so it shares level 0 and the flattened DAG
+        // order — the order `execute` now follows — is `[0, 2, 1]`, not
+        // registration order.
+        let spec = TextureSpec {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            samples: 1,
+            size: SizePolicy::Fixed {
+                width: 64,
+                height: 64,
+            },
+        };
+        let mut set = SystemSet::new();
+        set.set_surface_size((64, 64));
+        let a = set.create_resource("a", spec);
+        let b = set.create_resource("b", spec);
+        let c = set.create_resource("c", spec);
+        set.add_pass("p0").write(a);
+        set.add_pass("p1").read(a).write(b);
+        set.add_pass("p2").write(c);
+        let layout = set.build();
+        assert_eq!(layout.levels(), vec![vec![0, 2], vec![1]]);
+        let flat: Vec<usize> = layout.levels().iter().flatten().copied().collect();
+        assert_eq!(flat, vec![0, 2, 1]);
     }
 
     // ── S1: layout cache on the RenderFrame3D level ──────────────────

@@ -15,18 +15,18 @@
 `split.rs`, `migration.rs`, `avbd.rs`):
 
 - **M3 Islands — DONE (`cff2a11`, 2026-09-16).** `RoutingKind::Islands`
-  (`lib.rs:80-86`): роутинг по ОСТРОВАМ — контактная компонента всегда
+  (`lib.rs:92-98`): роутинг по ОСТРОВАМ — контактная компонента всегда
   шагает в одном солвере, cross-пар нет как класса (спайки 001–004,
   `spikes/`); общий реестр + rebuild с mass-restore; гистерезис
   unanimous-calm→Builtin / immediate-wake→AVBD; налог coupling —
-  `SplitMetrics` (`lib.rs:104-120`: migrations/timings). Тесты
+  `SplitMetrics` (`lib.rs:116-132`: migrations/timings). Тесты
   `solver_split` / `solver_lifecycle` / `solver_split_invariants`.
 - **Hardening PR #12 — закрыт (2026-09-17).** Inertia бокса на полных
   сторонах (была занижена ×4, `8c46601`), signed overlap contained/
   crossing primitive queries вместо ложной сепарации, angular locks:
   ошибка в frame тела A, торки/гессианы в world (`diff.dot(*e)`,
-  `avbd.rs:2496,3162`), nonzero warm reactions не отбрасываются
-  (`row_live(c,f)`, `avbd.rs:564`), lifecycle островов + joint rest state
+  `avbd.rs:2504,3170`), nonzero warm reactions не отбрасываются
+  (`row_live(c,f)`, `avbd.rs:572`), lifecycle островов + joint rest state
   + event baselines через rebuild'ы; гейт довинчен `966bac9`.
 - **CI — 5 шардов (`28e7301`, поверх мержа PR #13 `0a26089`).**
   Quality-гейт шардирован (fast/clippy/test/gpu/docs + сводный report);
@@ -34,8 +34,9 @@
 - **Остаток по solver-треку:** 100k tiled всё ещё вне real-time
   (~8 с/шаг — следующий шаг после M3, не закрыт); GPU AVBD (DSL-
   предусловия закрыты в M2, самого солвера нет); Custom per-entity
-  коллайдеры (мосты хендлят вариант без выдуманной сферы-заглушки,
-  `1020931`).
+  коллайдеры физики открыты (мосты скипают Custom без выдуманной
+  сферы-заглушки, `1020931`: `src/main.rs:287-288`,
+  `src/editor_world.rs:1004`; render per-entity Custom ✅ `3176c18`).
 
 ## Актуализация 2026-09-12: что закрыто, что осталось
 
@@ -59,8 +60,8 @@
   `02edf24`). Остаток по масштабу: **100k tiled всё ещё вне real-time**
   (~8 с/шаг на Grid по `perf-baseline-2026-09-02.md`) — следующий шаг
   зафиксирован как **модульные солверы Genesis-стиль, план M0–M3 в
-  `PLAN.md`** (M0 — CPU-спайк AVBD как предусловие; GPU-предусловия AVBD
-  см. `crates/physics/src/gpu.rs:46-48`).
+   `PLAN.md`** (M0 — CPU-спайк AVBD как предусловие; GPU-предусловия AVBD
+   см. `crates/physics/src/gpu.rs:46-53`).
 - **CCD/контакты/трение/джойнты — закрыто.** Kinematic CCD (`c0aa7c5`,
   deferred proof `e55857b`), unified CCD impact со spin-aware restitution
   (`520feb0`), angular CCD travel gate (`0f2c8a6`), gyroscopic torque
@@ -99,14 +100,14 @@
   `Cargo.toml`). Пометка «маркировать нечего» в §«Приоритет 4»
   **неактуальна** — шов есть и нуждается в тех же Experimental-маркерах.
 - **GPU-диспетчеризация в core — по-прежнему stub, но это слой, а не баг.**
-  `GpuExecutor::execute` возвращает `None` (`crates/core/src/dispatcher.rs:145-163`,
+  `GpuExecutor::execute` возвращает `None` (`crates/core/src/dispatcher.rs:120-170`,
   честно помечен STUB); рабочий путь — `AutoLane` + typed `GpuLanes` в
   `ornis-wgpu-backend` (`4440843`, `3c06af6`) и GPU bulk dispatch v2 физики
   (`f5fa4c4`). Ограничение **актуально частично**: API-граница
   задокументирована верно, доделывать надо не stub, а покрытие AutoLane.
 - **Редактор — WebSocket есть, polling остался fallback'ом.**
   `serve_websocket` в `crates/editor-backend/src/remote.rs`, reconnect +
-  polling fallback в `editor/editor.js:674`. Плюс icon set (`44d4d2e`,
+  polling fallback в `editor/editor.js:676`. Плюс icon set (`44d4d2e`,
   `db71ab9`). Формулировка «синхронизация идёт через polling»
   **неактуальна как основная** — polling теперь только fallback.
 - **Quality gate: BCA → rustqual — переход завершён.** `xtask` использует
@@ -138,9 +139,14 @@
 - Scope по-прежнему широк (12 крейтов + rhai/rune/python/shader-lang),
   но теперь связан правилом трёх и общим швом `ScriptEngine` —
   **актуально с оговоркой**.
-- Новый долг: **синхронизация доков с кодом** — этот файл, README,
-  `PLAN.md` (AVBD M0–M3 только в PLAN), `docs/quality/` отстают от кода;
-  scripting-шов без Experimental-маркеров.
+- ~~Синхронизация доков с кодом~~ — ✅ закрыт 2026-09-18: M3 Islands +
+  hardening отражены в этом файле (§«Актуализация 2026-09-18»), README
+  (§«Текущее состояние», Прил. A) и `PLAN.md` (M3 DONE); `docs/quality/`
+  `physics-hardening-2026-09-17.md` несёт appendix о мерже PR #12/#13
+  (тело выше appendix — исторический pre-merge снимок);
+  Experimental-маркеры scripting-шва на месте с 2026-09-12
+  (`crates/core/src/script.rs`: модуль, `ScriptEngine`, `NoopScriptEngine`,
+  `ScriptHost`, `ScriptPlugin` + шапки `crates/rhai|rune|python`).
 
 ## План дальнейшей работы
 
@@ -655,7 +661,7 @@ broadphase/narrowphase/solver и persistent `DynamicAabbTree`; adaptive policy
 ### 3. ~~Редактор ещё не является полностью live-системой~~ — ✅ в основном закрыт; остаток: native showcase (ниже — исторический снимок)
 
 > Статус 2026-09-12: WebSocket server-push + reconnect + bounded replay +
-> `EventGap` работают, polling — только fallback (`editor/editor.js:674`);
+> `EventGap` работают, polling — только fallback (`editor/editor.js:676`);
 > добавлен icon set. Открыто: native runtime остаётся showcase shell.
 
 Положительные части есть:

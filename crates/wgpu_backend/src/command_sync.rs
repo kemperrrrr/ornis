@@ -126,6 +126,37 @@ mod tests {
     use crate::context::WgpuContext;
     use wgpu::util::DeviceExt;
 
+    /// Adapter if the machine has one; `None` (skip the test) otherwise.
+    async fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+                apply_limit_buckets: false,
+            })
+            .await
+            .ok()?;
+        adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .ok()
+    }
+
     #[test]
     fn gpu_dispatch_records_and_flushes() {
         let ctx = WgpuContext::new_blocking();
@@ -177,6 +208,36 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         sync.dispatch_gpu(&pipeline, &bind_group, (1, 1, 1), "test_dispatch");
         assert_eq!(sync.len(), 1);
         sync.flush();
+        assert!(sync.is_empty());
+    }
+
+    #[test]
+    fn dispatch_auto_without_pipeline_runs_cpu_fallback() {
+        let Some((device, queue)) = pollster::block_on(try_device()) else {
+            return;
+        };
+        let mut sync = CommandSync::new(device, queue);
+        let config = DispatchConfig {
+            target: crate::dispatcher::ExecutionTarget::Auto(16),
+            workgroup_size: 64,
+            label: "dispatch_auto fallback test".to_string(),
+        };
+        // 64 elements would pick GPU, but no pipeline is wired: the CPU
+        // closure must run instead of dropping the work.
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        sync.dispatch_auto(
+            &config,
+            64,
+            None,
+            None,
+            Box::new(move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        assert_eq!(sync.len(), 1);
+        sync.flush();
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
         assert!(sync.is_empty());
     }
 }
