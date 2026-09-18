@@ -8,49 +8,251 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # B: CI runners have 4 vCPUs — use them. `.cargo/config.toml` keeps
+  # `jobs = 2` as the local default (env overrides the file, so local
+  # behavior is unchanged). Serialism for the shared lavapipe device is
+  # kept at test *runtime* (`--test-threads=1` in xtask), not at build time.
+  CARGO_BUILD_JOBS: 4
+  # C: sccache requires non-incremental compilation for cache hits.
+  CARGO_INCREMENTAL: 0
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
-# Explicit token scopes. The failure-digest comment step needs
-# `pull-requests: write`; the others (contents: read, actions: read)
-# are implicit for the runner, but listing them is best practice and
-# future-proofs the file against org-level Workflow permissions
-# changes (Settings → Actions → General → Workflow permissions).
+# Cancel superseded PR runs: a new push makes the previous 20-minute gate
+# result irrelevant. Master pushes are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Explicit token scopes. The report job needs `pull-requests: write` for
+# the failure-digest comments; shard jobs only read the repo and write
+# their own log artifacts (actions: read is implicit for the runner, but
+# listing it future-proofs against org-level Workflow permission changes).
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-  # Single job: exactly the same command that runs locally
-  # (`cargo xtask quality --ci`). xtask is the single source of truth for
-  # gate composition; this file only sets up the environment
-  # (system packages, toolchain, wasm target, cargo tools).
-  quality:
+  # Sharding: `cargo xtask quality` is still the single source of truth for
+  # gate composition — each shard runs the same xtask binary with
+  # `--ci --only <ids>` (see `cargo xtask quality --list-stages`). Wall time
+  # is the slowest shard, not the sum of all 13 stages.
+  #
+  # Shard map (stage ids):
+  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual (no compilation)
+  #   clippy — clippy-physics, clippy
+  #   test   — test (workspace)
+  #   gpu    — test-physics, smoke (both need lavapipe)
+  #   docs   — doc, wasm-check
+  fast:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
+      # Full history: rustqual's failure diagnostics run `git archive
+      # origin/<base>` for the reference measurement.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # System dependencies for the Linux build:
-      # libasound2-dev — cpal (audio), libudev-dev — gilrs/winit input,
-      # pkg-config — common build-time library discovery.
-      # mesa-vulkan-drivers — software Vulkan (lavapipe) for wgpu tests:
-      # Ubuntu runners have no GPU; without an ICD no adapter is found
-      # (no compatible GPU adapter found in ornis-wgpu-backend).
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      # Same toolset the single-job gate installed: no cargo-edit on
+      # purpose, so `upgrade-check` keeps its SKIP-with-hint behavior.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit,cargo-outdated,rustqual@1.8.2
+
+      - name: Verify rustqual version (pinned)
+        run: rustqual --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
+
+      - name: Quality gate (fast shard)
+        id: gate
+        shell: bash
+        run: |
+          mkdir -p target
+          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual 2>&1 | tee target/quality-fast.log
+
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-log-fast
+          path: target/quality-fast.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Install system dependencies
         timeout-minutes: 10
         run: |
-          # The Azure Ubuntu mirror (azure.archive.ubuntu.com) is periodically
-          # unreachable from runners: apt retries every suite entry with long
-          # timeouts before failing over to the public archive, which can hang
-          # this step for hours. Point apt straight at the public archive and
-          # fail fast instead.
           sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
             /etc/apt/sources.list.d/*.list 2>/dev/null || true
           sudo apt-get update \
             -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
             -o Acquire::ForceIPv4=true
-          sudo apt-get install -y -o Acquire::ForceIPv4=true \
-            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
+          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
+
+      - name: Quality gate (clippy shard)
+        id: gate
+        shell: bash
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold
+        run: |
+          mkdir -p target
+          cargo xtask quality --ci --only clippy-physics,clippy 2>&1 | tee target/quality-clippy.log
+
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-log-clippy
+          path: target/quality-clippy.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install system dependencies
+        timeout-minutes: 10
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+            /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update \
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
+
+      - name: Quality gate (test shard)
+        id: gate
+        shell: bash
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold
+        run: |
+          mkdir -p target
+          cargo xtask quality --ci --only test 2>&1 | tee target/quality-test.log
+
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-log-test
+          path: target/quality-test.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  gpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # mesa-vulkan-drivers — software Vulkan (lavapipe) for wgpu tests:
+      # Ubuntu runners have no GPU; without an ICD no adapter is found
+      # (no compatible GPU adapter found in ornis-wgpu-backend).
+      - name: Install system dependencies
+        timeout-minutes: 10
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+            /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update \
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
+
+      - name: Quality gate (gpu shard)
+        id: gate
+        shell: bash
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold
+        run: |
+          mkdir -p target
+          cargo xtask quality --ci --only test-physics,smoke 2>&1 | tee target/quality-gpu.log
+
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-log-gpu
+          path: target/quality-gpu.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install system dependencies
+        timeout-minutes: 10
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+            /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update \
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mold
 
       - uses: dtolnay/rust-toolchain@1.97
         with:
@@ -62,58 +264,64 @@ jobs:
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
-      # Supply-chain-tools: same set `cargo xtask quality` expects locally.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny,cargo-audit,cargo-outdated,rustqual@1.8.2
-
-      # Fallback if install-action misses (version bump): keep old path as backup,
-      # but pinned version above is the source of truth — do not use unpinned `cargo install`.
-      - name: Verify rustqual version (pinned)
-        run: rustqual --version
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
 
-      # The one command. Locally: same flags, same result.
-      # `tee` mirrors stdout+stderr to the GitHub log AND to
-      # `target/quality.log`, which the post-failure steps below
-      # read to build a structured PR comment. The arena.ai agent
-      # operates only via GitHub API and its sandbox's egress proxy
-      # blocks the Azure Blob endpoint where GitHub stores the raw
-      # run logs, so we re-publish a digest in the same API channel
-      # the agent can read.
-      - name: Quality gate
+      - name: Quality gate (docs shard)
         id: gate
-        # No `continue-on-error` here on purpose: the post-failure steps
-        # below use `if: steps.gate.outcome == 'failure'`, so they still
-        # run on failure, but the JOB must be red so the PR check and
-        # the status badge reflect reality. An earlier version of this
-        # file had `continue-on-error: true` on this step, which made
-        # the job silently green whenever the gate failed — a footgun.
-        #
-        # `shell: bash` is set explicitly because the step pipes through
-        # `tee`: without pipefail the pipeline's exit code is tee's (0),
-        # and a failing gate shows green. The runner's default shell on
-        # this repo resolved to plain `bash -e` (no pipefail), so the
-        # default cannot be relied on — `shell: bash` on Linux maps to
-        # `bash --noprofile --norc -eo pipefail {0}`.
+        # `cargo check`/`cargo doc` don't link, so no mold RUSTFLAGS here:
+        # a host linker flag must never leak into the wasm target check.
         shell: bash
         run: |
-          # tee opens the log BEFORE cargo starts, so `target/` must
-          # already exist: on a rust-cache miss (fresh Cargo.lock key,
-          # new branch) the directory is absent, tee fails instantly,
-          # pipefail turns the gate red, and every post-failure step
-          # then crashes on the missing file instead of reporting the
-          # real error (observed: FileNotFoundError in the chunked
-          # comment step on a cache-miss PR run).
           mkdir -p target
-          cargo xtask quality --ci 2>&1 | tee target/quality.log
+          cargo xtask quality --ci --only doc,wasm-check 2>&1 | tee target/quality-docs.log
 
-      # Artifact: full log, kept 7 days. Visible in the Actions UI
-      # (not the agent's reach, but useful for humans debugging the
-      # gate itself or comparing two runs).
-      - name: Upload failure log
-        if: failure() && steps.gate.outcome == 'failure'
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-log-docs
+          path: target/quality-docs.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  # Merges the five shard logs and preserves the old single-job reporting:
+  # one digest comment (QUALITY SUMMARY + tail) plus the full merged log as
+  # chunked comments. Runs even when shards fail; stays silent on success.
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [fast, clippy, test, gpu, docs]
+    # `always()` so failure digests are posted even when a shard fails;
+    # the steps below no-op on full success (except the merged-log artifact).
+    if: always()
+    steps:
+      - name: Download shard logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: quality-log-*
+          path: target/shard-logs
+          merge-multiple: true
+
+      - name: Merge shard logs
+        shell: bash
+        run: |
+          mkdir -p target
+          {
+            for f in target/shard-logs/quality-*.log; do
+              [ -f "$f" ] || continue
+              echo "════════ ${f##*/} ════════"
+              cat "$f"
+              echo
+            done
+          } > target/quality.log
+          ls -la target/quality.log target/shard-logs/ || true
+
+      - name: Upload merged log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: quality-log
@@ -121,13 +329,12 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      # One comment per PR, overwritten on each failing run. Built
-      # from the QUALITY SUMMARY block of the xtask output (per-stage
-      # PASS/FAIL/SKIP, a clean structured view) plus a collapsible
-      # tail of the raw log. The agent reads this via the PR comments
-      # endpoint and iterates from it.
+      # One comment per PR, overwritten on each failing run. Built from the
+      # QUALITY SUMMARY blocks of the shard outputs (per-stage PASS/FAIL/SKIP)
+      # plus a collapsible tail of the merged log. The agent reads this via
+      # the PR comments endpoint and iterates from it.
       - name: Build failure digest body
-        if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        if: failure() && github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.head_ref }}
           RUN_ID: ${{ github.run_id }}
@@ -137,7 +344,7 @@ jobs:
           {
             printf '❌ **Quality gate failed** on `%s` (run [%s](%s/%s/actions/runs/%s)).\n\n' \
               "$HEAD_REF" "$RUN_ID" "$SERVER_URL" "$REPOSITORY" "$RUN_ID"
-            echo '### 📊 QUALITY SUMMARY'
+            echo '### 📊 QUALITY SUMMARY (per shard)'
             echo
             echo '```text'
             if [ -f target/quality.log ]; then
@@ -147,12 +354,12 @@ jobs:
                 echo '(no summary block found in log — xtask may have crashed before printing it)'
               fi
             else
-              echo '(target/quality.log missing — gate failed before tee could write it;'
-              echo ' see the raw "Quality gate" step output in the Actions log)'
+              echo '(target/quality.log missing — shard logs were not produced;'
+              echo ' see the individual shard job outputs in the Actions run)'
             fi
             echo '```'
             echo
-            echo '### 📜 Tail of log (200 lines)'
+            echo '### 📜 Tail of merged log (200 lines)'
             echo
             echo '```text'
             if [ -f target/quality.log ]; then
@@ -162,23 +369,23 @@ jobs:
             fi
             echo '```'
             echo
-            echo 'Full logs are in the `quality-log` artifact of this run.'
+            echo 'Full logs are in the `quality-log` artifact (merged) and the per-shard `quality-log-<shard>` artifacts of this run.'
           } > target/comment-body.md
 
       - name: Post failure digest to PR
-        if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        if: failure() && github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body-path: target/comment-body.md
 
-      # Full gate log — split into a series of PR comments with ≤60k chars each
-      # (GitHub limit is 65536 per comment). Each run OVERWRITES prior
-      # chunk comments (PATCH) instead of creating new ones: same
+      # Full merged gate log — split into a series of PR comments with ≤60k
+      # chars each (GitHub limit is 65536 per comment). Each run OVERWRITES
+      # prior chunk comments (PATCH) instead of creating new ones: same
       # permissions already granted (pull-requests: write).
       # Marker <!--quality-log--> at the body start — used for lookup on read.
       - name: Publish full log as chunked PR comments
-        if: failure() && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        if: failure() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -207,12 +414,12 @@ jobs:
           if os.path.exists(log_path):
               log = open(log_path, encoding='utf-8', errors='replace').read()
           else:
-              # Gate failed before tee could write the log (e.g. missing
+              # Shards failed before tee could write their logs (e.g. missing
               # target/ on a cold rust-cache). Still post a marker comment
               # so the agent sees SOMETHING instead of a crashed step.
-              log = ('(target/quality.log was not created — the gate step failed\n'
-                     'before tee wrote anything. Read the raw "Quality gate" step\n'
-                     'output in the Actions run referenced by the digest comment.)\n')
+              log = ('(target/quality.log was not created — the shards failed\n'
+                     'before tee wrote anything. Read the raw shard job outputs\n'
+                     'in the Actions run referenced by the digest comment.)\n')
           log = re.sub(r'\x1b\[[0-9;]*m', '', log)  # ANSI codes from xtask
           chunks, buf = [], ''
           for line in log.splitlines(keepends=True):

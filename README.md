@@ -48,6 +48,7 @@ cargo xtask quality --ci      # + rustdoc и wasm32 check — ровно то, �
 cargo xtask quality --full    # + покрытие (llvm-cov → target/llvm-cov/html) и bench compile-check
 cargo xtask quality --bench   # + полный прогон criterion-бенчмарков (долго)
 cargo xtask quality --everything  # всё сразу: --ci + --full + --bench + mutants + fuzz smoke
+cargo xtask quality --ci --only fmt,test  # подмножество стадий для CI-шардов (идники: --list-stages)
 cargo xtask fuzz <target>     # фаззинг парсеров: scene_ron, materialx_parse (через +nightly)
 cargo xtask mutants           # мутационное тестирование ornis-core (cargo-mutants, долго)
 
@@ -70,13 +71,17 @@ cargo xtask quality            # регресс-гейт: падает толь�
 - Structural gate: [`rustqual.toml`](rustqual.toml) + [`baseline.json`](baseline.json)
   — гейт `rustqual` (MIT, https://github.com/SaschaOnTour/rustqual) измеряет
   IOSP/complexity/DRY/SRP/coupling/test-quality. Ratchet: `rustqual --compare baseline.json --fail-on-regression --no-fail` падает только при регрессе, baseline обновляется осознанно (`rustqual --save-baseline baseline.json`).
-- CI: `.github/workflows/quality.yml` — одна job на push/PR в `master`:
-  только установка окружения (системные пакеты, toolchain 1.97, wasm
-  target, cargo-deny/audit/outdated, rustqual — опционально, если установка
-  не удалась, гейт SKIP-нет structural-стадию) и один шаг
-  `cargo xtask quality --ci`.
-  xtask — единственный источник правды о составе гейта: локально и в CI
-  выполняется одна и та же команда.
+- CI: `.github/workflows/quality.yml` — пять параллельных шардов на push/PR
+  в `master` (fast, clippy, test, gpu, docs) + сводный `report`-job:
+  каждый шард гоняет ту же xtask-команду с фильтром
+  `cargo xtask quality --ci --only <ids>` (`--list-stages` — канонические id),
+  `report` склеивает шард-логи в `target/quality.log` и публикует тот же
+  digest + chunked-комменты к PR при падении.
+  Ускорение: `CARGO_BUILD_JOBS=4`, `sccache` + `mold` (линковщик, только
+  нативные шарды), общий `rust-cache`, serial только на рантайме GPU-тестов
+  (`--test-threads=1`, сборка параллельная).
+  xtask — единственный источник правды о составе гейта: локально
+  `cargo xtask quality --ci` гоняет те же 13 стадий, что все шарды вместе.
 
 - **Performance benchmarks** (`.github/workflows/performance.yml`) — отдельный
   workflow для criterion-бенчмарков, не входящий в основной quality gate:

@@ -40,6 +40,27 @@ struct StageResult {
     note: String,
 }
 
+/// Canonical stage ids in gate order. `--only` selects a subset for CI
+/// sharding; the default (no `--only`) runs everything implied by the
+/// level flags, exactly as before.
+const LEVEL1_IDS: [&str; 11] = [
+    "fmt",
+    "clippy-physics",
+    "test-physics",
+    "clippy",
+    "rustqual",
+    "smoke",
+    "test",
+    "audit",
+    "deny",
+    "outdated",
+    "upgrade-check",
+];
+const CI_IDS: [&str; 2] = ["doc", "wasm-check"];
+const FULL_IDS: [&str; 2] = ["coverage", "bench-compile"];
+const BENCH_IDS: [&str; 1] = ["criterion"];
+const DEEP_IDS: [&str; 3] = ["mutants", "fuzz-scene", "fuzz-editor"];
+
 /// Depth flags for the quality gate.
 #[derive(Default)]
 struct QualityFlags {
@@ -47,23 +68,40 @@ struct QualityFlags {
     bench: bool,
     ci: bool,
     everything: bool,
+    /// `--only id[,id...]` — run only these stage ids (CI sharding).
+    only: Option<Vec<String>>,
 }
 
 impl QualityFlags {
     fn parse(args: &[String]) -> Self {
         let mut f = Self::default();
-        for a in args {
-            match a.as_str() {
-                "--full" => f.full = true,
-                "--bench" => f.bench = true,
-                "--ci" => f.ci = true,
-                "--everything" => f.everything = true,
-                "-h" | "--help" => quality_usage(0),
-                other => {
-                    eprintln!("xtask quality: unknown flag '{other}'");
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i].as_str();
+            if let Some(list) = a.strip_prefix("--only=") {
+                push_only(&mut f, list);
+            } else if a == "--only" {
+                i += 1;
+                let Some(list) = args.get(i) else {
+                    eprintln!("xtask quality: --only requires a comma-separated stage list");
                     quality_usage(2);
+                };
+                push_only(&mut f, list);
+            } else {
+                match a {
+                    "--full" => f.full = true,
+                    "--bench" => f.bench = true,
+                    "--ci" => f.ci = true,
+                    "--everything" => f.everything = true,
+                    "--list-stages" => print_stages(0),
+                    "-h" | "--help" => quality_usage(0),
+                    _ => {
+                        eprintln!("xtask quality: unknown flag '{a}'");
+                        quality_usage(2);
+                    }
                 }
             }
+            i += 1;
         }
         // --everything implies all levels: level 2 (coverage + bench
         // compile-check), criterion, the CI set (doc + wasm check) and
@@ -73,19 +111,80 @@ impl QualityFlags {
             f.bench = true;
             f.ci = true;
         }
+        if let Some(only) = &f.only {
+            let all = Self::all_known_ids();
+            for id in only {
+                if !all.contains(&id.as_str()) {
+                    eprintln!("xtask quality: unknown stage id '{id}' (see --list-stages)");
+                    quality_usage(2);
+                }
+            }
+        }
         f
+    }
+
+    fn all_known_ids() -> Vec<&'static str> {
+        let mut v = Vec::new();
+        v.extend(LEVEL1_IDS);
+        v.extend(CI_IDS);
+        v.extend(FULL_IDS);
+        v.extend(BENCH_IDS);
+        v.extend(DEEP_IDS);
+        v
+    }
+
+    /// Stages implied by the level flags, in gate order.
+    fn active_ids(&self) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = LEVEL1_IDS.to_vec();
+        if self.ci {
+            v.extend(CI_IDS);
+        }
+        if self.full {
+            v.extend(FULL_IDS);
+        }
+        if self.bench {
+            v.extend(BENCH_IDS);
+        }
+        if self.everything {
+            v.extend(DEEP_IDS);
+        }
+        v
+    }
+
+    fn enabled(&self, id: &str) -> bool {
+        match &self.only {
+            None => true,
+            Some(only) => only.iter().any(|s| s == id),
+        }
     }
 
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
-    /// Level 1 now: fmt, clippy, rustqual, smoke (editor-only), test, test (physics gpu),
-    /// clippy (physics gpu), audit, deny, outdated, upgrade-check = 11
+    /// With `--only` the total is the filtered count.
     fn total_stages(&self) -> usize {
-        11 + usize::from(self.ci) * 2
-            + usize::from(self.full) * 2
-            + usize::from(self.bench)
-            + usize::from(self.everything) * 2
+        self.active_ids()
+            .iter()
+            .filter(|id| self.enabled(id))
+            .count()
     }
+}
+
+fn push_only(f: &mut QualityFlags, list: &str) {
+    let v = f.only.get_or_insert_with(Vec::new);
+    for part in list.split([',', ' ']) {
+        let id = part.trim();
+        if !id.is_empty() && !v.iter().any(|s| s == id) {
+            v.push(id.to_string());
+        }
+    }
+}
+
+fn print_stages(code: i32) -> ! {
+    eprintln!("xtask quality stages (gate order):");
+    for id in QualityFlags::all_known_ids() {
+        eprintln!("  {id}");
+    }
+    exit(code);
 }
 
 /// Running stage counter shared by the per-level runners.
@@ -94,25 +193,40 @@ struct StageList<'a> {
     total: usize,
     n: usize,
     results: Vec<StageResult>,
+    only: Option<Vec<String>>,
 }
 
 impl<'a> StageList<'a> {
-    fn new(root: &'a std::path::Path, total: usize) -> Self {
+    fn new(root: &'a std::path::Path, total: usize, only: Option<Vec<String>>) -> Self {
         Self {
             root,
             total,
             n: 0,
             results: Vec::new(),
+            only,
         }
     }
 
-    fn run(&mut self, name: &str, desc: &str, command: Command, informational: bool) {
+    fn enabled(&self, id: &str) -> bool {
+        match &self.only {
+            None => true,
+            Some(only) => only.iter().any(|s| s == id),
+        }
+    }
+
+    fn run(&mut self, id: &str, name: &str, desc: &str, command: Command, informational: bool) {
+        if !self.enabled(id) {
+            return;
+        }
         self.n += 1;
         let result = run_stage(self.n, self.total, name, desc, command, informational);
         self.results.push(result);
     }
 
-    fn skip(&mut self, name: &str, note: &str) {
+    fn skip(&mut self, id: &str, name: &str, note: &str) {
+        if !self.enabled(id) {
+            return;
+        }
         self.n += 1;
         let result = skip_stage(self.n, self.total, name, note);
         self.results.push(result);
@@ -124,8 +238,12 @@ impl<'a> StageList<'a> {
 }
 
 fn rustqual_stage(stages: &mut StageList<'_>) {
+    if !stages.enabled("rustqual") {
+        return;
+    }
     if !binary_exists("rustqual") {
         stages.skip(
+            "rustqual",
             "rustqual",
             "rustqual not installed — structural gate skipped (cargo install rustqual --locked --version 1.8.2)",
         );
@@ -137,6 +255,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
         let mut c = Command::new("rustqual");
         c.current_dir(stages.root);
         stages.run(
+            "rustqual",
             "rustqual",
             "rustqual (no baseline.json — run: rustqual --save-baseline baseline.json)",
             c,
@@ -311,6 +430,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
 fn level1(stages: &mut StageList<'_>) {
     stages.run(
         "fmt",
+        "fmt",
         "cargo fmt --all -- --check",
         stages.cargo(&["fmt", "--all", "--", "--check"]),
         false,
@@ -320,6 +440,7 @@ fn level1(stages: &mut StageList<'_>) {
     // before building the unrelated scripting/editor workspace. All original
     // stages still run and retain their strict failure status.
     stages.run(
+        "clippy-physics",
         "clippy (physics gpu)",
         "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
         stages.cargo(&[
@@ -341,17 +462,18 @@ fn level1(stages: &mut StageList<'_>) {
     // runs the solver against the CPU reference on a software adapter
     // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
     // so the gate stays green on machines without GPU drivers.
+    // Serial only at runtime (`--test-threads=1` for the shared lavapipe
+    // device); the build itself stays parallel via CARGO_BUILD_JOBS.
     stages.run(
+        "test-physics",
         "test (physics gpu)",
-        "cargo test -p ornis-physics --features gpu -j 1 --no-fail-fast -- --test-threads=1",
+        "cargo test -p ornis-physics --features gpu --no-fail-fast -- --test-threads=1",
         stages.cargo(&[
             "test",
             "-p",
             "ornis-physics",
             "--features",
             "gpu",
-            "-j",
-            "1",
             "--no-fail-fast",
             "--",
             "--test-threads=1",
@@ -360,6 +482,7 @@ fn level1(stages: &mut StageList<'_>) {
     );
 
     stages.run(
+        "clippy",
         "clippy",
         "cargo clippy --workspace --all-targets -- -D warnings",
         stages.cargo(&[
@@ -385,14 +508,22 @@ fn level1(stages: &mut StageList<'_>) {
 
     stages.run(
         "test",
+        "test",
         "cargo test --workspace --no-fail-fast",
         stages.cargo(&["test", "--workspace", "--no-fail-fast"]),
         false,
     );
 
-    stages.run("audit", "cargo audit", stages.cargo(&["audit"]), false);
+    stages.run(
+        "audit",
+        "audit",
+        "cargo audit",
+        stages.cargo(&["audit"]),
+        false,
+    );
 
     stages.run(
+        "deny",
         "deny",
         "cargo deny check",
         stages.cargo(&["deny", "check"]),
@@ -400,6 +531,7 @@ fn level1(stages: &mut StageList<'_>) {
     );
 
     stages.run(
+        "outdated",
         "outdated",
         "cargo outdated --workspace --exit-code 1 (hard gate: must be latest)",
         stages.cargo(&["outdated", "--workspace", "--exit-code", "1"]),
@@ -416,6 +548,9 @@ fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
     // cargo-edit's `cargo upgrade --dry-run --incompatible allow` prints a table
     // with `old req` rows when a dependency lags behind latest. Exit code is 0
     // even when outdated, so we inspect stdout/stderr instead of relying on exit.
+    if !stages.enabled("upgrade-check") {
+        return;
+    }
     stages.n += 1;
     let (idx, total) = (stages.n, stages.total);
     let name = "upgrade-check";
@@ -495,6 +630,7 @@ fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
 /// ── Level 2 (--full): coverage + bench compile check ──────
 fn full_stages(stages: &mut StageList<'_>) {
     stages.run(
+        "coverage",
         "coverage (llvm-cov)",
         "cargo llvm-cov --workspace --html --output-dir target/llvm-cov",
         stages.cargo(&[
@@ -508,6 +644,7 @@ fn full_stages(stages: &mut StageList<'_>) {
     );
 
     stages.run(
+        "bench-compile",
         "bench compile-check",
         "cargo bench --workspace --no-run",
         stages.cargo(&["bench", "--workspace", "--no-run"]),
@@ -517,6 +654,7 @@ fn full_stages(stages: &mut StageList<'_>) {
 
 fn bench_stage(stages: &mut StageList<'_>) {
     stages.run(
+        "criterion",
         "criterion benches",
         "cargo bench --workspace",
         stages.cargo(&["bench", "--workspace"]),
@@ -525,10 +663,11 @@ fn bench_stage(stages: &mut StageList<'_>) {
 }
 
 /// ── CI set (--ci): rustdoc + wasm target check ────────────
-/// These two stages mirror what the GitHub Actions quality job
-/// runs; --ci makes the local gate identical to CI by construction.
+/// These two stages mirror what the GitHub Actions quality shards
+/// run; --ci makes the local gate identical to CI by construction.
 fn ci_stages(stages: &mut StageList<'_>) {
     stages.run(
+        "doc",
         "doc",
         "cargo doc --workspace --no-deps",
         stages.cargo(&["doc", "--workspace", "--no-deps"]),
@@ -537,6 +676,7 @@ fn ci_stages(stages: &mut StageList<'_>) {
 
     if wasm_target_installed() {
         stages.run(
+            "wasm-check",
             "wasm-check",
             "cargo check -p ornis-wasm --target wasm32-unknown-unknown",
             stages.cargo(&[
@@ -551,6 +691,7 @@ fn ci_stages(stages: &mut StageList<'_>) {
     } else {
         stages.skip(
             "wasm-check",
+            "wasm-check",
             "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
         );
     }
@@ -561,6 +702,7 @@ fn ci_stages(stages: &mut StageList<'_>) {
 fn deep_stages(stages: &mut StageList<'_>) {
     if cargo_subcommand_exists("mutants") {
         stages.run(
+            "mutants",
             "mutants (ornis-core)",
             "cargo mutants -p ornis-core --features lock-free --timeout 300",
             stages.cargo(&[
@@ -575,17 +717,23 @@ fn deep_stages(stages: &mut StageList<'_>) {
             false,
         );
     } else {
-        stages.skip("mutants (ornis-core)", "cargo-mutants not installed");
+        stages.skip(
+            "mutants",
+            "mutants (ornis-core)",
+            "cargo-mutants not installed",
+        );
     }
 
     if cargo_subcommand_exists("fuzz") && nightly_available() {
         stages.run(
+            "fuzz-scene",
             "fuzz smoke (scene_ron)",
             "cargo +nightly fuzz run scene_ron -- -runs=200",
             stages.cargo(&["+nightly", "fuzz", "run", "scene_ron", "--", "-runs=200"]),
             false,
         );
         stages.run(
+            "fuzz-editor",
             "fuzz smoke (editor_command)",
             "cargo +nightly fuzz run editor_command -- -runs=200",
             stages.cargo(&[
@@ -600,10 +748,12 @@ fn deep_stages(stages: &mut StageList<'_>) {
         );
     } else {
         stages.skip(
+            "fuzz-scene",
             "fuzz smoke (scene_ron)",
             "cargo-fuzz or nightly toolchain missing",
         );
         stages.skip(
+            "fuzz-editor",
             "fuzz smoke (editor_command)",
             "cargo-fuzz or nightly toolchain missing",
         );
@@ -614,7 +764,14 @@ pub fn quality(args: &[String]) {
     let flags = QualityFlags::parse(args);
 
     let root = crate::workspace_root();
-    let mut stages = StageList::new(&root, flags.total_stages());
+    let total = flags.total_stages();
+    if total == 0 {
+        eprintln!(
+            "xtask quality: --only selected no active stages \
+             (level-gated ids like doc/coverage need --ci/--full; see --list-stages)"
+        );
+    }
+    let mut stages = StageList::new(&root, total, flags.only.clone());
 
     // ── Level 1 (mandatory set) ───────────────────────────────
     level1(&mut stages);
@@ -654,7 +811,9 @@ fn quality_usage(code: i32) -> ! {
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
-         everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n\
+         everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n  \
+         cargo xtask quality --ci --only fmt,audit  (CI sharding: run a subset)\n  \
+         cargo xtask quality --list-stages  (print canonical stage ids)\n\
          \n\
          External tools (audit, deny, outdated, upgrade, llvm-cov, rustqual) are optional:\n  \
          missing → SKIP with install hint. rustqual is MIT.\n  \
@@ -971,6 +1130,9 @@ fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult
 /// Compile separately so cold-build time is not confused with app readiness.
 /// Startup still has the same 90-second deadline and must leave a live server.
 fn smoke_stage(stages: &mut StageList<'_>) {
+    if !stages.enabled("smoke") {
+        return;
+    }
     stages.n += 1;
     eprintln!(
         "═══ [{}/{}] smoke (editor-only): build + 90s readiness ═══",

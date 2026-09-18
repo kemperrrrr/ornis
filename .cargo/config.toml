@@ -2,7 +2,9 @@
 xtask = "run --package xtask --"
 editor = "run --package xtask -- editor"
 
-# Keep compiler/linker memory bounded on CI runners. Runtime physics
+# Local default: keep compiler/linker memory bounded. Runtime physics
 # parallelism is independent of Cargo's compilation job count.
+# CI overrides this with CARGO_BUILD_JOBS=4 (see .github/workflows/quality.yml):
+# env takes precedence over this file, so local behavior is unchanged.
 [build]
 jobs = 2

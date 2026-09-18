@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   cargo xtask editor  [--skip-wasm] [--editor-dir <path>]
-//!   cargo xtask quality [--ci] [--full] [--bench] [--everything]
+//!   cargo xtask quality [--ci] [--full] [--bench] [--everything] [--only <ids>] [--list-stages]
 //!   cargo xtask fuzz <target> [-- <libfuzzer args>]
 //!   cargo xtask mutants [-- <cargo-mutants args>]
 //!   cargo editor   [--skip-wasm] [--editor-dir <path>]   (alias)
@@ -44,12 +44,13 @@ fn usage(code: i32) -> ! {
          with the remote editor at http://127.0.0.1:3420\n      \
          --skip-wasm    reuse the existing editor/pkg build\n      \
          --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
-         quality [--ci] [--full] [--bench] [--everything]\n      \
-                  Quality gate: fmt, clippy, rustqual, test, audit, deny, outdated (level 1);\n      \
-                  --ci adds rustdoc + wasm32 check (the exact set CI runs);\n      \
-                  --full adds llvm-cov coverage + bench compile-check (level 2);\n      \
-                  --bench runs the full criterion suite (long);\n      \
-                  --everything = --ci + --full + --bench + mutants + fuzz smoke\n  \
+          quality [--ci] [--full] [--bench] [--everything] [--only <ids>] [--list-stages]\n      \
+                   Quality gate: fmt, clippy, rustqual, test, audit, deny, outdated (level 1);\n      \
+                   --ci adds rustdoc + wasm32 check (the exact set CI shards run);\n      \
+                   --full adds llvm-cov coverage + bench compile-check (level 2);\n      \
+                   --bench runs the full criterion suite (long);\n      \
+                   --everything = --ci + --full + --bench + mutants + fuzz smoke;\n      \
+                   --only a,b runs a CI shard subset (see --list-stages)\n  \
          fuzz <target> [-- <args>]\n      \
          Run a cargo-fuzz target (scene_ron, materialx_parse, editor_command) via +nightly\n  \
          mutants [-- <args>]\n      \
