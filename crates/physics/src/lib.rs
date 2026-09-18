@@ -6,13 +6,25 @@
 //! ([`engine::BuiltinPhysicsEngine`]):
 //!
 //! - [`body`] — rigid bodies and their handles/mass model.
-//! - [`shape`] — convex primitives with AABB projection and inertia tensors.
+//! - [`shape`] — collision shapes (sphere, box, capsule, cylinder, cone,
+//!   convex hull, heightfield terrain, triangle-soup [`shape::TriMesh`]
+//!   under a median-split AABB BVH) with AABB projection and inertia
+//!   tensors; cylinder/cone/hull pairs resolve through the GJK/EPA
+//!   fallback (`gjk` module).
 //! - [`math`] — geometric queries used by broadphase and raycasts.
 //! - `broadphase` — candidate-pair backends and benchmark diagnostics.
-//! - [`joint`] — persistent equality constraints (ball/revolute).
-//! - [`engine`] — the step pipeline: broadphase → narrowphase → island
+//! - [`joint`] — persistent equality constraints (ball, revolute,
+//!   prismatic, fixed, distance, wheel, gear, six-DOF) with limits/motors.
+//! - [`engine`] — the builtin step pipeline: broadphase → narrowphase → island
 //!   partitioning → substepped velocity/position solving, with optional
 //!   SIMD-wide (`wide` module) and GPU (`gpu` feature) solver paths.
+//! - [`avbd`] — second engine behind the same seam: position-level AVBD
+//!   sweep (single-thread) over exact `distance` queries.
+//! - `migration`/`split` — scene snapshots and deterministic island
+//!   ownership for solver switches and [`RoutingKind::Islands`] routing.
+//! - [`Engine`] — solver orchestrator over [`SolverKind`]: one engine in
+//!   [`RoutingKind::Single`], both engines under [`RoutingKind::Islands`];
+//!   migrates scenes 1:1 and runs the cross-solver fracture pass.
 #![warn(missing_docs)]
 
 mod broadphase;

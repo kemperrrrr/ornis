@@ -477,6 +477,44 @@ fn point_cube_face_vp(position: [f32; 3], range: f32, face: usize) -> [[f32; 4];
     vp
 }
 
+/// Upload one inline `MeshDesc::Custom` soup as its own [`Mesh`].
+///
+/// Per-entity path: each Custom entity owns its vertex/index buffers (the
+/// shared sphere mesh never stands in for custom geometry). The pure
+/// conversion runs through [`crate::mesh_upload::custom_vertices`];
+/// buffers are created exactly like [`crate::mesh::create_sphere`].
+/// Edge direction stays one-way (`ornis-render` depends on
+/// `ornis-mesh-editor`, never the reverse).
+///
+/// # Errors
+///
+/// Returns [`crate::mesh_upload::UploadError::EmptyMesh`] when either slice
+/// is empty, [`crate::mesh_upload::UploadError::InvalidMesh`] when the soup
+/// fails validation — callers skip the entity, never a stub mesh.
+pub fn upload_custom_mesh(
+    device: &wgpu::Device,
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<Mesh, crate::mesh_upload::UploadError> {
+    let (vertices, indices) = crate::mesh_upload::custom_vertices(positions, indices)?;
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("custom mesh vertex buffer"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("custom mesh index buffer"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    Ok(Mesh {
+        vertex_buffer,
+        index_buffer,
+        num_indices: indices.len() as u32,
+        vertex_count: vertices.len() as u32,
+    })
+}
+
 impl Renderer3D {
     /// Build every pipeline/target for `surface_config`'s format and extent.
     ///
@@ -2293,6 +2331,28 @@ impl Renderer3D {
             0,
             bytemuck::cast_slice(&gpu_objects),
         );
+    }
+
+    /// Draw one per-entity custom mesh with its own instance.
+    ///
+    /// The caller uploads the merged material table once (a custom entry's
+    /// `instance.material_index` points into it), draws the shared sphere
+    /// batch first, then calls this once per custom entry: the single
+    /// instance is uploaded into slot 0 and `mesh` is drawn with count 1.
+    /// Rewriting slot 0 per entry is why shared draws must come first;
+    /// per-frame cost is one small upload + one draw per custom entity
+    /// (no refit budget yet — see PLAN §h).
+    pub fn render_custom_entry(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        g: &GbufferTargets<'_>,
+        mesh: &Mesh,
+        instance: &InstanceData,
+    ) {
+        self.upload_instances(device, queue, std::slice::from_ref(instance));
+        self.render_gbuffer(encoder, g, mesh, 1);
     }
 
     /// Record the gbuffer pass: fills the five MRT targets + depth for

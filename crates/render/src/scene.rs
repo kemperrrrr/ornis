@@ -70,6 +70,21 @@ pub enum MeshDesc {
     // Future: Box, Plane, Cylinder
 }
 
+impl MeshDesc {
+    /// Borrows the inline soup of a [`MeshDesc::Custom`].
+    ///
+    /// Returns `None` for procedural variants (currently only `Sphere`).
+    /// The render extraction routes `Some` into the per-entity upload path
+    /// (`mesh_upload::custom_vertices`); the transport itself never
+    /// validates shapes — see `MeshData::validate` in the mesh editor.
+    pub fn as_custom(&self) -> Option<(&[[f32; 3]], &[u32])> {
+        match self {
+            Self::Custom { positions, indices } => Some((positions, indices)),
+            Self::Sphere { .. } => None,
+        }
+    }
+}
+
 /// Material preset mapped onto the engine's OpenPBR surface model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MaterialDesc {

@@ -707,9 +707,14 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   immediate-wake→AVBD (003: 19 rebuild за 900 шагов/10 циклов, треша
   нет), покой инвариантен к начальному роутингу (004). Host-правки в
   спящий движок виснут (нужен явный wake-трек в `Engine::step`).
-  Налог coupling — счётчик миграций + per-solver тайминги в метрику.
-  Вне скоупа v1: cross-solver joints, разные частоты сабстепов,
-  O(n²) cross-AABB для больших сцен (v1 наивно, только cross-пары).
+   Налог coupling — счётчик миграций + per-solver тайминги в метрику.
+   Вне скоупа v1: cross-solver joints, разные частоты сабстепов,
+   O(n²) cross-AABB для больших сцен (v1 наивно, только cross-пары).
+   ✅ **DONE 2026-09-16/17** (`cff2a11` — M3 Islands routing на `Engine`,
+   оба солвера live; hardening PR #12 — inertia ×4, signed overlap,
+   angular frames, `row_live(c,f)`, `diff.dot(*e)`; тесты `solver_split` /
+   `solver_lifecycle` / `solver_split_invariants`). Вне скоупа v1 —
+   без изменений: cross-solver joints, разные частоты, O(n²) cross-AABB.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

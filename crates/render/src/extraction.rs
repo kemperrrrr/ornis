@@ -16,6 +16,8 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::{Engine, Entity, OpenPBRMaterial, SmartStore};
 
+use crate::mesh::Vertex;
+use crate::mesh_upload::custom_vertices;
 use crate::renderer::InstanceData;
 use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
@@ -26,10 +28,31 @@ use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 pub struct FrameUpload {
     /// Maximum sphere tessellation required by the extracted entities.
     pub mesh_params: (u32, u32),
-    /// GPU-ready materials in the same order as [`Self::instances`].
+    /// GPU-ready materials in the same order as [`Self::instances`] plus
+    /// one entry per [`Self::custom_meshes`] (a custom entry's
+    /// `instance.material_index` points here).
     pub materials: Vec<OpenPBRMaterial>,
-    /// Per-entity model/normal matrices and material indices.
+    /// Per-entity model/normal matrices and material indices (spheres
+    /// only — drawn with the shared sphere mesh).
     pub instances: Vec<InstanceData>,
+    /// Per-entity custom geometry (one entry per valid `MeshDesc::Custom`
+    /// entity — drawn with its own uploaded mesh, never the sphere).
+    pub custom_meshes: Vec<CustomMeshEntry>,
+}
+
+/// One valid `MeshDesc::Custom` entity: its CPU-side geometry plus the
+/// instance pointing at the merged [`FrameUpload::materials`] table.
+///
+/// The renderer uploads `vertices`/`indices` per entity
+/// (`renderer::upload_custom_mesh`) and draws the entry with `instance`.
+#[derive(Clone, Debug)]
+pub struct CustomMeshEntry {
+    /// GPU-ready vertices (`mesh_upload::custom_vertices` output).
+    pub vertices: Vec<Vertex>,
+    /// Triangle index list (`u32`, triples, CCW from outside).
+    pub indices: Vec<u32>,
+    /// Model/normal matrices and the index into `FrameUpload::materials`.
+    pub instance: InstanceData,
 }
 
 /// Tessellation floor when no complete renderable entity asks for more
@@ -42,6 +65,7 @@ impl Default for FrameUpload {
             mesh_params: DEFAULT_MESH_PARAMS,
             materials: Vec::new(),
             instances: Vec::new(),
+            custom_meshes: Vec::new(),
         }
     }
 }
@@ -229,16 +253,44 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
         let Some(material) = materials.get(entity) else {
             continue;
         };
-        // Custom soups have no shared-GPU-mesh upload path yet (the
-        // renderer draws one sphere mesh for all instances) — skip until
-        // per-entity geometry upload lands. Materials stay in lockstep
-        // with instances because both pushes happen below.
+        // Per-entity Custom path: CPU-side vertices via the mesh_upload
+        // bridge. An empty or invalid soup skips the entity — no panic,
+        // no sphere stub, no invented collider (same honesty as the
+        // physics TriMesh import, which has no sphere proxy). Materials
+        // stay in lockstep with both instance lanes because every push
+        // below appends to `materials` first.
+        if let Some((positions, indices)) = mesh.as_custom() {
+            if positions.is_empty() || indices.is_empty() {
+                continue;
+            }
+            let Ok((vertices, soup_indices)) = custom_vertices(positions, indices) else {
+                continue;
+            };
+            let model = Mat4::from_scale_rotation_translation(
+                Vec3::from_array(transform.scale),
+                normalized_rotation(transform.rotation),
+                Vec3::from_array(transform.translation),
+            );
+            extracted.materials.push(material_to_gpu(material));
+            let instance = InstanceData {
+                model_matrix: model,
+                normal_matrix: model.inverse().transpose(),
+                material_index: extracted.materials.len() as u32 - 1,
+            };
+            extracted.custom_meshes.push(CustomMeshEntry {
+                vertices,
+                indices: soup_indices,
+                instance,
+            });
+            continue;
+        }
         let MeshDesc::Sphere {
             radius,
             segments,
             rings,
         } = mesh
         else {
+            // Future MeshDesc variants land here: skip, never a stub.
             continue;
         };
         extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
@@ -514,6 +566,68 @@ mod tests {
         for (direct, snapshot) in direct.materials.iter().zip(&snapshot.materials) {
             assert_eq!(bytemuck::bytes_of(direct), bytemuck::bytes_of(snapshot));
         }
+    }
+
+    #[test]
+    fn custom_quad_routes_per_entity_and_bad_soups_skip_without_stub() {
+        // One sphere + one valid Custom quad + one empty + one invalid:
+        // the sphere stays in the shared batch, the quad lands in
+        // `custom_meshes` with its own geometry, and both bad soups skip
+        // the entity entirely (no sphere stub, no material leak).
+        let mut engine = Engine::new();
+        let mut add = |mesh: MeshDesc| {
+            let store = engine.world_mut().store_mut().expect("store");
+            let handle = store.create_entity();
+            store.insert(
+                handle,
+                TransformDesc {
+                    translation: Vec3::ZERO.to_array(),
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: Vec3::ONE.to_array(),
+                },
+            );
+            store.insert(handle, mesh);
+            store.insert(
+                handle,
+                MaterialDesc::Dielectric {
+                    base_color: [0.8, 0.2, 0.2],
+                    roughness: 0.4,
+                },
+            );
+        };
+        add(MeshDesc::Sphere {
+            radius: 1.0,
+            segments: 16,
+            rings: 12,
+        });
+        add(MeshDesc::Custom {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        add(MeshDesc::Custom {
+            positions: Vec::new(),
+            indices: Vec::new(),
+        });
+        add(MeshDesc::Custom {
+            positions: vec![[0.0, 0.0, 0.0]],
+            indices: vec![0, 0, 7],
+        });
+
+        let extracted = extract_render_data(engine.world().store().expect("store"));
+        assert_eq!(extracted.instances.len(), 1, "sphere batch only");
+        assert_eq!(extracted.custom_meshes.len(), 1, "only the valid quad");
+        assert_eq!(extracted.materials.len(), 2, "no material leak from skips");
+        let entry = &extracted.custom_meshes[0];
+        assert_eq!(entry.vertices.len(), 4);
+        assert_eq!(entry.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(entry.instance.material_index, 1);
+        // Custom geometry never feeds the shared sphere tessellation.
+        assert_eq!(extracted.mesh_params, (32, 24));
     }
 
     #[test]

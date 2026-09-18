@@ -15,12 +15,17 @@ use crate::mesh::{Mesh, Vertex};
 pub enum UploadError {
     /// [`ornis_mesh_editor::MeshData`] failed [`ornis_mesh_editor::MeshData::validate`].
     InvalidMesh(ornis_mesh_editor::MeshError),
+    /// Inline `MeshDesc::Custom` soup has no vertices or no indices —
+    /// there is no honest GPU mesh for it (callers skip the entity,
+    /// never a sphere stub).
+    EmptyMesh,
 }
 
 impl std::fmt::Display for UploadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidMesh(inner) => write!(f, "invalid mesh data: {inner}"),
+            Self::EmptyMesh => write!(f, "custom mesh has no vertices or indices"),
         }
     }
 }
@@ -29,6 +34,7 @@ impl std::error::Error for UploadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidMesh(inner) => Some(inner),
+            Self::EmptyMesh => None,
         }
     }
 }
@@ -96,6 +102,46 @@ pub fn upload_mesh_data(
     })
 }
 
+/// Build editor mesh data from an inline `MeshDesc::Custom` soup.
+///
+/// Positions plus a triangle index list; uvs are zeroed and normals are
+/// recomputed area-weighted (`with_computed_normals`), so shading normals
+/// are never transported — the same contract as the physics
+/// `to_physics_arrays` import. Pure and `wgpu`-free.
+///
+/// # Errors
+///
+/// Returns [`UploadError::EmptyMesh`] when either slice is empty,
+/// [`UploadError::InvalidMesh`] when validation fails.
+pub fn custom_mesh_data(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<ornis_mesh_editor::MeshData, UploadError> {
+    if positions.is_empty() || indices.is_empty() {
+        return Err(UploadError::EmptyMesh);
+    }
+    ornis_mesh_editor::MeshData::from_positions(positions.to_vec(), indices.to_vec())
+        .map(|mesh| mesh.with_computed_normals())
+        .map_err(UploadError::InvalidMesh)
+}
+
+/// Convert an inline `MeshDesc::Custom` soup into GPU-ready vertices + indices.
+///
+/// Thin pure wrapper over [`custom_mesh_data`] + [`to_vertices`]: the
+/// extraction's per-entity path calls this without touching `wgpu`; the
+/// renderer then moves the arrays into buffers
+/// (`renderer::upload_custom_mesh`).
+///
+/// # Errors
+///
+/// Same as [`custom_mesh_data`] (empty or invalid soup).
+pub fn custom_vertices(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<(Vec<Vertex>, Vec<u32>), UploadError> {
+    to_vertices(&custom_mesh_data(positions, indices)?)
+}
+
 /// Any unit vector orthogonal to `normal` (tangent fallback, see [`to_vertices`]).
 fn fallback_tangent(normal: [f32; 3]) -> [f32; 3] {
     let n = glam::Vec3::from_array(normal);
@@ -153,6 +199,46 @@ mod tests {
         };
         assert!(matches!(
             to_vertices(&data),
+            Err(UploadError::InvalidMesh(_))
+        ));
+    }
+
+    #[test]
+    fn custom_quad_converts_with_computed_normals() {
+        // Planar quad in y=0 (winding gives +Y face normals).
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ];
+        let indices = [0, 1, 2, 0, 2, 3];
+        let (vertices, out_indices) =
+            custom_vertices(&positions, &indices).expect("quad valid");
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(out_indices, indices);
+        for vertex in &vertices {
+            let n = glam::Vec3::from_array(vertex.normal);
+            assert!((n - glam::Vec3::Y).length() < 1e-6, "expected +Y, got {n:?}");
+            let t = glam::Vec3::from_array(vertex.tangent);
+            assert!((t.length() - 1.0).abs() < 1e-6, "tangent unit: {t:?}");
+            assert!(n.dot(t).abs() < 1e-6, "tangent orthogonal: {t:?}");
+        }
+    }
+
+    #[test]
+    fn empty_or_invalid_custom_soup_is_rejected() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        assert!(matches!(
+            custom_vertices(&[], &[0, 1, 2]),
+            Err(UploadError::EmptyMesh)
+        ));
+        assert!(matches!(
+            custom_vertices(&positions, &[]),
+            Err(UploadError::EmptyMesh)
+        ));
+        assert!(matches!(
+            custom_vertices(&positions, &[0, 1, 9]),
             Err(UploadError::InvalidMesh(_))
         ));
     }

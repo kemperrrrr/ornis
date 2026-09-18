@@ -16,7 +16,7 @@
 //! joints carry the official geometric-stiffness term (without it ball
 //! joints spin up through long levers).
 //!
-//! # M1 scope (deliberate gaps, all documented)
+//! # M1/M2 scope (closed) + M3 at the Engine level
 //!
 //! - Shapes: all pairs query through `crate::distance::shape_distance`;
 //!   face-stable multi-point manifolds are built for box-involved pairs
@@ -51,33 +51,41 @@
 //!   and [`crate::joint::JointKind::SixDof`] (per-axis free/locked/limited
 //!   rows in body A's live assembly frame, mirroring the builtin position
 //!   pass; limited forces in dual-owned per-axis slots).
-//!   Sleep (M2): quiet dynamics freeze per body (builtin 0.15 m/s + 0.5 s
-//!   parity) and wake on fresh pairs/joint edits/velocity kicks; no islands
-//!   — wake does not propagate through *existing* pairs (M3 gap).
-//!   Substeps (M2): fixed-step accumulator — the tuned core always advances
-//!   in exact 1/60 s increments (120 Hz hosts alternate sim/skip, hitches
-//!   replay whole steps, debt past 4 steps clamps to slow motion).
-//!   TOI (M2, builtin linear parity — angular sweep stays discrete: a body
-//!   whose step displacement exceeds half its smallest dimension sweeps
-//!   `cast_shape` and clamps to the first hit; jointed partners are excluded
-//!   so joint swings never self-clamp).
+//!   Sleep (M2, closed): quiet dynamics freeze per body (builtin 0.15 m/s
+//!   + 0.5 s parity) and wake on fresh pairs/joint edits/velocity kicks;
+//!   wake propagates through live pairs (1 cm backstop), so no per-engine
+//!   island pass is needed here.
+//!   Substeps (M2, closed): fixed-step accumulator — the tuned core always
+//!   advances in exact 1/60 s increments (120 Hz hosts alternate sim/skip,
+//!   hitches replay whole steps, debt past 4 steps clamps to slow motion).
+//!   TOI (M2, closed at builtin linear parity — angular sweep stays
+//!   discrete: a body whose step displacement exceeds half its smallest
+//!   dimension sweeps `cast_shape` and clamps to the first hit; jointed
+//!   partners are excluded so joint swings never self-clamp).
 //!   No-collide for pin joints (builtin `joint_pairs` parity, narrowed to
 //!   Ball/Revolute/Prismatic/Distance/Wheel): jointed bodies skip contact
 //!   discovery — a hinge pin passes through its mount, and contact
 //!   friction there is a phantom brake on the joint. Fixed/SixDof are
 //!   excluded (weld-like assemblies whose tests bury boxes by
 //!   construction; there the contact is structural).
-//!   Fracture is not implemented.
+//!   Fracture (M3, at the [`crate::Engine`] level, not in this engine):
+//!   the orchestrator's contact-event pass splits bodies on hard hits,
+//!   uniform for both solvers; reports wait in
+//!   [`crate::Engine::drain_fracture_events`] (see `tests/fracture.rs`).
 //!   Penalty joints show ~10cm dynamic stretch at swing bottom; motors droop
 //!   under sustained load (velocity servo); ball position-servo rows damp
 //!   fast orbital motion through long levers (all bounded, tested).
-//! - Sphere piles settle on floors/boxes (rolling friction helps); tall
-//!   sphere-on-sphere towers stay an M2 item (needs rolling multi-point
-//!   contact for true stacking).
-//! - No islands or angular CCD: one implicit step of 10
-//!   iterations (M2). Broadphase is an O(n2) bounding-sphere prefilter.
+//! - Sphere piles settle on floors/boxes (rolling friction helps); the tall
+//!   sphere tower is closed by measurement
+//!   (`avbd_tall_tower_drop_settle_holds`: 6-sphere drop-settle holds,
+//!   rolling multi-point contact was not needed).
+//! - No islands inside this engine (deliberate): one implicit step of 10
+//!   iterations; island routing lives at the orchestrator as
+//!   [`crate::RoutingKind::Islands`] (`split.rs`). Broadphase stays an O(n2)
+//!   bounding-sphere prefilter inside `AvbdEngine` (honest residual).
 //!   Joint swings and spinning bodies rely on the discrete phase (angular
-//!   sweep stays an M2 item, same as the builtin's linear-cast limit).
+//!   sweep covered by measurement up to 60 rad/s, same as the builtin's
+//!   linear-cast limit).
 //!   The pre-touch pair band (points form up to `GEN_MARGIN` before contact)
 //!   is load-bearing for fast impacts: their frozen-anchor C diverges on
 //!   touchdown and the penalty ramp turns it into a projection catch.

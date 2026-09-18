@@ -63,3 +63,22 @@ Compiler parallelism is bounded to two jobs, GPU test processes run serially,
 and debug line tables/assertions remain enabled. Smoke separates build from its
 unchanged 90-second runtime readiness deadline and drains output without an
 unread stderr pipe. No test or mandatory stage is disabled.
+
+## 2026-09-18 merged (appendix; history above is unchanged)
+
+- PR #12 (`fix(physics): AVBD correctness and M3 multisolver lifecycle`) is
+  MERGED as `d6a59b0` (mergedAt 2026-09-18T05:52:57Z). PR #13
+  (`fix(physics+quality): finish AVBD/M3 work of PR #12 with green quality
+  gate`) is MERGED as `0a26089` (mergedAt 2026-09-18T05:52:55Z). Note:
+  `0a26089` is the PR #13 merge, not the PR #12 merge.
+- Green evidence for the merges: Quality run `35312558704` (push of
+  `0a26089`) is `completed/success`; Quality run `35257932070` (PR #13
+  pull_request) is `completed/success`. Re-check with `gh run list` and the
+  `cargo xtask quality` gate.
+- HEAD caveat (2026-09-18T07:00Z): post-merge `28e7301` run `35316617236`
+  is `completed/failure` and `d227e11` run `35317406118` was `in_progress`;
+  the gate is therefore NOT claimed green at HEAD.
+- Baseline comparison: `docs/quality/physics-baseline-calibration-2026-09-17.json`.
+- The 2026-09-17 statements above ("Work is on PR #12; no merge is
+  authorized", "The full gate is NOT yet green") are retained as history and
+  are SUPERSEDED by this section for the merge status.
