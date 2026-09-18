@@ -11,7 +11,7 @@ use editor_backend::{GameEvent, UiCommand};
 #[cfg(not(feature = "editor-only"))]
 use engine_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
-use ornis_app::install_gameplay_physics_bridge;
+use ornis_app::{GameRuntime, install_gameplay_physics_bridge, spawn_static_floor};
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
@@ -91,8 +91,7 @@ mod native {
 
     pub use ornis_render::scene::Scene;
     pub use ornis_render::{
-        OrbitCamera, RenderFrame3D, RenderWorld, Renderer3D, Technique, create_sphere,
-        install_orbit_camera,
+        OrbitCamera, RenderFrame3D, Renderer3D, Technique, create_sphere, install_orbit_camera,
     };
 }
 
@@ -108,7 +107,7 @@ struct GameApp {
 #[cfg(not(feature = "editor-only"))]
 struct GameContext {
     window: winit::window::Window,
-    render_world: RenderWorld,
+    runtime: GameRuntime,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
@@ -218,14 +217,14 @@ impl GameApp {
         );
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
-        let (mut render_world, entity_count) = Self::showcase_engine();
+        let (mut runtime, entity_count) = Self::showcase_engine();
         // S7: GPU состояние — ресурс Engine, RenderSubmit/RenderPresent в schedule.
         {
             use ornis_render::gpu_resources::{
                 GpuFrameState, GpuMesh, GpuSurfaceState, install_gpu_resources,
             };
             install_gpu_resources(
-                render_world.engine_mut(),
+                runtime.engine_mut(),
                 device.clone(),
                 queue.clone(),
                 surface,
@@ -246,36 +245,33 @@ impl GameApp {
 
         Ok(GameContext {
             window,
-            render_world,
+            runtime,
             remote_cmd_rx,
             remote_ev_tx,
             entity_count,
         })
     }
 
-    fn showcase_engine() -> (RenderWorld, u32) {
+    fn showcase_engine() -> (GameRuntime, u32) {
         let scene = Scene::from_ron(include_str!("../assets/scene.ron"))
             .expect("shipped showcase scene must parse");
         let entity_count = scene.entities.len() as u32;
-        let mut render_world = RenderWorld::from_scene(&scene);
-        install_orbit_camera(
-            render_world.engine_mut(),
-            OrbitCamera::from_desc(&scene.camera),
-        );
-        install_physics(render_world.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
-        install_gameplay(render_world.engine_mut());
-        install_gameplay_physics_bridge(render_world.engine_mut());
+        let mut runtime = GameRuntime::from_scene(&scene);
+        install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
+        install_physics(runtime.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
+        install_gameplay(runtime.engine_mut());
+        install_gameplay_physics_bridge(runtime.engine_mut());
         // Audio steps in the same DAG (after motion); silently skipped when
         // no output device is available. No showcase entity carries an
         // AudioSource yet, so this is a no-op until content arrives.
         if let Some(audio) = AudioPlugin::try_default() {
-            audio.install(render_world.engine_mut());
+            audio.install(runtime.engine_mut());
         }
         // Listener pose/gain sync; no-op until a host is installed.
-        install_gameplay_audio_bridge(render_world.engine_mut());
+        install_gameplay_audio_bridge(runtime.engine_mut());
         {
-            let entities = render_world.entities().to_vec();
-            let store = render_world
+            let entities = runtime.entities().to_vec();
+            let store = runtime
                 .engine_mut()
                 .world_mut()
                 .store_mut()
@@ -299,19 +295,15 @@ impl GameApp {
             }
             // Hidden static floor: it has a physics component but no render
             // components, so it does not enter the frame upload.
-            let floor = store.create_entity();
-            store.insert(
-                floor,
-                RigidBody::new_box(Vec3::new(0.0, -2.0, 0.0), Vec3::new(20.0, 1.0, 20.0), 0.0),
-            );
+            spawn_static_floor(runtime.engine_mut());
         }
-        render_world.run_frame(0.0);
-        (render_world, entity_count)
+        runtime.frame(0.0);
+        (runtime, entity_count)
     }
 
     fn update_input(ctx: &mut GameContext, update: impl FnOnce(&mut InputState)) {
         if let Some(input) = ctx
-            .render_world
+            .runtime
             .engine_mut()
             .world_mut()
             .resources_mut()
@@ -406,7 +398,7 @@ impl GameApp {
     }
 
     fn apply_browser_input(ctx: &mut GameContext, input: &editor_backend::BrowserInput) {
-        let world = ctx.render_world.engine_mut().world_mut();
+        let world = ctx.runtime.engine_mut().world_mut();
         let state = world.resources_mut().get_mut::<InputState>();
         // Always ensure the resource exists even if never initialized elsewhere.
         let state = if let Some(s) = state {
@@ -430,9 +422,9 @@ impl GameApp {
     fn render_frame(ctx: &mut GameContext) {
         // S7-шаг 2: весь GPU-кадр (upload + acquire → record → submit → present)
         // — в Engine::schedule как RenderSubmit/RenderPresent. Здесь только
-        // run_frame (fixed + variable schedules); Present система сама делает
-        // surface.get_current_texture и frame3d.render.
-        ctx.render_world.run_frame(1.0 / 60.0);
+        // frame (fixed + variable schedules + CPU extraction); Present система
+        // сама делает surface.get_current_texture и frame3d.render.
+        ctx.runtime.frame(1.0 / 60.0);
     }
 }
 
@@ -489,14 +481,14 @@ impl ApplicationHandler for GameApp {
                 // Синхронизируем ECS ресурсы с новым размером — реконфигурируем
                 // Surface (в ресурсе) и обновляем GpuFrameState.
                 let device = ctx
-                    .render_world
+                    .runtime
                     .engine()
                     .world()
                     .resources()
                     .get::<ornis_render::gpu_resources::GpuDevice>()
                     .map(|d| d.0.clone());
                 if let Some(state) = ctx
-                    .render_world
+                    .runtime
                     .engine_mut()
                     .world_mut()
                     .resources_mut()
@@ -506,7 +498,7 @@ impl ApplicationHandler for GameApp {
                 }
                 if let (Some(device), Some(surface)) = (
                     device,
-                    ctx.render_world
+                    ctx.runtime
                         .engine()
                         .world()
                         .resources()
@@ -515,7 +507,7 @@ impl ApplicationHandler for GameApp {
                     let guard = surface.0.lock().expect("gpu surface lock");
                     // Формат берём из обновлённого GpuSurfaceState.
                     let format = ctx
-                        .render_world
+                        .runtime
                         .engine()
                         .world()
                         .resources()
@@ -538,12 +530,12 @@ impl ApplicationHandler for GameApp {
                     );
                 }
                 if let (Some(fs), Some(dev)) = (
-                    ctx.render_world
+                    ctx.runtime
                         .engine()
                         .world()
                         .resources()
                         .get::<std::sync::Mutex<ornis_render::gpu_resources::GpuFrameState>>(),
-                    ctx.render_world
+                    ctx.runtime
                         .engine()
                         .world()
                         .resources()

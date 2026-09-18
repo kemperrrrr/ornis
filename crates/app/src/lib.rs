@@ -1,4 +1,4 @@
-//! Unified gameplay runtime: single [`World`]/[`Engine`]/[`Schedule`] host.
+//! Unified gameplay runtime: single [`World`]/[`Engine`]/[`ornis_core::Schedule`] host.
 //!
 //! This crate bridges the backend-neutral gameplay systems in `ornis-core`
 //! with domain specifics (physics [`RigidBody`] and render
@@ -17,6 +17,15 @@ use ornis_physics::RigidBody;
 use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
 pub use ornis_core::{GameplayPlugin, Position, Velocity, install_gameplay};
+
+pub mod assets;
+pub mod runtime;
+
+pub use assets::{
+    AssetEvent, AssetId, AssetKind, AssetServer, MaterialHandle, MeshHandle, SceneLoadError,
+    parse_scene_ron,
+};
+pub use runtime::{GameRuntime, GameStage, spawn_static_floor};
 
 /// Thin view over the unified [`World`]: no second `Engine` copy required.
 ///

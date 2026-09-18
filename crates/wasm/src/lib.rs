@@ -1108,4 +1108,190 @@ mod integration_tests {
         poster.mark_sent(&released, INPUT_POST_INTERVAL_FRAMES * 2);
         assert!(!poster.should_post(&released, INPUT_POST_INTERVAL_FRAMES * 3 - 1));
     }
+
+    #[test]
+    fn full_contract_extract_golden_bytes_pinned() {
+        // Headless half of the pixel e2e: pins the exact extraction bytes
+        // for `FULL_CONTRACT` (JSON → lanes → `frame_upload`), so any drift
+        // in the scene→ECS→GPU chain fails here without a browser.
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        assert_eq!(live.version, 5);
+        assert_eq!(live.sequence, 12);
+
+        let mut render_world = RenderWorld::from_scene(&live.scene);
+        render_world.run_frame(0.0);
+        let extracted = render_world.frame_upload();
+
+        // Shared-mesh tessellation criterion.
+        assert_eq!(extracted.mesh_params, (32, 24));
+        assert_eq!(extracted.instances.len(), 1);
+        assert_eq!(extracted.materials.len(), 1);
+        assert_eq!(extracted.instances[0].material_index, 0);
+
+        // Model-matrix golden bits: identity rotation, unit scale folded
+        // with radius 1.0, translation (-5.6, 0, 0).
+        let model = extracted.instances[0].model_matrix;
+        assert_eq!(model.x_axis.x.to_bits(), 1f32.to_bits());
+        assert_eq!(model.x_axis.y.to_bits(), 0f32.to_bits());
+        assert_eq!(model.y_axis.y.to_bits(), 1f32.to_bits());
+        assert_eq!(model.z_axis.z.to_bits(), 1f32.to_bits());
+        assert_eq!(model.w_axis.x.to_bits(), (-5.6f32).to_bits());
+        assert_eq!(model.w_axis.y.to_bits(), 0f32.to_bits());
+        assert_eq!(model.w_axis.z.to_bits(), 0f32.to_bits());
+        assert_eq!(model.w_axis.w.to_bits(), 1f32.to_bits());
+
+        // Material golden: red Dielectric, roughness 0.5.
+        let material = &extracted.materials[0];
+        assert_eq!(material.base.color[0].to_bits(), 0.8f32.to_bits());
+        assert_eq!(material.base.color[1].to_bits(), 0.2f32.to_bits());
+        assert_eq!(material.base.color[2].to_bits(), 0.2f32.to_bits());
+        assert_eq!(material.base.params[2].to_bits(), 0f32.to_bits());
+        assert_eq!(material.specular.params[0].to_bits(), 1f32.to_bits());
+        assert_eq!(material.specular.params[1].to_bits(), 0.5f32.to_bits());
+
+        // Lighting, ambient and camera ride the same contract.
+        let lights = RenderLights::from_scene(&live.scene);
+        assert_eq!(lights.ambient, [0.10, 0.10, 0.15]);
+        assert_eq!(lights.lights.len(), 1);
+        assert!(matches!(
+            &lights.lights[0],
+            ornis_render::scene::LightDesc::Directional { intensity, .. }
+                if (*intensity - 0.6).abs() < f32::EPSILON
+        ));
+        assert_eq!(live.scene.camera.position, [0.0, 2.5, 9.0]);
+        assert!((live.scene.camera.fov - 60.0).abs() < f32::EPSILON);
+        assert_eq!(
+            (live.scene.camera.near, live.scene.camera.far),
+            (0.1, 100.0)
+        );
+    }
+
+    #[test]
+    fn snapshot_versioning_replaces_without_stale_instances() {
+        // v5 → v6 moves the extraction; downgrades are rejected; an empty
+        // scene clears instances so no stale upload survives.
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        assert_eq!(live.version, 5);
+        let mut render_world = RenderWorld::new();
+        render_world.replace_scene(&live.scene);
+        render_world.run_frame(0.0);
+        assert_eq!(render_world.frame_upload().instances.len(), 1);
+
+        // v6: moved entity — the extraction must follow the replacement.
+        let mut moved = live.scene.clone();
+        moved.entities[0].transform.translation = [1.0, 2.0, 3.0];
+        render_world.replace_scene(&moved);
+        render_world.run_frame(0.0);
+        let extracted = render_world.frame_upload();
+        assert_eq!(extracted.instances.len(), 1);
+        assert_eq!(
+            extracted.instances[0].model_matrix.w_axis.truncate(),
+            glam::Vec3::new(1.0, 2.0, 3.0)
+        );
+
+        // Downgrade guard: an older poll must not roll the viewport back.
+        assert!(!accept_live_scene_version(6, None, 5));
+        assert!(!accept_live_scene_version(6, Some(6), 6));
+        assert!(accept_live_scene_version(6, None, 7));
+
+        // Empty scene destroys previous entities before next extraction.
+        let mut empty = moved.clone();
+        empty.entities.clear();
+        render_world.replace_scene(&empty);
+        render_world.run_frame(0.0);
+        assert_eq!(render_world.entity_count(), 0);
+        assert!(render_world.frame_upload().instances.is_empty());
+    }
+
+    #[test]
+    fn malformed_scene_json_is_rejected_without_panic() {
+        // The parser returns `Err` (never panics) for every malformed leg:
+        // truncation at any point, empty/foreign shapes, NUL bytes, wrong
+        // types, the `camera: null` placeholder, and trailing garbage.
+        let full = scene_api::FULL_CONTRACT;
+        for pct in [10, 25, 50, 75, 90, 95] {
+            let cut = full.len() * pct / 100;
+            assert!(
+                scene_api::parse_scene_json(&full[..cut]).is_err(),
+                "truncation at {pct}% must be rejected"
+            );
+        }
+        for bad in ["", "null", "[]", "{}", "not json"] {
+            assert!(
+                scene_api::parse_scene_json(bad).is_err(),
+                "payload {bad:?} must be rejected"
+            );
+        }
+
+        // NUL bytes: prefix, suffix, and injected mid-payload.
+        assert!(scene_api::parse_scene_json(&format!("\0{full}")).is_err());
+        assert!(scene_api::parse_scene_json(&format!("{full}\0")).is_err());
+        let mut nul_mid = full.to_string();
+        nul_mid.insert(full.len() / 2, '\0');
+        assert!(scene_api::parse_scene_json(&nul_mid).is_err());
+
+        // Foreign types where the contract expects shaped values.
+        let version_string = full.replace("\"version\": 5", "\"version\": \"5\"");
+        assert!(scene_api::parse_scene_json(&version_string).is_err());
+        let entities_number = full.replace("\"entities\": [{", "\"entities\": 42, \"dropped\": [{");
+        assert!(scene_api::parse_scene_json(&entities_number).is_err());
+        let camera_null = r#"{"version": 5, "sequence": 12,
+            "entities": [], "lights": [],
+            "camera": null, "ambient": [0.10, 0.10, 0.15]}"#;
+        assert!(scene_api::parse_scene_json(camera_null).is_err());
+
+        // Trailing garbage after an otherwise valid payload.
+        assert!(scene_api::parse_scene_json(&format!("{full} trailing garbage")).is_err());
+        assert!(scene_api::parse_scene_json(&format!("{full}{{\"extra\": 1}}")).is_err());
+    }
+
+    /// Probes `PATH` for a browser binary the pixel harness could drive.
+    /// Returns the first hit; `None` means the pixel leg cannot run here.
+    fn probe_browser_binary() -> Option<String> {
+        const CANDIDATES: &[&str] = &[
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+            "google-chrome-stable",
+            "firefox",
+        ];
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            for candidate in CANDIDATES {
+                #[cfg(windows)]
+                let file = dir.join(format!("{candidate}.exe"));
+                #[cfg(not(windows))]
+                let file = dir.join(candidate);
+                if file.is_file() {
+                    return Some((*candidate).to_string());
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn browser_pixel_e2e_gated_on_browser_and_webgpu() {
+        // Live pixel run needs a real browser + WebGPU adapter, which CI
+        // has not — run it only by hand via `scripts/wasm_pixel_e2e.sh`
+        // (see `docs/WASM_PIXEL_E2E.md`). Without `ORNIS_E2E_BROWSER=1`
+        // or without a browser binary on PATH this is an honest SKIP.
+        if std::env::var("ORNIS_E2E_BROWSER").ok().as_deref() != Some("1") {
+            eprintln!("SKIP browser_pixel_e2e: set ORNIS_E2E_BROWSER=1 to enable");
+            return;
+        }
+        let Some(browser) = probe_browser_binary() else {
+            eprintln!("SKIP browser_pixel_e2e: no browser binary on PATH");
+            return;
+        };
+        // Enabled path pins the contract input the harness renders, so
+        // contract drift still fails the test even before any pixels.
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        assert_eq!(live.version, 5);
+        assert_eq!(live.scene.entities.len(), 1);
+        eprintln!("browser_pixel_e2e enabled with browser={browser}");
+    }
 }

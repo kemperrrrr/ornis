@@ -44,20 +44,24 @@
 //! rolling coefficients stay CPU-only).
 //!
 //! A true AVBD port (affine bodies, per-body Hessian assembly + LDL in the
-//! shader) is a separate step; its DSL preconditions are closed:
-//! `ShaderType::Mat3` (`mat3x3<f32>`, `Mat3::from_cols` constructor,
-//! `Mat3::IDENTITY`/`ZERO`), local fixed-size scratch arrays (incl.
-//! nested Hessian shapes; effectful repeats rejected loudly), and
-//! `helpers(...)` inclusion in `#[gpu_pipeline]` (stitches
-//! `#[wgsl_fn]`/`#[kernel]` sources ahead of the entry). Pinned by
-//! `macros/tests/compute_dsl.rs` and `helpers_stitch_ahead_of_main_and_validate`.
+//! shader) lands rung by rung: rung 1 (here) assembles the lumped inertial
+//! Hessian diagonal and solves the diagonal LDL system per body in
+//! `avbd_stub_kernel` (helpers stitched via `helpers(...)`); contact rows,
+//! the dense 6x6 LDL and device execution stay future work. The DSL
+//! preconditions are closed: `ShaderType::Mat3` (`mat3x3<f32>`,
+//! `Mat3::from_cols` constructor, `Mat3::IDENTITY`/`ZERO`), local
+//! fixed-size scratch arrays (incl. nested Hessian shapes; effectful
+//! repeats rejected loudly), and `helpers(...)` inclusion in
+//! `#[gpu_pipeline]` (stitches `#[wgsl_fn]`/`#[kernel]` sources ahead of
+//! the entry). Pinned by `macros/tests/compute_dsl.rs` and
+//! `helpers_stitch_ahead_of_main_and_validate`.
 
 use glam::Vec3;
-use ornis_macros::{WgslStruct, gpu_pipeline};
+use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
 use std::sync::Arc;
 
 use crate::avbd::AvbdEngine;
-use crate::body::RigidBody;
+use crate::body::{BodyType, RigidBody};
 use crate::engine::{Manifold, ManifoldState, PhysicsEngine};
 use bytemuck::Zeroable;
 
@@ -119,6 +123,87 @@ impl GpuBodyState {
         b.velocity = Vec3::from_array(self.velocity);
         b.angular_velocity = Vec3::from_array(self.angular);
     }
+}
+
+// ---------------------------------------------------------------------------
+// AVBD inertial mass roster (rung 1 device input)
+// ---------------------------------------------------------------------------
+
+/// Per-body mass roster for the AVBD device rung: body-frame inertia
+/// diagonal + inverse mass. Field order is layout-driven: `inertia`
+/// (`vec3<f32>`, 16-aligned) first so no padding is needed — the struct is
+/// exactly 16 bytes (see the layout test below).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+pub(crate) struct GpuAvbdMass {
+    inertia: [f32; 3],
+    inv_mass: f32,
+}
+
+impl GpuAvbdMass {
+    fn from_body(b: &RigidBody) -> Self {
+        if b.body_type == BodyType::Dynamic {
+            Self {
+                inertia: b.inertia.to_array(),
+                inv_mass: b.inv_mass,
+            }
+        } else {
+            Self {
+                inertia: [0.0; 3],
+                inv_mass: 0.0,
+            }
+        }
+    }
+}
+
+/// Inertial Hessian diagonal for one AVBD body (rung-1 lumped/Kurtz-style
+/// approximation): `[m/dt² × 3, I/dt² × 3]`.
+///
+/// This is the exact diagonal of the inertial block [`crate::avbd`]'s
+/// `solve_body` assembles before contact rows for the linear part
+/// (`m/dt²` with `m = 1/inv_mass`); the angular part keeps the body-frame
+/// diagonal and drops the world off-diagonal coupling, so it is exact for
+/// isotropic bodies (spheres/cubes) and a documented approximation
+/// otherwise. Statics (`inv_mass <= 0`) and non-positive `dt` yield zeros.
+/// Pure (no device) so unit tests pin it without an adapter.
+fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> [f32; 6] {
+    // Non-positive or non-finite inputs assemble nothing (matches the
+    // shader guards, which test the positive form and zero otherwise —
+    // NaN fails both spellings and lands on zeros either way).
+    if !inv_mass.is_finite() || inv_mass <= 0.0 || !dt.is_finite() || dt <= 0.0 {
+        return [0.0; 6];
+    }
+    let dt2 = dt * dt;
+    if !dt2.is_finite() || dt2 <= 1e-12 {
+        return [0.0; 6];
+    }
+    let lin = 1.0 / (inv_mass * dt2);
+    [
+        lin,
+        lin,
+        lin,
+        inertia[0] / dt2,
+        inertia[1] / dt2,
+        inertia[2] / dt2,
+    ]
+}
+
+/// Diagonal LDL solve (L = I, D = diag): `x[i] = rhs[i] / diag[i]`,
+/// degenerate axes (`<= 1e-12`) solve to `0.0` — statics and sleepers
+/// (zeroed mass model) carry no correction.
+///
+/// This mirrors the `avbd_diag_solve` shader helper exactly (WGSL has no
+/// `Option`); on strictly positive systems it agrees with the dense AVBD
+/// LDL within float tolerance (pinned by test, never bit-identical by
+/// promise). Full 6x6 device LDL with breakdown signaling is a later rung.
+fn avbd_diag_solve_cpu(diag: [f32; 6], rhs: [f32; 6]) -> [f32; 6] {
+    let mut out = [0.0f32; 6];
+    for i in 0..6 {
+        if diag[i] > 1e-12 {
+            out[i] = rhs[i] / diag[i];
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,12 +1118,13 @@ pub fn write_back_acc(
 
 /// STUB dispatch seam for a future GPU AVBD solver.
 ///
-/// Only the contract is pinned here: the DSL preconditions for per-body
-/// Hessian work are closed (see the module docs), but no Hessian assembly
-/// or LDL solve runs on device yet. Stepping always falls back to the CPU
-/// [`AvbdEngine`]; the kernel below is a wiring-only copy pass that moves
-/// no physics state. Honest by construction: `runs_on_device` returns
-/// `false` until a real solve lands.
+/// Rung 1 pins the per-body inertial contract in the shader: the kernel
+/// below assembles the lumped Hessian diagonal from the mass roster and
+/// solves the diagonal LDL system (helpers stitched via `helpers(...)`).
+/// Contact rows, the dense 6x6 LDL and device execution stay future work.
+/// Stepping always falls back to the CPU [`AvbdEngine`]; the kernel moves
+/// no engine state yet. Honest by construction: `runs_on_device` returns
+/// `false` until a real dispatch lands.
 ///
 /// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
 #[allow(dead_code)]
@@ -1052,10 +1138,12 @@ pub trait GpuAvbdDispatch {
 /// STUB GPU AVBD solver: config + CPU fallback, no device path.
 ///
 /// Holds only the buffer-size bound a future dispatch will need. Pair with
-/// [`avbd_stub_wgsl`] for the wiring-only kernel source.
+/// [`avbd_stub_wgsl`] for the rung-1 kernel source (inertial Hessian
+/// diagonal + diagonal LDL, no contacts yet).
 ///
 /// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
 #[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
 pub struct GpuAvbdStub {
     /// Maximum bodies one future dispatch covers (buffer-size bound only,
     /// not a physics bound — mirrors the `WgpuContactSolver` caps).
@@ -1078,6 +1166,41 @@ impl GpuAvbdStub {
     pub fn step_cpu(&self, engine: &mut AvbdEngine, dt: f32) {
         engine.step(dt);
     }
+
+    /// Build the device mass roster for `bodies`: one [`GpuAvbdMass`] per
+    /// body (dynamics carry their mass model, everything else zeroes).
+    /// Pure (no device); the future dispatch will upload this verbatim.
+    /// Entries mirror [`avbd_inertial_hessian_diag`]'s inputs exactly.
+    #[allow(dead_code)]
+    pub(crate) fn mass_roster(&self, bodies: &[RigidBody]) -> Vec<GpuAvbdMass> {
+        bodies.iter().map(GpuAvbdMass::from_body).collect()
+    }
+
+    /// CPU reference for the rung-1 device dispatch: assemble the inertial
+    /// Hessian diagonal per body and solve the diagonal LDL system —
+    /// exactly what `avbd_stub_kernel` computes per invocation. The future
+    /// device path validates against this (tolerance, never bit-identical).
+    /// Returns `None` only on a body/rhs length mismatch.
+    #[allow(dead_code)]
+    pub(crate) fn stage_diag_solve(
+        &self,
+        bodies: &[RigidBody],
+        rhs: &[[f32; 6]],
+        dt: f32,
+    ) -> Option<Vec<[f32; 6]>> {
+        if bodies.len() != rhs.len() {
+            return None;
+        }
+        bodies
+            .iter()
+            .zip(rhs.iter())
+            .map(|(b, r)| {
+                let m = GpuAvbdMass::from_body(b);
+                let h = avbd_inertial_hessian_diag(m.inv_mass, m.inertia, dt);
+                Some(avbd_diag_solve_cpu(h, *r))
+            })
+            .collect()
+    }
 }
 
 impl GpuAvbdDispatch for GpuAvbdStub {
@@ -1090,37 +1213,117 @@ impl GpuAvbdDispatch for GpuAvbdStub {
     }
 }
 
-/// STUB AVBD device kernel: wiring-only copy pass over body state.
-///
-/// Moves no physics state (each velocity is read back onto itself) — it
-/// only proves the buffer/bindings/dispatch shape a future per-body Hessian
-/// solve will reuse. No invented physics: assembled Hessian + LDL stay
-/// future work (DSL preconditions pinned by
-/// `helpers_stitch_ahead_of_main_and_validate`).
-#[gpu_pipeline(
-    workgroup_size = 64,
-    storage(avbd_stub_bodies: [GpuBodyState; 64], read_write),
-    uniform(avbd_stub_params: [u32; 4]),
-    builtin(gid: workgroup_id),
-)]
-fn avbd_stub_kernel() {
-    if gid.x >= avbd_stub_params.x {
-        return;
+/// Rung-1 AVBD helper: linear Hessian entry `m/dt²` from inverse mass,
+/// or `0.0` for statics / degenerate `dt`. Mirrors the linear half of
+/// [`avbd_inertial_hessian_diag`]; the shader-side spelling is pinned by
+/// naga validation, the values by the CPU test.
+#[wgsl_fn]
+fn avbd_hessian_lin(inv_mass: f32, dt: f32) -> f32 {
+    let mut h = 0.0;
+    if inv_mass > 0.0 {
+        let dt2 = dt * dt;
+        if dt2 > 1e-12 {
+            h = 1.0 / (inv_mass * dt2);
+        }
     }
-    let mut b = avbd_stub_bodies[gid.x];
-    let v = b.velocity;
-    b.velocity = v;
-    avbd_stub_bodies[gid.x].velocity = b.velocity;
+    return h;
 }
 
-/// STUB kernel WGSL source: struct layout + wiring-only entry (no physics).
-/// Pure (no device) so tests pin it without an adapter.
+/// Rung-1 AVBD helper: angular Hessian diagonal `I/dt²` (body-frame lumped
+/// approximation — the world off-diagonal coupling stays CPU-side, exact
+/// for isotropic bodies). Zeroes on degenerate `dt`. Mirrors the angular
+/// half of [`avbd_inertial_hessian_diag`].
+#[wgsl_fn]
+fn avbd_hessian_ang(inertia: Vec3, dt: f32) -> Vec3 {
+    let dt2 = dt * dt;
+    let mut h0 = 0.0;
+    let mut h1 = 0.0;
+    let mut h2 = 0.0;
+    if dt2 > 1e-12 {
+        h0 = inertia[0] / dt2;
+        h1 = inertia[1] / dt2;
+        h2 = inertia[2] / dt2;
+    }
+    return Vec3::new(h0, h1, h2);
+}
+
+/// Rung-1 AVBD helper: diagonal LDL solve (`L = I`), one 3-block.
+/// Degenerate axes solve to `0.0` (no `Option` in WGSL); the CPU
+/// [`avbd_diag_solve_cpu`] mirrors this exactly — the two agree on
+/// strictly positive systems (pinned by test).
+#[wgsl_fn]
+fn avbd_diag_solve(h: Vec3, r: Vec3) -> Vec3 {
+    let mut x0 = 0.0;
+    let mut x1 = 0.0;
+    let mut x2 = 0.0;
+    if h[0] > 1e-12 {
+        x0 = r[0] / h[0];
+    }
+    if h[1] > 1e-12 {
+        x1 = r[1] / h[1];
+    }
+    if h[2] > 1e-12 {
+        x2 = r[2] / h[2];
+    }
+    return Vec3::new(x0, x1, x2);
+}
+
+/// Rung-1 AVBD device kernel: per-body inertial Hessian diagonal + diagonal
+/// LDL solve (one invocation per body).
+///
+/// Each body reads its mass entry, assembles the 6-entry lumped Hessian
+/// diagonal (`m/dt²` linear, body-frame `I/dt²` angular) and solves the
+/// diagonal system against its rhs entry into the delta buffer. Contact
+/// rows and the dense 6x6 LDL stay future work; the kernel moves no engine
+/// state (no dispatch exists yet) — it pins the buffer/bindings/dispatch
+/// shape plus the exact per-body math the CPU tests verify in tolerances.
+//
+// qual:allow(abc) — kernel-DSL body: every statement is translated
+// verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
+// ONLY this function's body into `fn main`. Extracting helpers would emit
+// calls to functions that do not exist in the shader; splitting requires a
+// macro-level helper-inclusion feature, not a local edit.
+#[gpu_pipeline(
+    workgroup_size = 64,
+    storage(avbd_mass: [GpuAvbdMass; 64], read),
+    storage(avbd_rhs: [GpuBodyState; 64], read),
+    storage(avbd_delta: [GpuBodyState; 64], read_write),
+    uniform(avbd_count: [u32; 4]),
+    uniform(avbd_dt: [f32; 4]),
+    builtin(gid: workgroup_id),
+    helpers(avbd_hessian_lin, avbd_hessian_ang, avbd_diag_solve),
+)]
+fn avbd_stub_kernel() {
+    // qual:allow(abc) — kernel-DSL body: every statement is translated
+    // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
+    // ONLY this function's body into `fn main`. Extracting helpers would emit
+    // calls to functions that do not exist in the shader; splitting requires a
+    // macro-level helper-inclusion feature, not a local edit.
+    if gid.x >= avbd_count.x {
+        return;
+    }
+    let m = avbd_mass[gid.x];
+    let r = avbd_rhs[gid.x];
+    let dt = avbd_dt.x;
+    let hl = avbd_hessian_lin(m.inv_mass, dt);
+    let h_lin = vec3(hl, hl, hl);
+    let h_ang = avbd_hessian_ang(m.inertia, dt);
+    let x_lin = avbd_diag_solve(h_lin, r.velocity);
+    let x_ang = avbd_diag_solve(h_ang, r.angular);
+    avbd_delta[gid.x].velocity = x_lin;
+    avbd_delta[gid.x].angular = x_ang;
+}
+
+/// Rung-1 kernel WGSL source: mass/body layouts + inertial-Hessian/diagonal-
+/// LDL entry (no contacts, no engine state). Pure (no device) so tests pin
+/// it without an adapter.
 ///
 /// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
 #[allow(dead_code)]
 pub fn avbd_stub_wgsl() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        GpuAvbdMass::WGSL_SOURCE,
         GpuBodyState::WGSL_SOURCE,
         avbd_stub_kernel::wgsl_source()
     )
@@ -1480,15 +1683,158 @@ mod tests {
         }
     }
 
-    /// STUB contract: the kernel source carries the Rust-authored layout
-    /// and a wiring-only entry (no physics), and naga-validates without a
-    /// device.
+    /// Rung-1 mass roster layout (no device): 16-byte stride, `inertia`
+    /// first at offset 0 (16-aligned `vec3<f32>`), `inv_mass` at 12.
+    #[test]
+    fn avbd_mass_layout_matches_wgsl() {
+        assert_eq!(std::mem::size_of::<GpuAvbdMass>(), 16);
+        assert_eq!(std::mem::offset_of!(GpuAvbdMass, inertia), 0);
+        assert_eq!(std::mem::offset_of!(GpuAvbdMass, inv_mass), 12);
+        let source = avbd_stub_wgsl();
+        assert!(source.contains("struct GpuAvbdMass"));
+        assert!(source.contains("inertia: vec3<f32>"));
+        assert!(source.contains("inv_mass: f32"));
+    }
+
+    /// Rung-1 CPU assembly (no device): the inertial Hessian diagonal
+    /// equals the analytic `m/dt²`, `I/dt²` values; statics and
+    /// degenerate `dt` yield zeros.
+    #[test]
+    fn avbd_hessian_diag_matches_analytic() {
+        let dt = 1.0 / 60.0;
+        let diag = avbd_inertial_hessian_diag(1.0, [2.0, 3.0, 4.0], dt);
+        // f32 1/60 is inexact, so compare in tolerance (never bit-identical
+        // by promise — same rule as the device comparison to come).
+        let expect = [3600.0, 3600.0, 3600.0, 7200.0, 10800.0, 14400.0];
+        for i in 0..6 {
+            assert!(
+                (diag[i] - expect[i]).abs() < 1e-2,
+                "axis {i}: {} vs {}",
+                diag[i],
+                expect[i]
+            );
+        }
+        // Heavier body: linear block scales with mass, angular with inertia.
+        let heavy = avbd_inertial_hessian_diag(0.1, [1.0, 1.0, 1.0], dt);
+        assert!((heavy[0] - 36000.0).abs() < 1.0);
+        assert!((heavy[3] - 3600.0).abs() < 1e-2);
+        // Statics and degenerate dt assemble nothing.
+        assert_eq!(
+            avbd_inertial_hessian_diag(0.0, [1.0, 1.0, 1.0], dt),
+            [0.0; 6]
+        );
+        assert_eq!(
+            avbd_inertial_hessian_diag(-1.0, [1.0, 1.0, 1.0], dt),
+            [0.0; 6]
+        );
+        assert_eq!(
+            avbd_inertial_hessian_diag(1.0, [1.0, 1.0, 1.0], 0.0),
+            [0.0; 6]
+        );
+        assert_eq!(
+            avbd_inertial_hessian_diag(1.0, [1.0, 1.0, 1.0], f32::NAN),
+            [0.0; 6]
+        );
+    }
+
+    /// Rung-1 CPU solve (no device): the diagonal LDL agrees with the
+    /// dense AVBD LDL on diagonal systems within tolerance (never
+    /// bit-identical by promise); degenerate axes solve to zero (the
+    /// documented shader adaptation — no `Option` in WGSL).
+    #[test]
+    fn avbd_diag_ldl_matches_dense_solve() {
+        let diag = [4.0, 3600.0, 1.5, 7200.0, 9.0, 2.25];
+        let rhs = [8.0, -3.6, 0.75, 1.44, 27.0, -4.5];
+        let mut lhs = [[0.0f32; 6]; 6];
+        for (i, row) in lhs.iter_mut().enumerate() {
+            row[i] = diag[i];
+        }
+        let dense = crate::avbd::solve_6x6(lhs, rhs).expect("SPD diagonal solves");
+        let flown = avbd_diag_solve_cpu(diag, rhs);
+        for i in 0..6 {
+            assert!(
+                (dense[i] - flown[i]).abs() < 1e-5,
+                "axis {i}: dense {} vs diag {}",
+                dense[i],
+                flown[i]
+            );
+        }
+        // Degenerate axes carry no correction (statics/sleepers stay put).
+        let mut bad = diag;
+        bad[2] = 0.0;
+        bad[4] = -1.0;
+        let zeroed = avbd_diag_solve_cpu(bad, rhs);
+        assert_eq!(zeroed[2], 0.0);
+        assert_eq!(zeroed[4], 0.0);
+        assert!((zeroed[0] - rhs[0] / diag[0]).abs() < 1e-9);
+    }
+
+    /// Rung-1 staging (no device): the CPU reference assembles + solves
+    /// per body (dynamics move, statics zero out) and rejects mismatched
+    /// inputs — the exact contract the future device path validates against.
+    #[test]
+    fn avbd_stage_diag_solve_mirrors_kernel_math() {
+        let stub = GpuAvbdStub::new(8);
+        let dynamic = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 2.0);
+        let static_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0);
+        let bodies = [dynamic, static_body];
+        let rhs = [[1.0; 6], [1.0; 6]];
+        let dt = 1.0 / 60.0;
+        let out = stub
+            .stage_diag_solve(&bodies, &rhs, dt)
+            .expect("matching inputs stage");
+        assert_eq!(out.len(), 2);
+        // Dynamic linear block: rhs / (m/dt²) with m = 2.
+        let expect_lin = 1.0 / (2.0 / (dt * dt));
+        for (i, &got) in out[0].iter().enumerate().take(3) {
+            assert!((got - expect_lin).abs() < 1e-9, "axis {i}: {got}");
+        }
+        assert_eq!(out[1], [0.0; 6], "static body carries no correction");
+        assert!(stub.stage_diag_solve(&bodies, &rhs[..1], dt).is_none());
+    }
+
+    /// Rung-1 roster (no device): dynamics carry their mass model, statics
+    /// and kinematics zero out (the exact inputs `avbd_stub_kernel` reads).
+    #[test]
+    fn avbd_mass_roster_mirrors_body_mass_model() {
+        use crate::body::BodyType;
+        let stub = GpuAvbdStub::new(8);
+        let mut dynamic = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 2.0);
+        dynamic.body_type = BodyType::Dynamic;
+        let static_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0);
+        let roster = stub.mass_roster(&[dynamic.clone(), static_body]);
+        assert_eq!(roster.len(), 2);
+        assert!((roster[0].inv_mass - dynamic.inv_mass).abs() < 1e-9);
+        assert_eq!(roster[0].inertia, dynamic.inertia.to_array());
+        assert_eq!(roster[1].inv_mass, 0.0);
+        assert_eq!(roster[1].inertia, [0.0; 3]);
+    }
+
+    /// Rung-1 contract: the kernel source carries the Rust-authored layouts
+    /// plus the Hessian/LDL helpers stitched ahead of `main`, and
+    /// naga-validates without a device.
     #[test]
     fn avbd_stub_kernel_validates_with_naga() {
         let source = avbd_stub_wgsl();
+        assert!(source.contains("struct GpuAvbdMass"));
         assert!(source.contains("struct GpuBodyState"));
-        assert!(source.contains("fn main("));
-        assert!(source.contains("avbd_stub_bodies[gid.x].velocity = b.velocity;"));
+        for helper in [
+            "fn avbd_hessian_lin(",
+            "fn avbd_hessian_ang(",
+            "fn avbd_diag_solve(",
+        ] {
+            let helper_pos = source.find(helper).unwrap_or_else(|| {
+                panic!("stitched source must contain {helper}");
+            });
+            let main_pos = source.find("fn main(").expect("source must contain main");
+            assert!(
+                helper_pos < main_pos,
+                "{helper} must be declared before use"
+            );
+        }
+        assert!(source.contains("avbd_hessian_lin(m.inv_mass, dt)"));
+        assert!(source.contains("avbd_diag_solve(h_lin, r.velocity)"));
+        assert!(source.contains("avbd_delta[gid.x].velocity = x_lin;"));
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("stub WGSL must parse: {e}"));
         let mut validator = naga::valid::Validator::new(
@@ -1522,5 +1868,54 @@ mod tests {
             .expect("stub scene keeps its body")
             .velocity;
         assert!(v.y < 0.0, "CPU fallback must integrate gravity, got {v:?}");
+    }
+
+    /// Rung-1 wiring: the GPU flag defaults off; attaching the stub records
+    /// the CPU fallback per completed step while the trajectory stays
+    /// bit-identical to the unattached engine (same code path, honest
+    /// fallback — unlike the Jacobi/GS GPU contact hybrid, which only
+    /// promises tolerance).
+    #[test]
+    fn avbd_engine_gpu_flag_defaults_off_and_falls_back() {
+        use crate::avbd::AvbdEngine;
+        use crate::engine::PhysicsEngine;
+
+        fn scene() -> AvbdEngine {
+            let mut engine = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            engine.add_body(RigidBody::new_box(
+                Vec3::new(0.0, -0.5, 0.0),
+                Vec3::new(5.0, 0.5, 5.0),
+                0.0,
+            ));
+            engine.add_body(RigidBody::new_box(
+                Vec3::new(0.0, 3.0, 0.0),
+                Vec3::splat(0.4),
+                1.0,
+            ));
+            engine
+        }
+
+        let mut plain = scene();
+        assert!(!plain.gpu_avbd_enabled());
+        assert_eq!(plain.gpu_fallback_steps(), 0);
+        let mut wired = scene();
+        wired.set_gpu_avbd(Some(GpuAvbdStub::new(8)));
+        assert!(wired.gpu_avbd_enabled());
+        for _ in 0..60 {
+            plain.step(1.0 / 60.0);
+            wired.step(1.0 / 60.0);
+        }
+        assert_eq!(wired.gpu_fallback_steps(), 60);
+        assert_eq!(plain.gpu_fallback_steps(), 0);
+        for h in 0..2 {
+            let (bp, bw) = (
+                plain.get_body(h).expect("plain keeps bodies"),
+                wired.get_body(h).expect("wired keeps bodies"),
+            );
+            assert_eq!(bp.position.to_array(), bw.position.to_array());
+            assert_eq!(bp.velocity.to_array(), bw.velocity.to_array());
+        }
+        wired.set_gpu_avbd(None);
+        assert!(!wired.gpu_avbd_enabled());
     }
 }

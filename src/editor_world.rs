@@ -79,7 +79,7 @@ use ornis_physics::RigidBody;
 use ornis_rhai::RhaiScriptEngine;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
-use ornis_app::install_gameplay_physics_bridge;
+use ornis_app::{install_gameplay_physics_bridge, parse_scene_ron};
 use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
@@ -422,8 +422,8 @@ impl EditorWorld {
     /// [`EditorWorld::load_scene`]). An invalid RON string leaves the world
     /// untouched.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, String> {
-        let scene = Scene::from_ron(ron_str).map_err(|e| format!("invalid scene RON: {e}"))?;
-        Ok(self.load_scene(scene))
+        Ok(self
+            .load_scene(parse_scene_ron(ron_str).map_err(|e| format!("invalid scene RON: {e}"))?))
     }
 
     /// Serialize the world to RON and write it to `path` **atomically**

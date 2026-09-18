@@ -1,0 +1,470 @@
+//! Minimal typed asset registry over the existing scene contract.
+//!
+//! [`AssetServer`] owns CPU-side scene assets ([`Scene`](ornis_render::scene::Scene)) behind typed
+//! [`AssetId`]s and emits [`AssetEvent`] load/error events. Per-entity
+//! [`MeshHandle`]/[`MaterialHandle`] components are the typed counterpart of
+//! the inline [`MeshDesc`](ornis_render::scene::MeshDesc) /
+//! [`MaterialDesc`](ornis_render::scene::MaterialDesc) lanes: extraction
+//! still reads those lanes today, and handles migrate progressively —
+//! nothing here invents geometry or material data.
+//!
+//! Residency reuses existing mechanisms instead of a new manager island:
+//! CPU residency is the server-owned [`Scene`](ornis_render::scene::Scene) plus the [`SmartStore`](ornis_core::SmartStore)
+//! lanes written by [`AssetServer::instantiate`]; GPU residency stays with
+//! the existing [`FrameUpload`](ornis_render::FrameUpload) extraction and
+//! the platform upload path. Hot reload is a dirty-set заготовка:
+//! [`AssetServer::request_reload`] marks, [`AssetServer::take_dirty`]
+//! drains; file watching stays with the owner (editor `SceneFileWatch`).
+//! The only loader today is the scene `.ron` asset
+//! ([`AssetServer::load_scene_ron`], wrapping [`Scene::from_ron`](ornis_render::scene::Scene::from_ron)).
+//!
+//! `MeshHandle`/`MaterialHandle` as ECS lanes were assumed to exist already;
+//! they do not (checked 2026-09-18: only `MeshDesc`/`MaterialDesc` lanes and
+//! historical doc sketches). They are introduced here as new components.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+
+use ornis_core::{Engine, Entity, SmartStore};
+use ornis_render::scene::{EntityDesc, Scene};
+
+/// Opaque asset generation counter: every loaded asset gets a fresh id.
+const FIRST_ASSET_INDEX: u64 = 1;
+
+/// Opaque handle of one loaded asset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AssetId {
+    index: u64,
+}
+
+impl AssetId {
+    /// Raw generation counter, useful for deterministic ordering in tests.
+    pub fn index(self) -> u64 {
+        self.index
+    }
+}
+
+/// Typed handle of one mesh inside a scene asset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshHandle {
+    asset: AssetId,
+    index: u32,
+}
+
+impl MeshHandle {
+    /// Creates a handle of mesh `index` inside scene asset `asset`.
+    pub fn new(asset: AssetId, index: u32) -> Self {
+        Self { asset, index }
+    }
+
+    /// Asset the mesh was instantiated from.
+    pub fn asset(self) -> AssetId {
+        self.asset
+    }
+
+    /// Position of the mesh inside the scene asset's entity list.
+    pub fn index(self) -> u32 {
+        self.index
+    }
+}
+
+/// Typed handle of one material inside a scene asset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MaterialHandle {
+    asset: AssetId,
+    index: u32,
+}
+
+impl MaterialHandle {
+    /// Creates a handle of material `index` inside scene asset `asset`.
+    pub fn new(asset: AssetId, index: u32) -> Self {
+        Self { asset, index }
+    }
+
+    /// Asset the material was instantiated from.
+    pub fn asset(self) -> AssetId {
+        self.asset
+    }
+
+    /// Position of the material inside the scene asset's entity list.
+    pub fn index(self) -> u32 {
+        self.index
+    }
+}
+
+/// Asset kinds the server can load (today only scenes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetKind {
+    /// Scene `.ron` asset ([`Scene`]).
+    Scene,
+}
+
+impl AssetKind {
+    /// Short stable label of the kind.
+    pub fn name(self) -> &'static str {
+        match self {
+            AssetKind::Scene => "scene",
+        }
+    }
+}
+
+/// Load/error notifications drained via [`AssetServer::take_events`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssetEvent {
+    /// An asset finished loading and is addressable by `id`.
+    Loaded {
+        /// Handle of the loaded asset.
+        id: AssetId,
+        /// Kind that was loaded.
+        kind: AssetKind,
+    },
+    /// A load failed; the world is untouched.
+    Failed {
+        /// Kind that failed to load.
+        kind: AssetKind,
+        /// Human-readable reason.
+        error: String,
+    },
+}
+
+/// Scene `.ron` parse failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneLoadError {
+    message: String,
+}
+
+impl SceneLoadError {
+    /// Human-readable reason.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for SceneLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SceneLoadError {}
+
+/// Parses a scene `.ron` asset without touching any world.
+///
+/// Thin wrapper over [`Scene::from_ron`]; the editor routes its scene-file
+/// parsing through here so native, editor and tests share one loader.
+pub fn parse_scene_ron(ron_str: &str) -> Result<Scene, SceneLoadError> {
+    Scene::from_ron(ron_str).map_err(|error| SceneLoadError {
+        message: error.to_string(),
+    })
+}
+
+/// Minimal typed asset registry: owns scene sources and emits events.
+pub struct AssetServer {
+    next: u64,
+    scenes: HashMap<AssetId, Scene>,
+    sources: HashMap<AssetId, String>,
+    dirty: HashSet<AssetId>,
+    events: Vec<AssetEvent>,
+}
+
+impl Default for AssetServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AssetServer {
+    /// Creates an empty registry.
+    pub fn new() -> Self {
+        Self {
+            next: FIRST_ASSET_INDEX,
+            scenes: HashMap::new(),
+            sources: HashMap::new(),
+            dirty: HashSet::new(),
+            events: Vec::new(),
+        }
+    }
+
+    /// Whether no assets are loaded.
+    pub fn is_empty(&self) -> bool {
+        self.scenes.is_empty()
+    }
+
+    /// Number of loaded scene assets.
+    pub fn scene_count(&self) -> usize {
+        self.scenes.len()
+    }
+
+    /// Whether `id` addresses a loaded scene.
+    pub fn contains(&self, id: AssetId) -> bool {
+        self.scenes.contains_key(&id)
+    }
+
+    /// Stores an already-parsed scene and emits [`AssetEvent::Loaded`].
+    ///
+    /// `source` keeps the originating `.ron` text for round-trip and
+    /// hot-reload заготовка; `None` stores no text.
+    pub fn load_scene(&mut self, scene: Scene, source: Option<String>) -> AssetId {
+        let id = AssetId { index: self.next };
+        self.next = self.next.saturating_add(1);
+        if let Some(source) = source {
+            self.sources.insert(id, source);
+        }
+        self.scenes.insert(id, scene);
+        self.events.push(AssetEvent::Loaded {
+            id,
+            kind: AssetKind::Scene,
+        });
+        id
+    }
+
+    /// Parses and stores a scene `.ron` asset.
+    ///
+    /// On success emits [`AssetEvent::Loaded`] and returns the id; on
+    /// failure emits [`AssetEvent::Failed`] and returns the parse error.
+    pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<AssetId, SceneLoadError> {
+        match parse_scene_ron(ron_str) {
+            Ok(scene) => Ok(self.load_scene(scene, Some(ron_str.to_owned()))),
+            Err(error) => {
+                self.events.push(AssetEvent::Failed {
+                    kind: AssetKind::Scene,
+                    error: error.message.clone(),
+                });
+                Err(error)
+            }
+        }
+    }
+
+    /// Borrows a loaded scene by id.
+    pub fn get_scene(&self, id: AssetId) -> Option<&Scene> {
+        self.scenes.get(&id)
+    }
+
+    /// Re-serializes a loaded scene to `.ron`.
+    ///
+    /// Round-trip proof: `parse(load(x).ron) == load(parse(x))` up to RON
+    /// formatting. Returns `None` for unknown ids.
+    pub fn scene_ron(&self, id: AssetId) -> Option<String> {
+        self.scenes.get(&id)?.to_ron().ok()
+    }
+
+    /// Marks an asset dirty for hot reload; `false` for unknown ids.
+    pub fn request_reload(&mut self, id: AssetId) -> bool {
+        if !self.scenes.contains_key(&id) {
+            return false;
+        }
+        self.dirty.insert(id);
+        true
+    }
+
+    /// Drains dirty assets in id order; the second call is empty.
+    pub fn take_dirty(&mut self) -> Vec<AssetId> {
+        let mut out: Vec<AssetId> = self.dirty.iter().copied().collect();
+        out.sort_by_key(|id| id.index());
+        self.dirty.clear();
+        out
+    }
+
+    /// Drains pending load/error events in emission order.
+    pub fn take_events(&mut self) -> Vec<AssetEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Spawns every entity of scene `id` into `engine`.
+    ///
+    /// Writes the existing `Transform`/`Mesh`/`Material` lanes plus fresh
+    /// [`MeshHandle`]/[`MaterialHandle`] components; returns `None` for
+    /// unknown ids. Physics, gameplay and GPU state stay with the caller.
+    pub fn instantiate(&self, engine: &mut Engine, id: AssetId) -> Option<Vec<Entity>> {
+        let scene = self.scenes.get(&id)?;
+        let store = engine
+            .world_mut()
+            .store_mut()
+            .expect("asset instantiate store");
+        let mut out = Vec::with_capacity(scene.entities.len());
+        for (index, desc) in scene.entities.iter().enumerate() {
+            out.push(insert_asset_entity(store, id, index, desc));
+        }
+        Some(out)
+    }
+}
+
+fn insert_asset_entity(
+    store: &mut SmartStore,
+    id: AssetId,
+    index: usize,
+    desc: &EntityDesc,
+) -> Entity {
+    let entity = store.create_entity();
+    store.insert(entity, desc.transform.clone());
+    store.insert(entity, desc.mesh.clone());
+    store.insert(entity, desc.material.clone());
+    store.insert(entity, MeshHandle::new(id, index as u32));
+    store.insert(entity, MaterialHandle::new(id, index as u32));
+    entity
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ornis_core::Engine;
+    use ornis_render::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, TransformDesc};
+
+    /// Shipped demo scene: five spheres over two directional lights.
+    const DEMO_RON: &str = include_str!("../../../assets/scene.ron");
+
+    fn entity_desc(name: &str, x: f32) -> EntityDesc {
+        EntityDesc {
+            name: name.into(),
+            transform: TransformDesc {
+                translation: [x, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            mesh: MeshDesc::Sphere {
+                radius: 1.0,
+                segments: 16,
+                rings: 8,
+            },
+            material: MaterialDesc::Metal {
+                base_color: [0.9, 0.7, 0.1],
+                roughness: 0.2,
+            },
+        }
+    }
+
+    fn two_entity_scene() -> Scene {
+        Scene {
+            name: "assets-test".into(),
+            entities: vec![entity_desc("a", -1.0), entity_desc("b", 1.0)],
+            lights: Vec::new(),
+            camera: CameraDesc {
+                position: [0.0, 2.5, 9.0],
+                target: [0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov: 60.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            ambient: [0.1, 0.1, 0.1],
+        }
+    }
+
+    #[test]
+    fn loads_demo_scene_and_emits_loaded() {
+        let mut server = AssetServer::new();
+        assert!(server.is_empty());
+        let id = server.load_scene_ron(DEMO_RON).expect("demo scene loads");
+        assert_eq!(server.scene_count(), 1);
+        assert!(server.contains(id));
+        assert_eq!(server.get_scene(id).expect("stored").entities.len(), 5);
+        assert_eq!(
+            server.take_events(),
+            vec![AssetEvent::Loaded {
+                id,
+                kind: AssetKind::Scene
+            }]
+        );
+        assert!(server.take_events().is_empty());
+    }
+
+    #[test]
+    fn invalid_ron_emits_failed_and_leaves_world_untouched() {
+        let mut server = AssetServer::new();
+        let error = server
+            .load_scene_ron("Scene(name: 42)")
+            .expect_err("malformed RON fails");
+        assert!(!error.message().is_empty());
+        assert!(server.is_empty());
+        let events = server.take_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], AssetEvent::Failed { .. }));
+        assert!(server.take_events().is_empty());
+    }
+
+    #[test]
+    fn failed_event_carries_kind_and_reason() {
+        let mut server = AssetServer::new();
+        let _ = server.load_scene_ron("not a scene at all");
+        let events = server.take_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AssetEvent::Failed { kind, error } => {
+                assert_eq!(*kind, AssetKind::Scene);
+                assert!(!error.is_empty());
+            }
+            AssetEvent::Loaded { .. } => panic!("expected Failed, got Loaded"),
+        }
+    }
+
+    #[test]
+    fn stored_scene_round_trips_through_ron() {
+        let mut server = AssetServer::new();
+        let id = server.load_scene_ron(DEMO_RON).expect("demo scene loads");
+        let serialized = server.scene_ron(id).expect("re-serialize");
+        let reparsed = parse_scene_ron(&serialized).expect("re-parse");
+        assert_eq!(reparsed.entities.len(), 5);
+        assert_eq!(reparsed.name, "demo");
+        let reserialized = reparsed.to_ron().expect("re-serialize twice");
+        assert_eq!(serialized, reserialized);
+    }
+
+    #[test]
+    fn instantiate_populates_lanes_with_typed_handles() {
+        let mut server = AssetServer::new();
+        let scene = two_entity_scene();
+        let id = server.load_scene(scene, None);
+        let mut engine = Engine::new();
+        let entities = server
+            .instantiate(&mut engine, id)
+            .expect("known asset instantiates");
+        assert_eq!(entities.len(), 2);
+
+        let store = engine.world().store().expect("store");
+        let extracted = ornis_render::extract_render_data(store);
+        assert_eq!(extracted.instances.len(), 2);
+        assert_eq!(extracted.materials.len(), 2);
+        for (position, entity) in entities.iter().enumerate() {
+            let mesh_lane = store.read_lane::<MeshHandle>().expect("mesh handle lane");
+            let mesh = mesh_lane.get(*entity).expect("mesh handle");
+            assert_eq!(mesh.asset(), id);
+            assert_eq!(mesh.index(), position as u32);
+            let material_lane = store
+                .read_lane::<MaterialHandle>()
+                .expect("material handle lane");
+            let material = material_lane.get(*entity).expect("material handle");
+            assert_eq!(material.asset(), id);
+            assert_eq!(material.index(), position as u32);
+        }
+    }
+
+    #[test]
+    fn instantiate_unknown_id_returns_none() {
+        let server = AssetServer::new();
+        let mut engine = Engine::new();
+        let unknown = AssetId { index: 999 };
+        assert!(server.instantiate(&mut engine, unknown).is_none());
+        assert!(server.scene_ron(unknown).is_none());
+    }
+
+    #[test]
+    fn hot_reload_dirty_cycle_is_stable() {
+        let mut server = AssetServer::new();
+        let id = server.load_scene(two_entity_scene(), None);
+        assert!(!server.request_reload(AssetId { index: 999 }));
+        assert!(server.request_reload(id));
+        assert!(server.request_reload(id));
+        assert_eq!(server.take_dirty(), vec![id]);
+        assert!(server.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn asset_kinds_and_ids_have_stable_labels() {
+        assert_eq!(AssetKind::Scene.name(), "scene");
+        let mut server = AssetServer::new();
+        let first = server.load_scene(two_entity_scene(), None);
+        let second = server.load_scene(two_entity_scene(), None);
+        assert_ne!(first, second);
+        assert!(second.index() > first.index());
+    }
+}

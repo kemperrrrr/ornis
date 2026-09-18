@@ -56,12 +56,27 @@ pub struct BroadPhaseStats {
 /// the whole step rather than the last substep.
 ///
 /// 100k verdict (`probe_100k` tiled Grid-8, `--release`, 2026-09-18):
-/// the solver phase dominates — ~1.08 s of ~1.35 s/step at 100k candidates
-/// × 4 substeps (broad ~7 ms, narrow ~81 ms, island/trigger ~15 ms each).
-/// Broadphase is not the bottle. Next: solver-per-pair cost under settled
-/// sleep (100k dynamics stayed awake over the short probe; the 10k probe
-/// shows contact jitter regrowing max_v 0.09→0.25 m/s, which gates sleep) —
+/// the solver phase dominates — ~1.1 s of ~1.3 s/step at 100k candidates
+/// × 4 substeps (broad ~6–42 ms, narrow ~74–125 ms, island/trigger ~15 ms
+/// each; substeps shed to the floor by `StepBudget`). Broadphase is not
+/// the bottle. Next: solver-per-pair cost under settled sleep (100k
+/// dynamics stayed awake over the short probe; the 10k probe shows contact
+/// jitter regrowing max_v 0.09→0.25 m/s, which gates sleep) —
 /// island sleep + per-island iteration scaling, not candidate generation.
+///
+/// Settled probe (`probe_100k` tiled Grid-8, `--release`, 35 steps,
+/// 2026-09-18): sleep is NOT jitter-gated on tiled scenes. 100k dynamics
+/// sleep whole by step ~14 (104096/104096 asleep incl. statics, 0 awake
+/// dynamics) and steps drop from ~0.8–1.9 s active to ~2–3 ms settled
+/// (fully-sleeping fast path, zero phase work — a 300–400x settled
+/// discount). The 10k probe sleeps 10240/10400; its 160 perpetual awake
+/// (max_v ~4.4 m/s) are probe-scene edge overhang (even-sided grid tips
+/// off tile coverage and falls forever), not contact jitter. The step-13
+/// 6.9 s transition spike was `update_sleep`'s one-scan-per-island loop —
+/// now a single pass. Pinned by `settled_grid_sleeps_and_costs_less_than_active`
+/// (settled reports zero substeps, rest heights hold) plus the
+/// `tall_stack_stands_still` / `fast_box_drop_does_not_tunnel` stability
+/// guards (5-box tower stands; 6+ topple — pre-existing solver limit).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct StepTiming {
     /// Time spent rebuilding swept AABBs and candidate pairs.

@@ -5374,6 +5374,142 @@ mod tests {
         assert_eq!(physics.adaptive_iters_for_island(40.0, dt, 8), 8);
     }
 
+    /// Settled-scene economics (100k-tiled probe, StepTiming verdict): an
+    /// interior resting grid sleeps whole (~14 steps, longest island timer
+    /// 0.6 s) and the fully-sleeping fast path then reports zero phase
+    /// work, while the first active step runs real substeps. Dynamics sit
+    /// strictly inside tile coverage so no edge body tips off and falls
+    /// forever (the 10k probe's 160 perpetual awake are that scene
+    /// overhang, not solver jitter).
+    #[test]
+    fn settled_grid_sleeps_and_costs_less_than_active() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        for tx in -1..=1 {
+            for tz in -1..=1 {
+                physics.add_body(RigidBody::new_box(
+                    Vec3::new(tx as f32 * 10.0, -0.5, tz as f32 * 10.0),
+                    Vec3::new(5.0, 0.5, 5.0),
+                    0.0,
+                ));
+            }
+        }
+        let mut dynamics = Vec::new();
+        for gx in -2..=2 {
+            for gz in -2..=2 {
+                dynamics.push(physics.add_body(RigidBody::new_box(
+                    Vec3::new(gx as f32 * 2.0, 0.4, gz as f32 * 2.0),
+                    Vec3::splat(0.4),
+                    1.0,
+                )));
+            }
+        }
+        physics.step(1.0 / 60.0);
+        assert!(
+            dynamics.iter().all(|&h| !physics.is_asleep(h)),
+            "first step is active: nothing sleeps yet"
+        );
+        assert!(
+            physics.step_timing().substeps > 0,
+            "first step runs real substeps"
+        );
+        for _ in 0..240 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            dynamics.iter().all(|&h| physics.is_asleep(h)),
+            "interior resting grid must sleep whole"
+        );
+        let timing = physics.step_timing();
+        assert_eq!(
+            timing.substeps, 0,
+            "fully-sleeping fast path reports zero phase work, got {timing:?}"
+        );
+        for &h in &dynamics {
+            let b = physics.get_body(h).unwrap();
+            assert!(
+                (b.position.y - 0.4).abs() < 0.1,
+                "settled body rest height, got {}",
+                b.position.y
+            );
+            assert!(
+                b.velocity.length() < 0.05,
+                "settled body not quiet: {:?}",
+                b.velocity
+            );
+        }
+    }
+
+    /// Tall-stack stability guard for settled-cost work: a 5-box tower
+    /// stands 5 seconds without toppling or drifting (per-island minimum
+    /// iterations must still correct residual penetration). Taller towers
+    /// (6+ with this geometry) topple from micro-asymmetry amplification —
+    /// a pre-existing solver limit, not a settled-cost regression (measured
+    /// via a scratch probe: 4–5 stand, 6+ scatter; see perf_probe).
+    #[test]
+    fn tall_stack_stands_still() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            0.0,
+        ));
+        let mut handles = Vec::new();
+        for level in 0..5 {
+            handles.push(physics.add_body(RigidBody::new_box(
+                Vec3::new(0.0, 0.4 + level as f32 * 0.82, 0.0),
+                Vec3::splat(0.4),
+                1.0,
+            )));
+        }
+        for _ in 0..300 {
+            physics.step(1.0 / 60.0);
+        }
+        for (level, &h) in handles.iter().enumerate() {
+            let b = physics.get_body(h).unwrap();
+            let expected_y = 0.4 + level as f32 * 0.82;
+            assert!(
+                (b.position.y - expected_y).abs() < 0.3,
+                "box {level} rest height ≈{expected_y}, got {}",
+                b.position.y
+            );
+            assert!(
+                b.position.x.abs() < 0.3 && b.position.z.abs() < 0.3,
+                "box {level} drifted: {:?}",
+                b.position
+            );
+        }
+    }
+
+    /// Fast-drop guard for settled-cost work: a box thrown at the floor at
+    /// -40 m/s rests on it instead of tunneling (TOI clamp + discrete
+    /// solve, perf_probe `fast_drop` scenario as a unit test).
+    #[test]
+    fn fast_box_drop_does_not_tunnel() {
+        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            0.0,
+        ));
+        let mut ball = RigidBody::new_box(Vec3::new(0.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
+        ball.velocity = Vec3::new(0.0, -40.0, 0.0);
+        let h = physics.add_body(ball);
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(h).unwrap();
+        assert!(
+            b.position.y > -0.4,
+            "fast box tunneled through the floor: {:?}",
+            b.position
+        );
+        assert!(
+            (b.position.y - 0.4).abs() < 0.3,
+            "fast box must rest on the floor, got {}",
+            b.position.y
+        );
+    }
+
     #[test]
     fn sat_cache_is_shared_by_parallel_narrowphase() {
         // 299 overlapping slow box pairs force the rayon path (>256) and the

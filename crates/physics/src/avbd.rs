@@ -247,7 +247,12 @@ const LIM_PEN_MAX: f32 = 1e4;
 const ROLL_PEN: f32 = 100.0;
 
 /// Dense LDL (no pivoting) for a 6x6 SPD system. Returns `None` on breakdown.
-fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
+///
+/// This is the exact per-body solve `AvbdEngine::solve_body` runs after
+/// assembling the inertial + contact-row Hessian; the GPU rung-1 diagonal
+/// solve (behind the `gpu` feature) cross-checks against it on diagonal
+/// systems (tolerance, never bit-identical by promise).
+pub(crate) fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
     let mut l = [[0.0f32; 6]; 6];
     let mut d = [0.0f32; 6];
     for i in 0..6 {
@@ -762,6 +767,16 @@ pub struct AvbdEngine {
     /// hosts alternate sim/skip and hitch frames catch up — wall speed is
     /// exact on average without touching the tuned single-step dynamics.
     time_debt: f32,
+    /// Opt-in GPU AVBD dispatch (rung 1, `gpu` feature): attached via
+    /// [`AvbdEngine::set_gpu_avbd`], default off. Device execution stays
+    /// gated on the stub's `runs_on_device` (false until a real dispatch
+    /// lands), so an attached stub transparently takes the CPU fallback.
+    #[cfg(feature = "gpu")]
+    gpu_avbd: Option<crate::gpu::GpuAvbdStub>,
+    /// Completed steps that fell back to CPU while a GPU dispatch was
+    /// attached (observability for the opt-in flag; never a physics input).
+    #[cfg(feature = "gpu")]
+    gpu_fallback_steps: u64,
 }
 
 impl AvbdEngine {
@@ -907,6 +922,30 @@ impl AvbdEngine {
     /// and the 16.7 ms budget: sleepers skip the sweep and BDF1).
     pub fn sleeping_count(&self) -> usize {
         self.asleep.iter().filter(|&&s| s).count()
+    }
+
+    /// Attach (`Some`) or detach (`None`) the opt-in GPU AVBD dispatch
+    /// (rung 1, `gpu` feature). Default off. An attached stub still runs
+    /// the CPU fallback until its `runs_on_device` turns true (no adapter
+    /// path yet), so attaching never changes the trajectory — only the
+    /// [`AvbdEngine::gpu_fallback_steps`] counter moves.
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu_avbd(&mut self, stub: Option<crate::gpu::GpuAvbdStub>) {
+        self.gpu_avbd = stub;
+    }
+
+    /// Whether a GPU AVBD dispatch is attached (opt-in flag state, not
+    /// device execution — see `runs_on_device` on the stub).
+    #[cfg(feature = "gpu")]
+    pub fn gpu_avbd_enabled(&self) -> bool {
+        self.gpu_avbd.is_some()
+    }
+
+    /// Completed steps that fell back to CPU while a GPU dispatch was
+    /// attached. Zero when detached; observability only, never an input.
+    #[cfg(feature = "gpu")]
+    pub fn gpu_fallback_steps(&self) -> u64 {
+        self.gpu_fallback_steps
     }
 
     /// Freeze body `h` (builtin sleep semantics: static for the solver —
@@ -1261,6 +1300,10 @@ impl AvbdEngine {
             prev_pos: Vec::new(),
             prev_rot: Vec::new(),
             time_debt: 0.0,
+            #[cfg(feature = "gpu")]
+            gpu_avbd: None,
+            #[cfg(feature = "gpu")]
+            gpu_fallback_steps: 0,
         }
     }
 
@@ -3406,6 +3449,14 @@ impl PhysicsEngine for AvbdEngine {
     fn step(&mut self, dt: f32) {
         if !dt.is_finite() || dt <= 0.0 {
             return;
+        }
+        // Opt-in GPU dispatch (rung 1): device execution stays gated on the
+        // stub's `runs_on_device` (false until a real dispatch lands), so an
+        // attached stub records the CPU fallback and the accumulator below
+        // runs unchanged — attaching never changes the trajectory.
+        #[cfg(feature = "gpu")]
+        if self.gpu_avbd.as_ref().is_some_and(|s| !s.runs_on_device()) {
+            self.gpu_fallback_steps += 1;
         }
         // Fixed-step accumulator: catch up in exact `DT_STEP` increments so
         // 120 Hz hosts alternate sim/skip and hitch frames replay whole

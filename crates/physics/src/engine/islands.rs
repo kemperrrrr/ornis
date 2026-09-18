@@ -75,22 +75,27 @@ impl BuiltinPhysicsEngine {
                 *timer = 0.0;
             }
         }
-        for root in to_sleep {
-            for h in 0..self.bodies.len() {
-                if self.island[h] == root {
-                    self.asleep[h] = true;
-                    let b = &mut self.bodies[h];
-                    b.velocity = Vec3::ZERO;
-                    b.angular_velocity = Vec3::ZERO;
-                    // A sleeping body is STATIC for the solver (Jolt
-                    // semantics): zero inverse mass/inertia makes every
-                    // impulse and effective-mass computation treat it as
-                    // immovable, so a resting contact with an awake body
-                    // can never accumulate invisible velocity in the
-                    // sleeper and detonate it on wake. Restored on wake.
-                    b.inv_mass = 0.0;
-                    b.inertia = Vec3::ZERO;
-                }
+        if to_sleep.is_empty() {
+            return;
+        }
+        // Single pass over bodies (was: one full scan per sleeping island —
+        // the 100k settled transition showed a 6.9 s spike there). Same set
+        // of bodies freezes; only the loop shape changed.
+        let to_sleep: FxHashSet<u32> = to_sleep.into_iter().collect();
+        for h in 0..self.bodies.len() {
+            if to_sleep.contains(&self.island[h]) {
+                self.asleep[h] = true;
+                let b = &mut self.bodies[h];
+                b.velocity = Vec3::ZERO;
+                b.angular_velocity = Vec3::ZERO;
+                // A sleeping body is STATIC for the solver (Jolt
+                // semantics): zero inverse mass/inertia makes every
+                // impulse and effective-mass computation treat it as
+                // immovable, so a resting contact with an awake body
+                // can never accumulate invisible velocity in the
+                // sleeper and detonate it on wake. Restored on wake.
+                b.inv_mass = 0.0;
+                b.inertia = Vec3::ZERO;
             }
         }
     }

@@ -314,6 +314,12 @@ impl Engine {
     /// transient deltas are cleared from [`InputState`]; held keys/buttons
     /// persist.
     ///
+    /// `Time`/`FixedTime` publishing and `clear_frame_transients` stay
+    /// imperative here (direct `Resources::get_mut` on plain `Copy` clocks):
+    /// systems run against shared `&Resources`, so the frame boundary owns
+    /// these writes outside the declared-access contract. Moving them into
+    /// scheduler systems is the next step, not this one.
+    ///
     /// The delta must be finite and non-negative. Domain-specific mutable
     /// state continues to use the scheduler's declared resource/lane access
     /// contract.

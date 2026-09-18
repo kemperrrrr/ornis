@@ -9,20 +9,31 @@
 //! through a borrowed encoder at the execution site
 //! ([`crate::frame_exec::RenderFrame3D::render_schedule`]) — moving the
 //! recording itself into the systems via a frame resource is E2
-//! (`FrameCommandBuffers`), not this step.
+//! (`FrameCommandBuffers`), not this step. [`PassSystem::run`] only
+//! appends the pass name to [`PassOrderLog`]; GPU work stays on the
+//! borrowed-encoder dispatch.
 
 use crate::system::SystemSet;
 use crate::transient_pool::{PassId, PassNode, ResourceId};
 use ornis_core::{Schedule, System, SystemAccess};
 use std::any::TypeId;
 use std::fmt;
+use std::sync::Mutex;
+
+/// Order log for projected pass systems: [`PassSystem::run`] appends its
+/// pass name here when the resource is installed, giving tests a
+/// sequential-`Schedule::run` observable of the projected order without
+/// touching GPU state.
+#[derive(Debug, Default)]
+pub struct PassOrderLog(pub Mutex<Vec<&'static str>>);
 
 /// System twin of one declared pass: the declaration (name + accesses)
-/// projected into the core scheduler. `run` is a no-op by design — E1
+/// projected into the core scheduler. `run` appends the pass name to
+/// [`PassOrderLog`] when installed and is a silent no-op otherwise — E1
 /// executes passes through the borrowed-encoder dispatch; this type only
 /// drives leveling (and, with it, the single-engine invariant of
-/// `scheduler_parity`). E2 replaces the no-op with recording through
-/// frame resources.
+/// `scheduler_parity`) plus the order observable. E2 replaces the log
+/// append with recording through frame resources.
 pub struct PassSystem {
     name: &'static str,
     access: SystemAccess,
@@ -37,7 +48,15 @@ impl System for PassSystem {
         self.access.clone()
     }
 
-    fn run(&self, _resources: &ornis_core::Resources) {}
+    fn run(&self, resources: &ornis_core::Resources) {
+        let Some(log) = resources.get::<PassOrderLog>() else {
+            return;
+        };
+        log.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(self.name);
+    }
 }
 
 /// Why a pass cannot be projected into a [`PassSystem`].
@@ -104,6 +123,7 @@ fn pass_system(
     for &(resource, _) in &node.writes {
         push_typed_access(&mut access.writes, set, name, resource)?;
     }
+    access = access.reads::<PassOrderLog>();
     Ok(PassSystem { name, access })
 }
 
@@ -149,6 +169,9 @@ fn edge_name(set: &SystemSet, id: PassId) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::frame_exec::{RenderFrame3D, Technique};
+    use crate::system::{FrameResource, ResourceKind};
+    use crate::transient_pool::{SizePolicy, TextureSpec};
+    use ornis_core::Resources;
 
     /// Full production matrix: every Technique × bloom wiring projects and
     /// levels match the frame layout bitwise (the E1 gate; the mirrored
@@ -172,5 +195,121 @@ mod tests {
                 );
             }
         }
+    }
+
+    macro_rules! test_resources {
+        ($($r:ident => $name:literal),+ $(,)?) => {
+            $(
+                struct $r;
+                impl FrameResource for $r {
+                    const NAME: &'static str = $name;
+                    fn kind() -> ResourceKind {
+                        ResourceKind::FrameOwned
+                    }
+                    fn spec(_: wgpu::TextureFormat) -> TextureSpec {
+                        TextureSpec {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            samples: 1,
+                            size: SizePolicy::Fixed { width: 4, height: 4 },
+                        }
+                    }
+                }
+            )+
+        };
+    }
+
+    test_resources!(T0 => "t0", T1 => "t1", T2 => "t2");
+
+    fn sequential_log(schedule: &Schedule) -> Vec<&'static str> {
+        let mut resources = Resources::new();
+        resources.insert(PassOrderLog::default());
+        schedule.run(&resources);
+        resources
+            .get::<PassOrderLog>()
+            .expect("log installed")
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Sequential `Schedule::run` on production Hybrid follows the flat
+    /// DAG order `FrameExecutor::execute` iterates (on production wirings
+    /// both coincide with registration order).
+    #[test]
+    fn sequential_run_matches_flat_dag_order_on_production_hybrid() {
+        let mut plan = RenderFrame3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Hybrid,
+            false,
+        );
+        let mut schedule =
+            try_project_schedule(plan.systems()).expect("production resources are typed");
+        schedule.set_parallel(false);
+        let log = sequential_log(&schedule);
+        let layout = plan.systems_mut().build();
+        let flat: Vec<String> = layout
+            .levels()
+            .iter()
+            .flatten()
+            .map(|&i| layout.passes[i].name.clone())
+            .collect();
+        let log_strings: Vec<String> = log.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(
+            log_strings, flat,
+            "sequential Schedule::run != flat DAG order of FrameExecutor::execute"
+        );
+    }
+
+    /// Diamond: `p2` is independent of the `p0 → p1` chain, so it shares
+    /// level 0 and the projected levels are `[[0, 2], [1]]`.
+    #[test]
+    fn diamond_shares_level_for_independent_pass() {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut set = SystemSet::new();
+        set.set_surface_size((32, 32));
+        let a = set.register_resource::<T0>(format);
+        let b = set.register_resource::<T1>(format);
+        let c = set.register_resource::<T2>(format);
+        set.add_pass("p0").write(a);
+        set.add_pass("p1").read(a).write(b);
+        set.add_pass("p2").write(c);
+        let schedule = try_project_schedule(&set).expect("typed registration projects");
+        assert_eq!(schedule.levels(), vec![vec![0, 2], vec![1]]);
+        assert_eq!(
+            schedule.levels(),
+            set.build().levels(),
+            "projected levels != layout levels on the diamond"
+        );
+    }
+
+    /// The shared [`PassOrderLog`] read is conflict-free: independent
+    /// writers still share one level.
+    #[test]
+    fn shared_log_read_does_not_split_levels() {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut set = SystemSet::new();
+        set.set_surface_size((32, 32));
+        let a = set.register_resource::<T0>(format);
+        let b = set.register_resource::<T1>(format);
+        set.add_pass("p0").write(a);
+        set.add_pass("p1").write(b);
+        let schedule = try_project_schedule(&set).expect("typed registration projects");
+        assert_eq!(schedule.levels(), vec![vec![0, 1]]);
+    }
+
+    /// Without an installed [`PassOrderLog`] the twins are silent no-ops.
+    #[test]
+    fn run_without_log_is_silent_noop() {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut set = SystemSet::new();
+        set.set_surface_size((32, 32));
+        let a = set.register_resource::<T0>(format);
+        set.add_pass("p0").write(a);
+        let mut schedule = try_project_schedule(&set).expect("typed registration projects");
+        schedule.set_parallel(false);
+        let resources = Resources::new();
+        schedule.run(&resources);
     }
 }
