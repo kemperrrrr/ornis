@@ -5,6 +5,11 @@
 //! the run continues after a failed stage and prints a summary table at
 //! the end; the exit code is 1 if any stage FAILs.
 
+#[path = "quality_diagnostics.rs"]
+mod diagnostics;
+#[path = "quality_smoke.rs"]
+mod smoke;
+
 use std::path::Path;
 use std::process::{exit, Command};
 
@@ -243,6 +248,10 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
                     );
                     let regressed = quality_regressed || findings_regressed || violations_regressed;
                     if regressed {
+                        if ci_annotations() {
+                            diagnostics::baseline(&cur_v.to_string());
+                            diagnostics::reference_rustqual(stages.root);
+                        }
                         let mut reasons = Vec::new();
                         if quality_regressed {
                             reasons.push(format!("quality {base_q:.4}→{cur_q:.4}"));
@@ -307,6 +316,49 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // Physics is the active hardening target: fail diagnostically here
+    // before building the unrelated scripting/editor workspace. All original
+    // stages still run and retain their strict failure status.
+    stages.run(
+        "clippy (physics gpu)",
+        "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
+        stages.cargo(&[
+            "clippy",
+            "-p",
+            "ornis-physics",
+            "--features",
+            "gpu",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        false,
+    );
+
+    // Physics GPU solver (feature `gpu`): the shader is generated from Rust
+    // via ornis-macros. This stage validates the generated WGSL with naga and
+    // runs the solver against the CPU reference on a software adapter
+    // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
+    // so the gate stays green on machines without GPU drivers.
+    stages.run(
+        "test (physics gpu)",
+        "cargo test -p ornis-physics --features gpu -j 1 --no-fail-fast -- --test-threads=1",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-physics",
+            "--features",
+            "gpu",
+            "-j",
+            "1",
+            "--no-fail-fast",
+            "--",
+            "--test-threads=1",
+        ]),
+        false,
+    );
+
     stages.run(
         "clippy",
         "cargo clippy --workspace --all-targets -- -D warnings",
@@ -333,37 +385,8 @@ fn level1(stages: &mut StageList<'_>) {
 
     stages.run(
         "test",
-        "cargo test --workspace",
-        stages.cargo(&["test", "--workspace"]),
-        false,
-    );
-
-    // Physics GPU solver (feature `gpu`): the shader is generated from Rust
-    // via ornis-macros. This stage validates the generated WGSL with naga and
-    // runs the solver against the CPU reference on a software adapter
-    // (mesa/lavapipe on CI). Device tests skip gracefully without an adapter,
-    // so the gate stays green on machines without GPU drivers.
-    stages.run(
-        "test (physics gpu)",
-        "cargo test -p ornis-physics --features gpu",
-        stages.cargo(&["test", "-p", "ornis-physics", "--features", "gpu"]),
-        false,
-    );
-
-    stages.run(
-        "clippy (physics gpu)",
-        "cargo clippy -p ornis-physics --features gpu --all-targets -- -D warnings",
-        stages.cargo(&[
-            "clippy",
-            "-p",
-            "ornis-physics",
-            "--features",
-            "gpu",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ]),
+        "cargo test --workspace --no-fail-fast",
+        stages.cargo(&["test", "--workspace", "--no-fail-fast"]),
         false,
     );
 
@@ -691,17 +714,7 @@ fn run_stage(
     // annotations API is the transport that always works). Locally the
     // stages keep streaming.
     let ran = if ci_annotations() {
-        command.output().map(|out| {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            // Re-printing child output verbatim re-emits the child's
-            // workflow commands (::error …): rustqual floods annotations and
-            // crowds out this gate's curated diagnostics. Break the command
-            // prefix in the re-print — the gate emits its own annotations.
-            print!("{}", stdout.replace("::error", "::·error"));
-            eprint!("{}", stderr.replace("::error", "::·error"));
-            (out.status, format!("{stdout}{stderr}"))
-        })
+        diagnostics::run_streamed(&mut command)
     } else {
         command.status().map(|status| (status, String::new()))
     };
@@ -766,6 +779,20 @@ fn annotate_stage_failure(name: &str, log: &str) {
     // CI sets CARGO_TERM_COLOR=always: strip ANSI codes before matching,
     // otherwise colored diagnostics break the prefix checks below.
     let clean = strip_ansi(log);
+    // Preserve full failure context independently of short UI annotations
+    // and post-failure workflow steps (which a stopped runner may not run).
+    let detail = if let Some(start) = clean.find("failures:\n") {
+        let rest = &clean[start..];
+        let end = rest.find("test result:").unwrap_or(rest.len());
+        &rest[..end]
+    } else {
+        let mut tail = clean.len().saturating_sub(18_000);
+        while !clean.is_char_boundary(tail) {
+            tail += 1;
+        }
+        &clean[tail..]
+    };
+    diagnostics::attachment(&format!("stage-{}", name.replace(' ', "-")), detail);
     let is_match = |l: &str| {
         let t = l.trim_start();
         let lower = t.to_ascii_lowercase();
@@ -941,95 +968,31 @@ fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult
     }
 }
 
-/// Smoke: `cargo run --features editor-only` must compile, bind 127.0.0.1:3420 and stay alive.
-/// ponytail: 90s ceiling — cold CI-cache-miss cargo build dominates (cargo run includes compile).
-/// Poll TcpStream every 300ms, no curl/timeout dep; collect child stderr on timeout for diagnostics.
+/// Compile separately so cold-build time is not confused with app readiness.
+/// Startup still has the same 90-second deadline and must leave a live server.
 fn smoke_stage(stages: &mut StageList<'_>) {
-    use std::net::TcpStream;
-    use std::time::{Duration, Instant};
     stages.n += 1;
-    let (idx, total) = (stages.n, stages.total);
-    let name = "smoke (editor-only)";
-    let desc = "cargo run --features editor-only (bind 127.0.0.1:3420, 90s)";
-    eprintln!();
-    eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
-    let mut child = match Command::new("cargo")
-        .args(["run", "--features", "editor-only"])
-        .current_dir(stages.root)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let r = StageResult {
-                name: name.into(),
-                status: Status::Fail,
-                note: format!("spawn: {e}"),
-            };
-            eprintln!("── {name}: FAIL (spawn: {e}) ──");
-            stages.results.push(r);
-            return;
+    eprintln!(
+        "═══ [{}/{}] smoke (editor-only): build + 90s readiness ═══",
+        stages.n, stages.total
+    );
+    let (status, note) = match smoke::check(stages.root) {
+        Ok(()) => (Status::Pass, String::new()),
+        Err(log) => {
+            annotate_stage_failure("smoke", &log);
+            eprintln!("{log}");
+            (
+                Status::Fail,
+                log.lines().next().unwrap_or("smoke failed").to_string(),
+            )
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(90);
-    let mut ok = false;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().ok().flatten() {
-            // Child exited before binding — drain stderr for the real error.
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut s| {
-                    use std::io::Read;
-                    let mut buf = vec![0u8; 4096];
-                    let n = s.read(&mut buf).unwrap_or(0);
-                    String::from_utf8_lossy(&buf[..n]).into_owned()
-                })
-                .unwrap_or_default();
-            let note = if stderr.trim().is_empty() {
-                format!("exited early: {status}")
-            } else {
-                let tail = stderr.lines().last().unwrap_or("").trim();
-                format!("exited early: {status} — {tail}")
-            };
-            eprintln!("── {name}: FAIL ({note}) ──");
-            stages.results.push(StageResult {
-                name: name.into(),
-                status: Status::Fail,
-                note,
-            });
-            return;
-        }
-        if TcpStream::connect("127.0.0.1:3420").is_ok() {
-            ok = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    // Give OS time to release port for next run.
-    std::thread::sleep(Duration::from_millis(200));
-    if ok {
-        eprintln!("── {name}: PASS ──");
-        stages.results.push(StageResult {
-            name: name.into(),
-            status: Status::Pass,
-            note: String::new(),
-        });
-    } else {
-        let note = "timeout 90s: 127.0.0.1:3420 not reachable".to_string();
-        eprintln!("── {name}: FAIL ({note}) ──");
-        if ci_annotations() {
-            annotate(format!("quality-{}", name.replace(' ', "-")), &note);
-        }
-        stages.results.push(StageResult {
-            name: name.into(),
-            status: Status::Fail,
-            note,
-        });
-    }
+    eprintln!("── smoke (editor-only): {} ──", status.label());
+    stages.results.push(StageResult {
+        name: "smoke (editor-only)".into(),
+        status,
+        note,
+    });
 }
 
 /// Whether the wasm32-unknown-unknown target is installed for the

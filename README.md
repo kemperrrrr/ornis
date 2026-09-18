@@ -177,6 +177,26 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | `PhysicsEngine` trait + встроенный движок (Sweep-and-Prune, импульсный солвер, collision layers/masks, triggers, точный raycast, SIMD-wide батч-солвер G7) | ✅ | `crates/physics/`; `RigidBody` поддерживает взаимную фильтрацию layer/mask, trigger bodies дают deterministic enter/exit events без импульсов, raycast точно пересекает sphere/OBB/capsule, а angular CCD имеет bounded box/capsule sweep; G7: `wide.rs` (SIMD-wide CPU), `gpu.rs` (GPU, feature `gpu`; шейдер написан на Rust и транслируется в WGSL макросами `gpu_pipeline`/`WgslStruct`, проверен naga и lavapipe-тестами в quality-гейте); второй impl — `AvbdEngine` (`avbd.rs`, AVBD M1 ✅ 2026-09-12 + остатки M2 ✅ 2026-09-15: стек боксов, Ball/Revolute/Prismatic/Fixed/Distance/Wheel/Gear/SixDof + limits/motors (пружина подвески, spin-мотор, per-axis лимиты), анизотропный/rolling/torsion friction, триггеры/contact-события, raycast-паритет, детерминизм (канон-снапшот + Strong-Confluence 1-vs-32), Engine-уровень fracture, sleep/wake с impact/overlap-гейтами, linear TOI, tall sphere-tower (6 сфер drop-settle), GPU-DSL предусловия (`Mat3`/фикс-массивы/`helpers`); intra-engine опции — M3 ✅ 2026-09-16 (`RoutingKind::Islands`: общий реестр + острова по AABB/связям джойнтов + rebuild с mass-restore + гистерезис сна, 5 тестов `solver_split`); второй удар после баунса 30 м/с закрыт (per-body центры патча + no-collide pin-джойнтов)) |
 | Подключение Rapier/Jolt через трейт | ❌ | трейт есть, адаптеров нет |
 
+**Physics hardening (2026-09-17, PR #12):** AVBD angular locks now keep
+relative errors in body A's frame and apply torques/Hessians in world space
+(SixDof and Fixed). Nonzero warm reactions are never discarded by a
+mass-scaled epsilon; regression tests cover world-frame covariance and
+small-inertia equilibria. M3 lifecycle hardening now routes swept contact/joint components before a
+common fixed step, preserves joint rest state and driver/event baselines across
+rebuilds, exposes per-solver/coupling timings, and queries the current global
+registry even before a pending rebuild. Dense handles are stable across migration;
+removal swaps the last body into the removed slot. Full verification remains
+in progress through PR #12's `cargo xtask quality --ci` gate. Box inertia now
+uses full side lengths (fixing a factor-of-four error); fracture preserves the
+rigid velocity field, and contained/crossing primitive queries keep signed
+overlap rather than reporting false separation. Joint sleep also requires a small
+constraint residual; limit reactions unwind before deactivation, and CCD hits
+are recorded before velocity clamping so fracture cannot lose them. GPU
+layouts now use one iterative const table rather than exponentially nested
+expressions or deep query chains. Helper paths resolve in the caller module,
+and the GPU feature declares its production naga dependency explicitly. CI builds use two compiler
+jobs and line-table debug info (debug assertions stay enabled).
+
 ### Не начато
 
 - **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅ (`ComponentRegistry` + `#[derive(RegisterComponent)]`/`register_component` `2026-09-06`); `ScriptEngine`-трейт ✅ (`crates/core/src/script.rs`, `2026-09-05`: `load/call/batch_call/hot_reload/unload` + `NoopScriptEngine`); Batch API по хендлам и hot reload — ✅ как методы трейта; первый адаптер Rhai ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine`, JSON-кодек args/return, 6 тестов; deny/advisories/outdated чисто), второй адаптер Rune ✅ 2026-09-06 (`crates/rune`: `RuneScriptEngine`, rune 0.14, 7 тестов зеркально Rhai; шов проверен правилом трёх), третий адаптер Python ✅ 2026-09-06 (`crates/python`: `PythonScriptEngine`, rustpython-vm 0.5 на worker-thread, 8 тестов; deny/advisories чисто; 2026-09-07: rustpython-vm вендорен в `third_party/rustpython-vm` — `[patch.crates-io]` + однострочный фикс RustPython#8343, без него крейт не собирается с libc ≥ 0.2.187 при гейте «все зависимости latest»), интеграция в рантайм ✅ 2026-09-06 (`ScriptHost`-ресурс + `script_tick` во variable schedule + `ScriptPlugin`; тик `[{"dt","tick"}]` (массив — требование кодека адаптеров) → outcomes per entry; `apply_outcomes` пишет `{"set": [...]}` в мир двухфазно через реестр), editor-интеграция ✅ 2026-09-06 (`script_load/call/hot_reload/unload/list` + file-watch `.rhai` с hot-reload на тике + автоверсия; 3 e2e-теста), WASM — ❌; **Mojo — один из официально поддерживаемых адаптеров (решение 2026-09-05, до появления `wasm32`/`WASI` в Mojo — `modular#19`/`#5367` открыты — единственным не становится)** (рамка 2026-08-22: плагинный

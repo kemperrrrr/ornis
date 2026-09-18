@@ -224,11 +224,9 @@ impl Shape {
                 Vec3::splat(i)
             }
             Shape::Box { half_extents } => {
-                let (x, y, z) = (
-                    right2(half_extents.x),
-                    right2(half_extents.y),
-                    right2(half_extents.z),
-                );
+                // The cuboid formula uses full side lengths, not half extents.
+                let sides = *half_extents * 2.0;
+                let (x, y, z) = (right2(sides.x), right2(sides.y), right2(sides.z));
                 Vec3::new(
                     (mass / 12.0) * (y + z),
                     (mass / 12.0) * (z + x),
@@ -1158,13 +1156,13 @@ mod tests {
 
     #[test]
     fn box_inertia_matches_closed_form_per_axis() {
-        // I_x = (m/12)(h_y^2 + h_z^2), and cyclic; asymmetric half-extents
+        // I_x = (m/3)(h_y^2 + h_z^2), and cyclic; asymmetric half-extents
         // so a swapped axis or coefficient cannot hide behind symmetry.
         let shape = Shape::Box {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         };
         let i = shape.inertia(6.0);
-        assert_vec3_close(i, Vec3::new(6.5, 5.0, 2.5));
+        assert_vec3_close(i, Vec3::new(26.0, 20.0, 10.0));
     }
 
     #[test]

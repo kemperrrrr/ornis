@@ -48,10 +48,8 @@ fn sixdof_angular_rows_commit_duals_in_local_frame() {
             e.joints[0].sacc[5]
         };
         let expected = if locked {
-            // Locked rows see the violation projected onto the
-            // assembly-frame axis (A is pitched 0.7 about Y, so the z-row
-            // reads 0.3*cos(0.7)); limited rows read travel directly.
-            0.3 * 0.7f32.cos()
+            // A common world rotation cannot change local-Z violation.
+            0.3
         } else {
             0.1
         };
@@ -282,4 +280,69 @@ fn a4_angular_zero_violation_keeps_warm_reaction() {
         "warm torque dropped: {:?}",
         e.bodies[1].orientation
     );
+}
+
+#[test]
+fn angular_joint_primal_is_invariant_under_world_rotation() {
+    for kind in [AvbdJointKind::Fixed, AvbdJointKind::SixDof] {
+        for pitch in [0.0, 0.7, PI * 0.5, PI] {
+            for (i, axis) in SIXDOF_FRAME.into_iter().enumerate() {
+                let mut e = row_scene(kind);
+                let qa = Quat::from_rotation_y(pitch);
+                e.bodies[0].orientation = qa;
+                e.bodies[1].orientation = qa * Quat::from_axis_angle(axis, 0.3);
+                e.rot0 = vec![qa; 2];
+                e.inertial_rot[1] = e.bodies[1].orientation;
+                e.joints[0].pen_a[i] = 1000.0;
+                e.joints[0].six_ang[i] = AxisConfig::Locked;
+                e.solve_body(1);
+                let relative = qa.conjugate() * e.bodies[1].orientation;
+                let error = quat_diff_vec(relative, Quat::IDENTITY);
+                let inertia = e.bodies[1].inertia[i] / (DT_STEP * DT_STEP);
+                let expected = 0.3 * inertia / (inertia + 1000.0);
+                assert!(
+                    (error - axis * expected).length() < 2e-6,
+                    "kind={kind:?} pitch={pitch} axis={axis:?}: {error:?} vs {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sixdof_locked_dual_is_invariant_under_world_rotation() {
+    for pitch in [0.0, 0.7, PI * 0.5, PI] {
+        for (i, axis) in SIXDOF_FRAME.into_iter().enumerate() {
+            let mut e = row_scene(AvbdJointKind::SixDof);
+            let qa = Quat::from_rotation_y(pitch);
+            e.bodies[0].orientation = qa;
+            e.bodies[1].orientation = qa * Quat::from_axis_angle(axis, 0.3);
+            e.joints[0].six_ang[i] = AxisConfig::Locked;
+            e.dual_update();
+            assert!((e.joints[0].lam_a[i] - 0.3).abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
+fn small_inertia_keeps_balanced_warm_torque() {
+    for mass in [0.01, 1.0, 100.0] {
+        for radius in [0.01, 0.1, 1.0] {
+            for (i, axis) in SIXDOF_FRAME.into_iter().enumerate() {
+                let mut e = row_scene(AvbdJointKind::Fixed);
+                e.bodies[1] = RigidBody::new_sphere(Vec3::ZERO, radius, mass);
+                let inertia_dt2 = e.bodies[1].inertia[i] / (DT_STEP * DT_STEP);
+                let torque = 1e-4;
+                e.joints[0].pen_a[i] = 1e4;
+                e.joints[0].lam_a[i] = -torque;
+                e.inertial_rot[1] = quat_integrate(Quat::IDENTITY, -axis * (torque / inertia_dt2));
+                e.solve_body(1);
+                let movement = quat_diff_vec(e.bodies[1].orientation, Quat::IDENTITY).length();
+                assert!(
+                    movement < 1e-7,
+                    "balanced torque erased: mass={mass} radius={radius} movement={movement}"
+                );
+            }
+        }
+    }
 }

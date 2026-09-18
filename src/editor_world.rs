@@ -363,7 +363,9 @@ impl EditorWorld {
         self.store_mut().insert(entity, transform);
         self.store_mut().insert(entity, mesh);
         self.store_mut().insert(entity, material);
-        self.store_mut().insert(entity, physics_body);
+        if let Some(body) = physics_body {
+            self.store_mut().insert(entity, body);
+        }
         self.version += 1;
         entity
     }
@@ -995,13 +997,15 @@ fn list_entities_json(world: &EditorWorld) -> String {
 // Component defaults / JSON (de)serialization helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn physics_body_for(transform: &TransformDesc, mesh: &MeshDesc) -> RigidBody {
+fn physics_body_for(transform: &TransformDesc, mesh: &MeshDesc) -> Option<RigidBody> {
     let radius = match mesh {
         MeshDesc::Sphere { radius, .. } => *radius,
+        // Transport alone must not create an unrelated sphere collider.
+        MeshDesc::Custom { .. } => return None,
     };
     let mut body = RigidBody::new_sphere(Vec3::from_array(transform.translation), radius, 0.0);
     apply_transform_to_body(&mut body, transform);
-    body
+    Some(body)
 }
 
 fn default_transform() -> TransformDesc {
