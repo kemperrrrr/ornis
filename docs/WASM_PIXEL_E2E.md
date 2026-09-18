@@ -30,11 +30,11 @@ Prerequisites: `cargo`, `node`/`npx`, `wasm-pack`, a browser
 adapter (real GPU or SwiftShader with `--enable-unsafe-swiftshader`).
 
 ```sh
-scripts/wasm_pixel_e2e.sh [--port 3420] [--out /tmp/ornis-e2e]
-ORNIS_E2E_INSTALL=1 scripts/wasm_pixel_e2e.sh   # allow browser download
+cargo xtask e2e [--port 3420] [--out /tmp/ornis-e2e]
+ORNIS_E2E_INSTALL=1 cargo xtask e2e   # allow browser download
 ```
 
-The script builds the viewport exactly like `cargo xtask editor`
+The task builds the viewport exactly like `cargo xtask editor`
 (`wasm-pack build crates/wasm --target web --out-dir editor/pkg`), starts
 `cargo run --features editor-only` (fixed port 3420), polls `/api/scene`,
 captures `frame.png` of the `#bevy` canvas (`editor/index.html`), and —

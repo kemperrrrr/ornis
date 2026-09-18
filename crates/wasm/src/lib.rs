@@ -1275,7 +1275,7 @@ mod integration_tests {
     #[test]
     fn browser_pixel_e2e_gated_on_browser_and_webgpu() {
         // Live pixel run needs a real browser + WebGPU adapter, which CI
-        // has not — run it only by hand via `scripts/wasm_pixel_e2e.sh`
+        // has not — run it only by hand via `cargo xtask e2e`
         // (see `docs/WASM_PIXEL_E2E.md`). Without `ORNIS_E2E_BROWSER=1`
         // or without a browser binary on PATH this is an honest SKIP.
         if std::env::var("ORNIS_E2E_BROWSER").ok().as_deref() != Some("1") {

@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   cargo xtask editor  [--skip-wasm] [--editor-dir <path>]
+//!   cargo xtask e2e [--port 3420] [--out <dir>]
 //!   cargo xtask quality [--ci] [--full] [--bench] [--everything] [--only <ids>] [--list-stages]
 //!   cargo xtask fuzz <target> [-- <libfuzzer args>]
 //!   cargo xtask mutants [-- <cargo-mutants args>]
@@ -11,6 +12,7 @@
 //! remote editor server. Cross-platform: everything goes through
 //! std::process::Command without a shell.
 
+mod e2e;
 mod quality;
 
 use std::path::PathBuf;
@@ -23,6 +25,7 @@ fn main() {
     };
     match cmd.as_str() {
         "editor" => editor(&args[1..]),
+        "e2e" => e2e::e2e(&args[1..]),
         "quality" => quality::quality(&args[1..]),
         "fuzz" => quality::fuzz(&args[1..]),
         "mutants" => quality::mutants(&args[1..]),
@@ -43,7 +46,10 @@ fn usage(code: i32) -> ! {
          Build the WASM viewport (wasm-pack) and launch the engine\n      \
          with the remote editor at http://127.0.0.1:3420\n      \
          --skip-wasm    reuse the existing editor/pkg build\n      \
-         --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
+          --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
+           e2e [--port 3420] [--out <dir>]\n      \
+          Manual live-pixel e2e for the WASM viewport (honest SKIP\n      \
+          without a browser/WebGPU adapter; see docs/WASM_PIXEL_E2E.md)\n  \
           quality [--ci] [--full] [--bench] [--everything] [--only <ids>] [--list-stages]\n      \
                    Quality gate: fmt, clippy, rustqual, test, audit, deny, outdated (level 1);\n      \
                    --ci adds rustdoc + wasm32 check (the exact set CI shards run);\n      \
