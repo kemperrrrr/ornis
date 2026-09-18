@@ -111,15 +111,7 @@ impl QualityFlags {
             f.bench = true;
             f.ci = true;
         }
-        if let Some(only) = &f.only {
-            let all = Self::all_known_ids();
-            for id in only {
-                if !all.contains(&id.as_str()) {
-                    eprintln!("xtask quality: unknown stage id '{id}' (see --list-stages)");
-                    quality_usage(2);
-                }
-            }
-        }
+        validate_only(&f);
         f
     }
 
@@ -166,6 +158,19 @@ impl QualityFlags {
             .iter()
             .filter(|id| self.enabled(id))
             .count()
+    }
+}
+
+/// Rejects unknown `--only` ids: a typo must fail loudly, never silently
+/// run an empty (green) shard.
+fn validate_only(f: &QualityFlags) {
+    let Some(only) = &f.only else { return };
+    let all = QualityFlags::all_known_ids();
+    for id in only {
+        if !all.contains(&id.as_str()) {
+            eprintln!("xtask quality: unknown stage id '{id}' (see --list-stages)");
+            quality_usage(2);
+        }
     }
 }
 
