@@ -1,7 +1,7 @@
 //! Server-side ECS world for `editor-only` mode.
 //!
 //! In `editor-only` there is no native winit loop to consume `UiCommand`s,
-//! so [`run`] spawns an `editor-world` thread that owns an [`EditorWorld`]
+//! so [`run`] spawns an `editor-world` thread that owns an [`EditorSession`]
 //! (an `ornis-core::Engine` with its `World`, `SmartStore`, physics systems
 //! and component registry), executes commands from `POST /api/command` and
 //! publishes `GameEvent`s back to the HTTP server (`status`/`scene`
@@ -15,7 +15,7 @@
 //! `ornis_render::scene` description types — **serde-canonical** JSON
 //! (externally-tagged enums), served generically through the component
 //! registry (F0, audit §10 D2). The JSON contract of
-//! [`EditorWorld::scene_json`] is:
+//! [`EditorSession::scene_json`] is:
 //!
 //! ```json
 //! {
@@ -72,14 +72,13 @@ use serde_json::Value;
 
 use ornis_core::script::{ScriptHandle, ScriptHost, ScriptPlugin};
 use ornis_core::{
-    ComponentMeta, ComponentRegistry, Engine, Entity, InputState, SmartStore, World,
-    install_gameplay,
+    ComponentMeta, ComponentRegistry, Entity, InputState, SmartStore, World, install_gameplay,
 };
 use ornis_physics::RigidBody;
 use ornis_rhai::RhaiScriptEngine;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
-use ornis_app::{install_gameplay_physics_bridge, parse_scene_ron};
+use ornis_app::{GameWorld, install_gameplay_physics_bridge, parse_scene_ron};
 use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
@@ -133,11 +132,18 @@ impl Default for SceneEnvironment {
     }
 }
 
-/// Live renderable scene: an `ornis_core::Engine` with ECS components,
-/// environment resource, builtin physics bindings, the scene label and a
-/// mutation version counter.
-pub struct EditorWorld {
-    engine: Engine,
+/// Live renderable scene: the single [`GameWorld`] plus editor-side
+/// bookkeeping (protocol entity list, environment resource, SI physics
+/// bindings, the scene label and a mutation version counter).
+///
+/// `world` owns the authoritative engine and its frame host;
+/// `alive` is the protocol entity list (every spawn/despawn goes through
+/// it, so editor-only components such as names and colliders stay in one
+/// place). The world's own scene-entity list is only populated by the
+/// `replace_scene` path, which the session never uses — loads go through
+/// [`EditorSession::load_scene`] to attach names and physics bodies.
+pub struct EditorSession {
+    world: GameWorld,
     alive: Vec<Entity>,
     /// Scene label round-tripped through `Scene::name` on save/load.
     scene_name: String,
@@ -153,26 +159,27 @@ pub struct EditorWorld {
     script_last_apply: Vec<ScriptEntryStatus>,
 }
 
-impl Default for EditorWorld {
+impl Default for EditorSession {
     fn default() -> Self {
-        let mut engine = Engine::new();
+        let mut world = GameWorld::new();
+        let engine = world.engine_mut();
         let _ = engine.world_mut().insert(SceneEnvironment::default());
-        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
-        install_gameplay(&mut engine);
-        install_gameplay_physics_bridge(&mut engine);
+        install_physics(engine, Vec3::new(0.0, -9.81, 0.0));
+        install_gameplay(engine);
+        install_gameplay_physics_bridge(engine);
         // Audio mirrors the showcase runtime: real output when a device
         // exists, silent otherwise; the bridge is a no-op without a host.
         if let Some(audio) = AudioPlugin::try_default() {
-            audio.install(&mut engine);
+            audio.install(engine);
         }
-        install_gameplay_audio_bridge(&mut engine);
+        install_gameplay_audio_bridge(engine);
         // Rhai is the default editor scripting engine (PLAN phase 6: the
         // primary adapter and the WASM fallback). Scripts stay idle until
         // `script_load` registers tick entries — an empty host is one
         // atomic counter plus an empty loop per frame.
-        ScriptPlugin::new(Box::new(RhaiScriptEngine::default())).install(&mut engine);
+        ScriptPlugin::new(Box::new(RhaiScriptEngine::default())).install(engine);
         Self {
-            engine,
+            world,
             alive: Vec::new(),
             scene_name: "scene".into(),
             version: 0,
@@ -183,7 +190,7 @@ impl Default for EditorWorld {
     }
 }
 
-impl EditorWorld {
+impl EditorSession {
     /// An empty world with the default environment (default camera,
     /// no lights).
     pub fn new() -> Self {
@@ -196,12 +203,12 @@ impl EditorWorld {
     /// beside the world, but ECS components and singleton domain resources
     /// live in this single `ornis_core::World`.
     pub fn world(&self) -> &World {
-        self.engine.world()
+        self.world.engine().world()
     }
 
     /// Returns the shared logical world for setup and command processing.
     pub fn world_mut(&mut self) -> &mut World {
-        self.engine.world_mut()
+        self.world.engine_mut().world_mut()
     }
 
     /// Advances the editor's domain schedule by one frame.
@@ -211,9 +218,10 @@ impl EditorWorld {
     /// an ECS pose and the caller should publish a fresh scene snapshot.
     pub fn tick(&mut self, delta_seconds: f32) -> bool {
         self.poll_script_watches();
-        self.engine.run_frame(delta_seconds);
+        let _ = self.world.frame(delta_seconds);
         let changed = self
-            .engine
+            .world
+            .engine_mut()
             .world_mut()
             .resources_mut()
             .get_mut::<Mutex<PhysicsRuntime>>()
@@ -273,7 +281,7 @@ impl EditorWorld {
         if drained.is_empty() {
             return 0;
         }
-        let Some(store) = self.engine.world_mut().store_mut() else {
+        let Some(store) = self.world.engine_mut().world_mut().store_mut() else {
             return 0;
         };
         let report = ScriptHost::apply_drained(store, &REGISTRY, drained);
@@ -291,44 +299,49 @@ impl EditorWorld {
     }
 
     fn script_host(&self) -> Option<&ScriptHost> {
-        self.engine.world().resources().get::<ScriptHost>()
+        self.world.engine().world().resources().get::<ScriptHost>()
     }
 
     fn script_host_mut(&mut self) -> Option<&mut ScriptHost> {
-        self.engine
+        self.world
+            .engine_mut()
             .world_mut()
             .resources_mut()
             .get_mut::<ScriptHost>()
     }
 
     fn store(&self) -> &SmartStore {
-        self.engine
+        self.world
+            .engine()
             .world()
             .store()
-            .expect("EditorWorld always registers SmartStore")
+            .expect("EditorSession always registers SmartStore")
     }
 
     fn store_mut(&mut self) -> &mut SmartStore {
-        self.engine
+        self.world
+            .engine_mut()
             .world_mut()
             .store_mut()
-            .expect("EditorWorld always registers SmartStore")
+            .expect("EditorSession always registers SmartStore")
     }
 
     fn environment(&self) -> &SceneEnvironment {
-        self.engine
+        self.world
+            .engine()
             .world()
             .resources()
             .get::<SceneEnvironment>()
-            .expect("EditorWorld always registers SceneEnvironment")
+            .expect("EditorSession always registers SceneEnvironment")
     }
 
     fn environment_mut(&mut self) -> &mut SceneEnvironment {
-        self.engine
+        self.world
+            .engine_mut()
             .world_mut()
             .resources_mut()
             .get_mut::<SceneEnvironment>()
-            .expect("EditorWorld always registers SceneEnvironment")
+            .expect("EditorSession always registers SceneEnvironment")
     }
 
     /// Number of currently alive entities.
@@ -403,7 +416,7 @@ impl EditorWorld {
     /// Returns the number of entities loaded.
     pub fn load_scene(&mut self, scene: Scene) -> usize {
         let count = scene.entities.len();
-        let mut fresh = EditorWorld::new();
+        let mut fresh = EditorSession::new();
         for e in scene.entities {
             fresh.spawn_with(Some(e.name), e.transform, e.mesh, e.material);
         }
@@ -419,7 +432,7 @@ impl EditorWorld {
     }
 
     /// Parse a RON scene and load it (replacing the world, see
-    /// [`EditorWorld::load_scene`]). An invalid RON string leaves the world
+    /// [`EditorSession::load_scene`]). An invalid RON string leaves the world
     /// untouched.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, String> {
         Ok(self
@@ -461,16 +474,16 @@ impl EditorWorld {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Snapshots and command handling — free functions over [`EditorWorld`]
+// Snapshots and command handling — free functions over [`EditorSession`]
 // ═══════════════════════════════════════════════════════════════════════════
 // The bulk of the snapshot/command logic lives here, not in
-// `impl EditorWorld`, to keep the type's method count within the structural
+// `impl EditorSession`, to keep the type's method count within the structural
 // gate's thresholds; the public methods above are thin delegates.
 
 /// Snapshot `world` as a [`Scene`]: every alive entity becomes an
 /// [`EntityDesc`] (missing components fall back to the spawn defaults),
 /// lights/camera/ambient come from the environment resource.
-fn to_scene(world: &EditorWorld) -> Scene {
+fn to_scene(world: &EditorSession) -> Scene {
     let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
     Scene {
         name: world.scene_name.clone(),
@@ -482,7 +495,7 @@ fn to_scene(world: &EditorWorld) -> Scene {
 }
 
 /// One alive entity as an [`EntityDesc`] for [`to_scene`].
-fn entity_desc(world: &EditorWorld, entity: Entity) -> EntityDesc {
+fn entity_desc(world: &EditorSession, entity: Entity) -> EntityDesc {
     EntityDesc {
         name: world
             .name_of(entity)
@@ -494,7 +507,7 @@ fn entity_desc(world: &EditorWorld, entity: Entity) -> EntityDesc {
 }
 
 /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
-fn scene_json(world: &EditorWorld) -> String {
+fn scene_json(world: &EditorSession) -> String {
     let entities: Vec<Value> = world
         .alive
         .iter()
@@ -514,7 +527,7 @@ fn scene_json(world: &EditorWorld) -> String {
 }
 
 /// JSON payload for `GET /api/status` (cached by the HTTP server).
-fn status_json(world: &EditorWorld) -> String {
+fn status_json(world: &EditorSession) -> String {
     serde_json::json!({
         "entity_count": world.entity_count(),
         "name": "Ornis Engine",
@@ -525,7 +538,7 @@ fn status_json(world: &EditorWorld) -> String {
 
 /// Publish `status` + `scene` snapshots so the HTTP server's caches
 /// (`GET /api/status`, `GET /api/scene`) reflect the current world.
-fn publish_state(world: &EditorWorld, ev_tx: &Sender<GameEvent>) {
+fn publish_state(world: &EditorSession, ev_tx: &Sender<GameEvent>) {
     emit(ev_tx, "status", world.status_json());
     emit(ev_tx, "scene", world.scene_json());
 }
@@ -574,7 +587,7 @@ impl CommandOutcome {
 /// events (`entity_created`/`entity_destroyed`/`entity_list`,
 /// `ComponentUpdated`, `status`/`scene` snapshots or `error`). A transport
 /// wrapped command additionally receives a correlated completion event.
-fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
+fn handle_command(world: &mut EditorSession, cmd: &UiCommand, ev_tx: &Sender<GameEvent>) {
     // Browser input channel (WS + POST /api/input): replace authoritative
     // InputState in the unified World. No polling / scene.ron fallback.
     // Handles both bare Input and wrapped WithRequestId(Input).
@@ -601,23 +614,14 @@ fn handle_command(world: &mut EditorWorld, cmd: &UiCommand, ev_tx: &Sender<GameE
     }
 }
 
-fn apply_browser_input(world: &mut EditorWorld, input: &editor_backend::ipc::BrowserInput) {
-    let state = world
-        .engine
-        .world_mut()
-        .resources_mut()
-        .get_mut::<InputState>();
+fn apply_browser_input(world: &mut EditorSession, input: &editor_backend::ipc::BrowserInput) {
+    let world_mut = world.world.engine_mut().world_mut();
+    let state = world_mut.resources_mut().get_mut::<InputState>();
     let state = if let Some(s) = state {
         s
     } else {
-        world
-            .engine
-            .world_mut()
-            .resources_mut()
-            .insert(InputState::default());
-        world
-            .engine
-            .world_mut()
+        world_mut.resources_mut().insert(InputState::default());
+        world_mut
             .resources_mut()
             .get_mut::<InputState>()
             .expect("just inserted")
@@ -632,7 +636,7 @@ fn apply_browser_input(world: &mut EditorWorld, input: &editor_backend::ipc::Bro
 }
 
 fn execute_command(
-    world: &mut EditorWorld,
+    world: &mut EditorSession,
     cmd: &UiCommand,
     ev_tx: &Sender<GameEvent>,
 ) -> CommandOutcome {
@@ -706,7 +710,7 @@ fn emit_command_completed(
 /// error (unknown entity/component, malformed JSON) is an `error`
 /// event with the world left untouched.
 fn handle_set_component(
-    world: &mut EditorWorld,
+    world: &mut EditorSession,
     entity_id: u32,
     generation: Option<u32>,
     type_name: &str,
@@ -734,7 +738,7 @@ fn handle_set_component(
 
 /// Validate and apply the upsert; returns the applied payload.
 fn set_component(
-    world: &mut EditorWorld,
+    world: &mut EditorSession,
     entity_id: u32,
     generation: Option<u32>,
     type_name: &str,
@@ -752,7 +756,7 @@ fn set_component(
 }
 
 fn handle_custom(
-    world: &mut EditorWorld,
+    world: &mut EditorSession,
     cmd_type: &str,
     json_data: &str,
     ev_tx: &Sender<GameEvent>,
@@ -893,7 +897,7 @@ fn handle_custom(
     }
 }
 
-fn cmd_create_entity(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+fn cmd_create_entity(world: &mut EditorSession, data: &Value) -> Result<String, String> {
     let name = opt_string(data, "name")?;
     // Optional component overrides by registry name. Everything is
     // parsed BEFORE the spawn so a bad payload leaves the world (and
@@ -916,14 +920,14 @@ fn cmd_create_entity(world: &mut EditorWorld, data: &Value) -> Result<String, St
     .to_string())
 }
 
-fn cmd_destroy_entity(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+fn cmd_destroy_entity(world: &mut EditorSession, data: &Value) -> Result<String, String> {
     let entity = resolve_entity(world, data)?;
     world.despawn(entity.id(), entity.generation());
     Ok(serde_json::json!({"id": entity.id(), "generation": entity.generation()}).to_string())
 }
 
 /// Validate `id` + `generation` against the store's allocator.
-fn resolve_entity(world: &EditorWorld, data: &Value) -> Result<Entity, String> {
+fn resolve_entity(world: &EditorSession, data: &Value) -> Result<Entity, String> {
     let id = data
         .get("id")
         .and_then(Value::as_u64)
@@ -978,7 +982,7 @@ fn resolve_alive(alive: &[Entity], id: u32, generation: Option<u32>) -> Result<E
 }
 
 /// `list_entities` payload: entity count plus `{id, generation, name}` rows.
-fn list_entities_json(world: &EditorWorld) -> String {
+fn list_entities_json(world: &EditorSession) -> String {
     let entities: Vec<Value> = world
         .alive
         .iter()
@@ -1063,7 +1067,7 @@ fn parse_data(json_data: &str) -> Result<Value, String> {
 // side: load sources, call functions, and inspect entries.
 
 /// One file-backed script module: external edits hot-reload on the next
-/// tick (see [`EditorWorld::poll_script_watches`]).
+/// tick (see [`EditorSession::poll_script_watches`]).
 struct ScriptWatch {
     /// Module id from `script_load` (see [`ScriptHandle`]).
     module: u64,
@@ -1087,7 +1091,7 @@ struct ScriptEntryStatus {
 /// `"path"` reads the file now (fail fast on unreadable files) and
 /// watches it for external edits. Exactly one of `"source"`/`"path"`
 /// is required.
-fn cmd_script_load(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+fn cmd_script_load(world: &mut EditorSession, data: &Value) -> Result<String, String> {
     let name = opt_string(data, "name")?.unwrap_or_else(|| "editor_script".into());
     let source = opt_string(data, "source")?;
     let path = opt_string(data, "path")?;
@@ -1123,7 +1127,7 @@ fn cmd_script_load(world: &mut EditorWorld, data: &Value) -> Result<String, Stri
 /// `script_call {"module", "func", "args"?}`: calls one loaded module
 /// directly; `"args"` is a JSON array string (default `[]`). The raw
 /// JSON reply rides in `"result"`.
-fn cmd_script_call(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+fn cmd_script_call(world: &mut EditorSession, data: &Value) -> Result<String, String> {
     let module = data
         .get("module")
         .and_then(Value::as_u64)
@@ -1149,7 +1153,7 @@ fn cmd_script_call(world: &mut EditorWorld, data: &Value) -> Result<String, Stri
 /// under its handle — tick entries keep pointing at it and globals
 /// survive; a bad source keeps the old module live. Without `"source"`
 /// the watched file is re-read; unwatched modules require `"source"`.
-fn cmd_script_hot_reload(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+fn cmd_script_hot_reload(world: &mut EditorSession, data: &Value) -> Result<String, String> {
     let module = data
         .get("module")
         .and_then(Value::as_u64)
@@ -1181,7 +1185,7 @@ fn cmd_script_hot_reload(world: &mut EditorWorld, data: &Value) -> Result<String
 /// `script_unload {"module"}`: drops the module and its file watch. Tick
 /// entries stay registered and record `unknown handle` errors until the
 /// module id is loaded again — unload ticking modules deliberately.
-fn cmd_script_unload(world: &mut EditorWorld, data: &Value) -> Result<String, String> {
+fn cmd_script_unload(world: &mut EditorSession, data: &Value) -> Result<String, String> {
     let module = data
         .get("module")
         .and_then(Value::as_u64)
@@ -1200,7 +1204,7 @@ fn cmd_script_unload(world: &mut EditorWorld, data: &Value) -> Result<String, St
 /// `script_list {}`: every loaded module with its tick entry (if any),
 /// watched path, last apply status, plus the pending outcome count.
 /// Non-tick modules are callable but never tick.
-fn cmd_script_list(world: &mut EditorWorld, _data: &Value) -> Result<String, String> {
+fn cmd_script_list(world: &mut EditorSession, _data: &Value) -> Result<String, String> {
     let host = world.script_host().ok_or("script host is not installed")?;
     let modules: Vec<Value> = world
         .script_modules
@@ -1344,7 +1348,7 @@ fn watched_scene_path() -> Option<PathBuf> {
 
 /// Reloads the watched file into the world and publishes fresh snapshots.
 /// A missing or malformed file keeps the live world untouched.
-fn reload_watched_scene(world: &mut EditorWorld, path: &Path, ev_tx: &Sender<GameEvent>) {
+fn reload_watched_scene(world: &mut EditorSession, path: &Path, ev_tx: &Sender<GameEvent>) {
     match world.load_scene_file(path) {
         Ok(count) => {
             publish_state(world, ev_tx);
@@ -1365,7 +1369,7 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
     thread::Builder::new()
         .name("editor-world".into())
         .spawn(move || {
-            let mut world = EditorWorld::new();
+            let mut world = EditorSession::new();
             match startup_scene_ron() {
                 Some(ron) => {
                     if let Err(e) = world.load_scene_ron(&ron) {
@@ -1403,9 +1407,9 @@ mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
 
-    fn world_and_events() -> (EditorWorld, Sender<GameEvent>, Receiver<GameEvent>) {
+    fn world_and_events() -> (EditorSession, Sender<GameEvent>, Receiver<GameEvent>) {
         let (ev_tx, ev_rx) = unbounded();
-        (EditorWorld::new(), ev_tx, ev_rx)
+        (EditorSession::new(), ev_tx, ev_rx)
     }
 
     fn custom(cmd_type: &str, json_data: &str) -> UiCommand {
@@ -1482,8 +1486,8 @@ mod tests {
     const FULL_TRANSFORM: &str = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
 
     #[test]
-    fn editor_world_uses_core_world_for_components_and_environment() {
-        let mut world = EditorWorld::new();
+    fn editor_session_uses_core_world_for_components_and_environment() {
+        let mut world = EditorSession::new();
         let entity = world.spawn(Some("Hero".into()));
 
         assert!(world.world().store().is_some());
@@ -1508,7 +1512,7 @@ mod tests {
 
     #[test]
     fn editor_tick_synchronizes_dynamic_physics_pose() {
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         let entity = world.spawn(None);
         world
             .world_mut()
@@ -1527,7 +1531,7 @@ mod tests {
         use ornis_core::{Player, Position};
 
         let (ev_tx, _ev_rx) = unbounded();
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         let entity = world.spawn(None);
         world
             .world_mut()
@@ -1733,7 +1737,7 @@ mod tests {
     #[test]
     fn hot_reload_replaces_world_and_survives_garbage() {
         let (ev_tx, _ev_rx) = unbounded();
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         let ron =
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
                 .expect("editor/scene.ron readable");
@@ -1751,7 +1755,7 @@ mod tests {
 
     #[test]
     fn spawn_assigns_names_and_counts() {
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         let a = world.spawn(None);
         let b = world.spawn(Some("Hero".into()));
         assert_eq!(world.entity_count(), 2);
@@ -1762,7 +1766,7 @@ mod tests {
 
     #[test]
     fn despawn_recycles_ids_with_new_generation() {
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         let a = world.spawn(None);
         let b = world.spawn(None);
         // Stale generation must not despawn.
@@ -1781,7 +1785,7 @@ mod tests {
         let ron =
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
                 .expect("editor/scene.ron readable");
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         let loaded = world.load_scene_ron(&ron).expect("scene loads");
         assert_eq!(loaded, 5);
         assert_eq!(world.entity_count(), 5);
@@ -1843,7 +1847,7 @@ mod tests {
 
     #[test]
     fn scene_json_lists_entities_with_full_components() {
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         world.spawn(None);
         world.spawn(Some("Hero".into()));
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
@@ -1870,7 +1874,7 @@ mod tests {
 
     #[test]
     fn scene_json_empty_world() {
-        let world = EditorWorld::new();
+        let world = EditorSession::new();
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
         assert_eq!(scene["version"], 0);
         assert_eq!(scene["entity_count"], 0);
@@ -2243,7 +2247,7 @@ mod tests {
     // ── save/load scene ────────────────────────────────────────────────────
 
     /// Snapshot JSON with `version` stripped: two worlds compare by content.
-    fn scene_value(world: &EditorWorld) -> Value {
+    fn scene_value(world: &EditorSession) -> Value {
         let mut v: Value = serde_json::from_str(&world.scene_json()).unwrap();
         v.as_object_mut().unwrap().remove("version");
         v
@@ -2262,7 +2266,7 @@ mod tests {
         let ron =
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
                 .expect("editor/scene.ron readable");
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         world.load_scene_ron(&ron).expect("scene loads");
         // A runtime-created entity must round-trip too.
         world.spawn_with(
@@ -2286,7 +2290,7 @@ mod tests {
         let serialized = world.to_scene().to_ron().expect("serialize");
         let reparsed = Scene::from_ron(&serialized).expect("re-parse");
 
-        let mut restored = EditorWorld::new();
+        let mut restored = EditorSession::new();
         let loaded = restored.load_scene(reparsed);
         assert_eq!(loaded, 6);
         assert_eq!(scene_value(&restored), scene_value(&world));
@@ -2300,7 +2304,7 @@ mod tests {
         let dir = temp_dir("ornis_editor_world_save_load");
         let path = dir.join("scene.ron");
 
-        let mut world = EditorWorld::new();
+        let mut world = EditorSession::new();
         world.spawn(Some("Hero".into()));
         world.save_scene_file(&path).expect("save");
 
@@ -2309,7 +2313,7 @@ mod tests {
         assert_eq!(on_disk.entities.len(), 1);
         assert_eq!(on_disk.entities[0].name, "Hero");
 
-        let mut restored = EditorWorld::new();
+        let mut restored = EditorSession::new();
         let loaded = restored.load_scene_file(&path).expect("load");
         assert_eq!(loaded, 1);
         assert_eq!(scene_value(&restored), scene_value(&world));
@@ -2325,7 +2329,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("scene.ron");
 
-        let world = EditorWorld::new();
+        let world = EditorSession::new();
         assert!(world.save_scene_file(&path).is_err());
         assert!(!path.exists(), "no partial scene file");
         assert!(!dir.join("scene.ron.tmp").exists(), "no temp file left");

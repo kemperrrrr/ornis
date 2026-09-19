@@ -59,7 +59,7 @@ pub struct RenderComponents {
 
 /// A successfully parsed `/api/scene` payload converted into the render
 /// crate's scene description. The WASM runtime inserts it into the shared
-/// [`ornis_render::RenderWorld`] before ECS extraction and GPU upload.
+/// [`GameWorld`](ornis_app::GameWorld) before ECS extraction and GPU upload.
 pub struct LiveScene {
     /// Authoritative server-side scene version.
     pub version: u64,

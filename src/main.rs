@@ -11,7 +11,7 @@ use editor_backend::{GameEvent, UiCommand};
 #[cfg(not(feature = "editor-only"))]
 use engine_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
-use ornis_app::{GameRuntime, install_gameplay_physics_bridge, spawn_static_floor};
+use ornis_app::{GameWorld, install_gameplay_physics_bridge, spawn_static_floor};
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
@@ -21,9 +21,9 @@ use ornis_core::install_gameplay;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // native mode also installs the physics systems into the showcase Engine.
-#[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
-mod editor_world;
 mod engine_runtime;
+#[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
+mod server_session;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // "BROWSER-ONLY EDITOR" MODE (editor-only)
@@ -44,7 +44,7 @@ fn main() {
 
     // Live ECS world on a dedicated thread: executes commands from
     // POST /api/command and publishes status/scene snapshots + events.
-    editor_world::run(cmd_rx, ev_tx);
+    server_session::run(cmd_rx, ev_tx);
 
     // The binding keeps RemoteEditor alive until main ends (Drop stops the server).
     let _editor = RemoteEditor::start(3420, cmd_tx, ev_rx);
@@ -107,7 +107,7 @@ struct GameApp {
 #[cfg(not(feature = "editor-only"))]
 struct GameContext {
     window: winit::window::Window,
-    runtime: GameRuntime,
+    runtime: GameWorld,
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
@@ -252,11 +252,11 @@ impl GameApp {
         })
     }
 
-    fn showcase_engine() -> (GameRuntime, u32) {
+    fn showcase_engine() -> (GameWorld, u32) {
         let scene = Scene::from_ron(include_str!("../assets/scene.ron"))
             .expect("shipped showcase scene must parse");
         let entity_count = scene.entities.len() as u32;
-        let mut runtime = GameRuntime::from_scene(&scene);
+        let mut runtime = GameWorld::from_scene(&scene);
         install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
         install_physics(runtime.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
         install_gameplay(runtime.engine_mut());

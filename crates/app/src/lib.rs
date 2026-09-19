@@ -4,8 +4,8 @@
 //! with domain specifics (physics [`RigidBody`] and render
 //! [`TransformDesc`]/[`MeshDesc`]/[`MaterialDesc`]) so that the schedule
 //! plans physics, render and gameplay as one DAG over a single world.
-//! `RenderWorld` remains as an optional thin view — extraction is no longer
-//! a mandatory copy boundary.
+//! [`GameWorld`](game_world::GameWorld) is the single scene-backed world
+//! type — extraction reads its lanes directly, never a second world copy.
 
 use std::sync::Mutex;
 
@@ -19,13 +19,13 @@ use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
 pub use ornis_core::{GameplayPlugin, Position, Velocity, install_gameplay};
 
 pub mod assets;
-pub mod runtime;
+pub mod game_world;
 
 pub use assets::{
     AssetEvent, AssetId, AssetKind, AssetServer, MaterialHandle, MeshHandle, SceneLoadError,
     parse_scene_ron,
 };
-pub use runtime::{GameRuntime, GameStage, spawn_static_floor};
+pub use game_world::{GameStage, GameWorld, spawn_static_floor};
 
 /// Thin view over the unified [`World`]: no second `Engine` copy required.
 ///

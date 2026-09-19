@@ -4,7 +4,7 @@
 //!
 //! Renders the live scene from `/api/scene` (polled ~1/s) when the remote
 //! server provides it; otherwise falls back to `assets/scene.ron` through
-//! the shared ECS [`RenderWorld`], [`FrameUpload`], and
+//! the shared [`GameWorld`](ornis_app::GameWorld), [`FrameUpload`], and
 //! [`RenderFrame3D`] frame contract. The orbit
 //! camera is client-side only.
 //!
@@ -17,10 +17,11 @@ use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
+use ornis_app::GameWorld;
 use ornis_render::scene::Scene;
 use ornis_render::{
-    FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, RenderWorld, Renderer3D,
-    Technique, install_orbit_camera, read_orbit_camera,
+    FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
+    install_orbit_camera, read_orbit_camera,
 };
 
 mod scene_api;
@@ -109,7 +110,7 @@ async fn fetch_live_scene() -> Option<LiveScene> {
 
 /// GPU-side scene built from the ECS extraction snapshot. The scene
 /// description remains the serialization boundary; renderable components
-/// are inserted into [`RenderWorld`] and extracted by its scheduled
+/// are inserted into [`GameWorld`] and extracted by its
 /// `Engine` frame before this GPU adapter runs.
 struct GpuScene {
     mesh: ornis_render::Mesh,
@@ -121,7 +122,7 @@ struct GpuScene {
     ambient: [f32; 3],
 }
 
-fn build_gpu_scene(device: &wgpu::Device, render_world: &RenderWorld, scene: &Scene) -> GpuScene {
+fn build_gpu_scene(device: &wgpu::Device, render_world: &GameWorld, scene: &Scene) -> GpuScene {
     let extracted = render_world.frame_upload();
     // RenderFrame3D draws one shared mesh instanced. Each sphere's radius is
     // already folded into its extracted model scale, so the maximum
@@ -569,7 +570,7 @@ struct FrameState<'a> {
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer3D,
     frame3d: RenderFrame3D,
-    render_world: RenderWorld,
+    render_world: GameWorld,
     mesh: ornis_render::Mesh,
     mesh_params: (u32, u32),
     instance_count: u32,
@@ -608,7 +609,7 @@ impl<'a> FrameState<'a> {
     /// device/surface recreation is needed for a live scene update.
     fn apply_live_scene(&mut self, live: &LiveScene, applied_version: &Cell<u64>) {
         self.render_world.replace_scene(&live.scene);
-        self.render_world.run_frame(0.0);
+        self.render_world.frame(0.0);
         let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
         if gpu.mesh_params != self.mesh_params {
             self.mesh = gpu.mesh;
@@ -797,13 +798,13 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let (scene, initial_version, live_mode) = load_initial_scene().await?;
     // Keep the browser-side ECS explicitly separate from the server's
     // authoritative world: the serialized scene crosses the boundary once,
-    // then the same Engine/RenderExtract contract as native is used locally.
-    let mut render_world = RenderWorld::from_scene(&scene);
+    // then the same `GameWorld` frame contract as native is used locally.
+    let mut render_world = GameWorld::from_scene(&scene);
     install_orbit_camera(
         render_world.engine_mut(),
         OrbitCamera::from_desc(&scene.camera),
     );
-    render_world.run_frame(0.0);
+    render_world.frame(0.0);
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
     let renderer = Renderer3D::new(&ctx.device, &ctx.config, 1);
@@ -853,7 +854,7 @@ fn spawn_render_loop(
     ctx: GpuContext,
     renderer: Renderer3D,
     frame3d: RenderFrame3D,
-    render_world: RenderWorld,
+    render_world: GameWorld,
     gpu_scene: GpuScene,
     initial_version: u64,
 ) -> Result<(), JsValue> {
@@ -900,7 +901,7 @@ fn spawn_render_loop(
         frame.handle_resize(&canvas);
         frame.maybe_post_input(frame_count);
         frame.sync_input();
-        frame.render_world.run_frame(1.0 / 60.0);
+        frame.render_world.frame(1.0 / 60.0);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
         if live_mode
@@ -976,16 +977,16 @@ mod integration_tests {
     use super::*;
 
     #[test]
-    fn live_snapshot_crosses_serialization_boundary_into_shared_render_world() {
+    fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
-        let mut render_world = RenderWorld::from_scene(&live.scene);
+        let mut render_world = GameWorld::from_scene(&live.scene);
 
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
         // X4: no scheduled extraction system — the lanes are read directly.
         assert_eq!(render_world.engine().schedule().len(), 0);
 
-        render_world.run_frame(0.0);
+        render_world.frame(0.0);
         let extracted = render_world.frame_upload();
 
         assert_eq!(extracted.mesh_params, (32, 24));
@@ -1003,14 +1004,14 @@ mod integration_tests {
         // Contract fallback for the browser visual e2e (snapshot → WASM):
         // a live pixel run needs a browser + WebGPU, which CI has not.
         // This pins the same chain headlessly instead — `/api/scene` JSON
-        // → `RenderWorld::replace_scene` → `run_frame` → `RenderExtract`
+        // → `GameWorld::replace_scene` → `frame` → `frame_upload`
         // (`frame_upload`), with lights published as the shared resource.
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
-        let mut render_world = RenderWorld::new();
+        let mut render_world = GameWorld::new();
         render_world.replace_scene(&live.scene);
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
-        render_world.run_frame(0.0);
+        render_world.frame(0.0);
 
         let snapshot = render_world.frame_upload();
         let direct = ornis_render::extract_render_data(
@@ -1037,7 +1038,7 @@ mod integration_tests {
         let mut empty = live.scene.clone();
         empty.entities.clear();
         render_world.replace_scene(&empty);
-        render_world.run_frame(0.0);
+        render_world.frame(0.0);
         assert_eq!(render_world.entity_count(), 0);
         assert!(render_world.frame_upload().instances.is_empty());
     }
@@ -1119,8 +1120,8 @@ mod integration_tests {
         assert_eq!(live.version, 5);
         assert_eq!(live.sequence, 12);
 
-        let mut render_world = RenderWorld::from_scene(&live.scene);
-        render_world.run_frame(0.0);
+        let mut render_world = GameWorld::from_scene(&live.scene);
+        render_world.frame(0.0);
         let extracted = render_world.frame_upload();
 
         // Shared-mesh tessellation criterion.
@@ -1174,16 +1175,16 @@ mod integration_tests {
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
-        let mut render_world = RenderWorld::new();
+        let mut render_world = GameWorld::new();
         render_world.replace_scene(&live.scene);
-        render_world.run_frame(0.0);
+        render_world.frame(0.0);
         assert_eq!(render_world.frame_upload().instances.len(), 1);
 
         // v6: moved entity — the extraction must follow the replacement.
         let mut moved = live.scene.clone();
         moved.entities[0].transform.translation = [1.0, 2.0, 3.0];
         render_world.replace_scene(&moved);
-        render_world.run_frame(0.0);
+        render_world.frame(0.0);
         let extracted = render_world.frame_upload();
         assert_eq!(extracted.instances.len(), 1);
         assert_eq!(
@@ -1200,7 +1201,7 @@ mod integration_tests {
         let mut empty = moved.clone();
         empty.entities.clear();
         render_world.replace_scene(&empty);
-        render_world.run_frame(0.0);
+        render_world.frame(0.0);
         assert_eq!(render_world.entity_count(), 0);
         assert!(render_world.frame_upload().instances.is_empty());
     }

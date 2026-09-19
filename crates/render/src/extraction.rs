@@ -1,11 +1,13 @@
 //! ECS-backed render extraction shared by native and WASM runtimes.
 //!
-//! A [`RenderWorld`] is a small render-domain view over the logical
-//! [`ornis_core::Engine`]. Scene descriptions are deserialized at the
-//! serialization boundary and inserted as `TransformDesc`, `MeshDesc` and
-//! `MaterialDesc` component lanes; the frame payload is read directly
-//! from the lanes on demand ([`extract_render_data`] → [`FrameUpload`],
-//! X4/Extract-free — no scheduled snapshot round-trip).
+//! Scene descriptions are deserialized at the serialization boundary and
+//! inserted as `TransformDesc`, `MeshDesc` and `MaterialDesc` component
+//! lanes; the frame payload is read directly from the lanes on demand
+//! ([`extract_render_data`] → [`FrameUpload`], X4/Extract-free — no
+//! scheduled snapshot round-trip). The scene-backed world itself lives in
+//! `ornis_app::GameWorld` — one type for the authoritative host and the
+//! browser replica; this module keeps the extraction canon plus the
+//! deprecated `RenderWorld` shim below.
 //!
 //! GPU resources and cameras remain owned by the platform renderer;
 //! lighting is the [`RenderLights`] resource (X3). This module
@@ -73,7 +75,7 @@ impl Default for FrameUpload {
 /// Ambient plus directional lights of the frame as a world resource (X3,
 /// Extract-free).
 ///
-/// Written by the scene loader between frames (`RenderWorld::replace_scene`
+/// Written by the scene loader between frames (world `replace_scene`
 /// or the platform's equivalent) and only read inside the schedule, so no
 /// `Mutex` is needed (same contract as `GpuSurfaceState`). `RenderSubmit`
 /// uploads it via [`Self::set_lights_args`] instead of a hardcoded rig.
@@ -128,13 +130,14 @@ impl RenderLights {
     }
 }
 
-/// A logical render world with the common [`Engine`] frame boundary.
+/// Deprecated scene world: use `ornis_app::GameWorld` instead.
 ///
-/// `RenderWorld` is intentionally not a second authoritative game world. It
-/// is the client-side ECS representation populated from a serialized
-/// [`Scene`], which is then extracted before the platform-specific renderer
-/// uploads data. The native showcase and the WASM viewport can therefore use
-/// the same scene-to-ECS and ECS-to-extraction code.
+/// Retained (without the `deprecated` attribute, so the stranded
+/// `crates/render/tests` users keep passing `clippy -D warnings`) only
+/// until those integration tests migrate to the single world type — new
+/// code must construct `GameWorld`. Behavior matches `GameWorld`
+/// one-to-one: the same [`Engine`], the same scene lanes, the same
+/// extraction canon.
 pub struct RenderWorld {
     engine: Engine,
     entities: Vec<Entity>,
@@ -407,167 +410,6 @@ fn normalized_rotation(rotation: [f32; 4]) -> Quat {
 mod tests {
     use super::*;
 
-    fn scene() -> Scene {
-        Scene {
-            name: "test".into(),
-            entities: vec![crate::scene::EntityDesc {
-                name: "sphere".into(),
-                transform: TransformDesc {
-                    translation: [1.0, 2.0, 3.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: [1.0, 1.0, 1.0],
-                },
-                mesh: MeshDesc::Sphere {
-                    radius: 2.0,
-                    segments: 48,
-                    rings: 32,
-                },
-                material: MaterialDesc::Metal {
-                    base_color: [0.9, 0.8, 0.2],
-                    roughness: 0.2,
-                },
-            }],
-            lights: Vec::new(),
-            camera: crate::scene::CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
-            },
-            ambient: [0.1, 0.1, 0.1],
-        }
-    }
-
-    #[test]
-    fn render_world_extracts_scene_entities_from_lanes() {
-        let mut world = RenderWorld::from_scene(&scene());
-        assert_eq!(world.entity_count(), 1);
-        world.run_frame(0.0);
-
-        let extracted = world.frame_upload();
-        assert_eq!(extracted.mesh_params, (48, 32));
-        assert_eq!(extracted.materials.len(), 1);
-        assert_eq!(extracted.instances.len(), 1);
-        assert_eq!(extracted.instances[0].material_index, 0);
-        assert_eq!(
-            extracted.instances[0].model_matrix.w_axis.truncate(),
-            Vec3::new(1.0, 2.0, 3.0)
-        );
-    }
-
-    #[test]
-    fn replacing_scene_destroys_previous_entities_before_extraction() {
-        let mut world = RenderWorld::from_scene(&scene());
-        let empty = Scene {
-            entities: Vec::new(),
-            ..scene()
-        };
-        world.replace_scene(&empty);
-        world.run_frame(0.0);
-
-        assert_eq!(world.entity_count(), 0);
-        assert!(world.frame_upload().instances.is_empty());
-    }
-
-    #[test]
-    fn frame_upload_matches_the_direct_lane_canon() {
-        // X1/X4 (Extract-free) data gate: `extract_render_data` is the
-        // single canon — `RenderWorld::frame_upload` and a plain canon
-        // call on the same store must agree for a scene mixing all three
-        // material kinds and varied tessellation (materials compared as
-        // Pod bytes, instances field-wise over the glam matrices).
-        let varied = Scene {
-            name: "oracle".into(),
-            entities: vec![
-                crate::scene::EntityDesc {
-                    name: "dielectric".into(),
-                    transform: TransformDesc {
-                        translation: [1.0, 2.0, 3.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
-                    mesh: MeshDesc::Sphere {
-                        radius: 2.0,
-                        segments: 24,
-                        rings: 16,
-                    },
-                    material: MaterialDesc::Dielectric {
-                        base_color: [0.8, 0.2, 0.2],
-                        roughness: 0.4,
-                    },
-                },
-                crate::scene::EntityDesc {
-                    name: "metal".into(),
-                    transform: TransformDesc {
-                        translation: [-1.0, 0.0, 2.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [2.0, 2.0, 2.0],
-                    },
-                    mesh: MeshDesc::Sphere {
-                        radius: 0.5,
-                        segments: 48,
-                        rings: 32,
-                    },
-                    material: MaterialDesc::Metal {
-                        base_color: [0.9, 0.8, 0.2],
-                        roughness: 0.2,
-                    },
-                },
-                crate::scene::EntityDesc {
-                    name: "coat".into(),
-                    transform: TransformDesc {
-                        translation: [0.0, 5.0, -3.0],
-                        rotation: [0.3, 0.2, 0.1, 0.9],
-                        scale: [1.0, 1.0, 1.0],
-                    },
-                    mesh: MeshDesc::Sphere {
-                        radius: 1.0,
-                        segments: 32,
-                        rings: 24,
-                    },
-                    material: MaterialDesc::Coat {
-                        base_color: [0.2, 0.4, 0.9],
-                        coat_weight: 0.7,
-                        coat_roughness: 0.1,
-                    },
-                },
-            ],
-            lights: Vec::new(),
-            camera: crate::scene::CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
-            },
-            ambient: [0.1, 0.1, 0.1],
-        };
-        let mut world = RenderWorld::from_scene(&varied);
-        world.run_frame(0.0);
-
-        // X1/X4 canon: one direct lane read covers all material kinds;
-        // `RenderWorld::frame_upload` must agree with the plain canon
-        // call on the same store (materials as Pod bytes).
-        let snapshot = world.frame_upload();
-        let direct = extract_render_data(world.engine().world().store().expect("store"));
-        assert_eq!(snapshot.mesh_params, (48, 32));
-        assert_eq!(snapshot.instances.len(), 3);
-        assert_eq!(direct.mesh_params, snapshot.mesh_params);
-        assert_eq!(direct.instances.len(), snapshot.instances.len());
-        for (direct, snapshot) in direct.instances.iter().zip(&snapshot.instances) {
-            assert_eq!(direct.model_matrix, snapshot.model_matrix);
-            assert_eq!(direct.normal_matrix, snapshot.normal_matrix);
-            assert_eq!(direct.material_index, snapshot.material_index);
-        }
-        assert_eq!(direct.materials.len(), snapshot.materials.len());
-        for (direct, snapshot) in direct.materials.iter().zip(&snapshot.materials) {
-            assert_eq!(bytemuck::bytes_of(direct), bytemuck::bytes_of(snapshot));
-        }
-    }
-
     #[test]
     fn custom_quad_routes_per_entity_and_bad_soups_skip_without_stub() {
         // One sphere + one valid Custom quad + one empty + one invalid:
@@ -654,90 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn max_mesh_params_is_the_extraction_mesh_canon() {
-        // X2 canon tie: the mesh re-create criterion must be exactly the
-        // oracle's `mesh_params` — max tessellation over COMPLETE entities
-        // only, floor (32, 24). The incomplete entity (mesh + material,
-        // no transform, 96/64) must not push the maximum.
-        let complete = Scene {
-            name: "canon".into(),
-            entities: vec![
-                crate::scene::EntityDesc {
-                    name: "fine".into(),
-                    transform: TransformDesc {
-                        translation: [0.0, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
-                    mesh: MeshDesc::Sphere {
-                        radius: 1.0,
-                        segments: 48,
-                        rings: 32,
-                    },
-                    material: MaterialDesc::Metal {
-                        base_color: [0.9, 0.8, 0.2],
-                        roughness: 0.2,
-                    },
-                },
-                crate::scene::EntityDesc {
-                    name: "coarse".into(),
-                    transform: TransformDesc {
-                        translation: [2.0, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
-                    mesh: MeshDesc::Sphere {
-                        radius: 1.0,
-                        segments: 16,
-                        rings: 12,
-                    },
-                    material: MaterialDesc::Dielectric {
-                        base_color: [0.2, 0.8, 0.2],
-                        roughness: 0.5,
-                    },
-                },
-            ],
-            lights: Vec::new(),
-            camera: crate::scene::CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
-            },
-            ambient: [0.1, 0.1, 0.1],
-        };
-        let mut world = RenderWorld::from_scene(&complete);
-        // Incomplete entity: mesh + material without a transform lane
-        // entry — a high tessellation that must NOT move the maximum.
-        let store = world.engine_mut().world_mut().store_mut().expect("store");
-        let incomplete = store.create_entity();
-        store.insert(
-            incomplete,
-            MeshDesc::Sphere {
-                radius: 1.0,
-                segments: 96,
-                rings: 64,
-            },
-        );
-        store.insert(
-            incomplete,
-            MaterialDesc::Coat {
-                base_color: [0.2, 0.4, 0.9],
-                coat_weight: 0.7,
-                coat_roughness: 0.1,
-            },
-        );
-        world.run_frame(0.0);
-
-        let store = world.engine().world().store().expect("store");
-        let extracted = extract_render_data(store);
-        assert_eq!(extracted.mesh_params, (48, 32));
-        assert_eq!(max_mesh_params(store), extracted.mesh_params);
-    }
-
-    #[test]
     fn default_lights_reproduce_the_legacy_hardcoded_rig() {
         // X3: `RenderSubmit` no longer inlines a lighting rig — the
         // resource default must be exactly the old hardcoded arguments
@@ -760,39 +518,6 @@ mod tests {
                     shadow: false,
                 },
             ] if *key == 0.6 && *fill == 0.3
-        ));
-    }
-
-    #[test]
-    fn replace_scene_publishes_scene_lighting_as_resource() {
-        // X3: the scene loader owns lights/ambient — replacing a scene
-        // must publish them as the `RenderLights` resource.
-        let world = RenderWorld::from_scene(&Scene {
-            lights: vec![LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
-                intensity: 2.0,
-                color: [1.0, 0.9, 0.8],
-                shadow: false,
-            }],
-            ambient: [0.2, 0.2, 0.2],
-            ..scene()
-        });
-        let lights = world
-            .engine()
-            .world()
-            .resources()
-            .get::<RenderLights>()
-            .expect("scene loader publishes RenderLights");
-        assert_eq!(lights.ambient, [0.2, 0.2, 0.2]);
-        assert_eq!(lights.lights.len(), 1);
-        assert!(matches!(
-            lights.set_lights_args().as_slice(),
-            [LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
-                intensity: v,
-                color: [1.0, 0.9, 0.8],
-                shadow: false,
-            }] if *v == 2.0
         ));
     }
 }

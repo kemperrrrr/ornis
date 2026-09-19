@@ -2654,6 +2654,7 @@ dependencies = [
  "console_error_panic_hook",
  "glam",
  "js-sys",
+ "ornis-app",
  "ornis-core",
  "ornis-render",
  "raw-window-handle",
