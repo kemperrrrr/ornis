@@ -12,9 +12,9 @@ use crate::distance::{ShapeRef, cast_shape};
 use crate::engine::raycast_shape_hit;
 use crate::migration::{EventState, JointSnapshot};
 use crate::{
-    AABB, AvbdEngine, BodyHandle, BodyType, BuiltinPhysicsEngine, ContactEvent, ContactEventKind,
-    JointKind, PhysicsEngine, Ray, RaycastHit, RigidBody, Shape, SolverKind, SplitTiming,
-    TriggerEvent, TriggerEventKind,
+    AABB, AvbdEngine, BodyHandle, BodyType, ContactEvent, ContactEventKind, JointKind,
+    PhysicsEngine, Ray, RaycastHit, RigidBody, SequentialImpulseEngine, Shape, SolverKind,
+    SplitTiming, TriggerEvent, TriggerEventKind,
 };
 
 pub(super) const DT: f32 = 1.0 / 60.0;
@@ -28,14 +28,14 @@ const LINK_MARGIN: f32 = 0.05;
 pub(super) enum SplitOwner {
     Static,
     Avbd,
-    Builtin,
+    SequentialImpulse,
 }
 
 impl SplitOwner {
     fn preferred(kind: SolverKind) -> Self {
         match kind {
             SolverKind::Avbd => Self::Avbd,
-            SolverKind::Builtin => Self::Builtin,
+            SolverKind::SequentialImpulse => Self::SequentialImpulse,
         }
     }
 }
@@ -44,7 +44,7 @@ pub(super) struct SplitBody {
     pub body: RigidBody,
     pub owner: SplitOwner,
     pub local_avbd: Option<BodyHandle>,
-    pub local_builtin: Option<BodyHandle>,
+    pub local_si: Option<BodyHandle>,
     pub sleepy: u32,
     pub previous: PrevPose,
 }
@@ -64,7 +64,7 @@ impl SplitBody {
             body,
             owner,
             local_avbd: None,
-            local_builtin: None,
+            local_si: None,
             sleepy: 0,
             previous,
         }
@@ -74,7 +74,7 @@ impl SplitBody {
 pub(super) struct SplitJoint {
     pub state: JointSnapshot,
     pub local_avbd: Option<usize>,
-    pub local_builtin: Option<usize>,
+    pub local_si: Option<usize>,
 }
 
 impl SplitJoint {
@@ -82,13 +82,13 @@ impl SplitJoint {
         Self {
             state,
             local_avbd: None,
-            local_builtin: None,
+            local_si: None,
         }
     }
 }
 
 pub(super) struct SplitState {
-    pub builtin: BuiltinPhysicsEngine,
+    pub si: SequentialImpulseEngine,
     pub avbd: AvbdEngine,
     pub gravity: Vec3,
     pub bodies: Vec<SplitBody>,
@@ -143,7 +143,7 @@ fn swept_bounds(body: &RigidBody, gravity: Vec3, dt: f32) -> AABB {
 impl SplitState {
     pub(super) fn new(gravity: Vec3) -> Self {
         Self {
-            builtin: BuiltinPhysicsEngine::new(gravity),
+            si: SequentialImpulseEngine::new(gravity),
             avbd: AvbdEngine::new(gravity),
             gravity,
             bodies: Vec::new(),
@@ -240,25 +240,25 @@ impl SplitState {
     pub(super) fn rebuild(&mut self) {
         let timer = Instant::now();
         self.avbd = AvbdEngine::new(self.gravity);
-        self.builtin = BuiltinPhysicsEngine::new(self.gravity);
+        self.si = SequentialImpulseEngine::new(self.gravity);
         for b in &mut self.bodies {
             restore_mass(&mut b.body);
             b.local_avbd = None;
-            b.local_builtin = None;
-            if b.owner != SplitOwner::Builtin {
+            b.local_si = None;
+            if b.owner != SplitOwner::SequentialImpulse {
                 let h = self.avbd.add_body(b.body.clone());
                 self.avbd.restore_body_baseline(h, b.previous);
                 b.local_avbd = Some(h);
             }
             if b.owner != SplitOwner::Avbd {
-                let h = self.builtin.add_body(b.body.clone());
-                self.builtin.restore_body_baseline(h, b.previous);
-                b.local_builtin = Some(h);
+                let h = self.si.add_body(b.body.clone());
+                self.si.restore_body_baseline(h, b.previous);
+                b.local_si = Some(h);
             }
         }
         for j in &mut self.joints {
             j.local_avbd = None;
-            j.local_builtin = None;
+            j.local_si = None;
         }
         for i in 0..self.joints.len() {
             let j = self.joints[i].state;
@@ -273,23 +273,17 @@ impl SplitState {
                     self.joints[i].local_avbd = Some(h);
                 }
             }
-            if let (Some(a), Some(b)) = (
-                self.bodies[j.a].local_builtin,
-                self.bodies[j.b].local_builtin,
-            ) {
+            if let (Some(a), Some(b)) = (self.bodies[j.a].local_si, self.bodies[j.b].local_si) {
                 let spec = self.local_spec(j.spec, false);
                 if let Some(spec) = spec {
-                    let h = self
-                        .builtin
-                        .add_joint(a, b, spec)
-                        .expect("validated builtin joint");
-                    self.builtin.restore_joint_reference(h, j.reference);
-                    self.joints[i].local_builtin = Some(h);
+                    let h = self.si.add_joint(a, b, spec).expect("validated SI joint");
+                    self.si.restore_joint_reference(h, j.reference);
+                    self.joints[i].local_si = Some(h);
                 }
             }
         }
         self.avbd.restore_event_state(self.local_events(true));
-        self.builtin.restore_event_state(self.local_events(false));
+        self.si.restore_event_state(self.local_events(false));
         self.rebuilds += 1;
         self.timing.rebuild += timer.elapsed();
     }
@@ -303,7 +297,7 @@ impl SplitState {
         {
             let local = |h: usize| {
                 let j = self.joints.get(h)?;
-                if avbd { j.local_avbd } else { j.local_builtin }
+                if avbd { j.local_avbd } else { j.local_si }
             };
             Some(JointKind::Gear {
                 joint_a: local(joint_a)?,
@@ -322,7 +316,7 @@ impl SplitState {
                 .filter_map(|&(a, b)| {
                     let get = |h: usize| {
                         let r = self.bodies.get(h)?;
-                        if avbd { r.local_avbd } else { r.local_builtin }
+                        if avbd { r.local_avbd } else { r.local_si }
                     };
                     Some((get(a)?, get(b)?))
                 })
@@ -338,7 +332,7 @@ impl SplitState {
         for b in &mut self.bodies {
             let src = match b.owner {
                 SplitOwner::Avbd => b.local_avbd.and_then(|h| self.avbd.get_body(h)),
-                SplitOwner::Builtin => b.local_builtin.and_then(|h| self.builtin.get_body(h)),
+                SplitOwner::SequentialImpulse => b.local_si.and_then(|h| self.si.get_body(h)),
                 SplitOwner::Static => None, // host owns non-dynamic poses/properties
             };
             if let Some(live) = src {
@@ -351,12 +345,12 @@ impl SplitState {
             };
         }
         let av = self.avbd.joint_snapshots();
-        let bu = self.builtin.joint_snapshots();
+        let si_joints = self.si.joint_snapshots();
         for j in &mut self.joints {
             let state = j
                 .local_avbd
                 .and_then(|h| av.get(h))
-                .or_else(|| j.local_builtin.and_then(|h| bu.get(h)));
+                .or_else(|| j.local_si.and_then(|h| si_joints.get(h)));
             if let Some(state) = state {
                 j.state.reference = state.reference;
             }
@@ -373,9 +367,9 @@ impl SplitState {
                 *dst = b.body.clone();
             }
         }
-        if let Some(h) = b.local_builtin {
-            self.builtin.wake_body(h);
-            if let Some(dst) = self.builtin.get_body_mut(h) {
+        if let Some(h) = b.local_si {
+            self.si.wake_body(h);
+            if let Some(dst) = self.si.get_body_mut(h) {
                 *dst = b.body.clone();
             }
         }
@@ -387,8 +381,8 @@ impl SplitState {
             if let Some(local) = b.local_avbd {
                 self.avbd.wake_body(local);
             }
-            if let Some(local) = b.local_builtin {
-                self.builtin.wake_body(local);
+            if let Some(local) = b.local_si {
+                self.si.wake_body(local);
             }
         }
     }
@@ -486,11 +480,11 @@ impl SplitState {
             b.owner = if active[r] {
                 SplitOwner::Avbd
             } else if calm[r] {
-                SplitOwner::Builtin
+                SplitOwner::SequentialImpulse
             } else if has_avbd[r] {
                 SplitOwner::Avbd
             } else {
-                SplitOwner::Builtin
+                SplitOwner::SequentialImpulse
             };
         }
         let moved = old
@@ -509,22 +503,22 @@ impl SplitState {
         self.avbd.step(DT);
         self.timing.avbd += timer.elapsed();
         let timer = Instant::now();
-        self.builtin.step(DT);
-        self.timing.builtin += timer.elapsed();
+        self.si.step(DT);
+        self.timing.si += timer.elapsed();
         let mut av = vec![None; self.bodies.len()];
-        let mut bu = av.clone();
+        let mut si_map = av.clone();
         for (global, b) in self.bodies.iter().enumerate() {
             if let Some(h) = b.local_avbd {
                 av[h] = Some(global);
             }
-            if let Some(h) = b.local_builtin {
-                bu[h] = Some(global);
+            if let Some(h) = b.local_si {
+                si_map[h] = Some(global);
             }
         }
         let mut hits = Vec::new();
         for (events, map) in [
             (self.avbd.drain_contact_events(), &av),
-            (self.builtin.drain_contact_events(), &bu),
+            (self.si.drain_contact_events(), &si_map),
         ] {
             for event in events {
                 let ContactEventKind::Hit {
@@ -553,11 +547,11 @@ impl SplitState {
             }
         }
         self.avbd.drain_trigger_events();
-        self.builtin.drain_trigger_events();
+        self.si.drain_trigger_events();
         let mut now = EventState::default();
         for (state, map) in [
             (self.avbd.event_state(), &av),
-            (self.builtin.event_state(), &bu),
+            (self.si.event_state(), &si_map),
         ] {
             let remap = |pairs: BTreeSet<(usize, usize)>| {
                 pairs

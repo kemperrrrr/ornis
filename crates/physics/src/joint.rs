@@ -1,4 +1,4 @@
-//! Joint (constraint) definitions for the builtin physics engine (G5).
+//! Joint (constraint) definitions for the sequential-impulse physics engine (G5).
 //!
 //! Modeled on Box3D `spherical_joint`/`revolute_joint` and Jolt `Constraint`:
 //! joints are persistent equality constraints with warm-started accumulated
@@ -227,7 +227,7 @@ pub struct RevoluteMotor {
 }
 
 /// Solver-agnostic joint setup, resolved once at creation from a
-/// [`JointKind`] and the two assembly poses. Both engines (builtin SI and
+/// [`JointKind`] and the two assembly poses. Both engines (SI and
 /// AVBD) consume this instead of parsing `JointKind` twice: axis
 /// normalization, axle orthogonalization and reference capture live here,
 /// per-solver row math stays in the engines.
@@ -238,9 +238,9 @@ pub struct RevoluteMotor {
 /// values are bit-identical to what each engine computed before.
 ///
 /// Degenerate axes (squared length below 1e-12) fall back infallibly
-/// (`Z` for hinge/slide, `Y` for suspension — the builtin policy) and set
+/// (`Z` for hinge/slide, `Y` for suspension — the SI policy) and set
 /// [`ResolvedJoint::degenerate`]; each engine keeps its own admission
-/// policy (builtin accepts, AVBD rejects revolute/prismatic).
+/// policy (SI accepts, AVBD rejects revolute/prismatic).
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedJoint {
     /// Anchor in body A's local frame (passthrough).

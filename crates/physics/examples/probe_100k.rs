@@ -18,10 +18,10 @@
 use std::time::Instant;
 
 use glam::Vec3;
-use ornis_physics::{BodyType, BroadPhaseKind, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BodyType, BroadPhaseKind, PhysicsEngine, RigidBody, SequentialImpulseEngine};
 
-fn setup_body_grid(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     let span = side as f32 * 2.0;
     let tile_half = 5.0f32;
@@ -53,8 +53,8 @@ fn setup_body_grid(n: u32) -> BuiltinPhysicsEngine {
 
 /// One huge static floor + `n` dynamic boxes resting above it. Stresses the
 /// large-static-AABB path that makes Sweep-and-Prune quadratic.
-fn setup_giant_floor(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_giant_floor(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::splat(500.0),
@@ -77,8 +77,8 @@ fn setup_giant_floor(n: u32) -> BuiltinPhysicsEngine {
 }
 
 /// `n` dynamic bodies spread far apart so almost no pairs overlap.
-fn setup_sparse(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_sparse(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     let spacing = 20.0f32;
     for i in 0..n {
@@ -97,8 +97,8 @@ fn setup_sparse(n: u32) -> BuiltinPhysicsEngine {
 
 /// `n` dynamic bodies arranged in dense stacked clusters (islands), isolated
 /// from each other. Stresses clustering behaviour of each backend.
-fn setup_islands(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_islands(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let per = 10u32;
     let islands = (n as f32 / per as f32).ceil() as u32;
     let cluster_spacing = 4u32;
@@ -123,8 +123,8 @@ fn setup_islands(n: u32) -> BuiltinPhysicsEngine {
 }
 
 /// `n` dynamic bodies of mixed shape and size on a regular grid.
-fn setup_heterogeneous(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_heterogeneous(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     for i in 0..n {
         let gx = i % side;

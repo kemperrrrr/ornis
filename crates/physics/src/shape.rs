@@ -19,7 +19,7 @@ use glam::{Quat, Vec2, Vec3};
 
 use crate::math::AABB;
 
-/// Convex collision primitives supported by the builtin engine.
+/// Convex collision primitives supported by the sequential-impulse engine.
 ///
 /// All shapes are centered on the body origin; a box, a capsule, a cylinder
 /// and a cone are symmetric about the body's local +Y axis. Every variant

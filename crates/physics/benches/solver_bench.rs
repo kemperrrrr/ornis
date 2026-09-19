@@ -5,12 +5,12 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use glam::Vec3;
 
-use ornis_physics::{BroadPhaseKind, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BroadPhaseKind, PhysicsEngine, RigidBody, SequentialImpulseEngine};
 
 /// A GxG grid of independent 4-box stacks on one big static floor: many
 /// disjoint islands — the best case for per-island parallel dispatch (G7).
-fn setup_islands_grid(g: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_islands_grid(g: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(100.0, 0.5, 100.0),
@@ -36,8 +36,8 @@ fn setup_islands_grid(g: u32) -> BuiltinPhysicsEngine {
 
 /// One tall stack: a single island — the worst case for per-island dispatch
 /// (measures gather/scatter overhead against the old monolithic solve).
-fn setup_big_stack(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_big_stack(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(10.0, 0.5, 10.0),
@@ -58,8 +58,8 @@ fn setup_big_stack(n: u32) -> BuiltinPhysicsEngine {
 /// The floor is tiled (10×10 tiles) instead of one huge AABB: a single
 /// floor box overlapping every body degenerates Sweep-and-Prune to O(n²)
 /// (measured 2026-08-27: ~48 s/step at 100k bodies, sleep never settles).
-fn setup_body_grid(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     let span = side as f32 * 2.0;
     let tile_half = 5.0f32;
@@ -120,7 +120,7 @@ fn settled_body_grid(
     bodies: u32,
     backend: BroadPhaseKind,
     cell_size: Option<f32>,
-) -> BuiltinPhysicsEngine {
+) -> SequentialImpulseEngine {
     let mut physics = setup_body_grid(bodies);
     if let Some(cell_size) = cell_size {
         physics.set_uniform_grid_cell_size(cell_size);
@@ -133,7 +133,7 @@ fn settled_body_grid(
     physics
 }
 
-fn print_broadphase_stats(backend_name: &str, bodies: u32, physics: &BuiltinPhysicsEngine) {
+fn print_broadphase_stats(backend_name: &str, bodies: u32, physics: &SequentialImpulseEngine) {
     let stats = physics.broadphase_stats();
     eprintln!(
         concat!(

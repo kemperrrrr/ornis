@@ -1,9 +1,9 @@
-//! Ornis builtin rigid-body physics: dynamics, collision detection, contact
+//! Ornis sequential-impulse rigid-body physics: dynamics, collision detection, contact
 //! and joint solving.
 //!
 //! The crate is organized as a small CPU pipeline shared by the engine trait
 //! ([`engine::PhysicsEngine`]) and its reference implementation
-//! ([`engine::BuiltinPhysicsEngine`]):
+//! ([`engine::SequentialImpulseEngine`]):
 //!
 //! - [`body`] — rigid bodies and their handles/mass model.
 //! - [`shape`] — collision shapes (sphere, box, capsule, cylinder, cone,
@@ -15,7 +15,7 @@
 //! - `broadphase` — candidate-pair backends and benchmark diagnostics.
 //! - [`joint`] — persistent equality constraints (ball, revolute,
 //!   prismatic, fixed, distance, wheel, gear, six-DOF) with limits/motors.
-//! - [`engine`] — the builtin step pipeline: broadphase → narrowphase → island
+//! - [`engine`] — the sequential-impulse step pipeline: broadphase → narrowphase → island
 //!   partitioning → substepped velocity/position solving, with optional
 //!   SIMD-wide (`wide` module) and GPU (`gpu` feature) solver paths.
 //! - [`avbd`] — second engine behind the same seam: position-level AVBD
@@ -29,6 +29,7 @@
 
 mod broadphase;
 mod broadphase_tree;
+mod contact_math;
 mod migration;
 mod split;
 
@@ -51,7 +52,7 @@ pub mod joint;
 pub mod math;
 /// Collision shapes with AABB projection and inertia tensors.
 pub mod shape;
-/// Trigger overlap event types emitted by the builtin physics engine.
+/// Trigger overlap event types emitted by the sequential-impulse physics engine.
 pub mod trigger;
 pub(crate) mod wide;
 
@@ -61,7 +62,7 @@ use split::{SplitBody, SplitJoint, SplitOwner, SplitState};
 pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, RigidBody};
 pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
-pub use engine::{BuiltinPhysicsEngine, PhysicsEngine};
+pub use engine::{PhysicsEngine, SequentialImpulseEngine};
 pub use joint::{
     AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, ResolvedJoint,
     RevoluteLimit, RevoluteMotor, WheelSuspension, resolve_joint,
@@ -74,13 +75,13 @@ pub use trigger::{
 };
 
 /// Selectable constraint solver (M2 intra-engine modularity, Genesis
-/// style): the builtin sequential-impulse engine or the AVBD engine.
+/// style): the sequential-impulse engine or the AVBD engine.
 /// Same [`PhysicsEngine`] seam, same scenes — the orchestrator
 /// ([`Engine`]) migrates bodies and joints across the switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverKind {
     /// Sequential-impulse engine with islands, sleep and substeps.
-    Builtin,
+    SequentialImpulse,
     /// AVBD engine (position-level, single-thread sweep).
     Avbd,
 }
@@ -92,7 +93,7 @@ pub enum SolverKind {
 pub enum RoutingKind {
     /// One engine owns the whole scene (M1/M2 behavior, default).
     Single,
-    /// Contact islands route between Builtin and AVBD with hysteresis
+    /// Contact islands route between SequentialImpulse and AVBD with hysteresis
     /// (unanimous-island calm migrates down, any fast body wakes up).
     Islands,
 }
@@ -106,8 +107,8 @@ pub struct SplitTiming {
     pub rebuild: std::time::Duration,
     /// Time inside AVBD, summed over completed fixed substeps.
     pub avbd: std::time::Duration,
-    /// Time inside the builtin solver, summed over completed fixed substeps.
-    pub builtin: std::time::Duration,
+    /// Time inside the sequential-impulse solver, summed over completed fixed substeps.
+    pub si: std::time::Duration,
 }
 
 /// M3 coupling metrics: the coupling tax, in the books per PLAN M3.
@@ -119,8 +120,8 @@ pub struct SplitMetrics {
     pub migrations: u64,
     /// Dynamic bodies currently owned by AVBD.
     pub avbd_bodies: usize,
-    /// Dynamic bodies currently owned by Builtin.
-    pub builtin_bodies: usize,
+    /// Dynamic bodies currently owned by SequentialImpulse.
+    pub si_bodies: usize,
     /// All rebuilds, including structural edits and initial construction.
     pub rebuilds: u64,
     /// Number of bodies whose owner changed (not just rebuild count).
@@ -177,7 +178,7 @@ pub struct Engine {
 /// Active solver behind the seam (boxed: both states dwarf the policy).
 enum EngineInner {
     /// Sequential-impulse engine with islands, sleep and substeps.
-    Builtin(Box<BuiltinPhysicsEngine>),
+    SequentialImpulse(Box<SequentialImpulseEngine>),
     /// AVBD engine (position-level, single-thread sweep).
     Avbd(Box<AvbdEngine>),
 }
@@ -186,8 +187,8 @@ impl Engine {
     /// Empty orchestrator with the given solver and world-space gravity.
     pub fn new(kind: SolverKind, gravity: glam::Vec3) -> Self {
         let inner = match kind {
-            SolverKind::Builtin => {
-                EngineInner::Builtin(Box::new(BuiltinPhysicsEngine::new(gravity)))
+            SolverKind::SequentialImpulse => {
+                EngineInner::SequentialImpulse(Box::new(SequentialImpulseEngine::new(gravity)))
             }
             SolverKind::Avbd => EngineInner::Avbd(Box::new(AvbdEngine::new(gravity))),
         };
@@ -220,18 +221,18 @@ impl Engine {
     /// M3 coupling metrics, or `None` outside Islands routing.
     pub fn split_metrics(&self) -> Option<SplitMetrics> {
         let s = self.split.as_ref()?;
-        let (mut av, mut bu) = (0, 0);
+        let (mut av, mut si) = (0, 0);
         for b in &s.bodies {
             match b.owner {
                 SplitOwner::Avbd => av += 1,
-                SplitOwner::Builtin => bu += 1,
+                SplitOwner::SequentialImpulse => si += 1,
                 SplitOwner::Static => {}
             }
         }
         Some(SplitMetrics {
             migrations: self.migrations,
             avbd_bodies: av,
-            builtin_bodies: bu,
+            si_bodies: si,
             rebuilds: s.rebuilds,
             migrated_bodies: s.migrated_bodies,
             simulation_steps: s.steps,
@@ -298,12 +299,12 @@ impl Engine {
         next.restore_joints(snapshot.joints);
         for (h, pose) in snapshot.previous.into_iter().enumerate() {
             match &mut next.inner {
-                EngineInner::Builtin(e) => e.restore_body_baseline(h, pose),
+                EngineInner::SequentialImpulse(e) => e.restore_body_baseline(h, pose),
                 EngineInner::Avbd(e) => e.restore_body_baseline(h, pose),
             }
         }
         match &mut next.inner {
-            EngineInner::Builtin(e) => e.restore_event_state(snapshot.events),
+            EngineInner::SequentialImpulse(e) => e.restore_event_state(snapshot.events),
             EngineInner::Avbd(e) => e.restore_event_state(snapshot.events),
         }
         next.contact_events = std::mem::take(&mut self.contact_events);
@@ -318,7 +319,7 @@ impl Engine {
             return s.bodies.len();
         }
         match &self.inner {
-            EngineInner::Builtin(e) => e.body_count(),
+            EngineInner::SequentialImpulse(e) => e.body_count(),
             EngineInner::Avbd(e) => e.body_count(),
         }
     }
@@ -329,7 +330,7 @@ impl Engine {
             return s.joints.len();
         }
         match &self.inner {
-            EngineInner::Builtin(e) => e.joint_count(),
+            EngineInner::SequentialImpulse(e) => e.joint_count(),
             EngineInner::Avbd(e) => e.joint_count(),
         }
     }
@@ -341,7 +342,7 @@ impl Engine {
             return match s.bodies.get(handle)?.owner {
                 SplitOwner::Static => None,
                 SplitOwner::Avbd => Some(SolverKind::Avbd),
-                SplitOwner::Builtin => Some(SolverKind::Builtin),
+                SplitOwner::SequentialImpulse => Some(SolverKind::SequentialImpulse),
             };
         }
         (self.get_body(handle)?.body_type == BodyType::Dynamic).then_some(self.single_kind)
@@ -357,7 +358,7 @@ impl Engine {
             };
         }
         match &self.inner {
-            EngineInner::Builtin(e) => SceneSnapshot {
+            EngineInner::SequentialImpulse(e) => SceneSnapshot {
                 bodies: e.bodies_snapshot(),
                 joints: e.joint_snapshots(),
                 previous: e.body_baselines(),
@@ -380,7 +381,7 @@ impl Engine {
                 .add_joint(j.a, j.b, j.spec)
                 .expect("validated migrating joint");
             match &mut self.inner {
-                EngineInner::Builtin(e) => e.restore_joint_reference(h, j.reference),
+                EngineInner::SequentialImpulse(e) => e.restore_joint_reference(h, j.reference),
                 EngineInner::Avbd(e) => e.restore_joint_reference(h, j.reference),
             }
             remap[old] = Some(h);
@@ -405,7 +406,7 @@ impl Engine {
     }
 
     /// Accumulate host time; each common tick routes swept islands first,
-    /// steps AVBD and Builtin, then captures events before fracture/rebuild.
+    /// steps AVBD and SequentialImpulse, then captures events before fracture/rebuild.
     fn split_step(&mut self, dt: f32) {
         let Some(s) = &mut self.split else { return };
         s.timing = SplitTiming::default();
@@ -599,7 +600,7 @@ impl Engine {
         // The inner queue is consumed here, so every event is stashed for
         // re-serve: fracture must never swallow the host's contact stream.
         let drained: Vec<ContactEvent> = match inner {
-            EngineInner::Builtin(e) => e.drain_contact_events(),
+            EngineInner::SequentialImpulse(e) => e.drain_contact_events(),
             EngineInner::Avbd(e) => e.drain_contact_events(),
         };
         self.contact_events.extend(drained.iter().cloned());
@@ -612,7 +613,7 @@ impl Engine {
             .collect();
         let get = |inner: &EngineInner, h: BodyHandle| -> Option<RigidBody> {
             match inner {
-                EngineInner::Builtin(e) => e.get_body(h).cloned(),
+                EngineInner::SequentialImpulse(e) => e.get_body(h).cloned(),
                 EngineInner::Avbd(e) => e.get_body(h).cloned(),
             }
         };
@@ -636,16 +637,16 @@ impl Engine {
                 continue;
             };
             let last = match inner {
-                EngineInner::Builtin(e) => e.body_count() - 1,
+                EngineInner::SequentialImpulse(e) => e.body_count() - 1,
                 EngineInner::Avbd(e) => e.body_count() - 1,
             };
             Self::remap_fracture_pieces(&mut self.fracture_events[event_start..], parent, last);
             match inner {
-                EngineInner::Builtin(e) => e.remove_body(parent),
+                EngineInner::SequentialImpulse(e) => e.remove_body(parent),
                 EngineInner::Avbd(e) => e.remove_body(parent),
             }
             let (ha, hb) = match inner {
-                EngineInner::Builtin(e) => (e.add_body(pa), e.add_body(pb)),
+                EngineInner::SequentialImpulse(e) => (e.add_body(pa), e.add_body(pb)),
                 EngineInner::Avbd(e) => (e.add_body(pa), e.add_body(pb)),
             };
             self.fracture_events.push(FractureEvent {
@@ -666,7 +667,7 @@ impl PhysicsEngine for Engine {
             return;
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.step(dt),
+            EngineInner::SequentialImpulse(e) => e.step(dt),
             EngineInner::Avbd(e) => e.step(dt),
         }
         self.fracture_pass();
@@ -680,7 +681,7 @@ impl PhysicsEngine for Engine {
             return h;
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.add_body(body),
+            EngineInner::SequentialImpulse(e) => e.add_body(body),
             EngineInner::Avbd(e) => e.add_body(body),
         }
     }
@@ -710,7 +711,7 @@ impl PhysicsEngine for Engine {
             return;
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.remove_body(handle),
+            EngineInner::SequentialImpulse(e) => e.remove_body(handle),
             EngineInner::Avbd(e) => e.remove_body(handle),
         }
     }
@@ -720,7 +721,7 @@ impl PhysicsEngine for Engine {
             return self.split.as_ref()?.bodies.get(handle).map(|r| &r.body);
         }
         match &self.inner {
-            EngineInner::Builtin(e) => e.get_body(handle),
+            EngineInner::SequentialImpulse(e) => e.get_body(handle),
             EngineInner::Avbd(e) => e.get_body(handle),
         }
     }
@@ -735,7 +736,7 @@ impl PhysicsEngine for Engine {
             return Some(&mut r.body);
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.get_body_mut(handle),
+            EngineInner::SequentialImpulse(e) => e.get_body_mut(handle),
             EngineInner::Avbd(e) => e.get_body_mut(handle),
         }
     }
@@ -754,7 +755,7 @@ impl PhysicsEngine for Engine {
             return Some(h);
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.add_joint(body_a, body_b, kind),
+            EngineInner::SequentialImpulse(e) => e.add_joint(body_a, body_b, kind),
             EngineInner::Avbd(e) => e.add_joint(body_a, body_b, kind),
         }
     }
@@ -772,7 +773,7 @@ impl PhysicsEngine for Engine {
             return;
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.remove_joint(handle),
+            EngineInner::SequentialImpulse(e) => e.remove_joint(handle),
             EngineInner::Avbd(e) => e.remove_joint(handle),
         }
     }
@@ -782,7 +783,7 @@ impl PhysicsEngine for Engine {
             return s.raycast(ray, max_dist);
         }
         match &self.inner {
-            EngineInner::Builtin(e) => e.raycast(ray, max_dist),
+            EngineInner::SequentialImpulse(e) => e.raycast(ray, max_dist),
             EngineInner::Avbd(e) => e.raycast(ray, max_dist),
         }
     }
@@ -792,7 +793,7 @@ impl PhysicsEngine for Engine {
             return s.shapecast(shape, from, to);
         }
         match &self.inner {
-            EngineInner::Builtin(e) => e.shapecast(shape, from, to),
+            EngineInner::SequentialImpulse(e) => e.shapecast(shape, from, to),
             EngineInner::Avbd(e) => e.shapecast(shape, from, to),
         }
     }
@@ -801,7 +802,7 @@ impl PhysicsEngine for Engine {
         let mut events = std::mem::take(&mut self.trigger_events);
         if self.routing == RoutingKind::Single {
             events.extend(match &mut self.inner {
-                EngineInner::Builtin(e) => e.drain_trigger_events(),
+                EngineInner::SequentialImpulse(e) => e.drain_trigger_events(),
                 EngineInner::Avbd(e) => e.drain_trigger_events(),
             });
         }
@@ -823,7 +824,7 @@ impl PhysicsEngine for Engine {
             return;
         }
         match &mut self.inner {
-            EngineInner::Builtin(e) => e.wake_body(handle),
+            EngineInner::SequentialImpulse(e) => e.wake_body(handle),
             EngineInner::Avbd(e) => e.wake_body(handle),
         }
     }

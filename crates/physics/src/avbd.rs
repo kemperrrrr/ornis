@@ -1,4 +1,5 @@
-//! AVBD rigid-body engine: a second [`crate::engine::PhysicsEngine`]
+//! Augmented Vertex Block Descent (Giles et al, SIGGRAPH'25) rigid-body engine
+//! (AVBD): a second [`crate::engine::PhysicsEngine`]
 //! implementation (M1, Genesis-style engine-level modularity).
 //!
 //! Ports the Augmented Vertex Block Descent update rules from
@@ -735,7 +736,7 @@ struct Discovered {
 /// AVBD rigid-body engine; see the module docs for formulation and scope.
 ///
 /// Bodies are stored in handle order (`swap_remove` on removal, exactly like
-/// [`crate::engine::BuiltinPhysicsEngine`]); contacts and joints remap the
+/// [`crate::engine::SequentialImpulseEngine`]); contacts and joints remap the
 /// same way. Single-threaded, hence deterministic by construction.
 #[derive(Clone, Debug)]
 pub struct AvbdEngine {

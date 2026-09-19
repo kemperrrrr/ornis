@@ -1,19 +1,19 @@
 //! Integration tests for the new physics API: box↔capsule contact and
 //! analytic swept-volume TOI with fast rotation (G6).
 //!
-//! Covers the public `BuiltinPhysicsEngine`/`RigidBody` API without access
+//! Covers the public `SequentialImpulseEngine`/`RigidBody` API without access
 //! to private `engine::` internals. Each test drives `step` and checks
 //! observable behavior: contact presence/absence, normal orientation
 //! and absence of tunneling under fast rotation.
 
 use glam::{Quat, Vec3};
-use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{PhysicsEngine, RigidBody, SequentialImpulseEngine};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn is_asleep_pair(physics: &BuiltinPhysicsEngine, a: usize, b: usize) -> bool {
+fn is_asleep_pair(physics: &SequentialImpulseEngine, a: usize, b: usize) -> bool {
     physics.debug_contact_count(a) > 0 && physics.debug_contact_count(b) > 0
 }
 
@@ -36,7 +36,7 @@ fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
 
 #[test]
 fn box_and_capsule_overlap_generates_contact() {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     // Box half 0.5 at origin, capsule radius 0.5 half_height 1.0 at x=0.6
     // capsule core is along Y, center 0.6 away -> surface gap = 0.6 - 0.5(box face) -0.5 = -0.4 (overlap)
     let bx = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
@@ -59,7 +59,7 @@ fn box_and_capsule_overlap_generates_contact() {
 fn capsule_and_box_swapped_order_also_generates_contact() {
     // Insertion in reverse order: capsule first, box second — normal must flip,
     // but contact must still appear (symmetry check for Box↔Capsule / Capsule↔Box branches).
-    let mut p1 = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut p1 = SequentialImpulseEngine::new(Vec3::ZERO);
     let a = p1.add_body(RigidBody::new_capsule(
         Vec3::new(0.6, 0.0, 0.0),
         0.5,
@@ -70,7 +70,7 @@ fn capsule_and_box_swapped_order_also_generates_contact() {
     p1.step(1.0 / 60.0);
     assert!(is_asleep_pair(&p1, a, b));
 
-    let mut p2 = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut p2 = SequentialImpulseEngine::new(Vec3::ZERO);
     let a2 = p2.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
     let b2 = p2.add_body(RigidBody::new_capsule(
         Vec3::new(0.6, 0.0, 0.0),
@@ -90,7 +90,7 @@ fn capsule_and_box_swapped_order_also_generates_contact() {
 
 #[test]
 fn separated_box_and_capsule_no_contact() {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     let bx = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
     let cp = physics.add_body(RigidBody::new_capsule(
         Vec3::new(3.0, 0.0, 0.0),
@@ -107,7 +107,7 @@ fn separated_box_and_capsule_no_contact() {
 fn rotated_box_vs_capsule_contact() {
     // Box rotated 45° around Z, capsule to the side. AABB expands to sqrt(2),
     // distance is computed via exact `shape_distance`, contact must appear.
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
     let bx = physics
         .add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0).with_orientation(rot));
@@ -131,7 +131,7 @@ fn box_capsule_touching_at_speculative_margin_generates_contact() {
     // Place distance at exactly 0.04 — inside margin, contact present.
     // Distance = dist(box face, capsule surface).
     // Box half 0.5, capsule radius 0.3, capsule center at 0.5+0.3+0.04=0.84
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     let bx = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
     let cp = physics.add_body(RigidBody::new_capsule(
         Vec3::new(0.84, 0.0, 0.0),
@@ -152,7 +152,7 @@ fn box_capsule_touching_at_speculative_margin_generates_contact() {
 #[test]
 fn capsule_capsule_still_works_after_box_capsule_patch() {
     // Regression: adding Box↔Capsule branches must not break Capsule↔Capsule
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     let a = physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 1.0));
     let b = physics.add_body(RigidBody::new_capsule(
         Vec3::new(0.9, 0.0, 0.0),
@@ -167,7 +167,7 @@ fn capsule_capsule_still_works_after_box_capsule_patch() {
 #[test]
 fn box_vs_box_still_produces_four_point_manifold() {
     // Regression for OBB-OBB (4-point face manifold)
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
     let b = physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, 0.75, 0.0),
@@ -196,7 +196,7 @@ fn fast_spinning_box_toi_stops_before_tunneling() {
     // pinned below. The old full-stop assert encoded the pre-unification
     // contract and contradicted the documented design.
     let dt = 1.0 / 60.0;
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, 1.1, 0.0),
@@ -241,7 +241,7 @@ fn fast_spinning_capsule_toi_stops_before_tunneling() {
     // clamp (no tunneling) plus spin-energy non-increase stand in for the
     // old full-stop assert, which encoded the pre-unification response.
     let dt = 1.0 / 60.0;
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, 1.3, 0.0),
@@ -275,7 +275,7 @@ fn slow_rotation_does_not_trigger_false_toi() {
     // Slow rotation < 15°/substep must not trigger angular CCD (MIN_ANGLE).
     // Body should freely reach the full orientation.
     let dt = 1.0 / 60.0;
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, 5.0, 0.0),
@@ -313,7 +313,7 @@ fn thin_feature_under_fast_rotation_does_not_tunnel() {
     // as in `fast_spinning_box_toi_stops_before_tunneling`: clamp plus
     // spin-energy non-increase instead of the old full-stop assert.
     let dt = 1.0 / 60.0;
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
     // Thin vertical wall near the trajectory of the rotating box tip
     physics.add_body(RigidBody::new_box(
@@ -349,7 +349,7 @@ fn capsule_vs_box_toi_with_combined_translation_and_rotation() {
     // Combined motion: translation + fast rotation of the capsule.
     // Checks that bound = |disp| + r*angle accounts for both contributions.
     let dt = 1.0 / 60.0;
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.set_substeps(1);
     physics.add_body(RigidBody::new_box(
         Vec3::new(2.0, 0.0, 0.0),
@@ -376,7 +376,7 @@ fn capsule_vs_box_toi_with_combined_translation_and_rotation() {
 #[test]
 fn multiple_capsules_and_boxes_interact_without_panic() {
     // Stress: several boxes and capsules interleaved, gravity, 60 steps — no panic and no NaN.
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(10.0, 0.5, 10.0),
@@ -417,7 +417,7 @@ fn multiple_capsules_and_boxes_interact_without_panic() {
 #[test]
 fn box_capsule_resting_penetration_is_resolved() {
     // Capsule resting on a box floor: penetration must be resolved by the solver, not grow.
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(5.0, 0.5, 5.0),

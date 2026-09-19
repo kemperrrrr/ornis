@@ -1,4 +1,4 @@
-//! Contact solver stages for `BuiltinPhysicsEngine` (G2b-G7): warm-started
+//! Contact solver stages for `SequentialImpulseEngine` (G2b-G7): warm-started
 //! Gauss-Seidel velocity solve with block-LCP normals, one-shot restitution,
 //! NGS position pass, and the island dispatch plumbing. Split out of
 //! `engine.rs` to keep each type's method count within the structural
@@ -10,6 +10,7 @@ use crate::gpu::{pack_single_point_batches, write_back_acc};
 use rustc_hash::FxHashMap;
 
 use super::*;
+use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 
 /// Warm-start / restitution policy constants, shared by the CPU island path
 /// and the GPU single-point path (identical preamble semantics).
@@ -281,7 +282,7 @@ fn prepare_manifold_state(
     })
 }
 
-impl BuiltinPhysicsEngine {
+impl SequentialImpulseEngine {
     /// Build one ManifoldState entry for a manifold at global body indices
     /// `i`/`j`. Thin wrapper over the shared `prepare_manifold_state`
     /// preamble; today only the GPU single-point path calls it.
@@ -734,9 +735,10 @@ impl BuiltinPhysicsEngine {
                 // Inelastic contact: restitution is a separate one-shot stage
                 // (below), never accumulated. G6: the target is the
                 // speculative approach limit (0 when touching), not
-                // necessarily a full stop.
-                let lambda = (st.target[k] - vn) / k_eff;
-                let new_acc = (st.acc[k] + lambda).max(0.0);
+                // necessarily a full stop. Shared isotropic row
+                // (contact_math): the reciprocal folds the division into
+                // the kernel's multiply form.
+                let new_acc = contact_normal_step::eval(vn, st.target[k], 1.0 / k_eff, st.acc[k]);
                 let delta = new_acc - st.acc[k];
                 st.acc[k] = new_acc;
                 if delta.abs() > 1e-12 {
@@ -1061,7 +1063,7 @@ fn run_velocity_iterations(
                         b.scatter(bodies);
                     }
                     SolverStep::Scalar(si) => {
-                        BuiltinPhysicsEngine::solve_scalar_velocity_step(
+                        SequentialImpulseEngine::solve_scalar_velocity_step(
                             bodies,
                             manifolds,
                             &mut states[*si],
@@ -1071,7 +1073,7 @@ fn run_velocity_iterations(
             }
         } else {
             for st in states.iter_mut() {
-                BuiltinPhysicsEngine::solve_scalar_velocity_step(bodies, manifolds, st);
+                SequentialImpulseEngine::solve_scalar_velocity_step(bodies, manifolds, st);
             }
         }
     }
@@ -1094,7 +1096,7 @@ fn run_restitution_stage(
                     b.scatter(bodies);
                 }
                 SolverStep::Scalar(si) => {
-                    BuiltinPhysicsEngine::solve_scalar_restitution_step(
+                    SequentialImpulseEngine::solve_scalar_restitution_step(
                         bodies,
                         manifolds,
                         &states[*si],
@@ -1104,7 +1106,7 @@ fn run_restitution_stage(
         }
     } else {
         for st in states {
-            BuiltinPhysicsEngine::solve_scalar_restitution_step(bodies, manifolds, st);
+            SequentialImpulseEngine::solve_scalar_restitution_step(bodies, manifolds, st);
         }
     }
 }
@@ -1163,12 +1165,8 @@ fn tangent_effective_mass(
 }
 
 /// Coulomb cone projection for one friction axis given the accumulated
-/// impulse on the perpendicular axis.
+/// impulse on the perpendicular axis. Thin alias over the shared isotropic
+/// row ([`crate::contact_math`]); kept so solver call sites stay unchanged.
 fn clamp_friction_impulse(new_t: f32, other: f32, max_friction: f32) -> f32 {
-    let len = (new_t * new_t + other * other).sqrt();
-    if len > max_friction && len > 1e-12 {
-        new_t * (max_friction / len)
-    } else {
-        new_t
-    }
+    contact_friction_clamp::eval(new_t, other, max_friction)
 }

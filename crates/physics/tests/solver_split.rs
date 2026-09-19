@@ -49,10 +49,13 @@ fn split_drop_settle_matches_single() {
             px.y
         );
     }
-    // Settled islands rest in Builtin; the floor lives in both natively.
+    // Settled islands rest in SequentialImpulse; the floor lives in both natively.
     let m = split.split_metrics().expect("metrics under Islands");
     assert!(m.migrations > 0, "expected at least one routing migration");
-    assert_eq!(m.avbd_bodies, 0, "all calm bodies must rest in Builtin");
+    assert_eq!(
+        m.avbd_bodies, 0,
+        "all calm bodies must rest in SequentialImpulse"
+    );
 }
 
 #[test]
@@ -92,7 +95,10 @@ fn split_sleep_migrate_wakes_sane() {
         engine.step(DT);
     }
     let m = engine.split_metrics().expect("metrics under Islands");
-    assert_eq!(m.avbd_bodies, 0, "settled body must sleep in Builtin");
+    assert_eq!(
+        m.avbd_bodies, 0,
+        "settled body must sleep in SequentialImpulse"
+    );
     assert!(m.migrations > 0);
     // Kick the migrated sleeper via the host-edit path.
     engine.get_body_mut(h).unwrap().velocity = Vec3::new(0.0, 5.0, 0.0);

@@ -1,4 +1,4 @@
-//! Broadphase backends for the builtin physics engine.
+//! Sequential-impulse broadphase backends: candidate-pair generation for the SI engine.
 //!
 //! The module keeps the candidate-pair contract separate from any one
 //! spatial data structure. Sweep-and-Prune remains the compatibility baseline;
@@ -49,7 +49,7 @@ pub struct BroadPhaseStats {
     pub large_bodies: usize,
 }
 
-/// Wall-clock breakdown of a single [`crate::BuiltinPhysicsEngine::step`].
+/// Wall-clock breakdown of a single [`crate::SequentialImpulseEngine::step`].
 ///
 /// Diagnostics for benchmarks only; not part of the simulation contract.
 /// Per-substep phases are summed across the substep loop, so totals reflect
@@ -140,7 +140,7 @@ impl Default for StepBudget {
     }
 }
 
-/// Available candidate-pair backends for [`crate::BuiltinPhysicsEngine`].
+/// Available candidate-pair backends for [`crate::SequentialImpulseEngine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadPhaseKind {
     /// Axis sweep baseline used by default for compatibility.

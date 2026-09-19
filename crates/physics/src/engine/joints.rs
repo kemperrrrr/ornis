@@ -1,4 +1,4 @@
-//! Joint sub-solver for `BuiltinPhysicsEngine` (G5): velocity and position
+//! Joint sub-solver for `SequentialImpulseEngine` (G5): velocity and position
 //! stages of the ball/revolute joint constraints. Split out of `engine.rs`
 //! to keep each type's method count within the structural gate's thresholds.
 
@@ -36,7 +36,7 @@ fn hinge_frame(orientation: Quat, axis: Vec3) -> (Vec3, Vec3, Vec3) {
     (wa, t1, t2)
 }
 
-impl BuiltinPhysicsEngine {
+impl SequentialImpulseEngine {
     /// Joint sub-solver (G5), run once per substep after the contact pass.
     /// Ball joint: 3 linear equality constraints along the world axes at the
     /// anchor points. Revolute: ball + 2 angular equality constraints along
@@ -999,7 +999,7 @@ fn joint_sixdof_angular_limit_iteration(
 /// Velocity stage for the fixed/distance/wheel/six-DOF joints (G5b).
 /// Mirrors the legacy path discipline: warm start, equality iterations,
 /// then the one-sided/spring/motor stage once per substep. Gears run in
-/// [`BuiltinPhysicsEngine::solve_gears_velocity`] instead (separate loop).
+/// [`SequentialImpulseEngine::solve_gears_velocity`] instead (separate loop).
 #[allow(clippy::too_many_arguments)]
 fn solve_new_joint_velocity(
     bodies: &mut [RigidBody],

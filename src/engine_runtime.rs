@@ -1,7 +1,7 @@
-//! Domain systems that connect the core frame host to builtin physics and
+//! Domain systems that connect the core frame host to sequential-impulse physics and
 //! backend-neutral render extraction.
 //!
-//! The runtime keeps `BuiltinPhysicsEngine` as a domain representation while
+//! The runtime keeps `SequentialImpulseEngine` as a domain representation while
 //! `TransformDesc` and `RigidBody` remain ECS components in the logical
 //! [`ornis_core::World`]. Physics systems make the sync-in/step/sync-out
 //! boundary explicit; render extraction turns the same ECS lanes into a
@@ -25,7 +25,7 @@ use ornis_render::scene::{MaterialDesc, MeshDesc};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///
-/// The builtin solver owns its optimized body array and the map keeps the
+/// The sequential-impulse solver owns its optimized body array and the map keeps the
 /// association with generational ECS entities. ECS `RigidBody` components are
 /// synchronized at the system boundary rather than exposing physics' internal
 /// vector to other domains. The common core engine host accumulates
@@ -41,7 +41,7 @@ impl PhysicsRuntime {
     /// Creates a physics runtime with world-space gravity.
     pub fn new(gravity: Vec3) -> Self {
         Self {
-            solver: ornis_physics::Engine::new(SolverKind::Builtin, gravity),
+            solver: ornis_physics::Engine::new(SolverKind::SequentialImpulse, gravity),
             bindings: HashMap::new(),
             changed: false,
         }

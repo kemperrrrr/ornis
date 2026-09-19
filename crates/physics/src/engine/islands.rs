@@ -1,4 +1,4 @@
-//! Island management for `BuiltinPhysicsEngine` (G4/G7): union-find island
+//! Island management for `SequentialImpulseEngine` (G4/G7): union-find island
 //! rebuild, island-coherent sleep/wake, partitioning into parallel work items,
 //! and the per-island velocity dispatch. Split out of `engine.rs` to keep each
 //! type's method count within the structural gate's thresholds.
@@ -10,7 +10,7 @@ use ornis_schedule::run_levels;
 
 use super::*;
 
-impl BuiltinPhysicsEngine {
+impl SequentialImpulseEngine {
     /// Rebuild the constraint-graph islands (union-find over dynamic bodies
     /// connected by a contact manifold). Static bodies never join islands —
     /// they anchor them, like in Jolt.
@@ -382,7 +382,7 @@ fn merge_sleeping_representations(parent: &mut [usize], asleep: &[bool], island:
 /// drop timers of roots that no longer exist.
 // Island arrays are indexed in parallel by body handle.
 #[allow(clippy::needless_range_loop)]
-fn assign_canonical_islands(engine: &mut BuiltinPhysicsEngine, parent: &mut [usize], n: usize) {
+fn assign_canonical_islands(engine: &mut SequentialImpulseEngine, parent: &mut [usize], n: usize) {
     let mut canonical: FxHashMap<usize, usize> = FxHashMap::default();
     for h in 0..n {
         if engine.bodies[h].body_type != BodyType::Dynamic {

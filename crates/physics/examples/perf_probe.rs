@@ -3,10 +3,10 @@
 use std::time::Instant;
 
 use glam::Vec3;
-use ornis_physics::{BuiltinPhysicsEngine, PhysicsEngine, RigidBody, StepTiming};
+use ornis_physics::{PhysicsEngine, RigidBody, SequentialImpulseEngine, StepTiming};
 
-fn setup_islands_grid(g: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_islands_grid(g: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(100.0, 0.5, 100.0),
@@ -30,8 +30,8 @@ fn setup_islands_grid(g: u32) -> BuiltinPhysicsEngine {
     physics
 }
 
-fn setup_big_stack(n: u32) -> BuiltinPhysicsEngine {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn setup_big_stack(n: u32) -> SequentialImpulseEngine {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(10.0, 0.5, 10.0),
@@ -47,10 +47,10 @@ fn setup_big_stack(n: u32) -> BuiltinPhysicsEngine {
     physics
 }
 
-fn setup_many_islands(clusters: u32) -> BuiltinPhysicsEngine {
+fn setup_many_islands(clusters: u32) -> SequentialImpulseEngine {
     // Many small isolated stacks (4-body towers) far apart — exercises island
     // discovery/count overhead rather than large contact clusters.
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let pitch = 12.0f32;
     for c in 0..clusters {
         let cx = (c % 32) as f32 * pitch;
@@ -66,10 +66,10 @@ fn setup_many_islands(clusters: u32) -> BuiltinPhysicsEngine {
     physics
 }
 
-fn setup_contact_cluster(n: u32) -> BuiltinPhysicsEngine {
+fn setup_contact_cluster(n: u32) -> SequentialImpulseEngine {
     // One dense packing of n bodies in a single contact cluster — stresses the
     // solver on a large island (no island splitting helps here).
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     let spacing = 0.95f32;
     for i in 0..n {
@@ -86,10 +86,10 @@ fn setup_contact_cluster(n: u32) -> BuiltinPhysicsEngine {
     physics
 }
 
-fn setup_tall_stack(n: u32) -> BuiltinPhysicsEngine {
+fn setup_tall_stack(n: u32) -> SequentialImpulseEngine {
     // Tall tower of n equal-mass bodies — stresses stability under low substeps
     // (high stacks need many substeps to settle without jitter).
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(10.0, 0.5, 10.0),
@@ -105,10 +105,10 @@ fn setup_tall_stack(n: u32) -> BuiltinPhysicsEngine {
     physics
 }
 
-fn setup_fast_drop() -> BuiltinPhysicsEngine {
+fn setup_fast_drop() -> SequentialImpulseEngine {
     // One dynamic body thrown at the floor with high speed — stress for
     // tunnelling / non-convergence at low substeps (large sub_dt).
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -0.5, 0.0),
         Vec3::new(10.0, 0.5, 10.0),
@@ -121,7 +121,7 @@ fn setup_fast_drop() -> BuiltinPhysicsEngine {
 }
 
 /// Report residual motion + lowest body (tunnelling check) after a settle run.
-fn log_stability(physics: &BuiltinPhysicsEngine, label: &str, count: usize) {
+fn log_stability(physics: &SequentialImpulseEngine, label: &str, count: usize) {
     let mut awake = 0usize;
     let mut max_v = 0.0f32;
     let mut min_y = f32::MAX;
@@ -139,7 +139,7 @@ fn log_stability(physics: &BuiltinPhysicsEngine, label: &str, count: usize) {
     );
 }
 
-fn time_steps(label: &str, physics: &mut BuiltinPhysicsEngine, settle: u32, measure: u32) {
+fn time_steps(label: &str, physics: &mut SequentialImpulseEngine, settle: u32, measure: u32) {
     for _ in 0..settle {
         physics.step(1.0 / 60.0);
     }
@@ -176,7 +176,7 @@ fn time_steps(label: &str, physics: &mut BuiltinPhysicsEngine, settle: u32, meas
 
 /// Sleep diagnostics for the grid: how much of the scene went to sleep and
 /// how fast the awake bodies are moving.
-fn log_grid_sleep_summary(grid: &BuiltinPhysicsEngine) {
+fn log_grid_sleep_summary(grid: &SequentialImpulseEngine) {
     let mut asleep = 0usize;
     let mut max_v = 0.0f32;
     let mut max_w = 0.0f32;
@@ -193,7 +193,7 @@ fn log_grid_sleep_summary(grid: &BuiltinPhysicsEngine) {
 }
 
 /// Watch the awake set for 30 more frames: does it oscillate?
-fn log_awake_oscillation(grid: &mut BuiltinPhysicsEngine) {
+fn log_awake_oscillation(grid: &mut SequentialImpulseEngine) {
     for f in 0..30 {
         grid.step(1.0 / 60.0);
         let mut awake = 0usize;
@@ -213,7 +213,7 @@ fn log_awake_oscillation(grid: &mut BuiltinPhysicsEngine) {
 }
 
 /// Who stays awake? Print the positions/velocities of a few stubborn bodies.
-fn log_stubborn_bodies(grid: &mut BuiltinPhysicsEngine) {
+fn log_stubborn_bodies(grid: &mut SequentialImpulseEngine) {
     let mut stubborn = Vec::new();
     for h in 0..1025 {
         if !grid.is_asleep(h) && stubborn.len() < 6 {
@@ -233,7 +233,7 @@ fn log_stubborn_bodies(grid: &mut BuiltinPhysicsEngine) {
 }
 
 /// Track island id + timer + contact count of one stubborn stack for 40 frames.
-fn log_island_tracking(grid: &mut BuiltinPhysicsEngine) {
+fn log_island_tracking(grid: &mut SequentialImpulseEngine) {
     for f in 0..40 {
         grid.step(1.0 / 60.0);
         println!(
@@ -249,7 +249,7 @@ fn log_island_tracking(grid: &mut BuiltinPhysicsEngine) {
 }
 
 /// Sleep summary plus per-frame manifold diagnostics for the big stack.
-fn log_stack_diagnostics(stack: &mut BuiltinPhysicsEngine) {
+fn log_stack_diagnostics(stack: &mut SequentialImpulseEngine) {
     let mut stack_asleep = 0;
     for h in 0..33 {
         if stack.is_asleep(h) {

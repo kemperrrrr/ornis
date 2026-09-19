@@ -1,10 +1,12 @@
-//! Physics engine trait and the builtin CPU implementation.
+//! Sequential-impulse (projected Gauss-Seidel, Catto-Box2D-Jolt class)
+//! physics engine: trait + CPU implementation.
 //!
 //! [`PhysicsEngine`] defines a single simulation step (broadphase →
 //! narrowphase → island partitioning → substepped contact/joint solving →
 //! integration; `dt` must be positive and finite) plus body/joint
-//! management and ray/shape cast queries. [`BuiltinPhysicsEngine`] is the
-//! reference implementation: parallelized with rayon, with optional GPU
+//! management and ray/shape cast queries. [`SequentialImpulseEngine`] is the
+//! reference implementation: velocity iterations + friction/restitution +
+//! Baumgarte positional correction, parallelized with rayon, with optional GPU
 //! contact solving behind the `gpu` feature.
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -23,7 +25,7 @@ use crate::broadphase::{
 };
 use crate::distance;
 #[cfg(feature = "gpu")]
-use crate::gpu::WgpuContactSolver;
+use crate::gpu::GpuSequentialImpulse;
 use crate::joint::{Joint, JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
 use crate::migration::{JointReference, JointSnapshot};
@@ -71,13 +73,13 @@ pub trait PhysicsEngine: Send + Sync {
     /// Drain trigger enter/exit transitions produced by completed steps.
     ///
     /// Engines without trigger support may keep the default empty result;
-    /// the builtin engine reports canonical body-handle pairs in deterministic
+    /// the sequential-impulse engine reports canonical body-handle pairs in deterministic
     /// order.
     fn drain_trigger_events(&mut self) -> Vec<TriggerEvent> {
         Vec::new()
     }
     /// Drain solid-contact begin/end/hit transitions produced by completed
-    /// steps (Box3D `b3ContactEvents` parity). Empty by default; the builtin
+    /// steps (Box3D `b3ContactEvents` parity). Empty by default; the sequential-impulse
     /// engine reports them in deterministic pair order.
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
         Vec::new()
@@ -2252,7 +2254,7 @@ struct SatCacheEntry {
 type SatCache = DashMap<(usize, usize), SatCacheEntry, FxBuildHasher>;
 
 #[allow(missing_docs)]
-pub struct BuiltinPhysicsEngine {
+pub struct SequentialImpulseEngine {
     bodies: Vec<RigidBody>,
     broadphase: BroadPhaseBackend,
     gravity: Vec3,
@@ -2317,7 +2319,7 @@ pub struct BuiltinPhysicsEngine {
     step_budget: Option<StepBudget>,
     /// Substeps shed by the budget on the last completed `step` (0 when the
     /// full speed-requested count ran). Observable marker for the fallback,
-    /// read via [`BuiltinPhysicsEngine::last_substep_shed`].
+    /// read via [`SequentialImpulseEngine::last_substep_shed`].
     last_shed: u32,
     /// Enter/exit transitions waiting for the caller to drain.
     trigger_events: Vec<TriggerEvent>,
@@ -2339,7 +2341,7 @@ pub struct BuiltinPhysicsEngine {
     /// single-point manifolds are solved on the GPU instead of the CPU
     /// wide path; multi-point manifolds stay on the CPU island path.
     #[cfg(feature = "gpu")]
-    gpu_solver: Option<WgpuContactSolver>,
+    gpu_solver: Option<GpuSequentialImpulse>,
     narrow_cache: FxHashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: SatCache,
 }
@@ -2372,7 +2374,7 @@ fn rebuild_joints(
         .collect();
 }
 
-impl BuiltinPhysicsEngine {
+impl SequentialImpulseEngine {
     /// Bodies in handle order, cloned for solver migration (`Engine`
     /// re-registers them 1:1, so handles stay valid across the switch).
     pub(crate) fn bodies_snapshot(&self) -> Vec<RigidBody> {
@@ -2571,7 +2573,7 @@ impl BuiltinPhysicsEngine {
     /// wide-path is unused. The GPU solver is a Jacobi/GS hybrid (not
     /// bit-identical to the CPU path); see the `gpu` module docs.
     #[cfg(feature = "gpu")]
-    pub fn set_gpu_solver(&mut self, solver: WgpuContactSolver) {
+    pub fn set_gpu_solver(&mut self, solver: GpuSequentialImpulse) {
         self.gpu_solver = Some(solver);
     }
 
@@ -3182,7 +3184,7 @@ impl BuiltinPhysicsEngine {
 
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
-/// [`BuiltinPhysicsEngine`] and [`crate::avbd::AvbdEngine`] both route
+/// [`SequentialImpulseEngine`] and [`crate::avbd::AvbdEngine`] both route
 /// through this routine so raycasts agree by construction.
 pub(crate) fn raycast_shape_hit(
     shape: &Shape,
@@ -4385,7 +4387,7 @@ fn ray_aabb_hit(
     Some((near, normal))
 }
 
-impl PhysicsEngine for BuiltinPhysicsEngine {
+impl PhysicsEngine for SequentialImpulseEngine {
     fn step(&mut self, dt: f32) {
         // Driver snapshot FIRST (even on the fast path below): the kinematic
         // step displacement must span exactly one step, and a zero-velocity
@@ -5091,7 +5093,7 @@ mod tests {
 
     #[test]
     fn sphere_falls() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let sphere = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 10.0, 0.0), 1.0, 1.0));
         physics.step(1.0 / 60.0);
         let body = physics.get_body(sphere).unwrap();
@@ -5100,7 +5102,7 @@ mod tests {
 
     #[test]
     fn static_body_does_not_fall() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let ground = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(10.0, 1.0, 10.0),
@@ -5113,7 +5115,7 @@ mod tests {
 
     #[test]
     fn broadphase_backend_can_be_selected_explicitly() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
         physics.set_broadphase(BroadPhaseKind::UniformGrid);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::UniformGrid);
@@ -5125,7 +5127,7 @@ mod tests {
 
     #[test]
     fn auto_broadphase_routes_small_scene_to_sweep_and_steps() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.set_broadphase(BroadPhaseKind::Auto);
         assert_eq!(physics.broadphase_kind(), BroadPhaseKind::Auto);
         physics.add_body(RigidBody::new_box(
@@ -5153,7 +5155,7 @@ mod tests {
 
     #[test]
     fn step_budget_shed_arithmetic_is_deterministic() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.set_step_budget(Some(StepBudget {
             max_pair_substeps: 200_000,
             min_substeps: 4,
@@ -5171,10 +5173,10 @@ mod tests {
         assert_eq!(physics.apply_step_budget(12, 1_000_000), (12, 0));
     }
 
-    fn dense_shedding_scene() -> BuiltinPhysicsEngine {
+    fn dense_shedding_scene() -> SequentialImpulseEngine {
         // 24 overlapping dynamic boxes (276 candidate pairs) plus one fast
         // body forcing the 12-substep speed request.
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         for i in 0..24 {
             physics.add_body(RigidBody::new_box(
                 Vec3::new((i % 5) as f32 * 0.1, (i / 5) as f32 * 0.1, 0.0),
@@ -5190,7 +5192,7 @@ mod tests {
 
     #[test]
     fn step_budget_leaves_typical_scenes_untouched() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(10.0, 0.5, 10.0),
@@ -5241,7 +5243,7 @@ mod tests {
     /// (min dot ≈ 0.998), so a deep flip is unreachable by construction.
     #[test]
     fn gyroscopic_intermediate_axis_spin_tumbles() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::new(0.2, 0.6, 0.4), 1.0);
         body.angular_velocity = Vec3::new(0.3, 0.0, 10.0);
         physics.add_body(body);
@@ -5269,7 +5271,7 @@ mod tests {
     /// is genuinely stable and must stay aligned.
     #[test]
     fn gyroscopic_major_axis_spin_stays_stable() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::new(0.2, 0.6, 0.4), 1.0);
         body.angular_velocity = Vec3::new(10.0, 0.3, 0.0);
         physics.add_body(body);
@@ -5287,7 +5289,7 @@ mod tests {
     /// the gyroscopic term is exactly zero there, so the skip gate fires.
     #[test]
     fn gyroscopic_isotropic_spin_is_untouched() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
         body.angular_velocity = Vec3::new(1.0, 2.0, 3.0);
         physics.add_body(body);
@@ -5316,7 +5318,7 @@ mod tests {
     fn adaptive_substeps_scale_with_body_speed() {
         // A fast body needs the full substep cap; a resting scene drops to the
         // minimum so it can sleep cheaply.
-        let mut fast = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut fast = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         fast.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(10.0, 0.5, 10.0),
@@ -5329,7 +5331,7 @@ mod tests {
         assert_eq!(fast.step_timing().substeps, 12, "fast body uses full cap");
 
         // Resting grid: after settling, velocities are ~0 -> minimum substeps.
-        let mut rest = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut rest = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         rest.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(100.0, 0.5, 100.0),
@@ -5354,7 +5356,7 @@ mod tests {
 
     #[test]
     fn per_island_iters_scale_with_speed() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let dt = 1.0 / 60.0;
         // slow island → minimal iters (3 vel from 4/12*8), fast → full cap
         assert_eq!(physics.adaptive_iters_for_island(0.0, dt, 8), 3);
@@ -5383,7 +5385,7 @@ mod tests {
     /// overhang, not solver jitter).
     #[test]
     fn settled_grid_sleeps_and_costs_less_than_active() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         for tx in -1..=1 {
             for tz in -1..=1 {
                 physics.add_body(RigidBody::new_box(
@@ -5447,7 +5449,7 @@ mod tests {
     /// via a scratch probe: 4–5 stand, 6+ scatter; see perf_probe).
     #[test]
     fn tall_stack_stands_still() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(10.0, 0.5, 10.0),
@@ -5485,7 +5487,7 @@ mod tests {
     /// solve, perf_probe `fast_drop` scenario as a unit test).
     #[test]
     fn fast_box_drop_does_not_tunnel() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(10.0, 0.5, 10.0),
@@ -5567,7 +5569,7 @@ mod tests {
 
     #[test]
     fn sphere_vs_sphere_collision() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0));
         let b = physics.add_body(RigidBody::new_sphere(Vec3::new(0.4, 0.0, 0.0), 0.5, 1.0));
         physics.step(1.0 / 60.0);
@@ -5579,7 +5581,7 @@ mod tests {
 
     #[test]
     fn collision_filter_blocks_broadphase_and_narrowphase() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(
             RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0)
                 .with_collision_filter(0b0001, 0b0010),
@@ -5599,7 +5601,7 @@ mod tests {
 
     #[test]
     fn collision_filter_allows_mutual_layer_match() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(
             RigidBody::new_sphere(Vec3::new(-0.4, 0.0, 0.0), 0.5, 1.0)
                 .with_collision_filter(0b0001, 0b0010),
@@ -5617,7 +5619,7 @@ mod tests {
 
     #[test]
     fn collision_filter_applies_to_continuous_cast() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(
             RigidBody::new_box(Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.05, 10.0), 0.0)
                 .with_collision_filter(0b0010, 0b0010),
@@ -5642,7 +5644,7 @@ mod tests {
     /// Contact events: a dropped box begins touching the floor on impact.
     #[test]
     fn contact_begin_fires_on_touch() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let floor = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -5672,7 +5674,7 @@ mod tests {
     /// touch) emits nothing — gameplay must not see begins without contact.
     #[test]
     fn contact_no_begin_for_speculative_gap() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -5698,7 +5700,7 @@ mod tests {
     /// Contact events: a fast impact records a Hit with the approach speed.
     #[test]
     fn contact_hit_reports_approach_speed() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -5734,7 +5736,7 @@ mod tests {
     /// Contact events: launching a resting box off the floor emits End.
     #[test]
     fn contact_end_fires_on_separation() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let floor = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -5771,7 +5773,7 @@ mod tests {
     /// retains touch state silently.
     #[test]
     fn contact_frozen_pair_emits_no_churn() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -5801,7 +5803,7 @@ mod tests {
     #[test]
     fn contact_events_deterministic_across_runs() {
         fn run() -> Vec<ContactEvent> {
-            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
             physics.add_body(RigidBody::new_box(
                 Vec3::new(0.0, -1.0, 0.0),
                 Vec3::new(5.0, 1.0, 5.0),
@@ -5825,7 +5827,7 @@ mod tests {
     /// component dies — separate per-axis Coulomb caps, one basis.
     #[test]
     fn aniso_floor_channels_sliding() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let mut floor =
             RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(5.0, 1.0, 5.0), 0.0);
         floor.friction = 0.0;
@@ -5857,7 +5859,7 @@ mod tests {
     #[test]
     fn rolling_resistance_stops_ball() {
         fn run(rolling: f32) -> (Vec3, f32) {
-            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
             // ±30 m floor: 120 steps at ~5 m/s stay on the slab, so both
             // balls are measured in rolling contact, never in free fall.
             let mut floor =
@@ -5895,7 +5897,7 @@ mod tests {
     #[test]
     fn torsion_friction_kills_spin() {
         fn run(torsion: f32) -> Vec3 {
-            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
             let mut floor =
                 RigidBody::new_box(Vec3::new(0.0, -1.0, 0.0), Vec3::new(5.0, 1.0, 5.0), 0.0);
             floor.torsion_friction = torsion;
@@ -5929,7 +5931,7 @@ mod tests {
     /// at a phantom "half-rolling" v = ω·r/2 and held it forever.
     #[test]
     fn rolling_converges_to_true_rolling_not_half() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(30.0, 1.0, 30.0),
@@ -5962,7 +5964,7 @@ mod tests {
 
     #[test]
     fn trigger_emits_enter_and_exit_without_solving_contact() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let mut trigger_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0);
         trigger_body.set_trigger(true);
         let trigger = physics.add_body(trigger_body);
@@ -6000,7 +6002,7 @@ mod tests {
 
     #[test]
     fn removing_trigger_body_queues_exit_and_clears_pair_state() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let mut trigger_body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0);
         trigger_body.set_trigger(true);
         let trigger = physics.add_body(trigger_body);
@@ -6026,7 +6028,7 @@ mod tests {
 
     #[test]
     fn raycast_hits_sphere() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, -5.0), 1.0, 1.0));
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         let hit = physics.raycast(ray, 10.0);
@@ -6037,7 +6039,7 @@ mod tests {
 
     #[test]
     fn raycast_obb_uses_exact_surface_and_normal() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
         physics.add_body(
             RigidBody::new_box(Vec3::ZERO, Vec3::new(1.0, 0.25, 0.25), 0.0)
@@ -6057,7 +6059,7 @@ mod tests {
 
     #[test]
     fn raycast_capsule_uses_spherical_cap_normal() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_capsule(Vec3::ZERO, 0.5, 1.0, 0.0));
 
         let ray = Ray::new(Vec3::new(0.4, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
@@ -6073,7 +6075,7 @@ mod tests {
 
     #[test]
     fn raycast_ignores_zero_length_rays() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0));
         assert!(
             physics
@@ -6084,7 +6086,7 @@ mod tests {
 
     #[test]
     fn box_vs_box_collision() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(RigidBody::new_box(
             Vec3::new(-0.4, 0.0, 0.0),
             Vec3::new(0.5, 0.5, 0.5),
@@ -6106,7 +6108,7 @@ mod tests {
 
     #[test]
     fn angular_velocity_rotates_body() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let handle = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
         physics
             .get_body_mut(handle)
@@ -6127,7 +6129,7 @@ mod tests {
 
     #[test]
     fn torque_turns_body() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let sphere = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
         // Apply torque around Z -> angular velocity must appear.
         let w_after = {
@@ -6146,7 +6148,7 @@ mod tests {
 
     #[test]
     fn oriented_boxes_collide() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         // Same center, rotated 45° about Y, box-ish units: OBB-OBB should separate.
         let half = Vec3::new(0.5, 0.5, 0.5);
         let a = physics.add_body(
@@ -6211,7 +6213,7 @@ mod tests {
 
     #[test]
     fn sphere_capsule_collision() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let sphere = physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, 0.0), 0.5, 1.0));
         let capsule = physics.add_body(
             RigidBody::new_capsule(Vec3::new(0.6, 0.0, 0.0), 0.5, 1.0, 1.0)
@@ -6227,7 +6229,7 @@ mod tests {
 
     #[test]
     fn shapecast_hits_body() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, -5.0), 1.0, 0.0));
         // Cast a small sphere from origin toward the static target.
         let shape = Shape::Sphere { radius: 0.1 };
@@ -6248,7 +6250,7 @@ mod tests {
         // contact when the sphere center is 1.5 above the origin, so a cast
         // from y=5 must report a hit distance of exactly 3.5 (G6: the cast
         // uses analytic shape distances, not a sampled march).
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0));
         let shape = Shape::Sphere { radius: 0.5 };
         let hit = physics
@@ -6267,7 +6269,7 @@ mod tests {
     fn shapecast_thin_wall_no_tunnel() {
         // A 4 cm wall is far thinner than the cast segment: a sampled march
         // would step over it, conservative advancement must not (G6).
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_box(
             Vec3::ZERO,
             Vec3::new(2.0, 2.0, 0.02),
@@ -6291,7 +6293,7 @@ mod tests {
         // substep (12 substeps at 60 Hz) — more than the 0.1 m floor slab.
         // Without speculative contacts + the TOI pass it would sail through;
         // here it must end up resting on top.
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::ZERO,
             Vec3::new(10.0, 0.05, 10.0),
@@ -6520,7 +6522,7 @@ mod tests {
     #[test]
     fn ccd_spin_bounce_pops_upward() {
         let dt = 1.0 / 60.0;
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.set_substeps(1);
         let floor_pos = Vec3::new(0.0, -1.0, 0.0);
         let floor_half = Vec3::new(5.0, 1.0, 5.0);
@@ -6571,7 +6573,7 @@ mod tests {
     #[test]
     fn angular_graze_keeps_tangential_spin() {
         let dt = 1.0 / 60.0;
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.set_substeps(1);
         let wall_half = Vec3::new(0.49, 2.0, 2.0);
         let wall_pos = Vec3::new(1.0, 0.0, 0.0);
@@ -6620,7 +6622,7 @@ mod tests {
     #[test]
     fn angular_continuous_motion_stops_at_first_impact() {
         let dt = 1.0 / 60.0;
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.set_substeps(1);
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 1.1, 0.0),
@@ -6685,7 +6687,7 @@ mod tests {
     #[test]
     fn box_rests_on_static_floor() {
         // A box in free fall must settle on a static floor (G2b target).
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -6720,7 +6722,7 @@ mod tests {
     #[test]
     fn sphere_rests_on_static_floor() {
         // G2 gate: a sphere dropped on a static floor settles and stays.
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -6747,7 +6749,7 @@ mod tests {
     /// are born awake. Every frozen-pair skip keys off this from step one.
     #[test]
     fn statics_are_born_asleep_dynamics_awake() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let floor = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -6767,7 +6769,7 @@ mod tests {
     /// no-op) while the struck boxes wake and move.
     #[test]
     fn static_floor_stays_asleep_under_impact() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let floor = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -6816,7 +6818,7 @@ mod tests {
     /// active-manifold filter and sleepers were intangible to drivers.)
     #[test]
     fn kinematic_wall_wakes_and_pushes_sleeper() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -6859,7 +6861,7 @@ mod tests {
     /// drivers hit this path every frame.)
     #[test]
     fn teleport_overlap_wakes_sleeper_without_velocity() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let sleeper = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.5, 0.0),
             Vec3::splat(0.5),
@@ -6893,7 +6895,7 @@ mod tests {
     /// 1/6 m step sits below the travel gate.
     #[test]
     fn fast_kinematic_plow_carries_thin_sleeper() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let victim = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.02, 0.5, 0.5),
@@ -6973,7 +6975,7 @@ mod tests {
     /// driver.
     #[test]
     fn teleported_kinematic_wall_cannot_tunnel_thin_sleeper() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let victim = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.02, 0.5, 0.5),
@@ -7021,7 +7023,7 @@ mod tests {
     /// wakes the victim.
     #[test]
     fn small_teleport_into_rest_settles_without_launch() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let victim = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.5, 0.0),
             Vec3::splat(0.5),
@@ -7059,7 +7061,7 @@ mod tests {
     /// gate boundary together with `small_teleport_into_rest_settles_without_launch`.
     #[test]
     fn large_teleport_into_rest_hits_like_fast_wall() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let victim = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.5, 0.0),
             Vec3::splat(0.5),
@@ -7091,7 +7093,7 @@ mod tests {
     /// the driver snapshot must not invent phantom motion.
     #[test]
     fn parked_kinematic_keeps_sleeping_fast_path() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let victim = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.5, 0.0),
             Vec3::splat(0.5),
@@ -7112,7 +7114,7 @@ mod tests {
     #[test]
     fn two_box_stack_stays_stable() {
         // G2 gate: a 2-box stack stands for 5 seconds without drift or toppling.
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -7173,7 +7175,7 @@ mod tests {
         // G3 gate: a 4-box stack stands for 5 seconds without drift or topple.
         // Taller stacks need the iterated cross-manifold position solve —
         // per-manifold nested correction cannot balance the chain.
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -7224,8 +7226,8 @@ mod tests {
         // data race, not float noise. The scene (9 separate 4-box stacks on
         // a floor) is wide enough to engage the rayon path: ≥2 islands,
         // ≥24 manifolds.
-        fn build_scene() -> BuiltinPhysicsEngine {
-            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        fn build_scene() -> SequentialImpulseEngine {
+            let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
             physics.add_body(RigidBody::new_box(
                 Vec3::new(0.0, -1.0, 0.0),
                 Vec3::new(8.0, 1.0, 8.0),
@@ -7287,8 +7289,8 @@ mod tests {
         // order cannot leak into float state (not merely same-seed luck).
         // Uses a small heterogeneous scene (stacked boxes, a resting
         // sphere and a fast drop), so caches, islands and CCD all engage.
-        fn build() -> BuiltinPhysicsEngine {
-            let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        fn build() -> SequentialImpulseEngine {
+            let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
             physics.add_body(RigidBody::new_box(
                 Vec3::new(0.0, -1.0, 0.0),
                 Vec3::new(10.0, 1.0, 10.0),
@@ -7309,7 +7311,7 @@ mod tests {
         }
         #[allow(clippy::type_complexity)]
         fn snapshot(
-            physics: &BuiltinPhysicsEngine,
+            physics: &SequentialImpulseEngine,
         ) -> Vec<([u32; 3], [u32; 4], [u32; 3], [u32; 3])> {
             physics
                 .bodies
@@ -7342,8 +7344,8 @@ mod tests {
     /// disable) fails loudly here instead of silently diverging.
     /// Re-baseline ONLY for intentional solver changes: run
     /// `determinism_snapshot_regenerate` (ignored), inspect the diff, commit.
-    fn determinism_snapshot_scene() -> BuiltinPhysicsEngine {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    fn determinism_snapshot_scene() -> SequentialImpulseEngine {
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(10.0, 1.0, 10.0),
@@ -7381,7 +7383,7 @@ mod tests {
         physics
     }
 
-    fn determinism_snapshot_render(physics: &BuiltinPhysicsEngine) -> String {
+    fn determinism_snapshot_render(physics: &SequentialImpulseEngine) -> String {
         let mut out = format!(
             "ornis-determinism-snapshot v1 bodies={} steps=120 dt=0.0166667\n",
             physics.bodies.len()
@@ -7440,7 +7442,7 @@ mod tests {
     fn tilted_box_falls_flat() {
         // G3 gate: a box dropped at a 20° tilt lands on an edge, tips over,
         // and comes to rest flat on the floor (4-point face manifold).
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
             Vec3::new(5.0, 1.0, 5.0),
@@ -7476,7 +7478,7 @@ mod tests {
 
     /// World-space distance between the two anchor points of a joint.
     fn joint_anchor_error(
-        physics: &BuiltinPhysicsEngine,
+        physics: &SequentialImpulseEngine,
         ja: BodyHandle,
         jb: BodyHandle,
         la: Vec3,
@@ -7490,7 +7492,7 @@ mod tests {
 
     #[test]
     fn ball_joint_pendulum_holds_anchor() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.1, 0.0));
         // Pendulum bob released off to the side: it must swing, not fall.
         let bob = physics.add_body(RigidBody::new_sphere(Vec3::new(1.0, -1.0, 0.0), 0.25, 1.0));
@@ -7528,7 +7530,7 @@ mod tests {
 
     #[test]
     fn ball_joint_chain_hangs() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let mut prev = anchor;
         let mut links = Vec::new();
@@ -7578,7 +7580,7 @@ mod tests {
 
     #[test]
     fn revolute_hinge_rotates_about_axis_only() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         // Arm hangs with its top at the origin: center one meter below. The
         // jointed pair does not collide (a hinge pin passes through the arm),
@@ -7628,7 +7630,7 @@ mod tests {
     /// constraints carry its weight (no sag) and lock the spin.
     #[test]
     fn prismatic_slider_travels_on_axis_without_sag() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let block = physics.add_body(RigidBody::new_box(
             Vec3::ZERO,
@@ -7670,7 +7672,7 @@ mod tests {
     /// Prismatic limit: a fast block stops at the window end and stays.
     #[test]
     fn prismatic_limit_blocks_travel_past_bounds() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let block = physics.add_body(RigidBody::new_box(
             Vec3::ZERO,
@@ -7714,7 +7716,7 @@ mod tests {
     /// Prismatic motor: a resting block spins up to the target slide speed.
     #[test]
     fn prismatic_motor_drives_to_target_speed() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let block = physics.add_body(RigidBody::new_box(
             Vec3::ZERO,
@@ -7753,7 +7755,7 @@ mod tests {
     /// pulls the slide axis back parallel.
     #[test]
     fn prismatic_misaligned_axes_realign() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let mut block = RigidBody::new_box(Vec3::ZERO, Vec3::new(0.2, 0.2, 0.2), 1.0);
         block.orientation = Quat::from_rotation_y(10.0f32.to_radians());
@@ -7782,7 +7784,7 @@ mod tests {
 
     #[test]
     fn revolute_limit_blocks_travel_past_bounds() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let arm = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
@@ -7823,7 +7825,7 @@ mod tests {
     #[test]
     fn revolute_motor_spins_up_to_target_speed() {
         // Zero gravity: only the motor drives the hinge.
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let arm = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
@@ -7855,7 +7857,7 @@ mod tests {
         let w = (b.angular_velocity - a.angular_velocity).dot(Vec3::Z);
         assert!((w - 3.0).abs() < 0.3, "motor missed target speed: {w}");
         // A starved torque budget must NOT reach the target (clamp binds).
-        let mut weak = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut weak = SequentialImpulseEngine::new(Vec3::ZERO);
         let anchor = weak.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let arm = weak.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),
@@ -8200,7 +8202,7 @@ mod tests {
     /// dynamics in free fall step cleanly and report no contacts.
     #[test]
     fn jointed_pair_buckets_emit_no_self_pairs() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
         let b = physics.add_body(RigidBody::new_box(
             Vec3::new(1.2, 0.3, 0.0),
@@ -8228,7 +8230,7 @@ mod tests {
     /// anchor coincidence and relative orientation both hold.
     #[test]
     fn fixed_weld_holds_assembly_pose() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
         let mut bb = RigidBody::new_box(Vec3::new(1.2, 0.3, 0.0), Vec3::splat(0.5), 1.0);
         bb.orientation = Quat::from_rotation_z(0.4);
@@ -8268,7 +8270,7 @@ mod tests {
     /// and swings through the bottom instead of stretching or freezing.
     #[test]
     fn distance_rod_keeps_anchor_separation() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.1), 0.0));
         let ball = physics.add_body(RigidBody::new_sphere(Vec3::new(2.0, 0.0, 0.0), 0.3, 1.0));
         physics
@@ -8306,7 +8308,7 @@ mod tests {
     /// under gravity instead of collapsing onto the wheel.
     #[test]
     fn wheel_suspension_holds_chassis_height() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let chassis = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 1.0, 0.0),
             Vec3::new(0.5, 0.2, 0.3),
@@ -8354,7 +8356,7 @@ mod tests {
     /// speed in zero gravity.
     #[test]
     fn wheel_motor_spins_axle_to_target() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let anchor = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 0.0));
         let wheel = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
@@ -8397,7 +8399,7 @@ mod tests {
     /// (`coord_a + ratio * coord_b = const`).
     #[test]
     fn gear_ratio_couples_hinges() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let ground = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 0.0));
         let arm_a = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 0.6, 0.0),
@@ -8477,7 +8479,7 @@ mod tests {
     /// rejected, and removing a referenced joint drops the gear silently.
     #[test]
     fn gear_validation_and_cleanup() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
         let b = physics.add_body(RigidBody::new_box(Vec3::X, Vec3::splat(0.5), 1.0));
         assert!(
@@ -8586,7 +8588,7 @@ mod tests {
     #[test]
     fn sixdof_all_locked_behaves_like_fixed() {
         let locked = [AxisConfig::Locked; 3];
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
         let b = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 1.4, 0.0),
@@ -8619,7 +8621,7 @@ mod tests {
     /// Six-DOF free axis: X slides under impulse while locked Y holds.
     #[test]
     fn sixdof_free_axis_slides_but_locked_holds() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
         let b = physics.add_body(RigidBody::new_box(Vec3::X, Vec3::splat(0.5), 1.0));
         physics
@@ -8647,7 +8649,7 @@ mod tests {
     /// Six-DOF angular limit: a fast spin about Z clamps at the window.
     #[test]
     fn sixdof_angular_limit_blocks_spin() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0));
         let b = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.4), 1.0));
         physics
@@ -8685,7 +8687,7 @@ mod tests {
     /// and steps without NaN.
     #[test]
     fn wheel_degenerate_axle_falls_back() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let a = physics.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0));
         let b = physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, 1.0, 0.0),
@@ -8740,7 +8742,7 @@ mod tests {
     /// velocity-only assert would also pass for a body that rolled off).
     #[test]
     fn cylinder_rests_on_static_floor() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(5.0, 0.5, 5.0),
@@ -8772,7 +8774,7 @@ mod tests {
     /// path on first contact, GJK separation after).
     #[test]
     fn cone_rests_on_base() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(5.0, 0.5, 5.0),
@@ -8800,7 +8802,7 @@ mod tests {
     /// oracle everywhere, including the settled state.
     #[test]
     fn hull_cube_rests_on_floor() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(5.0, 0.5, 5.0),
@@ -8841,7 +8843,7 @@ mod tests {
     /// loop — the concave-mesh narrow path end to end.
     #[test]
     fn ball_rests_on_trimesh_floor() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_trimesh(
             Vec3::ZERO,
             &[
@@ -8874,7 +8876,7 @@ mod tests {
     /// static box floor rests like an analytic box.
     #[test]
     fn mesh_cube_rests_on_floor() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(5.0, 0.5, 5.0),
@@ -8930,7 +8932,7 @@ mod tests {
     /// produce no contact and the dynamic one keeps falling.
     #[test]
     fn mesh_vs_mesh_reports_no_contact() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         let v = [
             Vec3::new(-0.5, -0.5, -0.5),
             Vec3::new(0.5, -0.5, -0.5),
@@ -8981,7 +8983,7 @@ mod tests {
     /// Raycast hits a mesh triangle at its surface through the BVH walk.
     #[test]
     fn raycast_hits_trimesh() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_trimesh(
             Vec3::ZERO,
             &[
@@ -9007,7 +9009,7 @@ mod tests {
     /// not asserted to rest (unstable equilibrium by geometry).
     #[test]
     fn hull_tetrahedron_rests_on_face() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_box(
             Vec3::new(0.0, -0.5, 0.0),
             Vec3::new(5.0, 0.5, 5.0),
@@ -9046,7 +9048,7 @@ mod tests {
     /// (column-oracle path): center height == sample height + radius.
     #[test]
     fn ball_rests_on_flat_heightfield() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
         physics.add_body(RigidBody::new_heightfield(
             Vec3::ZERO,
             vec![1.0f32; 16],
@@ -9076,7 +9078,7 @@ mod tests {
     /// cone wall, hull face, heightfield column top.
     #[test]
     fn raycast_hits_cylinder_cone_hull_heightfield() {
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_cylinder(Vec3::ZERO, 1.0, 1.0, 0.0));
         let hit = physics
             .raycast(Ray::new(Vec3::new(0.0, 0.0, -5.0), Vec3::Z), 10.0)
@@ -9084,7 +9086,7 @@ mod tests {
         assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
         assert!(hit.normal.dot(Vec3::NEG_Z) > 0.999);
 
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_cone(Vec3::ZERO, 1.0, 1.0, 0.0));
         // Cone wall at y=0 has radius 0.5: ray along +X from x=-5.
         let hit = physics
@@ -9092,7 +9094,7 @@ mod tests {
             .expect("ray must hit the cone wall");
         assert!((hit.distance - 4.5).abs() < 1e-4, "got {}", hit.distance);
 
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_convex_hull(
             Vec3::ZERO,
             vec![
@@ -9113,7 +9115,7 @@ mod tests {
         assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
         assert!(hit.normal.dot(Vec3::NEG_Z) > 0.999);
 
-        let mut physics = BuiltinPhysicsEngine::new(Vec3::ZERO);
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
         physics.add_body(RigidBody::new_heightfield(
             Vec3::ZERO,
             vec![2.0f32; 9],

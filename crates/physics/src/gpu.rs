@@ -1,4 +1,4 @@
-//! GPU-accelerated wide contact solver (G7) — `gpu` feature only.
+//! GPU sequential-impulse accelerator for wide contact batches (G7) — `gpu` feature only.
 //!
 //! Offloads single-point contact constraint solving to the GPU through wgpu
 //! compute shaders. Each workgroup (4 invocations) processes one wide batch
@@ -39,9 +39,10 @@
 //! command encoder (per-pass params via dynamic uniform offsets) instead of
 //! one submit + blocking wait per iteration. Passes on a single queue keep
 //! dispatch-boundary memory visibility, so the Jacobi consistency model is
-//! unchanged — only the N−1 CPU round-trips are gone. The shader itself is
-//! untouched (still mirrors the CPU isotropic slide path; anisotropic and
-//! rolling coefficients stay CPU-only).
+//! unchanged — only the N−1 CPU round-trips are gone. The shader row calls
+//! the shared `contact_math` kernels (normal + friction clamp) stitched via
+//! `helpers(...)` — one source of truth with the CPU wide/scalar paths;
+//! anisotropic and rolling coefficients stay CPU-only.
 //!
 //! A true AVBD port (affine bodies, per-body Hessian assembly + LDL in the
 //! shader) lands rung by rung: rung 1 (here) assembles the lumped inertial
@@ -62,6 +63,7 @@ use std::sync::Arc;
 
 use crate::avbd::AvbdEngine;
 use crate::body::{BodyType, RigidBody};
+use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState, PhysicsEngine};
 use bytemuck::Zeroable;
 
@@ -76,7 +78,7 @@ const GPU_BODY_STRIDE: u64 = std::mem::size_of::<GpuBodyState>() as u64;
 /// Number of bytes per GPU batch (see `GpuBatch`; same compile-time check).
 const GPU_BATCH_STRIDE: u64 = std::mem::size_of::<GpuBatch>() as u64;
 
-/// Maximum solver passes per [`WgpuContactSolver::solve`] call (bulk
+/// Maximum solver passes per [`GpuSequentialImpulse::solve`] call (bulk
 /// dispatch uploads one params entry per pass; 8 velocity iterations ×
 /// substeps never approach this — it is a buffer-size bound, not a
 /// physics bound).
@@ -527,28 +529,32 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
 ///
 /// The body of this function is the WGSL compute entry point (kernel DSL):
 /// the bindings below are in scope as storage/uniform variables and `gid`/
-/// `lid` are the built-in workgroup parameters. All per-lane writes to
-/// `batch_buf` accumulators go through the full buffer path so that they
-/// persist across dispatches (the `let b = ...` copy is read-only).
+/// `lid` are the built-in workgroup parameters. The isotropic contact row
+/// (normal update, friction clamp) is NOT duplicated here: it calls the
+/// shared `contact_math` kernels stitched via `helpers(...)` — one source
+/// of truth with the CPU wide/scalar paths. Only buffer plumbing (gather,
+/// accumulator read/write, body write-back) stays inline: bindings and
+/// builtins are entry-scoped and cannot live in helpers. All per-lane
+/// writes to `batch_buf` accumulators go through the full buffer path so
+/// that they persist across dispatches (the `let b = ...` copy is
+/// read-only).
 //
 // qual:allow(abc) — kernel-DSL body: every statement is translated
 // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
-// ONLY this function's body into `fn main`. Extracting helpers would emit
-// calls to functions that do not exist in the shader; splitting requires a
-// macro-level helper-inclusion feature, not a local edit.
+// ONLY this function's body into `fn main`. The isotropic row calls the
+// shared helpers stitched via `helpers(...)` (see `contact_math`); the
+// remaining size is entry-scoped buffer plumbing that cannot move.
 #[gpu_pipeline(
     workgroup_size = 4,
     storage(body_buf: [GpuBodyState; 64], read_write),
     storage(batch_buf: [GpuBatch; 64], read_write),
     uniform(params: [u32; 4]),
     builtin(gid: workgroup_id, lid: local_invocation_id),
+    helpers(contact_normal_step, contact_friction_clamp),
 )]
 fn contact_solver() {
-    // qual:allow(abc) — kernel-DSL body: every statement is translated
-    // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
-    // ONLY this function's body into `fn main`. Extracting helpers would emit
-    // calls to functions that do not exist in the shader; splitting requires a
-    // macro-level helper-inclusion feature, not a local edit.
+    // qual:allow(abc) — kernel-DSL body (see the item docs above): buffer
+    // plumbing stays inline, the contact row calls the stitched helpers.
     let b = batch_buf[gid.x];
     let l = lid.x;
     if l >= b.count {
@@ -575,11 +581,10 @@ fn contact_solver() {
     let spec_target = b.spec_target[l];
     let mut acc = batch_buf[gid.x].acc[l];
 
-    // Normal impulse.
+    // Normal impulse: shared isotropic row (contact_math).
     let rel = (vb + cross(wb, rb)) - (va + cross(wa, ra));
     let vn = dot(rel, n);
-    let lambda = (spec_target - vn) * inv_k;
-    let new_acc = max(acc + lambda, 0.0);
+    let new_acc = contact_normal_step(vn, spec_target, inv_k, acc);
     let delta = new_acc - acc;
     acc = new_acc;
 
@@ -590,7 +595,8 @@ fn contact_solver() {
         bb.angular += delta * vec3(b.apply_w_bx[l], b.apply_w_by[l], b.apply_w_bz[l]);
     }
 
-    // Friction (remeasure rel after the normal impulse).
+    // Friction (remeasure rel after the normal impulse): shared circular
+    // clamp per axis (contact_math).
     let rel2 = (bb.velocity + cross(bb.angular, rb)) - (ba.velocity + cross(ba.angular, ra));
     let max_f = b.mu[l] * acc;
     let t1 = vec3(b.t1x[l], b.t1y[l], b.t1z[l]);
@@ -600,28 +606,18 @@ fn contact_solver() {
     // Axis 1.
     if b.inv_k_t1[l] > 0.0 {
         let vt1 = dot(rel2, t1);
-        let new_t1 = batch_buf[gid.x].acc_f1[l] - vt1 * b.inv_k_t1[l];
-        let len1 = sqrt(new_t1 * new_t1 + batch_buf[gid.x].acc_f2[l] * batch_buf[gid.x].acc_f2[l]);
-        let new_t1c = select(
-            new_t1,
-            new_t1 * (max_f / len1),
-            len1 > max_f && len1 > 1e-12,
-        );
-        f_imp += t1 * (new_t1c - batch_buf[gid.x].acc_f1[l]);
-        batch_buf[gid.x].acc_f1[l] = new_t1c;
+        let raw_t1 = batch_buf[gid.x].acc_f1[l] - vt1 * b.inv_k_t1[l];
+        let new_t1 = contact_friction_clamp(raw_t1, batch_buf[gid.x].acc_f2[l], max_f);
+        f_imp += t1 * (new_t1 - batch_buf[gid.x].acc_f1[l]);
+        batch_buf[gid.x].acc_f1[l] = new_t1;
     }
     // Axis 2.
     if b.inv_k_t2[l] > 0.0 {
         let vt2 = dot(rel2, t2);
-        let new_t2 = batch_buf[gid.x].acc_f2[l] - vt2 * b.inv_k_t2[l];
-        let len2 = sqrt(new_t2 * new_t2 + batch_buf[gid.x].acc_f1[l] * batch_buf[gid.x].acc_f1[l]);
-        let new_t2c = select(
-            new_t2,
-            new_t2 * (max_f / len2),
-            len2 > max_f && len2 > 1e-12,
-        );
-        f_imp += t2 * (new_t2c - batch_buf[gid.x].acc_f2[l]);
-        batch_buf[gid.x].acc_f2[l] = new_t2c;
+        let raw_t2 = batch_buf[gid.x].acc_f2[l] - vt2 * b.inv_k_t2[l];
+        let new_t2 = contact_friction_clamp(raw_t2, batch_buf[gid.x].acc_f1[l], max_f);
+        f_imp += t2 * (new_t2 - batch_buf[gid.x].acc_f2[l]);
+        batch_buf[gid.x].acc_f2[l] = new_t2;
     }
     if dot(f_imp, f_imp) > 1e-24 {
         // Angular impulse uses r × f (same convention as the scalar solver:
@@ -681,11 +677,12 @@ fn contact_solver_wgsl() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// WGPU contact solver
+// GPU sequential-impulse solver
 // ---------------------------------------------------------------------------
 
-/// GPU-accelerated contact solver for single-point manifold batches.
-pub struct WgpuContactSolver {
+/// GPU sequential-impulse solver for single-point manifold batches: the
+/// same SI velocity iterations as the CPU wide path, run per wide batch.
+pub struct GpuSequentialImpulse {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::ComputePipeline,
@@ -701,7 +698,7 @@ pub struct WgpuContactSolver {
     param_stride: u64,
 }
 
-impl WgpuContactSolver {
+impl GpuSequentialImpulse {
     /// Create a new GPU solver attached to the given wgpu context.
     /// `max_bodies` and `max_batches` must be large enough for the scene.
     pub fn new(
@@ -1146,7 +1143,7 @@ pub trait GpuAvbdDispatch {
 #[derive(Clone, Copy, Debug)]
 pub struct GpuAvbdStub {
     /// Maximum bodies one future dispatch covers (buffer-size bound only,
-    /// not a physics bound — mirrors the `WgpuContactSolver` caps).
+    /// not a physics bound — mirrors the `GpuSequentialImpulse` caps).
     pub max_bodies: usize,
 }
 
@@ -1338,7 +1335,7 @@ mod tests {
     use super::*;
     use crate::body::RigidBody;
     use crate::engine::{
-        BuiltinPhysicsEngine, Manifold, ManifoldPoint, ManifoldState, PhysicsEngine,
+        Manifold, ManifoldPoint, ManifoldState, PhysicsEngine, SequentialImpulseEngine,
     };
 
     /// Bulk params layout (no device): pass `k` carries `(k, total, rest)`
@@ -1454,6 +1451,23 @@ mod tests {
         assert!(source.contains("let b = batch_buf[gid.x];"));
         assert!(source.contains("if (l >= b.count) { return; }"));
         assert!(source.contains("batch_buf[gid.x].acc[l] = acc;"));
+        // DSL-pilot rails: the shared contact_math row is stitched ahead of
+        // main and called from the entry (single source of truth with CPU).
+        let helper_pos = source
+            .find("fn contact_normal_step(")
+            .expect("stitched source must contain the normal helper");
+        let friction_pos = source
+            .find("fn contact_friction_clamp(")
+            .expect("stitched source must contain the friction helper");
+        let main_pos = source
+            .find("fn main(")
+            .expect("stitched source must contain main");
+        assert!(
+            helper_pos < main_pos && friction_pos < main_pos,
+            "helpers must be declared before use"
+        );
+        assert!(source.contains("contact_normal_step(vn, spec_target, inv_k, acc)"));
+        assert!(source.contains("contact_friction_clamp(raw_t1,"));
     }
 
     #[test]
@@ -1581,7 +1595,7 @@ mod tests {
             eprintln!("gpu_solver_single_contact_matches_analytic: no wgpu adapter — skipped");
             return;
         };
-        let solver = WgpuContactSolver::new(device, queue, 2, 1);
+        let solver = GpuSequentialImpulse::new(device, queue, 2, 1);
 
         let a = RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0); // static
         let mut b = RigidBody::new_sphere(Vec3::new(0.0, 1.0, 0.0), 0.5, 1.0);
@@ -1631,6 +1645,144 @@ mod tests {
         );
     }
 
+    /// DSL-pilot agreement: one frictional contact solved on the GPU must
+    /// match the CPU wide batch — both sides now run the shared
+    /// `contact_math` row — within tolerance. Never bit-identical by
+    /// promise (device float contraction may differ ±1 ulp per op), but
+    /// the same row math on both sides.
+    #[test]
+    fn gpu_contact_row_matches_cpu_kernels() {
+        let Some((device, queue)) = create_test_device() else {
+            eprintln!("gpu_contact_row_matches_cpu_kernels: no wgpu adapter — skipped");
+            return;
+        };
+        let n = Vec3::Y;
+        let t1 = crate::math::tangent_basis(n).0;
+        let t2 = t1.cross(n);
+        let contact = Vec3::new(0.0, 0.5, 0.0);
+        let mu = 0.5;
+
+        let a = RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0); // static
+        let mut b = RigidBody::new_sphere(Vec3::new(0.0, 1.0, 0.0), 0.5, 1.0);
+        b.velocity = Vec3::new(0.15, -1.0, 0.1); // approach + small slide
+        let bodies = [a.clone(), b.clone()];
+
+        // GPU side: one lane, 48 iterations, no restitution. (The row
+        // converges in a handful of passes; 48 keeps the CPU/GPU agreement
+        // comparison on many accumulated updates.)
+        let solver = GpuSequentialImpulse::new(device, queue, 2, 1);
+        let mut gb = GpuBatch::zero();
+        gb.fill_lane(LaneInput {
+            lane: 0,
+            n,
+            ra: contact - a.position,
+            rb: contact - b.position,
+            target: 0.0,
+            mu,
+            bias: 0.0,
+            acc_in: 0.0,
+            a: &a,
+            ba_idx: 0,
+            b: &b,
+            bb_idx: 1,
+        });
+        gb.count = 1;
+        solver.upload_bodies(&bodies);
+        solver.upload_batches(&[gb]);
+        solver.solve(1, 48, false);
+        let mut gpu_bodies = bodies.clone();
+        solver.download_bodies(&mut gpu_bodies);
+        let mut gpu_batches = [gb];
+        solver.download_acc(&mut gpu_batches);
+
+        // CPU side: the same contact as a one-lane wide batch (the batch
+        // path calls `contact_math::...::eval` per lane).
+        let manifolds = [Manifold {
+            body_a: 0,
+            body_b: 1,
+            normal: n,
+            point_count: 1,
+            points: [ManifoldPoint {
+                world_point: contact,
+                penetration: 0.01,
+            }; 4],
+        }];
+        let mut states = [ManifoldState {
+            mi: 0,
+            i: 0,
+            j: 1,
+            count: 1,
+            acc: [0.0; 4],
+            acc_friction: [0.0; 4],
+            acc_friction2: [0.0; 4],
+            bias: [0.0; 4],
+            target: [0.0; 4],
+            mu,
+            mu2: mu,
+            mu_roll: 0.0,
+            mu_spin: 0.0,
+            acc_roll: [0.0; 4],
+            acc_roll2: [0.0; 4],
+            acc_spin: [0.0; 4],
+            t1,
+            t2,
+            la: [Vec3::ZERO; 4],
+            lb: [Vec3::ZERO; 4],
+            pen0: [0.0; 4],
+        }];
+        let items: Vec<(usize, &Manifold, &ManifoldState)> = vec![(0, &manifolds[0], &states[0])];
+        let mut batch = crate::wide::WideBatch::build(&items, &bodies);
+        let mut cpu_bodies = bodies.clone();
+        for _ in 0..48 {
+            batch.gather(&cpu_bodies);
+            batch.solve_iteration();
+            batch.scatter(&mut cpu_bodies);
+        }
+        batch.write_back_acc(&mut states);
+
+        // The normal approach must stop and the contact slip must bite on
+        // both sides. NOTE: this asserts slip (relative tangential velocity
+        // at the contact), not center slide: with rolling resistance off, a
+        // frictional hit converts slide into rolling (v = -w x r), so the
+        // center keeps moving at ~0.129 while the contact slip is ~0.
+        let slip_of = |bodies: &[RigidBody; 2]| {
+            let (a, b) = (&bodies[0], &bodies[1]);
+            let rel = (b.velocity + b.angular_velocity.cross(contact - b.position))
+                - (a.velocity + a.angular_velocity.cross(contact - a.position));
+            (rel - n * rel.dot(n)).length()
+        };
+        for (label, bodies) in [("gpu", &gpu_bodies), ("cpu", &cpu_bodies)] {
+            assert!(
+                bodies[1].velocity.y.abs() < 0.05,
+                "{label}: normal approach must stop, got {:?}",
+                bodies[1].velocity
+            );
+            let slip = slip_of(bodies);
+            assert!(
+                slip < 1e-3,
+                "{label}: contact slip must bite, tangential slip {slip}"
+            );
+            assert_eq!(
+                bodies[0].velocity,
+                Vec3::ZERO,
+                "{label}: static must not move"
+            );
+        }
+        // ...and the two sides must agree in tolerance.
+        for h in 0..2 {
+            let dv = (gpu_bodies[h].velocity - cpu_bodies[h].velocity).length();
+            let dw = (gpu_bodies[h].angular_velocity - cpu_bodies[h].angular_velocity).length();
+            assert!(dv < 1e-4, "body {h} velocity diverged: {dv}");
+            assert!(dw < 1e-4, "body {h} angular velocity diverged: {dw}");
+        }
+        assert!(
+            (gpu_batches[0].acc[0] - states[0].acc[0]).abs() < 1e-4,
+            "normal impulse diverged: gpu {} vs cpu {}",
+            gpu_batches[0].acc[0],
+            states[0].acc[0]
+        );
+    }
+
     /// Engine-level check: the same scene run on the CPU and with the GPU
     /// solver attached must settle to the same resting state.
     #[test]
@@ -1639,11 +1791,11 @@ mod tests {
             eprintln!("gpu_solver_tracks_cpu_engine: no wgpu adapter — skipped");
             return;
         };
-        let solver = WgpuContactSolver::new(device, queue, 16, 64);
+        let solver = GpuSequentialImpulse::new(device, queue, 16, 64);
         let gravity = Vec3::new(0.0, -9.81, 0.0);
 
-        let mut cpu = BuiltinPhysicsEngine::new(gravity);
-        let mut gpu = BuiltinPhysicsEngine::new(gravity);
+        let mut cpu = SequentialImpulseEngine::new(gravity);
+        let mut gpu = SequentialImpulseEngine::new(gravity);
         for engine in [&mut cpu, &mut gpu] {
             engine.add_body(RigidBody::new_box(
                 Vec3::new(0.0, -2.0, 0.0),

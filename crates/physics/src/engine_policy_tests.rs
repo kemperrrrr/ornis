@@ -35,7 +35,7 @@ fn references_are_not_recaptured_from_an_unsolved_pose() {
             angular: [AxisConfig::Locked; 3],
         },
     ];
-    for kind in [SolverKind::Builtin, SolverKind::Avbd] {
+    for kind in [SolverKind::SequentialImpulse, SolverKind::Avbd] {
         for spec in specs {
             let mut e = Engine::new(kind, Vec3::ZERO);
             let a = e.add_body(body(Vec3::ZERO, 0.0));
@@ -45,7 +45,7 @@ fn references_are_not_recaptured_from_an_unsolved_pose() {
             e.get_body_mut(b).unwrap().position += Vec3::ONE;
             e.get_body_mut(b).unwrap().orientation = Quat::from_rotation_y(0.7);
             e.set_routing(RoutingKind::Islands);
-            e.set_solver_kind(SolverKind::Builtin, Vec3::ZERO);
+            e.set_solver_kind(SolverKind::SequentialImpulse, Vec3::ZERO);
             e.set_solver_kind(SolverKind::Avbd, Vec3::ZERO);
             let restored = e.snapshot().joints[0].reference;
             assert_eq!(restored.distance, original.distance);
@@ -88,7 +88,7 @@ fn fracture_preserves_rigid_velocity_field_momentum_and_energy() {
 
 #[test]
 fn simultaneous_fractures_report_the_final_piece_handles() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     e.set_routing(RoutingKind::Islands);
     let wall = e.add_body(body(Vec3::Y * 10.0, 0.0));
     let mut victim = RigidBody::new_box(Vec3::NEG_X * 3.0, Vec3::ONE, 1.0);
@@ -125,7 +125,7 @@ fn simultaneous_fractures_report_the_final_piece_handles() {
 
 #[test]
 fn inherited_gear_phase_survives_a_multi_turn_switch() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     let anchor = e.add_body(body(Vec3::ZERO, 0.0));
     let a = e.add_body(body(Vec3::NEG_X * 2.0, 1.0));
     let b = e.add_body(body(Vec3::X * 2.0, 1.0));

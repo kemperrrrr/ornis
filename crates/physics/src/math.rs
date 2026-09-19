@@ -132,7 +132,7 @@ pub fn tangent_basis(n: Vec3) -> (Vec3, Vec3) {
     (t1, t1.cross(n))
 }
 
-/// Wheel/joint axle orthogonalized against its reference axis (builtin
+/// Wheel/joint axle orthogonalized against its reference axis (SI
 /// creation rule): a near-parallel axle gets a deterministic
 /// perpendicular fallback from [`tangent_basis`], never a NaN.
 pub fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {

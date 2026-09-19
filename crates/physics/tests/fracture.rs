@@ -7,7 +7,7 @@ const DT: f32 = 1.0 / 60.0;
 
 #[test]
 fn fracture_splits_box_on_hard_hit_both_solvers() {
-    for kind in [SolverKind::Builtin, SolverKind::Avbd] {
+    for kind in [SolverKind::SequentialImpulse, SolverKind::Avbd] {
         // Victim hangs on a Ball joint; a projectile knocks it at 8 m/s.
         let mut engine = Engine::new(kind, Vec3::new(0.0, -9.81, 0.0));
         engine.add_body(RigidBody::new_box(
@@ -100,7 +100,7 @@ fn fracture_splits_box_on_hard_hit_both_solvers() {
 
 #[test]
 fn fracture_ignores_soft_hits_and_non_boxes() {
-    for kind in [SolverKind::Builtin, SolverKind::Avbd] {
+    for kind in [SolverKind::SequentialImpulse, SolverKind::Avbd] {
         let mut engine = Engine::new(kind, Vec3::new(0.0, -9.81, 0.0));
         engine.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),

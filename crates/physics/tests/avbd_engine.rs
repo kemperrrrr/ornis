@@ -4,8 +4,8 @@
 use glam::Vec3;
 use ornis_physics::trigger::{ContactEventKind, TriggerEventKind};
 use ornis_physics::{
-    AvbdEngine, AxisConfig, BodyHandle, BuiltinPhysicsEngine, JointKind, PhysicsEngine,
-    PrismaticLimit, PrismaticMotor, Ray, RevoluteLimit, RevoluteMotor, RigidBody, WheelSuspension,
+    AvbdEngine, AxisConfig, BodyHandle, JointKind, PhysicsEngine, PrismaticLimit, PrismaticMotor,
+    Ray, RevoluteLimit, RevoluteMotor, RigidBody, SequentialImpulseEngine, WheelSuspension,
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -321,7 +321,7 @@ fn avbd_contact_begin_end_roundtrip() {
 #[test]
 fn avbd_raycast_matches_builtin() {
     let mut avbd = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
-    let mut builtin = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut builtin = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     for engine in [
         &mut avbd as &mut dyn PhysicsEngine,
         &mut builtin as &mut dyn PhysicsEngine,
@@ -354,7 +354,9 @@ fn avbd_seam_fits_trait_object() {
         engine.get_body(h).unwrap().position.y
     }
     let ya = drive(&mut AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0)));
-    let yb = drive(&mut BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0)));
+    let yb = drive(&mut SequentialImpulseEngine::new(Vec3::new(
+        0.0, -9.81, 0.0,
+    )));
     assert!(ya < 5.0 && yb < 5.0, "both engines integrate gravity");
 }
 

@@ -8,7 +8,7 @@ use ornis_physics::{
 };
 
 const DT: f32 = 1.0 / 60.0;
-const KINDS: [SolverKind; 2] = [SolverKind::Builtin, SolverKind::Avbd];
+const KINDS: [SolverKind; 2] = [SolverKind::SequentialImpulse, SolverKind::Avbd];
 const ROUTES: [RoutingKind; 2] = [RoutingKind::Single, RoutingKind::Islands];
 
 fn sphere(pos: Vec3, mass: f32) -> RigidBody {
@@ -146,7 +146,7 @@ fn assembly_rest_length_survives_repeated_solver_and_routing_switches() {
         e.get_body_mut(b).unwrap().position.x = 3.0;
         for _ in 0..4 {
             e.set_routing(RoutingKind::Islands);
-            e.set_solver_kind(SolverKind::Builtin, Vec3::ZERO);
+            e.set_solver_kind(SolverKind::SequentialImpulse, Vec3::ZERO);
             e.set_solver_kind(SolverKind::Avbd, Vec3::ZERO);
         }
         assert_eq!(
@@ -201,7 +201,7 @@ fn sixdof_linear_limit_is_relative_to_assembly_not_world_origin() {
 
 #[test]
 fn split_queries_see_add_edit_remove_without_a_step() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     e.set_routing(RoutingKind::Islands);
     let h = e.add_body(sphere(Vec3::X * 2.0, 1.0));
     let ray = Ray {
@@ -226,7 +226,7 @@ fn split_queries_see_add_edit_remove_without_a_step() {
 #[test]
 fn split_fixed_time_is_independent_of_host_partition() {
     let run = |dt: f32, count: usize| {
-        let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+        let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
         let mut fast = isolated(Vec3::X * -10.0, 1.0);
         fast.velocity.x = 1.0;
         e.add_body(fast);
@@ -257,7 +257,7 @@ fn split_fixed_time_is_independent_of_host_partition() {
 
 #[test]
 fn invalid_time_does_not_route_rebuild_or_consume_events() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     e.set_routing(RoutingKind::Islands);
     let h = e.add_body(sphere(Vec3::ZERO, 1.0));
     let rebuilds = e.split_metrics().unwrap().rebuilds;
@@ -272,7 +272,7 @@ fn invalid_time_does_not_route_rebuild_or_consume_events() {
 
 #[test]
 fn split_trigger_history_survives_rebuild_and_is_not_duplicated() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     let trigger = e.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::ONE, 0.0).with_trigger(true));
     let body = e.add_body(sphere(Vec3::ZERO, 1.0));
     e.set_routing(RoutingKind::Islands);
@@ -301,7 +301,7 @@ fn split_trigger_history_survives_rebuild_and_is_not_duplicated() {
 
 #[test]
 fn split_static_copies_emit_one_trigger_transition() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     e.add_body(RigidBody::new_box(Vec3::ZERO, Vec3::ONE, 0.0).with_trigger(true));
     let mut driver = sphere(Vec3::ZERO, 0.0);
     driver.body_type = BodyType::Kinematic;
@@ -315,7 +315,7 @@ fn split_static_copies_emit_one_trigger_transition() {
 
 #[test]
 fn split_joins_contact_owners_before_integrating() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     let a = e.add_body(RigidBody::new_sphere(Vec3::X * 1.01, 0.5, 1.0));
     let b = e.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 100.0));
     e.set_routing(RoutingKind::Islands);
@@ -333,7 +333,7 @@ fn split_joins_contact_owners_before_integrating() {
 
 #[test]
 fn split_hysteresis_includes_spin_and_preserves_the_deadband_owner() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::ZERO);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::ZERO);
     let mut moving = isolated(Vec3::ZERO, 1.0);
     moving.velocity.x = 0.3;
     let h = e.add_body(moving);
@@ -344,7 +344,7 @@ fn split_hysteresis_includes_spin_and_preserves_the_deadband_owner() {
     for _ in 0..120 {
         e.step(DT);
     }
-    assert_eq!(e.body_solver(h), Some(SolverKind::Builtin));
+    assert_eq!(e.body_solver(h), Some(SolverKind::SequentialImpulse));
     assert_eq!(e.body_solver(spin), Some(SolverKind::Avbd));
     assert_eq!(e.split_metrics().unwrap().migrations, 0);
 }
@@ -398,7 +398,7 @@ fn native_joint_rotation_is_quaternion_sign_invariant() {
 
 #[test]
 fn contact_events_are_still_available_after_structural_changes() {
-    let mut e = Engine::new(SolverKind::Builtin, Vec3::NEG_Y * 9.81);
+    let mut e = Engine::new(SolverKind::SequentialImpulse, Vec3::NEG_Y * 9.81);
     e.add_body(RigidBody::new_box(
         Vec3::NEG_Y,
         Vec3::new(10.0, 1.0, 10.0),

@@ -12,7 +12,7 @@ fn box_at(y: f32) -> RigidBody {
 
 #[test]
 fn engine_dispatch_steps_both_solvers() {
-    for kind in [SolverKind::Builtin, SolverKind::Avbd] {
+    for kind in [SolverKind::SequentialImpulse, SolverKind::Avbd] {
         let mut engine = Engine::new(kind, Vec3::new(0.0, -9.81, 0.0));
         assert_eq!(engine.kind(), kind);
         let h = engine.add_body(box_at(5.0));
@@ -30,7 +30,7 @@ fn engine_dispatch_steps_both_solvers() {
 
 #[test]
 fn engine_migration_keeps_bodies_joints_handles() {
-    let mut engine = Engine::new(SolverKind::Builtin, Vec3::new(0.0, -9.81, 0.0));
+    let mut engine = Engine::new(SolverKind::SequentialImpulse, Vec3::new(0.0, -9.81, 0.0));
     let a = engine.add_body(box_at(2.0));
     let b = engine.add_body(box_at(4.0));
     let _j = engine
@@ -50,7 +50,7 @@ fn engine_migration_keeps_bodies_joints_handles() {
         engine.get_body(a).unwrap().position,
         engine.get_body(b).unwrap().position,
     );
-    // Builtin -> Avbd: poses, handles and the joint survive.
+    // SequentialImpulse -> Avbd: poses, handles and the joint survive.
     engine.set_solver_kind(SolverKind::Avbd, Vec3::new(0.0, -9.81, 0.0));
     assert_eq!(engine.kind(), SolverKind::Avbd);
     assert_eq!(engine.get_body(a).unwrap().position, pa);
@@ -67,9 +67,9 @@ fn engine_migration_keeps_bodies_joints_handles() {
         (rod - 2.0).abs() < 0.3,
         "migrated rod must hold its length, got {rod}"
     );
-    // Avbd -> Builtin: roundtrip keeps stepping on the same handles.
-    engine.set_solver_kind(SolverKind::Builtin, Vec3::new(0.0, -9.81, 0.0));
-    assert_eq!(engine.kind(), SolverKind::Builtin);
+    // Avbd -> SequentialImpulse: roundtrip keeps stepping on the same handles.
+    engine.set_solver_kind(SolverKind::SequentialImpulse, Vec3::new(0.0, -9.81, 0.0));
+    assert_eq!(engine.kind(), SolverKind::SequentialImpulse);
     for _ in 0..30 {
         engine.step(DT);
     }
@@ -91,7 +91,7 @@ fn engine_kinds_agree_on_drop_settle() {
     // scene to the same rest poses. Behavioral tolerance, never bit
     // identity — the implementations differ by design, the rest state
     // must not.
-    for kind in [SolverKind::Builtin, SolverKind::Avbd] {
+    for kind in [SolverKind::SequentialImpulse, SolverKind::Avbd] {
         let mut engine = Engine::new(kind, Vec3::new(0.0, -9.81, 0.0));
         engine.add_body(RigidBody::new_box(
             Vec3::new(0.0, -1.0, 0.0),

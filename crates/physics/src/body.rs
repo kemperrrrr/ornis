@@ -11,7 +11,7 @@ use glam::{Quat, Vec3};
 
 use crate::shape::Shape;
 
-/// Stable index of a body inside its owning [`BuiltinPhysicsEngine`](crate::engine::BuiltinPhysicsEngine).
+/// Stable index of a body inside its owning [`SequentialImpulseEngine`](crate::engine::SequentialImpulseEngine).
 ///
 /// Solver/routing migrations preserve handles. Removal swaps the final body
 /// into the removed slot; only that surviving body's handle changes. A removed

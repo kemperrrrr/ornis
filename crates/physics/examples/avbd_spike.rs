@@ -26,7 +26,7 @@
 //!   their own solve; sweep order is bottom-to-top (helps GS stacks).
 
 use glam::Vec3;
-use ornis_physics::{BodyHandle, BuiltinPhysicsEngine, PhysicsEngine, RigidBody};
+use ornis_physics::{BodyHandle, PhysicsEngine, RigidBody, SequentialImpulseEngine};
 use std::time::Instant;
 
 const DT: f32 = 1.0 / 60.0;
@@ -497,8 +497,8 @@ fn build_avbd_scene() -> Vec<Body> {
     bodies
 }
 
-fn build_si_scene() -> (BuiltinPhysicsEngine, Vec<BodyHandle>) {
-    let mut physics = BuiltinPhysicsEngine::new(Vec3::new(0.0, -9.81, 0.0));
+fn build_si_scene() -> (SequentialImpulseEngine, Vec<BodyHandle>) {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -1.0, 0.0),
         Vec3::new(5.0, 1.0, 5.0),
@@ -560,7 +560,7 @@ fn main() {
         physics.step(DT);
     }
     let si_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("=== SI (BuiltinPhysicsEngine) ===");
+    println!("=== SI (SequentialImpulseEngine) ===");
     println!("wall: {si_ms:.1} ms for {STEPS} steps");
     let mut si_ok = true;
     for (k, h) in si_handles.iter().enumerate() {

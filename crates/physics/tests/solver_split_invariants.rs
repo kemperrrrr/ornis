@@ -28,7 +28,7 @@ fn initial_solver_assignment_does_not_change_rest_state() {
             .collect::<Vec<_>>()
     };
     let avbd = run(SolverKind::Avbd);
-    let builtin = run(SolverKind::Builtin);
+    let builtin = run(SolverKind::SequentialImpulse);
     for (a, b) in avbd.iter().zip(&builtin) {
         assert!(
             (*a - *b).length() < 0.1,

@@ -1,4 +1,4 @@
-//! Trigger overlap events emitted by the builtin physics engine.
+//! Trigger overlap events emitted by the sequential-impulse physics engine.
 //!
 //! Triggers participate in broadphase overlap detection but never contribute
 //! impulses to the solver. Events are reported as deterministic body-handle
