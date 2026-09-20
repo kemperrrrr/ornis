@@ -57,6 +57,8 @@ pub(crate) mod gjk;
 pub mod gpu;
 pub mod joint;
 pub mod math;
+/// Sequential-impulse solver internals (Genesis-style `solvers/rigid/` box).
+pub mod sequential_impulse;
 /// Collision shapes with AABB projection and inertia tensors.
 pub mod shape;
 /// Trigger overlap event types emitted by the sequential-impulse physics engine.
