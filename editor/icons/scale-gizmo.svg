@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="icon" viewBox="0 0 24 24">
+  <g transform="translate(0.5680 0.5680) scale(0.95465)">
+  <path d="M10,1.4H14V5.4H10Z" />
+  <path d="M11,5H13V14.5H11Z" />
+  <path d="M18.3,17.5H22.1V21.3H18.3Z" />
+  <path d="M11.51,15.67L19.27,20.03L20.25,18.29L12.49,13.93Z" />
+  <path d="M1.9,17.5H5.7V21.3H1.9Z" />
+  <path d="M12.49,15.67L4.73,20.03L3.75,18.29L11.51,13.93Z" />
+  </g>
+</svg>

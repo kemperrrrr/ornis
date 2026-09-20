@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<!-- Ornis level-editor redesign mockup (static, no backend).
+  Original layout: general editor zones (hierarchy / viewport / inspector /
+  asset browser) are functional patterns. No third-party UI is copied:
+  all styles, labels and sample content are Ornis-specific. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ornis — Level Editor Mockup</title>
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<main class="layout">
+  <!-- LEFT: full-height hierarchy -->
+  <aside class="panel left">
+    <div class="tree-tools">
+      <label class="search">
+        <svg viewBox="0 0 24 24"><use href="../editor/icons/search.svg#icon" /></svg>
+        <input id="tree-filter" type="text" placeholder="Filter" />
+      </label>
+      <button class="ghost" id="add-entity" title="Add entity">
+        <svg viewBox="0 0 24 24"><use href="../editor/icons/plus.svg#icon" /></svg>
+      </button>
+      <button class="ghost" id="toggle-left" title="Collapse panel">
+        <svg viewBox="0 0 24 24"><use href="../editor/icons/dock-left.svg#icon" /></svg>
+      </button>
+    </div>
+    <div class="tree" id="tree" tabindex="0" aria-label="Scene hierarchy"></div>
+  </aside>
+
+  <div class="center-top">
+    <div class="project"><strong>demo</strong></div>
+    <div class="transport" role="toolbar" aria-label="Play controls">
+      <button id="btn-play" title="Play / Stop">
+        <svg viewBox="0 0 24 24"><use id="play-icon" href="../editor/icons/play.svg#icon" /></svg>
+      </button>
+    </div>
+    <div class="status" id="status-pill" title="Editor status">Ready</div>
+  </div>
+
+  <div class="panel viewport-panel">
+      <div class="viewport" id="viewport">
+        <div class="grid-bg"></div>
+        <div class="shapes" id="shapes"></div>
+        <div class="viewport-hint">Static mockup — live WASM canvas plugs in here later</div>
+        <div class="viewport-gizmos" role="toolbar" aria-label="Transform tools">
+          <button class="gizmo active" data-tool="select" title="Select">
+            <svg viewBox="0 0 24 24"><use href="../editor/icons/cursor-default.svg#icon" /></svg>
+          </button>
+          <button class="gizmo" data-tool="move" title="Move">
+            <svg viewBox="0 0 24 24"><use href="../editor/icons/transform-gizmo.svg#icon" /></svg>
+          </button>
+          <button class="gizmo" data-tool="rotate" title="Rotate">
+            <svg viewBox="0 0 24 24"><use href="../editor/icons/rotate-orbit.svg#icon" /></svg>
+          </button>
+          <button class="gizmo" data-tool="scale" title="Scale">
+            <svg viewBox="0 0 24 24"><use href="../editor/icons/scale-gizmo.svg#icon" /></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel browser-panel">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="assets">
+          <svg viewBox="0 0 24 24"><use href="../editor/icons/folder.svg#icon" /></svg>Project
+        </button>
+        <button class="tab" data-tab="console">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 9l3 3-3 3M12 15h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Console
+        </button>
+      </div>
+      <div class="tab-page" id="tab-assets">
+        <div class="browser-split">
+          <div class="tree folder-tree" id="folder-tree" tabindex="0" aria-label="Folders"></div>
+          <div class="folder-contents">
+            <div class="content-bar">
+              <span class="crumb" id="crumb"></span>
+              <label class="search inline">
+                <svg viewBox="0 0 24 24"><use href="../editor/icons/search.svg#icon" /></svg>
+                <input id="asset-filter" type="text" placeholder="Filter" />
+              </label>
+            </div>
+            <div class="content-list" id="content-list"></div>
+          </div>
+        </div>
+      </div>
+      <div class="tab-page hidden" id="tab-console">
+        <div class="console" id="console-log">
+          <div><span class="muted">[mock]</span> editor-v2 loaded — no backend connected.</div>
+          <div><span class="muted">[mock]</span> select an entity to inspect its components.</div>
+        </div>
+      </div>
+    </div>
+
+  <!-- RIGHT: full-height inspector -->
+  <aside class="panel right">
+    <div class="entity-head">
+      <button class="ghost" id="toggle-right" title="Collapse panel">
+        <svg viewBox="0 0 24 24"><use href="../editor/icons/dock-right.svg#icon" /></svg>
+      </button>
+      <svg viewBox="0 0 24 24" class="entity-icon"><use id="inspector-icon" href="../editor/icons/cube.svg#icon" /></svg>
+      <input id="inspector-name" type="text" value="" aria-label="Entity name" />
+    </div>
+    <div id="inspector"></div>
+    <button class="add-component" id="add-component">
+      <svg viewBox="0 0 24 24"><use href="../editor/icons/plus.svg#icon" /></svg>
+      Add Component
+    </button>
+  </aside>
+</main>
+
+<script src="./app.js"></script>
+</body>
+</html>
