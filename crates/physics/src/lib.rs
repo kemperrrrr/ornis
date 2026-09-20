@@ -30,7 +30,8 @@
 mod broadphase;
 mod broadphase_tree;
 mod contact_math;
-mod migration;
+/// Scene snapshots and joint-remap helpers for solver migration.
+pub mod migration;
 mod split;
 
 #[cfg(test)]
@@ -41,20 +42,27 @@ mod engine_policy_tests;
 pub mod avbd;
 /// Rigid bodies: [`RigidBody`], mass model and body handles/types.
 pub mod body;
-pub(crate) mod distance;
+/// Analytic closest-point and distance queries between convex shapes.
+pub mod distance;
 /// The physics step pipeline and the [`crate::engine::PhysicsEngine`] trait.
 pub mod engine;
 /// GJK/EPA fallback narrow phase for cylinder, cone and convex hull pairs.
 pub(crate) mod gjk;
 #[cfg(feature = "gpu")]
-pub(crate) mod gpu;
+/// GPU sequential-impulse accelerator for wide contact batches (G7).
+// The `#[gpu_pipeline]` macro emits undocumented `pub mod`s for its kernels
+// (outer attributes do not propagate into the expansion), so the docs gate
+// is relaxed for this subtree; every hand-written public item stays documented.
+#[allow(missing_docs)]
+pub mod gpu;
 pub mod joint;
 pub mod math;
 /// Collision shapes with AABB projection and inertia tensors.
 pub mod shape;
 /// Trigger overlap event types emitted by the sequential-impulse physics engine.
 pub mod trigger;
-pub(crate) mod wide;
+/// SIMD-wide solver for single-point contact batches.
+pub mod wide;
 
 use migration::{JointSnapshot, SceneSnapshot};
 use split::{SplitBody, SplitJoint, SplitOwner, SplitState};

@@ -168,3 +168,19 @@ fn contact_rotation_enters_taylor_residual_once() {
         }
     }
 }
+
+#[test]
+fn tangent_basis_is_orthonormal() {
+    for n in [
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+        Vec3::new(1.0, 2.0, 3.0).normalize(),
+    ] {
+        let (t1, t2) = tangent_basis(n);
+        assert!((t1.dot(n)).abs() < 1e-6);
+        assert!((t2.dot(n)).abs() < 1e-6);
+        assert!((t1.dot(t2)).abs() < 1e-6);
+        assert!((t1.length() - 1.0).abs() < 1e-6);
+    }
+}

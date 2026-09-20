@@ -97,7 +97,7 @@ impl Vec3x4 {
 
 /// Batch of up to 4 single-point contact constraints with DISJOINT body
 /// sets (guaranteed by `build_solver_steps`), solved in SoA lanes.
-pub(crate) struct WideBatch {
+pub struct WideBatch {
     /// Active lane count (1..=4); lanes >= count are masked to body 0.
     count: usize,
     /// Manifold-state index per lane, for writing accumulated impulses back.
@@ -205,10 +205,7 @@ impl WideBatch {
     /// Build a wide batch from 1..=4 single-point manifolds with disjoint
     /// body sets. `items` = (state index, manifold, state) triples.
     /// Lanes beyond `count` are masked to body 0 (a static placeholder).
-    pub(crate) fn build(
-        items: &[(usize, &Manifold, &ManifoldState)],
-        bodies: &[RigidBody],
-    ) -> Self {
+    pub fn build(items: &[(usize, &Manifold, &ManifoldState)], bodies: &[RigidBody]) -> Self {
         let count = items.len();
         debug_assert!((1..=4).contains(&count));
         let mut b = WideBatch {
@@ -381,7 +378,7 @@ impl WideBatch {
 
     /// Refresh velocities from the body array (called at the start of every
     /// solver step, so lanes see the updates of all earlier steps).
-    pub(crate) fn gather(&mut self, bodies: &[RigidBody]) {
+    pub fn gather(&mut self, bodies: &[RigidBody]) {
         for l in 0..self.count {
             let (i, j) = (self.idx_a[l], self.idx_b[l]);
             self.va.set_lane(l, bodies[i].velocity);
@@ -393,7 +390,7 @@ impl WideBatch {
 
     /// Write velocities back to the body array. Only lanes with positive
     /// inverse mass move (statics and masked lanes are untouched).
-    pub(crate) fn scatter(&self, bodies: &mut [RigidBody]) {
+    pub fn scatter(&self, bodies: &mut [RigidBody]) {
         for l in 0..self.count {
             if self.inv_ma.lane(l) > 0.0 {
                 bodies[self.idx_a[l]].velocity = self.va.lane(l);
@@ -408,7 +405,7 @@ impl WideBatch {
 
     /// Write the accumulated normal impulses back into `states` (the warm
     /// cache persistence reads them after the iterations).
-    pub(crate) fn write_back_acc(&self, states: &mut [ManifoldState]) {
+    pub fn write_back_acc(&self, states: &mut [ManifoldState]) {
         for l in 0..self.count {
             states[self.state_idx[l]].acc[0] = self.acc.lane(l);
         }
@@ -418,7 +415,7 @@ impl WideBatch {
     /// Gauss-Seidel, scalar form) then Coulomb friction in the fixed tangent
     /// basis. Mirrors the scalar single-point code in
     /// `solve_island_velocity`, lane by lane, with the precomputed factors.
-    pub(crate) fn solve_iteration(&mut self) {
+    pub fn solve_iteration(&mut self) {
         for l in 0..self.count {
             let max_friction = self.mu.lane(l) * self.acc.lane(l);
             self.solve_lane_normal(l);

@@ -346,3 +346,25 @@ fn small_inertia_keeps_balanced_warm_torque() {
         }
     }
 }
+
+#[test]
+fn ldl_solves_identity() {
+    let lhs = [
+        [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 2.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 2.0],
+    ];
+    let x = solve_6x6(lhs, [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]).unwrap();
+    for (got, want) in x.iter().zip([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) {
+        assert!((got - want).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn ldl_rejects_non_positive() {
+    let lhs = [[0.0f32; 6]; 6];
+    assert!(solve_6x6(lhs, [0.0; 6]).is_none());
+}

@@ -107,7 +107,7 @@ pub(crate) fn remap_gear(kind: &mut JointKind, remap: &[Option<usize>]) {
 
 /// Unwrap an angular coordinate relative to stored raw/continuous values.
 /// Linear coordinates are never periodic.
-pub(crate) fn gear_coordinate(raw: f32, angular: bool, previous: Option<(f32, f32)>) -> f32 {
+pub fn gear_coordinate(raw: f32, angular: bool, previous: Option<(f32, f32)>) -> f32 {
     match previous {
         Some((old_raw, continuous)) if angular => {
             continuous

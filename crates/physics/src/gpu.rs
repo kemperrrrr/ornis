@@ -73,10 +73,10 @@ use bytemuck::Zeroable;
 
 /// Number of bytes per GPU body state. The value and the per-field offsets
 /// are checked against the generated WGSL layout at compile time.
-const GPU_BODY_STRIDE: u64 = std::mem::size_of::<GpuBodyState>() as u64;
+pub const GPU_BODY_STRIDE: u64 = std::mem::size_of::<GpuBodyState>() as u64;
 
 /// Number of bytes per GPU batch (see `GpuBatch`; same compile-time check).
-const GPU_BATCH_STRIDE: u64 = std::mem::size_of::<GpuBatch>() as u64;
+pub const GPU_BATCH_STRIDE: u64 = std::mem::size_of::<GpuBatch>() as u64;
 
 /// Maximum solver passes per [`GpuSequentialImpulse::solve`] call (bulk
 /// dispatch uploads one params entry per pass; 8 velocity iterations ×
@@ -88,7 +88,7 @@ const PARAMS_CAP: u64 = 64;
 /// dispatch: pass `k` reads entry `k`, so the shader sees the same
 /// per-iteration values as the old one-dispatch-per-iteration loop.
 /// Pure (no device) so unit tests pin the layout.
-fn solve_params(iterations: u32, allow_restitution: bool) -> Vec<[u32; 4]> {
+pub fn solve_params(iterations: u32, allow_restitution: bool) -> Vec<[u32; 4]> {
     (0..iterations)
         .map(|k| [k, iterations, u32::from(allow_restitution), 0])
         .collect()
@@ -104,10 +104,12 @@ fn solve_params(iterations: u32, allow_restitution: bool) -> Vec<[u32; 4]> {
 /// the WGSL struct declaration is generated from this layout.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
-struct GpuBodyState {
-    velocity: [f32; 3],
+pub struct GpuBodyState {
+    /// Linear velocity.
+    pub velocity: [f32; 3],
     _pad_v: f32,
-    angular: [f32; 3],
+    /// Angular velocity.
+    pub angular: [f32; 3],
     _pad_w: f32,
 }
 
@@ -137,9 +139,11 @@ impl GpuBodyState {
 /// exactly 16 bytes (see the layout test below).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
-pub(crate) struct GpuAvbdMass {
-    inertia: [f32; 3],
-    inv_mass: f32,
+pub struct GpuAvbdMass {
+    /// Body-frame inertia diagonal.
+    pub inertia: [f32; 3],
+    /// Inverse mass (0 for non-dynamics).
+    pub inv_mass: f32,
 }
 
 impl GpuAvbdMass {
@@ -168,7 +172,7 @@ impl GpuAvbdMass {
 /// isotropic bodies (spheres/cubes) and a documented approximation
 /// otherwise. Statics (`inv_mass <= 0`) and non-positive `dt` yield zeros.
 /// Pure (no device) so unit tests pin it without an adapter.
-fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> [f32; 6] {
+pub fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> [f32; 6] {
     // Non-positive or non-finite inputs assemble nothing (matches the
     // shader guards, which test the positive form and zero otherwise —
     // NaN fails both spellings and lands on zeros either way).
@@ -198,7 +202,7 @@ fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> [f32
 /// `Option`); on strictly positive systems it agrees with the dense AVBD
 /// LDL within float tolerance (pinned by test, never bit-identical by
 /// promise). Full 6x6 device LDL with breakdown signaling is a later rung.
-fn avbd_diag_solve_cpu(diag: [f32; 6], rhs: [f32; 6]) -> [f32; 6] {
+pub fn avbd_diag_solve_cpu(diag: [f32; 6], rhs: [f32; 6]) -> [f32; 6] {
     let mut out = [0.0f32; 6];
     for i in 0..6 {
         if diag[i] > 1e-12 {
@@ -214,7 +218,8 @@ fn avbd_diag_solve_cpu(diag: [f32; 6], rhs: [f32; 6]) -> [f32; 6] {
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
-pub(crate) struct GpuBatch {
+/// One GPU contact batch: up to 4 single-point lanes over disjoint bodies.
+pub struct GpuBatch {
     // Geometry: SoA layout, 4 lanes each → [f32; 4]
     nx: [f32; 4],
     ny: [f32; 4],
@@ -298,11 +303,13 @@ pub(crate) struct GpuBatch {
     body_a: [u32; 4],
     body_b: [u32; 4],
     // Accumulators (read-write on GPU)
-    acc: [f32; 4],
+    /// Accumulated normal impulse per lane.
+    pub acc: [f32; 4],
     acc_f1: [f32; 4],
     acc_f2: [f32; 4],
     // Active lane count
-    count: u32,
+    /// Active lane count.
+    pub count: u32,
     // Explicit tail padding: keeps the struct a multiple of its 16-byte
     // alignment (WGSL stride) without implicit padding, which `Pod` rejects.
     _pad0: u32,
@@ -312,23 +319,36 @@ pub(crate) struct GpuBatch {
 
 /// One lane's worth of CPU-side contact data for `GpuBatch::fill_lane`
 /// (mirrors the WGSL batch layout: one scalar per field).
-struct LaneInput<'a> {
-    lane: usize,
-    n: Vec3,
-    ra: Vec3,
-    rb: Vec3,
-    target: f32,
-    mu: f32,
-    bias: f32,
-    acc_in: f32,
-    a: &'a RigidBody,
-    ba_idx: u32,
-    b: &'a RigidBody,
-    bb_idx: u32,
+pub struct LaneInput<'a> {
+    /// Lane index within the batch (0..4).
+    pub lane: usize,
+    /// Contact normal (body A to body B).
+    pub n: Vec3,
+    /// Contact offset from body A's center.
+    pub ra: Vec3,
+    /// Contact offset from body B's center.
+    pub rb: Vec3,
+    /// Approach-speed target for the lane.
+    pub target: f32,
+    /// Coulomb friction coefficient.
+    pub mu: f32,
+    /// Restitution bias.
+    pub bias: f32,
+    /// Incoming accumulated normal impulse (warm start).
+    pub acc_in: f32,
+    /// Body A snapshot.
+    pub a: &'a RigidBody,
+    /// Body A index.
+    pub ba_idx: u32,
+    /// Body B snapshot.
+    pub b: &'a RigidBody,
+    /// Body B index.
+    pub bb_idx: u32,
 }
 
 impl GpuBatch {
-    fn zero() -> Self {
+    /// Blank batch: zeroed lanes, zero active count.
+    pub fn zero() -> Self {
         Self::zeroed()
     }
 
@@ -336,7 +356,7 @@ impl GpuBatch {
     /// The per-lane scalars are packed into `LaneInput` (which mirrors the
     /// WGSL batch layout: one scalar per field) to stay within the structural
     /// gate's argument-count limit.
-    fn fill_lane(&mut self, input: LaneInput<'_>) {
+    pub fn fill_lane(&mut self, input: LaneInput<'_>) {
         let LaneInput {
             lane,
             n,
@@ -667,7 +687,7 @@ fn contact_solver() {
 
 /// The complete WGSL source: struct declarations (generated from the Rust
 /// layouts) + the compute shader translated from `contact_solver`.
-fn contact_solver_wgsl() -> String {
+pub fn contact_solver_wgsl() -> String {
     format!(
         "{}\n{}\n{}",
         GpuBodyState::WGSL_SOURCE,
@@ -889,7 +909,7 @@ impl GpuSequentialImpulse {
     }
 
     /// Upload contact batches to the GPU buffer.
-    pub(crate) fn upload_batches(&self, batches: &[GpuBatch]) {
+    pub fn upload_batches(&self, batches: &[GpuBatch]) {
         let n = batches.len().min(self.max_batches);
         let mut data = vec![GpuBatch::zeroed(); self.max_batches];
         for (i, b) in batches.iter().enumerate().take(n) {
@@ -900,7 +920,7 @@ impl GpuSequentialImpulse {
     }
 
     /// Download accumulated impulses back from the GPU batch buffer.
-    pub(crate) fn download_acc(&self, batches: &mut [GpuBatch]) {
+    pub fn download_acc(&self, batches: &mut [GpuBatch]) {
         let n = batches.len().min(self.max_batches);
         let copy_size = self.max_batches as u64 * GPU_BATCH_STRIDE;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1169,7 +1189,7 @@ impl GpuAvbdStub {
     /// Pure (no device); the future dispatch will upload this verbatim.
     /// Entries mirror [`avbd_inertial_hessian_diag`]'s inputs exactly.
     #[allow(dead_code)]
-    pub(crate) fn mass_roster(&self, bodies: &[RigidBody]) -> Vec<GpuAvbdMass> {
+    pub fn mass_roster(&self, bodies: &[RigidBody]) -> Vec<GpuAvbdMass> {
         bodies.iter().map(GpuAvbdMass::from_body).collect()
     }
 
@@ -1179,7 +1199,7 @@ impl GpuAvbdStub {
     /// device path validates against this (tolerance, never bit-identical).
     /// Returns `None` only on a body/rhs length mismatch.
     #[allow(dead_code)]
-    pub(crate) fn stage_diag_solve(
+    pub fn stage_diag_solve(
         &self,
         bodies: &[RigidBody],
         rhs: &[[f32; 6]],
@@ -1324,750 +1344,4 @@ pub fn avbd_stub_wgsl() -> String {
         GpuBodyState::WGSL_SOURCE,
         avbd_stub_kernel::wgsl_source()
     )
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::body::RigidBody;
-    use crate::engine::{
-        Manifold, ManifoldPoint, ManifoldState, PhysicsEngine, SequentialImpulseEngine,
-    };
-
-    /// Bulk params layout (no device): pass `k` carries `(k, total, rest)`
-    /// — the exact values the old per-iteration loop uploaded one by one.
-    #[test]
-    fn solve_params_mirror_old_per_iteration_values() {
-        let params = solve_params(8, true);
-        assert_eq!(params.len(), 8);
-        for (k, entry) in params.iter().enumerate() {
-            assert_eq!(*entry, [k as u32, 8, 1, 0], "pass {k} params wrong");
-        }
-        let params = solve_params(3, false);
-        assert_eq!(params, vec![[0, 3, 0, 0], [1, 3, 0, 0], [2, 3, 0, 0]]);
-        assert!(solve_params(0, false).is_empty());
-    }
-
-    #[test]
-    fn gpu_pack_produces_disjoint_batches() {
-        let bodies = vec![
-            RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0), // 0: static
-            RigidBody::new_sphere(Vec3::new(1.0, 0.0, 0.0), 0.5, 1.0), // 1
-            RigidBody::new_sphere(Vec3::new(2.0, 0.0, 0.0), 0.5, 1.0), // 2
-            RigidBody::new_sphere(Vec3::new(3.0, 0.0, 0.0), 0.5, 1.0), // 3
-            RigidBody::new_sphere(Vec3::new(4.0, 0.0, 0.0), 0.5, 1.0), // 4
-        ];
-        // Single-point manifold helper
-        fn mk_manifold(i: usize, j: usize, n: Vec3, p: Vec3) -> Manifold {
-            Manifold {
-                body_a: i,
-                body_b: j,
-                normal: n,
-                point_count: 1,
-                points: [ManifoldPoint {
-                    world_point: p,
-                    penetration: 0.01,
-                }; 4],
-            }
-        }
-        fn mk_state(i: usize, j: usize) -> ManifoldState {
-            ManifoldState {
-                mi: 0,
-                i,
-                j,
-                count: 1,
-                acc: [0.0; 4],
-                acc_friction: [0.0; 4],
-                acc_friction2: [0.0; 4],
-                bias: [0.0; 4],
-                target: [0.0; 4],
-                mu: 0.3,
-                mu2: 0.3,
-                mu_roll: 0.0,
-                mu_spin: 0.0,
-                acc_roll: [0.0; 4],
-                acc_roll2: [0.0; 4],
-                acc_spin: [0.0; 4],
-                t1: Vec3::X,
-                t2: Vec3::Z,
-                la: [Vec3::ZERO; 4],
-                lb: [Vec3::ZERO; 4],
-                pen0: [0.0; 4],
-            }
-        }
-
-        // Create contacts (0,1), (0,2) — conflict on 0
-        let manifolds = vec![
-            mk_manifold(0, 1, Vec3::X, Vec3::ZERO),
-            mk_manifold(0, 2, Vec3::X, Vec3::ZERO),
-            mk_manifold(3, 4, Vec3::X, Vec3::new(3.5, 0.0, 0.0)),
-        ];
-        let states: Vec<ManifoldState> = (0..3)
-            .map(|i| {
-                let m = &manifolds[i];
-                mk_state(m.body_a, m.body_b)
-            })
-            .collect();
-        let single_indices: Vec<usize> = (0..3).collect();
-
-        let (batches, count) =
-            pack_single_point_batches(&bodies, &states, &manifolds, &single_indices);
-        assert_eq!(count, 2, "should form 2 batches: [1, 2] with conflict");
-        assert_eq!(
-            batches[0].count, 1,
-            "first batch only has the non-conflicting contact... wait"
-        );
-        // Actually with greedy pack: (0,1) starts batch; (0,2) conflicts → flush batch1(1), start batch2 with (0,2); (3,4) clears bodies → adds to batch2.
-        // So batch[0].count = 1 (just 0,1), batch[1].count = 2 (0,2 + 3,4).
-        assert_eq!(batches[1].count, 2, "second batch has 2 lanes");
-    }
-
-    #[test]
-    fn layout_stride_matches_struct_size() {
-        // The WgslStruct derive asserts per-field offsets and the total size
-        // at compile time; the buffer strides must be the same numbers.
-        assert_eq!(GPU_BODY_STRIDE, 32);
-        assert_eq!(GPU_BATCH_STRIDE, std::mem::size_of::<GpuBatch>() as u64);
-        assert_eq!(std::mem::offset_of!(GpuBodyState, velocity), 0);
-        assert_eq!(std::mem::offset_of!(GpuBodyState, angular), 16);
-    }
-
-    #[test]
-    fn generated_wgsl_contains_rust_authored_layouts() {
-        let source = contact_solver_wgsl();
-        // Struct declarations are generated from the Rust structs...
-        assert!(source.contains("struct GpuBodyState"));
-        assert!(source.contains("velocity: vec3<f32>"));
-        assert!(source.contains("struct GpuBatch"));
-        assert!(source.contains("count: u32"));
-        // ...and the entry point is translated from the Rust kernel body.
-        assert!(source.contains("@compute @workgroup_size(4)"));
-        assert!(source.contains("array<GpuBodyState>"));
-        assert!(source.contains("fn main("));
-        assert!(source.contains("let b = batch_buf[gid.x];"));
-        assert!(source.contains("if (l >= b.count) { return; }"));
-        assert!(source.contains("batch_buf[gid.x].acc[l] = acc;"));
-        // DSL-pilot rails: the shared contact_math row is stitched ahead of
-        // main and called from the entry (single source of truth with CPU).
-        let helper_pos = source
-            .find("fn contact_normal_step(")
-            .expect("stitched source must contain the normal helper");
-        let friction_pos = source
-            .find("fn contact_friction_clamp(")
-            .expect("stitched source must contain the friction helper");
-        let main_pos = source
-            .find("fn main(")
-            .expect("stitched source must contain main");
-        assert!(
-            helper_pos < main_pos && friction_pos < main_pos,
-            "helpers must be declared before use"
-        );
-        assert!(source.contains("contact_normal_step(vn, spec_target, inv_k, acc)"));
-        assert!(source.contains("contact_friction_clamp(raw_t1,"));
-    }
-
-    #[test]
-    fn generated_wgsl_validates_with_naga() {
-        let source = contact_solver_wgsl();
-        let module = naga::front::wgsl::parse_str(&source)
-            .unwrap_or_else(|e| panic!("generated WGSL must parse: {e}"));
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        validator
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("generated WGSL must validate: {e}"));
-    }
-
-    /// Solver-grade kernel preconditions end to end: a 3x3 LDL
-    /// factor-and-solve helper written with `mat3x3` + fixed-size scratch
-    /// arrays, stitched into a pipeline via `helpers(...)`. The stitched
-    /// source must carry the helper ahead of `main` and naga-validate —
-    /// this is the exact shape a per-body Hessian solve will take.
-    #[ornis_macros::wgsl_fn]
-    fn avbd_ldl_3x3(c0: Vec3, c1: Vec3, c2: Vec3, rhs: Vec3) -> Vec3 {
-        let a = Mat3::from_cols(c0, c1, c2);
-        let mut l: [[f32; 3]; 3] = [[0.0; 3]; 3];
-        let mut d: [f32; 3] = [0.0; 3];
-        l[0][0] = 1.0;
-        l[1][1] = 1.0;
-        l[2][2] = 1.0;
-        d[0] = a[0][0];
-        l[1][0] = a[1][0] / d[0];
-        l[2][0] = a[2][0] / d[0];
-        d[1] = a[1][1] - l[1][0] * l[1][0] * d[0];
-        l[2][1] = (a[2][1] - l[2][0] * l[1][0] * d[0]) / d[1];
-        d[2] = a[2][2] - l[2][0] * l[2][0] * d[0] - l[2][1] * l[2][1] * d[1];
-        let y0 = rhs[0];
-        let y1 = rhs[1] - l[1][0] * y0;
-        let y2 = rhs[2] - l[2][0] * y0 - l[2][1] * y1;
-        let z0 = y0 / d[0];
-        let z1 = y1 / d[1];
-        let z2 = y2 / d[2];
-        let x2 = z2;
-        let x1 = z1 - l[2][1] * x2;
-        let x0 = z0 - l[1][0] * x1 - l[2][0] * x2;
-        return Vec3::new(x0, x1, x2);
-    }
-
-    #[gpu_pipeline(
-        workgroup_size = 4,
-        storage(hess: [[f32; 3]; 64], read_write),
-        uniform(params: [u32; 4]),
-        builtin(gid: workgroup_id),
-        helpers(avbd_ldl_3x3),
-    )]
-    fn avbd_hessian_solve() {
-        if gid.x >= params.x {
-            return;
-        }
-        let c = hess[gid.x];
-        let r = avbd_ldl_3x3(c, c, c, Vec3::new(1.0, 1.0, 1.0));
-        hess[gid.x] = r;
-    }
-
-    #[test]
-    fn helpers_stitch_ahead_of_main_and_validate() {
-        let source = avbd_hessian_solve::wgsl_source();
-        let helper_pos = source
-            .find("fn avbd_ldl_3x3(")
-            .expect("stitched source must contain the helper");
-        let main_pos = source
-            .find("fn main(")
-            .expect("stitched source must contain main");
-        assert!(helper_pos < main_pos, "helper must be declared before use");
-        assert!(source.contains("mat3x3<f32>(c0, c1, c2)"));
-        assert!(source.contains("var l: array<array<f32, 3>, 3>"));
-        assert!(source.contains("var d: array<f32, 3>"));
-        assert!(source.contains("let r = avbd_ldl_3x3(c, c, c, vec3<f32>(1.0, 1.0, 1.0));"));
-        let module = naga::front::wgsl::parse_str(&source)
-            .unwrap_or_else(|e| panic!("stitched WGSL must parse: {e}"));
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        validator
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("stitched WGSL must validate: {e}"));
-    }
-
-    /// Create a wgpu device/queue for tests. Returns `None` when no adapter
-    /// is available (e.g. a machine without GPU drivers) — the device tests
-    /// then skip instead of failing.
-    fn create_test_device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            memory_budget_thresholds: Default::default(),
-            backend_options: Default::default(),
-            display: None,
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            apply_limit_buckets: false,
-        }))
-        .ok()?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("ornis-physics gpu test"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .ok()?;
-        Some((Arc::new(device), Arc::new(queue)))
-    }
-
-    /// Direct solver-level check: a sphere falling onto a static sphere must
-    /// cancel its normal velocity, accumulate the full impulse, and leave the
-    /// static body untouched.
-    #[test]
-    fn gpu_solver_single_contact_matches_analytic() {
-        let Some((device, queue)) = create_test_device() else {
-            eprintln!("gpu_solver_single_contact_matches_analytic: no wgpu adapter — skipped");
-            return;
-        };
-        let solver = GpuSequentialImpulse::new(device, queue, 2, 1);
-
-        let a = RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0); // static
-        let mut b = RigidBody::new_sphere(Vec3::new(0.0, 1.0, 0.0), 0.5, 1.0);
-        b.velocity = Vec3::new(0.0, -1.0, 0.0);
-
-        let mut batch = GpuBatch::zero();
-        batch.fill_lane(LaneInput {
-            lane: 0,
-            n: Vec3::Y,                    // normal
-            ra: Vec3::new(0.0, 0.5, 0.0),  // ra = contact − center a
-            rb: Vec3::new(0.0, -0.5, 0.0), // rb = contact − center b
-            target: 0.0,                   // target (non-speculative rest)
-            mu: 0.0,                       // mu (no friction)
-            bias: 0.0,                     // bias (no restitution)
-            acc_in: 0.0,                   // acc_in
-            a: &a,
-            ba_idx: 0,
-            b: &b,
-            bb_idx: 1,
-        });
-        batch.count = 1;
-
-        solver.upload_bodies(&[a.clone(), b.clone()]);
-        solver.upload_batches(&[batch]);
-        solver.solve(1, 8, false);
-
-        let mut out = [a, b];
-        solver.download_bodies(&mut out);
-        let mut acc_batches = [batch];
-        solver.download_acc(&mut acc_batches);
-
-        assert!(
-            out[1].velocity.length() < 1e-3,
-            "normal velocity must be cancelled, got {:?}",
-            out[1].velocity
-        );
-        assert!(
-            (acc_batches[0].acc[0] - 1.0).abs() < 1e-2,
-            "accumulated impulse must equal the body mass, got {}",
-            acc_batches[0].acc[0]
-        );
-        assert_eq!(out[0].velocity, Vec3::ZERO, "static body must not move");
-        assert_eq!(out[0].angular_velocity, Vec3::ZERO);
-        assert!(
-            out[1].angular_velocity.length() < 1e-3,
-            "no torque expected"
-        );
-    }
-
-    /// DSL-pilot agreement: one frictional contact solved on the GPU must
-    /// match the CPU wide batch — both sides now run the shared
-    /// `contact_math` row — within tolerance. Never bit-identical by
-    /// promise (device float contraction may differ ±1 ulp per op), but
-    /// the same row math on both sides.
-    #[test]
-    fn gpu_contact_row_matches_cpu_kernels() {
-        let Some((device, queue)) = create_test_device() else {
-            eprintln!("gpu_contact_row_matches_cpu_kernels: no wgpu adapter — skipped");
-            return;
-        };
-        let n = Vec3::Y;
-        let t1 = crate::math::tangent_basis(n).0;
-        let t2 = t1.cross(n);
-        let contact = Vec3::new(0.0, 0.5, 0.0);
-        let mu = 0.5;
-
-        let a = RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0); // static
-        let mut b = RigidBody::new_sphere(Vec3::new(0.0, 1.0, 0.0), 0.5, 1.0);
-        b.velocity = Vec3::new(0.15, -1.0, 0.1); // approach + small slide
-        let bodies = [a.clone(), b.clone()];
-
-        // GPU side: one lane, 48 iterations, no restitution. (The row
-        // converges in a handful of passes; 48 keeps the CPU/GPU agreement
-        // comparison on many accumulated updates.)
-        let solver = GpuSequentialImpulse::new(device, queue, 2, 1);
-        let mut gb = GpuBatch::zero();
-        gb.fill_lane(LaneInput {
-            lane: 0,
-            n,
-            ra: contact - a.position,
-            rb: contact - b.position,
-            target: 0.0,
-            mu,
-            bias: 0.0,
-            acc_in: 0.0,
-            a: &a,
-            ba_idx: 0,
-            b: &b,
-            bb_idx: 1,
-        });
-        gb.count = 1;
-        solver.upload_bodies(&bodies);
-        solver.upload_batches(&[gb]);
-        solver.solve(1, 48, false);
-        let mut gpu_bodies = bodies.clone();
-        solver.download_bodies(&mut gpu_bodies);
-        let mut gpu_batches = [gb];
-        solver.download_acc(&mut gpu_batches);
-
-        // CPU side: the same contact as a one-lane wide batch (the batch
-        // path calls `contact_math::...::eval` per lane).
-        let manifolds = [Manifold {
-            body_a: 0,
-            body_b: 1,
-            normal: n,
-            point_count: 1,
-            points: [ManifoldPoint {
-                world_point: contact,
-                penetration: 0.01,
-            }; 4],
-        }];
-        let mut states = [ManifoldState {
-            mi: 0,
-            i: 0,
-            j: 1,
-            count: 1,
-            acc: [0.0; 4],
-            acc_friction: [0.0; 4],
-            acc_friction2: [0.0; 4],
-            bias: [0.0; 4],
-            target: [0.0; 4],
-            mu,
-            mu2: mu,
-            mu_roll: 0.0,
-            mu_spin: 0.0,
-            acc_roll: [0.0; 4],
-            acc_roll2: [0.0; 4],
-            acc_spin: [0.0; 4],
-            t1,
-            t2,
-            la: [Vec3::ZERO; 4],
-            lb: [Vec3::ZERO; 4],
-            pen0: [0.0; 4],
-        }];
-        let items: Vec<(usize, &Manifold, &ManifoldState)> = vec![(0, &manifolds[0], &states[0])];
-        let mut batch = crate::wide::WideBatch::build(&items, &bodies);
-        let mut cpu_bodies = bodies.clone();
-        for _ in 0..48 {
-            batch.gather(&cpu_bodies);
-            batch.solve_iteration();
-            batch.scatter(&mut cpu_bodies);
-        }
-        batch.write_back_acc(&mut states);
-
-        // The normal approach must stop and the contact slip must bite on
-        // both sides. NOTE: this asserts slip (relative tangential velocity
-        // at the contact), not center slide: with rolling resistance off, a
-        // frictional hit converts slide into rolling (v = -w x r), so the
-        // center keeps moving at ~0.129 while the contact slip is ~0.
-        let slip_of = |bodies: &[RigidBody; 2]| {
-            let (a, b) = (&bodies[0], &bodies[1]);
-            let rel = (b.velocity + b.angular_velocity.cross(contact - b.position))
-                - (a.velocity + a.angular_velocity.cross(contact - a.position));
-            (rel - n * rel.dot(n)).length()
-        };
-        for (label, bodies) in [("gpu", &gpu_bodies), ("cpu", &cpu_bodies)] {
-            assert!(
-                bodies[1].velocity.y.abs() < 0.05,
-                "{label}: normal approach must stop, got {:?}",
-                bodies[1].velocity
-            );
-            let slip = slip_of(bodies);
-            assert!(
-                slip < 1e-3,
-                "{label}: contact slip must bite, tangential slip {slip}"
-            );
-            assert_eq!(
-                bodies[0].velocity,
-                Vec3::ZERO,
-                "{label}: static must not move"
-            );
-        }
-        // ...and the two sides must agree in tolerance.
-        for h in 0..2 {
-            let dv = (gpu_bodies[h].velocity - cpu_bodies[h].velocity).length();
-            let dw = (gpu_bodies[h].angular_velocity - cpu_bodies[h].angular_velocity).length();
-            assert!(dv < 1e-4, "body {h} velocity diverged: {dv}");
-            assert!(dw < 1e-4, "body {h} angular velocity diverged: {dw}");
-        }
-        assert!(
-            (gpu_batches[0].acc[0] - states[0].acc[0]).abs() < 1e-4,
-            "normal impulse diverged: gpu {} vs cpu {}",
-            gpu_batches[0].acc[0],
-            states[0].acc[0]
-        );
-    }
-
-    /// Engine-level check: the same scene run on the CPU and with the GPU
-    /// solver attached must settle to the same resting state.
-    #[test]
-    fn gpu_solver_tracks_cpu_engine() {
-        let Some((device, queue)) = create_test_device() else {
-            eprintln!("gpu_solver_tracks_cpu_engine: no wgpu adapter — skipped");
-            return;
-        };
-        let solver = GpuSequentialImpulse::new(device, queue, 16, 64);
-        let gravity = Vec3::new(0.0, -9.81, 0.0);
-
-        let mut cpu = SequentialImpulseEngine::new(gravity);
-        let mut gpu = SequentialImpulseEngine::new(gravity);
-        for engine in [&mut cpu, &mut gpu] {
-            engine.add_body(RigidBody::new_box(
-                Vec3::new(0.0, -2.0, 0.0),
-                Vec3::new(4.0, 0.5, 4.0),
-                0.0,
-            ));
-            // Vertically aligned stack: with lateral offsets the stack
-            // topples chaotically and the Jacobi/GS hybrid (GPU path is not
-            // bit-identical to the CPU GS pass) diverges past any tight
-            // tolerance — the contract checked here is the settled state of
-            // a STABLE stack.
-            engine.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, 0.0), 0.5, 1.0));
-            engine.add_body(RigidBody::new_sphere(Vec3::new(0.0, 1.2, 0.0), 0.5, 1.0));
-            engine.add_body(RigidBody::new_sphere(Vec3::new(0.0, 2.4, 0.0), 0.5, 1.0));
-        }
-        gpu.set_gpu_solver(solver);
-
-        for _ in 0..60 {
-            cpu.step(1.0 / 60.0);
-            gpu.step(1.0 / 60.0);
-        }
-
-        for i in 0..4 {
-            let (bc, bg) = (cpu.get_body(i).unwrap(), gpu.get_body(i).unwrap());
-            assert!(
-                bc.position.distance(bg.position) < 0.05,
-                "body {i} position diverged: cpu {:?} vs gpu {:?}",
-                bc.position,
-                bg.position
-            );
-            assert!(
-                bc.velocity.distance(bg.velocity) < 0.05,
-                "body {i} velocity diverged: cpu {:?} vs gpu {:?}",
-                bc.velocity,
-                bg.velocity
-            );
-        }
-    }
-
-    /// Rung-1 mass roster layout (no device): 16-byte stride, `inertia`
-    /// first at offset 0 (16-aligned `vec3<f32>`), `inv_mass` at 12.
-    #[test]
-    fn avbd_mass_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<GpuAvbdMass>(), 16);
-        assert_eq!(std::mem::offset_of!(GpuAvbdMass, inertia), 0);
-        assert_eq!(std::mem::offset_of!(GpuAvbdMass, inv_mass), 12);
-        let source = avbd_stub_wgsl();
-        assert!(source.contains("struct GpuAvbdMass"));
-        assert!(source.contains("inertia: vec3<f32>"));
-        assert!(source.contains("inv_mass: f32"));
-    }
-
-    /// Rung-1 CPU assembly (no device): the inertial Hessian diagonal
-    /// equals the analytic `m/dt²`, `I/dt²` values; statics and
-    /// degenerate `dt` yield zeros.
-    #[test]
-    fn avbd_hessian_diag_matches_analytic() {
-        let dt = 1.0 / 60.0;
-        let diag = avbd_inertial_hessian_diag(1.0, [2.0, 3.0, 4.0], dt);
-        // f32 1/60 is inexact, so compare in tolerance (never bit-identical
-        // by promise — same rule as the device comparison to come).
-        let expect = [3600.0, 3600.0, 3600.0, 7200.0, 10800.0, 14400.0];
-        for i in 0..6 {
-            assert!(
-                (diag[i] - expect[i]).abs() < 1e-2,
-                "axis {i}: {} vs {}",
-                diag[i],
-                expect[i]
-            );
-        }
-        // Heavier body: linear block scales with mass, angular with inertia.
-        let heavy = avbd_inertial_hessian_diag(0.1, [1.0, 1.0, 1.0], dt);
-        assert!((heavy[0] - 36000.0).abs() < 1.0);
-        assert!((heavy[3] - 3600.0).abs() < 1e-2);
-        // Statics and degenerate dt assemble nothing.
-        assert_eq!(
-            avbd_inertial_hessian_diag(0.0, [1.0, 1.0, 1.0], dt),
-            [0.0; 6]
-        );
-        assert_eq!(
-            avbd_inertial_hessian_diag(-1.0, [1.0, 1.0, 1.0], dt),
-            [0.0; 6]
-        );
-        assert_eq!(
-            avbd_inertial_hessian_diag(1.0, [1.0, 1.0, 1.0], 0.0),
-            [0.0; 6]
-        );
-        assert_eq!(
-            avbd_inertial_hessian_diag(1.0, [1.0, 1.0, 1.0], f32::NAN),
-            [0.0; 6]
-        );
-    }
-
-    /// Rung-1 CPU solve (no device): the diagonal LDL agrees with the
-    /// dense AVBD LDL on diagonal systems within tolerance (never
-    /// bit-identical by promise); degenerate axes solve to zero (the
-    /// documented shader adaptation — no `Option` in WGSL).
-    #[test]
-    fn avbd_diag_ldl_matches_dense_solve() {
-        let diag = [4.0, 3600.0, 1.5, 7200.0, 9.0, 2.25];
-        let rhs = [8.0, -3.6, 0.75, 1.44, 27.0, -4.5];
-        let mut lhs = [[0.0f32; 6]; 6];
-        for (i, row) in lhs.iter_mut().enumerate() {
-            row[i] = diag[i];
-        }
-        let dense = crate::avbd::solve_6x6(lhs, rhs).expect("SPD diagonal solves");
-        let flown = avbd_diag_solve_cpu(diag, rhs);
-        for i in 0..6 {
-            assert!(
-                (dense[i] - flown[i]).abs() < 1e-5,
-                "axis {i}: dense {} vs diag {}",
-                dense[i],
-                flown[i]
-            );
-        }
-        // Degenerate axes carry no correction (statics/sleepers stay put).
-        let mut bad = diag;
-        bad[2] = 0.0;
-        bad[4] = -1.0;
-        let zeroed = avbd_diag_solve_cpu(bad, rhs);
-        assert_eq!(zeroed[2], 0.0);
-        assert_eq!(zeroed[4], 0.0);
-        assert!((zeroed[0] - rhs[0] / diag[0]).abs() < 1e-9);
-    }
-
-    /// Rung-1 staging (no device): the CPU reference assembles + solves
-    /// per body (dynamics move, statics zero out) and rejects mismatched
-    /// inputs — the exact contract the future device path validates against.
-    #[test]
-    fn avbd_stage_diag_solve_mirrors_kernel_math() {
-        let stub = GpuAvbdStub::new(8);
-        let dynamic = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 2.0);
-        let static_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0);
-        let bodies = [dynamic, static_body];
-        let rhs = [[1.0; 6], [1.0; 6]];
-        let dt = 1.0 / 60.0;
-        let out = stub
-            .stage_diag_solve(&bodies, &rhs, dt)
-            .expect("matching inputs stage");
-        assert_eq!(out.len(), 2);
-        // Dynamic linear block: rhs / (m/dt²) with m = 2.
-        let expect_lin = 1.0 / (2.0 / (dt * dt));
-        for (i, &got) in out[0].iter().enumerate().take(3) {
-            assert!((got - expect_lin).abs() < 1e-9, "axis {i}: {got}");
-        }
-        assert_eq!(out[1], [0.0; 6], "static body carries no correction");
-        assert!(stub.stage_diag_solve(&bodies, &rhs[..1], dt).is_none());
-    }
-
-    /// Rung-1 roster (no device): dynamics carry their mass model, statics
-    /// and kinematics zero out (the exact inputs `avbd_stub_kernel` reads).
-    #[test]
-    fn avbd_mass_roster_mirrors_body_mass_model() {
-        use crate::body::BodyType;
-        let stub = GpuAvbdStub::new(8);
-        let mut dynamic = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 2.0);
-        dynamic.body_type = BodyType::Dynamic;
-        let static_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0);
-        let roster = stub.mass_roster(&[dynamic.clone(), static_body]);
-        assert_eq!(roster.len(), 2);
-        assert!((roster[0].inv_mass - dynamic.inv_mass).abs() < 1e-9);
-        assert_eq!(roster[0].inertia, dynamic.inertia.to_array());
-        assert_eq!(roster[1].inv_mass, 0.0);
-        assert_eq!(roster[1].inertia, [0.0; 3]);
-    }
-
-    /// Rung-1 contract: the kernel source carries the Rust-authored layouts
-    /// plus the Hessian/LDL helpers stitched ahead of `main`, and
-    /// naga-validates without a device.
-    #[test]
-    fn avbd_stub_kernel_validates_with_naga() {
-        let source = avbd_stub_wgsl();
-        assert!(source.contains("struct GpuAvbdMass"));
-        assert!(source.contains("struct GpuBodyState"));
-        for helper in [
-            "fn avbd_hessian_lin(",
-            "fn avbd_hessian_ang(",
-            "fn avbd_diag_solve(",
-        ] {
-            let helper_pos = source.find(helper).unwrap_or_else(|| {
-                panic!("stitched source must contain {helper}");
-            });
-            let main_pos = source.find("fn main(").expect("source must contain main");
-            assert!(
-                helper_pos < main_pos,
-                "{helper} must be declared before use"
-            );
-        }
-        assert!(source.contains("avbd_hessian_lin(m.inv_mass, dt)"));
-        assert!(source.contains("avbd_diag_solve(h_lin, r.velocity)"));
-        assert!(source.contains("avbd_delta[gid.x].velocity = x_lin;"));
-        let module = naga::front::wgsl::parse_str(&source)
-            .unwrap_or_else(|e| panic!("stub WGSL must parse: {e}"));
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        validator
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("stub WGSL must validate: {e}"));
-    }
-
-    /// STUB contract: stepping falls back to the CPU AVBD engine (gravity
-    /// integrates velocity) and never claims the device.
-    #[test]
-    fn avbd_stub_cpu_fallback_advances() {
-        use crate::avbd::AvbdEngine;
-        use crate::engine::PhysicsEngine;
-
-        fn runs_on_device_via_seam(stub: &GpuAvbdStub) -> bool {
-            crate::gpu::GpuAvbdDispatch::runs_on_device(stub)
-        }
-
-        let stub = GpuAvbdStub::new(8);
-        assert!(!stub.runs_on_device());
-        assert!(!runs_on_device_via_seam(&stub));
-        let mut engine = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
-        engine.add_body(RigidBody::new_sphere(Vec3::new(0.0, 5.0, 0.0), 0.5, 1.0));
-        stub.step_avbd(&mut engine, 1.0 / 60.0);
-        let v = engine
-            .get_body(0)
-            .expect("stub scene keeps its body")
-            .velocity;
-        assert!(v.y < 0.0, "CPU fallback must integrate gravity, got {v:?}");
-    }
-
-    /// Rung-1 wiring: the GPU flag defaults off; attaching the stub records
-    /// the CPU fallback per completed step while the trajectory stays
-    /// bit-identical to the unattached engine (same code path, honest
-    /// fallback — unlike the Jacobi/GS GPU contact hybrid, which only
-    /// promises tolerance).
-    #[test]
-    fn avbd_engine_gpu_flag_defaults_off_and_falls_back() {
-        use crate::avbd::AvbdEngine;
-        use crate::engine::PhysicsEngine;
-
-        fn scene() -> AvbdEngine {
-            let mut engine = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
-            engine.add_body(RigidBody::new_box(
-                Vec3::new(0.0, -0.5, 0.0),
-                Vec3::new(5.0, 0.5, 5.0),
-                0.0,
-            ));
-            engine.add_body(RigidBody::new_box(
-                Vec3::new(0.0, 3.0, 0.0),
-                Vec3::splat(0.4),
-                1.0,
-            ));
-            engine
-        }
-
-        let mut plain = scene();
-        assert!(!plain.gpu_avbd_enabled());
-        assert_eq!(plain.gpu_fallback_steps(), 0);
-        let mut wired = scene();
-        wired.set_gpu_avbd(Some(GpuAvbdStub::new(8)));
-        assert!(wired.gpu_avbd_enabled());
-        for _ in 0..60 {
-            plain.step(1.0 / 60.0);
-            wired.step(1.0 / 60.0);
-        }
-        assert_eq!(wired.gpu_fallback_steps(), 60);
-        assert_eq!(plain.gpu_fallback_steps(), 0);
-        for h in 0..2 {
-            let (bp, bw) = (
-                plain.get_body(h).expect("plain keeps bodies"),
-                wired.get_body(h).expect("wired keeps bodies"),
-            );
-            assert_eq!(bp.position.to_array(), bw.position.to_array());
-            assert_eq!(bp.velocity.to_array(), bw.velocity.to_array());
-        }
-        wired.set_gpu_avbd(None);
-        assert!(!wired.gpu_avbd_enabled());
-    }
 }

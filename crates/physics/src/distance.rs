@@ -19,9 +19,12 @@ pub(crate) use boxes::box_box_signed_gap;
 
 /// A placed shape: geometry plus world transform.
 #[derive(Clone, Copy)]
-pub(crate) struct ShapeRef<'a> {
+pub struct ShapeRef<'a> {
+    /// Geometry to query.
     pub shape: &'a Shape,
+    /// World-space position.
     pub pos: Vec3,
+    /// World-space orientation.
     pub rot: Quat,
 }
 

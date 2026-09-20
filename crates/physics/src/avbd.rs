@@ -253,7 +253,7 @@ const ROLL_PEN: f32 = 100.0;
 /// assembling the inertial + contact-row Hessian; the GPU rung-1 diagonal
 /// solve (behind the `gpu` feature) cross-checks against it on diagonal
 /// systems (tolerance, never bit-identical by promise).
-pub(crate) fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
+pub fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
     let mut l = [[0.0f32; 6]; 6];
     let mut d = [0.0f32; 6];
     for i in 0..6 {
@@ -3866,48 +3866,5 @@ impl AvbdEngine {
         }
         self.contact_events.append(&mut hits);
         self.prev_touch = touch_now;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ldl_solves_identity() {
-        let lhs = [
-            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 2.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0, 2.0],
-        ];
-        let x = solve_6x6(lhs, [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]).unwrap();
-        for (got, want) in x.iter().zip([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) {
-            assert!((got - want).abs() < 1e-5);
-        }
-    }
-
-    #[test]
-    fn ldl_rejects_non_positive() {
-        let lhs = [[0.0f32; 6]; 6];
-        assert!(solve_6x6(lhs, [0.0; 6]).is_none());
-    }
-
-    #[test]
-    fn tangent_basis_is_orthonormal() {
-        for n in [
-            Vec3::X,
-            Vec3::Y,
-            Vec3::Z,
-            Vec3::new(1.0, 2.0, 3.0).normalize(),
-        ] {
-            let (t1, t2) = tangent_basis(n);
-            assert!((t1.dot(n)).abs() < 1e-6);
-            assert!((t2.dot(n)).abs() < 1e-6);
-            assert!((t1.dot(t2)).abs() < 1e-6);
-            assert!((t1.length() - 1.0).abs() < 1e-6);
-        }
     }
 }

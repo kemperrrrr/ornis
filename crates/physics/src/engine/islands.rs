@@ -104,7 +104,7 @@ impl SequentialImpulseEngine {
     /// propagates motion through the island, so partial wake is incoherent).
     /// Non-dynamic bodies have no island (statics are asleep from birth and
     /// never wake anything) — waking them is a no-op by construction.
-    pub(super) fn wake_island(&mut self, h: usize) {
+    pub fn wake_island(&mut self, h: usize) {
         if self.bodies[h].body_type != BodyType::Dynamic {
             return;
         }
