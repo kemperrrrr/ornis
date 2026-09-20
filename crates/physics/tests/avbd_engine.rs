@@ -1656,8 +1656,10 @@ fn avbd_confluence_one_vs_many_threads() {
     // Thread-schedule independence: parallel pair discovery must not leak
     // the thread schedule into the simulation. A heterogeneous scene above the 256-body
     // parallel threshold (tiled boxes + stack + sphere + fast drop +
-    // pendulum) runs 120 steps under 1-thread and 32-thread rayon pools;
-    // full states must match bit-for-bit. The sweep stays
+    // pendulum) runs 80 steps under 1-thread and 32-thread rayon pools;
+    // full states must match bit-for-bit. Diet: 80 steps keep every dynamic
+    // phase (fast-box bounce ~step 15, sphere landing ~step 64 + contact
+    // settle) at ~2/3 the cost. The sweep stays
     // single-threaded (Gauss-Seidel order is load-bearing), so this pins
     // discovery determinism: pure bundles in, canonical ordered merge.
     type Snapshot = ([u32; 3], [u32; 4], [u32; 3], [u32; 3]);
@@ -1738,7 +1740,7 @@ fn avbd_confluence_one_vs_many_threads() {
                 handles.len() > 256,
                 "confluence scene must engage the parallel path"
             );
-            for _ in 0..120 {
+            for _ in 0..80 {
                 physics.step(DT);
             }
             snapshot(&physics, &handles)

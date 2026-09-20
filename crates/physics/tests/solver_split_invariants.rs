@@ -64,7 +64,10 @@ fn routed_world_is_bit_identical_with_one_or_many_workers() {
             e.add_body(fast);
             e.set_routing(RoutingKind::Islands);
             let mut events = Vec::new();
-            for _ in 0..40 {
+            // Diet: 16 steps keep every gate — boxes land ~step 12 so the
+            // contact-event history covers begins plus first contact steps,
+            // and rebuilds stays 1 (initial island build, same as 40 steps).
+            for _ in 0..16 {
                 e.step(DT);
                 // Debug's shortest float representation roundtrips finite f32
                 // and preserves signed zero, unlike float PartialEq.
@@ -87,7 +90,7 @@ fn routed_world_is_bit_identical_with_one_or_many_workers() {
                 })
                 .collect::<Vec<_>>();
             let metrics = e.split_metrics().unwrap();
-            assert!(metrics.simulation_steps == 40 && metrics.rebuilds > 0);
+            assert!(metrics.simulation_steps == 16 && metrics.rebuilds > 0);
             (states, events, metrics.migrations, metrics.migrated_bodies)
         })
     };
