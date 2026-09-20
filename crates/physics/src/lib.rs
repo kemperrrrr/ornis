@@ -27,8 +27,8 @@
 //!   migrates scenes 1:1 and runs the cross-solver fracture pass.
 #![warn(missing_docs)]
 
-mod broadphase;
-mod broadphase_tree;
+/// Collision detection: broadphase backends, shapes and distance queries.
+pub mod collision;
 mod contact_math;
 /// Scene snapshots and joint-remap helpers for solver migration.
 pub mod migration;
@@ -43,11 +43,11 @@ pub mod avbd;
 /// Rigid bodies: [`RigidBody`], mass model and body handles/types.
 pub mod body;
 /// Analytic closest-point and distance queries between convex shapes.
-pub mod distance;
+pub use collision::distance;
 /// The physics step pipeline and the [`crate::engine::PhysicsEngine`] trait.
 pub mod engine;
 /// GJK/EPA fallback narrow phase for cylinder, cone and convex hull pairs.
-pub(crate) mod gjk;
+pub(crate) use collision::gjk;
 #[cfg(feature = "gpu")]
 /// GPU sequential-impulse accelerator for wide contact batches (G7).
 // The `#[gpu_pipeline]` macro emits undocumented `pub mod`s for its kernels
@@ -60,7 +60,7 @@ pub mod math;
 /// Sequential-impulse solver internals (Genesis-style `solvers/rigid/` box).
 pub mod sequential_impulse;
 /// Collision shapes with AABB projection and inertia tensors.
-pub mod shape;
+pub use collision::shape;
 /// Trigger overlap event types emitted by the sequential-impulse physics engine.
 pub mod trigger;
 /// SIMD-wide solver for single-point contact batches.
@@ -68,10 +68,13 @@ pub mod wide;
 
 use migration::{JointSnapshot, SceneSnapshot};
 use split::{SplitBody, SplitJoint, SplitOwner, SplitState};
+// Internal paths kept stable after the `collision/` move: `broadphase` and
+// `broadphase_tree` were (and stay) crate-private, reachable as before.
+pub(crate) use collision::{broadphase, broadphase_tree};
 
 pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, RigidBody};
-pub use broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
+pub use collision::broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{PhysicsEngine, SequentialImpulseEngine};
 pub use joint::{
     AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, ResolvedJoint,
