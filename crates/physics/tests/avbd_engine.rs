@@ -1796,3 +1796,51 @@ fn avbd_bounced_retouch_catches_at_offset() {
         );
     }
 }
+
+/// Custom-collider bridge end to end on AVBD: a per-entity custom soup
+/// (vertex soup + triangle indices, the shape a render/editor bridge hands
+/// over) built with `RigidBody::new_trimesh` as a static floor — a dropped
+/// ball rests at mesh top + radius through the BVH triangle loop. The SI
+/// twin is `ball_rests_on_trimesh_floor`; both engines must honor the same
+/// TriMesh path (see `Shape::pair_support` for the two undefined pairs).
+#[test]
+fn avbd_ball_rests_on_trimesh_floor() {
+    use ornis_physics::PairSupport;
+    let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let floor = physics.add_body(RigidBody::new_trimesh(
+        Vec3::ZERO,
+        &[
+            Vec3::new(-5.0, 0.0, -5.0),
+            Vec3::new(5.0, 0.0, 5.0),
+            Vec3::new(5.0, 0.0, -5.0),
+            Vec3::new(-5.0, 0.0, 5.0),
+        ],
+        &[[0, 1, 2], [0, 3, 1]],
+        0.0,
+    ));
+    // The bridge pair is on the closed supported list — a custom soup is a
+    // first-class collider here, not a quiet skip.
+    assert_eq!(
+        physics
+            .get_body(floor)
+            .unwrap()
+            .shape
+            .pair_support(&RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0).shape),
+        PairSupport::Supported
+    );
+    let ball = physics.add_body(RigidBody::new_sphere(Vec3::new(0.4, 4.0, -0.3), 0.5, 1.0));
+    for _ in 0..600 {
+        physics.step(DT);
+    }
+    let b = physics.get_body(ball).unwrap();
+    assert!(
+        (b.position.y - 0.5).abs() < 0.08,
+        "ball must rest at mesh top (0.0)+radius(0.5), got {}",
+        b.position.y
+    );
+    assert!(
+        b.velocity.length() < 0.2,
+        "resting velocity near zero, got {}",
+        b.velocity
+    );
+}

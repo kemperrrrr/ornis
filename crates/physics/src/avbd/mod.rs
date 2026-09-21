@@ -570,7 +570,10 @@ impl AvbdEngine {
     /// (rung 1, `gpu` feature). Default off. An attached stub still runs
     /// the CPU fallback until its `runs_on_device` turns true (no adapter
     /// path yet), so attaching never changes the trajectory — only the
-    /// [`AvbdEngine::gpu_fallback_steps`] counter moves.
+    /// [`AvbdEngine::gpu_fallback_steps`] counter moves. The rung-2 device
+    /// solver ([`crate::gpu::WgpuAvbdSolver`]) is not attachable here yet:
+    /// it solves staged linear systems on the device, while engine stepping
+    /// needs host discovery staging rows into that solve (rung 3).
     #[cfg(feature = "gpu")]
     pub fn set_gpu_avbd(&mut self, stub: Option<crate::gpu::GpuAvbdStub>) {
         self.gpu_avbd = stub;

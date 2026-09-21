@@ -132,6 +132,19 @@ pub struct TriMesh {
     pub min_feature: f32,
 }
 
+/// Closed contact-pair support: the loud marker for the two undefined
+/// (concave-concave) pairs. See [`Shape::pair_support`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairSupport {
+    /// The pair produces contacts (and cast hits) through
+    /// `distance::shape_distance`.
+    Supported,
+    /// The pair is undefined and reports separation (no contact, no cast
+    /// hit ever): terrain-vs-terrain or mesh-vs-mesh. Hosts must handle it
+    /// explicitly — never a silent skip.
+    UnsupportedPair,
+}
+
 /// One median-split AABB BVH node in mesh-local space. Internal nodes
 /// branch to `left`/`right`; leaves (`left == u32::MAX`) own the
 /// triangle range `start..start+count`.
@@ -296,6 +309,29 @@ impl Shape {
     /// — physics never substitutes a sphere placeholder.
     pub fn has_gjk_support(&self) -> bool {
         !matches!(self, Shape::Heightfield(_) | Shape::TriMesh(_))
+    }
+
+    /// Closed supported-pair list for discrete contacts: every pair EXCEPT
+    /// the two variants below produces contacts through
+    /// `distance::shape_distance` (heightfields column-wise, triangle meshes
+    /// per triangle — both dispatched before GJK, so [`has_gjk_support`](Self::has_gjk_support)
+    /// staying `false` for them is not a gap).
+    ///
+    /// The two [`PairSupport::UnsupportedPair`] cases (terrain-vs-terrain,
+    /// mesh-vs-mesh) are concave-concave and undefined: the query reports
+    /// separation, so no contact and no cast hit ever forms. This marker is
+    /// the loud counterpart of that silent separation — hosts bridging
+    /// per-entity custom colliders must check it up front (a custom render
+    /// soup arrives as [`TriMesh::from_indexed`], which pairs with every
+    /// convex shape and with heightfields) and either split the compound
+    /// with `Fixed` joints or fail loudly instead of expecting contacts
+    /// that never come. The solver behavior is unchanged by this query.
+    pub fn pair_support(&self, other: &Shape) -> PairSupport {
+        match (self, other) {
+            (Shape::Heightfield(_), Shape::Heightfield(_))
+            | (Shape::TriMesh(_), Shape::TriMesh(_)) => PairSupport::UnsupportedPair,
+            _ => PairSupport::Supported,
+        }
     }
 
     /// Closest surface point (world) to `p` for a placed shape. Exact for
@@ -1283,5 +1319,68 @@ mod tests {
             "empty soup builds an empty mesh, never a placeholder"
         );
         assert!(!Shape::TriMesh(empty).has_gjk_support());
+    }
+
+    /// Closed supported-pair list: every pair is `Supported` except the two
+    /// concave-concave cases, which must read back as the loud
+    /// `UnsupportedPair` marker (never a silent separation). One
+    /// representative per variant, both orders.
+    #[test]
+    fn pair_support_lists_supported_pairs_and_marks_undefined() {
+        use super::PairSupport;
+        let sphere = Shape::Sphere { radius: 0.5 };
+        let boxed = Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        };
+        let capsule = Shape::Capsule {
+            radius: 0.3,
+            half_height: 0.5,
+        };
+        let cylinder = Shape::Cylinder {
+            radius: 0.3,
+            half_height: 0.5,
+        };
+        let cone = Shape::Cone {
+            radius: 0.3,
+            half_height: 0.5,
+        };
+        let hull = Shape::ConvexHull(ConvexHull::from_vertices(vec![
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+        ]));
+        let terrain = Shape::Heightfield(Heightfield {
+            heights: vec![0.0; 4],
+            rows: 2,
+            cols: 2,
+            cell: 1.0,
+        });
+        let mesh = Shape::TriMesh(cube_mesh());
+        let convex = [&sphere, &boxed, &capsule, &cylinder, &cone, &hull];
+        // Convex-convex, convex-mesh, convex-terrain, mesh-terrain: supported.
+        let all: Vec<&Shape> = convex.iter().copied().chain([&mesh, &terrain]).collect();
+        for &a in &all {
+            for &b in &all {
+                // Mesh-vs-mesh and terrain-vs-terrain are the only gaps.
+                let undefined = matches!(
+                    (a, b),
+                    (Shape::TriMesh(_), Shape::TriMesh(_))
+                        | (Shape::Heightfield(_), Shape::Heightfield(_))
+                );
+                assert_eq!(
+                    a.pair_support(b),
+                    if undefined {
+                        PairSupport::UnsupportedPair
+                    } else {
+                        PairSupport::Supported
+                    },
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
+        // Symmetry: the marker does not depend on argument order.
+        assert_eq!(mesh.pair_support(&terrain), PairSupport::Supported);
+        assert_eq!(terrain.pair_support(&mesh), PairSupport::Supported);
     }
 }

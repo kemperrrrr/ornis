@@ -64,6 +64,18 @@ pub struct BroadPhaseStats {
 /// jitter regrowing max_v 0.09→0.25 m/s, which gates sleep) —
 /// island sleep + per-island iteration scaling, not candidate generation.
 ///
+/// Active probe (`probe_100k` tiled Grid-8, `--release`, 6 steps,
+/// 2026-09-20): all 100k dynamics awake (resting contact at max_v = 0 —
+/// sleep needs 0.5 s quiet, so no sleeper fast path yet) and steps cost
+/// ~1.21–1.40 s (mean steady 1243 ms/step over steps 1–5): broad 6–42 ms,
+/// narrow 72–122 ms, solver 984–1037 ms, island/trigger ~10–15 ms each at
+/// 4 substeps × 100k candidates. The solver phase is the top bottle (~80%
+/// of the step); broadphase is not it. Confirms the 2026-09-18 verdict on
+/// a fresh build. Honest fixation, no CPU real-time chase at 100k active:
+/// the scaling story is the settled path below (steps drop 300–400x once
+/// sleep takes the scene whole by step ~14). Next: solver-per-pair cost
+/// under settled sleep — island sleep + per-island iteration scaling, not
+/// candidate generation.
 /// Settled probe (`probe_100k` tiled Grid-8, `--release`, 35 steps,
 /// 2026-09-18): sleep is NOT jitter-gated on tiled scenes. 100k dynamics
 /// sleep whole by step ~14 (104096/104096 asleep incl. statics, 0 awake

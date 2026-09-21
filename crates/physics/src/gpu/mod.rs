@@ -45,24 +45,30 @@
 //! anisotropic and rolling coefficients stay CPU-only.
 //!
 //! A true AVBD port (affine bodies, per-body Hessian assembly + LDL in the
-//! shader) lands rung by rung: rung 1 (here) assembles the lumped inertial
+//! shader) lands rung by rung: rung 1 assembles the lumped inertial
 //! Hessian diagonal and solves the diagonal LDL system per body in
-//! `avbd_stub_kernel` (helpers stitched via `helpers(...)`); contact rows,
-//! the dense 6x6 LDL and device execution stay future work. The DSL
+//! `avbd_stub_kernel` (helpers stitched via `helpers(...)`); rung 2
+//! (`avbd_row_kernel` in `avbd.rs`) stamps one contact row per body and
+//! solves the dense 6x6 LDL with a breakdown flag on the device through
+//! [`WgpuAvbdSolver`]. Engine-step integration (host discovery staging rows
+//! into the device solve) stays rung-3 work: stepping a
+//! [`crate::avbd::AvbdEngine`] still falls back to the CPU. The DSL
 //! preconditions are closed: `ShaderType::Mat3` (`mat3x3<f32>`,
 //! `Mat3::from_cols` constructor, `Mat3::IDENTITY`/`ZERO`), local
 //! fixed-size scratch arrays (incl. nested Hessian shapes; effectful
-//! repeats rejected loudly), and `helpers(...)` inclusion in
-//! `#[gpu_pipeline]` (stitches `#[wgsl_fn]`/`#[kernel]` sources ahead of
-//! the entry). Pinned by `macros/tests/compute_dsl.rs` and
-//! `helpers_stitch_ahead_of_main_and_validate`.
+//! repeats rejected loudly), `u32` range `for` loops (increasing only —
+//! back substitution counts down via index arithmetic), and `helpers(...)`
+//! inclusion in `#[gpu_pipeline]` (stitches `#[wgsl_fn]`/`#[kernel]`
+//! sources ahead of the entry). Pinned by `macros/tests/compute_dsl.rs`
+//! and `helpers_stitch_ahead_of_main_and_validate`.
 
 mod avbd;
 mod si_batches;
 
 pub use avbd::{
-    GpuAvbdDispatch, GpuAvbdMass, GpuAvbdStub, avbd_diag_solve_cpu, avbd_inertial_hessian_diag,
-    avbd_stub_wgsl,
+    GPU_AVBD_SYSTEM_STRIDE, GpuAvbdDispatch, GpuAvbdMass, GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem,
+    WgpuAvbdSolver, avbd_diag_solve_cpu, avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu,
+    avbd_row_wgsl, avbd_stage_contact_solve, avbd_stamp_row_cpu, avbd_stub_wgsl,
 };
 pub use si_batches::{
     GpuBatch, LaneInput, contact_solver_wgsl, pack_single_point_batches, write_back_acc,
@@ -129,6 +135,30 @@ impl GpuBodyState {
             _pad_v: 0.0,
             _pad_w: 0.0,
         }
+    }
+
+    /// Pack a 6-vector `(linear, angular)` residual into body-state layout
+    /// (the rung-2 base residual / solved delta). Pure (no device).
+    pub fn from_residual(v: [f32; 6]) -> Self {
+        Self {
+            velocity: [v[0], v[1], v[2]],
+            angular: [v[3], v[4], v[5]],
+            _pad_v: 0.0,
+            _pad_w: 0.0,
+        }
+    }
+
+    /// Unpack body-state layout back into a 6-vector `(linear, angular)`.
+    /// Pure (no device).
+    pub fn to_residual(&self) -> [f32; 6] {
+        [
+            self.velocity[0],
+            self.velocity[1],
+            self.velocity[2],
+            self.angular[0],
+            self.angular[1],
+            self.angular[2],
+        ]
     }
 
     fn write_to_body(&self, b: &mut RigidBody) {
