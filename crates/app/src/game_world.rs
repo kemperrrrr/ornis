@@ -4,11 +4,13 @@
 //!
 //! [`GameStage`] fixes the gameplay-stage vocabulary (`PreUpdate` / `Input` /
 //! `Gameplay` / `PostFrame`) over the existing fixed/frame schedule split
-//! without changing it: see [`GameStage::stage_for_system`]. A fully staged
-//! schedule is the documented next step, not part of this facade.
+//! without changing it: see [`GameStage::stage_for_system`]. Each variant maps
+//! 1:1 onto the staged [`Engine`](ornis_core::Engine) plan
+//! ([`GameStage::core_stage`]); variable-rate gameplay ticks (`script_tick`)
+//! still execute in the `PostFrame` storage until the script host migrates.
 
 use glam::Vec3;
-use ornis_core::{Engine, Entity};
+use ornis_core::{Engine, Entity, Schedule, Stage as CoreStage};
 use ornis_physics::RigidBody;
 use ornis_render::FrameUpload;
 use ornis_render::extraction::{RenderLights, extract_render_data};
@@ -173,8 +175,9 @@ pub fn spawn_static_floor(engine: &mut Engine) -> Entity {
 /// `PostFrame` propagates poses and extracts audio/render views.
 /// `PreUpdate` is reserved for between-frame input ingest
 /// (`apply_snapshot` / `apply_browser_input`), which is not a scheduled
-/// system today. The fixed/frame schedules are unchanged; splitting them
-/// into staged schedules is the next step.
+/// system today. Each variant maps 1:1 onto the staged engine plan
+/// ([`GameStage::core_stage`]); `Gameplay` routes to the fixed schedule,
+/// `PostFrame` to the legacy variable schedule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameStage {
     /// Between-frame input ingest (reserved, no scheduled system yet).
@@ -220,6 +223,40 @@ impl GameStage {
             _ => None,
         }
     }
+
+    /// Maps this dictionary stage onto the real staged engine plan.
+    ///
+    /// The mapping is 1:1 by name; see [`CoreStage`] for execution order
+    /// (`PreUpdate → Input → Gameplay(fixed) → PostFrame`).
+    pub fn core_stage(self) -> CoreStage {
+        match self {
+            GameStage::PreUpdate => CoreStage::PreUpdate,
+            GameStage::Input => CoreStage::Input,
+            GameStage::Gameplay => CoreStage::Gameplay,
+            GameStage::PostFrame => CoreStage::PostFrame,
+        }
+    }
+
+    /// Classifies a system directly onto the real staged engine plan.
+    ///
+    /// Returns `None` for unknown systems; this is [`Self::stage_for_system`]
+    /// composed with [`Self::core_stage`], so the dictionary entry resolves
+    /// to the [`Schedule`] returned by
+    /// [`Engine::stage_schedule`](ornis_core::Engine::stage_schedule).
+    pub fn plan_for_system(system_name: &str) -> Option<CoreStage> {
+        Self::stage_for_system(system_name).map(Self::core_stage)
+    }
+
+    /// Returns the real engine schedule backing `system_name`, if known.
+    ///
+    /// Thin lookup over [`Engine::stage_schedule`](ornis_core::Engine::stage_schedule)
+    /// via [`Self::plan_for_system`]; unknown names yield `None`.
+    pub fn stage_schedule_for_system<'a>(
+        engine: &'a Engine,
+        system_name: &str,
+    ) -> Option<&'a Schedule> {
+        Self::plan_for_system(system_name).map(|stage| engine.stage_schedule(stage))
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +264,19 @@ mod tests {
     use super::*;
     use ornis_core::Time;
     use ornis_render::scene::{CameraDesc, MaterialDesc, MeshDesc, TransformDesc};
+
+    /// Minimal probe system for dictionary-to-plan lookups.
+    struct DictionaryProbe(&'static str);
+
+    impl ornis_core::System for DictionaryProbe {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn access(&self) -> ornis_core::SystemAccess {
+            ornis_core::SystemAccess::new()
+        }
+        fn run(&self, _: &ornis_core::Resources) {}
+    }
 
     fn two_sphere_scene() -> Scene {
         let entity = |name: &str, x: f32| EntityDesc {
@@ -244,6 +294,7 @@ mod tests {
             material: MaterialDesc::Dielectric {
                 base_color: [0.8, 0.2, 0.2],
                 roughness: 0.5,
+                emission: [0.0, 0.0, 0.0],
             },
         };
         Scene {
@@ -280,6 +331,7 @@ mod tests {
                 material: MaterialDesc::Metal {
                     base_color: [0.9, 0.8, 0.2],
                     roughness: 0.2,
+                    emission: [0.0, 0.0, 0.0],
                 },
             }],
             lights: Vec::new(),
@@ -304,7 +356,10 @@ mod tests {
 
         let upload = world.frame(1.0 / 60.0);
         assert_eq!(upload.instances.len(), 2);
-        assert_eq!(upload.materials.len(), 2);
+        // Identical materials dedup to one table entry (render extraction canon).
+        assert_eq!(upload.materials.len(), 1);
+        assert_eq!(upload.instances[0].material_index, 0);
+        assert_eq!(upload.instances[1].material_index, 0);
         let time = world
             .engine()
             .world()
@@ -409,6 +464,45 @@ mod tests {
     }
 
     #[test]
+    fn stages_resolve_to_real_engine_plans() {
+        use ornis_core::Engine;
+        let mut engine = Engine::new();
+        engine
+            .stage_schedule_mut(ornis_core::Stage::Input)
+            .add_system(DictionaryProbe("player_input"));
+        engine
+            .stage_schedule_mut(ornis_core::Stage::Gameplay)
+            .add_system(DictionaryProbe("physics_step"));
+
+        assert_eq!(
+            GameStage::plan_for_system("player_input"),
+            Some(ornis_core::Stage::Input)
+        );
+        assert_eq!(
+            GameStage::plan_for_system("physics_step"),
+            Some(ornis_core::Stage::Gameplay)
+        );
+        assert_eq!(GameStage::plan_for_system("no_such_system"), None);
+        assert_eq!(
+            GameStage::PreUpdate.core_stage(),
+            ornis_core::Stage::PreUpdate
+        );
+        assert_eq!(
+            GameStage::Gameplay.core_stage(),
+            ornis_core::Stage::Gameplay
+        );
+        let schedule = GameStage::stage_schedule_for_system(&engine, "player_input")
+            .expect("known system resolves to a real plan");
+        assert_eq!(schedule.len(), 1);
+        assert!(GameStage::stage_schedule_for_system(&engine, "no_such_system").is_none());
+        let gameplay = GameStage::stage_schedule_for_system(&engine, "physics_step")
+            .expect("gameplay resolves");
+        assert_eq!(gameplay.len(), engine.fixed_schedule().len());
+        let post = GameStage::stage_schedule_for_system(&engine, "render_present");
+        assert!(post.is_some() || engine.schedule().is_empty());
+    }
+
+    #[test]
     fn game_world_extracts_scene_entities_from_lanes() {
         let mut world = GameWorld::from_scene(&scene());
         assert_eq!(world.entity_count(), 1);
@@ -464,6 +558,7 @@ mod tests {
                     material: MaterialDesc::Dielectric {
                         base_color: [0.8, 0.2, 0.2],
                         roughness: 0.4,
+                        emission: [0.0, 0.0, 0.0],
                     },
                 },
                 EntityDesc {
@@ -481,6 +576,7 @@ mod tests {
                     material: MaterialDesc::Metal {
                         base_color: [0.9, 0.8, 0.2],
                         roughness: 0.2,
+                        emission: [0.0, 0.0, 0.0],
                     },
                 },
                 EntityDesc {
@@ -499,6 +595,7 @@ mod tests {
                         base_color: [0.2, 0.4, 0.9],
                         coat_weight: 0.7,
                         coat_roughness: 0.1,
+                        emission: [0.0, 0.0, 0.0],
                     },
                 },
             ],
@@ -561,6 +658,7 @@ mod tests {
                     material: MaterialDesc::Metal {
                         base_color: [0.9, 0.8, 0.2],
                         roughness: 0.2,
+                        emission: [0.0, 0.0, 0.0],
                     },
                 },
                 EntityDesc {
@@ -578,6 +676,7 @@ mod tests {
                     material: MaterialDesc::Dielectric {
                         base_color: [0.2, 0.8, 0.2],
                         roughness: 0.5,
+                        emission: [0.0, 0.0, 0.0],
                     },
                 },
             ],
@@ -611,6 +710,7 @@ mod tests {
                 base_color: [0.2, 0.4, 0.9],
                 coat_weight: 0.7,
                 coat_roughness: 0.1,
+                emission: [0.0, 0.0, 0.0],
             },
         );
         world.frame(0.0);

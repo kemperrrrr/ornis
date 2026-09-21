@@ -60,6 +60,34 @@ pub(crate) const LIGHT_KIND_POINT: f32 = 1.0;
 /// Evaluation kind of a [`GpuLight`] entry: spotlight.
 pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 
+/// Maximum lights uploaded per frame: the [`LightingUniform`] WGSL block
+/// spells `array<Light, 8>`, and [`Renderer3D::set_lights`] uploads the
+/// first eight entries of any kind. Excess lights are dropped and reported
+/// in [`LightUploadStats::dropped_lights`] (never silently).
+pub const MAX_LIGHTS: usize = 8;
+/// Compile-time pin: the WGSL derive only accepts integer literals for
+/// array lengths, so [`LightingUniform::lights`] spells `8` literally —
+/// this assert keeps the spell and the limit in sync.
+const _: [(); MAX_LIGHTS] = [(); 8];
+
+/// Per-`set_lights` upload report: explicit counts for what the old
+/// silent-truncate path dropped (excess lights, shadow requests without a
+/// free layer/cube slot). Returned by
+/// [`Renderer3D::set_lights_full`] and [`count_light_drops`], and published
+/// for the last upload via [`Renderer3D::light_upload_stats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LightUploadStats {
+    /// Lights written into the uniform (`min(len, MAX_LIGHTS)`).
+    pub uploaded: u32,
+    /// Scene lights beyond [`MAX_LIGHTS`] that were not uploaded.
+    pub dropped_lights: u32,
+    /// Shadow requests (`shadow: true`) that received no map slot: 2D
+    /// layers ([`SHADOW_LAYERS`]) for directional/spot lights and cube
+    /// slots ([`POINT_SHADOW_CUBES`]) for point lights, including requests
+    /// on dropped excess lights. These lights render unshadowed.
+    pub dropped_shadows: u32,
+}
+
 /// Shadow-map layers (one per light slot).
 pub const SHADOW_LAYERS: usize = 4;
 /// Shadow-map resolution in pixels (square).
@@ -153,10 +181,12 @@ pub(crate) struct GpuLight {
 #[wgsl(name = "Lighting")]
 pub(crate) struct LightingUniform {
     ambient_color: [f32; 4],
-    /// Four lights; spelled `array<Light, 4>` in WGSL (the inner struct's
+    /// Eight lights; spelled `array<Light, 8>` in WGSL (the inner struct's
     /// `name` override is not visible here, hence the explicit `to`).
+    /// The evaluators iterate `0..light_count`, so directional-only scenes
+    /// with ≤4 lights render pixel-identical to the old 4-wide block.
     #[wgsl(to = "Light")]
-    lights: [GpuLight; 4],
+    lights: [GpuLight; 8],
     light_count: u32,
     /// Trailing pad to a 16-multiple size (padding: not shader-visible).
     #[wgsl(skip)]
@@ -229,6 +259,45 @@ pub struct LightingPass {
     bind_group_layout: wgpu::BindGroupLayout,
     /// Linear sampler for gbuffer fetches (MSAA resolve handled upstream).
     sampler: wgpu::Sampler,
+}
+
+/// Opt-in transparency for the forward HDR layer (scaffolding).
+///
+/// The forward layer is always cleared to transparent black
+/// (`ClearTransparent`); this flag only selects the blend state of the
+/// forward pipeline (see [`forward_blend_state`]) and whether callers
+/// should submit instances in [`sort_by_depth`] order. Off by default so
+/// the default frame (all opacities at 1.0, where `REPLACE` and
+/// `ALPHA_BLENDING` coincide) stays golden-pinned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransparencyOptions {
+    /// When `true`, the forward pipeline blends with `ALPHA_BLENDING`
+    /// and instances are expected back-to-front ([`sort_by_depth`]).
+    /// When `false` (default), the pipeline uses `REPLACE`.
+    pub sorted_alpha: bool,
+}
+
+/// Blend state of the forward pipeline for the given transparency
+/// options: `REPLACE` by default, `ALPHA_BLENDING` when
+/// `sorted_alpha` is enabled. Pure (no GPU access) so the default can
+/// be pinned without an adapter.
+pub fn forward_blend_state(options: TransparencyOptions) -> wgpu::BlendState {
+    if options.sorted_alpha {
+        wgpu::BlendState::ALPHA_BLENDING
+    } else {
+        wgpu::BlendState::REPLACE
+    }
+}
+
+/// CPU-side back-to-front draw order for `depths` (view-space depth per
+/// instance): indices sorted by descending depth, far first, stable
+/// (equal depths keep submission order). `NaN` sorts as farthest
+/// (`total_cmp`). Pure helper for the future sorted forward submit; the
+/// current single-draw forward pass ignores order.
+pub fn sort_by_depth(depths: &[f32]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..depths.len() as u32).collect();
+    order.sort_by(|&a, &b| depths[b as usize].total_cmp(&depths[a as usize]));
+    order
 }
 
 /// Forward pass for transparency-friendly objects: draws geometry with full
@@ -348,6 +417,13 @@ pub struct Renderer3D {
     pbr_texture: wgpu::Texture,
     pbr_texture_view: wgpu::TextureView,
     sample_count: u32,
+    /// Exposure multiplier applied by [`set_lights`](Self::set_lights);
+    /// `1.0` (default) is the exact no-op. Set from
+    /// [`crate::render_backend::RenderBackendConfig::exposure`].
+    exposure: f32,
+    /// Transparency mode of the forward pipeline (see
+    /// [`TransparencyOptions`]); default off (golden-pinned `REPLACE`).
+    transparency: TransparencyOptions,
     max_objects: std::sync::atomic::AtomicU32,
     max_materials: std::sync::atomic::AtomicU32,
     format: wgpu::TextureFormat,
@@ -377,6 +453,15 @@ pub struct Renderer3D {
     /// Shadow-casting lights assigned by the last
     /// [`set_lights`](Self::set_lights) call (layers `0..count`).
     shadow_count: std::sync::atomic::AtomicU32,
+    /// Directional-shadow fit: `(center, half-extent)` set via
+    /// [`set_shadow_bounds`](Self::set_shadow_bounds) from the scene AABB.
+    /// `None` (default) keeps the legacy ±[`SHADOW_ORTHO_HALF`] box around
+    /// the origin, so scenes that never set bounds render pixel-identical.
+    shadow_fit: std::sync::RwLock<Option<([f32; 3], f32)>>,
+    /// Upload report of the last [`set_lights`](Self::set_lights) /
+    /// [`set_lights_full`](Self::set_lights_full) call; read via
+    /// [`light_upload_stats`](Self::light_upload_stats).
+    last_light_stats: std::sync::RwLock<LightUploadStats>,
     /// Point-light shadow cubes: one depth cube per slot (6 faces),
     /// per-face views, sampling array view, per-face VP uniforms, and
     /// the active cube count. `params.w` on a point light indexes the
@@ -418,6 +503,49 @@ fn dir_shadow_vp(to_light: glam::Vec3) -> [[f32; 4]; 4] {
         SHADOW_ORTHO_HALF,
         SHADOW_DIR_DIST - 20.0,
         SHADOW_DIR_DIST + 20.0,
+    );
+    (proj * view).to_cols_array_2d()
+}
+
+/// Scene fit for one directional shadow map: `(center, half-extent)` from
+/// a scene AABB (`min`/`max` corners, e.g. over instance translations and
+/// custom-geometry points). The half-extent never shrinks below
+/// [`SHADOW_ORTHO_HALF`], so small scenes keep the legacy box exactly;
+/// non-finite inputs fall back to the origin default instead of poisoning
+/// the projection.
+pub fn shadow_fit_for_bounds(min: [f32; 3], max: [f32; 3]) -> ([f32; 3], f32) {
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let half = ((max[0] - min[0]) * 0.5)
+        .max((max[1] - min[1]) * 0.5)
+        .max((max[2] - min[2]) * 0.5)
+        .max(SHADOW_ORTHO_HALF);
+    if center.iter().all(|v| v.is_finite()) && half.is_finite() {
+        (center, half)
+    } else {
+        ([0.0, 0.0, 0.0], SHADOW_ORTHO_HALF)
+    }
+}
+
+/// Light-space clip matrix for a shadowed directional light fitted to the
+/// scene: ortho box ±`half` around `center`, eye at `half + 20` along the
+/// to-light direction, depth range covering the box diameter plus margin.
+/// Same `directx` depth convention as [`dir_shadow_vp`]; only used when a
+/// scene fit was set via [`Renderer3D::set_shadow_bounds`].
+fn dir_shadow_vp_fitted(to_light: glam::Vec3, center: [f32; 3], half: f32) -> [[f32; 4]; 4] {
+    let dist = half + 20.0;
+    let c = glam::Vec3::from_array(center);
+    let view = glam::camera::rh::view::look_at_mat4(c + to_light * dist, c, shadow_up(to_light));
+    let proj = glam::camera::rh::proj::directx::orthographic(
+        -half,
+        half,
+        -half,
+        half,
+        1.0,
+        dist + half + 10.0,
     );
     (proj * view).to_cols_array_2d()
 }
@@ -515,6 +643,254 @@ pub fn upload_custom_mesh(
     })
 }
 
+/// Identity clip matrix for lights that cast no shadow.
+const NO_SHADOW_VP: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+/// Pure result of [`build_lighting_uniform`]: the uploadable uniform, the
+/// shadow VPs the depth pre-pass publishes (layers in assignment order,
+/// cube faces in slot-major order), and the upload report.
+struct BuiltLighting {
+    uniform: LightingUniform,
+    stats: LightUploadStats,
+    shadow_layer_vps: Vec<[[f32; 4]; 4]>,
+    cube_face_vps: Vec<[[f32; 4]; 4]>,
+}
+
+/// Pure [`LightingUniform`] construction shared by
+/// [`Renderer3D::set_lights_full`] and [`count_light_drops`]: ambient RGB
+/// scaled by `ambient_intensity`, light colors scaled by `exposure`
+/// (CPU-baked IBL-minimum multipliers — no shader-layout change; 1.0 is
+/// the exact no-op), the first [`MAX_LIGHTS`] entries uploaded, the rest
+/// reported as dropped. Directional VPs use the legacy ±
+/// [`SHADOW_ORTHO_HALF`] box when `fit` is `None` and the fitted box
+/// otherwise. Shadow layer VPs are collected in assignment order (layer
+/// `i` ↔ entry `i`).
+fn build_lighting_uniform(
+    ambient: [f32; 3],
+    ambient_intensity: f32,
+    exposure: f32,
+    lights: &[LightDesc],
+    fit: Option<([f32; 3], f32)>,
+) -> BuiltLighting {
+    /// Normalize a direction, falling back to +Z on degenerate input.
+    fn norm_dir(d: [f32; 3]) -> [f32; 4] {
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len > 0.0 {
+            [d[0] / len, d[1] / len, d[2] / len, 0.0]
+        } else {
+            [0.0, 0.0, 1.0, 0.0]
+        }
+    }
+    /// Same as [`norm_dir`](norm_dir) as a [`glam::Vec3`].
+    fn norm3(d: [f32; 3]) -> glam::Vec3 {
+        let v = glam::Vec3::from_array(d);
+        if v.length_squared() > 0.0 {
+            v.normalize()
+        } else {
+            glam::Vec3::Z
+        }
+    }
+    let count = lights.len().min(MAX_LIGHTS);
+    let mut gpu_lights = [GpuLight {
+        kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
+        direction: [0.0, 0.0, 1.0, 0.0],
+        position: [0.0, 0.0, 0.0, 1.0],
+        color: [0.0; 4],
+        params: [0.0, 0.0, 0.0, -1.0],
+        shadow_vp: NO_SHADOW_VP,
+    }; 8];
+    let mut shadow_count = 0u32;
+    let mut cube_count = 0u32;
+    let mut dropped_shadows = 0u32;
+    let mut shadow_layer_vps: Vec<[[f32; 4]; 4]> = Vec::new();
+    // (position, range, cube slot) for shadowed point lights, in
+    // assignment order; face VPs are derived below.
+    let mut cube_lights: Vec<([f32; 3], f32, usize)> = Vec::new();
+    /// Assign the next shadow layer, or -1.0 when `wants` is false
+    /// or the array is full. Returns `(layer, clip_matrix)`.
+    macro_rules! shadow_layer {
+        ($wants:expr, $vp:expr) => {{
+            let wants: bool = $wants;
+            if wants && (shadow_count as usize) < SHADOW_LAYERS {
+                let layer = shadow_count;
+                shadow_count += 1;
+                (layer as f32, $vp)
+            } else {
+                (-1.0, NO_SHADOW_VP)
+            }
+        }};
+    }
+    for (i, light) in lights.iter().take(count).enumerate() {
+        gpu_lights[i] = match light {
+            LightDesc::Directional {
+                direction,
+                intensity,
+                color,
+                shadow,
+            } => {
+                let to_light = norm3(*direction);
+                let vp = match fit {
+                    None => dir_shadow_vp(to_light),
+                    Some((center, half)) => dir_shadow_vp_fitted(to_light, center, half),
+                };
+                let (layer, vp) = shadow_layer!(*shadow, vp);
+                if *shadow && layer < 0.0 {
+                    dropped_shadows += 1;
+                }
+                if layer >= 0.0 {
+                    shadow_layer_vps.push(vp);
+                }
+                GpuLight {
+                    direction: norm_dir(*direction),
+                    color: [
+                        color[0] * exposure,
+                        color[1] * exposure,
+                        color[2] * exposure,
+                        *intensity,
+                    ],
+                    params: [0.0, 0.0, 0.0, layer],
+                    shadow_vp: vp,
+                    ..gpu_lights[i]
+                }
+            }
+            LightDesc::Point {
+                position,
+                intensity,
+                color,
+                range,
+                shadow,
+            } => {
+                // Cube slots live in a separate index space from the
+                // 2D layers (the evaluator picks the pool by kind).
+                let slot = if *shadow && (cube_count as usize) < POINT_SHADOW_CUBES {
+                    let s = cube_count as usize;
+                    cube_count += 1;
+                    cube_lights.push((*position, *range, s));
+                    s as f32
+                } else {
+                    -1.0
+                };
+                if *shadow && slot < 0.0 {
+                    dropped_shadows += 1;
+                }
+                GpuLight {
+                    kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
+                    position: [position[0], position[1], position[2], 1.0],
+                    color: [
+                        color[0] * exposure,
+                        color[1] * exposure,
+                        color[2] * exposure,
+                        *intensity,
+                    ],
+                    params: [range.max(1e-3), 0.0, 0.0, slot],
+                    ..gpu_lights[i]
+                }
+            }
+            LightDesc::Spot {
+                position,
+                direction,
+                intensity,
+                color,
+                range,
+                inner_angle,
+                outer_angle,
+                shadow,
+            } => {
+                // Cosineordered: inner must be the tighter cone.
+                let ci = inner_angle.to_radians().cos();
+                let co = outer_angle.to_radians().cos();
+                let axis = norm3(*direction);
+                let (layer, vp) = shadow_layer!(
+                    *shadow,
+                    spot_shadow_vp(*position, axis, *outer_angle, *range)
+                );
+                if *shadow && layer < 0.0 {
+                    dropped_shadows += 1;
+                }
+                if layer >= 0.0 {
+                    shadow_layer_vps.push(vp);
+                }
+                GpuLight {
+                    kind: [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
+                    direction: norm_dir(*direction),
+                    position: [position[0], position[1], position[2], 1.0],
+                    color: [
+                        color[0] * exposure,
+                        color[1] * exposure,
+                        color[2] * exposure,
+                        *intensity,
+                    ],
+                    params: [range.max(1e-3), ci.max(co), co.min(ci), layer],
+                    shadow_vp: vp,
+                }
+            }
+        };
+    }
+    // Excess lights beyond the upload window never reach the GPU; a
+    // shadow request on one is a dropped shadow too.
+    let mut dropped_lights = 0u32;
+    for light in lights.iter().skip(count) {
+        dropped_lights += 1;
+        let wants = matches!(
+            light,
+            LightDesc::Directional { shadow: true, .. }
+                | LightDesc::Point { shadow: true, .. }
+                | LightDesc::Spot { shadow: true, .. }
+        );
+        if wants {
+            dropped_shadows += 1;
+        }
+    }
+    let mut cube_face_vps = Vec::with_capacity(cube_lights.len() * 6);
+    for (position, range, _) in &cube_lights {
+        for face in 0..6 {
+            cube_face_vps.push(point_cube_face_vp(*position, *range, face));
+        }
+    }
+    BuiltLighting {
+        uniform: LightingUniform {
+            ambient_color: [
+                ambient[0] * ambient_intensity,
+                ambient[1] * ambient_intensity,
+                ambient[2] * ambient_intensity,
+                1.0,
+            ],
+            lights: gpu_lights,
+            light_count: count as u32,
+            _pad: [0; 3],
+        },
+        stats: LightUploadStats {
+            uploaded: count as u32,
+            dropped_lights,
+            dropped_shadows,
+        },
+        shadow_layer_vps,
+        cube_face_vps,
+    }
+}
+
+/// Pure preview of what [`Renderer3D::set_lights`] would drop for
+/// `lights`: excess beyond [`MAX_LIGHTS`] plus shadow requests without a
+/// free layer/cube slot. No GPU access — safe to call per frame; log on
+/// scene change, not per frame.
+pub fn count_light_drops(lights: &[LightDesc]) -> LightUploadStats {
+    build_lighting_uniform([0.0; 3], 1.0, 1.0, lights, None).stats
+}
+
+/// Exact CPU staging capacity for one [`Renderer3D::upload_instances`]
+/// call: the caller reserves this once up front, so the per-instance
+/// conversion never reallocates mid-frame. Identity today (exact fit —
+/// a repeated same-size frame reserves the same capacity, no growth);
+/// kept as a named helper so the upload path reads as one reservation.
+pub(crate) fn staging_capacity_for_instances(needed: usize) -> usize {
+    needed
+}
+
 impl Renderer3D {
     /// Build every pipeline/target for `surface_config`'s format and extent.
     ///
@@ -578,6 +954,7 @@ impl Renderer3D {
             width,
             height,
             sample_count,
+            TransparencyOptions::default(),
         );
         let composite_pass = Self::create_composite_pass(device, format);
         let bloom_pass = Self::create_bloom_pass(device);
@@ -602,6 +979,8 @@ impl Renderer3D {
             pbr_texture,
             pbr_texture_view,
             sample_count,
+            exposure: 1.0,
+            transparency: TransparencyOptions::default(),
             max_objects: std::sync::atomic::AtomicU32::new(max_objects),
             max_materials: std::sync::atomic::AtomicU32::new(max_materials),
             format,
@@ -623,6 +1002,12 @@ impl Renderer3D {
             shadow_pipeline,
             shadow_sampler,
             shadow_count: std::sync::atomic::AtomicU32::new(0),
+            shadow_fit: std::sync::RwLock::new(None),
+            last_light_stats: std::sync::RwLock::new(LightUploadStats {
+                uploaded: 0,
+                dropped_lights: 0,
+                dropped_shadows: 0,
+            }),
             shadow_cube_maps,
             shadow_cube_views,
             shadow_cube_array_view,
@@ -630,6 +1015,68 @@ impl Renderer3D {
             shadow_cube_pipeline,
             point_shadow_count: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Like [`new`](Self::new) with an explicit forward-layer
+    /// transparency mode: rebuilds only the forward pipeline with
+    /// [`forward_blend_state`] for `transparency`. The default
+    /// (`sorted_alpha: false`) builds the same `REPLACE` pipeline as
+    /// [`new`](Self::new), so the default frame is unchanged.
+    pub fn new_with_transparency(
+        device: &wgpu::Device,
+        surface_config: &wgpu::SurfaceConfiguration,
+        sample_count: u32,
+        transparency: TransparencyOptions,
+    ) -> Self {
+        let mut this = Self::new(device, surface_config, sample_count);
+        this.transparency = transparency;
+        {
+            let per_object = this
+                .per_object_buffer
+                .read()
+                .expect("per-object buffer lock");
+            let material = this.material_buffer.read().expect("material buffer lock");
+            this.forward_pass = Self::create_forward_pass(
+                device,
+                &this.camera_buffer,
+                &per_object,
+                &material,
+                &this.lighting_buffer,
+                &this.shadow_array_view,
+                &this.shadow_sampler,
+                &this.shadow_cube_array_view,
+                this.width,
+                this.height,
+                this.sample_count,
+                transparency,
+            );
+        }
+        this
+    }
+
+    /// MSAA sample count this renderer was built with (see
+    /// [`crate::render_backend::RenderBackendConfig::sample_count`]).
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    /// Exposure multiplier applied by [`set_lights`](Self::set_lights);
+    /// `1.0` (default) is the exact no-op. Set from
+    /// [`crate::render_backend::RenderBackendConfig::exposure`].
+    pub fn exposure(&self) -> f32 {
+        self.exposure
+    }
+
+    /// Replace the exposure multiplier applied by future
+    /// [`set_lights`](Self::set_lights) calls (default `1.0`).
+    pub fn set_exposure(&mut self, exposure: f32) {
+        self.exposure = exposure;
+    }
+
+    /// Transparency mode of the forward pipeline (see
+    /// [`TransparencyOptions`]).
+    pub fn transparency(&self) -> TransparencyOptions {
+        self.transparency
     }
 
     fn create_core_buffers(
@@ -685,7 +1132,7 @@ impl Renderer3D {
                     [0.0, 0.0, 1.0, 0.0],
                     [0.0, 0.0, 0.0, 1.0],
                 ],
-            }; 4],
+            }; 8],
             light_count: 0,
             _pad: [0; 3],
         };
@@ -1488,6 +1935,7 @@ impl Renderer3D {
         width: u32,
         height: u32,
         sample_count: u32,
+        transparency: TransparencyOptions,
     ) -> ForwardPass {
         // Same layout as the PBR bind group: entries from the shared table.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> = shaders::pbr_generated::PBR_RESOURCES
@@ -1566,7 +2014,7 @@ impl Renderer3D {
                 entry_point: Some(shaders::pbr_generated::fs_main::entry_point()),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(forward_blend_state(transparency)),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -1858,6 +2306,7 @@ impl Renderer3D {
             width,
             height,
             self.sample_count,
+            self.transparency,
         );
 
         self.composite_pass = Self::create_composite_pass(device, self.format);
@@ -1972,181 +2421,117 @@ impl Renderer3D {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    /// Upload ambient RGB plus up to four scene lights of any kind;
-    /// excess lights beyond four are dropped (shader-side limit).
-    /// Directionals map exactly as before, so directional-only scenes
-    /// render pixel-identical to the legacy rig.
+    /// Upload ambient RGB plus up to eight scene lights of any kind
+    /// ([`MAX_LIGHTS`]); excess lights are dropped and the drop is
+    /// published via [`light_upload_stats`](Self::light_upload_stats),
+    /// never silently. Directionals map exactly as before, so
+    /// directional-only scenes render pixel-identical to the legacy rig.
+    /// Identical to [`set_lights_full`](Self::set_lights_full) with
+    /// `ambient_intensity = 1.0` and `exposure = [`exposure`](Self::exposure)
+    /// (`1.0` by default — the exact no-op).
     ///
     /// Shadowed lights (directional/spot with `shadow: true`) are
     /// assigned map layers `0..shadow_count` (`params.w`); their
     /// light-space clip matrices go both into [`GpuLight::shadow_vp`]
     /// (sampled by the evaluators) and into the per-layer VP uniform
     /// buffers the depth pre-pass reuses through the gbuffer vertex
-    /// shader's `camera` slot.
+    /// shader's `camera` slot. Directional VPs use the legacy
+    /// ±[`SHADOW_ORTHO_HALF`] box around the origin unless a scene fit
+    /// was set via [`set_shadow_bounds`](Self::set_shadow_bounds).
     pub fn set_lights(&self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]) {
-        /// Normalize a direction, falling back to +Z on degenerate input.
-        fn norm_dir(d: [f32; 3]) -> [f32; 4] {
-            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            if len > 0.0 {
-                [d[0] / len, d[1] / len, d[2] / len, 0.0]
-            } else {
-                [0.0, 0.0, 1.0, 0.0]
-            }
-        }
-        /// Same as [`norm_dir`](norm_dir) as a [`glam::Vec3`].
-        fn norm3(d: [f32; 3]) -> glam::Vec3 {
-            let v = glam::Vec3::from_array(d);
-            if v.length_squared() > 0.0 {
-                v.normalize()
-            } else {
-                glam::Vec3::Z
-            }
-        }
-        /// Identity clip matrix for lights that cast no shadow.
-        const NO_SHADOW: [[f32; 4]; 4] = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ];
-        let count = lights.len().min(4);
-        let mut gpu_lights = [GpuLight {
-            kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
-            direction: [0.0, 0.0, 1.0, 0.0],
-            position: [0.0, 0.0, 0.0, 1.0],
-            color: [0.0; 4],
-            params: [0.0, 0.0, 0.0, -1.0],
-            shadow_vp: NO_SHADOW,
-        }; 4];
-        let mut shadow_count = 0u32;
-        let mut cube_count = 0u32;
-        // (position, range, cube slot) for shadowed point lights, in
-        // assignment order; face VPs are published below.
-        let mut cube_lights: Vec<([f32; 3], f32, usize)> = Vec::new();
-        /// Assign the next shadow layer, or -1.0 when `wants` is false
-        /// or the array is full. Returns `(layer, clip_matrix)`.
-        macro_rules! shadow_layer {
-            ($wants:expr, $vp:expr) => {{
-                let wants: bool = $wants;
-                if wants && (shadow_count as usize) < SHADOW_LAYERS {
-                    let layer = shadow_count;
-                    shadow_count += 1;
-                    (layer as f32, $vp)
-                } else {
-                    (-1.0, NO_SHADOW)
-                }
-            }};
-        }
-        for (i, light) in lights.iter().take(count).enumerate() {
-            gpu_lights[i] = match light {
-                LightDesc::Directional {
-                    direction,
-                    intensity,
-                    color,
-                    shadow,
-                } => {
-                    let to_light = norm3(*direction);
-                    let (layer, vp) = shadow_layer!(*shadow, dir_shadow_vp(to_light));
-                    GpuLight {
-                        direction: norm_dir(*direction),
-                        color: [color[0], color[1], color[2], *intensity],
-                        params: [0.0, 0.0, 0.0, layer],
-                        shadow_vp: vp,
-                        ..gpu_lights[i]
-                    }
-                }
-                LightDesc::Point {
-                    position,
-                    intensity,
-                    color,
-                    range,
-                    shadow,
-                } => {
-                    // Cube slots live in a separate index space from the
-                    // 2D layers (the evaluator picks the pool by kind).
-                    let slot = if *shadow && (cube_count as usize) < POINT_SHADOW_CUBES {
-                        let s = cube_count as usize;
-                        cube_count += 1;
-                        cube_lights.push((*position, *range, s));
-                        s as f32
-                    } else {
-                        -1.0
-                    };
-                    GpuLight {
-                        kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
-                        position: [position[0], position[1], position[2], 1.0],
-                        color: [color[0], color[1], color[2], *intensity],
-                        params: [range.max(1e-3), 0.0, 0.0, slot],
-                        ..gpu_lights[i]
-                    }
-                }
-                LightDesc::Spot {
-                    position,
-                    direction,
-                    intensity,
-                    color,
-                    range,
-                    inner_angle,
-                    outer_angle,
-                    shadow,
-                } => {
-                    // Cosineordered: inner must be the tighter cone.
-                    let ci = inner_angle.to_radians().cos();
-                    let co = outer_angle.to_radians().cos();
-                    let axis = norm3(*direction);
-                    let (layer, vp) = shadow_layer!(
-                        *shadow,
-                        spot_shadow_vp(*position, axis, *outer_angle, *range)
-                    );
-                    GpuLight {
-                        kind: [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
-                        direction: norm_dir(*direction),
-                        position: [position[0], position[1], position[2], 1.0],
-                        color: [color[0], color[1], color[2], *intensity],
-                        params: [range.max(1e-3), ci.max(co), co.min(ci), layer],
-                        shadow_vp: vp,
-                    }
-                }
-            };
-        }
-        let lighting = LightingUniform {
-            ambient_color: [ambient[0], ambient[1], ambient[2], 1.0],
-            lights: gpu_lights,
-            light_count: count as u32,
-            _pad: [0; 3],
-        };
-        queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&lighting));
+        self.set_lights_full(queue, ambient, 1.0, self.exposure, lights);
+    }
+
+    /// [`set_lights`](Self::set_lights) with IBL-minimum multipliers and
+    /// an explicit upload report. `ambient_intensity` scales the ambient
+    /// RGB and `exposure` scales every light color; both are baked on the
+    /// CPU (no shader-layout change) and both are the exact no-op at
+    /// `1.0`. Returns the [`LightUploadStats`] for this upload and
+    /// publishes it for [`light_upload_stats`](Self::light_upload_stats).
+    pub fn set_lights_full(
+        &self,
+        queue: &wgpu::Queue,
+        ambient: [f32; 3],
+        ambient_intensity: f32,
+        exposure: f32,
+        lights: &[LightDesc],
+    ) -> LightUploadStats {
+        let fit = *self.shadow_fit.read().expect("shadow fit lock");
+        let built = build_lighting_uniform(ambient, ambient_intensity, exposure, lights, fit);
+        queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
         // Publish the light-space VPs for the depth pre-pass (as camera
         // uniforms: the shadow pipeline reuses the gbuffer vertex shader,
         // which only reads `view_proj`) and the active layer count.
-        for (layer, light) in gpu_lights.iter().enumerate().take(shadow_count as usize) {
-            let vp = CameraUniform {
-                view_proj: light.shadow_vp,
-                inv_view_proj: NO_SHADOW,
+        // Layers publish in assignment order (layer `i` ↔ entry `i`).
+        for (layer, vp) in built.shadow_layer_vps.iter().enumerate() {
+            let uniform = CameraUniform {
+                view_proj: *vp,
+                inv_view_proj: NO_SHADOW_VP,
                 camera_pos: [0.0, 0.0, 0.0, 1.0],
             };
-            queue.write_buffer(&self.shadow_vp_buffers[layer], 0, bytemuck::bytes_of(&vp));
+            queue.write_buffer(
+                &self.shadow_vp_buffers[layer],
+                0,
+                bytemuck::bytes_of(&uniform),
+            );
         }
-        self.shadow_count
-            .store(shadow_count, std::sync::atomic::Ordering::Relaxed);
+        self.shadow_count.store(
+            built.shadow_layer_vps.len() as u32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // Publish the cube-face VPs (as camera uniforms, like the 2D
         // layers) and the active cube count.
-        for (position, range, slot) in &cube_lights {
-            for face in 0..6 {
-                let vp = CameraUniform {
-                    view_proj: point_cube_face_vp(*position, *range, face),
-                    inv_view_proj: NO_SHADOW,
-                    camera_pos: [0.0, 0.0, 0.0, 1.0],
-                };
-                queue.write_buffer(
-                    &self.shadow_cube_vp_buffers[slot * 6 + face],
-                    0,
-                    bytemuck::bytes_of(&vp),
-                );
-            }
+        for (index, vp) in built.cube_face_vps.iter().enumerate() {
+            let uniform = CameraUniform {
+                view_proj: *vp,
+                inv_view_proj: NO_SHADOW_VP,
+                camera_pos: [0.0, 0.0, 0.0, 1.0],
+            };
+            queue.write_buffer(
+                &self.shadow_cube_vp_buffers[index],
+                0,
+                bytemuck::bytes_of(&uniform),
+            );
         }
-        self.point_shadow_count
-            .store(cube_count, std::sync::atomic::Ordering::Relaxed);
+        self.point_shadow_count.store(
+            (built.cube_face_vps.len() / 6) as u32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.last_light_stats.write().expect("light stats lock") = built.stats;
+        built.stats
+    }
+
+    /// Upload report of the last [`set_lights`](Self::set_lights) /
+    /// [`set_lights_full`](Self::set_lights_full) call: what was uploaded
+    /// and what was dropped (excess lights, shadow requests without a
+    /// slot). Starts at zero before the first upload.
+    pub fn light_upload_stats(&self) -> LightUploadStats {
+        *self.last_light_stats.read().expect("light stats lock")
+    }
+
+    /// Fit the directional shadow frustum to a scene AABB (`min`/`max`
+    /// corners over instance translations and custom-geometry points).
+    /// The ortho half-extent grows from the ±[`SHADOW_ORTHO_HALF`]
+    /// default to cover the box (see [`shadow_fit_for_bounds`]); pass the
+    /// scene bounds once per scene, not per frame.
+    pub fn set_shadow_bounds(&self, min: [f32; 3], max: [f32; 3]) {
+        *self.shadow_fit.write().expect("shadow fit lock") = Some(shadow_fit_for_bounds(min, max));
+    }
+
+    /// Drop the scene fit and return to the legacy ±[`SHADOW_ORTHO_HALF`]
+    /// box around the origin.
+    pub fn clear_shadow_bounds(&self) {
+        *self.shadow_fit.write().expect("shadow fit lock") = None;
+    }
+
+    /// Current directional-shadow ortho half-extent: the fitted value
+    /// after [`set_shadow_bounds`](Self::set_shadow_bounds), else the
+    /// ±[`SHADOW_ORTHO_HALF`] default.
+    pub fn shadow_half_extent(&self) -> f32 {
+        self.shadow_fit
+            .read()
+            .expect("shadow fit lock")
+            .map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
     }
 
     /// Grow a storage buffer when `needed` exceeds `capacity`, doubling
@@ -2302,6 +2687,11 @@ impl Renderer3D {
     /// Convert and upload instances into the per-object buffer used by
     /// both gbuffer and forward passes, growing the buffer (and rebinding
     /// the passes) when the frame needs more than the current capacity.
+    ///
+    /// The CPU staging vector reserves `instances.len()` exactly up front,
+    /// so the conversion never reallocates mid-frame; a repeated
+    /// same-size frame reuses the GPU buffer as-is
+    /// ([`Self::ensure_instance_capacity`] no-ops when the data fits).
     pub fn upload_instances(
         &self,
         device: &wgpu::Device,
@@ -2312,7 +2702,8 @@ impl Renderer3D {
         let count = instances
             .len()
             .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
-        let mut gpu_objects: Vec<PerObjectGpu> = Vec::with_capacity(count);
+        let mut gpu_objects: Vec<PerObjectGpu> =
+            Vec::with_capacity(staging_capacity_for_instances(count));
         for inst in instances.iter().take(count) {
             let model_arr: [[f32; 4]; 4] = inst.model_matrix.to_cols_array_2d();
             let normal_arr: [[f32; 4]; 4] = inst.normal_matrix.to_cols_array_2d();
@@ -2964,5 +3355,170 @@ mod tests {
             assert!(nu[0] > 0.05, "face {face}: +u offset -> {nu:?}");
             assert!(nv[1] < -0.05, "face {face}: +v offset -> {nv:?}");
         }
+    }
+
+    fn dir_probe(direction: [f32; 3], shadow: bool) -> LightDesc {
+        LightDesc::Directional {
+            direction,
+            intensity: 1.0,
+            color: [1.0, 1.0, 1.0],
+            shadow,
+        }
+    }
+
+    #[test]
+    fn lighting_uniform_spells_eight_lights() {
+        // The WGSL block must spell the widened array; the member list
+        // itself is unchanged (multipliers stay CPU-baked, no new
+        // shader-visible field).
+        assert!(
+            LightingUniform::WGSL_SOURCE.contains("array<Light, 8>"),
+            "{}",
+            LightingUniform::WGSL_SOURCE
+        );
+        assert_eq!(
+            LightingUniform::FIELD_NAMES,
+            &["ambient_color", "lights", "light_count"]
+        );
+    }
+
+    #[test]
+    fn ten_lights_upload_eight_and_drop_two() {
+        let lights: Vec<LightDesc> = (0..10).map(|_| dir_probe([1.0, 1.0, 1.0], false)).collect();
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None);
+        assert_eq!(
+            built.stats,
+            LightUploadStats {
+                uploaded: 8,
+                dropped_lights: 2,
+                dropped_shadows: 0,
+            }
+        );
+        assert_eq!(built.uniform.light_count, 8);
+        // The public preview agrees with the upload path (single logic).
+        assert_eq!(count_light_drops(&lights), built.stats);
+    }
+
+    #[test]
+    fn shadow_overflow_counts_dropped_shadows() {
+        // Five shadowed directionals over four 2D layers.
+        let dirs: Vec<LightDesc> = (0..5).map(|_| dir_probe([0.0, 1.0, 0.0], true)).collect();
+        let stats = count_light_drops(&dirs);
+        assert_eq!(stats.uploaded, 5);
+        assert_eq!(stats.dropped_lights, 0);
+        assert_eq!(stats.dropped_shadows, 1, "{stats:?}");
+        // Three shadowed points over two cubes.
+        let points: Vec<LightDesc> = (0..3)
+            .map(|i| LightDesc::Point {
+                position: [i as f32, 4.0, 6.0],
+                intensity: 100.0,
+                color: [1.0, 1.0, 1.0],
+                range: 30.0,
+                shadow: true,
+            })
+            .collect();
+        let stats = count_light_drops(&points);
+        assert_eq!(stats.dropped_shadows, 1, "{stats:?}");
+        // A shadow request on a dropped excess light counts too.
+        let mut lights: Vec<LightDesc> =
+            (0..8).map(|_| dir_probe([1.0, 1.0, 1.0], false)).collect();
+        lights.push(dir_probe([0.0, 1.0, 0.0], true));
+        lights.push(dir_probe([0.0, 1.0, 0.0], true));
+        let stats = count_light_drops(&lights);
+        assert_eq!(stats.dropped_lights, 2, "{stats:?}");
+        assert_eq!(stats.dropped_shadows, 2, "{stats:?}");
+    }
+
+    #[test]
+    fn legacy_shadow_path_matches_dir_shadow_vp() {
+        // `fit: None` must reproduce the legacy matrix bit-for-bit:
+        // directional-only scenes stay pixel-identical.
+        let light = dir_probe([1.0, 1.0, 1.0], true);
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None);
+        let v = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
+        assert_eq!(built.uniform.lights[0].shadow_vp, dir_shadow_vp(v));
+        assert_eq!(built.uniform.lights[0].params[3], 0.0);
+    }
+
+    #[test]
+    fn fitted_shadow_covers_radius_50_scene() {
+        let (center, half) = shadow_fit_for_bounds([-50.0; 3], [50.0; 3]);
+        assert_eq!(center, [0.0, 0.0, 0.0]);
+        assert!((half - 50.0).abs() < 1e-6, "{half}");
+        let vp = dir_shadow_vp_fitted(glam::Vec3::Y, center, half);
+        for x in [-50.0, 50.0] {
+            for y in [-50.0, 50.0] {
+                for z in [-50.0, 50.0] {
+                    let n = ndc_of(vp, [x, y, z]);
+                    assert!(
+                        n[0].abs() <= 1.0 + 1e-3 && n[1].abs() <= 1.0 + 1e-3,
+                        "{x},{y},{z} -> {n:?}"
+                    );
+                    assert!((0.0..=1.0).contains(&n[2]), "{x},{y},{z} -> {n:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_fit_keeps_legacy_box() {
+        assert_eq!(
+            shadow_fit_for_bounds([-1.0; 3], [1.0; 3]),
+            ([0.0; 3], SHADOW_ORTHO_HALF)
+        );
+        assert_eq!(SHADOW_ORTHO_HALF, 12.0);
+        assert_eq!(
+            shadow_fit_for_bounds([f32::NAN; 3], [0.0; 3]),
+            ([0.0; 3], SHADOW_ORTHO_HALF)
+        );
+    }
+
+    #[test]
+    fn transparency_defaults_to_replace_and_sorts_far_first() {
+        // Default flag off: the forward pipeline blends with REPLACE
+        // (golden-pinned); opt-in selects ALPHA_BLENDING.
+        assert!(!TransparencyOptions::default().sorted_alpha);
+        assert_eq!(
+            forward_blend_state(TransparencyOptions::default()),
+            wgpu::BlendState::REPLACE
+        );
+        assert_eq!(
+            forward_blend_state(TransparencyOptions { sorted_alpha: true }),
+            wgpu::BlendState::ALPHA_BLENDING
+        );
+        // Depth sort: far first, stable on ties, empty stays empty.
+        assert_eq!(sort_by_depth(&[]), Vec::<u32>::new());
+        assert_eq!(sort_by_depth(&[2.0]), vec![0]);
+        assert_eq!(sort_by_depth(&[1.0, 5.0, 3.0]), vec![1, 2, 0]);
+        assert_eq!(sort_by_depth(&[2.0, 2.0, 1.0]), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ibl_multipliers_scale_upload_and_default_is_noop() {
+        let lights = vec![LightDesc::Directional {
+            direction: [1.0, 1.0, 1.0],
+            intensity: 2.0,
+            color: [0.5, 0.25, 0.125],
+            shadow: false,
+        }];
+        let base = build_lighting_uniform([0.5, 0.25, 0.125], 1.0, 1.0, &lights, None);
+        assert_eq!(base.uniform.ambient_color, [0.5, 0.25, 0.125, 1.0]);
+        assert_eq!(base.uniform.lights[0].color, [0.5, 0.25, 0.125, 2.0]);
+        let scaled = build_lighting_uniform([0.5, 0.25, 0.125], 2.0, 4.0, &lights, None);
+        assert_eq!(scaled.uniform.ambient_color, [1.0, 0.5, 0.25, 1.0]);
+        assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, 0.5, 2.0]);
+    }
+
+    #[test]
+    fn staging_reserve_is_exact_and_stable_at_same_size() {
+        // The upload path reserves once up front: exact fit for the
+        // frame, and re-reserving the same size never reallocates.
+        assert_eq!(staging_capacity_for_instances(300), 300);
+        let mut staging: Vec<PerObjectGpu> =
+            Vec::with_capacity(staging_capacity_for_instances(300));
+        assert!(staging.capacity() >= 300);
+        let capacity = staging.capacity();
+        staging.reserve(staging_capacity_for_instances(300).saturating_sub(staging.len()));
+        assert_eq!(staging.capacity(), capacity, "same size: no realloc");
     }
 }

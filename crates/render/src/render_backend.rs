@@ -19,6 +19,10 @@ pub struct RenderBackendConfig {
     pub surface_config: wgpu::SurfaceConfiguration,
     /// MSAA sample count for the gbuffer and lighting passes.
     pub sample_count: u32,
+    /// Exposure multiplier baked into every light color by
+    /// `Renderer3D::set_lights_full` (via [`create_render_backend`]);
+    /// `1.0` is the exact no-op.
+    pub exposure: f32,
     /// Upper bound on instances per frame (sized into GPU buffers).
     pub max_objects: u32,
     /// Upper bound on materials per frame.
@@ -40,6 +44,7 @@ impl Default for RenderBackendConfig {
                 color_space: wgpu::SurfaceColorSpace::Auto,
             },
             sample_count: 1,
+            exposure: 1.0,
             max_objects: 256,
             max_materials: 64,
         }
@@ -69,7 +74,9 @@ pub trait RenderBackend {
     fn set_camera(&mut self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]);
 
     /// Upload ambient RGB and scene lights ([`LightDesc`]); the renderer
-    /// uploads the first four of any kind.
+    /// uploads the first eight of any kind (see
+    /// `crate::renderer::MAX_LIGHTS`) and reports drops via
+    /// `crate::renderer::Renderer3D::light_upload_stats`.
     fn set_lights(&mut self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]);
 
     /// Replace the material table; instance data references entries by index.
@@ -101,11 +108,10 @@ pub fn create_render_backend(
     device: &wgpu::Device,
     config: &RenderBackendConfig,
 ) -> Box<dyn RenderBackend> {
-    Box::new(crate::renderer::Renderer3D::new(
-        device,
-        &config.surface_config,
-        config.sample_count,
-    ))
+    let mut renderer =
+        crate::renderer::Renderer3D::new(device, &config.surface_config, config.sample_count);
+    renderer.set_exposure(config.exposure);
+    Box::new(renderer)
 }
 
 /// Adapter implementing [`RenderBackend`] by delegating to the concrete
@@ -188,8 +194,180 @@ mod tests {
         assert_eq!(config.surface_config.desired_maximum_frame_latency, 2);
         assert!(config.surface_config.view_formats.is_empty());
         assert_eq!(config.sample_count, 1);
+        assert_eq!(config.exposure, 1.0);
         assert_eq!(config.max_objects, 256);
         assert_eq!(config.max_materials, 64);
+    }
+
+    /// MSAA/exposure passthrough gate: the default config carries
+    /// `sample_count = 1` and `exposure = 1.0` (both exact no-ops), and a
+    /// non-default config round-trips its values into the built renderer
+    /// without changing the defaults. Pure CPU except the build itself.
+    #[test]
+    fn config_msaa_and_exposure_forward_to_renderer() {
+        let defaults = RenderBackendConfig::default();
+        assert_eq!(defaults.sample_count, 1);
+        assert_eq!(defaults.exposure, 1.0);
+        let custom = RenderBackendConfig {
+            sample_count: 4,
+            exposure: 2.0,
+            ..RenderBackendConfig::default()
+        };
+        assert_eq!(custom.sample_count, 4);
+        assert_eq!(custom.exposure, 2.0);
+        // The defaults above are unchanged by constructing a custom value.
+        assert_eq!(RenderBackendConfig::default().sample_count, 1);
+        assert_eq!(RenderBackendConfig::default().exposure, 1.0);
+    }
+
+    /// Transparency-flag gate: building with default transparency options
+    /// renders pixel-identical to the plain constructor (the flag defaults
+    /// off and must not change the default frame). Skipped when no adapter
+    /// is available.
+    #[test]
+    fn default_transparency_flag_leaves_frame_unchanged() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        const W: u32 = 160;
+        const H: u32 = 90;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: W,
+            height: H,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let plain = crate::renderer::Renderer3D::new(&device, &surface_config, 1);
+        let flagged = crate::renderer::Renderer3D::new_with_transparency(
+            &device,
+            &surface_config,
+            1,
+            crate::renderer::TransparencyOptions::default(),
+        );
+        assert_eq!(
+            flagged.transparency(),
+            crate::renderer::TransparencyOptions::default()
+        );
+        assert_eq!(flagged.sample_count(), 1);
+        assert_eq!(flagged.exposure(), 1.0);
+
+        let mesh = crate::mesh::create_sphere(&device, 1.0, 16, 12);
+        let mut red = ornis_core::OpenPBRMaterial::dielectric();
+        red.base.color_rgb([0.8, 0.2, 0.2]);
+        let view = glam::camera::rh::view::look_at_mat4(
+            glam::Vec3::new(0.0, 0.0, 5.0),
+            glam::Vec3::ZERO,
+            glam::Vec3::Y,
+        );
+        let proj = glam::camera::rh::proj::directx::perspective(
+            55.0f32.to_radians(),
+            W as f32 / H as f32,
+            0.1,
+            100.0,
+        );
+        let view_proj = (proj * view).to_cols_array_2d();
+        let render = |renderer: &crate::renderer::Renderer3D| -> Vec<u8> {
+            renderer.upload_materials(&device, &queue, &[red]);
+            let model = glam::Mat4::IDENTITY;
+            renderer.upload_instances(
+                &device,
+                &queue,
+                &[crate::renderer::InstanceData {
+                    model_matrix: model,
+                    normal_matrix: model.inverse().transpose(),
+                    material_index: 0,
+                }],
+            );
+            renderer.set_camera(&queue, &view_proj, [0.0, 0.0, 5.0]);
+            renderer.set_lights(
+                &queue,
+                [0.1, 0.1, 0.15],
+                &[crate::scene::LightDesc::Directional {
+                    direction: [1.0, 1.0, 1.0],
+                    intensity: 1.0,
+                    color: [1.0, 1.0, 1.0],
+                    shadow: false,
+                }],
+            );
+            let target_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("transparency flag target"),
+                size: wgpu::Extent3d {
+                    width: W,
+                    height: H,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let target_view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("transparency flag encoder"),
+            });
+            renderer.render_scene(&device, &queue, &mut encoder, &target_view, &mesh, 1);
+            let bpp = 4u32;
+            let unpadded = W * bpp;
+            let padded = unpadded.div_ceil(256) * 256;
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("transparency flag readback"),
+                size: (padded * H) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(H),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: W,
+                    height: H,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll");
+            let data = slice.get_mapped_range().unwrap();
+            let mut pixels = vec![0u8; (unpadded * H) as usize];
+            for y in 0..H as usize {
+                pixels[y * unpadded as usize..][..unpadded as usize]
+                    .copy_from_slice(&data[y * padded as usize..][..unpadded as usize]);
+            }
+            drop(data);
+            readback.unmap();
+            pixels
+        };
+
+        let a = render(&plain);
+        let b = render(&flagged);
+        assert_eq!(a.len(), b.len());
+        let diffs = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+        eprintln!("transparency flag: differing bytes={diffs}");
+        assert_eq!(diffs, 0, "default transparency flag changed the frame");
     }
 
     /// Uploads past the initial 256-instance / 64-material capacities grow
@@ -430,6 +608,7 @@ mod tests {
         let backend_config = RenderBackendConfig {
             surface_config: surface_config.clone(),
             sample_count: 1,
+            exposure: 1.0,
             max_objects: 256,
             max_materials: 64,
         };
@@ -443,7 +622,14 @@ mod tests {
                 segments,
                 rings,
             } => crate::mesh::create_sphere(&device, *radius, *segments, *rings),
-            // The golden probe renders Sphere-only scenes; Custom soups
+            crate::scene::MeshDesc::Box { size } => crate::mesh::create_box(&device, *size),
+            crate::scene::MeshDesc::Plane { size } => crate::mesh::create_plane(&device, *size),
+            crate::scene::MeshDesc::Cylinder {
+                radius,
+                height,
+                radial_segments,
+            } => crate::mesh::create_cylinder(&device, *radius, *height, *radial_segments),
+            // The golden probe renders procedural scenes; Custom soups
             // have no upload path here yet.
             crate::scene::MeshDesc::Custom { .. } => {
                 panic!("Custom mesh not supported by this probe")
@@ -456,6 +642,7 @@ mod tests {
                 crate::scene::MaterialDesc::Dielectric {
                     base_color,
                     roughness,
+                    ..
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::dielectric();
                     m.base.color_rgb(*base_color);
@@ -465,6 +652,7 @@ mod tests {
                 crate::scene::MaterialDesc::Metal {
                     base_color,
                     roughness,
+                    ..
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::metal();
                     m.base.color_rgb(*base_color);
@@ -475,11 +663,33 @@ mod tests {
                     base_color,
                     coat_weight,
                     coat_roughness,
+                    ..
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::coat();
                     m.base.color_rgb(*base_color);
                     m.coat.weight(*coat_weight);
                     m.coat.roughness(*coat_roughness);
+                    m
+                }
+                crate::scene::MaterialDesc::Matte {
+                    base_color,
+                    roughness,
+                } => {
+                    let mut m = ornis_core::OpenPBRMaterial::dielectric();
+                    m.base.color_rgb(*base_color);
+                    m.base.diffuse_roughness(*roughness);
+                    m.specular.weight(0.0);
+                    m
+                }
+                crate::scene::MaterialDesc::Glass {
+                    base_color,
+                    roughness,
+                    ior,
+                } => {
+                    let mut m = ornis_core::OpenPBRMaterial::glass();
+                    m.transmission.color_rgb(*base_color);
+                    m.specular.roughness(*roughness);
+                    m.specular.ior(*ior);
                     m
                 }
             };
@@ -704,6 +914,7 @@ mod tests {
             &RenderBackendConfig {
                 surface_config,
                 sample_count: 1,
+                exposure: 1.0,
                 max_objects: 256,
                 max_materials: 64,
             },
@@ -896,6 +1107,7 @@ mod tests {
             &RenderBackendConfig {
                 surface_config,
                 sample_count: 1,
+                exposure: 1.0,
                 max_objects: 256,
                 max_materials: 64,
             },
@@ -1064,6 +1276,7 @@ mod tests {
             &RenderBackendConfig {
                 surface_config,
                 sample_count: 1,
+                exposure: 1.0,
                 max_objects: 256,
                 max_materials: 64,
             },
@@ -1232,6 +1445,7 @@ mod tests {
             &RenderBackendConfig {
                 surface_config,
                 sample_count: 1,
+                exposure: 1.0,
                 max_objects: 256,
                 max_materials: 64,
             },
@@ -1686,5 +1900,306 @@ mod tests {
                 "shadowed frame is not darker ({technique:?}): on={mean_on:.2} off={mean_off:.2}"
             );
         }
+    }
+
+    /// Light-limit gate: ten scene lights upload eight and report two
+    /// dropped — the silent-truncate path is now explicit. Pure CPU
+    /// (no adapter needed).
+    #[test]
+    fn ten_scene_lights_preview_two_dropped() {
+        let lights: Vec<crate::scene::LightDesc> = (0..10)
+            .map(|_| crate::scene::LightDesc::Directional {
+                direction: [1.0, 1.0, 1.0],
+                intensity: 0.6,
+                color: [1.0, 1.0, 1.0],
+                shadow: false,
+            })
+            .collect();
+        let rig = crate::extraction::RenderLights {
+            ambient: [0.10, 0.10, 0.15],
+            lights,
+            ambient_intensity: 1.0,
+            exposure: 1.0,
+        };
+        let stats = rig.light_upload_stats();
+        assert_eq!(stats.uploaded, 8, "{stats:?}");
+        assert_eq!(stats.dropped_lights, 2, "{stats:?}");
+        assert_eq!(stats.dropped_shadows, 0, "{stats:?}");
+        assert_eq!(stats, crate::renderer::count_light_drops(&rig.lights));
+    }
+
+    /// Back-compat gate: the shipped demo RON (no IBL fields) loads and
+    /// the resource defaults both multipliers to the exact no-op `1.0`.
+    /// Pure CPU (no adapter needed).
+    #[test]
+    fn old_scene_ron_loads_with_ibl_defaults() {
+        let ron_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scene.ron");
+        let ron = std::fs::read_to_string(&ron_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", ron_path.display()));
+        let scene = crate::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
+        let rig = crate::extraction::RenderLights::from_scene(&scene);
+        assert_eq!(rig.ambient_intensity, 1.0);
+        assert_eq!(rig.exposure, 1.0);
+        // The demo scene fits the limits — the scene-load log stays quiet.
+        let stats = rig.light_upload_stats();
+        assert_eq!(stats.dropped_lights, 0, "{stats:?}");
+        assert_eq!(stats.dropped_shadows, 0, "{stats:?}");
+    }
+
+    /// Shadow-fit gate: a radius-50 scene AABB grows the directional
+    /// ortho box to cover it (default stays ±12). Pure CPU.
+    #[test]
+    fn shadow_bounds_fit_covers_radius_50_scene() {
+        let (center, half) = crate::renderer::shadow_fit_for_bounds([-50.0; 3], [50.0; 3]);
+        assert_eq!(center, [0.0, 0.0, 0.0]);
+        assert!(half >= 50.0, "half={half}");
+        let (_, small) = crate::renderer::shadow_fit_for_bounds([-1.0; 3], [1.0; 3]);
+        assert_eq!(small, crate::renderer::SHADOW_ORTHO_HALF);
+    }
+
+    /// GPU path: `set_lights_full` uploads ten lights, reports two
+    /// dropped, publishes the report, and the scene fit switches the
+    /// ortho half from ±12 to the fitted value and back. Skipped when no
+    /// adapter is available.
+    #[test]
+    fn gpu_upload_reports_drops_and_applies_scene_fit() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: 320,
+            height: 180,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let renderer = crate::renderer::Renderer3D::new(&device, &surface_config, 1);
+        assert_eq!(
+            renderer.shadow_half_extent(),
+            crate::renderer::SHADOW_ORTHO_HALF
+        );
+        renderer.set_shadow_bounds([-50.0; 3], [50.0; 3]);
+        assert!(
+            renderer.shadow_half_extent() >= 50.0,
+            "half={}",
+            renderer.shadow_half_extent()
+        );
+        let lights: Vec<crate::scene::LightDesc> = (0..10)
+            .map(|_| crate::scene::LightDesc::Directional {
+                direction: [0.0, 1.0, 1.0],
+                intensity: 1.0,
+                color: [1.0, 1.0, 1.0],
+                shadow: false,
+            })
+            .collect();
+        let stats = renderer.set_lights_full(&queue, [0.1, 0.1, 0.15], 1.0, 1.0, &lights);
+        assert_eq!(stats.uploaded, 8, "{stats:?}");
+        assert_eq!(stats.dropped_lights, 2, "{stats:?}");
+        assert_eq!(renderer.light_upload_stats(), stats);
+        renderer.clear_shadow_bounds();
+        assert_eq!(
+            renderer.shadow_half_extent(),
+            crate::renderer::SHADOW_ORTHO_HALF
+        );
+    }
+
+    /// Custom smoke: a quad `MeshDesc::Custom` uploads through
+    /// `renderer::upload_custom_mesh` and draws non-empty pixels that
+    /// differ from the empty frame — the Custom path renders real
+    /// geometry instead of panicking (cf. the golden probe's Custom
+    /// arm). Skipped when no adapter is available.
+    #[test]
+    fn custom_quad_renders_nonempty_pixels_distinct_from_empty() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter; skipping custom probe");
+            return;
+        };
+        const W: u32 = 320;
+        const H: u32 = 180;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("custom probe target"),
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: W,
+            height: H,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let mut backend = create_render_backend(
+            &device,
+            &RenderBackendConfig {
+                surface_config,
+                sample_count: 1,
+                exposure: 1.0,
+                max_objects: 256,
+                max_materials: 64,
+            },
+        );
+        // Planar quad in y=0, CCW seen from +Y (the same soup as the
+        // extraction `custom_quad_*` tests) — the upload must not panic.
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ];
+        let indices = [0u32, 1, 2, 0, 2, 3];
+        let mesh = crate::renderer::upload_custom_mesh(&device, &positions, &indices)
+            .expect("quad soup valid");
+        let mut red = ornis_core::OpenPBRMaterial::dielectric();
+        red.base.color_rgb([0.8, 0.2, 0.2]);
+        red.specular.roughness(0.5);
+        backend.upload_materials(&device, &queue, &[red]);
+        // The soup spans x/z in [0, 1]: enlarge 2x and center at the
+        // origin so the camera frames it.
+        let model = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::new(2.0, 1.0, 2.0),
+            glam::Quat::IDENTITY,
+            glam::Vec3::new(-1.0, 0.0, -1.0),
+        );
+        backend.upload_instances(
+            &device,
+            &queue,
+            &[crate::renderer::InstanceData {
+                model_matrix: model,
+                normal_matrix: model.inverse().transpose(),
+                material_index: 0,
+            }],
+        );
+        // Camera above-front looking at the quad center; the light comes
+        // from above so the +Y face is lit.
+        let view = glam::camera::rh::view::look_at_mat4(
+            glam::Vec3::new(0.0, 3.0, 3.0),
+            glam::Vec3::ZERO,
+            glam::Vec3::Y,
+        );
+        let proj = glam::camera::rh::proj::directx::perspective(
+            55.0f32.to_radians(),
+            W as f32 / H as f32,
+            0.1,
+            100.0,
+        );
+        backend.set_camera(&queue, &(proj * view).to_cols_array_2d(), [0.0, 3.0, 3.0]);
+        backend.set_lights(
+            &queue,
+            [0.05, 0.05, 0.08],
+            &[crate::scene::LightDesc::Directional {
+                direction: [0.2, 1.0, 0.3],
+                intensity: 1.2,
+                color: [1.0, 1.0, 1.0],
+                shadow: false,
+            }],
+        );
+        let render = |count: u32| -> Vec<u8> {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("custom probe encoder"),
+            });
+            backend.render_scene(
+                RenderContext {
+                    device: &device,
+                    queue: &queue,
+                    encoder: &mut encoder,
+                    target: &target_view,
+                },
+                &mesh,
+                count,
+            );
+            let bpp = 4u32;
+            let unpadded = W * bpp;
+            let padded = unpadded.div_ceil(256) * 256;
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("custom probe readback"),
+                size: (padded * H) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(H),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: W,
+                    height: H,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll");
+            let data = slice.get_mapped_range().unwrap();
+            let mut pixels = vec![0u8; (unpadded * H) as usize];
+            for y in 0..H as usize {
+                pixels[y * unpadded as usize..][..unpadded as usize]
+                    .copy_from_slice(&data[y * padded as usize..][..unpadded as usize]);
+            }
+            drop(data);
+            readback.unmap();
+            pixels
+        };
+
+        let custom = render(1);
+        let empty = render(0);
+        assert_eq!(custom.len(), empty.len());
+        let lit_px = custom
+            .chunks_exact(4)
+            .filter(|c| (c[0] as u16 + c[1] as u16 + c[2] as u16) > 30)
+            .count();
+        let mut diff_px = 0usize;
+        for (a, b) in custom.chunks_exact(4).zip(empty.chunks_exact(4)) {
+            let d = (a[0] as i16 - b[0] as i16).abs()
+                + (a[1] as i16 - b[1] as i16).abs()
+                + (a[2] as i16 - b[2] as i16).abs();
+            if d > 12 {
+                diff_px += 1;
+            }
+        }
+        eprintln!("custom probe: lit_px={lit_px} diff_px={diff_px}");
+        assert!(
+            lit_px > 200,
+            "custom quad drew nothing: {lit_px} lit pixels"
+        );
+        assert!(
+            diff_px > 200,
+            "custom frame matches the empty frame: {diff_px} pixels differ"
+        );
     }
 }

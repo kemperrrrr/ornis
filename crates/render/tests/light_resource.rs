@@ -37,6 +37,7 @@ fn legacy_scene() -> Scene {
             material: MaterialDesc::Metal {
                 base_color: [0.9, 0.8, 0.2],
                 roughness: 0.2,
+                emission: [0.0, 0.0, 0.0],
             },
         }],
         lights: vec![

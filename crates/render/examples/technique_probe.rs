@@ -16,35 +16,73 @@ const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const BYTES_PER_PIXEL: u32 = 4;
 
+/// Peak-luminance emission mapping, mirroring `extraction::apply_emission`.
+fn apply_emission(mat: &mut OpenPBRMaterial, emission: [f32; 3]) {
+    let peak = emission[0].max(emission[1]).max(emission[2]).max(0.0);
+    if peak > 0.0 {
+        mat.emission.luminance(peak);
+        mat.emission
+            .color_rgb([emission[0] / peak, emission[1] / peak, emission[2] / peak]);
+    }
+}
+
 fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
     match entity_material {
         MaterialDesc::Dielectric {
             base_color,
             roughness,
+            emission,
         } => {
             let mut mat = OpenPBRMaterial::dielectric();
             mat.base.color_rgb(*base_color);
             mat.specular.roughness(*roughness);
+            apply_emission(&mut mat, *emission);
             mat
         }
         MaterialDesc::Metal {
             base_color,
             roughness,
+            emission,
         } => {
             let mut mat = OpenPBRMaterial::metal();
             mat.base.color_rgb(*base_color);
             mat.specular.roughness(*roughness);
+            apply_emission(&mut mat, *emission);
             mat
         }
         MaterialDesc::Coat {
             base_color,
             coat_weight,
             coat_roughness,
+            emission,
         } => {
             let mut mat = OpenPBRMaterial::coat();
             mat.base.color_rgb(*base_color);
             mat.coat.weight(*coat_weight);
             mat.coat.roughness(*coat_roughness);
+            apply_emission(&mut mat, *emission);
+            mat
+        }
+        MaterialDesc::Matte {
+            base_color,
+            roughness,
+        } => {
+            let mut mat = OpenPBRMaterial::dielectric();
+            mat.base.color_rgb(*base_color);
+            mat.base.diffuse_roughness(*roughness);
+            // Matte is diffuse-only: no specular lobe.
+            mat.specular.weight(0.0);
+            mat
+        }
+        MaterialDesc::Glass {
+            base_color,
+            roughness,
+            ior,
+        } => {
+            let mut mat = OpenPBRMaterial::glass();
+            mat.transmission.color_rgb(*base_color);
+            mat.specular.roughness(*roughness);
+            mat.specular.ior(*ior);
             mat
         }
     }
@@ -119,7 +157,14 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
             segments,
             rings,
         } => ornis_render::create_sphere(&device, *radius, *segments, *rings),
-        // This probe renders Sphere-only scenes; Custom soups have no
+        MeshDesc::Box { size } => ornis_render::mesh::create_box(&device, *size),
+        MeshDesc::Plane { size } => ornis_render::mesh::create_plane(&device, *size),
+        MeshDesc::Cylinder {
+            radius,
+            height,
+            radial_segments,
+        } => ornis_render::mesh::create_cylinder(&device, *radius, *height, *radial_segments),
+        // This probe renders procedural scenes; Custom soups have no
         // upload path here yet.
         MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),
     };

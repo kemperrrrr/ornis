@@ -253,7 +253,7 @@ impl GameApp {
     }
 
     fn showcase_engine() -> (GameWorld, u32) {
-        let scene = Scene::from_ron(include_str!("../assets/scene.ron"))
+        let scene = Scene::from_ron(include_str!("../assets/demo_scene.ron"))
             .expect("shipped showcase scene must parse");
         let entity_count = scene.entities.len() as u32;
         let mut runtime = GameWorld::from_scene(&scene);
@@ -280,8 +280,11 @@ impl GameApp {
                 let description = &scene.entities[index];
                 let radius = match &description.mesh {
                     ornis_render::scene::MeshDesc::Sphere { radius, .. } => *radius,
-                    // Custom meshes need an explicit validated collider recipe.
-                    ornis_render::scene::MeshDesc::Custom { .. } => continue,
+                    // Custom/Box/Plane/Cylinder need an explicit validated collider recipe.
+                    ornis_render::scene::MeshDesc::Custom { .. }
+                    | ornis_render::scene::MeshDesc::Box { .. }
+                    | ornis_render::scene::MeshDesc::Plane { .. }
+                    | ornis_render::scene::MeshDesc::Cylinder { .. } => continue,
                 };
                 let mass = if index == 0 { 1.0 } else { 0.0 };
                 store.insert(

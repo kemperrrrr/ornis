@@ -315,6 +315,7 @@ impl System for UnifiedRenderExtractSystem {
                 MaterialDesc::Dielectric {
                     base_color,
                     roughness,
+                    ..
                 } => {
                     let mut o = ornis_core::OpenPBRMaterial::dielectric();
                     o.base.color_rgb(*base_color);
@@ -324,6 +325,7 @@ impl System for UnifiedRenderExtractSystem {
                 MaterialDesc::Metal {
                     base_color,
                     roughness,
+                    ..
                 } => {
                     let mut o = ornis_core::OpenPBRMaterial::metal();
                     o.base.color_rgb(*base_color);
@@ -334,11 +336,33 @@ impl System for UnifiedRenderExtractSystem {
                     base_color,
                     coat_weight,
                     coat_roughness,
+                    ..
                 } => {
                     let mut o = ornis_core::OpenPBRMaterial::coat();
                     o.base.color_rgb(*base_color);
                     o.coat.weight(*coat_weight);
                     o.coat.roughness(*coat_roughness);
+                    o
+                }
+                MaterialDesc::Matte {
+                    base_color,
+                    roughness,
+                } => {
+                    let mut o = ornis_core::OpenPBRMaterial::dielectric();
+                    o.base.color_rgb(*base_color);
+                    o.base.diffuse_roughness(*roughness);
+                    o.specular.weight(0.0);
+                    o
+                }
+                MaterialDesc::Glass {
+                    base_color,
+                    roughness,
+                    ior,
+                } => {
+                    let mut o = ornis_core::OpenPBRMaterial::glass();
+                    o.transmission.color_rgb(*base_color);
+                    o.specular.roughness(*roughness);
+                    o.specular.ior(*ior);
                     o
                 }
             };
@@ -399,6 +423,7 @@ mod tests {
             MaterialDesc::Dielectric {
                 base_color: [1.0, 0.0, 0.0],
                 roughness: 0.5,
+                emission: [0.0, 0.0, 0.0],
             },
         );
         let view = UnifiedView::new(engine.world());

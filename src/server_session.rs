@@ -1005,7 +1005,11 @@ fn physics_body_for(transform: &TransformDesc, mesh: &MeshDesc) -> Option<RigidB
     let radius = match mesh {
         MeshDesc::Sphere { radius, .. } => *radius,
         // Transport alone must not create an unrelated sphere collider.
-        MeshDesc::Custom { .. } => return None,
+        // Box/Plane/Cylinder need explicit collider recipes (same as Custom).
+        MeshDesc::Custom { .. }
+        | MeshDesc::Box { .. }
+        | MeshDesc::Plane { .. }
+        | MeshDesc::Cylinder { .. } => return None,
     };
     let mut body = RigidBody::new_sphere(Vec3::from_array(transform.translation), radius, 0.0);
     apply_transform_to_body(&mut body, transform);
@@ -1032,6 +1036,7 @@ fn default_material() -> MaterialDesc {
     MaterialDesc::Dielectric {
         base_color: [0.5, 0.5, 0.5],
         roughness: 0.5,
+        emission: [0.0, 0.0, 0.0],
     }
 }
 
@@ -2284,6 +2289,7 @@ mod tests {
             MaterialDesc::Metal {
                 base_color: [1.0, 0.0, 0.0],
                 roughness: 0.3,
+                emission: [0.0, 0.0, 0.0],
             },
         );
 

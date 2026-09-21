@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use ornis_core::{Engine, InputState, Resources, System, SystemAccess};
 
 use crate::scene::CameraDesc;
@@ -164,6 +164,70 @@ pub fn camera_view_projection(
     let projection =
         glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
     (projection * view_matrix, cam_pos)
+}
+
+/// Six normalized world-space frustum planes for CPU-side sphere culling.
+///
+/// Read-only helper: built once per frame from the frame `view_proj` and
+/// queried per entity via [`Frustum::sphere_visible`]. Planes follow
+/// Gribb/Hartmann extraction from the matrix rows; the depth planes assume
+/// the DirectX `0..1` convention of [`camera_view_projection`]
+/// (`near = row2`, `far = row3 - row2`). A degenerate (zero-length or
+/// non-finite) plane never culls — the query fails open.
+#[derive(Clone, Debug)]
+pub struct Frustum {
+    planes: [Vec4; 6],
+}
+
+impl Frustum {
+    /// Extracts the six planes from `view_proj` and normalizes them.
+    pub fn from_view_proj(view_proj: &Mat4) -> Self {
+        let r0 = view_proj.row(0);
+        let r1 = view_proj.row(1);
+        let r2 = view_proj.row(2);
+        let r3 = view_proj.row(3);
+        Self {
+            planes: [
+                r3 + r0, // left
+                r3 - r0, // right
+                r3 + r1, // bottom
+                r3 - r1, // top
+                r2,      // near (DirectX 0..1)
+                r3 - r2, // far
+            ]
+            .map(|p| {
+                let len = p.truncate().length();
+                if len.is_finite() && len > 1e-12 {
+                    p / len
+                } else {
+                    // Degenerate: mark with a NaN normal so the query
+                    // fails open instead of culling the frame.
+                    Vec4::NAN
+                }
+            }),
+        }
+    }
+
+    /// Tests a world-space sphere against the six planes.
+    ///
+    /// Returns `false` only when the sphere is fully outside at least one
+    /// plane with a valid normal; degenerate planes and non-finite
+    /// inputs return `true` (never falsely cull).
+    pub fn sphere_visible(&self, center: Vec3, radius: f32) -> bool {
+        if !center.is_finite() || !radius.is_finite() || radius < 0.0 {
+            return true;
+        }
+        for plane in &self.planes {
+            if !plane.is_finite() {
+                continue;
+            }
+            let distance = plane.truncate().dot(center) + plane.w;
+            if distance < -radius {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[cfg(test)]

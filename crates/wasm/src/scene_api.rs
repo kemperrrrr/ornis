@@ -274,6 +274,121 @@ mod tests {
     }
 
     #[test]
+    fn parses_box_plane_cylinder_and_emission_parity() {
+        // WASM transport parity for the procedural variants in `MeshDesc`
+        // plus `MaterialDesc::emission`: new payloads parse with values
+        // intact, while old payloads without `emission` keep loading with
+        // emission off (serde default).
+        let json = r#"{
+            "version": 9,
+            "entities": [
+                {
+                    "components": {
+                        "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                        "Mesh": {"Box": {"size": [2.0, 4.0, 6.0]}},
+                        "Material": {"Dielectric": {"base_color":[0.8,0.2,0.2],"roughness":0.4,"emission":[2.0,1.0,0.5]}}
+                    }
+                },
+                {
+                    "components": {
+                        "Transform": {"translation":[3,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                        "Mesh": {"Plane": {"size": [3.0, 5.0]}},
+                        "Material": {"Metal": {"base_color":[0.9,0.8,0.3],"roughness":0.2}}
+                    }
+                },
+                {
+                    "components": {
+                        "Transform": {"translation":[-3,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                        "Mesh": {"Cylinder": {"radius": 1.5, "height": 7.0, "radial_segments": 12}},
+                        "Material": {"Coat": {"base_color":[0.1,0.2,0.9],"coat_weight":0.8,"coat_roughness":0.1,"emission":[0.0,0.0,1.0]}}
+                    }
+                }
+            ],
+            "lights": [],
+            "camera": {"position":[0,2,8],"target":[0,0,0],"up":[0,1,0],"fov":55.0,"near":0.1,"far":100.0},
+            "ambient": [0.1,0.1,0.1]
+        }"#;
+        let live =
+            parse_scene_json(json).expect("box/plane/cylinder + emission payload must parse");
+        assert_eq!(live.scene.entities.len(), 3);
+        assert!(matches!(
+            live.scene.entities[0].mesh,
+            MeshDesc::Box { size } if size == [2.0, 4.0, 6.0]
+        ));
+        assert!(matches!(
+            live.scene.entities[0].material,
+            MaterialDesc::Dielectric {
+                emission: [2.0, 1.0, 0.5],
+                ..
+            }
+        ));
+        assert!(matches!(
+            live.scene.entities[1].mesh,
+            MeshDesc::Plane { size } if size == [3.0, 5.0]
+        ));
+        // Old payload without `emission`: defaults to off, still loads.
+        assert!(matches!(
+            live.scene.entities[1].material,
+            MaterialDesc::Metal {
+                emission: [0.0, 0.0, 0.0],
+                ..
+            }
+        ));
+        assert!(matches!(
+            live.scene.entities[2].mesh,
+            MeshDesc::Cylinder {
+                radius,
+                height,
+                radial_segments,
+            } if radius == 1.5 && height == 7.0 && radial_segments == 12
+        ));
+        assert!(matches!(
+            live.scene.entities[2].material,
+            MaterialDesc::Coat {
+                emission: [0.0, 0.0, 1.0],
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn box_and_emission_survive_transport_round_trip() {
+        // Serialize components exactly as the server would, embed them in
+        // an `/api/scene` payload, and parse back: the JSON transport
+        // preserves Box geometry and emission bit-exactly.
+        let mesh_json = serde_json::to_string(&MeshDesc::Box {
+            size: [2.0, 4.0, 6.0],
+        })
+        .expect("mesh serializes");
+        let material_json = serde_json::to_string(&MaterialDesc::Dielectric {
+            base_color: [0.8, 0.2, 0.2],
+            roughness: 0.4,
+            emission: [2.0, 1.0, 0.5],
+        })
+        .expect("material serializes");
+        let payload = format!(
+            r#"{{"version": 1, "entities": [{{"components": {{
+                "Transform": {{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]}},
+                "Mesh": {mesh_json},
+                "Material": {material_json}
+            }} }}], "lights": [],
+            "camera": {{"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}} }}"#
+        );
+        let live = parse_scene_json(&payload).expect("round-tripped payload must parse");
+        assert!(matches!(
+            live.scene.entities[0].mesh,
+            MeshDesc::Box { size } if size == [2.0, 4.0, 6.0]
+        ));
+        let MaterialDesc::Dielectric { emission, .. } = &live.scene.entities[0].material else {
+            panic!(
+                "expected Dielectric, got {:?}",
+                live.scene.entities[0].material
+            );
+        };
+        assert_eq!(*emission, [2.0, 1.0, 0.5]);
+    }
+
+    #[test]
     fn rejects_unknown_enum_variants() {
         let unknown_mesh = r#"{
             "version": 1,

@@ -38,6 +38,7 @@ fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
                 material: MaterialDesc::Dielectric {
                     base_color: [0.8, 0.2, 0.2],
                     roughness: 0.4,
+                    emission: [0.0, 0.0, 0.0],
                 },
             })
             .collect(),

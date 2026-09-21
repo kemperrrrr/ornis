@@ -312,6 +312,8 @@ mod tests {
 
     /// Shipped demo scene: five spheres over two directional lights.
     const DEMO_RON: &str = include_str!("../../../assets/scene.ron");
+    /// Showcase demo scene: floor + wall + tower + rolling ball.
+    const SHOWCASE_RON: &str = include_str!("../../../assets/demo_scene.ron");
 
     fn entity_desc(name: &str, x: f32) -> EntityDesc {
         EntityDesc {
@@ -329,6 +331,7 @@ mod tests {
             material: MaterialDesc::Metal {
                 base_color: [0.9, 0.7, 0.1],
                 roughness: 0.2,
+                emission: [0.0, 0.0, 0.0],
             },
         }
     }
@@ -366,6 +369,39 @@ mod tests {
             }]
         );
         assert!(server.take_events().is_empty());
+    }
+
+    #[test]
+    fn loads_showcase_scene_with_floor_wall_tower_and_ball() {
+        let mut server = AssetServer::new();
+        let id = server
+            .load_scene_ron(SHOWCASE_RON)
+            .expect("showcase scene loads");
+        let scene = server.get_scene(id).expect("stored");
+        assert_eq!(scene.name, "demo_showcase");
+        assert_eq!(scene.entities.len(), 7);
+        let names: Vec<&str> = scene
+            .entities
+            .iter()
+            .map(|entity| entity.name.as_str())
+            .collect();
+        for expected in [
+            "Rolling Ball",
+            "Floor",
+            "Wall",
+            "Tower Base",
+            "Tower Mid",
+            "Tower Top",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        let mut engine = Engine::new();
+        let entities = server
+            .instantiate(&mut engine, id)
+            .expect("showcase instantiates");
+        assert_eq!(entities.len(), 7);
+        let extracted = ornis_render::extract_render_data(engine.world().store().expect("store"));
+        assert_eq!(extracted.instances.len(), 7);
     }
 
     #[test]
@@ -423,7 +459,8 @@ mod tests {
         let store = engine.world().store().expect("store");
         let extracted = ornis_render::extract_render_data(store);
         assert_eq!(extracted.instances.len(), 2);
-        assert_eq!(extracted.materials.len(), 2);
+        // Both entities share one identical material → deduped table entry.
+        assert_eq!(extracted.materials.len(), 1);
         for (position, entity) in entities.iter().enumerate() {
             let mesh_lane = store.read_lane::<MeshHandle>().expect("mesh handle lane");
             let mesh = mesh_lane.get(*entity).expect("mesh handle");

@@ -45,7 +45,8 @@ pub mod transient_pool;
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{
-    FrameUpload, RenderLights, RenderWorld, extract_render_data, max_mesh_params,
+    ExtractionStats, FrameUpload, RenderLights, RenderWorld, extract_render_data,
+    extract_render_data_with_stats, max_mesh_params,
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};

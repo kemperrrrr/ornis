@@ -558,6 +558,91 @@ impl CompositeMode for CompositeForward {
     }
 }
 
+/// Distance-fog settings (opt-in scaffolding, never wired by default).
+///
+/// `density = 0.0` (default) disables fog: [`apply_fog`] is the exact
+/// identity then, so registering [`FogPass`] with defaults leaves the
+/// frame pixel-identical. Positive densities mix toward [`color`](Self::color)
+/// with depth (see [`apply_fog`]); the GPU mix is future work.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogSettings {
+    /// Fog color mixed toward with depth.
+    pub color: [f32; 3],
+    /// Fog density; `0.0` disables (identity).
+    pub density: f32,
+}
+
+impl Default for FogSettings {
+    fn default() -> Self {
+        Self {
+            color: [0.5, 0.6, 0.7],
+            density: 0.0,
+        }
+    }
+}
+
+/// Pure distance-fog mix: `color + (fog.color - color) * (1 - exp(-density * depth))`.
+///
+/// `density <= 0.0` (or non-finite inputs) returns `color` unchanged —
+/// the exact identity, so the disabled pass cannot drift a pixel.
+/// `depth` is view-space distance (`>= 0`).
+pub fn apply_fog(color: [f32; 3], depth: f32, fog: FogSettings) -> [f32; 3] {
+    if fog.density <= 0.0 || !fog.density.is_finite() || !depth.is_finite() {
+        return color;
+    }
+    let depth = depth.max(0.0);
+    let factor = 1.0 - (-fog.density * depth).exp();
+    [
+        color[0] + (fog.color[0] - color[0]) * factor,
+        color[1] + (fog.color[1] - color[1]) * factor,
+        color[2] + (fog.color[2] - color[2]) * factor,
+    ]
+}
+
+/// Optional distance-fog pass over the deferred HDR layer (scaffolding).
+///
+/// Never registered by [`crate::frame_exec::RenderFrame3D`] — opt in by
+/// registering `FogPass` after the composite pass. With default settings
+/// [`run`](FramePass::run) records no commands (pixel-identical no-op);
+/// the non-zero-density GPU mix is future work (see [`apply_fog`] for
+/// the pinned math).
+pub struct FogPass {
+    settings: FogSettings,
+}
+
+impl FogPass {
+    /// Value constructor.
+    pub fn new(settings: FogSettings) -> Self {
+        Self { settings }
+    }
+
+    /// `true` when fog is disabled (`density <= 0.0`): [`run`](FramePass::run)
+    /// is a no-op and the frame is unchanged.
+    pub fn is_disabled(&self) -> bool {
+        self.settings.density <= 0.0
+    }
+}
+
+impl Default for FogPass {
+    fn default() -> Self {
+        Self::new(FogSettings::default())
+    }
+}
+
+impl FramePass for FogPass {
+    type Reads = (Read<Hdr>,);
+    type Writes = (Write<Target>,);
+    fn name(&self) -> &'static str {
+        "fog"
+    }
+    fn run(&mut self, views: SystemViews<'_, Self>, _frame: &mut Frame<'_>) {
+        // Keep the declared wiring honest in debug builds even though no
+        // commands are recorded yet (scaffolding: pure math in `apply_fog`).
+        let _ = views.get::<Hdr>();
+        let _ = views.get::<Target>();
+    }
+}
+
 /// The composite pass; `M` is the (technique × bloom) mode.
 pub struct Composite<M: CompositeMode>(PhantomData<fn() -> M>);
 impl<M: CompositeMode> Composite<M> {
@@ -762,6 +847,44 @@ mod tests {
             writes_of::<BloomBright<FromDeferred>>(),
             vec![("bloom0", Some(wgpu::Color::BLACK))]
         );
+    }
+
+    #[test]
+    fn fog_defaults_to_disabled_identity() {
+        // Default density is 0.0 = off.
+        assert_eq!(FogSettings::default().density, 0.0);
+        assert!(FogPass::default().is_disabled());
+        assert_eq!(FogPass::default().name(), "fog");
+        // Opt-in wiring: reads the deferred HDR layer, writes the target.
+        assert_eq!(reads_of::<FogPass>(), vec!["hdr"]);
+        assert_eq!(writes_of::<FogPass>(), vec![("target", None)]);
+        // Density 0 leaves every sample unchanged: 0 differences.
+        let fog = FogSettings::default();
+        let samples = [
+            ([1.0, 0.0, 0.0], 0.0),
+            ([0.0, 1.0, 0.0], 1.5),
+            ([0.2, 0.3, 0.9], 100.0),
+            ([0.0, 0.0, 0.0], 1000.0),
+        ];
+        let mut diffs = 0usize;
+        for (color, depth) in samples {
+            if apply_fog(color, depth, fog) != color {
+                diffs += 1;
+            }
+        }
+        assert_eq!(diffs, 0, "disabled fog must be pixel-identical");
+        // Enabled fog moves toward the fog color with depth, never past it.
+        let fog = FogSettings {
+            color: [0.5, 0.6, 0.7],
+            density: 0.1,
+        };
+        assert!(!FogPass::new(fog).is_disabled());
+        let near = apply_fog([0.0, 0.0, 0.0], 0.5, fog);
+        let far = apply_fog([0.0, 0.0, 0.0], 50.0, fog);
+        for i in 0..3 {
+            assert!(near[i] > 0.0 && near[i] < far[i], "{near:?} {far:?}");
+            assert!(far[i] < fog.color[i], "{far:?}");
+        }
     }
 
     #[test]
