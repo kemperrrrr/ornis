@@ -473,7 +473,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Resources, System, SystemAccess};
+    use crate::{InputState, KeyCode, Resources, System, SystemAccess};
     use std::sync::{Arc, Mutex};
 
     struct CaptureTime(Arc<Mutex<Vec<Time>>>);
@@ -544,6 +544,78 @@ mod tests {
     }
 
     struct TraceLog(Arc<Mutex<Vec<&'static str>>>);
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct CapturedInput {
+        key_down: bool,
+        pointer_position: [f32; 2],
+        pointer_delta: [f32; 2],
+        wheel_delta: f32,
+    }
+
+    struct CaptureInput(Arc<Mutex<Vec<CapturedInput>>>);
+
+    impl System for CaptureInput {
+        fn name(&self) -> &'static str {
+            "capture_input"
+        }
+
+        fn access(&self) -> SystemAccess {
+            SystemAccess::new().reads::<InputState>()
+        }
+
+        fn run(&self, resources: &Resources) {
+            let input = resources.get::<InputState>().expect("input resource");
+            self.0.lock().expect("capture lock").push(CapturedInput {
+                key_down: input.keycode_down(KeyCode::KeyW),
+                pointer_position: input.pointer_position(),
+                pointer_delta: input.pointer_delta(),
+                wheel_delta: input.wheel_delta(),
+            });
+        }
+    }
+
+    #[test]
+    fn engine_publishes_input_to_systems_before_clearing_deltas() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::new();
+        engine
+            .schedule_mut()
+            .add_system(CaptureInput(captured.clone()));
+        {
+            let input = engine
+                .world_mut()
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("engine publishes input");
+            input.set_keycode(KeyCode::KeyW, true);
+            input.set_pointer_position([4.0, 5.0]);
+            input.add_wheel_delta(-1.0);
+        }
+
+        engine.run_frame(1.0 / 60.0);
+
+        assert_eq!(
+            captured.lock().expect("capture lock").as_slice(),
+            &[CapturedInput {
+                key_down: true,
+                pointer_position: [4.0, 5.0],
+                pointer_delta: [4.0, 5.0],
+                wheel_delta: -1.0,
+            }]
+        );
+        let input = engine
+            .world()
+            .resources()
+            .get::<InputState>()
+            .expect("input resource");
+        assert_eq!(input.pointer_delta(), [0.0, 0.0]);
+        assert_eq!(input.wheel_delta(), 0.0);
+        // Named write lands on the legacy wire codes readers still use.
+        assert!(input.keycode_down(KeyCode::KeyW));
+        assert!(input.key_down(17));
+        assert!(input.key_down(87));
+    }
 
     #[test]
     fn run_frame_publishes_monotonic_time() {

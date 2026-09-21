@@ -1,0 +1,21 @@
+# Optional runner config for `cargo nextest`.
+#
+# `cargo test` stays the only gate runner (`cargo xtask quality --only test`
+# / `--only test-physics`); nextest is a convenience for faster local
+# iteration. Install: `cargo install cargo-nextest`.
+#
+# Fast profile (default): same set as `cargo test` — #[ignore]d heavy
+# determinism gates are skipped.
+#   cargo nextest run -p ornis-physics
+# Full profile: also runs the #[ignore]d heavy gates.
+#   cargo nextest run -p ornis-physics --profile full
+# (equivalent without nextest: `cargo test -p ornis-physics -- --include-ignored`
+# for everything, or `cargo test -p ornis-physics -- --ignored` for the
+# ignored-only set).
+
+[profile.default]
+slow-timeout = "60s"
+
+[profile.full]
+run-ignored = "all"
+slow-timeout = "300s"

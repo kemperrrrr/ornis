@@ -210,6 +210,16 @@ Hot reload сцены ✅: editor-world следит за mtime файла сц�
 трогает); фронтенд подхватывает новую версию через обычные версионные
 снапшоты `/api/scene`. Остаток: hot reload мешей/`.mtlx` и build-time
 бинарные слепки Sparse Sets — позже.
+✅ **2026-09-22 — glTF-импорт геометрии** (`crates/gltf`, `ornis-gltf`):
+первый шаг пайплайна — `.glb`/`.gltf` → `MeshDesc::Custom` +
+сущности/TRS (нормали/uv — verbatim или как `custom_mesh_data`;
+скин/анимации/текстуры — честный скип со счётчиками, 32 теста).
+Следом: wiring в загрузку сцен, текстуры, скин по контракту
+`docs/animation-design.md` §4.
+✅ **2026-09-22 — input отдельным крейтом** (`crates/input`,
+`ornis-input`): `InputState` + `KeyCode`/`MouseButton` + action mapping
+(`InputMap`, `default_gameplay()`); `player_input` без магических
+кодов; проводной `pressed_keys: Vec<u32>` неизменен.
 
 ### e. Качество (продолжение)
 

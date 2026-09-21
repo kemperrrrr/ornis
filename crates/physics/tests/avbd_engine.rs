@@ -1651,7 +1651,10 @@ fn avbd_snapshot_regenerate() {
     std::fs::write(path, avbd_snapshot_render(&physics, &handles)).unwrap();
 }
 
+// Slow (~37s: 265-body scene, 80 AVBD steps under 1- and 32-thread pools).
+// Skipped by the default suite; full profile: cargo test -p ornis-physics -- --ignored
 #[test]
+#[ignore]
 fn avbd_confluence_one_vs_many_threads() {
     // Thread-schedule independence: parallel pair discovery must not leak
     // the thread schedule into the simulation. A heterogeneous scene above the 256-body

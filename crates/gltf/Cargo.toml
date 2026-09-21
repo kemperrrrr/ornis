@@ -1,0 +1,12 @@
+[package]
+name = "ornis-gltf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gltf = { version = "1", default-features = false, features = ["utils", "names"] }
+
+[lints]
+workspace = true

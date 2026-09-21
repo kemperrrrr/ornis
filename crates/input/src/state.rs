@@ -2,17 +2,23 @@
 //!
 //! Platform adapters (winit, browser events and future integrations) update
 //! [`InputState`] between frame calls. Systems read the same resource during
-//! [`crate::Engine::run_frame`]; transient pointer and wheel deltas are
-//! cleared after the schedule, while held keys/buttons remain active.
+//! the frame; transient pointer and wheel deltas are cleared after the
+//! schedule, while held keys/buttons remain active.
 
 use std::collections::BTreeSet;
 
-/// Input snapshot exposed to systems through the logical [`crate::World`].
+use crate::{KeyCode, MouseButton};
+
+/// Input snapshot exposed to systems through the logical world.
 ///
 /// Key and mouse-button identifiers are platform-neutral numeric codes. A
 /// native adapter can use physical key codes, while a browser adapter can
 /// use its DOM `code` mapping. The core intentionally does not depend on a
 /// windowing or DOM crate.
+///
+/// Prefer the named helpers ([`InputState::keycode_down`],
+/// [`InputState::button_down`]) and [`crate::InputMap`] on the read edge;
+/// producers keep writing raw codes so the wire format never changes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputState {
     pressed_keys: BTreeSet<u32>,
@@ -42,6 +48,22 @@ impl InputState {
         self.pressed_keys.contains(&code)
     }
 
+    /// Marks every raw alias of `key` as pressed or released.
+    ///
+    /// Mirrors what the browser adapter does when it expands one DOM `code`
+    /// into the physical + ASCII pair: a semantic press touches all aliases
+    /// so both read paths observe it.
+    pub fn set_keycode(&mut self, key: KeyCode, pressed: bool) {
+        for &code in key.codes() {
+            self.set_key(code, pressed);
+        }
+    }
+
+    /// Whether any raw alias of `key` is currently held.
+    pub fn keycode_down(&self, key: KeyCode) -> bool {
+        key.codes().iter().any(|code| self.key_down(*code))
+    }
+
     /// Marks a platform-neutral mouse-button code as pressed or released.
     pub fn set_mouse_button(&mut self, code: u8, pressed: bool) {
         if pressed {
@@ -54,6 +76,16 @@ impl InputState {
     /// Whether the mouse-button code is currently held.
     pub fn mouse_button_down(&self, code: u8) -> bool {
         self.pressed_mouse_buttons.contains(&code)
+    }
+
+    /// Marks a named mouse button as pressed or released.
+    pub fn set_button(&mut self, button: MouseButton, pressed: bool) {
+        self.set_mouse_button(button.code(), pressed);
+    }
+
+    /// Whether the named mouse button is currently held.
+    pub fn button_down(&self, button: MouseButton) -> bool {
+        self.mouse_button_down(button.code())
     }
 
     /// Records an absolute pointer position and accumulates its frame delta.
@@ -155,40 +187,6 @@ impl InputState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Engine, Resources, System, SystemAccess};
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct Captured {
-        key_down: bool,
-        button_down: bool,
-        pointer_position: [f32; 2],
-        pointer_delta: [f32; 2],
-        wheel_delta: f32,
-    }
-
-    struct CaptureInput(Arc<Mutex<Vec<Captured>>>);
-
-    impl System for CaptureInput {
-        fn name(&self) -> &'static str {
-            "capture_input"
-        }
-
-        fn access(&self) -> SystemAccess {
-            SystemAccess::new().reads::<InputState>()
-        }
-
-        fn run(&self, resources: &Resources) {
-            let input = resources.get::<InputState>().expect("input resource");
-            self.0.lock().expect("capture lock").push(Captured {
-                key_down: input.key_down(17),
-                button_down: input.mouse_button_down(1),
-                pointer_position: input.pointer_position(),
-                pointer_delta: input.pointer_delta(),
-                wheel_delta: input.wheel_delta(),
-            });
-        }
-    }
 
     #[test]
     fn input_state_accumulates_events_and_clears_transients() {
@@ -220,42 +218,63 @@ mod tests {
     }
 
     #[test]
-    fn engine_publishes_input_to_systems_before_clearing_deltas() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::new();
-        engine
-            .schedule_mut()
-            .add_system(CaptureInput(captured.clone()));
-        {
-            let input = engine
-                .world_mut()
-                .resources_mut()
-                .get_mut::<InputState>()
-                .expect("engine publishes input");
-            input.set_key(17, true);
-            input.set_pointer_position([4.0, 5.0]);
-            input.add_wheel_delta(-1.0);
-        }
+    fn named_key_helpers_cover_all_raw_aliases() {
+        let mut input = InputState::new();
+        input.set_keycode(KeyCode::KeyW, true);
+        assert!(input.keycode_down(KeyCode::KeyW));
+        // Both the legacy physical and the ASCII alias land on the wire.
+        assert_eq!(input.pressed_keys(), vec![17, 87]);
 
-        engine.run_frame(1.0 / 60.0);
+        // Releasing clears every alias at once.
+        input.set_keycode(KeyCode::KeyW, false);
+        assert!(!input.keycode_down(KeyCode::KeyW));
+        assert!(input.pressed_keys().is_empty());
 
-        assert_eq!(
-            captured.lock().expect("capture lock").as_slice(),
-            &[Captured {
-                key_down: true,
-                button_down: false,
-                pointer_position: [4.0, 5.0],
-                pointer_delta: [4.0, 5.0],
-                wheel_delta: -1.0,
-            }]
-        );
-        let input = engine
-            .world()
-            .resources()
-            .get::<InputState>()
-            .expect("input resource");
-        assert_eq!(input.pointer_delta(), [0.0, 0.0]);
+        // A single raw alias is enough for the named read to fire.
+        input.set_key(87, true);
+        assert!(input.keycode_down(KeyCode::KeyW));
+        assert!(!input.keycode_down(KeyCode::KeyS));
+    }
+
+    #[test]
+    fn named_button_helpers_match_raw_codes() {
+        let mut input = InputState::new();
+        input.set_button(MouseButton::Left, true);
+        assert!(input.button_down(MouseButton::Left));
+        assert!(input.mouse_button_down(0));
+        assert!(!input.button_down(MouseButton::Right));
+
+        input.set_button(MouseButton::Left, false);
+        assert!(!input.button_down(MouseButton::Left));
+    }
+
+    #[test]
+    fn snapshot_replaces_held_state_wholesale() {
+        let mut input = InputState::new();
+        input.set_key(17, true);
+        input.set_mouse_button(0, true);
+        input.set_pointer_position([5.0, 5.0]);
+        input.add_wheel_delta(1.0);
+
+        input.apply_snapshot(&[87], &[1], [1.0, 2.0], [3.0, 4.0], -2.0);
+        assert!(!input.key_down(17));
+        assert!(input.key_down(87));
+        assert!(!input.mouse_button_down(0));
+        assert!(input.mouse_button_down(1));
+        assert_eq!(input.pointer_position(), [1.0, 2.0]);
+        assert_eq!(input.pointer_delta(), [3.0, 4.0]);
+        assert_eq!(input.wheel_delta(), -2.0);
+        // Wire snapshots stay sorted ascending.
+        input.set_key(17, true);
+        assert_eq!(input.pressed_keys(), vec![17, 87]);
+    }
+
+    #[test]
+    fn snapshot_sanitizes_non_finite_wheel_delta() {
+        let mut input = InputState::new();
+        input.apply_snapshot(&[], &[], [0.0, 0.0], [0.0, 0.0], f32::NAN);
         assert_eq!(input.wheel_delta(), 0.0);
-        assert!(input.key_down(17));
+        input.add_wheel_delta(f32::INFINITY);
+        assert_eq!(input.wheel_delta(), 0.0);
     }
 }

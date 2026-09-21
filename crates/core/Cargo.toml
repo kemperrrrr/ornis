@@ -22,16 +22,13 @@ serde = "1.0"
 serde_json = "1"
 # Phase A (audit §7): scheduler level/edge/cache mechanics.
 ornis-schedule = { path = "../schedule" }
+# Backend-neutral input state, named keys and action mapping.
+ornis-input = { path = "../input" }
 
 [features]
 default = []
-# Reserved extension points (used via cfg in code):
-gpu = ["dep:wgpu"]  # GpuExecutor STUB in dispatcher — CPU-fallback; real GPU in ornis-wgpu-backend::CommandSync
+# Reserved extension point (used via cfg in code):
 lock-free = []  # experimental lock-free lanes
-
-[dependencies.wgpu]
-version = "30"
-optional = true
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }

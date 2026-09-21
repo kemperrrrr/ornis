@@ -12,7 +12,7 @@ use ornis_core::{
     Engine, FixedTime, InputState, Resources, SmartStore, System, SystemAccess, World,
 };
 use ornis_physics::RigidBody;
-use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_render::scene::TransformDesc;
 
 pub use ornis_core::{GameplayPlugin, Position, Velocity, install_gameplay};
 
@@ -23,75 +23,7 @@ pub use assets::{
     AssetEvent, AssetId, AssetKind, AssetServer, MaterialHandle, MeshHandle, SceneLoadError,
     parse_scene_ron,
 };
-pub use game_world::{GameStage, GameWorld, spawn_static_floor};
-
-/// Thin view over the unified [`World`]: no second `Engine` copy required.
-///
-/// Wraps [`ornis_core::RenderWorldView`] and adds render-specific projection
-/// that reads [`TransformDesc`]/[`MeshDesc`]/[`MaterialDesc`] lanes directly
-/// from the authoritative world.
-pub struct UnifiedView<'a> {
-    world: &'a World,
-}
-
-impl<'a> UnifiedView<'a> {
-    /// Creates a view over the unified world.
-    pub fn new(world: &'a World) -> Self {
-        Self { world }
-    }
-
-    /// Returns the underlying world.
-    pub fn world(&self) -> &World {
-        self.world
-    }
-
-    /// Number of renderable entities (entities with all three render lanes).
-    pub fn renderable_count(&self) -> usize {
-        let Some(store) = self.world.store() else {
-            return 0;
-        };
-        let Some(transforms) = store.read_lane::<TransformDesc>() else {
-            return 0;
-        };
-        let Some(meshes) = store.read_lane::<MeshDesc>() else {
-            return 0;
-        };
-        let Some(materials) = store.read_lane::<MaterialDesc>() else {
-            return 0;
-        };
-        let mut count = 0;
-        for &entity in &transforms.entities {
-            if meshes.get(entity).is_some() && materials.get(entity).is_some() {
-                count += 1;
-            }
-        }
-        count
-    }
-
-    /// Projects render snapshot without serialization.
-    pub fn render_snapshot(&self) -> Vec<(TransformDesc, MeshDesc, MaterialDesc)> {
-        let Some(store) = self.world.store() else {
-            return Vec::new();
-        };
-        let Some(transforms) = store.read_lane::<TransformDesc>() else {
-            return Vec::new();
-        };
-        let Some(meshes) = store.read_lane::<MeshDesc>() else {
-            return Vec::new();
-        };
-        let Some(materials) = store.read_lane::<MaterialDesc>() else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
-            let (Some(mesh), Some(material)) = (meshes.get(entity), materials.get(entity)) else {
-                continue;
-            };
-            out.push((transform.clone(), mesh.clone(), material.clone()));
-        }
-        out
-    }
-}
+pub use game_world::{GameWorld, spawn_static_floor};
 
 /// Installs the unified runtime into `engine`.
 ///
@@ -264,10 +196,67 @@ pub fn apply_browser_input(world: &mut World, input: InputState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_core::Engine;
     #[allow(unused_imports)]
     use ornis_core::Entity;
+    use ornis_core::{Engine, World};
     use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
+
+    /// Thin view over the unified [`World`]: no second `Engine` copy required.
+    struct UnifiedView<'a> {
+        world: &'a World,
+    }
+
+    impl<'a> UnifiedView<'a> {
+        fn new(world: &'a World) -> Self {
+            Self { world }
+        }
+
+        fn renderable_count(&self) -> usize {
+            let Some(store) = self.world.store() else {
+                return 0;
+            };
+            let Some(transforms) = store.read_lane::<TransformDesc>() else {
+                return 0;
+            };
+            let Some(meshes) = store.read_lane::<MeshDesc>() else {
+                return 0;
+            };
+            let Some(materials) = store.read_lane::<MaterialDesc>() else {
+                return 0;
+            };
+            let mut count = 0;
+            for &entity in &transforms.entities {
+                if meshes.get(entity).is_some() && materials.get(entity).is_some() {
+                    count += 1;
+                }
+            }
+            count
+        }
+
+        fn render_snapshot(&self) -> Vec<(TransformDesc, MeshDesc, MaterialDesc)> {
+            let Some(store) = self.world.store() else {
+                return Vec::new();
+            };
+            let Some(transforms) = store.read_lane::<TransformDesc>() else {
+                return Vec::new();
+            };
+            let Some(meshes) = store.read_lane::<MeshDesc>() else {
+                return Vec::new();
+            };
+            let Some(materials) = store.read_lane::<MaterialDesc>() else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
+                let (Some(mesh), Some(material)) = (meshes.get(entity), materials.get(entity))
+                else {
+                    continue;
+                };
+                out.push((transform.clone(), mesh.clone(), material.clone()));
+            }
+            out
+        }
+    }
 
     #[test]
     fn unified_view_counts_renderables_without_copy() {

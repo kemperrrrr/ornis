@@ -33,13 +33,6 @@ use scene_api::LiveScene;
 /// render loop needs to reference itself).
 type FrameCallback = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
-/// Compiled-in fallback for the scene when fetch('scene.ron') is unavailable
-/// (e.g. opened without the ornis remote server).
-/// Legacy static fallback — deprecated, unified runtime requires `/api/scene`.
-/// Kept as `allow(dead_code)` for reference; `load_initial_scene` no longer uses it.
-#[allow(dead_code)]
-const FALLBACK_SCENE_RON: &str = include_str!("../../../assets/scene.ron");
-
 /// Poll `/api/scene` about once per second (~60 animation frames).
 const LIVE_POLL_INTERVAL_FRAMES: u64 = 60;
 
@@ -66,32 +59,6 @@ impl raw_window_handle::HasWindowHandle for CanvasWindow {
         let raw = RawWindowHandle::WebCanvas(web_handle);
         Ok(unsafe { WindowHandle::borrow_raw(raw) })
     }
-}
-
-/// Fetch scene.ron from the server; fall back to the compiled-in copy.
-/// Deprecated: use `fetch_live_scene` — static `scene.ron` fetch is no longer the initial scene source.
-#[allow(dead_code)]
-async fn load_scene_ron() -> String {
-    if let Some(window) = web_sys::window() {
-        let resp_value =
-            wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("scene.ron")).await;
-        if let Ok(resp_value) = resp_value {
-            let resp: web_sys::Response = match resp_value.dyn_into() {
-                Ok(r) => r,
-                Err(_) => return FALLBACK_SCENE_RON.to_string(),
-            };
-            if resp.ok()
-                && let Ok(text_promise) = resp.text()
-                && let Ok(text) = wasm_bindgen_futures::JsFuture::from(text_promise).await
-                && let Some(s) = text.as_string()
-            {
-                console::log_1(&"[ornis-wasm] scene.ron fetched from server".into());
-                return s;
-            }
-        }
-    }
-    console::warn_1(&"[ornis-wasm] fetch(scene.ron) failed, using embedded scene".into());
-    FALLBACK_SCENE_RON.to_string()
 }
 
 /// Fetch and parse `/api/scene`. Returns `None` on any failure — network

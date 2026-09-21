@@ -4,7 +4,8 @@
 //! The crate provides the data backbone of the engine: [`Entity`] handles
 //! with generational reuse, dense ([`ComponentStore`]) and packed
 //! ([`SmartStore`]) component storage, a dependency-driven [`Schedule`],
-//! and a [`Dispatcher`] that routes work between CPU lanes and GPU compute.
+//! and a [`Dispatcher`] that decides CPU-vs-GPU placement by element count
+//! (execution itself lives in backend crates).
 //! [`Engine`] adds a backend-neutral frame boundary with [`Time`],
 //! [`FixedTime`] and [`InputState`] resources over the logical [`World`].
 //! The [`material`]
@@ -20,7 +21,6 @@ mod entity;
 mod gameplay;
 /// Stable scalar wrappers for GPU-compatible buffer representations.
 pub mod gpu_types;
-mod input;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
 pub mod material;
@@ -46,12 +46,15 @@ pub use engine::{
 };
 pub use entity::{Entity, EntityAllocator};
 pub use gameplay::{
-    GameplayPlugin, Player, Position, RenderSnapshot, RenderWorldView, Velocity, install_gameplay,
-    physics_push, player_input, transform_update,
+    GameplayPlugin, Player, Position, RenderWorldView, Velocity, install_gameplay, physics_push,
+    player_input, transform_update,
 };
 pub use gpu_types::GpuBool;
-pub use input::InputState;
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
+/// Backend-neutral input (re-exported from `ornis-input` so downstream
+/// crates keep a single import path: adapters write raw codes, gameplay
+/// reads through [`InputMap`] or named keys).
+pub use ornis_input::{InputBinding, InputMap, InputState, KeyCode, MouseButton};
 pub use page_table::{PAGE_SIZE, PageTable};
 pub use pipeline::{
     AutoPipeline, CpuLane, GpuLane, HybridLane, LaneTarget, PipelineConfig, Route,

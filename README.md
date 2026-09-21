@@ -136,13 +136,13 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | Sparse Sets (`ComponentStore`: dense + entities + paginated sparse + bitset) | ✅ | `crates/core/src/component_store.rs` |
 | Логический `World` (общие `Resources` + `SmartStore` + запуск `Schedule`) | ✅ | `crates/core/src/world.rs`; native, WASM и editor-only используют единый `ornis_core::World/Engine/Schedule` (prod-композиция `crates/app`: `install_gameplay` + `install_gameplay_physics_bridge` + audio-мост; `install_unified_runtime` — та же композиция для тестов), serialization boundary только для транспорта |
 | Backend-neutral `Engine` (`World` + variable/fixed `Schedule` + `Time`/`FixedTime`) | ✅ | `crates/core/src/engine.rs`; `run_frame` публикует оба clock-ресурса; native showcase, WASM и editor-only подключены к единой композиции `install_gameplay` + bridges (60 Hz fixed host, InputState→Velocity→Position→RigidBody) |
-| Backend-neutral `InputState` resource | ✅ | `crates/core/src/input.rs`; `Engine` + `InputState::apply_snapshot` — единый источник; native winit, WASM orbit + browser `BrowserInput`→`UiCommand::Input`→WS/`POST /api/input`→`apply_snapshot` (remote.rs, server_session.rs, main.rs) |
+| Backend-neutral `InputState` resource | ✅ | `crates/input` (`ornis-input`: `InputState` + `KeyCode`/`MouseButton` + `InputMap` action mapping, реэкспорт через `ornis_core`); `Engine` + `InputState::apply_snapshot` — единый источник; native winit, WASM orbit + browser `BrowserInput`→`UiCommand::Input`→WS/`POST /api/input`→`apply_snapshot` (remote.rs, server_session.rs, main.rs); проводной формат `pressed_keys` (u32) не менялся, маппинг на краю чтения (`player_input` — через `InputMap::default_gameplay`) |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
 | Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
 | ZST-диспетчеризация (`GpuLane`/`CpuLane`/`HybridLane`, `LaneTarget`) | ✅ | `crates/core/src/pipeline.rs` |
 | Макросы (`smart_pipeline`, `for_each_entity`, `kernel`, `gpu_pipeline`, `WgslStruct`, `Pack`, `PipelineConfig`, `AutoPipeline`) | ✅ | `crates/macros/src/` |
-| Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | 🟡 | `crates/core/src/dispatcher.rs`; выбор по порогу работает, но `GpuExecutor` в core пока CPU-fallback/stub |
+| Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | ✅ | `crates/core/src/dispatcher.rs`; `Dispatcher::decide` — чистое решение по порогу, `SmartDispatcher` — CPU-only; core `GpuExecutor`-STUB удалён решением владельца (исполнение требует Device/Queue — слой `ornis-wgpu-backend`: `AutoLane`/`GpuLanes`/`CommandSync`) |
 | Command-Based Sync: CPU-side очередь команд + residency tracker | ✅ | `crates/core/src/command_sync.rs` |
 | Command-Based Sync: реальное GPU-исполнение (compute dispatch + flush) | ✅ | `crates/wgpu_backend/src/command_sync.rs`, есть тест `gpu_dispatch_records_and_flushes` |
 | Линтер: compile-time предупреждения при непараллелизуемых паттернах | 🟡 | `#[smart_pipeline]` помечает такие циклы через deprecated-note трюк (видно в IDE и терминале; `crates/macros/src/smart_pipeline.rs`), но нет расширяемого набора правил |
@@ -291,9 +291,10 @@ reload сцены уже есть: editor-world следит за mtime `editor/
    страничный sparse-индексатор + bitset). Мутации O(1), без Archetype Move.
 2. **Компилятор как оптимизатор.** ZST-маркеры (`GpuLane`/`CpuLane`) задают
    статический типовой маршрут там, где он уже известен; runtime
-   `SmartDispatcher` пока выбирает по порогу, а `ornis-core::GpuExecutor`
-   остаётся CPU-fallback/stub. Статический профайлер анализирует AST (размер
-   типа, ветвления, access pattern) и генерирует пороги.
+   `Dispatcher::decide` выбирает по порогу (исполнение CPU-only в core,
+   GPU — в `ornis-wgpu-backend`: `AutoLane`/`GpuLanes`). Статический
+   профайлер анализирует AST (размер типа, ветвления, access pattern)
+   и генерирует пороги.
 3. **Инструкции вместо данных.** CPU шлёт GPU не массивы float'ов, а команды
    («примени гравитацию к Position»); данные живут там, где созданы
    (Command-Based Sync + Data Residency).

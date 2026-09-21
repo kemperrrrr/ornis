@@ -16,11 +16,11 @@
 //! Render extraction remains an optional view ([`RenderWorldView`]) rather than
 //! a mandatory copy boundary.
 
-use std::sync::Mutex;
-
 use glam::Vec3;
 
-use crate::{Engine, FixedTime, InputState, Resources, SmartStore, System, SystemAccess, Time};
+use crate::{
+    Engine, FixedTime, InputMap, InputState, Resources, SmartStore, System, SystemAccess, Time,
+};
 
 /// Marker for the locally controlled player entity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -126,8 +126,6 @@ pub fn install_gameplay(engine: &mut Engine) {
 pub struct GameplayPlugin {
     /// Speed applied when input is held (world units / s).
     pub player_speed: f32,
-    /// Whether to also publish a [`RenderSnapshot`] resource for optional consumers.
-    pub with_render_snapshot: bool,
 }
 
 impl Default for GameplayPlugin {
@@ -136,23 +134,14 @@ impl Default for GameplayPlugin {
     }
 }
 impl GameplayPlugin {
-    /// Creates a plugin with default speed (5.0) and no snapshot resource.
+    /// Creates a plugin with default speed (5.0).
     pub fn new() -> Self {
-        Self {
-            player_speed: 5.0,
-            with_render_snapshot: false,
-        }
+        Self { player_speed: 5.0 }
     }
 
     /// Overrides the player movement speed.
     pub fn with_speed(mut self, speed: f32) -> Self {
         self.player_speed = speed;
-        self
-    }
-
-    /// Enables an auxiliary [`RenderSnapshot`] resource updated each frame.
-    pub fn with_snapshot(mut self, enabled: bool) -> Self {
-        self.with_render_snapshot = enabled;
         self
     }
 
@@ -171,12 +160,6 @@ impl GameplayPlugin {
                 .resources_mut()
                 .insert(InputState::default());
         }
-        if self.with_render_snapshot {
-            let _ = engine
-                .world_mut()
-                .insert(Mutex::new(RenderSnapshot::default()));
-            engine.schedule_mut().add_system(RenderSnapshotSystem);
-        }
         engine.schedule_mut().add_system(PlayerInputSystem {
             speed: self.player_speed,
         });
@@ -188,16 +171,6 @@ impl GameplayPlugin {
             .schedule_mut()
             .try_order_before("player_input", "transform_update");
     }
-}
-
-/// Optional CPU-side snapshot for consumers that still want a polled view
-/// without a second world copy.
-#[derive(Clone, Debug, Default)]
-pub struct RenderSnapshot {
-    /// Positions at the last frame.
-    pub positions: Vec<(crate::Entity, Vec3)>,
-    /// Velocities at the last frame.
-    pub velocities: Vec<(crate::Entity, Vec3)>,
 }
 
 /// Consumes [`InputState`] and writes gameplay intent.
@@ -214,24 +187,34 @@ pub fn player_input(resources: &Resources, speed: f32) {
     let Some(store) = resources.get::<SmartStore>() else {
         return;
     };
-    // Intent vector: WASD + arrows.
+    // Read-edge mapping: an installed `InputMap` resource remaps the four
+    // movement actions, otherwise the default WASD + arrows table applies.
+    // Either way no raw key codes appear in gameplay logic.
+    let fallback;
+    let map = match resources.get::<InputMap>() {
+        Some(custom) => custom,
+        None => {
+            fallback = InputMap::default_gameplay();
+            &fallback
+        }
+    };
+    // Intent vector from the mapped movement actions.
     let mut dx = 0.0f32;
     let mut dz = 0.0f32;
-    // Key codes: physical codes (winit) map, plus ASCII fallbacks for browser.
-    // W / Up
-    if input.key_down(17) || input.key_down(87) || input.key_down(38) {
+    // Forward
+    if map.action_down(input, InputMap::MOVE_FORWARD) {
         dz -= 1.0;
     }
-    // S / Down
-    if input.key_down(31) || input.key_down(83) || input.key_down(40) {
+    // Back
+    if map.action_down(input, InputMap::MOVE_BACK) {
         dz += 1.0;
     }
-    // A / Left
-    if input.key_down(30) || input.key_down(65) || input.key_down(37) {
+    // Strafe left
+    if map.action_down(input, InputMap::MOVE_LEFT) {
         dx -= 1.0;
     }
-    // D / Right
-    if input.key_down(32) || input.key_down(68) || input.key_down(39) {
+    // Strafe right
+    if map.action_down(input, InputMap::MOVE_RIGHT) {
         dx += 1.0;
     }
     // Normalize to keep diagonal speed bounded.
@@ -362,6 +345,7 @@ impl System for PlayerInputSystem {
     fn access(&self) -> SystemAccess {
         SystemAccess::new()
             .reads::<InputState>()
+            .reads::<InputMap>()
             .reads::<SmartStore>()
             .reads_lane::<Player>()
             .writes_lane::<Velocity>()
@@ -413,64 +397,13 @@ impl System for TransformUpdateSystem {
     }
 }
 
-struct RenderSnapshotSystem;
-
-impl System for RenderSnapshotSystem {
-    fn name(&self) -> &'static str {
-        "render_snapshot"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<SmartStore>()
-            .reads_lane::<Position>()
-            .reads_lane::<Velocity>()
-            .writes::<Mutex<RenderSnapshot>>()
-    }
-
-    fn run(&self, resources: &Resources) {
-        let Some(store) = resources.get::<SmartStore>() else {
-            return;
-        };
-        let Some(snapshot) = resources.get::<Mutex<RenderSnapshot>>() else {
-            return;
-        };
-        let positions: Vec<(crate::Entity, Vec3)> = store
-            .read_lane::<Position>()
-            .map(|lane| {
-                lane.entities
-                    .iter()
-                    .zip(&lane.data)
-                    .map(|(&e, p)| (e, p.0))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let velocities: Vec<(crate::Entity, Vec3)> = store
-            .read_lane::<Velocity>()
-            .map(|lane| {
-                lane.entities
-                    .iter()
-                    .zip(&lane.data)
-                    .map(|(&e, v)| (e, v.0))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut guard = snapshot.lock().expect("render snapshot lock");
-        guard.positions = positions;
-        guard.velocities = velocities;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Engine;
+    use crate::{Engine, KeyCode};
     use glam::Vec3;
 
-    #[test]
-    fn player_input_writes_velocity_from_keys() {
-        let mut engine = Engine::new();
-        install_gameplay(&mut engine);
+    fn spawn_player(engine: &mut Engine) -> crate::Entity {
         let entity = engine.world().store().unwrap().create_entity();
         engine
             .world_mut()
@@ -482,23 +415,75 @@ mod tests {
             .store_mut()
             .unwrap()
             .insert(entity, Position(Vec3::ZERO));
+        entity
+    }
+
+    fn player_velocity(engine: &Engine, entity: crate::Entity) -> Vec3 {
+        engine
+            .world()
+            .store()
+            .unwrap()
+            .read_lane::<Velocity>()
+            .unwrap()
+            .get(entity)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn player_input_writes_velocity_from_keys() {
+        let mut engine = Engine::new();
+        install_gameplay(&mut engine);
+        let entity = spawn_player(&mut engine);
         {
             let input = engine
                 .world_mut()
                 .resources_mut()
                 .get_mut::<InputState>()
                 .expect("InputState installed by GameplayPlugin");
-            input.set_key(87, true); // W
+            input.set_keycode(KeyCode::KeyW, true);
         }
         engine.run_frame(1.0 / 60.0);
-        let store = engine.world().store().unwrap();
-        let vel = store
-            .read_lane::<Velocity>()
-            .unwrap()
-            .get(entity)
-            .unwrap()
-            .0;
+        let vel = player_velocity(&engine, entity);
         assert!(vel.z < 0.0, "W should move negative Z, got {vel:?}");
+    }
+
+    #[test]
+    fn player_input_honors_custom_action_map() {
+        use crate::InputBinding;
+        let mut engine = Engine::new();
+        install_gameplay(&mut engine);
+        let entity = spawn_player(&mut engine);
+        // Remap forward to Space only: W must stop driving the player.
+        let mut map = InputMap::default_gameplay();
+        map.bind(
+            InputMap::MOVE_FORWARD,
+            InputBinding::with_keys([KeyCode::Space]),
+        );
+        let _ = engine.world_mut().insert(map);
+        {
+            let input = engine
+                .world_mut()
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("InputState installed by GameplayPlugin");
+            input.set_keycode(KeyCode::KeyW, true);
+        }
+        engine.run_frame(1.0 / 60.0);
+        let vel = player_velocity(&engine, entity);
+        assert_eq!(vel, Vec3::ZERO, "remapped W must not move, got {vel:?}");
+        {
+            let input = engine
+                .world_mut()
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("InputState installed by GameplayPlugin");
+            input.set_keycode(KeyCode::KeyW, false);
+            input.set_keycode(KeyCode::Space, true);
+        }
+        engine.run_frame(1.0 / 60.0);
+        let vel = player_velocity(&engine, entity);
+        assert!(vel.z < 0.0, "Space should move negative Z, got {vel:?}");
     }
 
     #[test]
@@ -567,31 +552,5 @@ mod tests {
         let mermaid = engine.schedule().mermaid();
         assert!(mermaid.contains("player_input"));
         assert!(mermaid.contains("transform_update"));
-    }
-
-    #[test]
-    fn install_with_snapshot_publishes_resource() {
-        let mut engine = Engine::new();
-        GameplayPlugin::new()
-            .with_snapshot(true)
-            .install(&mut engine);
-        assert!(
-            engine
-                .world()
-                .resources()
-                .get::<Mutex<RenderSnapshot>>()
-                .is_some()
-        );
-        engine.run_frame(0.016);
-        let snap = engine
-            .world()
-            .resources()
-            .get::<Mutex<RenderSnapshot>>()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .positions
-            .len();
-        assert_eq!(snap, 0);
     }
 }

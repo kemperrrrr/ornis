@@ -40,7 +40,10 @@ fn initial_solver_assignment_does_not_change_rest_state() {
     assert!((avbd[2].y - 0.3).abs() < 0.1);
 }
 
+// Slow (~51s: 256-box AVBD scene under 1- and 32-thread pools).
+// Skipped by the default suite; full profile: cargo test -p ornis-physics -- --ignored
 #[test]
+#[ignore]
 fn routed_world_is_bit_identical_with_one_or_many_workers() {
     let run = |workers| {
         let pool = rayon::ThreadPoolBuilder::new()

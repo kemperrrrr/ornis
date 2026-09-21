@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/core",
+    "crates/input",
     "crates/macros",
     "crates/shader-lang",
     "crates/physics",
@@ -14,6 +15,7 @@ members = [
     "crates/app",
     "crates/editor-backend",
     "crates/mesh-editor",
+    "crates/gltf",
     "xtask",
 ]
 

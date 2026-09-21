@@ -1,46 +1,51 @@
 //! CPU/GPU dispatch decisions for smart-store workloads.
 //!
-//! [`Dispatcher`] (and the higher-level [`SmartDispatcher`]) compare an
-//! operation's element count against a configurable threshold and route it
-//! to CPU or GPU executors, falling back to CPU whenever no GPU executor is
-//! wired up or the `gpu` feature is off.
+//! [`Dispatcher`] compares an operation's element count against a
+//! configurable threshold and returns an advisory [`ExecutionTarget`].
+//! [`SmartDispatcher`] is a CPU-only executor built on that decision:
+//! every read/write runs through [`CpuExecutor`].
 //!
-//! # Boundary: working GPU path vs core STUB
+//! # Layer boundary: no Device/Queue in core (owner decision 2026-09-21)
 //!
-//! * **Working GPU path (stable):** `ornis-wgpu-backend` — `CommandSync`
-//!   records `wgpu::ComputePipeline` dispatches and CPU closures, then
-//!   `flush()` submits them to the `Device`/`Queue`. `AutoLane` resolves the
-//!   CPU/GPU verdict from the element count and drives `SmartBuffer`
-//!   residency itself (upload-if-dirty → dispatch → flush →
-//!   download-if-dirty) with CPU fallback, and `GpuLanes` bridges
-//!   `SmartStore` component lanes to `AutoLane` with per-type slot reuse.
-//!   Covered by the backend test suite (GPU tests skip without an adapter).
-//!   The CPU sends commands to where the data lives — no eager PCIe copies.
-//! * **STUB in this crate:** `GpuExecutor` and the GPU branch of
-//!   `SmartDispatcher` — a reserved extension point.
-//!   `GpuExecutor::execute` always returns `None` and performs no GPU work;
-//!   `SmartDispatcher` silently falls back to `CpuExecutor` on
-//!   `ExecutionTarget::Gpu`. Do not use as a working GPU executor.
+//! Execution on a GPU requires owning a `wgpu::Device`/`Queue`, which
+//! `ornis-core` must not own. The former `GpuExecutor` STUB promised
+//! execution the layering forbids — it always returned `None` — so it was
+//! removed together with the GPU branch of `SmartDispatcher`,
+//! `SmartDispatcher::set_gpu_executor`, and the `gpu` feature.
+//! [`Dispatcher::decide`] stays: it is a pure threshold comparison with
+//! no device dependency.
 //!
-//! **Status:** the GPU route in this crate is a reserved extension point —
-//! `GpuExecutor` is an experimental stub that performs no GPU work, so every
-//! dispatch through `SmartDispatcher` effectively executes on CPU today.
 //! Working GPU compute dispatch lives in `ornis-wgpu-backend`
-//! (`CommandSync`, `AutoLane`, `GpuLanes`).
+//! (`CommandSync`, `AutoLane`, `GpuLanes`): `CommandSync` records
+//! `wgpu::ComputePipeline` dispatches and CPU closures, then `flush()`
+//! submits them to the `Device`/`Queue`; `AutoLane` resolves the CPU/GPU
+//! verdict from the element count and drives `SmartBuffer` residency
+//! itself (upload-if-dirty → dispatch → flush → download-if-dirty) with
+//! CPU fallback; `GpuLanes` bridges `SmartStore` component lanes to
+//! `AutoLane` with per-type slot reuse. The CPU sends commands to where
+//! the data lives — no eager PCIe copies.
 use crate::component_store::ComponentStore;
 use crate::pipeline::PipelineConfig;
 use crate::smart_store::SmartStore;
 
-/// Result of runtime dispatch decision
+/// Result of runtime dispatch decision.
+///
+/// Advisory only: [`Dispatcher::decide`] performs a pure threshold
+/// comparison. `Gpu` means "large enough that the GPU may pay off" —
+/// interpreting and executing that verdict lives in `ornis-wgpu-backend`,
+/// never in this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionTarget {
     /// Run on CPU threads.
     Cpu,
-    /// Run on the GPU.
+    /// Advisory: workload is large enough to consider the GPU.
     Gpu,
 }
 
-/// Runtime dispatcher that decides CPU vs GPU based on element count and threshold
+/// Runtime dispatcher that decides CPU vs GPU based on element count and threshold.
+///
+/// Pure decision, no execution and no device dependency: safe to keep in
+/// `ornis-core`.
 #[derive(Debug, Clone, Copy)]
 pub struct Dispatcher {
     cpu_threshold: usize,
@@ -115,74 +120,14 @@ impl CpuExecutor {
     }
 }
 
-/// GPU executor (requires gpu feature).
+/// High-level CPU-only dispatcher over [`Dispatcher`] decisions.
 ///
-/// **STUB — experimental, not production-ready, always falls back to CPU.**
-/// This is a reserved extension point: `execute` is a stub that performs no
-/// GPU work and returns `None`. Real GPU compute dispatch lives in
-/// `ornis-wgpu-backend` (`CommandSync::dispatch_gpu` / `flush`), which is
-/// tested (`gpu_dispatch_records_and_flushes`) and stable. Treat this type
-/// as a placeholder for the future automatic ECS→GPU dispatch, not as a
-/// working executor. The `gpu` feature now compiles (brings `wgpu` dep) but
-/// the body remains a no-op stub emitting a runtime warning.
-#[cfg(feature = "gpu")]
-pub struct GpuExecutor {
-    // GPU device and queue would be stored here
-}
-
-#[cfg(feature = "gpu")]
-impl GpuExecutor {
-    /// Create a new GPU executor
-    ///
-    /// **STUB:** stores nothing; the executor never performs GPU work.
-    /// Exists only so `SmartDispatcher::set_gpu_executor` can be compiled
-    /// with `--features gpu`. Real GPU execution is via
-    /// `ornis-wgpu-backend::CommandSync`.
-    pub fn new(_device: &wgpu::Device, _queue: &wgpu::Queue) -> Self {
-        eprintln!(
-            "[ornis-core::dispatcher] WARN: GpuExecutor::new is STUB — no GPU work will be performed; use ornis-wgpu-backend::CommandSync for real dispatch"
-        );
-        Self {}
-    }
-
-    /// Execute a compute shader on a component lane.
-    ///
-    /// **STUB:** always returns `None`; the generic ECS→GPU path is not wired.
-    /// Call sites fall back to `CpuExecutor`. Emits a runtime warning so
-    /// accidental GPU reliance is visible. Real dispatch:
-    /// `ornis-wgpu-backend::CommandSync::dispatch_gpu`.
-    ///
-    /// Stub: the `gpu` feature is a reserved extension point; this body is
-    /// intentionally a no-op — mutants here are untestable, skip.
-    #[mutants::skip]
-    pub fn execute<T, F, R>(&self, _store: &SmartStore, _f: F) -> Option<R>
-    where
-        T: 'static + Send + Sync,
-        F: FnOnce(&ComponentStore<T>) -> R + Send,
-        R: Send,
-    {
-        eprintln!(
-            "[ornis-core::dispatcher] WARN: GpuExecutor::execute STUB called — returning None, caller must fall back to CPU (use ornis-wgpu-backend::CommandSync for real GPU)"
-        );
-        // Would compile shader, create buffers, dispatch compute
-        None
-    }
-}
-
-/// High-level smart dispatcher that combines CPU and GPU execution.
-///
-/// **STUB-boundary:** the GPU side is currently a stub — see `GpuExecutor`
-/// (behind the `gpu` feature). When the dispatcher picks
-/// [`ExecutionTarget::Gpu`] the work silently falls back to the CPU executor
-/// with a runtime warning, so `SmartDispatcher` is effectively CPU-only today.
-/// Working GPU compute dispatch: `ornis-wgpu-backend::CommandSync`
-/// (`dispatch_gpu`/`dispatch_auto`/`flush`) — stable and tested; the finished
-/// automatic ECS→GPU routing is `ornis-wgpu-backend::AutoLane`/`GpuLanes`,
-/// the GPU branch here stays a stub.
+/// The dispatch verdict stays advisory and observable via [`dispatcher`](Self::dispatcher),
+/// but execution always runs on [`CpuExecutor`]. Real GPU execution lives
+/// in `ornis-wgpu-backend` (`CommandSync` / `AutoLane` / `GpuLanes`),
+/// which owns the `Device`/`Queue` this crate must not own.
 pub struct SmartDispatcher {
     dispatcher: Dispatcher,
-    #[cfg(feature = "gpu")]
-    gpu_executor: Option<GpuExecutor>,
 }
 
 impl SmartDispatcher {
@@ -190,8 +135,6 @@ impl SmartDispatcher {
     pub fn new<T: PipelineConfig>(gpu_available: bool) -> Self {
         Self {
             dispatcher: Dispatcher::from_config::<T>(gpu_available),
-            #[cfg(feature = "gpu")]
-            gpu_executor: None,
         }
     }
 
@@ -199,30 +142,14 @@ impl SmartDispatcher {
     pub fn with_threshold(cpu_threshold: usize, gpu_available: bool) -> Self {
         Self {
             dispatcher: Dispatcher::new(cpu_threshold, gpu_available),
-            #[cfg(feature = "gpu")]
-            gpu_executor: None,
         }
     }
 
-    /// Set GPU executor (requires gpu feature).
+    /// Execute a read-only operation on the CPU.
     ///
-    /// **STUB only:** `gpu_executor` is never actually used for GPU work —
-    /// `GpuExecutor::execute` returns `None` and `execute_read` falls back to
-    /// CPU. Kept only for API completeness; real GPU work is
-    /// `ornis-wgpu-backend::CommandSync`.
-    /// Stub only: `gpu_executor` is never read without the (uncompilable)
-    /// `gpu` feature, so a `with ()` mutant is unobservable — skip.
-    #[cfg(feature = "gpu")]
-    #[mutants::skip]
-    pub fn set_gpu_executor(&mut self, executor: GpuExecutor) {
-        self.gpu_executor = Some(executor);
-    }
-
-    /// Execute a read-only operation, automatically choosing CPU/GPU
-    ///
-    /// When `ExecutionTarget::Gpu` is selected but the GPU path is the
-    /// `GpuExecutor` STUB (always), this falls back to `CpuExecutor` and
-    /// emits a runtime warning. Real GPU dispatch is
+    /// `element_count` is still resolved through [`Dispatcher::decide`] so
+    /// the threshold wiring stays observable, but the verdict is advisory:
+    /// execution always runs on [`CpuExecutor`]. Real GPU dispatch is
     /// `ornis-wgpu-backend::CommandSync`.
     pub fn execute_read<T, F, R>(&self, store: &SmartStore, element_count: usize, f: F) -> Option<R>
     where
@@ -230,45 +157,11 @@ impl SmartDispatcher {
         F: FnOnce(&ComponentStore<T>) -> R + Send,
         R: Send,
     {
-        let target = self.dispatcher.decide(element_count);
-
-        match target {
-            ExecutionTarget::Cpu => CpuExecutor::execute::<T, _, R>(store, f),
-            ExecutionTarget::Gpu => {
-                #[cfg(feature = "gpu")]
-                if let Some(_gpu) = self.gpu_executor.as_ref() {
-                    // GpuExecutor is STUB — do not call _gpu.execute (it would
-                    // consume `f` and return None). Emit both warnings (new
-                    // STUB + fallback) and run on CPU for correctness.
-                    eprintln!(
-                        "[ornis-core::dispatcher] WARN: GpuExecutor::execute STUB — Gpu target (count {} >= threshold {}) falls back to CPU; real GPU via ornis-wgpu-backend::CommandSync",
-                        element_count,
-                        self.dispatcher.threshold()
-                    );
-                    CpuExecutor::execute::<T, _, R>(store, f)
-                } else {
-                    eprintln!(
-                        "[ornis-core::dispatcher] WARN: SmartDispatcher picked Gpu (count {} >= threshold {}) but gpu_executor=None — falling back to CPU (real GPU is ornis-wgpu-backend::CommandSync)",
-                        element_count,
-                        self.dispatcher.threshold()
-                    );
-                    // Fallback to CPU if GPU not set up
-                    CpuExecutor::execute::<T, _, R>(store, f)
-                }
-                #[cfg(not(feature = "gpu"))]
-                {
-                    eprintln!(
-                        "[ornis-core::dispatcher] WARN: SmartDispatcher picked Gpu (count {} >= threshold {}) but gpu feature off — falling back to CPU (real GPU is ornis-wgpu-backend::CommandSync)",
-                        element_count,
-                        self.dispatcher.threshold()
-                    );
-                    CpuExecutor::execute::<T, _, R>(store, f)
-                }
-            }
-        }
+        let _ = self.dispatcher.decide(element_count);
+        CpuExecutor::execute::<T, _, R>(store, f)
     }
 
-    /// Execute a mutable operation (CPU only for now)
+    /// Execute a mutable operation on the CPU.
     pub fn execute_mut<T, F, R>(&self, store: &SmartStore, element_count: usize, f: F) -> Option<R>
     where
         T: 'static + Send + Sync,
@@ -334,6 +227,22 @@ mod tests {
         }
 
         let result = dispatcher.execute_read::<f32, _, _>(&store, 100, |lane| lane.len());
+        assert_eq!(result, Some(100));
+    }
+
+    #[test]
+    fn smart_dispatcher_large_count_stays_on_cpu() {
+        let mut store = SmartStore::new();
+        let dispatcher = SmartDispatcher::with_threshold(1000, true);
+
+        for i in 0..100 {
+            let entity = store.create_entity();
+            store.insert::<f32>(entity, i as f32);
+        }
+
+        // The verdict is advisory Gpu, but execution is CPU-only.
+        assert_eq!(dispatcher.dispatcher().decide(10_000), ExecutionTarget::Gpu);
+        let result = dispatcher.execute_read::<f32, _, _>(&store, 10_000, |lane| lane.len());
         assert_eq!(result, Some(100));
     }
 
