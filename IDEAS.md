@@ -436,7 +436,7 @@ pub struct ComponentStore<T> {
 - **Вывод автора:** без warmstart чуть жёстче PBD, с warmstart — заметно жёстче, но параметры `beta/min_stiffness/max_stiffness/max_lambda` магические, сцено-зависимые, взрываются/дубеют. Код — `ProjectVBD` с `grad/hessian + m/dt²`.
 - **Для Ornis:** текущий `ornis-physics` — `sequential impulse + islands/sleep` для rigid (Box/Sphere/Capsule). Для жёстких контактов `AVBD` менее стабилен, чем `SI` — те же проблемы, что в LegitParticles, усилятся на `tiled 10k`.
 - **Когда брать:** только для будущей фазы **Soft Bodies / Particles** (обломки, ткань, канаты). Тогда смотреть на **XPBD** (Müller), а не чистый `AVBD` — меньше магии. Warmstart/ constraint graph уже есть в Ornis (`warm_impulses`, islands) — переносить не нужно, брать как негативный пример.
-- **Статус:** занесено 2026-09-01 как `IDEAS §29`, не в приоритете a–g.
+- **Статус:** занесено 2026-09-01 как `IDEAS §29`, не в приоритете a–g. **Обновление 2026-09-21:** предусловие «брать XPBD» закрыто — rigid-ядро XPBD существует (`crates/physics/src/xpbd.rs`, `XpbdEngine: PhysicsEngine`, коммит `096c4bc`); compliance-ядро `Δλ` готово к переиспользованию для частиц. Сущности soft body ещё нет — следующий шаг расписан как **PLAN B2/D1** (фаза Deformables: `soft.rs`, верёвка → ткань-грид → volume → deformable↔rigid → рендер-сетка).
 
 ## 30. GPU Physics — single-point WGPU solver (оценка 2026-09-01)
 
