@@ -1,11 +1,112 @@
 # Ornis: текущие ограничения и план развития
 
-> **Актуальный срез: 2026-09-18.** Этот документ объединяет
+> **Актуальный срез: 2026-09-20.** Этот документ объединяет
 > аудит и план работ. Формулировки в разделах с датами —
 > исторические снимки; текущие статусы сверены ниже с кодом и
 > последующими коммитами. Разделы без пометки «✅ закрыт / неактуально»
 > и без статуса 2026-09-xx — исторические, их перекрывает
-> «Актуализация 2026-09-18» ниже.
+> «Актуализация 2026-09-20» ниже.
+
+## Актуализация 2026-09-20: SI-переименование, GameWorld, иерархия физики, xtask e2e
+
+Срез 2026-09-18 устарел по четырём трекам — сели коммиты
+`1e2822b..b603224` (плюс settled-вердикт `74b6424` от 2026-09-18,
+не отражённый в прошлой актуализации). Сверено с кодом и `git log`;
+при расхождении доков с кодом верить коду
+(`crates/physics/src/`, `crates/app/src/game_world.rs`,
+`src/server_session.rs`, `xtask/src/e2e.rs`).
+`editor-v2/` и `crates/render` в этом срезе не затрагивались;
+`baseline.json` НЕ регенерировался — реген отдельно после всех
+треков (см. напоминание в конце секции).
+
+- **Статус пунктов актуализации 2026-09-18.** M3 Islands DONE
+  (`cff2a11`) — подтверждён, поверх легла иерархия физики
+  (см. ниже, поведение не менялось); hardening PR #12 closed
+  (`966bac9`, мерж PR #13 `0a26089`) — подтверждён; CI — 5 шардов
+  (`28e7301`) — действует. Остаток solver-трека «100k tiled ~8 с/шаг»
+  — **частично закрыт**: settled-вердикт `74b6424` даёт
+  ~2–3 мс на полностью спящей сцене (fast path, zero phase work),
+  активный шаг 100k по-прежнему вне real-time — см. «остатки» ниже.
+- **SI-переименование — DONE (`5c0e0c8`, 2026-09-19).**
+  `BuiltinPhysicsEngine` → `SequentialImpulseEngine`
+  (`crates/physics/src/sequential_impulse/mod.rs`, фасад `engine.rs`
+  — 140 строк, трейт-шов + реэкспорты),
+  `WgpuContactSolver` → `GpuSequentialImpulse`
+  (`crates/physics/src/gpu/`), `SolverKind::Builtin` →
+  `SolverKind::SequentialImpulse` (внутренности следом: `SplitOwner`,
+  `EngineInner`, `SplitTiming::si`, `si_bodies`, `local_si`).
+  `AvbdEngine` оставлен сознательно (легитимное имя метода —
+  Augmented Vertex Block Descent). Старые имена в датированных
+  аудитах `docs/quality/` — исторические снимки, не текущий API.
+- **contact_math + slip-тест — DONE (тот же `5c0e0c8`).**
+  Новый `crates/physics/src/contact_math.rs`: изотропная SI-строка
+  как `#[kernel]`-функции — CPU wide/scalar-пути вызывают их
+  напрямую (`crates/physics/src/wide.rs`), GPU-ядро стыкуется через
+  `helpers(...)`, зеркальной реализации больше нет. Тест
+  `gpu_contact_row` теперь проверяет контактное проскальзывание
+  (качение, не слайд центра) с **побитовым CPU/GPU согласием**.
+- **GameWorld + EditorSession — DONE (`2d3c6ce`, 2026-09-19).**
+  Новый `crates/app/src/game_world.rs` (`GameWorld`: Engine +
+  entities + version + `from_scene`/`replace_scene` +
+  `frame`/`frame_upload`, wasm32-clean): один тип, два инстанса
+  (authoritative + browser replica). `RenderWorld`/`GameRuntime`
+  поглощены (`RenderWorld` оставлен как doc-noted shim ради двух
+  render-тестов); `EditorWorld` → `EditorSession
+  { world: GameWorld, ... }` в `src/server_session.rs`
+  (переименован из `src/editor_world.rs`); native работает на
+  `GameWorld`. Формулировки про `EditorWorld`/`RenderWorld`/
+  `GameRuntime` как живые типы в README/PLAN ниже обновлены;
+  датированные разборы в теле этого файла — исторические снимки.
+- **Иерархия физики + тесты в `tests/` — DONE
+  (`a38e51a`, `2da8568`, `a688fda`, 2026-09-20; поведение не менялось,
+  сьюты зелёные).** `engine.rs` 9133 → 5115 → 140 строк:
+  инлайн-тесты переехали в `crates/physics/tests/si_step|si_narrow|
+  si_sleep|si_queries` + `gpu_batches` (`a38e51a`); затем
+  `engine.rs` распался на `sequential_impulse/` (`mod` — движок и
+  step-пайплайн, `narrow`, `queries`, `step`, `math`, `caches`,
+  `events`, `sleep`, плюс verbatim-переезды `contacts`/`islands`/
+  `joints` через `git mv`, всё < 1500 строк, публичный API неизменен
+  — `2da8568`); затем `gpu.rs` → `gpu/{mod,si_batches,avbd}`
+  (< 1000 строк), `avbd.rs` → `avbd/{mod,assembly,rows,joints_ext,
+  sleep}` (< 1500, тесты переехали внутрь), `collision/`
+  собрал `broadphase(+tree)`, `shape`, `gjk`, `distance(+box)`
+  verbatim-переездами (`a688fda`). Старые пути `engine.rs`,
+  `engine/contacts.rs`, `gpu.rs`, `avbd.rs`, `broadphase.rs`
+  в датированных секциях ниже — исторические.
+- **Диета тестов −41% — DONE (`b603224`, 2026-09-20).**
+  `routed_world_is_bit_identical`: 40 → 16 шагов (побитовые ассерты
+  те же, margin rebuild'ов проверен идентично на 10/15/20/30/40);
+  `avbd_confluence_one_vs_many_threads`: 120 → 80 шагов (все
+  динамические фазы сохранены: bounce ~15, landing ~64 + settle).
+  Полный physics-сьют ~223 → ~132 с, всё зелёное.
+- **xtask e2e вместо sh — DONE (`1e2822b`, 2026-09-18).**
+  `scripts/wasm_pixel_e2e.sh` (99 строк) удалён; новый таск
+  `cargo xtask e2e [--port 3420] [--out <dir>]` (`xtask/src/e2e.rs`,
+  391 строка) повторяет цепочку editor scene → `/api/scene` →
+  screenshot → golden compare с теми же honest-SKIP семантиками
+  (std-only HTTP по TCP, Windows-aware browser, playwright-cache
+  probing). `docs/WASM_PIXEL_E2E.md` уже говорит `cargo xtask e2e`;
+  таблица xtask в README ниже поправлена (`editor, quality, fuzz,
+  mutants` → + `e2e`).
+- **Settled-вердикт 100k в StepTiming — DONE (`74b6424`,
+  2026-09-18).** `settled_grid_sleeps_and_costs_less_than_active`:
+  внутренняя покоящаяся решётка спит целиком, fully-sleeping fast
+  path отдаёт zero phase work (`substeps == 0`); зонд 100k tiled
+  Grid-8: шаги падают с ~0.8–1.9 с активных до ~2–3 мс settled
+  (300–400×, сон НЕ jitter-gated на tiled-сценах). Заодно в том же
+  коммите: single-pass `update_sleep`, `GpuAvbdStub` rung 1
+  (lumped-diagonal Hessian + diagonal LDL, opt-in с CPU fallback),
+  `PassSystem`-близнецы логируют через `PassOrderLog` (паритет с
+  порядком `FrameExecutor` DAG), `GameRuntime`-lite +
+  `AssetServer`-lite (поглощены `GameWorld` коммитом `2d3c6ce` —
+  см. выше), WASM golden-байты extract + версионирование снапшотов
+  + malformed-JSON матрица.
+
+  > ⏳ **Напоминание: `baseline.json` НЕ тронут.** Структурный
+  > baseline регенерировать отдельно после всех треков:
+  > `rustqual --save-baseline baseline.json`, затем `git add
+  > baseline.json` и `cargo xtask quality` (регресс-гейт). Проверять,
+  > что Score не регрессирует.
 
 ## Актуализация 2026-09-18: M3 Islands + hardening закрыты
 

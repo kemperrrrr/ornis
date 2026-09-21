@@ -160,6 +160,8 @@ fn fetch_scene(port: u16) -> Option<Vec<u8>> {
 }
 
 /// Screenshot `url` into `out_png`. `true` when the file appears.
+/// Waits for the `#bevy` canvas and lets it settle, so the shot pins a
+/// rendered frame rather than a blank viewport.
 fn screenshot(browser: &str, url: &str, out_png: &Path) -> bool {
     let status = if browser == "playwright-chromium" {
         Command::new("npx")
@@ -169,6 +171,10 @@ fn screenshot(browser: &str, url: &str, out_png: &Path) -> bool {
                 "screenshot",
                 "--browser=chromium",
                 &format!("--viewport-size={VIEWPORT}"),
+                "--wait-for-selector",
+                "#bevy",
+                "--wait-for-timeout",
+                "3000",
                 url,
             ])
             .arg(out_png)
@@ -187,6 +193,7 @@ fn screenshot(browser: &str, url: &str, out_png: &Path) -> bool {
                 "--no-sandbox",
                 "--use-angle=swiftshader",
                 "--enable-unsafe-swiftshader",
+                "--timeout=20000",
                 &format!("--window-size={VIEWPORT}"),
             ])
             .arg(format!("--screenshot={}", out_png.display()))
@@ -252,16 +259,35 @@ fn spawn_server(root: &Path, editor_dir: &Path) -> Child {
         .unwrap_or_else(|e| skip(&format!("cannot spawn editor server: {e}")))
 }
 
+/// Poll `/api/scene` until the server publishes a non-empty scene.
+/// The first answer after boot is an empty placeholder (version 0, no
+/// entities); screenshotting that would pin a blank viewport, so this
+/// waits for real content with the same deadline as the TCP wait.
+fn wait_for_scene(port: u16) -> Option<Vec<u8>> {
+    let deadline = Instant::now() + Duration::from_secs(POLL_DEADLINE_SECS);
+    while Instant::now() < deadline {
+        if let Some(body) = fetch_scene(port) {
+            let published = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("entities")?.as_array().map(|e| !e.is_empty()))
+                .unwrap_or(false);
+            if published {
+                return Some(body);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    None
+}
+
 /// Post-spawn half of the chain. `Err` is a SKIP reason; the caller kills
 /// the server before reporting it.
 fn pixel_leg(port: u16, browser: &str, out_scene: &Path, out_frame: &Path) -> Result<(), String> {
     if !wait_for_server(port) {
         return Err("editor server did not answer /api/scene".to_string());
     }
-    let body = fetch_scene(port).ok_or_else(|| "GET /api/scene failed".to_string())?;
-    if body.is_empty() || !body.starts_with(b"{") {
-        return Err("GET /api/scene returned no JSON".to_string());
-    }
+    let body = wait_for_scene(port)
+        .ok_or_else(|| "server never published a scene (empty placeholder only)".to_string())?;
     std::fs::write(out_scene, &body)
         .map_err(|e| format!("cannot write {}: {e}", out_scene.display()))?;
 

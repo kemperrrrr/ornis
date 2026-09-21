@@ -48,7 +48,20 @@ reports the RMSE. Any missing capability is an honest `SKIP` (exit 0).
 - mismatched-pixel fraction ≤ 0.5%.
 
 First run bootstraps the golden: with no `editor/e2e_golden.png` the
-script stores the screenshot under `--out` for manual review; promote it
+harness stores the screenshot under `--out` for manual review; promote it
 to `editor/e2e_golden.png` only after visual sign-off. Re-render with the
 default orbit camera (`viewport.js` → `start_renderer('bevy')`) and a
 fixed 800×600 viewport so runs are comparable.
+
+## Known gap 2026-09-20: headless canvas renders solid red
+
+Two harness runs captured a solid dark-red `#bevy` canvas even with a
+warm published scene (5 entities, v5) after `#bevy` + 3 s settle, so the
+golden is deliberately NOT bootstrapped from those shots. Probable cause:
+headless playwright-chromium gets no WebGPU adapter (the CLI cannot
+forward `--enable-unsafe-swiftshader`; only the system-chromium path
+carries SwiftShader flags). Next step: software-WebGPU provisioning for
+the playwright path (or a node-driven launch with explicit args), then
+re-run → visual sign-off → promote. The harness already waits for a
+published non-empty scene before shooting, so the empty-scene failure
+mode is closed regardless.

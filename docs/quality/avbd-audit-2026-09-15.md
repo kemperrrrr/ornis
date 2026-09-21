@@ -49,7 +49,7 @@
 
 Эта структура соответствует AVBD и авторскому демо. Отсутствие GPU само по себе не означает подмену алгоритма: авторское доступное демо также использует последовательный проход по телам. [3](https://github.com/savant117/avbd-demo3d)
 
-Это не только throwaway-spike: `AvbdEngine` реализует `PhysicsEngine`, а `SolverKind::Avbd` создаёт его через публичный оркестратор (`crates/physics/src/lib.rs:56–141`). Однако стандартный `PhysicsRuntime::new` выбирает `SolverKind::Builtin` (`src/engine_runtime.rs:40–47`); само наличие работающего редактора ещё не подтверждает работу AVBD в нём.
+Это не только throwaway-spike: `AvbdEngine` реализует `PhysicsEngine`, а `SolverKind::Avbd` создаёт его через публичный оркестратор (`crates/physics/src/lib.rs:56–141`). Однако стандартный `PhysicsRuntime::new` выбирает `SolverKind::Builtin` (`src/engine_runtime.rs:40–47` — историческое имя, ныне `SolverKind::SequentialImpulse`, переименование `5c0e0c8`); само наличие работающего редактора ещё не подтверждает работу AVBD в нём.
 
 ## 2. Найденные проблемы
 

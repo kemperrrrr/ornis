@@ -12,6 +12,11 @@
 >
 > Это **ornis-physics**, не ornis-core как в `mutants-tickets-2026-08-11.md` —
 > тикеты продолжают сквозную нумерацию с T8.
+>
+> Историческая пометка (2026-09-20): `BuiltinPhysicsEngine` ниже — это
+> нынешний `SequentialImpulseEngine` (переименование `5c0e0c8`,
+> 2026-09-19); пути `engine.rs`/`engine/*` — ныне
+> `sequential_impulse/` (`2da8568`, 2026-09-20).
 
 ## Статус снимка (2026-08-24, первый прогон)
 

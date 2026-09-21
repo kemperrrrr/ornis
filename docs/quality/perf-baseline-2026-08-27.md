@@ -106,7 +106,7 @@ cargo bench -p ornis-physics --bench solver_bench -- --verbose
 
 `Gnuplot not found` не влияет на измерения: Criterion использовал Plotters
 backend. Этот прогон не включал GPU physics — benchmark использовал обычный
-CPU path без `--features gpu` и без подключения `WgpuContactSolver`.
+CPU path без `--features gpu` и без подключения `WgpuContactSolver` (историческое имя — ныне `GpuSequentialImpulse`, переименование `5c0e0c8`, 2026-09-19).
 
 **Промежуточное решение:** UniformGrid — сильный provisional candidate для
 текущей CPU-сцены, но Sweep-and-Prune остаётся default до профилирования

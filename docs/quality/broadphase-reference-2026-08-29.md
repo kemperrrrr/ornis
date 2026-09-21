@@ -190,7 +190,7 @@ backend:
    в 9.9x быстрее SAP в steady state на tiled-floor workload.
 3. ✅ Добавлен timing breakdown broadphase / narrowphase / solver.
    `StepTiming` (`crates/physics/src/broadphase.rs`) суммирует фазы по substep-циклу
-   в `BuiltinPhysicsEngine::step`; `step_timing()` отдаёт разбивку, `perf_probe`
+   в `BuiltinPhysicsEngine::step` (историческое имя — ныне `SequentialImpulseEngine`, `5c0e0c8`); `step_timing()` отдаёт разбивку, `perf_probe`
    печатает среднее + peak-frame. Замер на активном мире (2026-08-29, dev build,
    aarch64):
    - islands_grid 16×16 (1025 тел): broad 28.7 ms | narrow 142.0 ms | solver 437.1 ms
@@ -243,7 +243,8 @@ backend:
    Дефект moved-list в tree исправлен (re-query всех dynamic), но это сделало
    tree медленнее; возврат к selective moved-list — отдельная оптимизация.
 6. ✅ Решение: **default = UniformGrid** (победитель матрицы), не SAP.
-   Изменено в `BuiltinPhysicsEngine::new` (`engine.rs`): `BroadPhaseBackend::new
+   Изменено в `BuiltinPhysicsEngine::new` (`engine.rs` — исторические имена, ныне
+   `SequentialImpulseEngine::new`, `sequential_impulse/`): `BroadPhaseBackend::new
    (BroadPhaseKind::UniformGrid)`. SAP оставлен как compatibility baseline
    (явный выбор через `set_broadphase`). Tree — experimental. Adaptive routing
    (SAP↔grid↔tree по паттерну сцены) — будущая работа. Тест

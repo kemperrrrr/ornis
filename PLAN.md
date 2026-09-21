@@ -69,8 +69,9 @@
   объединяет `Resources` и авторитетный `SmartStore`, а `ornis_core::Engine`
   добавляет `Time`/`FixedTime`, два rate-плана и `run_frame` поверх
   `Schedule`. Editor-only facade уже использует этот host и physics
-  sync/step/sync-out; native и WASM render используют общий library-level
-  `RenderWorld`/`RenderExtract`/`FramePlan` contract. Backend-neutral
+  sync/step/sync-out; native и WASM render используют общий
+  `GameWorld` (`crates/app`)/`RenderExtract`/`RenderFrame3D` contract
+  (до 2026-09-19 — library-level `RenderWorld` + `FramePlan`). Backend-neutral
   `InputState` уже публикуется Engine и native winit/WASM orbit adapters его
   заполняют; native showcase и editor-only physics подключены к общему
   bounded 60 Hz fixed host, browser gameplay consumers и полный cross-domain
@@ -84,8 +85,9 @@
   `sequence`; `/api/events?after=<sequence>` даёт bounded replay и `EventGap`.
   WebSocket upgrade на `/api/events` реализован для server-push; editor UI
   предпочитает его и сохраняет cursor polling как fallback.
-  Editor-only `EditorWorld` использует `ornis_core::World`,
-  а браузер восстанавливает snapshot в отдельном `RenderWorld` после
+  Editor-only `EditorSession` (`src/server_session.rs`, на `GameWorld`;
+  до 2026-09-19 — `EditorWorld`) использует `ornis_core::World`,
+  а браузер восстанавливает snapshot в browser-инстансе того же `GameWorld` после
   serialization boundary — общей памяти между ними нет.
 - **Command-Based Sync**: CPU-очередь + residency tracker и базовое
   GPU-исполнение (compute dispatch + flush, есть тест) — есть;
@@ -95,9 +97,9 @@
   через deprecated-note трюк; IDE-интеграции и расширяемого набора правил нет.
 - **WASM**: viewport получает актуальные scene snapshot'ы из `/api/scene`
   через polling (~1/с), без fallback на `scene.ron` (единый `Engine/World/Schedule` — `InputState::apply_snapshot` + `POST /api/input`/WS), имеет orbit-камеру; каждый
-  snapshot восстанавливается в общий для native/WASM library-level
-  `RenderWorld`, проходит `Engine::run_frame`/`RenderExtract` и записывается
-  через `RenderFrame3D`/`FramePlan`. Браузер отправляет WASD/стрелки и
+  snapshot восстанавливается в browser-инстанс общего `GameWorld`
+  (до 2026-09-19 — library-level `RenderWorld`), проходит `Engine::run_frame`/`RenderExtract` и записывается
+  через `RenderFrame3D`/`SystemSet` (до 2026-09-07 — `FramePlan`). Браузер отправляет WASD/стрелки и
   pointer/wheel-снапшоты идут по WebSocket `/api/events` (`InputSocket`,
   тот же сокет, что серверный event-push), с fallback на `POST /api/input`
   (throttled ~15 Hz + flush релиза, `InputPoster`); сервер применяет их
@@ -133,14 +135,15 @@ WebSocket server-push реализован; connection handles отслежив�
 
 ✅ WASM-canvas рендерит актуальные snapshot'ы editor-only ECS через
 `/api/scene`, без fallback на `scene.ron` (единый runtime), имеет orbit-камеру. После границы
-serialization snapshot восстанавливается в `ornis_render::RenderWorld`,
+serialization snapshot восстанавливается в browser-инстанс `GameWorld`
+(до 2026-09-19 — `ornis_render::RenderWorld`),
 где `Engine` запускает общий `RenderExtract`, публикует `InputState`, а
-`RenderFrame3D` исполняет `FramePlan`. Orbit pointer/wheel input уже проходит
+`RenderFrame3D` исполняет `SystemSet`-реестр. Orbit pointer/wheel input уже проходит
 через этот ресурс и scheduled `OrbitCamera` consumer. Общий `Engine` уже
 предоставляет `FixedTime` и
 bounded fixed schedule; WebSocket server-push уже добавлен. Остаются
 browser/gameplay consumers и полный cross-domain runtime; серверный
-`EditorWorld` и browser-side copy намеренно не делят память.
+`GameWorld` (authoritative) и browser-side copy намеренно не делят память.
 
 ### c. Фаза 6 — Скриптинг (пересмотрена 2026-08-22, решение D1 аудита)
 
@@ -182,7 +185,7 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
    `2025-03-25`) Mojo становится `primary` для native, Rhai остаётся
    `WASM`-fallback; до появления WASM-поддержки Mojo единственным
    адаптером не становится.
-6. **Editor-интеграция** ✅ 2026-09-06 (`src/editor_world.rs`: `EditorWorld::default` ставит `ScriptPlugin` с Rhai — primary-адаптер и WASM-fallback; `tick` опрашивает файловые вотчи → `hot_reload`, гоняет кадр, пишет outcomes через `REGISTRY` с бампом версии; команды `script_load` (inline `source` xor `path` + watch, опц. `tick`), `script_call` (args — JSON-массив), `script_hot_reload`, `script_unload`, `script_list` (entries + watched-пути + last apply + pending); `SceneFileWatch` обобщён в `FileWatch`; 3 e2e-теста Rhai→мир; host добрался методами `load/call/hot_reload/unload/take_outcomes/apply_drained/pending_outcome_count`).
+6. **Editor-интеграция** ✅ 2026-09-06 (`src/server_session.rs` (до 2026-09-19 — `src/editor_world.rs`): `EditorSession` на `GameWorld` ставит `ScriptPlugin` с Rhai — primary-адаптер и WASM-fallback; `tick` опрашивает файловые вотчи → `hot_reload`, гоняет кадр, пишет outcomes через `REGISTRY` с бампом версии; команды `script_load` (inline `source` xor `path` + watch, опц. `tick`), `script_call` (args — JSON-массив), `script_hot_reload`, `script_unload`, `script_list` (entries + watched-пути + last apply + pending); `SceneFileWatch` обобщён в `FileWatch`; 3 e2e-теста Rhai→мир; host добрался методами `load/call/hot_reload/unload/take_outcomes/apply_drained/pending_outcome_count`).
 
 ### d. Фаза 7 — Asset Pipeline (браузерная интерпретация)
 
@@ -407,8 +410,9 @@ runtime без отдельной extract-фазы — будущая цель, 
   `RenderBackend::render_scene` сохраняется как compatibility/plugin API и
   reference path без дублирования pass logic.
 - **R6.** Связать рендер с ECS-сценой в браузере: snapshot уже
-  восстанавливается в shared library-level `RenderWorld` и проходит
-  `Engine`/`RenderExtract`/`FramePlan`; остаются ввод/камера из браузера в
+  восстанавливается в browser-инстанс `GameWorld` (до 2026-09-19 —
+  shared library-level `RenderWorld`) и проходит
+  `Engine`/`RenderExtract`/`SystemSet`; остаются ввод/камера из браузера в
   движок и live event transport (перекликается с «b. Живой ECS в браузере»).
 - **R7.** Render Graph — слой оркестрации пассов (design/implementation note,
   2026-08-10). Гибрид forward/deferred уже работает императивно в
@@ -497,7 +501,7 @@ runtime без отдельной extract-фазы — будущая цель, 
 **G7 (2026-08-16, полностью):** производительность.
 - **CPU-часть**: замеры, фиксы сна, per-island параллельный солвер (rayon), детерминизм (25/25 тестов) — реализовано ранее (2026-08-15).
 - **SIMD-wide контактный путь** (2026-08-16): `WideBatch` — SoA-пакет из ≤4 single-point контактов с дизъюнктными телами, решаемых лейнами в порядке глобального GS. Прекомпьютинг K⁻¹, матриц инерции, факторов применения; каждая лейна — скалярное арифметическое выражение, идентичное скалярному пути в пределах ±1 ulp (матричная инерция вместо кватернионных вращений). Встраивание: `build_solver_steps(bodies, manifolds, states) → Vec<SolverStep>` — жадная упаковка последовательных контактов с непересекающимися телами в батчи по 4; шаги исполняются в исходном порядке манифолдов. Реституция: `WideBatch::solve_restitution()` — одноразовый поститерационный пасс на тех же лейнах. Config: `set_wide_solver(bool)` (default true); отключение возвращает чистый скалярный путь для бит-точного воспроизведения. Бенчмарк: `cargo bench -p ornis-physics` на сцене spheres_grid (оценка SPEEDUP wide vs scalar). Тесты: `wide_batch_matches_scalar_single_point` (две независимые пары, точность 1e-4), `batch_groups_disjoint_consecutive_contacts`.
-- **GPU-перенос wide-контактного солвера** (2026-08-16, обновлён 2026-08-17): модуль `gpu.rs` (`#[cfg(feature = "gpu")]`). Compute шейдер (4 лейны/workgroup, один батч/диспатч): нормальный + фрикционный импульс, реституция. Шейдер **написан на Rust**: `#[gpu_pipeline(...)]` генерирует WGSL из тела Rust-функции (bindings/builtins/workgroup size — в атрибутах макроса), `#[derive(WgslStruct)]` генерирует WGSL-структуры из Rust-раскладок и compile-time ассертит `offset_of!`/`size_of` против правил WGSL — рукописного WGSL в физике больше нет (идея №4 «CPU↔GPU из одного Rust-кода»). Заодно исправлены расхождения раскладок, накопленные при ручной синхронизации: явный паддинг после `vec3` (WGSL выравнивает `vec3<f32>` на 16 байт) и страйды буферов из `size_of::<T>()` вместо устаревшей константы 2144. `WgpuContactSolver` — wgpu-буферы (body state 32 байта/тело, batch 1248 байт/батч), пайплайн, `upload/download/solve` методы. Пэкер `pack_single_point_batches` — CPU-side упаковка состояний в GPU-батчи (та же стратегия дизъюнктных тел). Интеграция через `solve_contacts_velocity_gpu` (гибрид: single-point → GPU, multi-point → CPU острова, Jacobi/GS hybrid — не бит-идентичен CPU). Аттач: `BuiltinPhysicsEngine::set_gpu_solver(solver)`. Детерминизм: GPU-путь не бит-идентичен CPU (разные ассоциации fma/rounding); документировано. Тесты: `gpu_pack_produces_disjoint_batches` (чистый CPU), валидация сгенерированного WGSL через naga (без устройства), `gpu_solver_single_contact_matches_analytic` и `gpu_solver_tracks_cpu_engine` (прогон на реальном адаптере; на CI — mesa/lavapipe, без адаптера — skip). Зависимости: wgpu, bytemuck (feature gate `gpu`), ornis-macros; dev: naga, pollster. `cargo test -p ornis-physics --features gpu` + clippy — отдельные стадии гейта `cargo xtask quality`.
+- **GPU-перенос wide-контактного солвера** (2026-08-16, обновлён 2026-08-17): модуль `gpu.rs` (`#[cfg(feature = "gpu")]`). Compute шейдер (4 лейны/workgroup, один батч/диспатч): нормальный + фрикционный импульс, реституция. Шейдер **написан на Rust**: `#[gpu_pipeline(...)]` генерирует WGSL из тела Rust-функции (bindings/builtins/workgroup size — в атрибутах макроса), `#[derive(WgslStruct)]` генерирует WGSL-структуры из Rust-раскладок и compile-time ассертит `offset_of!`/`size_of` против правил WGSL — рукописного WGSL в физике больше нет (идея №4 «CPU↔GPU из одного Rust-кода»). Заодно исправлены расхождения раскладок, накопленные при ручной синхронизации: явный паддинг после `vec3` (WGSL выравнивает `vec3<f32>` на 16 байт) и страйды буферов из `size_of::<T>()` вместо устаревшей константы 2144. `WgpuContactSolver` — wgpu-буферы (body state 32 байта/тело, batch 1248 байт/батч), пайплайн, `upload/download/solve` методы. Пэкер `pack_single_point_batches` — CPU-side упаковка состояний в GPU-батчи (та же стратегия дизъюнктных тел). Интеграция через `solve_contacts_velocity_gpu` (гибрид: single-point → GPU, multi-point → CPU острова, Jacobi/GS hybrid — не бит-идентичен CPU). Аттач: `BuiltinPhysicsEngine::set_gpu_solver(solver)`. Детерминизм: GPU-путь не бит-идентичен CPU (разные ассоциации fma/rounding); документировано. Тесты: `gpu_pack_produces_disjoint_batches` (чистый CPU), валидация сгенерированного WGSL через naga (без устройства), `gpu_solver_single_contact_matches_analytic` и `gpu_solver_tracks_cpu_engine` (прогон на реальном адаптере; на CI — mesa/lavapipe, без адаптера — skip). Зависимости: wgpu, bytemuck (feature gate `gpu`), ornis-macros; dev: naga, pollster. `cargo test -p ornis-physics --features gpu` + clippy — отдельные стадии гейта `cargo xtask quality`. Обновление 2026-09-19/20 (`5c0e0c8`, `a688fda`): `WgpuContactSolver` → `GpuSequentialImpulse`, модуль `gpu.rs` → `gpu/{mod,si_batches,avbd}`, изотропная SI-строка — `contact_math.rs` (единый источник CPU/GPU, тест `gpu_contact_row` — побитовое согласие по slip); аттач — `SequentialImpulseEngine::set_gpu_solver` (до 2026-09-19 — `BuiltinPhysicsEngine`).
 - **Gather/scatter**: инструкции `Vec::with_capacity` добавлены; пулинг аллокаций не реализован (тривиально, даёт <1% прироста).
 - **High-stack rocking** (качество, не производительность): 32-стек подрагивает, 24/33 спит — остаётся как issue для будущей работы (физически корректно, визуально приемлемо).
 - **Извлечение хелперов**: `build_manifold_state` (единый преамбул), `partition_into_islands`, `dispatch_islands_velocity` — переиспользуются CPU и GPU путём. Итог: 25 тестов, clippy/fmt/AST проверено (в среде без Rust toolchain — код написан, полная компиляция при следующем `cargo test -p ornis-physics`).
@@ -613,7 +617,7 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
  нормали/пары, reverse sweep. M1 gaps закрыты в M2 (2026-09-15, см. ниже):
  sphere-stacking держит 6 сфер без rolling multi-point, fracture на уровне
  Engine, island-wake propagation через живые пары, deep-catch до ~10 м/с
- одиночных ударов, angular CCD закрыт замером. Закрыто после M1: SolverKind/Engine-оркестратор (переключение builtin↔AVBD с миграцией
+ одиночных ударов, angular CCD закрыт замером. Закрыто после M1: SolverKind/Engine-оркестратор (переключение SequentialImpulse↔AVBD (до 2026-09-19 — builtin↔AVBD) с миграцией
  тел/джойнтов 1:1, рантайм держит Engine; миграция пробуждает — warm-start
  не мигрирует), Prismatic/Fixed/Distance + limits/motors, Wheel (пружина
  подвески + spin-мотор, rigid-degrade), Gear (позиционный ряд, ближе к
@@ -703,7 +707,7 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   mass model (зомби-правило: спящий снапшот несёт inv_mass=0; M2
   `bodies_snapshot` это уже делает), статика живёт в обоих движках
   нативно, джойнты пинят остров (концы всегда в одном солвере —
-  cross-joint rows не нужны), гистерезис unanimous-calm→Builtin /
+  cross-joint rows не нужны), гистерезис unanimous-calm→SequentialImpulse /
   immediate-wake→AVBD (003: 19 rebuild за 900 шагов/10 циклов, треша
   нет), покой инвариантен к начальному роутингу (004). Host-правки в
   спящий движок виснут (нужен явный wake-трек в `Engine::step`).
@@ -713,7 +717,12 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
    ✅ **DONE 2026-09-16/17** (`cff2a11` — M3 Islands routing на `Engine`,
    оба солвера live; hardening PR #12 — inertia ×4, signed overlap,
    angular frames, `row_live(c,f)`, `diff.dot(*e)`; тесты `solver_split` /
-   `solver_lifecycle` / `solver_split_invariants`). Вне скоупа v1 —
+   `solver_lifecycle` / `solver_split_invariants`). Обновление 2026-09-19/20:
+   солверы переименованы (`SequentialImpulseEngine`/`GpuSequentialImpulse`/
+   `SolverKind::SequentialImpulse`, `5c0e0c8`), физика разложена в
+   `sequential_impulse/`|`avbd/`|`gpu/`|`collision/` + `tests/` без смены
+   поведения (`a38e51a`, `2da8568`, `a688fda`), диета сьютов −41%
+   (`b603224`). Вне скоупа v1 —
    без изменений: cross-solver joints, разные частоты, O(n²) cross-AABB.
 
 ---
