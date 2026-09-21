@@ -145,11 +145,28 @@ bounded fixed schedule; WebSocket server-push уже добавлен. Оста�
 browser/gameplay consumers и полный cross-domain runtime; серверный
 `GameWorld` (authoritative) и browser-side copy намеренно не делят память.
 
-### c. Фаза 6 — Скриптинг (пересмотрена 2026-08-22, решение D1 аудита)
+### c. Фаза 6 — Мутации мира (бывший «Скриптинг»; унифицирована 2026-09-22)
+
+> Хронология 2026-09-05…09-07 ниже — исторический снимок: плагинный
+> шов `ScriptEngine` + три адаптера (Rhai/Rune/Python, правило трёх) +
+> `ScriptHost`/`script_tick`/`ScriptPlugin` + команды
+> `script_load/call/hot_reload/unload/list`. Проверка 2026-09-22
+> показала, что применение исходов скриптов и команд редактора —
+> один и тот же вызов (`parse_json`→`insert_any` через реестр), а
+> адаптеры не имеют prod-потребителей. Фаза закрыта унификацией,
+> а не наращиванием: **одна сущность `MutationBus`**
+> (`crates/core/src/mutation.rs`) — язык подключается как
+> `MutationProducer`, свой редактор пишет те же `Mutation`; старые
+> имена (`ScriptEngine`, `ScriptHost`, `ScriptPlugin`, `script_tick`,
+> `script_*`-команды, `crates/{rhai,rune,python}`,
+> `third_party/rustpython-vm`) удалены под корень, без алиасов.
+> Батчинг требования «100k за вызов» — сам поток `Vec<Mutation>`;
+> JSON-кодек на вызов упразднён (продюсер получает `dt`/`tick`
+> типами, JSON — только значения компонентов, родной язык реестра).
 
 Не «лесенка языков», а плагинный шов + первый адаптер
 ([`docs/quality/audit-2026-08-22.md`](docs/quality/audit-2026-08-22.md),
-решения F0/D1):
+решения F0/D1) — рамки шва пережили унификацию, сменился носитель:
 
 1. **Реестр компонентов (F0, фундамент)** — имя ↔ TypeId ↔
    type-erased операции (insert/get/remove в `SmartStore`, serde JSON
@@ -164,28 +181,25 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
    (`crates/macros/src/register_component.rs`, `RegisterComponent::COMPONENT_NAME`
    + `ComponentRegistry::register_component::<T>()`, `#[component(name=\"...\")]`
    опционально; `crates/core/tests/register_component.rs`).
-2. **`ScriptEngine`-трейт** — третий плагинный трейт рядом с
-   `PhysicsEngine` и `RenderBackend`: ядро знает только трейт
-   (load/call/batch/hot reload), языки — адаптеры.
-   ✅ **2026-09-05**: реализован в `crates/core/src/script.rs`
-   (`ScriptEngine` + `ScriptHandle`/`BatchHandle`/`NoopScriptEngine`;
-   `load`/`call`/`batch_call`/`hot_reload`/`unload`, тест `noop_load_call_reload`).
-3. **Batch API по хендлам** (`engine.batch_add(...)` — один вызов
-   вместо 100k): хендлы вместо прямых указателей на ячейки Sparse
-   Set — указатели совместимы только с in-process FFI и ломают
-   WASM-сценарий (sandbox).
-   ✅ **2026-09-05**: реализован как `ScriptEngine::batch_call` с `BatchHandle` (см. `script.rs`).
-4. **Первый адаптер — Rhai** ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine` + JSON-кодек, AST на модуль, hot reload держит старый AST при ошибке; rhai 1.26 + `sync`-фича для `Send+Sync`).
-   ✅ **2026-09-06 — второй адаптер Rune** (`crates/rune`: `RuneScriptEngine`, rune 0.14, per-call свежий `Vm` из хранимого `Unit` + shared `RuntimeContext`, тот же JSON-кодек null→`()`, 7 тестов зеркально Rhai incl. object round-trip; шов правилом трёх проверен — обе реализации проходят идентичное поведение `load/call/batch/hot_reload/unload`).
-   ✅ **2026-09-06 — третий адаптер Python** (`crates/python`: `PythonScriptEngine`, rustpython-vm 0.5; интерпретатор `!Send/!Sync` по дизайну → живёт на выделенном worker-thread, через границу только owned-данные и JSON-байты; `without_stdlib` (гостю хватает builtins для JSON-кодека); тот же JSON-кодек, 8 тестов зеркально Rhai + `None↔null`/`unload`; deny/advisories чисто — leaf-адаптеры вне графа deny 0.20.2, как Rhai/Rune) → остался исследовательский трек WASM-компоненты (языко-нейтральность + sandbox).
-5. **Интеграция в рантайм** ✅ 2026-09-06 (`crates/core/src/script.rs`: `ScriptHost` как `Resource` — движок за `Mutex`, т.к. системы получают только `&Resources`; `script_tick`-система во variable schedule (reads `Time`/`ScriptHost`, без лейнов, никогда в fixed — JSON-кодек на каждый вызов); `ScriptPlugin::with_tick/install` зеркально `GameplayPlugin`; контракт тика `[{"dt","tick"}]` (один аргумент — массив, как требует кодек всех трёх адаптеров; фикс шва 2026-09-06: раньше слался голый объект и реальные движки отвечали `args must be a JSON array`) → outcomes per entry, падающая запись изолирована; тесты на `EchoEngine` + doctest; `apply_outcomes` — двухфазное применение `{"set": [{entity, component, value}]}` через `parse_json`/`insert_any` (all-or-nothing per entry, outcomes drain; `take_outcomes` + `apply_drained` для drain-рядом-с-тиком/apply-рядом-со-стором).
-   **Mojo — один из официальных адаптеров (решение 2026-09-05):**
-   после появления `wasm32`/`WASI` таргета в Mojo (`modular/modular#19`, `#5367`
-   — по состоянию на `2026-09-05` открыты, `no current plans` на форуме
-   `2025-03-25`) Mojo становится `primary` для native, Rhai остаётся
-   `WASM`-fallback; до появления WASM-поддержки Mojo единственным
-   адаптером не становится.
-6. **Editor-интеграция** ✅ 2026-09-06 (`src/server_session.rs` (до 2026-09-19 — `src/editor_world.rs`): `EditorSession` на `GameWorld` ставит `ScriptPlugin` с Rhai — primary-адаптер и WASM-fallback; `tick` опрашивает файловые вотчи → `hot_reload`, гоняет кадр, пишет outcomes через `REGISTRY` с бампом версии; команды `script_load` (inline `source` xor `path` + watch, опц. `tick`), `script_call` (args — JSON-массив), `script_hot_reload`, `script_unload`, `script_list` (entries + watched-пути + last apply + pending); `SceneFileWatch` обобщён в `FileWatch`; 3 e2e-теста Rhai→мир; host добрался методами `load/call/hot_reload/unload/take_outcomes/apply_drained/pending_outcome_count`).
+2. **Единый протокол записи (2026-09-22, вместо `ScriptEngine`-трейта)** —
+   `Mutation` + `apply_mutations` + `MutationBus`/`MutationPlugin` +
+   `mutation_tick` (PostFrame, раз в кадр) в `crates/core/src/mutation.rs`:
+   редактор (`set_component`) и продюсеры — один язык, один applier,
+   один отчёт (`MutationReport`, all-or-nothing per entry). Язык
+   подключается реализацией `MutationProducer::produce(dt, tick)`.
+3. **Адаптеры Rhai/Rune/Python — удалены 2026-09-22** (бывшие пп. 2–4
+   шва 2026-09-05/06: `ScriptEngine` + хендлы + batch + три реализации
+   + file-watch hot reload + `script_*`-команды + 3 e2e-теста; детали —
+   в git-истории). Причина: ноль prod-потребителей, а единственный
+   рантайм с движком был сам editor-server — скриптинг де-факто жил
+   внутри редактирования мира, что унификация и оформила.
+4. **Editor-интеграция** ✅ (`src/server_session.rs`): `EditorSession`
+   ставит `MutationPlugin` (пустая шина — счётчик + пустой цикл);
+   контент-команды транслируются в `Mutation` и идут через общий
+   `apply_mutations` с бампом версии и теми же сообщениями ошибок;
+   `tick` дренирует шину продюсеров. `save/load_scene`, transport
+   ACK/sequence/events — хост-команды (файловое IO и транспорт —
+   не контент мира) — остались без изменений.
 
 ### d. Фаза 7 — Asset Pipeline (браузерная интерпретация)
 

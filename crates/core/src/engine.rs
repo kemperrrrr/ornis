@@ -381,7 +381,7 @@ impl Engine {
     /// Registers one system into a named [`Stage`] plan.
     ///
     /// Delegates to [`Engine::stage_schedule_mut`]; variable-rate gameplay
-    /// ticks (`script_tick`) belong in [`Stage::PostFrame`] storage: the
+    /// ticks (`mutation_tick`) belong in [`Stage::PostFrame`] storage: the
     /// once-per-frame plan after the final fixed update, so one JSON-codec
     /// tick round-trip covers the whole frame instead of repeating per
     /// fixed substep. A dedicated variable-gameplay plan would only pay

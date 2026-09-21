@@ -3,7 +3,7 @@
 //! type-erased operations over [`SmartStore`] lanes.
 //!
 //! Serves tooling paths: the editor's generic `SetComponent` (D2),
-//! the scripting batch API (D1), scene serialization (phase 7), scheduler
+//! the mutation-producer batch protocol, scene serialization (phase 7), scheduler
 //! lane granularity (`lane_id` — dense index for future access bitsets).
 //! Hot per-frame loops **do not touch** the registry — they stay typed
 //! (SoA lanes, `#[smart_pipeline]`); the boundary is the same as Bevy's

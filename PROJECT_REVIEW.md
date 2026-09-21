@@ -213,11 +213,11 @@
   `GameplayPlugin` в едином `Engine` schedule. Формулировка «gameplay
   consumers ещё не собраны» **частично неактуальна**: референсные системы
   есть, полноценного cross-domain runtime с контентом нет.
-- **Scripting фаза 6 — начата, вопреки статусу «не начата».**
-  `ScriptEngine`-шов + три адаптера (правило трёх): `crates/rhai`,
-  `crates/rune`, `crates/python` (rustpython-vm vendored, см. корень
-  `Cargo.toml`). Пометка «маркировать нечего» в §«Приоритет 4»
-  **неактуальна** — шов есть и нуждается в тех же Experimental-маркерах.
+- **Мутации мира (бывшая фаза 6 «Скриптинг») — унифицирована 2026-09-22:**
+  одна сущность `MutationBus` (`crates/core/src/mutation.rs`) вместо
+  `ScriptEngine`-шва с тремя адаптерами (`crates/{rhai,rune,python}` +
+  вендор удалены — ноль prod-потребителей). Формулировки про шов
+  и адаптеры в датированных разборах ниже — исторические снимки.
 - **GPU-диспетчеризация в core — по-прежнему stub, но это слой, а не баг.**
   `GpuExecutor::execute` возвращает `None` (`crates/core/src/dispatcher.rs:120-170`,
   честно помечен STUB); рабочий путь — `AutoLane` + typed `GpuLanes` в
@@ -251,7 +251,7 @@
   boundary. Открыто: browser physics за boundary (намеренно), полный
   gameplay-кадр во всех режимах.
 - Scheduler един для нативного кадра (staged `Engine`-расписания;
-  уровни `[[Mesh,Submit],[Present],[Flush]]`, `script_tick` — PostFrame,
+  уровни `[[Mesh,Submit],[Present],[Flush]]`, `mutation_tick` — PostFrame,
   граница кадра — осознанный императив) — **закрыт 2026-09-21**
   (сверка: `PLAN.md` §g, `docs/rendering/unified-scheduler.md` S7);
   вне DAG намеренно только transport-границы (server↔browser
@@ -261,17 +261,20 @@
 - Редактор live (WebSocket + replay + `EventGap`), polling — только
   fallback — **бывшее ограничение снято**; native остаётся showcase
   shell — **актуально**.
-- Scope по-прежнему широк (12 крейтов + rhai/rune/python/shader-lang),
-  но теперь связан правилом трёх и общим швом `ScriptEngine` —
-  **актуально с оговоркой**.
+- Scope сужен 2026-09-22 (снесены rhai/rune/python + вендор; шов —
+  `MutationBus`) — было «12 крейтов + rhai/rune/python/shader-lang»,
+  стало меньше на три крейта и вендор. Остаток широты — shader-lang
+  и mesh-editor — **актуально с оговоркой**.
 - ~~Синхронизация доков с кодом~~ — ✅ закрыт 2026-09-18: M3 Islands +
   hardening отражены в этом файле (§«Актуализация 2026-09-18»), README
   (§«Текущее состояние», Прил. A) и `PLAN.md` (M3 DONE); `docs/quality/`
   `physics-hardening-2026-09-17.md` несёт appendix о мерже PR #12/#13
   (тело выше appendix — исторический pre-merge снимок);
-  Experimental-маркеры scripting-шва на месте с 2026-09-12
-  (`crates/core/src/script.rs`: модуль, `ScriptEngine`, `NoopScriptEngine`,
-  `ScriptHost`, `ScriptPlugin` + шапки `crates/rhai|rune|python`).
+  Experimental-маркеры scripting-шва (на месте с 2026-09-12) сняты
+  вместе со швом 2026-09-22: `crates/core/src/script.rs`,
+  `ScriptEngine`, `NoopScriptEngine`, `ScriptHost`, `ScriptPlugin` и
+  `crates/{rhai,rune,python}` удалены, замена — `MutationBus`
+  (`crates/core/src/mutation.rs`).
 
 ## План дальнейшей работы
 
@@ -569,6 +572,9 @@ bucketing + sleep), референсные gameplay-системы зареги�
    `AutoLane::refresh_cpu_data` + refresh при reuse; плюс round-trip тест
    gpu→cpu→gpu. Backend lib 35/35, clippy/fmt чисто (варнинг в physics —
    работа M0-агента, не трогал).
+   ➡️ **Заменено 2026-09-22:** шов, маркеры и адаптеры сняты — единая
+   сущность `MutationBus` (`crates/core/src/mutation.rs`), старые имена
+   удалены под корень.
 
 ---
 
@@ -1099,6 +1105,10 @@ browser reconnect test и полноценное чтение client close frame
 > `ScriptEngine`-шов + адаптеры `crates/rhai` + `crates/rune` +
 > `crates/python` (правило трёх, JSON-кодек, hot reload). Шов нуждается
 > в тех же Experimental-маркерах; это п.4 нового «Ближайшего приоритета».
+>
+> ⏭️ Заменено 2026-09-22: шов и адаптеры удалены под корень — единая
+> сущность `MutationBus` (`crates/core/src/mutation.rs`). Абзацы выше —
+> история шва, не текущий API.
 >
 > ✅ 2026-09-08: автоматический слой появился — `AutoLane`
 > (`ornis-wgpu-backend`, политика + residency + CPU-фолбэк, доказан

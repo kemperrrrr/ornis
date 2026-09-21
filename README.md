@@ -203,9 +203,7 @@ jobs and line-table debug info (debug assertions stay enabled).
 
 ### Не начато
 
-- **Скриптинг (фаза 6)**: реестр компонентов (F0) ✅ (`ComponentRegistry` + `#[derive(RegisterComponent)]`/`register_component` `2026-09-06`); `ScriptEngine`-трейт ✅ (`crates/core/src/script.rs`, `2026-09-05`: `load/call/batch_call/hot_reload/unload` + `NoopScriptEngine`); Batch API по хендлам и hot reload — ✅ как методы трейта; первый адаптер Rhai ✅ 2026-09-05 (`crates/rhai`: `RhaiScriptEngine`, JSON-кодек args/return, 6 тестов; deny/advisories/outdated чисто), второй адаптер Rune ✅ 2026-09-06 (`crates/rune`: `RuneScriptEngine`, rune 0.14, 7 тестов зеркально Rhai; шов проверен правилом трёх), третий адаптер Python ✅ 2026-09-06 (`crates/python`: `PythonScriptEngine`, rustpython-vm 0.5 на worker-thread, 8 тестов; deny/advisories чисто; 2026-09-07: rustpython-vm вендорен в `third_party/rustpython-vm` — `[patch.crates-io]` + однострочный фикс RustPython#8343, без него крейт не собирается с libc ≥ 0.2.187 при гейте «все зависимости latest»), интеграция в рантайм ✅ 2026-09-06 (`ScriptHost`-ресурс + `script_tick` во variable schedule + `ScriptPlugin`; тик `[{"dt","tick"}]` (массив — требование кодека адаптеров) → outcomes per entry; `apply_outcomes` пишет `{"set": [...]}` в мир двухфазно через реестр), editor-интеграция ✅ 2026-09-06 (`script_load/call/hot_reload/unload/list` + file-watch `.rhai` с hot-reload на тике + автоверсия; 3 e2e-теста), WASM — ❌; **Mojo — один из официально поддерживаемых адаптеров (решение 2026-09-05, до появления `wasm32`/`WASI` в Mojo — `modular#19`/`#5367` открыты — единственным не становится)** (рамка 2026-08-22: плагинный
-  шов + адаптеры вместо лесенки языков — см. PLAN.md и
-  [audit-2026-08-22](docs/quality/audit-2026-08-22.md), решения F0/D1)
+- **Мутации мира (бывшая фаза 6 «Скриптинг», унифицирована 2026-09-22)**: реестр компонентов (F0) ✅ (`ComponentRegistry` + `#[derive(RegisterComponent)]`); единый протокол записи контента — `Mutation` + `apply_mutations` + `MutationBus` (`crates/core/src/mutation.rs`): редактор (`set_component`) и вычислительные продюсеры (будущие языки) говорят одним языком, отчёт один (`MutationReport`); продюсеры дренируются `mutation_tick` в PostFrame. Языковые адаптеры Rhai/Rune/Python и вендоренный `third_party/rustpython-vm` **удалены** (ноль prod-потребителей; шов под язык — `MutationProducer`, подключится когда появится контент). История фазы — в git и [audit-2026-08-22](docs/quality/audit-2026-08-22.md) (решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов — ❌; hot reload сцены ✅ (`FileWatch`, mtime `editor/scene.ron`, без `notify`)
 - **NUMA-aware allocation** — ❌
 - **HVM2/Bend как compute-бэкенд** — ❌ (идея на будущее)
@@ -228,7 +226,7 @@ keyboard, mouse, pointer and wheel input, а browser render frame публику
 `RigidBody→Position/TransformDesc` frame) в `EditorSession` (`GameWorld`) и native showcase:
 browser `WASD`/`InputState` (WS `POST /api/input` → `apply_browser_input`)
 ведёт `Player` в том же DAG, что физика и render extraction. Остаётся
-расширить orchestration на прочие домены (audio/script) — полный
+расширить orchestration на audio-домен — полный
 единый runtime без отдельной render-фазы extract остаётся будущей
 целью.
 
@@ -263,16 +261,17 @@ browser `WASD`/`InputState` (WS `POST /api/input` → `apply_browser_input`)
    `TransformDesc`) в том же `Engine::run_frame` DAG, что и editor/native;
    `browser_wasd_input_drives_player_through_gameplay` верифицирует 2-тактный
    `Input→Velocity→RigidBody→Position` путь. Остаётся расширить bridge на
-   audio/script домены.
+   audio-домен (мутации мира уже в том же DAG через `mutation_tick`).
 5. ~~WebSocket server-push для `/api/events`~~ — ✅ реализован: upgrade на `/api/events`, heartbeat ping, reconnect; polling остаётся fallback.
 
-### Фаза 6 — Скриптинг (рамка пересмотрена 2026-08-22)
+### Фаза 6 — Мутации мира (бывший «Скриптинг», унифицирован 2026-09-22)
 
-Реестр компонентов (F0) → `ScriptEngine`-трейт (плагинный, как
-`PhysicsEngine`/`RenderBackend`) → Batch API по хендлам → первый
-адаптер Rhai ✅ → hot reload → прочие языки отдельными адаптерами
-(Rune/Python/WASM-компоненты) по правилу трёх. Подробно: фаза 6 в
-[`PLAN.md`](PLAN.md), решения F0/D1/D2 в
+Реестр компонентов (F0) → единый протокол записи: `Mutation` +
+`apply_mutations` + `MutationBus`/`MutationPlugin` (`crates/core/src/mutation.rs`).
+Редактор и вычислительные продюсеры (будущие языки — через
+`MutationProducer`, батчинг — сам поток `Vec<Mutation>`) — один язык,
+один applier, один отчёт. Языковые адаптеры удалены (см. «Не начато»
+выше). Подробно: фаза 6 в [`PLAN.md`](PLAN.md), решения F0/D1/D2 в
 [audit-2026-08-22](docs/quality/audit-2026-08-22.md).
 
 ### Фаза 7 — Asset Pipeline

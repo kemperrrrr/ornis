@@ -442,7 +442,7 @@ fn level1(stages: &mut StageList<'_>) {
     );
 
     // Physics is the active hardening target: fail diagnostically here
-    // before building the unrelated scripting/editor workspace. All original
+    // before building the rest of the workspace. All original
     // stages still run and retain their strict failure status.
     stages.run(
         "clippy-physics",

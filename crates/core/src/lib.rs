@@ -24,14 +24,14 @@ mod input;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
 pub mod material;
+/// World mutation bus: the single write protocol for world content.
+pub mod mutation;
 mod page_table;
 /// Compile-time CPU/GPU routing for the smart pipeline.
 pub mod pipeline;
 mod prefetch;
 mod registry;
 pub mod schedule;
-/// Scripting plugin seam (Phase 6).
-pub mod script;
 mod smart_store;
 mod world;
 

@@ -6,10 +6,10 @@
 //! `Gameplay` / `PostFrame`) over the existing fixed/frame schedule split
 //! without changing it: see [`GameStage::stage_for_system`]. Each variant maps
 //! 1:1 onto the staged [`Engine`](ornis_core::Engine) plan
-//! ([`GameStage::core_stage`]); variable-rate gameplay ticks (`script_tick`)
-//! execute in the `PostFrame` storage — the once-per-frame variable plan
-//! (a fixed-schedule tick would repeat the JSON-codec round-trip per
-//! substep; see `ScriptTickSystem`).
+//! ([`GameStage::core_stage`]); variable-rate producer ticks
+//! (`mutation_tick`) execute in the `PostFrame` storage — the once-per-frame
+//! variable plan (a fixed-schedule tick would repeat producer work per
+//! substep; see `MutationTick`).
 
 use glam::Vec3;
 use ornis_core::{Engine, Entity, Schedule, Stage as CoreStage};
@@ -214,7 +214,7 @@ impl GameStage {
             | "physics_sync_out" => Some(GameStage::Gameplay),
             "transform_update"
             | "body_to_transform"
-            | "script_tick"
+            | "mutation_tick"
             | "render_snapshot"
             | "audio_step"
             | "audio_listener_sync"
@@ -447,7 +447,7 @@ mod tests {
             Some(GameStage::Gameplay)
         );
         assert_eq!(
-            GameStage::stage_for_system("script_tick"),
+            GameStage::stage_for_system("mutation_tick"),
             Some(GameStage::PostFrame)
         );
         assert_eq!(
@@ -493,7 +493,7 @@ mod tests {
         for name in [
             "orbit_camera_input",
             "render_snapshot",
-            "script_tick",
+            "mutation_tick",
             "audio_step",
             "audio_listener_sync",
             "render_mesh",

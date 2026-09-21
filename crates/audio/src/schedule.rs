@@ -5,7 +5,7 @@
 //! schedule half — a system that steps it once per frame after motion, so
 //! spatialization observes fresh positions. [`AudioPlugin`] installs both the
 //! [`AudioHost`] resource and the `audio_step` system, mirroring
-//! `GameplayPlugin`/`ScriptPlugin` conventions.
+//! `GameplayPlugin`/`MutationPlugin` conventions.
 //!
 //! Platform split: schedule systems and resources must be `Send + Sync`, but
 //! the wasm backend is single-threaded (`Rc<RefCell>`). The host therefore
@@ -24,7 +24,7 @@ use crate::source::{AudioClip, AudioSource};
 /// Schedule-owned [`AudioEngine`].
 ///
 /// Systems only receive `&Resources`, hence the mutex (same pattern as
-/// `ScriptHost` and `Mutex<PhysicsRuntime>`).
+/// `MutationBus` and `Mutex<PhysicsRuntime>`).
 ///
 /// # Safety
 ///
