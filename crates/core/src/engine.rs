@@ -218,6 +218,44 @@ impl FixedTime {
     }
 }
 
+/// Named execution stage over the existing fixed/frame schedule split.
+///
+/// Stages are logical plans, not extra worlds: `PreUpdate` and `Input` run
+/// once per frame before the fixed catch-up loop, `Gameplay` is the bounded
+/// fixed-rate plan, and `PostFrame` is the once-per-frame plan after all
+/// fixed updates. Physically `PostFrame` reuses the legacy variable
+/// [`Engine::schedule`] storage and `Gameplay` reuses
+/// [`Engine::fixed_schedule`], so the pre-existing entry points delegate
+/// unchanged; see [`Engine::stage_schedule`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Between-frame input ingest (reserved, runs first, once per frame).
+    PreUpdate,
+    /// Once-per-frame input consumers (runs second, once per frame).
+    Input,
+    /// Fixed-step intent and physics (bounded catch-up loop).
+    Gameplay,
+    /// Pose propagation and audio/render extraction views (runs last).
+    PostFrame,
+}
+
+impl Stage {
+    /// Short stable label of the stage.
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::PreUpdate => "pre_update",
+            Stage::Input => "input",
+            Stage::Gameplay => "gameplay",
+            Stage::PostFrame => "post_frame",
+        }
+    }
+
+    /// Whether the stage runs inside the bounded fixed catch-up loop.
+    pub fn is_fixed(self) -> bool {
+        matches!(self, Stage::Gameplay)
+    }
+}
+
 /// Owns a logical [`World`] and the systems that process its frames.
 ///
 /// The variable-rate schedule runs once per frame after zero or more runs of
@@ -227,10 +265,17 @@ impl FixedTime {
 /// small, backend-neutral host: domain algorithms remain registered by
 /// higher layers and the core runner does not choose a physics or render
 /// backend.
+///
+/// Staged plans ([`Stage`]) run in `PreUpdate → Input → Gameplay(fixed) →
+/// PostFrame` order; `PreUpdate`/`Input` are new once-per-frame schedules
+/// ahead of the fixed loop, while `Gameplay`/`PostFrame` delegate to the
+/// pre-existing `fixed_schedule`/`schedule` storage.
 pub struct Engine {
     world: World,
     schedule: Schedule,
     fixed_schedule: Schedule,
+    pre_update: Schedule,
+    input: Schedule,
 }
 
 impl Default for Engine {
@@ -251,6 +296,8 @@ impl Engine {
             world,
             schedule: Schedule::new(),
             fixed_schedule: Schedule::new(),
+            pre_update: Schedule::new(),
+            input: Schedule::new(),
         }
     }
 
@@ -269,6 +316,9 @@ impl Engine {
     }
 
     /// Returns the variable-rate frame schedule for read-only inspection.
+    ///
+    /// This is the [`Stage::PostFrame`] storage: it runs once after all
+    /// fixed updates for the frame.
     pub fn schedule(&self) -> &Schedule {
         &self.schedule
     }
@@ -277,12 +327,16 @@ impl Engine {
     ///
     /// It runs once after all fixed updates for the frame. Render extraction
     /// should normally be registered here so it observes final fixed-step
-    /// poses without being repeated for each substep.
+    /// poses without being repeated for each substep. This is the
+    /// [`Stage::PostFrame`] plan; see [`Engine::stage_schedule_mut`] for the
+    /// named routing over the same storage.
     pub fn schedule_mut(&mut self) -> &mut Schedule {
         &mut self.schedule
     }
 
     /// Returns the fixed-rate schedule for read-only inspection.
+    ///
+    /// This is the [`Stage::Gameplay`] storage.
     pub fn fixed_schedule(&self) -> &Schedule {
         &self.fixed_schedule
     }
@@ -291,9 +345,51 @@ impl Engine {
     ///
     /// Every system in this schedule runs once per fixed update selected by
     /// the accumulator. Systems should read [`FixedTime`] for the exact step
-    /// duration and declare all resource/lane accesses normally.
+    /// duration and declare all resource/lane accesses normally. This is the
+    /// [`Stage::Gameplay`] plan.
     pub fn fixed_schedule_mut(&mut self) -> &mut Schedule {
         &mut self.fixed_schedule
+    }
+
+    /// Returns the schedule backing a named [`Stage`] for inspection.
+    ///
+    /// `PreUpdate`/`Input` are dedicated once-per-frame schedules ahead of
+    /// the fixed loop; `Gameplay` delegates to [`Engine::fixed_schedule`]
+    /// and `PostFrame` to [`Engine::schedule`].
+    pub fn stage_schedule(&self, stage: Stage) -> &Schedule {
+        match stage {
+            Stage::PreUpdate => &self.pre_update,
+            Stage::Input => &self.input,
+            Stage::Gameplay => &self.fixed_schedule,
+            Stage::PostFrame => &self.schedule,
+        }
+    }
+
+    /// Returns the schedule backing a named [`Stage`] for registration.
+    ///
+    /// Routing only; execution order stays
+    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`.
+    pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
+        match stage {
+            Stage::PreUpdate => &mut self.pre_update,
+            Stage::Input => &mut self.input,
+            Stage::Gameplay => &mut self.fixed_schedule,
+            Stage::PostFrame => &mut self.schedule,
+        }
+    }
+
+    /// Registers one system into a named [`Stage`] plan.
+    ///
+    /// Delegates to [`Engine::stage_schedule_mut`]; variable-rate gameplay
+    /// ticks (`script_tick`) still belong in [`Stage::PostFrame`] storage
+    /// until the script host migrates to its own variable gameplay plan.
+    pub fn add_stage_system<S: crate::System + 'static>(
+        &mut self,
+        stage: Stage,
+        system: S,
+    ) -> &mut Self {
+        self.stage_schedule_mut(stage).add_system(system);
+        self
     }
 
     /// Registers one fixed-rate system and returns the engine for chaining.
@@ -304,15 +400,17 @@ impl Engine {
 
     /// Runs one frame with `delta_seconds` and publishes [`Time`] first.
     ///
-    /// The fixed accumulator is advanced before the fixed schedule runs. Each
-    /// selected fixed update receives the same frame-level input snapshot and
-    /// the current [`FixedTime`] step; the variable-rate schedule then runs
-    /// once. Input events accumulated by a platform adapter are visible to
-    /// both schedules during the frame. Consumers of transient pointer/wheel
-    /// deltas should normally run in the once-per-frame schedule so a catch-up
-    /// frame does not apply one event repeatedly. After all systems finish,
-    /// transient deltas are cleared from [`InputState`]; held keys/buttons
-    /// persist.
+    /// Staged order is `PreUpdate → Input → Gameplay(fixed × N) → PostFrame`.
+    /// The fixed accumulator is advanced before the staged schedules run so
+    /// the frame-level input snapshot and the [`FixedTime`] step count are
+    /// already published when `PreUpdate`/`Input` execute; each selected
+    /// fixed update then receives the same snapshot, and the `PostFrame`
+    /// (legacy variable) schedule runs once last. Input events accumulated
+    /// by a platform adapter are visible to all stages during the frame.
+    /// Consumers of transient pointer/wheel deltas should normally run in a
+    /// once-per-frame stage so a catch-up frame does not apply one event
+    /// repeatedly. After all systems finish, transient deltas are cleared
+    /// from [`InputState`]; held keys/buttons persist.
     ///
     /// `Time`/`FixedTime` publishing and `clear_frame_transients` stay
     /// imperative here (direct `Resources::get_mut` on plain `Copy` clocks):
@@ -342,6 +440,8 @@ impl Engine {
             .expect("engine publishes FixedTime")
             .begin_frame(delta_seconds);
 
+        self.world.run(&self.pre_update);
+        self.world.run(&self.input);
         for _ in 0..fixed_steps {
             self.world
                 .resources_mut()
@@ -515,6 +615,81 @@ mod tests {
         assert!(engine.world().store().is_some());
         assert!(engine.schedule().is_empty());
         assert!(engine.fixed_schedule().is_empty());
+        assert!(engine.stage_schedule(Stage::PreUpdate).is_empty());
+        assert!(engine.stage_schedule(Stage::Input).is_empty());
+        assert!(engine.stage_schedule(Stage::Gameplay).is_empty());
+        assert!(engine.stage_schedule(Stage::PostFrame).is_empty());
+    }
+
+    #[test]
+    fn stage_labels_and_fixed_flag_are_stable() {
+        assert_eq!(Stage::PreUpdate.name(), "pre_update");
+        assert_eq!(Stage::Input.name(), "input");
+        assert_eq!(Stage::Gameplay.name(), "gameplay");
+        assert_eq!(Stage::PostFrame.name(), "post_frame");
+        assert!(!Stage::PreUpdate.is_fixed());
+        assert!(!Stage::Input.is_fixed());
+        assert!(Stage::Gameplay.is_fixed());
+        assert!(!Stage::PostFrame.is_fixed());
+    }
+
+    #[test]
+    fn legacy_schedules_delegate_to_staged_plans() {
+        let mut engine = Engine::new();
+        engine.schedule_mut().add_system(Trace { fixed: false });
+        engine
+            .fixed_schedule_mut()
+            .add_system(Trace { fixed: true });
+        assert_eq!(engine.stage_schedule(Stage::PostFrame).len(), 1);
+        assert_eq!(engine.stage_schedule(Stage::Gameplay).len(), 1);
+        assert!(engine.stage_schedule(Stage::PreUpdate).is_empty());
+        assert!(engine.stage_schedule(Stage::Input).is_empty());
+    }
+
+    #[test]
+    fn staged_plans_run_pre_input_gameplay_post_in_order() {
+        struct Tag(&'static str);
+        impl System for Tag {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new().reads::<TraceLog>()
+            }
+            fn run(&self, resources: &Resources) {
+                let log = resources.get::<TraceLog>().expect("trace log");
+                log.0.lock().expect("trace lock").push(self.0);
+            }
+        }
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::new();
+        let _ = engine.world_mut().insert(TraceLog(trace.clone()));
+        engine.add_stage_system(Stage::PreUpdate, Tag("pre_update"));
+        engine.add_stage_system(Stage::Input, Tag("input"));
+        engine.add_stage_system(Stage::Gameplay, Tag("gameplay"));
+        engine.add_stage_system(Stage::PostFrame, Tag("post_frame"));
+
+        let delta = FixedTime::default().delta_seconds();
+        engine.run_frame(delta);
+        assert_eq!(
+            *trace.lock().expect("trace lock"),
+            vec!["pre_update", "input", "gameplay", "post_frame"]
+        );
+    }
+
+    #[test]
+    fn empty_stages_preserve_legacy_frame_semantics() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::new();
+        let _ = engine.world_mut().insert(TraceLog(trace.clone()));
+        engine
+            .fixed_schedule_mut()
+            .add_system(Trace { fixed: true });
+        engine.schedule_mut().add_system(Trace { fixed: false });
+
+        let delta = FixedTime::default().delta_seconds();
+        engine.run_frame(delta * 0.5);
+        assert_eq!(*trace.lock().expect("trace lock"), vec!["frame"]);
     }
 
     #[test]

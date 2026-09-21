@@ -42,7 +42,7 @@ pub use command_sync::{
 pub use component_store::{ChunkedIterMut, ComponentStore, ZipIter};
 pub use dispatcher::{CpuExecutor, Dispatchable, Dispatcher, ExecutionTarget, SmartDispatcher};
 pub use engine::{
-    DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, FixedTime, Time,
+    DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, FixedTime, Stage, Time,
 };
 pub use entity::{Entity, EntityAllocator};
 pub use gameplay::{

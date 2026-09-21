@@ -1,0 +1,133 @@
+// Showcase demo scene: floor + wall + tower + rolling ball.
+//
+// All entities are spheres (scaled via TransformDesc scale for floor/wall
+// slabs) so the native showcase physics recipe (RigidBody sphere)
+// and the render extraction path handle every entity. The first entity is
+// the dynamic rolling ball; the rest are static. A hidden static floor tops
+// at y = -1.0, matching the visual floor top.
+
+Scene(
+    name: "demo_showcase",
+    entities: [
+        // Rolling ball: dynamic (index 0 in the native showcase).
+        (
+            name: "Rolling Ball",
+            transform: (
+                translation: (-4.0, 3.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 0.5, segments: 32, rings: 24),
+            material: Metal(
+                base_color: (0.9, 0.7, 0.1),
+                roughness: 0.25,
+            ),
+        ),
+        // Floor slab: flattened sphere, top at y = -1.0 (hidden floor top).
+        (
+            name: "Floor",
+            transform: (
+                translation: (0.0, -1.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (12.0, 0.5, 12.0),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: (0.5, 0.5, 0.55),
+                roughness: 0.9,
+            ),
+        ),
+        // Back wall slab.
+        (
+            name: "Wall",
+            transform: (
+                translation: (0.0, 1.0, -6.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (12.0, 4.0, 0.5),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: (0.6, 0.6, 0.65),
+                roughness: 0.8,
+            ),
+        ),
+        // Tower base.
+        (
+            name: "Tower Base",
+            transform: (
+                translation: (3.0, -0.5, 1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.0, 1.5),
+            ),
+            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: (0.8, 0.2, 0.2),
+                roughness: 0.5,
+            ),
+        ),
+        // Tower middle.
+        (
+            name: "Tower Mid",
+            transform: (
+                translation: (3.0, 1.0, 1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 0.8, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: (0.2, 0.8, 0.2),
+                roughness: 0.6,
+            ),
+        ),
+        // Tower top.
+        (
+            name: "Tower Top",
+            transform: (
+                translation: (3.0, 2.2, 1.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 0.6, segments: 32, rings: 24),
+            material: Coat(
+                base_color: (0.9, 0.9, 0.9),
+                coat_weight: 1.0,
+                coat_roughness: 0.1,
+            ),
+        ),
+        // Accent sphere for material variety.
+        (
+            name: "Blue Smooth Sphere",
+            transform: (
+                translation: (-1.0, 0.0, 2.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Sphere(radius: 0.7, segments: 32, rings: 24),
+            material: Dielectric(
+                base_color: (0.2, 0.2, 0.8),
+                roughness: 0.1,
+            ),
+        ),
+    ],
+    lights: [
+        Directional(
+            direction: (1.0, 1.0, 1.0),
+            intensity: 0.6,
+            color: (1.0, 1.0, 1.0),
+        ),
+        Directional(
+            direction: (-0.5, 0.5, -0.5),
+            intensity: 0.3,
+            color: (0.8, 0.8, 1.0),
+        ),
+    ],
+    camera: (
+        position: (0.0, 3.0, 11.0),
+        target: (0.0, 0.5, 0.0),
+        up: (0.0, 1.0, 0.0),
+        fov: 60.0,
+        near: 0.1,
+        far: 100.0,
+    ),
+    ambient: (0.10, 0.10, 0.15),
+)
