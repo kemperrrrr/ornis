@@ -7,8 +7,6 @@
 //! [`GameWorld`](game_world::GameWorld) is the single scene-backed world
 //! type — extraction reads its lanes directly, never a second world copy.
 
-use std::sync::Mutex;
-
 use glam::Vec3;
 use ornis_core::{
     Engine, FixedTime, InputState, Resources, SmartStore, System, SystemAccess, World,
@@ -101,14 +99,13 @@ impl<'a> UnifiedView<'a> {
 /// * core gameplay systems (`player_input`, `physics_push`, `transform_update`)
 ///   via [`install_gameplay`];
 /// * physics bridge systems that propagate gameplay intent into [`RigidBody`]
-///   and back;
-/// * optional render extraction as a scheduled system (not a separate world copy).
+///   and back.
 ///
 /// The single [`Engine`] then drives the frame:
 ///
 /// ```text
 /// fixed:  gameplay physics_push + physics sync/step + bridge
-/// frame:  player_input + transform_update + render extract
+/// frame:  player_input + transform_update + body_to_transform
 /// ```
 /// Installs the cross-domain bridges `Velocity → RigidBody` (fixed) and
 /// `RigidBody → Position/TransformDesc` (frame) so that browser `InputState`
@@ -148,24 +145,6 @@ pub fn install_unified_runtime(engine: &mut Engine) {
     // Bridge gameplay velocity/position with physics bodies so that
     // the single schedule plans them together.
     install_gameplay_physics_bridge(engine);
-
-    // Render extraction as a schedule system on the same world — not a
-    // second RenderWorld copy. The extracted snapshot lives as a resource.
-    let _ = engine
-        .world_mut()
-        .insert(Mutex::new(UnifiedRenderExtracted::default()));
-    engine.schedule_mut().add_system(UnifiedRenderExtractSystem);
-}
-
-/// CPU-side render data extracted from the unified world.
-#[derive(Clone, Debug, Default)]
-pub struct UnifiedRenderExtracted {
-    /// Extracted materials in instance order.
-    pub materials: Vec<ornis_core::OpenPBRMaterial>,
-    /// Per-entity instance count.
-    pub instance_count: usize,
-    /// Whether extraction saw renderable entities.
-    pub has_content: bool,
 }
 
 /// Writes [`Velocity`] (gameplay intent) into kinematic/dynamic [`RigidBody`]s.
@@ -266,113 +245,6 @@ impl System for BodyToTransformSystem {
                 }
             }
         }
-    }
-}
-
-struct UnifiedRenderExtractSystem;
-
-impl System for UnifiedRenderExtractSystem {
-    fn name(&self) -> &'static str {
-        "unified_render_extract"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<SmartStore>()
-            .reads_lane::<TransformDesc>()
-            .reads_lane::<MeshDesc>()
-            .reads_lane::<MaterialDesc>()
-            .writes::<Mutex<UnifiedRenderExtracted>>()
-    }
-
-    fn run(&self, resources: &Resources) {
-        let Some(store) = resources.get::<SmartStore>() else {
-            return;
-        };
-        let Some(out) = resources.get::<Mutex<UnifiedRenderExtracted>>() else {
-            return;
-        };
-        let transforms = store.read_lane::<TransformDesc>();
-        let meshes = store.read_lane::<MeshDesc>();
-        let materials = store.read_lane::<MaterialDesc>();
-        let (Some(t), Some(m), Some(ma)) = (transforms, meshes, materials) else {
-            *out.lock().expect("unified extract lock") = UnifiedRenderExtracted::default();
-            return;
-        };
-        let mut count = 0;
-        for &entity in &t.entities {
-            if m.get(entity).is_some() && ma.get(entity).is_some() {
-                count += 1;
-            }
-        }
-        // Material conversion borrowed from render extraction logic.
-        let mut extracted_materials = Vec::with_capacity(count);
-        for (&entity, _) in t.entities.iter().zip(&t.data) {
-            let (Some(_mesh), Some(material)) = (m.get(entity), ma.get(entity)) else {
-                continue;
-            };
-            let gpu = match material {
-                MaterialDesc::Dielectric {
-                    base_color,
-                    roughness,
-                    ..
-                } => {
-                    let mut o = ornis_core::OpenPBRMaterial::dielectric();
-                    o.base.color_rgb(*base_color);
-                    o.specular.roughness(*roughness);
-                    o
-                }
-                MaterialDesc::Metal {
-                    base_color,
-                    roughness,
-                    ..
-                } => {
-                    let mut o = ornis_core::OpenPBRMaterial::metal();
-                    o.base.color_rgb(*base_color);
-                    o.specular.roughness(*roughness);
-                    o
-                }
-                MaterialDesc::Coat {
-                    base_color,
-                    coat_weight,
-                    coat_roughness,
-                    ..
-                } => {
-                    let mut o = ornis_core::OpenPBRMaterial::coat();
-                    o.base.color_rgb(*base_color);
-                    o.coat.weight(*coat_weight);
-                    o.coat.roughness(*coat_roughness);
-                    o
-                }
-                MaterialDesc::Matte {
-                    base_color,
-                    roughness,
-                } => {
-                    let mut o = ornis_core::OpenPBRMaterial::dielectric();
-                    o.base.color_rgb(*base_color);
-                    o.base.diffuse_roughness(*roughness);
-                    o.specular.weight(0.0);
-                    o
-                }
-                MaterialDesc::Glass {
-                    base_color,
-                    roughness,
-                    ior,
-                } => {
-                    let mut o = ornis_core::OpenPBRMaterial::glass();
-                    o.transmission.color_rgb(*base_color);
-                    o.specular.roughness(*roughness);
-                    o.specular.ior(*ior);
-                    o
-                }
-            };
-            extracted_materials.push(gpu);
-        }
-        *out.lock().expect("unified extract lock") = UnifiedRenderExtracted {
-            materials: extracted_materials,
-            instance_count: count,
-            has_content: count > 0,
-        };
     }
 }
 

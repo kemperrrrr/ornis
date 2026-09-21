@@ -9,8 +9,9 @@
 //! `ornis_render::scene` (externally-tagged enums) — both sides use the
 //! same types, no per-variant mirror code. The server may answer with a
 //! reduced variant whose entities lack `components` (no live world yet) —
-//! parsing such a payload fails here and the caller falls back to the
-//! static `scene.ron` path.
+//! parsing such a payload fails here and the caller reports the error:
+//! there is no static `scene.ron` fallback (unified runtime: `/api/scene`
+//! is the sole source of truth).
 
 use ornis_render::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
@@ -100,7 +101,7 @@ impl ApiScene {
 
 /// Parse a `/api/scene` JSON body. Returns `Err` for malformed JSON and —
 /// intentionally — for the reduced server variant without per-entity
-/// `components`, so the caller can fall back to `scene.ron`.
+/// `components`, so the caller reports the error instead of rendering.
 pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
     Ok(serde_json::from_str::<ApiScene>(json)?.into_live())
 }
@@ -156,7 +157,7 @@ mod tests {
     #[test]
     fn rejects_reduced_variant_without_entity_fields() {
         // Server without a live world: entities lack `components`.
-        // Parse must fail so the caller falls back to the scene.ron path.
+        // Parse must fail so the caller reports the error (no fallback).
         let reduced = r#"{
             "version": 3, "entity_count": 1,
             "entities": [{"id": 0, "generation": 0}],

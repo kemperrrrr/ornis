@@ -2,10 +2,11 @@
 
 #![warn(missing_docs)]
 //!
-//! Renders the live scene from `/api/scene` (polled ~1/s) when the remote
-//! server provides it; otherwise falls back to `assets/scene.ron` through
+//! Renders the live scene from `/api/scene` (polled ~1/s) through
 //! the shared [`GameWorld`](ornis_app::GameWorld), [`FrameUpload`], and
-//! [`RenderFrame3D`] frame contract. The orbit
+//! [`RenderFrame3D`] frame contract. There is no static fallback: without
+//! the remote server [`start_renderer`] fails instead of rendering a stale
+//! scene — the browser is a view over the editor's live world. The orbit
 //! camera is client-side only.
 //!
 //! Build: `wasm-pack build crates/wasm --target web`.
@@ -95,8 +96,8 @@ async fn load_scene_ron() -> String {
 
 /// Fetch and parse `/api/scene`. Returns `None` on any failure — network
 /// error, non-OK status, malformed JSON or the reduced server variant
-/// without per-entity transform/mesh/material — so the caller can fall back
-/// to the static scene.ron path.
+/// without per-entity transform/mesh/material — so the caller reports the
+/// error instead of rendering (no static scene fallback in unified runtime).
 async fn fetch_live_scene() -> Option<LiveScene> {
     let text = fetch_api_text("/api/scene").await?;
     match scene_api::parse_scene_json(&text) {
@@ -108,7 +109,8 @@ async fn fetch_live_scene() -> Option<LiveScene> {
     }
 }
 
-/// GPU-side scene built from the ECS extraction snapshot. The scene
+/// GPU-side scene built from the ECS direct-read payload
+/// ([`FrameUpload`], no scheduled snapshot — X4 Extract-free). The scene
 /// description remains the serialization boundary; renderable components
 /// are inserted into [`GameWorld`] and extracted by its
 /// `Engine` frame before this GPU adapter runs.

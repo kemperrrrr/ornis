@@ -7,7 +7,9 @@
 //! without changing it: see [`GameStage::stage_for_system`]. Each variant maps
 //! 1:1 onto the staged [`Engine`](ornis_core::Engine) plan
 //! ([`GameStage::core_stage`]); variable-rate gameplay ticks (`script_tick`)
-//! still execute in the `PostFrame` storage until the script host migrates.
+//! execute in the `PostFrame` storage — the once-per-frame variable plan
+//! (a fixed-schedule tick would repeat the JSON-codec round-trip per
+//! substep; see `ScriptTickSystem`).
 
 use glam::Vec3;
 use ornis_core::{Engine, Entity, Schedule, Stage as CoreStage};
@@ -171,8 +173,8 @@ pub fn spawn_static_floor(engine: &mut Engine) -> Entity {
 ///
 /// Mapping (see [`GameStage::stage_for_system`]): `Input` systems consume the
 /// per-frame [`InputState`](ornis_core::InputState); `Gameplay` systems run
-/// intent and physics at the fixed step (plus the variable script tick);
-/// `PostFrame` propagates poses and extracts audio/render views.
+/// intent and physics at the fixed step; `PostFrame` runs the variable
+/// script tick, propagates poses and extracts audio/render views.
 /// `PreUpdate` is reserved for between-frame input ingest
 /// (`apply_snapshot` / `apply_browser_input`), which is not a scheduled
 /// system today. Each variant maps 1:1 onto the staged engine plan
@@ -184,9 +186,9 @@ pub enum GameStage {
     PreUpdate,
     /// Once-per-frame input consumers.
     Input,
-    /// Fixed-step intent and physics plus the variable script tick.
+    /// Fixed-step intent and physics.
     Gameplay,
-    /// Pose propagation and audio/render extraction views.
+    /// Variable script tick, pose propagation and audio/render extraction views.
     PostFrame,
 }
 
@@ -209,10 +211,10 @@ impl GameStage {
         match system_name {
             "player_input" | "orbit_camera_input" => Some(GameStage::Input),
             "physics_push" | "velocity_to_body" | "physics_sync_in" | "physics_step"
-            | "physics_sync_out" | "script_tick" => Some(GameStage::Gameplay),
+            | "physics_sync_out" => Some(GameStage::Gameplay),
             "transform_update"
             | "body_to_transform"
-            | "unified_render_extract"
+            | "script_tick"
             | "render_snapshot"
             | "audio_step"
             | "audio_listener_sync"
@@ -446,7 +448,7 @@ mod tests {
         );
         assert_eq!(
             GameStage::stage_for_system("script_tick"),
-            Some(GameStage::Gameplay)
+            Some(GameStage::PostFrame)
         );
         assert_eq!(
             GameStage::stage_for_system("body_to_transform"),
@@ -461,6 +463,49 @@ mod tests {
         assert_eq!(GameStage::Input.name(), "input");
         assert_eq!(GameStage::Gameplay.name(), "gameplay");
         assert_eq!(GameStage::PostFrame.name(), "post_frame");
+    }
+
+    #[test]
+    fn stage_dictionary_covers_all_registered_and_plugin_systems() {
+        use crate::install_unified_runtime;
+        let mut engine = Engine::new();
+        install_unified_runtime(&mut engine);
+        let frame = engine.schedule().mermaid();
+        let fixed = engine.fixed_schedule().mermaid();
+        // Every system the unified runtime actually registers must classify.
+        for name in [
+            "player_input",
+            "physics_push",
+            "transform_update",
+            "velocity_to_body",
+            "body_to_transform",
+        ] {
+            assert!(
+                frame.contains(name) || fixed.contains(name),
+                "{name} should be registered by install_unified_runtime"
+            );
+            assert!(
+                GameStage::stage_for_system(name).is_some(),
+                "{name} is registered but unclassified"
+            );
+        }
+        // Plugin systems registered outside this crate must stay classified.
+        for name in [
+            "orbit_camera_input",
+            "render_snapshot",
+            "script_tick",
+            "audio_step",
+            "audio_listener_sync",
+            "render_mesh",
+            "render_submit",
+            "render_present",
+            "render_flush",
+        ] {
+            assert!(
+                GameStage::stage_for_system(name).is_some(),
+                "{name} is unclassified"
+            );
+        }
     }
 
     #[test]

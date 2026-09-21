@@ -43,7 +43,9 @@
 //!   ordered submit (`FrameCommandBuffers::flush`) и презентует acquired
 //!   frame из `FramePresentTarget`. Порядок после `RenderPresent`
 //!   гарантирован WaW по обоим handover-ресурсам (регистрация следом).
-//!   После этого `GameApp::render_frame` сводится к `run_frame`.
+//!   После этого `GameApp::render_frame` сводится к `GameWorld::frame`
+//!   (`run_frame` в schedule + внеплановый `frame_upload`, чей результат
+//!   нативный путь отбрасывает — системы читают лейны сами).
 
 use std::sync::Mutex;
 
@@ -161,6 +163,18 @@ pub fn install_render_mesh(engine: &mut ornis_core::Engine, mesh: GpuMesh) {
     engine.schedule_mut().add_system(RenderMesh);
 }
 
+/// Публикует legacy-риг света, только если сцено-загрузчик ещё не опубликовал.
+///
+/// `GameWorld::replace_scene` пишет `RenderLights` из сцены, а
+/// `install_gpu_resources` в `GameApp::initialize` идёт после — слепой
+/// `insert` молча сбрасывал бы свет сцены к дефолту (`insert` заменяет).
+/// Для shipped-сцены оба рига совпадают, гард важен для остальных сцен.
+fn insert_render_lights_default(engine: &mut ornis_core::Engine) {
+    if engine.world().resources().get::<RenderLights>().is_none() {
+        let _ = engine.world_mut().insert(RenderLights::default());
+    }
+}
+
 /// Регистрирует GPU-ресурсы в `engine`.
 ///
 /// Вызывать после создания `Device`/`Queue`/`Surface`/`Renderer3D`/
@@ -183,7 +197,7 @@ pub fn install_gpu_resources(
     let _ = engine.world_mut().insert(surface_state);
     let _ = engine.world_mut().insert(Mutex::new(frame_state));
     let _ = engine.world_mut().insert(FramePresentTarget::default());
-    let _ = engine.world_mut().insert(RenderLights::default());
+    insert_render_lights_default(engine);
     install_render_mesh(engine, mesh);
     engine.schedule_mut().add_system(RenderSubmit);
     engine.schedule_mut().add_system(RenderPresent);
@@ -242,7 +256,7 @@ impl System for RenderMesh {
 /// `MaterialDesc`-лейн (канон S5d) через `extract_render_data`.
 /// X2: пересоздание меша ушло в `RenderMesh` (`GpuMesh`-ресурс).
 /// X3: свет — из `RenderLights`-ресурса (сцено-загрузчик), не хардкод.
-/// `frame3d.render` — в `RenderPresent` (S7-шаг 2).
+/// `frame3d.render_to_buffers` — в `RenderPresent` (S7-шаг 2).
 struct RenderSubmit;
 
 impl System for RenderSubmit {
@@ -531,5 +545,133 @@ mod tests {
             buffers.0.lock().expect("frame buffers lock").is_empty(),
             "fresh install holds no pending buffers"
         );
+    }
+
+    #[test]
+    fn install_keeps_scene_published_lights() {
+        // `replace_scene` runs before `install_gpu_resources` in
+        // `GameApp::initialize`: a published scene rig must survive the
+        // GPU install, while a sceneless runtime still gets the legacy
+        // default (X3 zero-diff gate).
+        let mut engine = Engine::new();
+        let custom = RenderLights {
+            ambient: [0.5, 0.4, 0.3],
+            lights: vec![crate::scene::LightDesc::Directional {
+                direction: [0.0, -1.0, 0.0],
+                intensity: 2.0,
+                color: [1.0, 0.9, 0.8],
+                shadow: false,
+            }],
+            ambient_intensity: 1.0,
+            exposure: 1.0,
+        };
+        let _ = engine.world_mut().insert(custom);
+        insert_render_lights_default(&mut engine);
+        let kept = engine
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("lights resource");
+        assert_eq!(kept.ambient, [0.5, 0.4, 0.3]);
+        assert_eq!(kept.lights.len(), 1);
+
+        let mut fresh = Engine::new();
+        insert_render_lights_default(&mut fresh);
+        let defaulted = fresh
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("lights resource");
+        assert_eq!(defaulted.ambient, RenderLights::default().ambient);
+        assert_eq!(defaulted.lights.len(), RenderLights::default().lights.len());
+        assert_eq!(defaulted.ambient_intensity, 1.0);
+        assert_eq!(defaulted.exposure, 1.0);
+    }
+
+    #[test]
+    fn render_system_accesses_pin_the_dag_contract() {
+        use std::any::TypeId;
+
+        // E1–E3/X1–X4 pin: the whole native frame orders through these
+        // declarations — no hidden edges. All lane readers declare the
+        // full S5d canon; RenderMesh shares nothing with RenderSubmit;
+        // RenderPresent follows via RaW on `Mutex<GpuMesh>` plus WaW on
+        // `Mutex<GpuFrameState>`; RenderFlush closes via WaW on both
+        // handover resources.
+        for access in [
+            RenderMesh.access(),
+            RenderSubmit.access(),
+            RenderPresent.access(),
+        ] {
+            for lane in [
+                TypeId::of::<TransformDesc>(),
+                TypeId::of::<MeshDesc>(),
+                TypeId::of::<MaterialDesc>(),
+            ] {
+                assert!(
+                    access.reads_lanes.contains(&lane),
+                    "render systems read the lane canon"
+                );
+            }
+        }
+
+        // RenderMesh writes only the mesh slot (X2).
+        let mesh = RenderMesh.access();
+        assert_eq!(mesh.writes, vec![TypeId::of::<Mutex<GpuMesh>>()]);
+        assert!(mesh.reads.contains(&TypeId::of::<GpuDevice>()));
+
+        // RenderSubmit writes only the frame slot (X1/X3: lanes and
+        // lights in, no snapshot).
+        let submit = RenderSubmit.access();
+        assert_eq!(submit.writes, vec![TypeId::of::<Mutex<GpuFrameState>>()]);
+        assert!(submit.reads.contains(&TypeId::of::<RenderLights>()));
+
+        // RenderPresent bridges into both handover resources (E2).
+        let present = RenderPresent.access();
+        assert!(present.reads.contains(&TypeId::of::<Mutex<GpuMesh>>()));
+        assert!(
+            present
+                .writes
+                .contains(&TypeId::of::<Mutex<GpuFrameState>>())
+        );
+        assert!(
+            present
+                .writes
+                .contains(&TypeId::of::<FrameCommandBuffers>())
+        );
+        assert!(present.writes.contains(&TypeId::of::<FramePresentTarget>()));
+
+        // RenderFlush drains exactly the handover pair (E2).
+        let flush = RenderFlush.access();
+        assert_eq!(flush.reads, vec![TypeId::of::<GpuQueue>()]);
+        assert!(flush.writes.contains(&TypeId::of::<FrameCommandBuffers>()));
+        assert!(flush.writes.contains(&TypeId::of::<FramePresentTarget>()));
+    }
+
+    #[test]
+    fn render_systems_level_as_mesh_submit_then_present_then_flush() {
+        // Registration order is the execution contract
+        // (`install_gpu_resources` registers in this exact order): mesh
+        // and submit share level 0, present follows (RaW on the mesh
+        // slot, WaW on the frame slot), flush closes (WaW on both
+        // handovers). Needs no GPU — levels come from declarations only.
+        let mut engine = Engine::new();
+        engine.schedule_mut().add_system(RenderMesh);
+        engine.schedule_mut().add_system(RenderSubmit);
+        engine.schedule_mut().add_system(RenderPresent);
+        engine.schedule_mut().add_system(RenderFlush);
+        assert_eq!(
+            engine.schedule().levels(),
+            vec![vec![0, 1], vec![2], vec![3]]
+        );
+        let mermaid = engine.schedule().mermaid();
+        for name in [
+            "render_mesh",
+            "render_submit",
+            "render_present",
+            "render_flush",
+        ] {
+            assert!(mermaid.contains(name), "schedule mentions {name}");
+        }
     }
 }

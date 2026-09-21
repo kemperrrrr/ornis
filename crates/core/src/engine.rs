@@ -381,8 +381,12 @@ impl Engine {
     /// Registers one system into a named [`Stage`] plan.
     ///
     /// Delegates to [`Engine::stage_schedule_mut`]; variable-rate gameplay
-    /// ticks (`script_tick`) still belong in [`Stage::PostFrame`] storage
-    /// until the script host migrates to its own variable gameplay plan.
+    /// ticks (`script_tick`) belong in [`Stage::PostFrame`] storage: the
+    /// once-per-frame plan after the final fixed update, so one JSON-codec
+    /// tick round-trip covers the whole frame instead of repeating per
+    /// fixed substep. A dedicated variable-gameplay plan would only pay
+    /// off with a second consumer; until then `PostFrame` is the variable
+    /// plan, not a stopgap.
     pub fn add_stage_system<S: crate::System + 'static>(
         &mut self,
         stage: Stage,
@@ -412,11 +416,19 @@ impl Engine {
     /// repeatedly. After all systems finish, transient deltas are cleared
     /// from [`InputState`]; held keys/buttons persist.
     ///
-    /// `Time`/`FixedTime` publishing and `clear_frame_transients` stay
-    /// imperative here (direct `Resources::get_mut` on plain `Copy` clocks):
-    /// systems run against shared `&Resources`, so the frame boundary owns
-    /// these writes outside the declared-access contract. Moving them into
-    /// scheduler systems is the next step, not this one.
+    /// `Time`/`FixedTime` publishing and `clear_frame_transients` are an
+    /// intentional frame boundary, not a scheduled system: system bodies
+    /// receive only shared `&Resources` (see [`crate::System::run`]) while
+    /// [`crate::Resources::get_mut`] needs `&mut` (and [`World::run`]
+    /// holds only `&self`), so a system cannot mutate the plain `Copy`
+    /// clocks no matter what it declares — `writes::<Time>()` only orders
+    /// levels and arms enforcement, it grants no `&mut`. Moving the
+    /// boundary inside would require a `World`/`Resources` API change
+    /// (`Mutex`-wrapped clocks or `&mut` execution, breaking the parallel
+    /// level executor and every system impl). The host loop must bracket
+    /// the schedules anyway: `begin_frame` before the stages, one step
+    /// advance between fixed iterations, transients cleared after
+    /// `PostFrame`.
     ///
     /// The delta must be finite and non-negative. Domain-specific mutable
     /// state continues to use the scheduler's declared resource/lane access

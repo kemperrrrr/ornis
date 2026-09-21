@@ -618,17 +618,34 @@ debug-only по умолчанию). Тесты:
 `capture_outside_schedule_run_is_noop`. Фаза B аудита с этим закрыта
 целиком: ленты (#5) ✅, пассы (#6) ✅, rayon (#7) ✅.
 
-## S7 — GPU как системы (2026-09-06, native, шаг 1+2)
+## S7 — GPU как системы (2026-09-06, native, шаг 1+2; финал сверен 2026-09-21)
+
+> Историческая сводка ниже описывает S7 на 2026-09-06 (доступы через
+> `Mutex<RenderExtracted>`-снимок, `frame_plan.render`, цепочка
+> `RenderExtract → … → RenderPresent`). После S5e/X1–X4 и E2 картина
+> такая — верить коду (`crates/render/src/gpu_resources.rs`), а не
+> абзацам ниже.
+
+`GpuDevice`/`GpuQueue`/`GpuSurface`/`GpuSurfaceState` + `Mutex<GpuFrameState>{renderer, frame3d}` + `Mutex<GpuMesh>` + `FrameCommandBuffers`/`FramePresentTarget`-handover'ы + `RenderLights` как ECS-ресурсы
+(`crates/render/src/gpu_resources.rs`): `install_gpu_resources(engine, device, queue, surface, surface_state, frame_state, mesh)` (7 аргументов) вставляет их в `World` и регистрирует `RenderMesh → RenderSubmit → RenderPresent → RenderFlush` — порядок регистрации и есть контракт исполнения.
+
+Модуль `gpu_resources` — native-only: `#[cfg(not(target_arch = "wasm32"))]` в `render/src/lib.rs` (2026-09-07) — wgpu web-типы `!Send`/`!Sync` (`Rc`/JS-колбэки), а `World::insert`/`Resources::get` требуют `Send + Sync`; wasm-путь идёт через `GameWorld::frame`/`frame_upload` (прямое чтение лейн) + serialization boundary в `ornis-wasm`, как и раньше.
+
+- `RenderMesh` (X2; `reads SmartStore + reads_lane Transform/Mesh/Material + reads GpuDevice`, `writes Mutex<GpuMesh>`): тесселяция из лейн (`max_mesh_params`), с `RenderSubmit` общих ресурсов нет — один уровень.
+- `RenderSubmit` (X1/X3; `reads` лейны + `RenderLights`/`GpuQueue`/камера, `writes Mutex<GpuFrameState>`): прямое чтение `TransformDesc`/`MeshDesc`/`MaterialDesc`-лейн по канону `extract_render_data` (без снимка), `set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
+- `RenderPresent` (E2; `reads … + Mutex<GpuMesh>`, `writes Mutex<GpuFrameState> + FrameCommandBuffers + FramePresentTarget`): `surface.get_current_texture → create_view → render_to_buffers` (записи — в handover-буферы, не submit). `Outdated`/`Lost` — реконфигурирует `Surface` на месте; `Occluded`/`Timeout`/`Validation` — пропускает кадр; `Suboptimal` как `Success`.
+- `RenderFlush` (E2; `reads GpuQueue`, `writes` оба handover-ресурса): один ordered submit + present.
+- Уровни `[[RenderMesh, RenderSubmit], [RenderPresent], [RenderFlush]]` (RaW по `GpuMesh`, WaW по `GpuFrameState`/handover'ам) — пинятся тестами `render_system_accesses_pin_the_dag_contract` / `render_systems_level_as_mesh_submit_then_present_then_flush` (`gpu_resources.rs`, без GPU).
+
+Интеграция native: `GameApp::initialize` клонирует `Device/Queue` и отдаёт `Surface` в ресурсы, `GameContext` больше не хранит `Renderer3D/FramePlan/Mesh/Surface/SurfaceConfig` отдельно; `GameApp::render_frame` → только `GameWorld::frame` (`run_frame` в schedule; системы читают лейны сами, возвращаемый `frame_upload` нативный путь отбрасывает). `Resized` реконфигурирует `GpuSurface` (`Mutex<Surface>.configure`) по `GpuDevice` + обновлённому `GpuSurfaceState` и синхронит `GpuFrameState{renderer.resize, frame3d.set_surface_size}`. `cargo check/clippy` чисто, `cargo test -p ornis-render --lib` зелёный (205 на 2026-09-21).
+
+Исходный текст S7 (2026-09-06, до X1–X4/E2):
 
 `GpuDevice`/`GpuQueue`/`GpuSurface`/`GpuSurfaceState` + `GpuFrameState{Renderer3D, RenderFrame3D, Mesh}` как ECS-ресурсы
 (`crates/render/src/gpu_resources.rs`): `install_gpu_resources(device, queue, surface, surface_state, frame_state)` вставляет их в `World` и добавляет `RenderSubmit` + `RenderPresent`.
 
-Модуль `gpu_resources` — native-only: `#[cfg(not(target_arch = "wasm32"))]` в `render/src/lib.rs` (2026-09-07) — wgpu web-типы `!Send`/`!Sync` (`Rc`/JS-колбэки), а `World::insert`/`Resources::get` требуют `Send + Sync`; wasm-путь рендерит через `RenderWorld` extraction + `ornis-wasm`, как и раньше.
-
 - `RenderSubmit` (`reads Mutex<RenderExtracted>/Mutex<OrbitCamera>/GpuDevice/GpuQueue/GpuSurfaceState, writes Mutex<GpuFrameState>`): пересоздаёт `Mesh` по `mesh_params`, считает `view_proj` из `OrbitCamera + GpuSurfaceState.size`, `set_camera/set_lights/upload_materials/upload_instances` на `Queue`.
-- `RenderPresent` (`reads GpuDevice/GpuQueue/GpuSurface/GpuSurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`): `surface.get_current_texture → create_view → frame_plan.render → queue.submit/present` (основание — `RenderContext` из `render_backend.rs`). `Outdated`/`Lost` — реконфигурирует `Surface` на месте; `Occluded`/`Timeout`/`Validation` — пропускает кадр; `Suboptimal` как `Success`.
-
-Интеграция native: `GameApp::initialize` клонирует `Device/Queue` и отдаёт `Surface` в ресурсы, `GameContext` больше не хранит `Renderer3D/FramePlan/Mesh/Surface/SurfaceConfig` отдельно; `GameApp::render_frame` → только `render_world.run_frame` (в `Engine::schedule` уже `RenderExtract → OrbitCamera → RenderSubmit → RenderPresent` на едином `bitset_level_plan`, уровни `Extract → Submit → Present`: RaW по `Mutex<RenderExtracted>` + WaW по `Mutex<GpuFrameState>`). `Resized` реконфигурирует `GpuSurface` (`Mutex<Surface>.configure`) по `GpuDevice` + обновлённому `GpuSurfaceState` и синхронит `GpuFrameState{renderer.resize, frame_plan.set_surface_size}`. `cargo check/clippy` чисто, `cargo test -p ornis-render --lib` 99 + `ornis-core` 142 зелёные.
+- `RenderPresent` (`reads GpuDevice/GpuQueue/GpuSurface/GpuSurfaceState/Mutex<RenderExtracted>, writes Mutex<GpuFrameState>`): `surface.get_current_texture → create_view → frame_plan.render → queue.submit/present` (основание — `RenderContext` из `render_backend.rs`).
 
 ## Роспуск оболочки FramePlan — стадия 1 (2026-09-06)
 

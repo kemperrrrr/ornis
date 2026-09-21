@@ -27,9 +27,9 @@ use crate::mesh_upload::custom_vertices_cached;
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
 use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
-/// CPU-side render data read from the ECS lanes for one frame (X4:
-/// the former `RenderExtracted` snapshot, now a direct-read payload —
-/// no scheduled `Mutex` round-trip).
+/// CPU-side render data read from the ECS lanes for one frame (X4
+/// Extract-free: a direct-read payload, not a scheduled snapshot —
+/// no `Mutex` round-trip).
 #[derive(Clone, Debug)]
 pub struct FrameUpload {
     /// Maximum sphere tessellation required by the extracted entities.

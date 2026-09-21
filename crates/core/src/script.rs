@@ -366,7 +366,12 @@ impl ScriptHost {
 ///
 /// Reads [`Time`] for the frame delta and declares no lanes. Every call
 /// goes through the JSON codec, so this system belongs in the variable
-/// schedule ([`Engine::schedule_mut`]) — never the bounded fixed one.
+/// schedule ([`Engine::schedule_mut`], the [`crate::Stage::PostFrame`]
+/// storage) — never the bounded fixed one: there it would run once per
+/// substep, multiplying codec round-trips by the step count, advancing
+/// the tick counter per substep, and overwriting outcomes so only the
+/// last substep survives the per-frame drain; it also reads the variable
+/// [`Time`] delta, not the fixed step.
 pub struct ScriptTickSystem;
 
 impl System for ScriptTickSystem {
@@ -427,7 +432,8 @@ impl ScriptPlugin {
     }
 
     /// Inserts the host resource and the `script_tick` system into the
-    /// variable schedule.
+    /// variable schedule (the [`crate::Stage::PostFrame`] storage: once
+    /// per frame, after the fixed loop — see [`ScriptTickSystem`]).
     pub fn install(self, engine: &mut Engine) {
         engine.world_mut().insert(self.host);
         engine.schedule_mut().add_system(ScriptTickSystem);
@@ -793,6 +799,47 @@ mod tests {
         assert!(host.outcome(1).expect("outcome 1").is_err());
         // The failing entry was still attempted exactly once.
         assert_eq!(log.lock().expect("test lock").len(), 1);
+    }
+
+    #[test]
+    fn script_tick_runs_once_per_frame_not_per_fixed_substep() {
+        // Placement pin: PostFrame storage only, so one JSON-codec
+        // round-trip covers a catch-up frame instead of multiplying by
+        // the fixed step count (see `ScriptTickSystem`).
+        let (echo, log) = EchoEngine::new();
+        let mut engine = crate::Engine::new();
+        ScriptPlugin::new(Box::new(echo))
+            .with_tick("a", "src", "tick")
+            .expect("load")
+            .install(&mut engine);
+        assert_eq!(engine.schedule().len(), 1);
+        assert!(engine.fixed_schedule().is_empty());
+        assert!(engine.stage_schedule(crate::Stage::PreUpdate).is_empty());
+        assert!(engine.stage_schedule(crate::Stage::Input).is_empty());
+
+        // Catch-up frame: three fixed steps, exactly one script tick
+        // carrying the variable frame delta.
+        let delta = crate::FixedTime::default().delta_seconds();
+        engine.run_frame(delta * 3.0);
+
+        let fixed = *engine
+            .world()
+            .resources()
+            .get::<crate::FixedTime>()
+            .expect("fixed clock");
+        assert_eq!(fixed.steps_this_frame(), 3);
+        assert_eq!(fixed.tick(), 3);
+        let host = engine
+            .world()
+            .resources()
+            .get::<ScriptHost>()
+            .expect("host installed");
+        assert_eq!(host.ticks(), 1);
+        let calls = log.lock().expect("test lock");
+        assert_eq!(calls.len(), 1);
+        let v = tick_args(&calls[0].1);
+        assert!((v["dt"].as_f64().expect("dt") - f64::from(delta * 3.0)).abs() < 1e-6);
+        assert_eq!(v["tick"].as_u64().expect("tick"), 0);
     }
 
     #[test]

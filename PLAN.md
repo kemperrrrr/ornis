@@ -369,6 +369,26 @@ runtime без отдельной extract-фазы — будущая цель, 
 > Минус 806 строк; единственный реестр деклараций; паритет-оракул
 > усилен (та же `SystemSet`, типизированный и императивный пути
 > проверяются на одном типе).
+>
+> **Финал 2026-09-21 (unified scheduler закрыт, сверено с кодом):**
+> нативный кадр идёт целиком через staged `Engine`-расписания
+> (`PreUpdate → Input → Gameplay(fixed) → PostFrame`):
+> `RenderMesh → RenderSubmit → RenderPresent → RenderFlush`
+> упорядочены декларациями (уровни `[[Mesh,Submit],[Present],[Flush]]`,
+> тесты-пины в `crates/render/src/gpu_resources.rs`); upload-системы
+> читают лейны напрямую по канону `extract_render_data`, снимка в
+> schedule нет (X4). `Time`/`FixedTime`-публикация и clear транзиентов —
+> осознанная императивная граница кадра (системы видят только
+> `&Resources`; `crates/core/src/engine.rs`), `script_tick` —
+> PostFrame-система раз в кадр (fixed tick умножал бы JSON-кодек на
+> число сабстепов; `crates/core/src/script.rs`). Намеренно вне единого
+> DAG только transport-границы: server↔browser serialization boundary
+> (IDEAS §28) и wasm через `frame_upload` (`gpu_resources` native-only:
+> wgpu web-типы `!Send/!Sync`). Решением владельца 2026-09-21:
+> write-only `UnifiedRenderExtracted` удалён (читателей было ноль),
+> в `install_gpu_resources` свет сцены переживает GPU-install
+> (`insert_render_lights_default`, тест-пин), внеплановый
+> `frame_upload` в нативном кадре оставлен (единый API кадра).
 
 ## ❌ Не делать / отложено (решения владельца)
 
@@ -722,8 +742,35 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
    `SolverKind::SequentialImpulse`, `5c0e0c8`), физика разложена в
    `sequential_impulse/`|`avbd/`|`gpu/`|`collision/` + `tests/` без смены
    поведения (`a38e51a`, `2da8568`, `a688fda`), диета сьютов −41%
-   (`b603224`). Вне скоупа v1 —
+   (`b603224`).    Вне скоупа v1 —
    без изменений: cross-solver joints, разные частоты, O(n²) cross-AABB.
+- **XPBD rigid-движок (2026-09-21, `096c4bc`):** standalone
+  `XpbdEngine: PhysicsEngine` (`crates/physics/src/xpbd.rs`, отдельный
+  файл + 4 юнит-теста, physics-сьют зелёный, clippy/fmt чисто) —
+  Macklin–Müller–Chentanez 2016 (`Δλ = (−C − α̃λ)/(w + α̃)`,
+  `α̃ = α/h²`), rigid-body расширение Мюллера (обобщённые обратные
+  массы, угловые коррекции), сабстепинг Small Steps 2019 (дефолт
+  20×1). Контакты-неравенства + реституция/кулоново трение velocity-проходом,
+  джойнты Ball/Distance/Fixed/Revolute/Prismatic структурно
+  (лимиты/моторы не ведутся, Wheel/Gear/SixDof → `None`); без CCD,
+  сна, событий, в оркестратор `Engine`/`SolverKind` не заведён —
+  осознанно (см. шапку модуля).
+- **D1 — Deformables / Soft Bodies (план, IDEAS §29):** предусловие
+  §29 («когда дойдём — брать XPBD Мюллера») закрыто XPBD-движком выше —
+  compliance-ядро `Δλ` уже лежит в `xpbd.rs` и переиспользуется 1:1.
+  Сущности сейчас нет (поиск `soft|cloth|particle|deform` по крейтам
+  пуст; `RigidBody` не подходит — частице не нужны кватернион/инерция).
+  Шаги: (1) `SoftBody { particles: Vec<Particle{position, prev_position,
+  velocity, inv_mass}>, constraints }` в новом `soft.rs` + distance-ряды
+  structural/shear/bend с compliance на существующем ядре;
+  (2) верёвка/цепь частиц и висящий грид ткани — первые сцены-гейты
+  (растяжение под нагрузкой, драпировка без PBD-перенатяга);
+  (3) volume preservation (тетраэдры) для мягких тел;
+  (4) deformable↔rigid через `shape_distance` (частицы как сферы),
+  self-collision — вне скоупа v1; (5) обновление рендер-сетки из частиц
+  каждый кадр (кросс-крейт `render`/`app`). Гейт каждого шага:
+  юнит-тесты + отсутствие регресса physics-сьюта; разрывы топологии
+  (рвущаяся ткань) — отдельная фаза, не D1.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
