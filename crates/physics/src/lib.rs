@@ -65,6 +65,9 @@ pub use collision::shape;
 pub mod trigger;
 /// SIMD-wide solver for single-point contact batches.
 pub mod wide;
+/// XPBD rigid-body engine: standalone [`engine::PhysicsEngine`]
+/// implementation (Small-Steps substepping over compliant constraints).
+pub mod xpbd;
 
 use migration::{JointSnapshot, SceneSnapshot};
 use split::{SplitBody, SplitJoint, SplitOwner, SplitState};
@@ -86,6 +89,7 @@ pub use trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, FractureEvent,
     TriggerEvent, TriggerEventKind,
 };
+pub use xpbd::XpbdEngine;
 
 /// Selectable constraint solver (M2 intra-engine modularity, Genesis
 /// style): the sequential-impulse engine or the AVBD engine.
