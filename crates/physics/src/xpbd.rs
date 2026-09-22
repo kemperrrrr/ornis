@@ -36,6 +36,9 @@
 //! - No sleeping, no islands, single-threaded, no trigger/contact events:
 //!   use [`crate::engine::SequentialImpulseEngine`] or
 //!   [`crate::avbd::AvbdEngine`] when gameplay events are needed.
+//! - Soft bodies ([`crate::soft::SoftBody`], PLAN B2/D1.1) step in the same
+//!   substep loop (particles + distance rows only — no volume, no
+//!   deformable↔rigid coupling, no render upload yet).
 //! - Not wired into the [`crate::Engine`] orchestrator / [`crate::SolverKind`]
 //!   switch: this engine stands alone behind [`crate::engine::PhysicsEngine`].
 
@@ -50,6 +53,7 @@ use crate::joint::{JointHandle, JointKind, resolve_joint};
 use crate::math::{Ray, RaycastHit, tangent_basis};
 use crate::migration::valid_joint;
 use crate::shape::Shape;
+use crate::soft::{SoftBody, SoftHandle};
 
 /// Structural joint model supported by [`XpbdEngine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +117,8 @@ struct Contact {
 /// Bodies live in dense handle order (`swap_remove` on removal, like the
 /// other engines). Constraints are rebuilt from scratch every substep, so
 /// there is no cross-step warm-start state to migrate or invalidate.
+/// Soft bodies ([`crate::soft::SoftBody`]) live in a second dense registry
+/// and step in the same substep loop (D1.1: particles + distance rows only).
 #[derive(Debug)]
 pub struct XpbdEngine {
     /// Constant world-space acceleration applied to dynamic bodies.
@@ -135,6 +141,8 @@ pub struct XpbdEngine {
     joint_compliance: f32,
     /// Approach speed below which contacts are inelastic (m/s).
     restitution_threshold: f32,
+    /// Soft bodies in handle order (PLAN B2/D1).
+    soft_bodies: Vec<SoftBody>,
 }
 
 impl XpbdEngine {
@@ -151,6 +159,7 @@ impl XpbdEngine {
             contact_compliance: 0.0,
             joint_compliance: 0.0,
             restitution_threshold: 1.0,
+            soft_bodies: Vec::new(),
         }
     }
 
@@ -210,6 +219,37 @@ impl XpbdEngine {
         self.joints.len()
     }
 
+    /// Register a soft body and return its handle (PLAN B2/D1).
+    pub fn add_soft_body(&mut self, body: SoftBody) -> SoftHandle {
+        self.soft_bodies.push(body);
+        self.soft_bodies.len() - 1
+    }
+
+    /// Remove a soft body, swapping the last into its slot. Invalid
+    /// handles are a no-op. No joints reference particles in D1.1, so no
+    /// remap is needed beyond the swap.
+    pub fn remove_soft_body(&mut self, handle: SoftHandle) {
+        if handle < self.soft_bodies.len() {
+            self.soft_bodies.swap_remove(handle);
+        }
+    }
+
+    /// Number of registered soft bodies (dense handles).
+    pub fn soft_body_count(&self) -> usize {
+        self.soft_bodies.len()
+    }
+
+    /// Read-only access to a soft body, or `None` for an invalid handle.
+    pub fn get_soft_body(&self, handle: SoftHandle) -> Option<&SoftBody> {
+        self.soft_bodies.get(handle)
+    }
+
+    /// Mutable access to a soft body, or `None` for an invalid handle.
+    /// Direct particle edits take effect at the next [`PhysicsEngine::step`].
+    pub fn get_soft_body_mut(&mut self, handle: SoftHandle) -> Option<&mut SoftBody> {
+        self.soft_bodies.get_mut(handle)
+    }
+
     /// Whether the body is simulated by this engine (dynamic with mass).
     fn solvable(&self, h: usize) -> bool {
         self.bodies[h].body_type == BodyType::Dynamic && self.bodies[h].inv_mass > 0.0
@@ -244,12 +284,19 @@ impl XpbdEngine {
         // Time-scaled compliance: α̃ = α/h² (Macklin et al. 2016, §4).
         let alpha_c = self.contact_compliance / (h * h);
         let alpha_j = self.joint_compliance / (h * h);
+        for body in &mut self.soft_bodies {
+            body.integrate(h, self.gravity);
+            body.begin_substep();
+        }
         for _ in 0..self.iterations {
             for i in 0..contacts.len() {
                 self.solve_contact(i, &mut contacts, alpha_c);
             }
             for j in 0..self.joints.len() {
                 self.solve_joint(j, alpha_j);
+            }
+            for body in &mut self.soft_bodies {
+                body.solve_constraints(h);
             }
         }
         for b in &mut self.bodies {
@@ -263,6 +310,9 @@ impl XpbdEngine {
             }
             b.velocity = (b.position - prev_pos[i]) / h;
             b.angular_velocity = angular_velocity_from_delta(b.orientation, prev_rot[i], h);
+        }
+        for body in &mut self.soft_bodies {
+            body.update_velocities(h);
         }
         self.solve_velocities(&contacts, h);
     }
@@ -800,7 +850,8 @@ impl PhysicsEngine for XpbdEngine {
 /// XPBD scalar update (Macklin et al. 2016, Eq. 18):
 /// `Δλ = (−C − α̃·λ) / (w + α̃)` with the time-scaled compliance
 /// `α̃ = α/h²` folded in by the caller. `α̃ = 0` is exactly PBD.
-fn delta_lambda(c: f32, lambda: f32, w_sum: f32, alpha_tilde: f32) -> f32 {
+/// Shared with [`crate::soft`] (deformable distance rows reuse it 1:1).
+pub(crate) fn delta_lambda(c: f32, lambda: f32, w_sum: f32, alpha_tilde: f32) -> f32 {
     (-c - alpha_tilde * lambda) / (w_sum + alpha_tilde)
 }
 
@@ -1047,5 +1098,84 @@ mod tests {
             "gear must be rejected"
         );
         assert_eq!(engine.joint_count(), 0);
+    }
+
+    /// A hanging chain must keep its total length under gravity (D1.1):
+    /// rigid structural rows converge instead of stretching like rubber.
+    #[test]
+    fn chain_holds_length_under_gravity() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let rope = engine.add_soft_body(SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 6, 0.5, 1.0, 0.0));
+        for _ in 0..180 {
+            engine.step(1.0 / 60.0);
+        }
+        let body = engine.get_soft_body(rope).expect("rope survives");
+        // Pinned end at the origin, 5 links of 0.5: free end hangs at ≈ −2.5.
+        let end = body.particles.last().expect("nonempty").position;
+        assert!(
+            (end.y + 2.5).abs() < 0.1,
+            "free end height {}, want ~-2.5",
+            end.y
+        );
+        let mut worst = 0.0f32;
+        for c in &body.constraints {
+            let d = (body.particles[c.a].position - body.particles[c.b].position).length();
+            worst = worst.max((d - c.rest).abs() / c.rest);
+        }
+        assert!(worst < 0.02, "max link stretch {worst}, want <2%");
+        assert!(
+            body.particles.iter().all(|p| p.position.is_finite()),
+            "no NaN in rope"
+        );
+    }
+
+    /// A top-pinned cloth grid must drape (D1.1): the free edge falls below
+    /// the pins while structural stretch stays bounded — no PBD rubber.
+    #[test]
+    fn cloth_grid_drapes_with_bounded_stretch() {
+        use crate::soft::{ClothPin, DeformKind, SoftBody};
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let (cols, rows, spacing) = (6, 6, 0.25);
+        let sheet = engine.add_soft_body(SoftBody::cloth_grid(
+            Vec3::ZERO,
+            cols,
+            rows,
+            spacing,
+            1.0,
+            0.0,
+            0.0,
+            1e-4,
+            ClothPin::TopRow,
+        ));
+        for _ in 0..180 {
+            engine.step(1.0 / 60.0);
+        }
+        let body = engine.get_soft_body(sheet).expect("sheet survives");
+        // Free edge (last row) must hang well below the pinned top row.
+        let edge_y = body.particles[(rows - 1) * cols..]
+            .iter()
+            .map(|p| p.position.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            edge_y < -0.8,
+            "free edge at {edge_y}, want drape below -0.8"
+        );
+        let mut worst = 0.0f32;
+        for c in body
+            .constraints
+            .iter()
+            .filter(|c| c.kind == DeformKind::Structural)
+        {
+            let d = (body.particles[c.a].position - body.particles[c.b].position).length();
+            worst = worst.max((d - c.rest).abs() / c.rest);
+        }
+        assert!(worst < 0.08, "max structural stretch {worst}, want <8%");
+        assert!(
+            body.particles.iter().all(|p| p.position.is_finite()),
+            "no NaN in cloth"
+        );
     }
 }

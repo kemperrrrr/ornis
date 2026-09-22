@@ -63,6 +63,8 @@ pub mod math;
 pub mod sequential_impulse;
 /// Collision shapes with AABB projection and inertia tensors.
 pub use collision::shape;
+/// Deformable bodies (PLAN B2/D1): particles and distance topologies.
+pub mod soft;
 /// Trigger overlap event types emitted by the sequential-impulse physics engine.
 pub mod trigger;
 /// SIMD-wide solver for single-point contact batches.
@@ -87,6 +89,7 @@ pub use joint::{
 };
 pub use math::{AABB, Ray, RaycastHit};
 pub use shape::{ConvexHull, Heightfield, PairSupport, Shape, TriMesh};
+pub use soft::{ClothPin, DeformConstraint, DeformKind, Particle, SoftBody, SoftHandle};
 pub use trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, FractureEvent,
     TriggerEvent, TriggerEventKind,

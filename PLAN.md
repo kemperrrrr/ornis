@@ -810,6 +810,12 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   каждый кадр (кросс-крейт `render`/`app`). Гейт каждого шага:
   юнит-тесты + отсутствие регресса physics-сьюта; разрывы топологии
   (рвущаяся ткань) — отдельная фаза, не D1.
+  ✅ **Шаги 1–2 DONE 2026-09-22** (`soft.rs`: `Particle`/`SoftBody`/
+  `DeformConstraint`/`DeformKind` + билдеры `chain`/`cloth_grid`,
+  интеграция в сабстеп `XpbdEngine`, 5 тестов: топология билдеров,
+  дегенеративные ряды, верёвка держит длину <2%, ткань драпируется при
+  structural-растяжении <8%; lib-сьют 146 зелёный, clippy/fmt чисто).
+  Остаток D1: volume, deformable↔rigid, рендер-сетка.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
