@@ -42,6 +42,199 @@ enabled = true
 [structural]
 enabled = true
 
+[architecture]
+enabled = true
+
+# Layer direction: inner layers know nothing of outer ones; outer layers
+# may use inner ones freely. Order is innermost-first. Cross-crate imports
+# resolve through [architecture.external_crates] below (keys use the Rust
+# module spelling with underscores: ornis_core, NOT ornis-core).
+#
+# DISABLED 2026-09-23: rustqual 1.8.2 misresolves every same-crate
+# `crate::x` import to the last layer ("adapters") — 452 false positives
+# on a layer-clean tree (verified via `rustqual --explain`, cross-crate
+# externals resolve correctly). Re-enable when upstream fixes `crate::`
+# target resolution; the layer map below stays as the documented intent.
+# [architecture.layers]
+# order = ["foundation", "domain", "application", "adapters"]
+# unmatched_behavior = "strict_error"
+#
+# [architecture.layers.foundation]
+# paths = ["crates/schedule/**", "crates/input/**", "crates/shader-lang/**", "crates/gltf/**"]
+#
+# [architecture.layers.domain]
+# paths = [
+#     "crates/core/**",
+#     "crates/gameplay/**",
+#     "crates/assets/**",
+#     "crates/animation/**",
+#     "crates/physics/**",
+#     "crates/render/**",
+#     "crates/audio/**",
+#     "crates/materialx/**",
+#     "crates/mesh-editor/**",
+#     "crates/wgpu_backend/**",
+#     "crates/macros/**",
+# ]
+#
+# [architecture.layers.application]
+# paths = ["crates/app/**"]
+#
+# [architecture.layers.adapters]
+# paths = [
+#     "crates/editor-backend/**",
+#     "crates/wasm/**",
+#     "src/**",
+#     "xtask/**",
+#     "fuzz/fuzz_targets/**",
+# ]
+#
+# [architecture.external_crates]
+# ornis_schedule = "foundation"
+# ornis_input = "foundation"
+# ornis_shader_lang = "foundation"
+# ornis_gltf = "foundation"
+# ornis_core = "domain"
+# ornis_gameplay = "domain"
+# ornis_assets = "domain"
+# ornis_animation = "domain"
+# ornis_physics = "domain"
+# ornis_render = "domain"
+# ornis_audio = "domain"
+# ornis_materialx = "domain"
+# ornis_mesh_editor = "domain"
+# ornis_wgpu_backend = "domain"
+# ornis_macros = "domain"
+# ornis_app = "application"
+# editor_backend = "adapters"
+# ornis_wasm = "adapters"
+
+# Solver isolation: the two physics solvers meet only at the seams
+# (Engine/split/contact_math/gpu stitching), never directly. Catches the
+# next shape_min_dimension-style helper duplication at the import site.
+# Implemented as path patterns (not [[architecture.forbidden]] edges):
+# 1.8.2 cannot resolve same-crate `crate::` targets (falls back to
+# "adapters"/unresolved), but path-prefix matching is textual and verified
+# with probe imports (see trajectory 2026-09-23).
+[[architecture.pattern]]
+name = "solver_isolation_si"
+forbid_path_prefix = ["crate::avbd"]
+forbidden_in = ["crates/physics/src/sequential_impulse/**"]
+reason = "Solvers meet only at Engine/split/contact_math seams, never directly"
+
+[[architecture.pattern]]
+name = "solver_isolation_avbd"
+forbid_path_prefix = ["crate::sequential_impulse"]
+forbidden_in = ["crates/physics/src/avbd/**"]
+reason = "Solvers meet only at Engine/split/contact_math seams, never directly"
+
+# Core stays backend-neutral: execution backends plug into core via Engine,
+# never the reverse. Path patterns again (textual, resolution-free).
+[[architecture.pattern]]
+name = "core_neutral_physics"
+forbid_path_prefix = ["ornis_physics::"]
+forbidden_in = ["crates/core/**"]
+reason = "Core is backend-neutral; physics plugs into Engine, not imports"
+
+[[architecture.pattern]]
+name = "core_neutral_render"
+forbid_path_prefix = ["ornis_render::"]
+forbidden_in = ["crates/core/**"]
+reason = "Core is backend-neutral; render reads core lanes, never the reverse"
+
+[[architecture.pattern]]
+name = "core_neutral_app"
+forbid_path_prefix = ["ornis_app::", "ornis_wasm::", "editor_backend::"]
+forbidden_in = ["crates/core/**"]
+reason = "Composition lives in app/adapters, not in core"
+
+# GPU types stay behind backend seams: logic crates see scalars and ids
+# (core::gpu_types), never wgpu handles. Guards Cargo edits; today these
+# imports cannot even compile (no wgpu dep) — the rule documents why.
+[[architecture.pattern]]
+name = "no_wgpu_in_logic"
+forbid_path_prefix = ["wgpu::"]
+forbidden_in = [
+    "crates/core/**",
+    "crates/schedule/**",
+    "crates/gameplay/**",
+    "crates/assets/**",
+    "crates/animation/**",
+    "crates/audio/**",
+    "crates/input/**",
+    "crates/shader-lang/**",
+    "crates/gltf/**",
+]
+reason = "GPU types live behind backend seams; logic sees scalars/ids"
+
+# AST types stay in the compiler crates.
+[[architecture.pattern]]
+name = "no_syn_outside_macros"
+forbid_path_prefix = ["syn::", "proc_macro2::", "quote::"]
+forbidden_in = [
+    "crates/core/**",
+    "crates/schedule/**",
+    "crates/gameplay/**",
+    "crates/assets/**",
+    "crates/animation/**",
+    "crates/physics/**",
+    "crates/render/**",
+    "crates/audio/**",
+    "crates/materialx/**",
+    "crates/mesh-editor/**",
+    "crates/wgpu_backend/**",
+    "crates/app/**",
+    "crates/editor-backend/**",
+    "crates/wasm/**",
+    "crates/input/**",
+    "crates/gltf/**",
+    "src/**",
+    "xtask/**",
+]
+reason = "AST types stay in the compiler crates (crates/macros and crates/shader-lang deliberately not listed: shader-lang is the syn→IR translator front-end)"
+
+# stdout is the binary's channel: library code reports via eprintln/types.
+# (eprintln! stays allowed everywhere — diagnostics, not output.)
+[[architecture.pattern]]
+name = "no_stdout_in_library_code"
+forbid_macro_call = ["println", "print", "dbg"]
+forbidden_in = [
+    "crates/animation/src/**",
+    "crates/app/src/**",
+    "crates/assets/src/**",
+    "crates/audio/src/**",
+    "crates/core/src/**",
+    "crates/editor-backend/src/**",
+    "crates/gameplay/src/**",
+    "crates/gltf/src/**",
+    "crates/input/src/**",
+    "crates/macros/src/**",
+    "crates/materialx/src/**",
+    "crates/mesh-editor/src/**",
+    "crates/physics/src/**",
+    "crates/render/src/**",
+    "crates/schedule/src/**",
+    "crates/shader-lang/src/**",
+    "crates/wasm/src/**",
+    "crates/wgpu_backend/src/**",
+]
+reason = "stdout is the binary's channel, not library code's"
+
+# Seam contracts as port traits. System::run takes &self so the scheduler
+# can share systems across rayon threads; PhysicsEngine takes &mut self
+# (step mutates) but stays Send+Sync for cross-thread stepping.
+[[architecture.trait_contract]]
+name = "system_port"
+scope = "crates/core/src/schedule.rs"
+receiver_may_be = ["shared_ref"]
+required_supertraits_contain = ["Send", "Sync"]
+
+[[architecture.trait_contract]]
+name = "solver_port"
+scope = "crates/physics/src/engine.rs"
+receiver_may_be = ["mut_ref", "shared_ref"]
+required_supertraits_contain = ["Send", "Sync"]
+
 [test_quality]
 enabled = true
 

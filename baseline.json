@@ -1,22 +1,22 @@
 {
   "version": 2,
   "quality_score": 0.0,
-  "iosp_score": 0.8819554848966613,
-  "violations": 297,
-  "total": 3980,
-  "complexity_warnings": 49,
-  "magic_number_warnings": 1507,
+  "iosp_score": 0.8829623944742901,
+  "violations": 305,
+  "total": 4103,
+  "complexity_warnings": 50,
+  "magic_number_warnings": 1563,
   "nesting_depth_warnings": 13,
-  "function_length_warnings": 86,
+  "function_length_warnings": 87,
   "unsafe_warnings": 9,
   "error_handling_warnings": 152,
-  "duplicate_groups": 76,
-  "dead_code_warnings": 218,
-  "dead_type_warnings": 5,
-  "fragment_groups": 446,
-  "boilerplate_warnings": 168,
+  "duplicate_groups": 77,
+  "dead_code_warnings": 234,
+  "dead_type_warnings": 7,
+  "fragment_groups": 450,
+  "boilerplate_warnings": 170,
   "srp_struct_warnings": 8,
-  "srp_module_warnings": 67,
+  "srp_module_warnings": 68,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 24,
   "structural_coupling_warnings": 22,
-  "total_findings": 3391,
+  "total_findings": 3488,
   "violation_details": [
     {
       "name": "serve",
@@ -218,12 +218,12 @@
     {
       "name": "extract_render_data_with_stats",
       "file": "crates/render/src/extraction.rs",
-      "line": 331
+      "line": 342
     },
     {
       "name": "normalized_rotation",
       "file": "crates/render/src/extraction.rs",
-      "line": 673
+      "line": 686
     },
     {
       "name": "OrbitCamera::from_desc",
@@ -234,6 +234,21 @@
       "name": "OrbitCamera::position",
       "file": "crates/render/src/camera.rs",
       "line": 58
+    },
+    {
+      "name": "blend_position",
+      "file": "crates/animation/src/lib.rs",
+      "line": 943
+    },
+    {
+      "name": "blend_normal",
+      "file": "crates/animation/src/lib.rs",
+      "line": 963
+    },
+    {
+      "name": "normalized_skel_quat",
+      "file": "crates/animation/src/lib.rs",
+      "line": 1195
     },
     {
       "name": "lower_expr",
@@ -511,6 +526,21 @@
       "line": 447
     },
     {
+      "name": "SoftBody::chain",
+      "file": "crates/physics/src/soft.rs",
+      "line": 154
+    },
+    {
+      "name": "SoftBody::cloth_grid",
+      "file": "crates/physics/src/soft.rs",
+      "line": 193
+    },
+    {
+      "name": "SoftBody::soft_cube",
+      "file": "crates/physics/src/soft.rs",
+      "line": 292
+    },
+    {
       "name": "RigidBody::build",
       "file": "crates/physics/src/body.rs",
       "line": 128
@@ -518,182 +548,192 @@
     {
       "name": "XpbdEngine::substep",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 219
+      "line": 286
     },
     {
       "name": "XpbdEngine::discover_contacts",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 273
+      "line": 355
+    },
+    {
+      "name": "XpbdEngine::discover_soft_contacts",
+      "file": "crates/physics/src/xpbd.rs",
+      "line": 418
+    },
+    {
+      "name": "XpbdEngine::solve_soft_contact",
+      "file": "crates/physics/src/xpbd.rs",
+      "line": 470
     },
     {
       "name": "XpbdEngine::solve_contact",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 333
+      "line": 509
     },
     {
       "name": "XpbdEngine::solve_joint",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 360
+      "line": 536
     },
     {
       "name": "XpbdEngine::solve_position_row",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 464
+      "line": 640
     },
     {
       "name": "XpbdEngine::solve_angular_lock",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 492
+      "line": 668
     },
     {
       "name": "XpbdEngine::solve_axis_alignment",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 527
+      "line": 703
     },
     {
       "name": "XpbdEngine::solve_velocities",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 563
+      "line": 739
     },
     {
       "name": "XpbdEngine::solve_restitution",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 605
+      "line": 781
     },
     {
       "name": "XpbdEngine::rebuild_joint_pairs",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 635
+      "line": 811
     },
     {
       "name": "XpbdEngine::step",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 665
+      "line": 841
     },
     {
       "name": "XpbdEngine::remove_body",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 683
+      "line": 859
     },
     {
       "name": "XpbdEngine::add_joint",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 706
+      "line": 882
     },
     {
       "name": "XpbdEngine::remove_joint",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 753
+      "line": 929
     },
     {
       "name": "XpbdEngine::shapecast",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 775
+      "line": 951
     },
     {
       "name": "apply_inv_inertia",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 809
+      "line": 986
     },
     {
       "name": "generalized_inverse_mass",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 827
+      "line": 1004
     },
     {
       "name": "angular_inverse_mass",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 838
+      "line": 1015
     },
     {
       "name": "apply_position_correction",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 846
+      "line": 1023
     },
     {
       "name": "apply_angular_correction",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 859
+      "line": 1036
     },
     {
       "name": "apply_velocity_impulse",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 870
+      "line": 1047
     },
     {
       "name": "integrate_orientation",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 885
+      "line": 1062
     },
     {
       "name": "angular_velocity_from_delta",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 894
+      "line": 1071
     },
     {
       "name": "Engine::set_solver_kind",
       "file": "crates/physics/src/lib.rs",
-      "line": 268
+      "line": 271
     },
     {
       "name": "Engine::set_routing",
       "file": "crates/physics/src/lib.rs",
-      "line": 280
+      "line": 283
     },
     {
       "name": "Engine::collapse_to_single",
       "file": "crates/physics/src/lib.rs",
-      "line": 311
+      "line": 314
     },
     {
       "name": "Engine::split_ensure_built",
       "file": "crates/physics/src/lib.rs",
-      "line": 417
+      "line": 420
     },
     {
       "name": "Engine::split_step",
       "file": "crates/physics/src/lib.rs",
-      "line": 429
+      "line": 432
     },
     {
       "name": "Engine::fracture_split",
       "file": "crates/physics/src/lib.rs",
-      "line": 461
+      "line": 464
     },
     {
       "name": "Engine::split_remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 501
+      "line": 504
     },
     {
       "name": "Engine::split_remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 534
+      "line": 537
     },
     {
       "name": "Engine::split_box",
       "file": "crates/physics/src/lib.rs",
-      "line": 571
+      "line": 574
     },
     {
       "name": "Engine::fracture_pass",
       "file": "crates/physics/src/lib.rs",
-      "line": 614
+      "line": 617
     },
     {
       "name": "Engine::step",
       "file": "crates/physics/src/lib.rs",
-      "line": 680
+      "line": 683
     },
     {
       "name": "Engine::remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 708
+      "line": 711
     },
     {
       "name": "Engine::remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 782
+      "line": 785
     },
     {
       "name": "AvbdEngine::update_gear_mem",
