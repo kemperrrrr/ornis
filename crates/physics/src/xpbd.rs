@@ -36,9 +36,12 @@
 //! - No sleeping, no islands, single-threaded, no trigger/contact events:
 //!   use [`crate::engine::SequentialImpulseEngine`] or
 //!   [`crate::avbd::AvbdEngine`] when gameplay events are needed.
-//! - Soft bodies ([`crate::soft::SoftBody`], PLAN B2/D1.1) step in the same
-//!   substep loop (particles + distance rows only — no volume, no
-//!   deformable↔rigid coupling, no render upload yet).
+//! - Soft bodies ([`crate::soft::SoftBody`], PLAN B2/D1): particles +
+//!   distance rows + global volume row step in the same substep loop, and
+//!   particles couple against rigid bodies as spheres (inelastic,
+//!   frictionless — the velocity passes do not know these rows).
+//!   No self-collision, no layer/mask filtering on the soft side, no
+//!   render upload yet.
 //! - Not wired into the [`crate::Engine`] orchestrator / [`crate::SolverKind`]
 //!   switch: this engine stands alone behind [`crate::engine::PhysicsEngine`].
 
@@ -109,6 +112,30 @@ struct Contact {
     /// Contact anchor in B's local frame.
     lb: Vec3,
     /// Accumulated normal multiplier (force estimate: `λ/h²`).
+    lambda: f32,
+}
+
+/// Particle↔rigid contact for a single substep (D1.4): the particle is
+/// side A (a bare position, no orientation), the rigid body side B with a
+/// body-local anchor. Inelastic and frictionless — the velocity passes do
+/// not know these rows; both sides derive post-solve velocities via BDF1.
+#[derive(Debug, Clone)]
+struct SoftContact {
+    /// Soft body handle.
+    soft: usize,
+    /// Particle index inside the soft body.
+    particle: usize,
+    /// Rigid body handle.
+    body: usize,
+    /// Contact normal from the particle toward the rigid body.
+    n: Vec3,
+    /// Surface witness offset from the particle center at discovery
+    /// (particles don't rotate, so the world offset stays fixed): the gap
+    /// is measured from the sphere surface, not its center.
+    off: Vec3,
+    /// Contact anchor in the rigid body's local frame.
+    lb: Vec3,
+    /// Accumulated normal multiplier (`λ ≥ 0`).
     lambda: f32,
 }
 
@@ -288,6 +315,7 @@ impl XpbdEngine {
             body.integrate(h, self.gravity);
             body.begin_substep();
         }
+        let mut soft_contacts = self.discover_soft_contacts();
         for _ in 0..self.iterations {
             for i in 0..contacts.len() {
                 self.solve_contact(i, &mut contacts, alpha_c);
@@ -297,6 +325,10 @@ impl XpbdEngine {
             }
             for body in &mut self.soft_bodies {
                 body.solve_constraints(h);
+                body.solve_volume(h);
+            }
+            for i in 0..soft_contacts.len() {
+                self.solve_soft_contact(i, &mut soft_contacts, alpha_c);
             }
         }
         for b in &mut self.bodies {
@@ -377,6 +409,100 @@ impl XpbdEngine {
             }
         }
         out
+    }
+
+    /// Particle↔rigid discovery (D1.4): every particle of a body with a
+    /// positive `contact_radius` is queried as a sphere against every
+    /// non-trigger rigid body. No layer/mask filtering in D1.4 — soft
+    /// bodies couple with everything (documented).
+    fn discover_soft_contacts(&self) -> Vec<SoftContact> {
+        let mut out = Vec::new();
+        for (s, soft) in self.soft_bodies.iter().enumerate() {
+            if soft.contact_radius <= 0.0 {
+                continue;
+            }
+            let sphere = Shape::Sphere {
+                radius: soft.contact_radius,
+            };
+            for (p, particle) in soft.particles.iter().enumerate() {
+                for (b, body) in self.bodies.iter().enumerate() {
+                    if body.is_trigger {
+                        continue;
+                    }
+                    let d = shape_distance(
+                        ShapeRef {
+                            shape: &sphere,
+                            pos: particle.position,
+                            rot: Quat::IDENTITY,
+                        },
+                        ShapeRef {
+                            shape: &body.shape,
+                            pos: body.position,
+                            rot: body.orientation,
+                        },
+                    );
+                    if !d.dist.is_finite() || d.dist > 0.0 {
+                        continue;
+                    }
+                    let mut normal = d.point_b - d.point_a;
+                    if normal.length_squared() < 1e-12 {
+                        normal = body.position - particle.position;
+                    }
+                    out.push(SoftContact {
+                        soft: s,
+                        particle: p,
+                        body: b,
+                        n: normal.normalize_or(Vec3::Y),
+                        off: d.point_a - particle.position,
+                        lb: body.orientation.inverse() * (d.point_b - body.position),
+                        lambda: 0.0,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Position-level solve for one particle↔rigid contact (inequality,
+    /// `λ ≥ 0`): the particle carries side A (`+n`), the rigid body side B
+    /// (`−n` with its rotation lever). Contact compliance is shared with
+    /// the rigid path.
+    fn solve_soft_contact(&mut self, i: usize, contacts: &mut [SoftContact], alpha_tilde: f32) {
+        let c = &mut contacts[i];
+        let Some(soft) = self.soft_bodies.get_mut(c.soft) else {
+            return;
+        };
+        let Some(particle) = soft.particles.get_mut(c.particle) else {
+            return;
+        };
+        let Some(body) = self.bodies.get_mut(c.body) else {
+            return;
+        };
+        let pb = body.position + body.orientation * c.lb;
+        // Signed gap from the particle's surface witness (not its center —
+        // at a clean touch the witness gap is 0 while the center is a full
+        // radius away along −n).
+        let gap = (particle.position + c.off - pb).dot(c.n);
+        if gap >= 0.0 && c.lambda == 0.0 {
+            return;
+        }
+        let rb = pb - body.position;
+        // Rigid gradient enters with −n, but the mass term is quadratic.
+        let t = rb.cross(c.n);
+        let w = particle.inv_mass
+            + body.inv_mass
+            + t.dot(apply_inv_inertia(body.inertia, body.orientation, t));
+        if w <= 0.0 {
+            return;
+        }
+        let dlambda = delta_lambda(gap, c.lambda, w, alpha_tilde);
+        let next = (c.lambda + dlambda).max(0.0);
+        let applied = next - c.lambda;
+        c.lambda = next;
+        if applied != 0.0 {
+            particle.position += c.n * (applied * particle.inv_mass);
+            apply_position_correction(body, -1.0, c.n, rb, applied);
+        }
     }
 
     /// Position-level normal solve for one contact (inequality, `λ ≥ 0`).
@@ -718,7 +844,7 @@ impl PhysicsEngine for XpbdEngine {
         }
         let h = dt / self.substeps as f32;
         for _ in 0..self.substeps {
-            if self.bodies.is_empty() {
+            if self.bodies.is_empty() && self.soft_bodies.is_empty() {
                 return;
             }
             self.substep(h);
@@ -1176,6 +1302,105 @@ mod tests {
         assert!(
             body.particles.iter().all(|p| p.position.is_finite()),
             "no NaN in cloth"
+        );
+    }
+
+    /// A squashed soft cube must recover its volume (D1.3): with soft edges
+    /// the shape alone would stay flat — the global volume row reinflates it.
+    /// Edges stay softer than the volume row so the test isolates volume
+    /// work; damping keeps the reinflation path quasi-static (an undamped
+    /// rigid-volume snap overshoots into a tall limit cycle the soft edges
+    /// cannot unwind).
+    #[test]
+    fn soft_cube_recovers_volume() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::ZERO);
+        let cube = engine.add_soft_body(SoftBody::soft_cube(Vec3::ZERO, 1.0, 1.0, 1e-5, 0.0));
+        {
+            let body = engine.get_soft_body(cube).expect("cube survives");
+            assert!(
+                (body.volume_rest - 1.0).abs() < 1e-5,
+                "rest volume {}",
+                body.volume_rest
+            );
+            assert_eq!(body.constraints.len(), 12, "cube edges");
+            assert_eq!(body.triangles.len(), 12, "cube surface");
+            // Squash along Y around the center: volume halves.
+            let center = Vec3::splat(0.5);
+            let b = engine.get_soft_body_mut(cube).expect("cube mut");
+            b.damping = 8.0;
+            for p in &mut b.particles {
+                p.position = center + (p.position - center) * Vec3::new(1.0, 0.5, 1.0);
+            }
+        }
+        for _ in 0..180 {
+            engine.step(1.0 / 60.0);
+        }
+        let body = engine.get_soft_body(cube).expect("cube survives");
+        let ratio = body.volume() / body.volume_rest;
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "volume ratio {ratio}, want ~1.0"
+        );
+        let (min_y, max_y) = body
+            .particles
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p.position.y), hi.max(p.position.y))
+            });
+        assert!(
+            (max_y - min_y - 1.0).abs() < 0.15,
+            "height {}, want ~1.0",
+            max_y - min_y
+        );
+        assert!(
+            body.particles.iter().all(|p| p.position.is_finite()),
+            "no NaN in cube"
+        );
+    }
+
+    /// A soft cube dropped on a static floor must rest on it (D1.4): the
+    /// particle↔rigid coupling holds the bottom layer at `contact_radius`
+    /// without tunneling, while the volume row keeps the cube from
+    /// crushing through.
+    #[test]
+    fn soft_cube_rests_on_static_floor() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -5.0, 0.0),
+            Vec3::splat(5.0),
+            0.0,
+        ));
+        let cube = engine.add_soft_body(SoftBody::soft_cube(
+            Vec3::new(-0.5, 2.0, -0.5),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        ));
+        engine.get_soft_body_mut(cube).expect("cube mut").damping = 4.0;
+        for _ in 0..240 {
+            engine.step(1.0 / 60.0);
+        }
+        let body = engine.get_soft_body(cube).expect("cube survives");
+        // Floor top at y=0, particle radius 0.1: bottom layer rests at ≈0.1.
+        let min_y = body
+            .particles
+            .iter()
+            .map(|p| p.position.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            min_y > -0.05 && min_y < 0.25,
+            "bottom layer at {min_y}, want ~0.1"
+        );
+        let ratio = body.volume() / body.volume_rest;
+        assert!((ratio - 1.0).abs() < 0.1, "volume ratio {ratio}, want ~1.0");
+        assert!(
+            body.particles.iter().all(|p| p.position.is_finite()),
+            "no NaN in landed cube"
         );
     }
 }

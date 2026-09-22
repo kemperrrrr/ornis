@@ -101,16 +101,53 @@ pub enum ClothPin {
 ///
 /// Constraints reference particle indices of this body only (no cross-body
 /// rows in D1.1); invalid indices are rejected by the builders, and the
-/// solver skips degenerate rows defensively.
+/// solver skips degenerate rows defensively. `triangles` is an optional
+/// closed, consistently-wound surface driving the global volume constraint
+/// (D1.3, XPBD balloon model — zero triangles disables it).
 #[derive(Debug, Clone)]
 pub struct SoftBody {
     /// Particles in index order.
     pub particles: Vec<Particle>,
     /// Distance rows over the particles.
     pub constraints: Vec<DeformConstraint>,
+    /// Closed surface triangles (outward-wound) for the volume row.
+    pub triangles: Vec<[usize; 3]>,
+    /// Rest volume (m³) captured at build time.
+    pub volume_rest: f32,
+    /// Volume compliance `α` (0 = incompressible).
+    pub volume_compliance: f32,
+    /// Accumulated volume multiplier, live within one substep only.
+    pub volume_lambda: f32,
+    /// Velocity damping rate (1/s, 0 = undamped): velocities retain
+    /// `exp(−damping·h)` per substep — a timestep-independent exponential
+    /// decay, unlike a per-substep fraction (which would make the terminal
+    /// velocity depend on the substep count). XPBD projection is nearly
+    /// energy-preserving, so undamped bodies jiggle around equilibrium
+    /// instead of settling — production solvers (Vellum included) all
+    /// carry this control. Negative values are clamped to 0 on use;
+    /// builders default to 0.
+    pub damping: f32,
+    /// Particle radius (m) for deformable↔rigid coupling (D1.4): each
+    /// particle collides as a sphere of this radius via `shape_distance`.
+    /// Zero disables the coupling for the whole body.
+    pub contact_radius: f32,
 }
 
 impl SoftBody {
+    /// Bare body without a volume surface (volume row disabled).
+    fn raw(particles: Vec<Particle>, constraints: Vec<DeformConstraint>) -> Self {
+        Self {
+            particles,
+            constraints,
+            triangles: Vec::new(),
+            volume_rest: 0.0,
+            volume_compliance: 0.0,
+            volume_lambda: 0.0,
+            damping: 0.0,
+            contact_radius: 0.0,
+        }
+    }
+
     /// Rope/cable: `count` particles from `origin` along `dir` (normalized
     /// internally) spaced `spacing` apart, each of `mass`, linked by
     /// structural rows of `compliance`. The first particle is pinned.
@@ -142,10 +179,9 @@ impl SoftBody {
                 lambda: 0.0,
             });
         }
-        Self {
-            particles,
-            constraints,
-        }
+        let mut body = Self::raw(particles, constraints);
+        body.contact_radius = spacing * 0.2;
+        body
     }
 
     /// Cloth sheet in the local XY plane: `cols × rows` particles from
@@ -242,10 +278,82 @@ impl SoftBody {
                 }
             }
         }
-        Self {
-            particles,
-            constraints,
+        let mut body = Self::raw(particles, constraints);
+        body.contact_radius = spacing * 0.2;
+        body
+    }
+
+    /// Soft cube of edge `size` at `origin` (minimum corner): 8 particles,
+    /// 12 structural edges of `edge_compliance`, and a closed 12-triangle
+    /// surface driving the global volume row of `volume_compliance`
+    /// (0 = incompressible). Triangle winding is fixed up programmatically
+    /// (each face must point away from the centroid), so the builder is
+    /// correct by construction rather than by hand-checked order.
+    pub fn soft_cube(
+        origin: Vec3,
+        size: f32,
+        mass: f32,
+        edge_compliance: f32,
+        volume_compliance: f32,
+    ) -> Self {
+        let corner = |x: u32, y: u32, z: u32| {
+            origin + Vec3::new(x as f32 * size, y as f32 * size, z as f32 * size)
+        };
+        let mut particles = Vec::with_capacity(8);
+        for z in 0..2 {
+            for y in 0..2 {
+                for x in 0..2 {
+                    particles.push(Particle::new(corner(x, y, z), mass));
+                }
+            }
         }
+        // Index = x + 2*y + 4*z.
+        let mut constraints = Vec::with_capacity(12);
+        for a in 0..8 {
+            for b in (a + 1)..8 {
+                let diff = (a ^ b) as u32;
+                // Exactly one coordinate differs: cube edge.
+                if diff == 1 || diff == 2 || diff == 4 {
+                    constraints.push(DeformConstraint {
+                        a,
+                        b,
+                        rest: size,
+                        compliance: edge_compliance,
+                        kind: DeformKind::Structural,
+                        lambda: 0.0,
+                    });
+                }
+            }
+        }
+        // Six quad faces as corner loops; triangulated + outward-fixed below.
+        let quads: [[usize; 4]; 6] = [
+            [1, 3, 7, 5],
+            [0, 4, 6, 2],
+            [2, 6, 7, 3],
+            [0, 1, 5, 4],
+            [4, 5, 7, 6],
+            [0, 2, 3, 1],
+        ];
+        let positions: Vec<Vec3> = particles.iter().map(|p| p.position).collect();
+        let center = positions.iter().sum::<Vec3>() / positions.len() as f32;
+        let mut triangles = Vec::with_capacity(12);
+        for [a, b, c, d] in quads {
+            for (x, mut y, mut z) in [(a, b, c), (a, c, d)] {
+                let n = (positions[y] - positions[x]).cross(positions[z] - positions[x]);
+                let face_center = (positions[x] + positions[y] + positions[z]) / 3.0;
+                if n.dot(face_center - center) < 0.0 {
+                    std::mem::swap(&mut y, &mut z);
+                }
+                triangles.push([x, y, z]);
+            }
+        }
+        let volume_rest = mesh_volume(&positions, &triangles).abs();
+        let mut body = Self::raw(particles, constraints);
+        body.triangles = triangles;
+        body.volume_rest = volume_rest;
+        body.volume_compliance = volume_compliance;
+        body.contact_radius = size * 0.1;
+        body
     }
 
     /// Number of particles.
@@ -313,18 +421,88 @@ impl SoftBody {
         for c in &mut self.constraints {
             c.lambda = 0.0;
         }
+        self.volume_lambda = 0.0;
     }
 
-    /// BDF1-style velocity update from the solved positions.
+    /// BDF1-style velocity update from the solved positions, with the
+    /// body's exponential velocity damping applied.
     pub fn update_velocities(&mut self, h: f32) {
+        let retain = (-self.damping.max(0.0) * h).exp();
         for p in &mut self.particles {
             if p.inv_mass <= 0.0 {
                 p.velocity = Vec3::ZERO;
                 continue;
             }
-            p.velocity = (p.position - p.prev_position) / h;
+            p.velocity = (p.position - p.prev_position) / h * retain;
         }
     }
+
+    /// Global volume row (XPBD balloon model, Macklin et al. 2016 §6.5):
+    /// `C = (V − V0)/V0` over the closed surface, solved as one equality.
+    /// Skipped without triangles or with a degenerate rest volume.
+    pub fn solve_volume(&mut self, h: f32) {
+        if self.triangles.is_empty() || self.volume_rest <= 1e-12 {
+            return;
+        }
+        let positions: Vec<Vec3> = self.particles.iter().map(|p| p.position).collect();
+        let volume = mesh_volume(&positions, &self.triangles);
+        let c = (volume - self.volume_rest) / self.volume_rest;
+        // Per-particle gradients, accumulated over adjacent triangles:
+        // triangle (a,b,c) contributes (pb×pc)/6, (pc×pa)/6, (pa×pb)/6.
+        let mut grads = vec![Vec3::ZERO; self.particles.len()];
+        let mut valid = true;
+        for [a, b, c] in &self.triangles {
+            if *a >= self.particles.len()
+                || *b >= self.particles.len()
+                || *c >= self.particles.len()
+            {
+                valid = false;
+                break;
+            }
+            let (pa, pb, pc) = (positions[*a], positions[*b], positions[*c]);
+            grads[*a] += pb.cross(pc) / (6.0 * self.volume_rest);
+            grads[*b] += pc.cross(pa) / (6.0 * self.volume_rest);
+            grads[*c] += pa.cross(pb) / (6.0 * self.volume_rest);
+        }
+        if !valid {
+            return;
+        }
+        let mut w = 0.0;
+        for (p, g) in self.particles.iter().zip(&grads) {
+            w += p.inv_mass * g.length_squared();
+        }
+        if w <= 0.0 {
+            return;
+        }
+        let alpha_tilde = self.volume_compliance / (h * h);
+        let dlambda = crate::xpbd::delta_lambda(c, self.volume_lambda, w, alpha_tilde);
+        self.volume_lambda += dlambda;
+        if dlambda != 0.0 {
+            for (p, g) in self.particles.iter_mut().zip(&grads) {
+                p.position += *g * (dlambda * p.inv_mass);
+            }
+        }
+    }
+
+    /// Live volume of the closed surface (m³, signed by winding).
+    pub fn volume(&self) -> f32 {
+        let positions: Vec<Vec3> = self.particles.iter().map(|p| p.position).collect();
+        mesh_volume(&positions, &self.triangles)
+    }
+}
+
+/// Signed volume of a closed triangle surface (divergence theorem):
+/// `V = Σ (pa × pb)·pc / 6`. Positive for outward-wound meshes.
+fn mesh_volume(positions: &[Vec3], triangles: &[[usize; 3]]) -> f32 {
+    let mut volume = 0.0;
+    for [a, b, c] in triangles {
+        if let (Some(pa), Some(pb), Some(pc)) =
+            (positions.get(*a), positions.get(*b), positions.get(*c))
+        {
+            volume += pa.cross(*pb).dot(*pc) / 6.0;
+        }
+    }
+    volume
 }
 
 /// Shared read of two distinct particles (`None` for bad indices).
@@ -403,12 +581,12 @@ mod tests {
     /// skipped, never panicking or producing NaN.
     #[test]
     fn degenerate_rows_are_skipped() {
-        let mut body = SoftBody {
-            particles: vec![
+        let mut body = SoftBody::raw(
+            vec![
                 Particle::new(Vec3::ZERO, 1.0),
                 Particle::new(Vec3::ZERO, 1.0),
             ],
-            constraints: vec![
+            vec![
                 DeformConstraint {
                     a: 0,
                     b: 0,
@@ -434,7 +612,7 @@ mod tests {
                     lambda: 0.0,
                 },
             ],
-        };
+        );
         body.integrate(1.0 / 1200.0, Vec3::new(0.0, -9.81, 0.0));
         body.solve_constraints(1.0 / 1200.0);
         body.update_velocities(1.0 / 1200.0);
