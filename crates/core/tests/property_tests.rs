@@ -2,26 +2,24 @@
 //!
 //! We check invariants, not examples: sparse-set ComponentStore
 //! (insert/remove/get/iter/iter_zip against a HashMap model),
-//! generational EntityAllocator (slot recycling, stale handles),
-//! PageTable
-//! (sparse indices over a large range) and pure AABB/Ray geometry.
+//! generational EntityAllocator (slot recycling, stale handles) and
+//! PageTable (sparse indices over a large range).
+//!
+//! AABB/Ray geometry invariants used to live here but moved to
+//! `ornis-physics/tests/math_props.rs` so `cargo test -p ornis-core`
+//! no longer builds the physics crate.
 //!
 //! The case count is bounded so `cargo test` stays fast.
 
 use std::collections::{HashMap, HashSet};
 
 use ornis_core::{ComponentStore, Entity, EntityAllocator, PageTable};
-use ornis_physics::math::{AABB, Ray};
 use proptest::prelude::*;
 
 const CASES: u32 = 64;
 
 fn entity_strategy() -> impl Strategy<Value = Entity> {
     (0u32..512, 0u32..4).prop_map(|(id, g)| Entity::new_with_gen(id, g))
-}
-
-fn vec3_strategy() -> impl Strategy<Value = glam::Vec3> {
-    (-1e4f32..1e4, -1e4f32..1e4, -1e4f32..1e4).prop_map(|(x, y, z)| glam::Vec3::new(x, y, z))
 }
 
 /// Operation on ComponentStore for the model-based test.
@@ -292,58 +290,5 @@ proptest! {
             prop_assert_eq!(table.get(neighbour), Some(&u64::default()));
         }
         prop_assert_eq!(table.get(i), Some(&v));
-    }
-
-    // ── physics math: AABB / Ray ─────────────────────────────────────
-
-    /// AABB::from_points contains every sampled point.
-    #[test]
-    fn aabb_from_points_contains_all(
-        points in proptest::collection::vec(vec3_strategy(), 1..32)
-    ) {
-        let aabb = AABB::from_points(&points);
-        for p in &points {
-            prop_assert!(aabb.contains_point(*p));
-        }
-    }
-
-    /// expand(point) grows the AABB to contain both old points and the new one.
-    #[test]
-    fn aabb_expand_keeps_contents(
-        points in proptest::collection::vec(vec3_strategy(), 1..32),
-        extra in vec3_strategy(),
-    ) {
-        let mut aabb = AABB::from_points(&points);
-        aabb.expand(extra);
-        for p in points.iter().chain(std::iter::once(&extra)) {
-            prop_assert!(aabb.contains_point(*p));
-        }
-    }
-
-    /// overlaps is commutative.
-    #[test]
-    fn aabb_overlaps_is_commutative(
-        a_min in vec3_strategy(),
-        a_size in vec3_strategy(),
-        b_min in vec3_strategy(),
-        b_size in vec3_strategy(),
-    ) {
-        let a = AABB::new(a_min, a_min + a_size.abs());
-        let b = AABB::new(b_min, b_min + b_size.abs());
-        prop_assert_eq!(a.overlaps(&b), b.overlaps(&a));
-    }
-
-    /// Ray::point_at(t) == origin + direction * t.
-    #[test]
-    fn ray_point_at_is_linear(
-        origin in vec3_strategy(),
-        direction in vec3_strategy(),
-        t in -1e3f32..1e3,
-    ) {
-        let ray = Ray::new(origin, direction);
-        let expected = origin + direction * t;
-        let got = ray.point_at(t);
-        let eps = 1e-3 * (1.0 + expected.length());
-        prop_assert!((got - expected).length() <= eps);
     }
 }

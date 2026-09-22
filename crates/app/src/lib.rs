@@ -14,7 +14,7 @@ use ornis_core::{
 use ornis_physics::RigidBody;
 use ornis_render::scene::TransformDesc;
 
-pub use ornis_core::{GameplayPlugin, Position, Velocity, install_gameplay};
+pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 
 pub mod assets;
 pub mod game_world;
@@ -342,9 +342,10 @@ mod tests {
 
     #[test]
     fn browser_wasd_input_drives_player_through_gameplay_to_physics() {
-        use ornis_core::{InputState, Position};
+        use ornis_core::InputState;
+        use ornis_gameplay::Position;
         let mut engine = Engine::new();
-        ornis_core::install_gameplay(&mut engine);
+        ornis_gameplay::install_gameplay(&mut engine);
         install_gameplay_physics_bridge(&mut engine);
         struct MiniPhysics;
         impl ornis_core::System for MiniPhysics {
@@ -389,7 +390,7 @@ mod tests {
             .world_mut()
             .store_mut()
             .unwrap()
-            .insert(e, ornis_core::Player);
+            .insert(e, ornis_gameplay::Player);
         engine
             .world_mut()
             .store_mut()

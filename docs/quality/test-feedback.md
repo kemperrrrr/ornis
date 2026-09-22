@@ -7,7 +7,9 @@
 ## Команды
 
 ```sh
-# Быстро (дефолт, gate): ~5 с тест-рантайма, 333 passed / 4 ignored
+# Быстро (дефолт, gate): ~5 с тест-рантайма, 337 passed / 4 ignored
+# (включая `math_props`: 4 детерминированных AABB/Ray-инварианта,
+# переехавших из `ornis-core/tests/property_tests.rs`)
 cargo test -p ornis-physics
 
 # Только ignored-набор (2 тяжёлых гейта + 2 regenerate-хелпера)

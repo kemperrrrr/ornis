@@ -36,7 +36,14 @@
 - **Дизайн анимации — DONE как документ** (`docs/animation-design.md`):
   объектная (фаза A, S) + скелетная (фазы B–E, M–L), CPU-скининг
   первым, GPU — позже; стык с glTF-треком расписан. Кода нет.
-- **Волна 2 — DONE (проверено): `ornis-input` + `ornis-gltf`.**
+- **Волна 2 — DONE (проверено): `ornis-input` + `ornis-gltf` +
+  `ornis-gameplay` + объектная анимация.**
+  Gameplay извлечён из core под корень (`RenderWorldView` удалён);
+  `anim_sample` (фаза A) в render с тестами, wiring отдельно.
+- **Развязка `cargo test -p ornis-core` от физики — DONE.** Единственная
+  зацепка был 1 импорт в `property_tests.rs`; 4 proptest-инварианта
+  переехали в `physics/tests/math_props.rs` как детерминированные LCG.
+  Core lib: 147 тестов за 0.05 с рантайма, физики в графе больше нет.
   Input вынесен из core в `crates/input` (`InputState` 1:1 +
   `KeyCode`/`MouseButton` + `InputMap`/`default_gameplay()`;
   `player_input` без магических кодов, провод `pressed_keys` цел,

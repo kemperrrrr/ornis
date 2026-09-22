@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 ornis-core = { path = "../core" }
+ornis-gameplay = { path = "../gameplay" }
 cpal = "0.18"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "ogg", "mp3", "flac", "pcm"] }
 crossbeam-channel = "0.5"

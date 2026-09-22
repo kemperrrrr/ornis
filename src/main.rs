@@ -17,7 +17,7 @@ use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::bridge::install_gameplay_audio_bridge;
 #[cfg(not(feature = "editor-only"))]
-use ornis_core::install_gameplay;
+use ornis_gameplay::install_gameplay;
 
 // Compiled in both modes so its unit tests run under a plain `cargo test`;
 // native mode also installs the physics systems into the showcase Engine.

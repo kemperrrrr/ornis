@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 
 use glam::Vec3;
-use ornis_core::{Entity, Position, SmartStore};
+use ornis_core::{Entity, SmartStore};
+use ornis_gameplay::Position;
 
 use crate::backend::{AudioBackend, AudioBackendTrait};
 use crate::source::{AudioClip, AudioSource, AudioState, MixInput, SpatialParams};

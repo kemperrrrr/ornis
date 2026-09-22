@@ -18,7 +18,6 @@ mod component_store;
 mod dispatcher;
 mod engine;
 mod entity;
-mod gameplay;
 /// Stable scalar wrappers for GPU-compatible buffer representations.
 pub mod gpu_types;
 #[cfg(feature = "lock-free")]
@@ -45,10 +44,6 @@ pub use engine::{
     DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, FixedTime, Stage, Time,
 };
 pub use entity::{Entity, EntityAllocator};
-pub use gameplay::{
-    GameplayPlugin, Player, Position, RenderWorldView, Velocity, install_gameplay, physics_push,
-    player_input, transform_update,
-};
 pub use gpu_types::GpuBool;
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Backend-neutral input (re-exported from `ornis-input` so downstream

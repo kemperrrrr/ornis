@@ -217,9 +217,17 @@ Hot reload сцены ✅: editor-world следит за mtime файла сц�
 Следом: wiring в загрузку сцен, текстуры, скин по контракту
 `docs/animation-design.md` §4.
 ✅ **2026-09-22 — input отдельным крейтом** (`crates/input`,
-`ornis-input`): `InputState` + `KeyCode`/`MouseButton` + action mapping
+`ornis-input`): `InputState` 1:1 + `KeyCode`/`MouseButton` + action mapping
 (`InputMap`, `default_gameplay()`); `player_input` без магических
 кодов; проводной `pressed_keys: Vec<u32>` неизменен.
+✅ **2026-09-22 — gameplay отдельным крейтом** (`crates/gameplay`,
+`ornis-gameplay`): `Player`/`Velocity`/`Position` + три системы +
+`GameplayPlugin` переехали из core под корень; `RenderWorldView`
+(нулевые потребители) удалён; потребители (app, бинарь, audio, render)
+правлены напрямую, без алиасов.
+✅ **2026-09-22 — объектная анимация, фаза A** (`crates/render/src/anim.rs`):
+`AnimClip`/`AnimPlayer`, `anim_sample` в PostFrame (`RigidBody`-сущности
+пропускаются, mirror в `Position` без insert); wiring в сессию — отдельно.
 
 ### e. Качество (продолжение)
 

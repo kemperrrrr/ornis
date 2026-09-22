@@ -1828,6 +1828,7 @@ dependencies = [
  "ornis-app",
  "ornis-audio",
  "ornis-core",
+ "ornis-gameplay",
  "ornis-physics",
  "ornis-render",
  "pollster",
@@ -1844,6 +1845,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "ornis-core",
+ "ornis-gameplay",
  "ornis-physics",
  "ornis-render",
  "serde",
@@ -1858,6 +1860,7 @@ dependencies = [
  "glam",
  "js-sys",
  "ornis-core",
+ "ornis-gameplay",
  "symphonia",
  "wasm-bindgen",
  "web-sys",
@@ -1876,12 +1879,20 @@ dependencies = [
  "mutants",
  "ornis-input",
  "ornis-macros",
- "ornis-physics",
  "ornis-schedule",
  "proptest",
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ornis-gameplay"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "ornis-core",
+ "ornis-input",
 ]
 
 [[package]]
@@ -1958,6 +1969,7 @@ dependencies = [
  "glam",
  "naga",
  "ornis-core",
+ "ornis-gameplay",
  "ornis-macros",
  "ornis-mesh-editor",
  "ornis-schedule",

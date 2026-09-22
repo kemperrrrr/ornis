@@ -1,8 +1,8 @@
 //! World↔audio bridge for the unified [`Engine`](ornis_core::Engine) schedule.
 //!
 //! Mirrors [`install_gameplay_physics_bridge`](ornis_app) (if that helper is
-//! unavailable, see `ornis-app/src/lib.rs`): gameplay writes authoritative
-//! [`Position`](ornis_core::Position), the bridge propagates it into the
+//! unavailable, see `ornis-app/src/lib.rs`): gameplay writes the authoritative
+//! `Position` lane, the bridge propagates it into the
 //! audio domain, and the [`AudioPlugin`](crate::schedule::AudioPlugin)
 //! stepping system consumes the result in the same frame DAG:
 //!
@@ -13,14 +13,15 @@
 //! Two halves, both frame-rate (audio has no fixed-step solver state):
 //!
 //! * source positions — [`AudioEngine`](crate::engine::AudioEngine) reads the
-//!   gameplay [`Position`](ornis_core::Position) lane first, raw `Vec3` only
+//!   gameplay `Position` lane first, raw `Vec3` only
 //!   as back-compat, so no copy system is needed;
 //! * listener pose/gain — [`AudioListenerSyncSystem`] (below) pushes the
 //!   world listener into the [`AudioHost`](crate::schedule::AudioHost) once
 //!   per frame, after motion and before `audio_step`.
 
 use glam::Vec3;
-use ornis_core::{Engine, Position, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Engine, Resources, SmartStore, System, SystemAccess};
+use ornis_gameplay::Position;
 
 use crate::schedule::AudioHost;
 use crate::source::{AudioListener, AudioSource};
@@ -28,7 +29,7 @@ use crate::source::{AudioListener, AudioSource};
 /// Pushes the world listener into the [`AudioHost`] once per frame.
 ///
 /// Listener entity = first entity carrying an [`AudioListener`] component;
-/// its pose is read from gameplay [`Position`](ornis_core::Position) (raw
+/// its pose is read from the gameplay `Position` lane (raw
 /// `Vec3` as back-compat), its gain from the component. Without a marked
 /// entity the [`AudioListener`] *resource* supplies the master gain and the
 /// pose stays wherever [`AudioEngine::set_listener`](crate::engine::AudioEngine::set_listener)
@@ -90,7 +91,7 @@ impl System for AudioListenerSyncSystem {
 /// ordered after motion (`transform_update`, `body_to_transform`,
 /// best-effort) and before `audio_step` (best-effort), so spatialization
 /// observes this frame's positions. Source positions need no copy system:
-/// the engine reads [`Position`](ornis_core::Position) directly.
+/// the engine reads the gameplay `Position` lane directly.
 ///
 /// Idempotent: a second call leaves a single `audio_listener_sync` system.
 /// Safe without [`AudioPlugin`](crate::schedule::AudioPlugin): the sync is

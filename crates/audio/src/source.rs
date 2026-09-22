@@ -68,7 +68,7 @@ impl Default for AudioSource {
 /// ([`install_gameplay_audio_bridge`](crate::bridge::install_gameplay_audio_bridge)):
 /// as a `World` resource it supplies the master gain when no listener entity
 /// is marked; as a component it marks the listener entity (pose read from
-/// gameplay [`Position`](ornis_core::Position) on the same entity) and its
+/// gameplay `Position` lane on the same entity) and its
 /// gain wins over the resource.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioListener {

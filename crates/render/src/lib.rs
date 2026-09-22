@@ -2,6 +2,8 @@
 //! frame-plan layer ([`transient_pool`]/[`system`]/[`frame_exec`]/[`frame_passes`]),
 //! procedural meshes, scene descriptions and the WGSL shader assembly.
 #![warn(missing_docs)]
+/// Object animation: cold clip lanes plus the hot player lane (`anim_sample`).
+mod anim;
 /// Client-side orbit camera and backend-neutral input consumer.
 pub mod camera;
 /// Final PBR/UI blend pass (legacy path).
@@ -42,6 +44,9 @@ pub mod transform;
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
+pub use anim::{
+    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, Key, KeyTrack, NoPhysics,
+};
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{

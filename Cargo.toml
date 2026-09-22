@@ -13,6 +13,7 @@ members = [
     "crates/materialx",
     "crates/wasm",
     "crates/app",
+    "crates/gameplay",
     "crates/editor-backend",
     "crates/mesh-editor",
     "crates/gltf",
@@ -41,6 +42,7 @@ license.workspace = true
 
 [dependencies]
 ornis-core = { path = "crates/core" }
+ornis-gameplay = { path = "crates/gameplay" }
 ornis-physics = { path = "crates/physics" }
 ornis-render = { path = "crates/render" }
 ornis-app = { path = "crates/app" }

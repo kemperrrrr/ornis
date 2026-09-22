@@ -1,26 +1,26 @@
 //! Gameplay consumers + unified runtime without extract.
 //!
 //! Provides the canonical gameplay building blocks over the shared
-//! [`crate::World`]/[`crate::Engine`] host. The three reference systems
-//! are:
+//! [`ornis_core::World`]/[`ornis_core::Engine`] host. The three reference
+//! systems are:
 //!
-//! * [`player_input`] — consumes [`crate::InputState`] and writes intent
-//!   into gameplay components;
+//! * [`player_input`] — consumes [`ornis_input::InputState`] and writes
+//!   intent into gameplay components;
 //! * [`physics_push`] — applies gameplay intent to physics-adjacent state;
 //! * [`transform_update`] — propagates time-stepped motion into world
 //!   placement.
 //!
 //! They are registered through [`GameplayPlugin`] / [`install_gameplay`] into
-//! the unified [`crate::Engine`] schedule so that [`crate::Schedule`] plans
-//! physics, render and gameplay as one DAG over a single [`crate::World`].
-//! Render extraction remains an optional view ([`RenderWorldView`]) rather than
-//! a mandatory copy boundary.
+//! the unified [`ornis_core::Engine`] schedule so that
+//! [`ornis_core::Schedule`] plans physics, render and gameplay as one DAG
+//! over a single [`ornis_core::World`].
+
+#![warn(missing_docs)]
 
 use glam::Vec3;
 
-use crate::{
-    Engine, FixedTime, InputMap, InputState, Resources, SmartStore, System, SystemAccess, Time,
-};
+use ornis_core::{Engine, FixedTime, Resources, SmartStore, System, SystemAccess, Time};
+use ornis_input::{InputMap, InputState};
 
 /// Marker for the locally controlled player entity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,64 +51,10 @@ impl Default for Position {
     }
 }
 
-/// Lightweight view over the unified [`crate::World`] for render consumers.
-///
-/// The view borrows the world and reads the hot lanes directly — no copy
-/// through a second `Engine`/`World` is required. Call
-/// [`RenderWorldView::extract_snapshot`] to obtain a CPU-side snapshot when
-/// needed. The snapshot extraction itself remains schedule-driven when
-/// [`GameplayPlugin`] installs the render view system, but this view makes
-/// that boundary optional.
-pub struct RenderWorldView<'a> {
-    world: &'a crate::World,
-}
-
-impl<'a> RenderWorldView<'a> {
-    /// Creates a view over `world`.
-    pub fn new(world: &'a crate::World) -> Self {
-        Self { world }
-    }
-
-    /// Returns the number of entities that have a [`Position`] component.
-    pub fn position_count(&self) -> usize {
-        self.world
-            .store()
-            .and_then(|store| store.read_lane::<Position>().map(|lane| lane.len()))
-            .unwrap_or(0)
-    }
-
-    /// Reads the authoritative store directly; callers may project their own
-    /// render snapshot without going through a serialization boundary.
-    pub fn store(&self) -> Option<&SmartStore> {
-        self.world.store()
-    }
-
-    /// Returns a snapshot of all [`Position`] + [`Velocity`] pairs.
-    pub fn snapshot_positions(&self) -> Vec<(crate::Entity, Vec3, Vec3)> {
-        let Some(store) = self.world.store() else {
-            return Vec::new();
-        };
-        let Some(pos_lane) = store.read_lane::<Position>() else {
-            return Vec::new();
-        };
-        let vel_lane = store.read_lane::<Velocity>();
-        let mut out = Vec::new();
-        for (&entity, pos) in pos_lane.entities.iter().zip(&pos_lane.data) {
-            let vel = vel_lane
-                .as_ref()
-                .and_then(|lane| lane.get(entity))
-                .map(|v| v.0)
-                .unwrap_or(Vec3::ZERO);
-            out.push((entity, pos.0, vel));
-        }
-        out
-    }
-}
-
 /// Installs the three canonical gameplay systems into `engine`.
 ///
-/// * `player_input`   — once-per-frame [`crate::schedule::Schedule`] (variable)
-/// * `physics_push`   — fixed [`crate::Engine::fixed_schedule_mut`] (bounded)
+/// * `player_input`   — once-per-frame [`ornis_core::Schedule`] (variable)
+/// * `physics_push`   — fixed [`ornis_core::Engine::fixed_schedule_mut`] (bounded)
 /// * `transform_update` — once-per-frame (after fixed steps)
 ///
 /// The schedule declarations ensure deterministic levels:
@@ -225,7 +171,7 @@ pub fn player_input(resources: &Resources, speed: f32) {
     let Some(player_lane) = store.read_lane::<Player>() else {
         return;
     };
-    let entities: Vec<crate::Entity> = player_lane.entities.clone();
+    let entities: Vec<ornis_core::Entity> = player_lane.entities.clone();
     drop(player_lane);
     let Some(mut vel_lane) = store.write_lane::<Velocity>() else {
         return;
@@ -259,7 +205,7 @@ pub fn physics_push(resources: &Resources) {
     let Some(vel_lane) = store.read_lane::<Velocity>() else {
         return;
     };
-    let entities: Vec<(crate::Entity, Vec3)> = vel_lane
+    let entities: Vec<(ornis_core::Entity, Vec3)> = vel_lane
         .entities
         .iter()
         .zip(&vel_lane.data)
@@ -304,7 +250,7 @@ pub fn transform_update(resources: &Resources) {
     let Some(vel_lane) = store.read_lane::<Velocity>() else {
         return;
     };
-    let snapshot: Vec<(crate::Entity, Vec3)> = vel_lane
+    let snapshot: Vec<(ornis_core::Entity, Vec3)> = vel_lane
         .entities
         .iter()
         .zip(&vel_lane.data)
@@ -400,10 +346,11 @@ impl System for TransformUpdateSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Engine, KeyCode};
     use glam::Vec3;
+    use ornis_core::Engine;
+    use ornis_input::KeyCode;
 
-    fn spawn_player(engine: &mut Engine) -> crate::Entity {
+    fn spawn_player(engine: &mut Engine) -> ornis_core::Entity {
         let entity = engine.world().store().unwrap().create_entity();
         engine
             .world_mut()
@@ -418,7 +365,7 @@ mod tests {
         entity
     }
 
-    fn player_velocity(engine: &Engine, entity: crate::Entity) -> Vec3 {
+    fn player_velocity(engine: &Engine, entity: ornis_core::Entity) -> Vec3 {
         engine
             .world()
             .store()
@@ -450,7 +397,7 @@ mod tests {
 
     #[test]
     fn player_input_honors_custom_action_map() {
-        use crate::InputBinding;
+        use ornis_input::InputBinding;
         let mut engine = Engine::new();
         install_gameplay(&mut engine);
         let entity = spawn_player(&mut engine);
@@ -518,28 +465,6 @@ mod tests {
             .0;
         // Fixed delta is 1/60, so motion ~10 * 1/60 = 0.166
         assert!((pos.x - 10.0 / 60.0).abs() < 1e-4, "pos {pos:?}");
-    }
-
-    #[test]
-    fn render_view_is_optional_and_tracks_unified_world() {
-        let mut engine = Engine::new();
-        install_gameplay(&mut engine);
-        let entity = engine.world().store().unwrap().create_entity();
-        engine
-            .world_mut()
-            .store_mut()
-            .unwrap()
-            .insert(entity, Position(Vec3::new(1.0, 2.0, 3.0)));
-        engine
-            .world_mut()
-            .store_mut()
-            .unwrap()
-            .insert(entity, Velocity(Vec3::new(0.0, 1.0, 0.0)));
-        let view = RenderWorldView::new(engine.world());
-        assert_eq!(view.position_count(), 1);
-        let snap = view.snapshot_positions();
-        assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].1, Vec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]

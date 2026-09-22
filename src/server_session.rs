@@ -71,9 +71,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
-use ornis_core::{
-    ComponentMeta, ComponentRegistry, Entity, InputState, SmartStore, World, install_gameplay,
-};
+use ornis_core::{ComponentMeta, ComponentRegistry, Entity, InputState, SmartStore, World};
+use ornis_gameplay::install_gameplay;
 use ornis_physics::RigidBody;
 
 use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
@@ -1251,7 +1250,7 @@ mod tests {
     #[test]
     fn browser_wasd_input_drives_player_through_gameplay() {
         use editor_backend::ipc::BrowserInput;
-        use ornis_core::{Player, Position};
+        use ornis_gameplay::{Player, Position};
 
         let (ev_tx, _ev_rx) = unbounded();
         let mut world = EditorSession::new();

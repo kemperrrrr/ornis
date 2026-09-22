@@ -15,7 +15,8 @@
 use std::sync::Mutex;
 
 use glam::Vec3;
-use ornis_core::{Engine, Position, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Engine, Resources, SmartStore, System, SystemAccess};
+use ornis_gameplay::Position;
 
 use crate::backend::AudioBackendTrait;
 use crate::engine::AudioEngine;
