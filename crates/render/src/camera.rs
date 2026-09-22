@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use glam::{Mat4, Vec3, Vec4};
 use ornis_core::{Engine, InputState, Resources, System, SystemAccess};
 
-use crate::scene::CameraDesc;
+use ornis_assets::scene::CameraDesc;
 
 /// Client-side orbit camera: azimuth/elevation around a target plus a zoom
 /// radius. It is view state, not part of the server-authoritative scene.

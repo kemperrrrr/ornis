@@ -11,13 +11,11 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use glam::{Quat, Vec3};
+use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, Key, KeyTrack};
+use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Engine, Entity, Resources, Stage, System, SystemAccess};
 use ornis_gameplay::Position;
-use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_render::{
-    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, ExtractionStats, Key, KeyTrack,
-    extract_render_data_with_stats,
-};
+use ornis_render::{ExtractionStats, extract_render_data_with_stats};
 
 /// Stand-in for the physics-authoritative lane: `ornis-render` cannot name
 /// `ornis_physics::RigidBody` (no such dependency by design), so tests use

@@ -12,7 +12,9 @@ members = [
     "crates/schedule",
     "crates/materialx",
     "crates/wasm",
+    "crates/animation",
     "crates/app",
+    "crates/assets",
     "crates/gameplay",
     "crates/editor-backend",
     "crates/mesh-editor",
@@ -41,6 +43,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ornis-assets = { path = "crates/assets" }
 ornis-core = { path = "crates/core" }
 ornis-gameplay = { path = "crates/gameplay" }
 ornis-physics = { path = "crates/physics" }

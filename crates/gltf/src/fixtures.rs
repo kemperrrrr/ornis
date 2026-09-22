@@ -1,10 +1,17 @@
 //! In-code fixtures: minimal single-mesh `.glb` / `.gltf` documents.
 //!
 //! Everything is assembled from parts here — no binary blobs in the repo.
+//! Images included: fixture pixels are generated in code and encoded with
+//! the same `image` crate the loader decodes with.
+//!
 //! Test-only: declared under `#[cfg(test)]` in the crate root.
 
 use super::LoadedScene;
 use super::import::load_slice;
+
+/// Built document: JSON, raw buffer bytes, plus sibling files for
+/// [`FixtureImageStorage::External`] images.
+type DocumentParts = (String, Vec<u8>, Vec<(String, Vec<u8>)>);
 
 /// Index storage of the fixture primitive (`None` = unindexed soup).
 #[derive(Debug, Clone)]
@@ -51,6 +58,46 @@ pub(crate) struct FixtureMaterial {
     pub(crate) emission: [f32; 3],
 }
 
+/// Pixel encoding of one fixture image.
+#[derive(Debug, Clone)]
+pub(crate) enum FixtureEncoding {
+    /// Lossless RGBA; decodes bit-exact.
+    Png,
+    /// Lossy RGB (alpha decodes opaque); assert with tolerance.
+    Jpeg,
+}
+
+/// Where the encoded bytes of one fixture image live.
+#[derive(Debug, Clone)]
+pub(crate) enum FixtureImageStorage {
+    /// Appended to the asset buffer, referenced by `bufferView` (+`mimeType`).
+    BufferView,
+    /// Inline `data:<mime>;base64,...` URI (no `mimeType` field — the header
+    /// carries it).
+    DataUri,
+    /// Sibling file for [`load_path`](super::import::load_path) tests; the
+    /// `(filename, bytes)` pairs come out of [`build_glb_with_files`], and
+    /// [`load_slice`](super::import::load_slice) rejects these documents.
+    External(String),
+}
+
+/// One image exercised by the texture tests: generated pixels, no blobs.
+#[derive(Debug, Clone)]
+pub(crate) struct FixtureImage {
+    /// Width in pixels.
+    pub(crate) width: u32,
+    /// Height in pixels.
+    pub(crate) height: u32,
+    /// RGBA source pixels, row-major (JPEG encoding keeps RGB only).
+    pub(crate) rgba: Vec<u8>,
+    /// Lossless or lossy encoding.
+    pub(crate) encoding: FixtureEncoding,
+    /// Buffer view, data URI, or sibling file.
+    pub(crate) storage: FixtureImageStorage,
+    /// Overrides the emitted `mimeType`/`data:`-URI header (error-path tests).
+    pub(crate) mime_override: Option<String>,
+}
+
 /// One primitive + node tree assembled to bytes by the builders below.
 #[derive(Debug, Clone)]
 pub(crate) struct Fixture {
@@ -74,8 +121,17 @@ pub(crate) struct Fixture {
     pub(crate) scene_name: Option<String>,
     /// Scene root node indices (default `vec![0]`).
     pub(crate) roots: Vec<usize>,
-    /// Material (`None` = default material).
+    /// Material (`None` = default material; auto-created when any texture
+    /// slot below is set).
     pub(crate) material: Option<FixtureMaterial>,
+    /// Fixture images (empty = untextured document).
+    pub(crate) images: Vec<FixtureImage>,
+    /// `baseColorTexture` source image (`None` = slot unbound).
+    pub(crate) base_color_texture: Option<usize>,
+    /// `metallicRoughnessTexture` source image (`None` = slot unbound).
+    pub(crate) metallic_roughness_texture: Option<usize>,
+    /// `emissiveTexture` source image (`None` = slot unbound).
+    pub(crate) emissive_texture: Option<usize>,
 }
 
 /// Default single triangle in the XY plane (`+Z` face normal).
@@ -100,6 +156,10 @@ pub(crate) fn triangle() -> Fixture {
         scene_name: Some("tri-scene".to_string()),
         roots: vec![0],
         material: None,
+        images: Vec::new(),
+        base_color_texture: None,
+        metallic_roughness_texture: None,
+        emissive_texture: None,
     }
 }
 
@@ -111,6 +171,20 @@ pub(crate) fn load_triangle() -> LoadedScene {
 /// Assembles a `.glb` container (JSON + BIN chunks, 4-byte aligned).
 pub(crate) fn build_glb(fixture: &Fixture) -> Vec<u8> {
     let (json, bin) = build_parts(fixture, None);
+    assemble_glb(&json, &bin)
+}
+
+/// Assembles a `.glb` plus sibling files for external-image tests.
+///
+/// The second element holds `(filename, bytes)` pairs to write next to the
+/// `.glb` before [`load_path`](super::import::load_path).
+pub(crate) fn build_glb_with_files(fixture: &Fixture) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+    let (json, bin, files) = build_document(fixture, None);
+    (assemble_glb(&json, &bin), files)
+}
+
+/// Packs one JSON/BIN pair into a `.glb` container (4-byte aligned chunks).
+fn assemble_glb(json: &str, bin: &[u8]) -> Vec<u8> {
     let json_pad = json.len().next_multiple_of(4) - json.len();
     let bin_pad = bin.len().next_multiple_of(4) - bin.len();
     let total = 12
@@ -133,7 +207,7 @@ pub(crate) fn build_glb(fixture: &Fixture) -> Vec<u8> {
     if !bin.is_empty() {
         out.extend_from_slice(&((bin.len() + bin_pad) as u32).to_le_bytes());
         out.extend_from_slice(b"BIN\x00");
-        out.extend_from_slice(&bin);
+        out.extend_from_slice(bin);
         out.extend(std::iter::repeat_n(0u8, bin_pad));
     }
     out
@@ -159,6 +233,16 @@ pub(crate) fn build_external_parts() -> (String, Vec<u8>) {
 /// `buffer_uri`: `None` → `BIN`-chunk buffer (`.glb`); `Some(uri)` → that URI
 /// (`.gltf` with `data:` or external reference).
 fn build_parts(fixture: &Fixture, buffer_uri: Option<String>) -> (String, Vec<u8>) {
+    let (json, bin, _) = build_document(fixture, buffer_uri);
+    (json, bin)
+}
+
+/// Builds the document JSON, the raw buffer bytes, plus sibling files.
+///
+/// The third element holds `(filename, bytes)` pairs for
+/// [`FixtureImageStorage::External`] images — empty unless the fixture uses
+/// external image storage.
+fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentParts {
     let mut bin: Vec<u8> = Vec::new();
     // (offset, length) per buffer view, in attribute order.
     let mut views: Vec<(usize, usize)> = Vec::new();
@@ -255,6 +339,39 @@ fn build_parts(fixture: &Fixture, buffer_uri: Option<String>) -> (String, Vec<u8
         weight_accessor = Some((views.len() - 1, joints.len()));
     }
 
+    // Fixture images: encoded with the same `image` crate the loader uses.
+    // Buffer-view images append to the asset buffer; data-URI and external
+    // images only surface in the JSON (plus sibling files below).
+    let mut images_json_parts: Vec<String> = Vec::new();
+    let mut external_files: Vec<(String, Vec<u8>)> = Vec::new();
+    for image in &fixture.images {
+        let encoded = encode_fixture_image(image);
+        let mime = image.mime_override.clone().unwrap_or_else(|| {
+            match image.encoding {
+                FixtureEncoding::Png => "image/png",
+                FixtureEncoding::Jpeg => "image/jpeg",
+            }
+            .to_string()
+        });
+        match &image.storage {
+            FixtureImageStorage::BufferView => {
+                push(&encoded, &mut bin, &mut views);
+                images_json_parts.push(format!(
+                    "{{\"bufferView\":{},\"mimeType\":\"{mime}\"}}",
+                    views.len() - 1
+                ));
+            }
+            FixtureImageStorage::DataUri => {
+                let uri = format!("data:{mime};base64,{}", encode(&encoded));
+                images_json_parts.push(format!("{{\"uri\":\"{uri}\"}}"));
+            }
+            FixtureImageStorage::External(name) => {
+                external_files.push((name.clone(), encoded));
+                images_json_parts.push(format!("{{\"uri\":\"{name}\"}}"));
+            }
+        }
+    }
+
     // Accessor table; attribute accessors reference entries by index.
     let mut accessors: Vec<String> = Vec::new();
     let positions_accessor = accessors.len();
@@ -315,8 +432,31 @@ fn build_parts(fixture: &Fixture, buffer_uri: Option<String>) -> (String, Vec<u8
     let mode_json = fixture
         .mode
         .map_or(String::new(), |mode| format!(",\"mode\":{mode}"));
-    let material_ref_json = fixture
-        .material
+    // Texture slots share one texture table; several slots may point at the
+    // same image (each gets its own texture entry, as real exporters emit).
+    let mut texture_images: Vec<usize> = Vec::new();
+    let slot_texture = |slot: Option<usize>, textures: &mut Vec<usize>| -> Option<usize> {
+        slot.map(|image| {
+            let index = textures.len();
+            textures.push(image);
+            index
+        })
+    };
+    let base_texture = slot_texture(fixture.base_color_texture, &mut texture_images);
+    let mr_texture = slot_texture(fixture.metallic_roughness_texture, &mut texture_images);
+    let emissive_texture = slot_texture(fixture.emissive_texture, &mut texture_images);
+    // A textured primitive needs a material even when the fixture sets none.
+    let material = fixture.material.clone().or(if texture_images.is_empty() {
+        None
+    } else {
+        Some(FixtureMaterial {
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 1.0,
+            roughness: 1.0,
+            emission: [0.0, 0.0, 0.0],
+        })
+    });
+    let material_ref_json = material
         .as_ref()
         .map_or(String::new(), |_| ",\"material\":0".to_string());
     let primitive_json =
@@ -325,7 +465,7 @@ fn build_parts(fixture: &Fixture, buffer_uri: Option<String>) -> (String, Vec<u8
         .mesh_name
         .as_ref()
         .map_or(String::new(), |name| format!(",\"name\":\"{name}\""));
-    let materials_json = match &fixture.material {
+    let materials_json = match &material {
         None => String::new(),
         Some(material) => {
             let base = material
@@ -336,13 +476,37 @@ fn build_parts(fixture: &Fixture, buffer_uri: Option<String>) -> (String, Vec<u8
                 .emission
                 .map(|component| format!("{component:?}"))
                 .join(",");
+            let base_texture_json = base_texture.map_or(String::new(), |index| {
+                format!(",\"baseColorTexture\":{{\"index\":{index}}}")
+            });
+            let mr_texture_json = mr_texture.map_or(String::new(), |index| {
+                format!(",\"metallicRoughnessTexture\":{{\"index\":{index}}}")
+            });
+            let emissive_texture_json = emissive_texture.map_or(String::new(), |index| {
+                format!(",\"emissiveTexture\":{{\"index\":{index}}}")
+            });
             format!(
                 "\"materials\":[{{\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{base}],\
-                \"metallicFactor\":{:?},\"roughnessFactor\":{:?}}},\
-                \"emissiveFactor\":[{emission}]}}],",
+                \"metallicFactor\":{:?},\"roughnessFactor\":{:?}{base_texture_json}\
+                {mr_texture_json}}},\"emissiveFactor\":[{emission}]{emissive_texture_json}}}],",
                 material.metallic, material.roughness
             )
         }
+    };
+    let textures_json = if texture_images.is_empty() {
+        String::new()
+    } else {
+        let parts = texture_images
+            .iter()
+            .map(|image| format!("{{\"source\":{image}}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("\"textures\":[{parts}],")
+    };
+    let images_json = if images_json_parts.is_empty() {
+        String::new()
+    } else {
+        format!("\"images\":[{}],", images_json_parts.join(","))
     };
     let nodes_json = fixture
         .nodes
@@ -409,10 +573,42 @@ fn build_parts(fixture: &Fixture, buffer_uri: Option<String>) -> (String, Vec<u8
         \"scene\":0,\"scenes\":[{{{scene_name_json}\"nodes\":[{roots_json}]}}],\
         \"nodes\":[{nodes_json}],\
         \"meshes\":[{{\"primitives\":[{primitive_json}]{mesh_name_json}}}],\
-        {materials_json}\"buffers\":[{buffer_json}],\
+        {materials_json}{textures_json}{images_json}\"buffers\":[{buffer_json}],\
         \"bufferViews\":[{views_json}],\"accessors\":[{accessors_json}]}}"
     );
-    (json, bin)
+    (json, bin, external_files)
+}
+
+/// Encodes one fixture image with the same `image` decoders the loader uses.
+fn encode_fixture_image(image: &FixtureImage) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let mut out = Vec::new();
+    match image.encoding {
+        FixtureEncoding::Png => image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(
+                &image.rgba,
+                image.width,
+                image.height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("fixture png encodes"),
+        FixtureEncoding::Jpeg => {
+            let rgb: Vec<u8> = image
+                .rgba
+                .chunks_exact(4)
+                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95)
+                .write_image(
+                    &rgb,
+                    image.width,
+                    image.height,
+                    image::ExtendedColorType::Rgb8,
+                )
+                .expect("fixture jpeg encodes")
+        }
+    }
+    out
 }
 
 /// One accessor entry: view, component type, count, data type.

@@ -225,9 +225,16 @@ Hot reload сцены ✅: editor-world следит за mtime файла сц�
 `GameplayPlugin` переехали из core под корень; `RenderWorldView`
 (нулевые потребители) удалён; потребители (app, бинарь, audio, render)
 правлены напрямую, без алиасов.
-✅ **2026-09-22 — объектная анимация, фаза A** (`crates/render/src/anim.rs`):
+✅ **2026-09-22 — объектная анимация, фаза A** (`crates/animation`):
 `AnimClip`/`AnimPlayer`, `anim_sample` в PostFrame (`RigidBody`-сущности
 пропускаются, mirror в `Position` без insert); wiring в сессию — отдельно.
+✅ **2026-09-22 — `ornis-assets` (P0 контентного спринта):** desc-типы +
+`Scene` переехали из render под корень (`git mv`, без алиасов);
+`ColliderDesc` + явные рецепты; проекция `MeshDesc→тело` из бинаря в
+`physics::colliders::body_for` (Sphere-хак удалён, Box/Cylinder строятся,
+скорость сохраняется); gltf-wiring (`scene_from_gltf`) + `AssetServer`
+с consumption dirty-set в тике сессии (replace-семантика, identity gap
+зафиксирован); мёртвый `render::transform::Transform` удалён.
 
 ### e. Качество (продолжение)
 

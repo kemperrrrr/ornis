@@ -5,9 +5,9 @@
 //! for the render-graph-driven equivalent.
 
 use crate::mesh::{Mesh, Vertex};
-use crate::scene::LightDesc;
 use crate::shaders;
 use glam::Mat4;
+use ornis_assets::scene::LightDesc;
 use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
 use ornis_macros::WgslStruct;
 use std::borrow::Cow;

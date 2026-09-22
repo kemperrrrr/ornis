@@ -11,7 +11,9 @@ use editor_backend::{GameEvent, UiCommand};
 #[cfg(not(feature = "editor-only"))]
 use engine_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
-use ornis_app::{GameWorld, install_gameplay_physics_bridge, spawn_static_floor};
+use ornis_app::{
+    GameWorld, install_gameplay_physics_bridge, install_object_animation, spawn_static_floor,
+};
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
@@ -89,7 +91,7 @@ mod native {
     pub use winit::keyboard::PhysicalKey;
     pub use winit::window::WindowAttributes;
 
-    pub use ornis_render::scene::Scene;
+    pub use ornis_assets::scene::Scene;
     pub use ornis_render::{
         OrbitCamera, RenderFrame3D, Renderer3D, Technique, create_sphere, install_orbit_camera,
     };
@@ -269,6 +271,9 @@ impl GameApp {
         }
         // Listener pose/gain sync; no-op until a host is installed.
         install_gameplay_audio_bridge(runtime.engine_mut());
+        // Object animation in the same DAG (after body poses); no-op
+        // until an entity carries animation lanes.
+        install_object_animation(runtime.engine_mut());
         {
             let entities = runtime.entities().to_vec();
             let store = runtime
@@ -279,12 +284,12 @@ impl GameApp {
             for (index, entity) in entities.into_iter().enumerate() {
                 let description = &scene.entities[index];
                 let radius = match &description.mesh {
-                    ornis_render::scene::MeshDesc::Sphere { radius, .. } => *radius,
+                    ornis_assets::scene::MeshDesc::Sphere { radius, .. } => *radius,
                     // Custom/Box/Plane/Cylinder need an explicit validated collider recipe.
-                    ornis_render::scene::MeshDesc::Custom { .. }
-                    | ornis_render::scene::MeshDesc::Box { .. }
-                    | ornis_render::scene::MeshDesc::Plane { .. }
-                    | ornis_render::scene::MeshDesc::Cylinder { .. } => continue,
+                    ornis_assets::scene::MeshDesc::Custom { .. }
+                    | ornis_assets::scene::MeshDesc::Box { .. }
+                    | ornis_assets::scene::MeshDesc::Plane { .. }
+                    | ornis_assets::scene::MeshDesc::Cylinder { .. } => continue,
                 };
                 let mass = if index == 0 { 1.0 } else { 0.0 };
                 store.insert(

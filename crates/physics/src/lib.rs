@@ -27,6 +27,8 @@
 //!   migrates scenes 1:1 and runs the cross-solver fracture pass.
 #![warn(missing_docs)]
 
+/// Mesh/collider recipes → solver bodies (the single projection point).
+pub mod colliders;
 /// Collision detection: broadphase backends, shapes and distance queries.
 pub mod collision;
 mod contact_math;

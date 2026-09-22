@@ -1,22 +1,22 @@
 {
   "version": 2,
   "quality_score": 0.0,
-  "iosp_score": 0.8752093802345059,
-  "violations": 298,
-  "total": 3799,
-  "complexity_warnings": 48,
-  "magic_number_warnings": 1442,
+  "iosp_score": 0.8819554848966613,
+  "violations": 297,
+  "total": 3980,
+  "complexity_warnings": 49,
+  "magic_number_warnings": 1507,
   "nesting_depth_warnings": 13,
-  "function_length_warnings": 85,
+  "function_length_warnings": 86,
   "unsafe_warnings": 9,
-  "error_handling_warnings": 150,
-  "duplicate_groups": 74,
+  "error_handling_warnings": 152,
+  "duplicate_groups": 76,
   "dead_code_warnings": 218,
-  "dead_type_warnings": 6,
-  "fragment_groups": 442,
-  "boilerplate_warnings": 167,
+  "dead_type_warnings": 5,
+  "fragment_groups": 446,
+  "boilerplate_warnings": 168,
   "srp_struct_warnings": 8,
-  "srp_module_warnings": 66,
+  "srp_module_warnings": 67,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
@@ -26,9 +26,9 @@
   "tq_untested_warnings": 118,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
-  "structural_srp_warnings": 25,
+  "structural_srp_warnings": 24,
   "structural_coupling_warnings": 22,
-  "total_findings": 3318,
+  "total_findings": 3391,
   "violation_details": [
     {
       "name": "serve",
@@ -71,9 +71,9 @@
       "line": 8
     },
     {
-      "name": "player_input",
-      "file": "crates/core/src/gameplay.rs",
-      "line": 210
+      "name": "install_object_animation",
+      "file": "crates/app/src/lib.rs",
+      "line": 76
     },
     {
       "name": "ExactWorker::try_recv",
@@ -336,6 +336,11 @@
       "line": 57
     },
     {
+      "name": "player_input",
+      "file": "crates/gameplay/src/lib.rs",
+      "line": 129
+    },
+    {
       "name": "check_builtin_arity",
       "file": "crates/shader-lang/src/lib.rs",
       "line": 368
@@ -459,6 +464,11 @@
       "name": "bench_body_scaling",
       "file": "crates/physics/benches/solver_bench.rs",
       "line": 162
+    },
+    {
+      "name": "body_for",
+      "file": "crates/physics/src/colliders.rs",
+      "line": 26
     },
     {
       "name": "avbd_hessian_ang",
@@ -623,67 +633,67 @@
     {
       "name": "Engine::set_solver_kind",
       "file": "crates/physics/src/lib.rs",
-      "line": 266
+      "line": 268
     },
     {
       "name": "Engine::set_routing",
       "file": "crates/physics/src/lib.rs",
-      "line": 278
+      "line": 280
     },
     {
       "name": "Engine::collapse_to_single",
       "file": "crates/physics/src/lib.rs",
-      "line": 309
+      "line": 311
     },
     {
       "name": "Engine::split_ensure_built",
       "file": "crates/physics/src/lib.rs",
-      "line": 415
+      "line": 417
     },
     {
       "name": "Engine::split_step",
       "file": "crates/physics/src/lib.rs",
-      "line": 427
+      "line": 429
     },
     {
       "name": "Engine::fracture_split",
       "file": "crates/physics/src/lib.rs",
-      "line": 459
+      "line": 461
     },
     {
       "name": "Engine::split_remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 499
+      "line": 501
     },
     {
       "name": "Engine::split_remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 532
+      "line": 534
     },
     {
       "name": "Engine::split_box",
       "file": "crates/physics/src/lib.rs",
-      "line": 569
+      "line": 571
     },
     {
       "name": "Engine::fracture_pass",
       "file": "crates/physics/src/lib.rs",
-      "line": 612
+      "line": 614
     },
     {
       "name": "Engine::step",
       "file": "crates/physics/src/lib.rs",
-      "line": 678
+      "line": 680
     },
     {
       "name": "Engine::remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 706
+      "line": 708
     },
     {
       "name": "Engine::remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 780
+      "line": 782
     },
     {
       "name": "AvbdEngine::update_gear_mem",
@@ -1478,42 +1488,27 @@
     {
       "name": "EditorSession::default",
       "file": "src/server_session.rs",
-      "line": 153
-    },
-    {
-      "name": "EditorSession::spawn_with",
-      "file": "src/server_session.rs",
-      "line": 305
-    },
-    {
-      "name": "EditorSession::load_scene",
-      "file": "src/server_session.rs",
-      "line": 358
-    },
-    {
-      "name": "physics_body_for",
-      "file": "src/server_session.rs",
-      "line": 910
+      "line": 159
     },
     {
       "name": "GameApp::showcase_engine",
       "file": "src/main.rs",
-      "line": 255
+      "line": 257
     },
     {
       "name": "GameApp::process_remote_commands",
       "file": "src/main.rs",
-      "line": 319
+      "line": 324
     },
     {
       "name": "GameApp::window_event",
       "file": "src/main.rs",
-      "line": 467
+      "line": 472
     },
     {
       "name": "GameApp::about_to_wait",
       "file": "src/main.rs",
-      "line": 595
+      "line": 600
     },
     {
       "name": "normalized_rotation",

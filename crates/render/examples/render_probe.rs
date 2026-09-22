@@ -8,8 +8,8 @@
 //! buffer expectations so the browser (WASM) path can be compared against it.
 
 use glam::{Mat4, Quat, Vec3};
+use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
-use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_render::{
     InstanceData, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
 };

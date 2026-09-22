@@ -44,6 +44,13 @@
   зацепка был 1 импорт в `property_tests.rs`; 4 proptest-инварианта
   переехали в `physics/tests/math_props.rs` как детерминированные LCG.
   Core lib: 147 тестов за 0.05 с рантайма, физики в графе больше нет.
+- **P0 `ornis-assets` — DONE (проверено).** Нижний крейт (только core):
+  desc-типы + `Scene` из render, `ColliderDesc` + явные рецепты,
+  проекция в `physics::colliders`, gltf-wiring, `AssetServer` с живым
+  dirty-consumption в тике. `app` больше не тянет render ради типов;
+  Box/Cylinder получили тела (раньше только сферы); reload = replace
+  (identity gap зафиксирован как следующий шаг, не стаб).
+  Попутно: мёртвый `render::transform::Transform` удалён.
   Input вынесен из core в `crates/input` (`InputState` 1:1 +
   `KeyCode`/`MouseButton` + `InputMap`/`default_gameplay()`;
   `player_input` без магических кодов, провод `pressed_keys` цел,

@@ -20,7 +20,7 @@ use glam::{Quat, Vec3};
 use ornis_core::{Entity, Resources, SmartStore, System, SystemAccess, Time};
 use ornis_gameplay::Position;
 
-use crate::scene::{MeshDesc, TransformDesc};
+use ornis_assets::scene::{MeshDesc, TransformDesc};
 
 /// One animation key: the channel value at `time` seconds from clip start.
 ///

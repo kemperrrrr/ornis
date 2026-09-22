@@ -9,7 +9,10 @@ use gltf::{Buffer, Gltf, Node, Primitive};
 
 use crate::base64;
 use crate::geom::{self, Mat4};
-use crate::{ImportError, ImportStats, LoadedEntity, LoadedMaterial, LoadedMesh, LoadedScene};
+use crate::textures::resolve_images;
+use crate::{
+    ImportError, ImportStats, LoadedEntity, LoadedImage, LoadedMaterial, LoadedMesh, LoadedScene,
+};
 
 /// Parses a `.glb` or `.gltf` document held in memory.
 ///
@@ -25,7 +28,8 @@ use crate::{ImportError, ImportStats, LoadedEntity, LoadedMaterial, LoadedMesh, 
 pub fn load_slice(bytes: &[u8]) -> Result<LoadedScene, ImportError> {
     let gltf = Gltf::from_slice(bytes).map_err(|error| ImportError::Parse(error.to_string()))?;
     let buffers = resolve_buffers(&gltf, None)?;
-    import_gltf(&gltf, &buffers)
+    let images = resolve_images(&gltf, &buffers, None)?;
+    import_gltf(&gltf, &buffers, &images)
 }
 
 /// Loads a `.glb` or `.gltf` file; sibling buffer URIs resolve against the
@@ -40,8 +44,10 @@ pub fn load_slice(bytes: &[u8]) -> Result<LoadedScene, ImportError> {
 pub fn load_path(path: &Path) -> Result<LoadedScene, ImportError> {
     let bytes = std::fs::read(path)?;
     let gltf = Gltf::from_slice(&bytes).map_err(|error| ImportError::Parse(error.to_string()))?;
-    let buffers = resolve_buffers(&gltf, path.parent())?;
-    import_gltf(&gltf, &buffers)
+    let parent = path.parent();
+    let buffers = resolve_buffers(&gltf, parent)?;
+    let images = resolve_images(&gltf, &buffers, parent)?;
+    import_gltf(&gltf, &buffers, &images)
 }
 
 /// Resolves every document buffer to owned bytes.
@@ -74,18 +80,18 @@ fn resolve_buffers(gltf: &Gltf, base_dir: Option<&Path>) -> Result<Vec<Vec<u8>>,
 }
 
 /// True for `data:...;base64,...` URIs (any media type).
-fn is_data_uri(uri: &str) -> bool {
+pub(crate) fn is_data_uri(uri: &str) -> bool {
     uri.starts_with("data:") && uri.contains(";base64,")
 }
 
 /// Extracts and decodes the payload after the first comma.
-fn decode_data_uri(uri: &str) -> Result<Vec<u8>, ImportError> {
+pub(crate) fn decode_data_uri(uri: &str) -> Result<Vec<u8>, ImportError> {
     let payload = uri.split_once(',').map_or("", |(_, after)| after);
     base64::decode(payload).map_err(|_| ImportError::InvalidDataUri(short_head(uri)))
 }
 
 /// Rejects absolute paths and remote schemes before any filesystem access.
-fn reject_remote_uri(uri: &str) -> Result<(), ImportError> {
+pub(crate) fn reject_remote_uri(uri: &str) -> Result<(), ImportError> {
     if uri.contains("://") || uri.starts_with("//") || uri.starts_with("data:") {
         return Err(ImportError::ExternalBuffer(uri.to_string()));
     }
@@ -93,18 +99,22 @@ fn reject_remote_uri(uri: &str) -> Result<(), ImportError> {
 }
 
 /// First 48 characters of a URI for error messages (URIs can be megabytes).
-fn short_head(uri: &str) -> String {
+pub(crate) fn short_head(uri: &str) -> String {
     uri.chars().take(48).collect()
 }
 
 /// Traverses the picked scene, flattening node hierarchies to entities.
-fn import_gltf(gltf: &Gltf, buffers: &[Vec<u8>]) -> Result<LoadedScene, ImportError> {
+fn import_gltf(
+    gltf: &Gltf,
+    buffers: &[Vec<u8>],
+    images: &[LoadedImage],
+) -> Result<LoadedScene, ImportError> {
     let document = &gltf.document;
     let scene = document
         .default_scene()
         .or_else(|| document.scenes().next())
         .ok_or(ImportError::NoScene)?;
-    let mut import = Import::new(buffers);
+    let mut import = Import::new(buffers, images);
     for node in scene.nodes() {
         import.visit_node(&node, &geom::IDENTITY);
     }
@@ -119,6 +129,8 @@ fn import_gltf(gltf: &Gltf, buffers: &[Vec<u8>]) -> Result<LoadedScene, ImportEr
 struct Import<'a> {
     /// Resolved buffer bytes indexed by document buffer index.
     buffers: &'a [Vec<u8>],
+    /// Resolved image pixels indexed by document image index.
+    images: &'a [LoadedImage],
     /// Finished entities in traversal order.
     entities: Vec<LoadedEntity>,
     /// Counters (see the crate skip-rules table).
@@ -126,10 +138,11 @@ struct Import<'a> {
 }
 
 impl<'a> Import<'a> {
-    /// Borrows resolved buffers for one traversal.
-    fn new(buffers: &'a [Vec<u8>]) -> Self {
+    /// Borrows resolved buffers and images for one traversal.
+    fn new(buffers: &'a [Vec<u8>], images: &'a [LoadedImage]) -> Self {
         Self {
             buffers,
+            images,
             entities: Vec::new(),
             stats: ImportStats::default(),
         }
@@ -233,7 +246,7 @@ impl<'a> Import<'a> {
                 normals,
                 uvs,
             },
-            material: read_material(primitive),
+            material: read_material(primitive, self.images),
         })
     }
 
@@ -272,8 +285,8 @@ fn entity_name(
     format!("mesh_{mesh_index}_{primitive_index}")
 }
 
-/// Scalar PBR factors; texture slots are ignored (next step, see crate docs).
-fn read_material(primitive: &Primitive<'_>) -> LoadedMaterial {
+/// Scalar PBR factors plus decoded texture slots; untextured slots are `None`.
+fn read_material(primitive: &Primitive<'_>, images: &[LoadedImage]) -> LoadedMaterial {
     let material = primitive.material();
     let pbr = material.pbr_metallic_roughness();
     let base = pbr.base_color_factor();
@@ -282,7 +295,22 @@ fn read_material(primitive: &Primitive<'_>) -> LoadedMaterial {
         metallic: pbr.metallic_factor(),
         roughness: pbr.roughness_factor(),
         emission: material.emissive_factor(),
+        base_color_texture: texture_image(images, pbr.base_color_texture()),
+        metallic_roughness_texture: texture_image(images, pbr.metallic_roughness_texture()),
+        emissive_texture: texture_image(images, material.emissive_texture()),
     }
+}
+
+/// Clones the resolved pixels for one texture slot (`None` = untextured).
+///
+/// Image indices come from `Gltf::from_slice` validation, so `.get` only
+/// misses on hand-built nonsense — which maps to `None`, never a panic.
+fn texture_image(
+    images: &[LoadedImage],
+    texture: Option<gltf::texture::Info<'_>>,
+) -> Option<LoadedImage> {
+    let image = texture?.texture().source();
+    images.get(image.index()).cloned()
 }
 
 /// Casts index iterators (`u8`/`u16`/`u32`) to `u32`.

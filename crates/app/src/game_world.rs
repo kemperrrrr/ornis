@@ -11,11 +11,11 @@
 //! script tick, propagates poses and extracts audio/render views.
 
 use glam::Vec3;
+use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{Engine, Entity};
 use ornis_physics::RigidBody;
 use ornis_render::FrameUpload;
 use ornis_render::extraction::{RenderLights, extract_render_data};
-use ornis_render::scene::{EntityDesc, Scene};
 
 /// Centre of the hidden showcase static floor in world units.
 const FLOOR_CENTER: [f32; 3] = [0.0, -2.0, 0.0];
@@ -171,8 +171,8 @@ pub fn spawn_static_floor(engine: &mut Engine) -> Entity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_assets::scene::{CameraDesc, MaterialDesc, MeshDesc, TransformDesc};
     use ornis_core::{Stage as CoreStage, Time};
-    use ornis_render::scene::{CameraDesc, MaterialDesc, MeshDesc, TransformDesc};
 
     /// Minimal probe system for staged-plan lookups.
     struct StageProbe(&'static str);
@@ -618,7 +618,7 @@ mod tests {
     fn replace_scene_publishes_scene_lighting_as_resource() {
         // X3: the scene loader owns lights/ambient — replacing a scene
         // must publish them as the `RenderLights` resource.
-        use ornis_render::scene::LightDesc;
+        use ornis_assets::scene::LightDesc;
         let world = GameWorld::from_scene(&Scene {
             lights: vec![LightDesc::Directional {
                 direction: [0.0, -1.0, 0.0],

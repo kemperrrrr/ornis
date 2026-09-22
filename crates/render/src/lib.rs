@@ -1,9 +1,8 @@
 //! Ornis render library: deferred [`renderer::Renderer3D`], the
 //! frame-plan layer ([`transient_pool`]/[`system`]/[`frame_exec`]/[`frame_passes`]),
-//! procedural meshes, scene descriptions and the WGSL shader assembly.
+//! procedural meshes and the WGSL shader assembly. Scene description types
+//! live in `ornis-assets`; this crate only projects them.
 #![warn(missing_docs)]
-/// Object animation: cold clip lanes plus the hot player lane (`anim_sample`).
-mod anim;
 /// Client-side orbit camera and backend-neutral input consumer.
 pub mod camera;
 /// Final PBR/UI blend pass (legacy path).
@@ -29,8 +28,6 @@ pub mod mesh_upload;
 pub mod render_backend;
 /// The deferred [`renderer::Renderer3D`] and its passes.
 pub mod renderer;
-/// RON-serializable scene description types.
-pub mod scene;
 /// E1 (S5e) bridge: frame passes projected as ordinary core `Schedule`
 /// systems (declaration twins; level parity pinned by `scheduler_parity`).
 pub mod schedule_bridge;
@@ -38,15 +35,10 @@ pub mod schedule_bridge;
 pub mod shaders;
 /// Typed plan systems + single declaration registry (d3).
 pub mod system;
-/// Local-to-world transform component.
-pub mod transform;
 /// Transient pool — the dynamic half of the dissolved frame-plan shell
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
-pub use anim::{
-    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, Key, KeyTrack, NoPhysics,
-};
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{
@@ -72,7 +64,6 @@ pub use system::{
     Access, AccessSet, ClearBlack, ClearTransparent, ClearValue, ClearWhite, Frame, FramePass,
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,
 };
-pub use transform::Transform;
 pub use transient_pool::{
     Budget, BudgetExceeded, FrameLayout, PassId, PassLayout, PoolSlot, ResourceId, ResourceLayout,
     SizePolicy, TextureSpec, TransientPool, format_bytes_per_pixel,

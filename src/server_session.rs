@@ -9,7 +9,7 @@
 //! `GET /api/status` and `GET /api/scene`; the rest reach `GET /api/events`).
 //!
 //! At startup the world loads `editor/scene.ron` (via
-//! `ornis_render::scene::Scene::from_ron`), so the initial live world matches
+//! `ornis_assets::scene::Scene::from_ron`), so the initial live world matches
 //! the scene used by the WASM viewport; subsequent changes arrive through
 //! live snapshots. Component payloads reuse the
 //! `ornis_render::scene` description types — **serde-canonical** JSON
@@ -75,12 +75,14 @@ use ornis_core::{ComponentMeta, ComponentRegistry, Entity, InputState, SmartStor
 use ornis_gameplay::install_gameplay;
 use ornis_physics::RigidBody;
 
-use crate::engine_runtime::{PhysicsRuntime, apply_transform_to_body, install_physics};
-use ornis_app::{GameWorld, install_gameplay_physics_bridge, parse_scene_ron};
-use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
-use ornis_render::scene::{
+use crate::engine_runtime::{PhysicsRuntime, install_physics};
+use ornis_app::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
+use ornis_assets::collider::ColliderDesc;
+use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
+use ornis_assets::server::AssetServer;
+use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 
 use editor_backend::ipc::{GameEvent, UiCommand};
 
@@ -99,6 +101,7 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
     registry.register::<TransformDesc>("Transform");
     registry.register::<MeshDesc>("Mesh");
     registry.register::<MaterialDesc>("Material");
+    registry.register::<ColliderDesc>("Collider");
     registry
 });
 
@@ -146,6 +149,10 @@ pub struct EditorSession {
     /// Scene label round-tripped through `Scene::name` on save/load.
     scene_name: String,
     version: u64,
+    /// Asset registry: parse entry point, retained sources and the
+    /// reload dirty-set. Survives world replacement (see
+    /// [`EditorSession::load_scene`]).
+    assets: AssetServer,
 }
 
 impl Default for EditorSession {
@@ -168,11 +175,15 @@ impl Default for EditorSession {
         // editor below applies the same `Mutation` values synchronously.
         // An empty bus is one atomic counter plus an empty loop per frame.
         MutationPlugin::new().install(engine);
+        // Object animation in the same DAG (after body poses): no-op
+        // until an entity carries animation lanes.
+        install_object_animation(engine);
         Self {
             world,
             alive: Vec::new(),
             scene_name: "scene".into(),
             version: 0,
+            assets: AssetServer::new(),
         }
     }
 }
@@ -200,10 +211,14 @@ impl EditorSession {
 
     /// Advances the editor's domain schedule by one frame.
     ///
-    /// Physics is intentionally opt-in per component: only entities with a
-    /// `RigidBody` lane entry participate. Returns `true` when physics changed
-    /// an ECS pose and the caller should publish a fresh scene snapshot.
+    /// Asset reloads queued via `request_reload` replace the world first;
+    /// physics is intentionally opt-in per component: only entities with a
+    /// `RigidBody` lane entry participate. Returns `true` when anything
+    /// changed and the caller should publish a fresh scene snapshot.
     pub fn tick(&mut self, delta_seconds: f32) -> bool {
+        // Asset reloads replace the whole world (fresh engine included),
+        // so they run before the frame — never on a discarded world.
+        let assets_changed = self.drain_assets();
         let _ = self.world.frame(delta_seconds);
         let changed = self
             .world
@@ -222,7 +237,28 @@ impl EditorSession {
         if changed || applied > 0 {
             self.version += 1;
         }
-        changed || applied > 0
+        changed || applied > 0 || assets_changed
+    }
+
+    /// Applies asset-server reloads queued via `request_reload`, in id
+    /// order through the normal replace path ([`EditorSession::load_scene`]).
+    /// Second input channel next to [`EditorSession::drain_mutations`]:
+    /// file changes arrive here after the watcher re-reads them, and
+    /// programmatic hosts mark dirty assets directly. Returns true when
+    /// the world was replaced.
+    fn drain_assets(&mut self) -> bool {
+        let dirty = self.assets.take_dirty();
+        if dirty.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for id in dirty {
+            if let Some(scene) = self.assets.get_scene(id).cloned() {
+                self.load_scene(scene);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Drains producer mutations queued by `mutation_tick` and writes them
@@ -308,7 +344,7 @@ impl EditorSession {
         mesh: MeshDesc,
         material: MaterialDesc,
     ) -> Entity {
-        let physics_body = physics_body_for(&transform, &mesh);
+        let physics_body = ornis_physics::colliders::body_for(&transform, &mesh, None, 0.0);
         let entity = self.store().create_entity();
         self.alive.push(entity);
         let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
@@ -367,16 +403,28 @@ impl EditorSession {
         };
         fresh.scene_name = scene.name;
         fresh.version = fresh.version.max(self.version + 1);
+        // The asset registry (load history, retained sources) survives the
+        // replacement — it describes files, not the live world.
+        fresh.assets = std::mem::take(&mut self.assets);
         *self = fresh;
         count
     }
 
     /// Parse a RON scene and load it (replacing the world, see
     /// [`EditorSession::load_scene`]). An invalid RON string leaves the world
-    /// untouched.
+    /// untouched. Parsing goes through the asset server so the source is
+    /// retained for round-trips.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, String> {
-        Ok(self
-            .load_scene(parse_scene_ron(ron_str).map_err(|e| format!("invalid scene RON: {e}"))?))
+        let id = self
+            .assets
+            .load_scene_ron(ron_str)
+            .map_err(|e| format!("invalid scene RON: {}", e.message()))?;
+        let scene = self
+            .assets
+            .get_scene(id)
+            .expect("just-loaded scene")
+            .clone();
+        Ok(self.load_scene(scene))
     }
 
     /// Serialize the world to RON and write it to `path` **atomically**
@@ -390,9 +438,24 @@ impl EditorSession {
         atomic_write(path, &ron)
     }
 
-    /// Read `path` and replace the world with its scene. Any error (missing
-    /// file, invalid RON) leaves the world untouched.
+    /// Read `path` and replace the world with its scene. `.ron` files go
+    /// through the asset server (retained as sources); `.glb`/`.gltf`
+    /// files load geometry + scalar materials the same replace path.
+    /// Any error (missing file, invalid content) leaves the world untouched.
     pub fn load_scene_file(&mut self, path: &Path) -> Result<usize, String> {
+        let is_gltf = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("glb") || ext.eq_ignore_ascii_case("gltf"));
+        if is_gltf {
+            let id = self.assets.load_gltf_file(path)?;
+            let scene = self
+                .assets
+                .get_scene(id)
+                .expect("just-loaded scene")
+                .clone();
+            return Ok(self.load_scene(scene));
+        }
         let ron = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         self.load_scene_ron(&ron)
     }
@@ -706,6 +769,11 @@ fn set_component(
     {
         return Err(entry.errors.join("; "));
     }
+    if type_name == "Collider" {
+        // An explicit collider redefines collision: rebuild the lane body
+        // from the current lanes (velocity state is preserved).
+        resync_collider_body(world.store_mut(), entity);
+    }
     world.version += 1;
     Ok(value)
 }
@@ -817,6 +885,9 @@ fn cmd_create_entity(world: &mut EditorSession, data: &Value) -> Result<String, 
         // Parsed from the same meta — the box type always matches.
         meta.insert_any(world.store_mut(), entity, boxed);
     }
+    // Overrides may have replaced the mesh or set an explicit collider:
+    // rebuild the body from the final lanes (velocity is fresh here).
+    resync_collider_body(world.store_mut(), entity);
     Ok(serde_json::json!({
         "id": entity.id(),
         "generation": entity.generation(),
@@ -906,19 +977,41 @@ fn list_entities_json(world: &EditorSession) -> String {
 // Component defaults / JSON (de)serialization helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn physics_body_for(transform: &TransformDesc, mesh: &MeshDesc) -> Option<RigidBody> {
-    let radius = match mesh {
-        MeshDesc::Sphere { radius, .. } => *radius,
-        // Transport alone must not create an unrelated sphere collider.
-        // Box/Plane/Cylinder need explicit collider recipes (same as Custom).
-        MeshDesc::Custom { .. }
-        | MeshDesc::Box { .. }
-        | MeshDesc::Plane { .. }
-        | MeshDesc::Cylinder { .. } => return None,
+/// (Re)builds the entity's solver body from its current lanes through
+/// the shared projection ([`ornis_physics::colliders::body_for`]):
+/// an explicit [`ColliderDesc`] lane entry wins, else the exact auto
+/// recipe applies. The lane body's velocity state survives the rebuild;
+/// when nothing builds the lane is left as-is (there is no lane-remove
+/// API — spawn paths start clean, so this only affects live edits that
+/// remove collision).
+fn resync_collider_body(store: &mut SmartStore, entity: Entity) {
+    let Some(transform) = store
+        .read_lane::<TransformDesc>()
+        .and_then(|lane| lane.get(entity).cloned())
+    else {
+        return;
     };
-    let mut body = RigidBody::new_sphere(Vec3::from_array(transform.translation), radius, 0.0);
-    apply_transform_to_body(&mut body, transform);
-    Some(body)
+    let Some(mesh) = store
+        .read_lane::<MeshDesc>()
+        .and_then(|lane| lane.get(entity).cloned())
+    else {
+        return;
+    };
+    let collider = store
+        .read_lane::<ColliderDesc>()
+        .and_then(|lane| lane.get(entity).cloned());
+    let previous = store
+        .read_lane::<RigidBody>()
+        .and_then(|lane| lane.get(entity).cloned());
+    if let Some(mut body) =
+        ornis_physics::colliders::body_for(&transform, &mesh, collider.as_ref(), 0.0)
+    {
+        if let Some(prev) = previous {
+            body.velocity = prev.velocity;
+            body.angular_velocity = prev.angular_velocity;
+        }
+        store.insert(entity, body);
+    }
 }
 
 fn default_transform() -> TransformDesc {
@@ -1381,6 +1474,53 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// `.glb` dispatch rejects garbage without touching the world; the
+    /// positive bytes→`Scene` path is pinned in `ornis-assets`.
+    #[test]
+    fn load_scene_file_rejects_gltf_garbage() {
+        let mut world = EditorSession::new();
+        let version = world.version;
+        let path = temp_scene_path("garbage");
+        let glb = path.with_extension("glb");
+        fs::write(&glb, "not a glb at all").expect("write garbage");
+        assert!(world.load_scene_file(&glb).is_err());
+        assert_eq!(world.version, version);
+        assert_eq!(world.entity_count(), 0);
+        let _ = fs::remove_file(&glb);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Queued asset reloads replace the world on the next tick, in id
+    /// order, with a version bump — the dirty-set is a live input
+    /// channel, not a dead API.
+    #[test]
+    fn drain_assets_replaces_world_on_tick() {
+        use ornis_assets::server::AssetServer;
+        let mut world = EditorSession::new();
+        assert_eq!(world.entity_count(), 0);
+        let mut server = AssetServer::new();
+        let a = server
+            .load_scene_ron("Scene(name: \"a\", entities: [], lights: [], camera: (position: (0.0, 2.5, 9.0), target: (0.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), fov: 60.0, near: 0.1, far: 100.0), ambient: (0.1, 0.1, 0.1))")
+            .expect("scene a loads");
+        let version_before = world.version;
+        // Swap in a server holding one dirty scene, then tick.
+        world.assets = server;
+        assert!(world.assets.request_reload(a));
+        assert!(world.tick(1.0 / 60.0), "asset reload must mark changed");
+        assert!(world.version > version_before);
+        assert_eq!(world.scene_name, "a");
+        assert!(world.assets.take_dirty().is_empty());
+    }
+
+    /// The session installs object animation into the frame schedule
+    /// (physics bodies skipped by the sampler itself).
+    #[test]
+    fn session_installs_object_animation() {
+        let world = EditorSession::new();
+        let mermaid = world.world.engine().schedule().mermaid();
+        assert!(mermaid.contains("anim_sample"), "anim wired:\n{mermaid}");
+    }
+
     #[test]
     fn spawn_assigns_names_and_counts() {
         let mut world = EditorSession::new();
@@ -1390,6 +1530,43 @@ mod tests {
         assert_eq!(world.name_of(a).as_deref(), Some("Entity 0"));
         assert_eq!(world.name_of(b).as_deref(), Some("Hero"));
         assert_ne!(a.id(), b.id());
+    }
+
+    /// Auto recipes build exact bodies at spawn: box meshes get box
+    /// bodies (the old helper only knew spheres), planes get none.
+    #[test]
+    fn spawn_builds_exact_bodies_from_auto_recipes() {
+        use ornis_physics::Shape;
+        let mut world = EditorSession::new();
+        let sphere = world.spawn(None);
+        let lane = world.store().read_lane::<RigidBody>().expect("body lane");
+        assert!(matches!(
+            lane.get(sphere).expect("sphere body").shape,
+            Shape::Sphere { .. }
+        ));
+        drop(lane);
+        world.spawn_with(
+            Some("box".into()),
+            TransformDesc {
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            MeshDesc::Box {
+                size: [2.0, 4.0, 6.0],
+            },
+            default_material(),
+        );
+        let lane = world.store().read_lane::<RigidBody>().expect("body lane");
+        let boxed = world
+            .alive
+            .iter()
+            .find(|e| world.name_of(**e).as_deref() == Some("box"))
+            .expect("box entity");
+        assert!(matches!(
+            lane.get(*boxed).expect("box body").shape,
+            Shape::Box { .. }
+        ));
     }
 
     #[test]
@@ -1705,7 +1882,7 @@ mod tests {
         let version = world.version;
 
         // Unknown component type.
-        world.handle_command(&set_component(0, Some(0), "Collider", "{}"), &ev_tx);
+        world.handle_command(&set_component(0, Some(0), "NoSuchComponent", "{}"), &ev_tx);
         // Malformed component JSON.
         world.handle_command(&set_component(0, Some(0), "Transform", "{broken"), &ev_tx);
         // Schema mismatch (rotation is missing).

@@ -19,7 +19,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use ornis_app::GameWorld;
-use ornis_render::scene::Scene;
+use ornis_assets::scene::Scene;
 use ornis_render::{
     FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
     install_orbit_camera, read_orbit_camera,
@@ -87,7 +87,7 @@ struct GpuScene {
     /// when these change.
     mesh_params: (u32, u32),
     extracted: FrameUpload,
-    lights: Vec<ornis_render::scene::LightDesc>,
+    lights: Vec<ornis_assets::scene::LightDesc>,
     ambient: [f32; 3],
 }
 
@@ -1126,7 +1126,7 @@ mod integration_tests {
         assert_eq!(lights.lights.len(), 1);
         assert!(matches!(
             &lights.lights[0],
-            ornis_render::scene::LightDesc::Directional { intensity, .. }
+            ornis_assets::scene::LightDesc::Directional { intensity, .. }
                 if (*intensity - 0.6).abs() < f32::EPSILON
         ));
         assert_eq!(live.scene.camera.position, [0.0, 2.5, 9.0]);

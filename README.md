@@ -116,7 +116,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | `crates/materialx` | Парсер `.mtlx` и конвертация в OpenPBR | Активен |
 | `crates/wasm` | WASM-обёртка для рендера сцены в браузере | Активен |
 | `crates/audio` | Аудио: `AudioSource`/`AudioListener`, бэкенды cpal / Web Audio | Активен |
-| `assets/` | Ассеты (шрифты Inter и пр.) | Служебное |
+| `assets/` | Сцены (`scene.ron`, `demo_scene.ron`) | Служебное |
 
 > Удалено (август 2026): нативный UI-стек `crates/ui`, `crates/ui-blitz`,
 > `crates/ui-gosub`, `crates/ui-core`, `src/bin_blitz.rs` и локальные форки

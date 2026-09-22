@@ -13,7 +13,7 @@
 //! there is no static `scene.ron` fallback (unified runtime: `/api/scene`
 //! is the sole source of truth).
 
-use ornis_render::scene::{
+use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
 use serde::Deserialize;

@@ -1,19 +1,16 @@
 [package]
-name = "ornis-app"
+name = "ornis-assets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ornis-animation = { path = "../animation" }
-ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
-ornis-gameplay = { path = "../gameplay" }
-ornis-physics = { path = "../physics" }
-ornis-render = { path = "../render" }
-glam = "0.33"
+ornis-gltf = { path = "../gltf" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.12"
 
 [lints]
 workspace = true

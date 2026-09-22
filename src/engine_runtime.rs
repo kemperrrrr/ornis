@@ -13,15 +13,15 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
+use ornis_assets::scene::TransformDesc;
+#[cfg(test)]
+use ornis_assets::scene::{MaterialDesc, MeshDesc};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
 use ornis_physics::{BodyHandle, BodyType, PhysicsEngine, RigidBody, SolverKind};
 #[cfg(test)]
 use ornis_render::extract_render_data;
-use ornis_render::scene::TransformDesc;
-#[cfg(test)]
-use ornis_render::scene::{MaterialDesc, MeshDesc};
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///

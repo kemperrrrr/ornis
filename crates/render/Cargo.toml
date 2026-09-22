@@ -10,6 +10,7 @@ wgpu = "30"
 naga = { version = "30", features = ["wgsl-out"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
+ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 ornis-gameplay = { path = "../gameplay" }
 ornis-mesh-editor = { path = "../mesh-editor" }

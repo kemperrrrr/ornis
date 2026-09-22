@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 glam = "0.33"
+ornis-assets = { path = "../assets" }
 rayon = "1.12"
 dashmap = "6"
 ornis-macros = { path = "../macros" }

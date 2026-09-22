@@ -90,7 +90,7 @@ fn bench_recording(c: &mut Criterion) {
     renderer.set_lights(
         &queue,
         [0.1, 0.1, 0.1],
-        &[ornis_render::scene::LightDesc::Directional {
+        &[ornis_assets::scene::LightDesc::Directional {
             direction: [0.3, -1.0, 0.5],
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],

@@ -6,7 +6,7 @@
 //! factory [`create_render_backend`] returns the production implementation.
 use crate::mesh::Mesh;
 use crate::renderer::InstanceData;
-use crate::scene::LightDesc;
+use ornis_assets::scene::LightDesc;
 use ornis_core::material::OpenPBRMaterial;
 
 use wgpu;
@@ -289,7 +289,7 @@ mod tests {
             renderer.set_lights(
                 &queue,
                 [0.1, 0.1, 0.15],
-                &[crate::scene::LightDesc::Directional {
+                &[ornis_assets::scene::LightDesc::Directional {
                     direction: [1.0, 1.0, 1.0],
                     intensity: 1.0,
                     color: [1.0, 1.0, 1.0],
@@ -559,7 +559,7 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scene.ron");
         let ron = std::fs::read_to_string(&ron_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", ron_path.display()));
-        let scene = crate::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
+        let scene = ornis_assets::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
 
         // ── Gold PNG → bytes ───────────────────────────────────────
         let gold_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -617,21 +617,23 @@ mod tests {
         // Build mesh/materials/instances as in render_probe::build_scene_data.
         let first = scene.entities.first().expect("scene has entities");
         let mesh = match &first.mesh {
-            crate::scene::MeshDesc::Sphere {
+            ornis_assets::scene::MeshDesc::Sphere {
                 radius,
                 segments,
                 rings,
             } => crate::mesh::create_sphere(&device, *radius, *segments, *rings),
-            crate::scene::MeshDesc::Box { size } => crate::mesh::create_box(&device, *size),
-            crate::scene::MeshDesc::Plane { size } => crate::mesh::create_plane(&device, *size),
-            crate::scene::MeshDesc::Cylinder {
+            ornis_assets::scene::MeshDesc::Box { size } => crate::mesh::create_box(&device, *size),
+            ornis_assets::scene::MeshDesc::Plane { size } => {
+                crate::mesh::create_plane(&device, *size)
+            }
+            ornis_assets::scene::MeshDesc::Cylinder {
                 radius,
                 height,
                 radial_segments,
             } => crate::mesh::create_cylinder(&device, *radius, *height, *radial_segments),
             // The golden probe renders procedural scenes; Custom soups
             // have no upload path here yet.
-            crate::scene::MeshDesc::Custom { .. } => {
+            ornis_assets::scene::MeshDesc::Custom { .. } => {
                 panic!("Custom mesh not supported by this probe")
             }
         };
@@ -639,7 +641,7 @@ mod tests {
         let mut instances = Vec::new();
         for (i, ent) in scene.entities.iter().enumerate() {
             let mat = match &ent.material {
-                crate::scene::MaterialDesc::Dielectric {
+                ornis_assets::scene::MaterialDesc::Dielectric {
                     base_color,
                     roughness,
                     ..
@@ -649,7 +651,7 @@ mod tests {
                     m.specular.roughness(*roughness);
                     m
                 }
-                crate::scene::MaterialDesc::Metal {
+                ornis_assets::scene::MaterialDesc::Metal {
                     base_color,
                     roughness,
                     ..
@@ -659,7 +661,7 @@ mod tests {
                     m.specular.roughness(*roughness);
                     m
                 }
-                crate::scene::MaterialDesc::Coat {
+                ornis_assets::scene::MaterialDesc::Coat {
                     base_color,
                     coat_weight,
                     coat_roughness,
@@ -671,7 +673,7 @@ mod tests {
                     m.coat.roughness(*coat_roughness);
                     m
                 }
-                crate::scene::MaterialDesc::Matte {
+                ornis_assets::scene::MaterialDesc::Matte {
                     base_color,
                     roughness,
                 } => {
@@ -681,7 +683,7 @@ mod tests {
                     m.specular.weight(0.0);
                     m
                 }
-                crate::scene::MaterialDesc::Glass {
+                ornis_assets::scene::MaterialDesc::Glass {
                     base_color,
                     roughness,
                     ior,
@@ -962,7 +964,7 @@ mod tests {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
-                &[crate::scene::LightDesc::Directional {
+                &[ornis_assets::scene::LightDesc::Directional {
                     direction: [0.42, 0.84, 0.3],
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
@@ -1147,7 +1149,7 @@ mod tests {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
-                &[crate::scene::LightDesc::Directional {
+                &[ornis_assets::scene::LightDesc::Directional {
                     direction: [0.42, 0.84, 0.3],
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
@@ -1316,7 +1318,7 @@ mod tests {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
-                &[crate::scene::LightDesc::Point {
+                &[ornis_assets::scene::LightDesc::Point {
                     position: [5.0, 4.0, 6.0],
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
@@ -1492,7 +1494,7 @@ mod tests {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
-                &[crate::scene::LightDesc::Spot {
+                &[ornis_assets::scene::LightDesc::Spot {
                     position: [0.0, 8.0, 0.0],
                     direction: [0.0, -1.0, 0.0],
                     intensity: 2000.0,
@@ -1638,7 +1640,7 @@ mod tests {
         renderer.set_lights(
             &queue,
             [0.05, 0.05, 0.08],
-            &[crate::scene::LightDesc::Spot {
+            &[ornis_assets::scene::LightDesc::Spot {
                 position: [0.0, 8.0, 0.0],
                 direction: [0.0, -1.0, 0.0],
                 intensity: 2000.0,
@@ -1793,7 +1795,7 @@ mod tests {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
-                &[crate::scene::LightDesc::Point {
+                &[ornis_assets::scene::LightDesc::Point {
                     position: [5.0, 4.0, 6.0],
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
@@ -1907,8 +1909,8 @@ mod tests {
     /// (no adapter needed).
     #[test]
     fn ten_scene_lights_preview_two_dropped() {
-        let lights: Vec<crate::scene::LightDesc> = (0..10)
-            .map(|_| crate::scene::LightDesc::Directional {
+        let lights: Vec<ornis_assets::scene::LightDesc> = (0..10)
+            .map(|_| ornis_assets::scene::LightDesc::Directional {
                 direction: [1.0, 1.0, 1.0],
                 intensity: 0.6,
                 color: [1.0, 1.0, 1.0],
@@ -1937,7 +1939,7 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scene.ron");
         let ron = std::fs::read_to_string(&ron_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", ron_path.display()));
-        let scene = crate::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
+        let scene = ornis_assets::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
         let rig = crate::extraction::RenderLights::from_scene(&scene);
         assert_eq!(rig.ambient_intensity, 1.0);
         assert_eq!(rig.exposure, 1.0);
@@ -1991,8 +1993,8 @@ mod tests {
             "half={}",
             renderer.shadow_half_extent()
         );
-        let lights: Vec<crate::scene::LightDesc> = (0..10)
-            .map(|_| crate::scene::LightDesc::Directional {
+        let lights: Vec<ornis_assets::scene::LightDesc> = (0..10)
+            .map(|_| ornis_assets::scene::LightDesc::Directional {
                 direction: [0.0, 1.0, 1.0],
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
@@ -2108,7 +2110,7 @@ mod tests {
         backend.set_lights(
             &queue,
             [0.05, 0.05, 0.08],
-            &[crate::scene::LightDesc::Directional {
+            &[ornis_assets::scene::LightDesc::Directional {
                 direction: [0.2, 1.0, 0.3],
                 intensity: 1.2,
                 color: [1.0, 1.0, 1.0],

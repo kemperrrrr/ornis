@@ -10,8 +10,8 @@
 //! exits 0 when the two paths match pixel-for-pixel.
 
 use glam::{Mat4, Quat, Vec3};
+use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
-use ornis_render::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_render::{InstanceData, RenderFrame3D, Renderer3D, Technique};
 
 const WIDTH: u32 = 1280;

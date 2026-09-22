@@ -37,6 +37,7 @@ console_error_panic_hook = "0.1"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 ornis-render = { path = "../render" }
+ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 ornis-app = { path = "../app" }
 ron = "0.12"

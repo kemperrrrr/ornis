@@ -12,10 +12,10 @@
 #[allow(dead_code)]
 mod common;
 
-use ornis_render::RenderLights;
-use ornis_render::scene::{
+use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
+use ornis_render::RenderLights;
 
 /// The legacy rig as scene data — what `RenderLights::default`
 /// reproduces and what `RenderSubmit` hardcoded before X3.

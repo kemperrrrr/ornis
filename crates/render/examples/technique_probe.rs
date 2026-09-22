@@ -8,8 +8,8 @@
 //! artifacts; touches no library code.
 
 use glam::{Mat4, Quat, Vec3};
+use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
-use ornis_render::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_render::{InstanceData, RenderFrame3D, Renderer3D, Technique};
 
 const WIDTH: u32 = 1280;

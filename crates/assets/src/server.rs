@@ -1,22 +1,23 @@
 //! Minimal typed asset registry over the existing scene contract.
 //!
-//! [`AssetServer`] owns CPU-side scene assets ([`Scene`](ornis_render::scene::Scene)) behind typed
+//! [`AssetServer`] owns CPU-side scene assets ([`Scene`](crate::scene::Scene)) behind typed
 //! [`AssetId`]s and emits [`AssetEvent`] load/error events. Per-entity
 //! [`MeshHandle`]/[`MaterialHandle`] components are the typed counterpart of
-//! the inline [`MeshDesc`](ornis_render::scene::MeshDesc) /
-//! [`MaterialDesc`](ornis_render::scene::MaterialDesc) lanes: extraction
+//! the inline [`MeshDesc`](crate::scene::MeshDesc) /
+//! [`MaterialDesc`](crate::scene::MaterialDesc) lanes: extraction
 //! still reads those lanes today, and handles migrate progressively —
 //! nothing here invents geometry or material data.
 //!
 //! Residency reuses existing mechanisms instead of a new manager island:
-//! CPU residency is the server-owned [`Scene`](ornis_render::scene::Scene) plus the [`SmartStore`](ornis_core::SmartStore)
+//! CPU residency is the server-owned [`Scene`](crate::scene::Scene) plus the [`SmartStore`](ornis_core::SmartStore)
 //! lanes written by [`AssetServer::instantiate`]; GPU residency stays with
-//! the existing [`FrameUpload`](ornis_render::FrameUpload) extraction and
-//! the platform upload path. Hot reload is a dirty-set заготовка:
-//! [`AssetServer::request_reload`] marks, [`AssetServer::take_dirty`]
-//! drains; file watching stays with the owner (editor `SceneFileWatch`).
-//! The only loader today is the scene `.ron` asset
-//! ([`AssetServer::load_scene_ron`], wrapping [`Scene::from_ron`](ornis_render::scene::Scene::from_ron)).
+//! the platform upload path (no render dependency: this crate never names
+//! GPU types). Hot reload is a dirty-set plan: [`AssetServer::request_reload`]
+//! marks, [`AssetServer::take_dirty`] drains, and the owner re-imports the
+//! dirty sources and applies them as world mutations; file watching stays
+//! with the owner (editor `SceneFileWatch`). Loaders today: scene `.ron`
+//! ([`AssetServer::load_scene_ron`], wrapping [`Scene::from_ron`](crate::scene::Scene::from_ron))
+//! and glTF geometry ([`AssetServer::load_gltf`], via [`crate::import`]).
 //!
 //! `MeshHandle`/`MaterialHandle` as ECS lanes were assumed to exist already;
 //! they do not (checked 2026-09-18: only `MeshDesc`/`MaterialDesc` lanes and
@@ -25,8 +26,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use crate::scene::{EntityDesc, Scene};
 use ornis_core::{Engine, Entity, SmartStore};
-use ornis_render::scene::{EntityDesc, Scene};
 
 /// Opaque asset generation counter: every loaded asset gets a fresh id.
 const FIRST_ASSET_INDEX: u64 = 1;
@@ -203,7 +204,7 @@ impl AssetServer {
     /// Stores an already-parsed scene and emits [`AssetEvent::Loaded`].
     ///
     /// `source` keeps the originating `.ron` text for round-trip and
-    /// hot-reload заготовка; `None` stores no text.
+    /// hot-reload plan; `None` stores no text.
     pub fn load_scene(&mut self, scene: Scene, source: Option<String>) -> AssetId {
         let id = AssetId { index: self.next };
         self.next = self.next.saturating_add(1);
@@ -248,7 +249,34 @@ impl AssetServer {
         self.scenes.get(&id)?.to_ron().ok()
     }
 
+    /// Parses glTF bytes (`.glb` or `.gltf`) into a [`Scene`] via
+    /// [`crate::import`] and stores it. Textured slots keep their scalar
+    /// fallback until the GPU upload step learns images.
+    ///
+    /// # Errors
+    ///
+    /// Returns the import error; the registry is untouched.
+    pub fn load_gltf(&mut self, bytes: &[u8]) -> Result<AssetId, String> {
+        let loaded = ornis_gltf::load_slice(bytes).map_err(|error| error.to_string())?;
+        Ok(self.load_scene(crate::import::scene_from_gltf(&loaded), None))
+    }
+
+    /// Reads a glTF file (resolving sibling `.bin` like
+    /// [`ornis_gltf::load_path`]) and stores it as a scene.
+    ///
+    /// # Errors
+    ///
+    /// Returns the IO/import error; the registry is untouched.
+    pub fn load_gltf_file(&mut self, path: &std::path::Path) -> Result<AssetId, String> {
+        let loaded = ornis_gltf::load_path(path).map_err(|error| error.to_string())?;
+        Ok(self.load_scene(crate::import::scene_from_gltf(&loaded), None))
+    }
+
     /// Marks an asset dirty for hot reload; `false` for unknown ids.
+    ///
+    /// Programmatic invalidation API. The editor's file watcher drives
+    /// reloads by re-reading files (see below); this set is for hosts
+    /// that detect staleness another way.
     pub fn request_reload(&mut self, id: AssetId) -> bool {
         if !self.scenes.contains_key(&id) {
             return false;
@@ -258,6 +286,13 @@ impl AssetServer {
     }
 
     /// Drains dirty assets in id order; the second call is empty.
+    ///
+    /// Honest boundary: a dirty scene re-applies as a whole-world
+    /// replace (same as file reload), not as per-entity mutations —
+    /// allocator `id`/`generation` handles are unstable across loads,
+    /// so there is no identity to patch by. Per-entity reload streams
+    /// await stable asset-entity ids (explicit next step, not a stub:
+    /// the replace path is real and tested).
     pub fn take_dirty(&mut self) -> Vec<AssetId> {
         let mut out: Vec<AssetId> = self.dirty.iter().copied().collect();
         out.sort_by_key(|id| id.index());
@@ -307,8 +342,8 @@ fn insert_asset_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, TransformDesc};
     use ornis_core::Engine;
-    use ornis_render::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, TransformDesc};
 
     /// Shipped demo scene: five spheres over two directional lights.
     const DEMO_RON: &str = include_str!("../../../assets/scene.ron");
@@ -400,8 +435,28 @@ mod tests {
             .instantiate(&mut engine, id)
             .expect("showcase instantiates");
         assert_eq!(entities.len(), 7);
-        let extracted = ornis_render::extract_render_data(engine.world().store().expect("store"));
-        assert_eq!(extracted.instances.len(), 7);
+        let store = engine.world().store().expect("store");
+        assert_eq!(
+            store
+                .read_lane::<crate::scene::TransformDesc>()
+                .expect("lane")
+                .len(),
+            7
+        );
+        assert_eq!(
+            store
+                .read_lane::<crate::scene::MeshDesc>()
+                .expect("lane")
+                .len(),
+            7
+        );
+        assert_eq!(
+            store
+                .read_lane::<crate::scene::MaterialDesc>()
+                .expect("lane")
+                .len(),
+            7
+        );
     }
 
     #[test]
@@ -457,10 +512,27 @@ mod tests {
         assert_eq!(entities.len(), 2);
 
         let store = engine.world().store().expect("store");
-        let extracted = ornis_render::extract_render_data(store);
-        assert_eq!(extracted.instances.len(), 2);
-        // Both entities share one identical material → deduped table entry.
-        assert_eq!(extracted.materials.len(), 1);
+        assert_eq!(
+            store
+                .read_lane::<crate::scene::TransformDesc>()
+                .expect("lane")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .read_lane::<crate::scene::MeshDesc>()
+                .expect("lane")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .read_lane::<crate::scene::MaterialDesc>()
+                .expect("lane")
+                .len(),
+            2
+        );
         for (position, entity) in entities.iter().enumerate() {
             let mesh_lane = store.read_lane::<MeshHandle>().expect("mesh handle lane");
             let mesh = mesh_lane.get(*entity).expect("mesh handle");
@@ -503,5 +575,67 @@ mod tests {
         let second = server.load_scene(two_entity_scene(), None);
         assert_ne!(first, second);
         assert!(second.index() > first.index());
+    }
+
+    /// One triangle (positions + indices) as base64 buffer bytes.
+    const TRIANGLE_B64: &str = "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAACAAAA";
+
+    fn triangle_gltf_json() -> String {
+        let mut json = serde_json::json!({
+            "asset": {"version": "2.0"},
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0, "name": "tri"}],
+            "meshes": [{"primitives": [{
+                "attributes": {"POSITION": 0},
+                "indices": 1,
+                "material": 0,
+            }]}],
+            "materials": [{"pbrMetallicRoughness": {
+                "baseColorFactor": [0.9, 0.8, 0.2, 1.0],
+                "metallicFactor": 1.0,
+                "roughnessFactor": 0.2,
+            }}],
+            "buffers": [{"byteLength": 48, "uri": "data:application/octet-stream;base64,__B64__"}],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                {"buffer": 0, "byteOffset": 36, "byteLength": 12},
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                 "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]},
+                {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"},
+            ],
+        });
+        let uri = format!("data:application/octet-stream;base64,{TRIANGLE_B64}");
+        json["buffers"][0]["uri"] = serde_json::Value::String(uri);
+        serde_json::to_string(&json).expect("fixture serializes")
+    }
+
+    #[test]
+    fn load_gltf_stores_scene_end_to_end() {
+        // Real bytes (not hand-built structs): JSON + base64 buffer.
+        let mut server = AssetServer::new();
+        let id = server
+            .load_gltf(triangle_gltf_json().as_bytes())
+            .expect("triangle gltf loads");
+        let scene = server.get_scene(id).expect("stored");
+        assert_eq!(scene.entities.len(), 1);
+        assert_eq!(scene.entities[0].name, "tri");
+        assert_eq!(scene.entities[0].transform.translation, [0.0, 0.0, 0.0]);
+        assert!(matches!(
+            scene.entities[0].mesh,
+            crate::scene::MeshDesc::Custom { .. }
+        ));
+        assert!(matches!(
+            scene.entities[0].material,
+            crate::scene::MaterialDesc::Metal { .. }
+        ));
+        assert_eq!(
+            server.take_events(),
+            vec![AssetEvent::Loaded {
+                id,
+                kind: AssetKind::Scene
+            }]
+        );
     }
 }

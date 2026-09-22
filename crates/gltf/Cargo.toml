@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 gltf = { version = "1", default-features = false, features = ["utils", "names"] }
+# Minimal decoders for the core glTF image mimes (PNG/JPEG): sniffing plus
+# RGBA8 conversion. No default features — the full `image` tree (tiff, webp,
+# exr, …) stays out of a geometry-first loader.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [lints]
 workspace = true

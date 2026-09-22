@@ -25,7 +25,7 @@ use crate::camera::Frustum;
 use crate::mesh::Vertex;
 use crate::mesh_upload::custom_vertices_cached;
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
-use crate::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
 /// CPU-side render data read from the ECS lanes for one frame (X4
 /// Extract-free: a direct-read payload, not a scheduled snapshot —
@@ -558,7 +558,7 @@ pub fn sort_by_depth(upload: &mut FrameUpload, view: &Mat4) {
 
 fn insert_scene_entities(
     engine: &mut Engine,
-    entities: &[crate::scene::EntityDesc],
+    entities: &[ornis_assets::scene::EntityDesc],
 ) -> Vec<Entity> {
     let store = engine.world_mut().store_mut().expect("render world store");
     let mut handles = Vec::with_capacity(entities.len());

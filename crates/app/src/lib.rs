@@ -8,21 +8,17 @@
 //! type — extraction reads its lanes directly, never a second world copy.
 
 use glam::Vec3;
+use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem};
+use ornis_assets::scene::TransformDesc;
 use ornis_core::{
     Engine, FixedTime, InputState, Resources, SmartStore, System, SystemAccess, World,
 };
 use ornis_physics::RigidBody;
-use ornis_render::scene::TransformDesc;
 
 pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 
-pub mod assets;
 pub mod game_world;
 
-pub use assets::{
-    AssetEvent, AssetId, AssetKind, AssetServer, MaterialHandle, MeshHandle, SceneLoadError,
-    parse_scene_ron,
-};
 pub use game_world::{GameWorld, spawn_static_floor};
 
 /// Installs the unified runtime into `engine`.
@@ -68,6 +64,30 @@ pub fn install_gameplay_physics_bridge(engine: &mut Engine) {
     let _ = engine
         .fixed_schedule_mut()
         .try_order_before("velocity_to_body", "physics_sync_in");
+}
+
+/// Installs object animation (`anim_sample`, physics bodies skipped) into
+/// the frame schedule after the body-pose propagation.
+///
+/// Idempotent like [`install_gameplay_physics_bridge`]: a second call on
+/// the same engine is a no-op. Physics-authoritative entities keep the
+/// generic sampler honest — `RigidBody` is visible here, unlike in
+/// `ornis-anim` itself (which stays physics-free by design).
+pub fn install_object_animation(engine: &mut Engine) {
+    if engine.schedule().mermaid().contains("anim_sample") {
+        return;
+    }
+    let store = engine.world_mut().store_mut().expect("anim lane store");
+    store.register::<AnimPlayer>();
+    store.register_cold::<AnimClip>();
+    engine
+        .schedule_mut()
+        .add_system(AnimSampleSystem::<RigidBody>::new());
+    // Poses propagate body → animation: the sampler overwrites what the
+    // bridge wrote, never the reverse. Best-effort without the bridge.
+    let _ = engine
+        .schedule_mut()
+        .try_order_before("body_to_transform", "anim_sample");
 }
 
 pub fn install_unified_runtime(engine: &mut Engine) {
@@ -196,10 +216,10 @@ pub fn apply_browser_input(world: &mut World, input: InputState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
     #[allow(unused_imports)]
     use ornis_core::Entity;
     use ornis_core::{Engine, World};
-    use ornis_render::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
     /// Thin view over the unified [`World`]: no second `Engine` copy required.
     struct UnifiedView<'a> {

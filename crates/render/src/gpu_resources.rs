@@ -56,7 +56,7 @@ use crate::extraction::{RenderLights, extract_render_data, max_mesh_params};
 use crate::frame_exec::{BufferRenderContext, RenderFrame3D};
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
-use crate::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
 /// Обёртка над `wgpu::Device` как ECS-ресурс.
 pub struct GpuDevice(pub wgpu::Device);
@@ -556,7 +556,7 @@ mod tests {
         let mut engine = Engine::new();
         let custom = RenderLights {
             ambient: [0.5, 0.4, 0.3],
-            lights: vec![crate::scene::LightDesc::Directional {
+            lights: vec![ornis_assets::scene::LightDesc::Directional {
                 direction: [0.0, -1.0, 0.0],
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
