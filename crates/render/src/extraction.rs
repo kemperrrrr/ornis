@@ -61,6 +61,17 @@ pub struct CustomMeshEntry {
     pub indices: Vec<u32>,
     /// Model/normal matrices and the index into `FrameUpload::materials`.
     pub instance: InstanceData,
+    /// Whether this entry carries pre-skinned world-space vertices (phase B,
+    /// `docs/animation-design.md` §2.3): then `vertices` are already in
+    /// world space and `instance.model_matrix` is `IDENTITY`.
+    ///
+    /// Always `false` on the classic soup path below (bind-pose geometry
+    /// transformed by `instance.model_matrix`, never pre-skinned). The
+    /// `true` arm arrives with the phase C wiring, which reads the skin
+    /// output lane — deliberately not probed here: `ornis-render` must
+    /// not depend on `ornis-animation` (same dependency direction as
+    /// `ornis-physics`), so no new manifest dependency is introduced.
+    pub skinned: bool,
 }
 
 /// Tessellation floor when no complete renderable entity asks for more
@@ -391,6 +402,8 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 vertices,
                 indices: soup_indices,
                 instance,
+                // Classic soup path: bind-pose geometry, never pre-skinned.
+                skinned: false,
             });
             continue;
         }
@@ -1278,6 +1291,7 @@ mod tests {
                     normal_matrix: model.inverse().transpose(),
                     material_index: 0,
                 },
+                skinned: false,
             });
         }
         let view = (

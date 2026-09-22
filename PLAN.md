@@ -228,6 +228,16 @@ Hot reload сцены ✅: editor-world следит за mtime файла сц�
 ✅ **2026-09-22 — объектная анимация, фаза A** (`crates/animation`):
 `AnimClip`/`AnimPlayer`, `anim_sample` в PostFrame (`RigidBody`-сущности
 пропускаются, mirror в `Position` без insert); wiring в сессию — отдельно.
+✅ **2026-09-22 — upload текстур в GPU** (`render/src/textures.rs`):
+`GpuTexture` + `TextureCache` (дедуп, хендлы), бинд по `TextureRole`,
+sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metalness);
+шейдерный сэмплинг — следующий шаг, legacy пиксель-в-пиксель цел.
+✅ **2026-09-22 — скелет, фаза B** (`ornis-animation`): `Skeleton`/
+`JointPose`/`SkinnedMesh`/`SkelClip`/`SkelPlayer`, `skel_sample` +
+`skel_skin_cpu`, кап 128, bad-skin = скип со счётчиком; gltf-приёмка
+(фаза C) и GPU-скининг (фаза D) — следом.
+✅ **2026-09-22 — загрузка сцен из UI**: File → Load… (`editor.js`,
+server-side path) шлёт `load_scene {path}` — `.ron` и `.glb`/`.gltf`.
 ✅ **2026-09-22 — `ornis-assets` (P0 контентного спринта):** desc-типы +
 `Scene` переехали из render под корень (`git mv`, без алиасов);
 `ColliderDesc` + явные рецепты; проекция `MeshDesc→тело` из бинаря в
@@ -815,7 +825,25 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   интеграция в сабстеп `XpbdEngine`, 5 тестов: топология билдеров,
   дегенеративные ряды, верёвка держит длину <2%, ткань драпируется при
   structural-растяжении <8%; lib-сьют 146 зелёный, clippy/fmt чисто).
-  Остаток D1: volume, deformable↔rigid, рендер-сетка.
+  ✅ **Шаг 3 DONE 2026-09-22** (глобальный volume-ряд по замкнутой
+  триангуляции, XPBD-balloon: `C=(V−V0)/V0`, градиенты из смежных граней;
+  `soft_cube` с программной правкой winding + поле `damping` — без него
+  BDF1 не гасит колебания; тест: сплющенный куб реинфлейтится к V0±5%.
+  По дороге пойман настоящий баг: `step()` выходил досрочно при пустых
+  rigid-телах, и soft-сцены стояли — D1.1-тесты проходили вхолостую;
+  теперь гейт `bodies && soft_bodies`. Lib-сьют 147 зелёный, clippy чист).
+  ✅ **Шаг 4 DONE 2026-09-22** (deformable↔rigid: частицы как сферы
+  `contact_radius` против `shape_distance`, неравенства `λ≥0` с якорем на
+  rigid-стороне, inelastic+frictionless; тест: куб падает на пол и лежит
+  на `contact_radius` без туннеля. По дороге два бага: (1) зазор мерился
+  от центра частицы, а не от поверхности — касание читалось как
+  проникновение на радиус (фикс: `SoftContact.off` — witness-оффсет);
+  (2) `damping` как доля за сабстеп давал терминальную скорость,
+  зависящую от числа сабстепов — переделан в rate 1/s (`exp(−d·h)`),
+  timestep-независимый. Урок: жёсткий volume + мягкие рёбра без демпфа
+  зацикливаются в высокую форму — балансировать жёсткости и гасить путь
+  к равновесию. Lib-сьют 148 зелёный, clippy чист).
+  Остаток D1: рендер-сетка.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

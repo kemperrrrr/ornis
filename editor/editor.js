@@ -596,6 +596,23 @@ function initFileMenu() {
             .then(refreshStatus)
             .catch(function() { showFileStatus('Reload failed: engine offline'); });
     });
+    // Load… opens any server-side scene asset: .ron scenes and .glb/.gltf
+    // geometry (imported as Custom-soup entities with scalar materials).
+    // The path is resolved by the editor server, not the browser.
+    var load = document.getElementById('file-load');
+    if (load) load.addEventListener('click', function() {
+        menu.classList.remove('open');
+        var path = window.prompt('Scene asset path (.ron, .glb, .gltf):', 'editor/scene.ron');
+        if (path === null) return;
+        path = path.trim();
+        if (!path) return;
+        showFileStatus('Loading ' + path + '…');
+        sendCommand('load_scene', { path: path })
+            .then(refreshEvents)
+            .then(refreshScene)
+            .then(refreshStatus)
+            .catch(function() { showFileStatus('Load failed: engine offline'); });
+    });
 }
 
 // Apply replay records from either HTTP polling or the WebSocket stream.

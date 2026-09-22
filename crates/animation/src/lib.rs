@@ -13,11 +13,21 @@
 //! Entities with a physics-authoritative lane are skipped (physics wins).
 //! Root motion is out of scope: gameplay-affecting motion travels the fixed
 //! `Velocity → RigidBody` path, never this sampler.
+//!
+//! Phase B (`docs/animation-design.md` §2 and §5) adds the skeletal side in
+//! the same file: [`Skeleton`]/[`JointPose`]/[`SkelPlayer`] hot lanes plus
+//! the cold [`SkelClip`] lane and [`SkinnedMesh`] bind data, sampled by
+//! `skel_sample` ([`SkelSampleSystem`]) and skinned on the CPU by
+//! `skel_skin_cpu` ([`SkelSkinSystem`]).
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
-use glam::{Quat, Vec3};
-use ornis_core::{Entity, Resources, SmartStore, System, SystemAccess, Time};
+use glam::{Mat3, Mat4, Quat, Vec3};
+use ornis_core::{
+    ColdComponentStore, ComponentStore, Entity, Resources, SmartStore, System, SystemAccess, Time,
+};
 use ornis_gameplay::Position;
 
 use ornis_assets::scene::{MeshDesc, TransformDesc};
@@ -480,4 +490,897 @@ mod tests {
     fn advance_freezes_on_zero_duration() {
         assert_eq!(advance_player_time(3.0, 1.0, 1.0, 0.0, true), 3.0);
     }
+}
+
+// ── Phase B: skeletal animation (design `docs/animation-design.md` §2 and §5) ──
+//
+// Hot lanes on the skeleton root (`Skeleton`, `JointPose`, `SkelPlayer`),
+// the cold clip lane (`SkelClip`) and the per-mesh bind data (`SkinnedMesh`)
+// are sampled by `skel_sample` (local → model matrices along `parents`) and
+// skinned on the CPU by `skel_skin_cpu` (linear blend skinning into the
+// mesh's own output buffers). Both are PostFrame-only, like `anim_sample`.
+// Bad skin (missing/invalid skeleton, pose or bind data) skips the entity
+// and bumps a counter — never a stub pose. Joints are never ECS entities:
+// the flat `JointPose` vector is the only pose representation.
+
+/// Maximum joints per skeleton: the uniform/storage limit of the future
+/// GPU path (design §2.1).
+///
+/// Skeletons beyond the cap are rejected, never silently truncated:
+/// [`Skeleton::validate`] fails, loaders must fail, and the systems skip
+/// the entity while counting it (`skipped_bad_skin`).
+pub const MAX_JOINTS: usize = 128;
+
+/// Why a [`Skeleton`] is unusable (and its entities must be skipped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkelError {
+    /// No joints: nothing to sample or skin.
+    Empty,
+    /// More than [`MAX_JOINTS`] joints.
+    TooManyJoints,
+    /// `parents`/`inverse_bind` length mismatch.
+    LengthMismatch,
+    /// Parent index outside `[-1, joint_count)`.
+    BadParent,
+    /// Parent cycle (including self-parenting).
+    Cycle,
+}
+
+/// Topology of one skeleton: joint parents plus per-joint inverse bind matrices.
+///
+/// Hot lane on the skeleton root. `parents`/`inverse_bind` (and names) ride
+/// an [`Arc`] so cloning the lane never copies the arrays. Lengths of
+/// `parents` and `inverse_bind` must match; `parents[joint]` is the parent
+/// joint index or `-1` for a root. Parent order is unrestricted — chains
+/// are resolved per joint, cycles are rejected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Skeleton {
+    /// Parent joint per joint (`-1` = root); length equals the joint count.
+    pub parents: Arc<[i32]>,
+    /// Bind-pose inverses; skinning uses `model[joint] * inverse_bind[joint]`.
+    pub inverse_bind: Arc<[Mat4]>,
+    /// Human-readable joint labels, diagnostics only (length unchecked).
+    pub joint_names: Arc<[String]>,
+}
+
+impl Skeleton {
+    /// Builds a skeleton; topology is checked by [`Skeleton::validate`],
+    /// not here, so loaders can assemble first and fail with a reason.
+    pub fn new(parents: Vec<i32>, inverse_bind: Vec<Mat4>, joint_names: Vec<String>) -> Self {
+        Self {
+            parents: Arc::from(parents),
+            inverse_bind: Arc::from(inverse_bind),
+            joint_names: Arc::from(joint_names),
+        }
+    }
+
+    /// Number of joints (`parents.len()`).
+    pub fn joint_count(&self) -> usize {
+        self.parents.len()
+    }
+
+    /// Checks joint count, cap, array lengths, parent range and cycles.
+    ///
+    /// Returns the joint count on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkelError`] describing the first defect found.
+    pub fn validate(&self) -> Result<usize, SkelError> {
+        let count = self.parents.len();
+        if count == 0 {
+            return Err(SkelError::Empty);
+        }
+        if count > MAX_JOINTS {
+            return Err(SkelError::TooManyJoints);
+        }
+        if self.inverse_bind.len() != count {
+            return Err(SkelError::LengthMismatch);
+        }
+        for joint in 0..count {
+            validate_chain(&self.parents, joint, count)?;
+        }
+        Ok(count)
+    }
+}
+
+/// Validates one joint's ancestor chain: every link must index a joint,
+/// `-1` terminates at a root, anything else is [`SkelError::BadParent`];
+/// more links than joints means a cycle ([`SkelError::Cycle`]).
+///
+/// `joint` ranges over `0..count` (caller-checked), so the first lookup
+/// always hits.
+fn validate_chain(parents: &[i32], joint: usize, count: usize) -> Result<(), SkelError> {
+    let mut cursor = joint;
+    let mut steps = 0;
+    while cursor < parents.len() && parents[cursor] >= 0 {
+        let parent = parents[cursor] as usize;
+        if parent >= count {
+            return Err(SkelError::BadParent);
+        }
+        cursor = parent;
+        steps += 1;
+        if steps > count {
+            return Err(SkelError::Cycle);
+        }
+    }
+    if cursor < parents.len() {
+        Ok(())
+    } else {
+        Err(SkelError::BadParent)
+    }
+}
+
+/// Sampled model-space pose of one skeleton: one matrix per joint.
+///
+/// Hot lane on the skeleton root, written whole by `skel_sample` (vector
+/// swap, never element-wise). Length must equal the [`Skeleton`] joint
+/// count; stale lengths make the entity bad skin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointPose {
+    /// Local-to-model matrices, one per joint (`root * chain * local`).
+    pub matrices: Vec<Mat4>,
+}
+
+impl JointPose {
+    /// Bind/rest pose placeholder: every joint at identity.
+    ///
+    /// The loader seeds roots with this (design §4.5); the sampler
+    /// overwrites it. Over-cap counts are kept (systems reject them).
+    pub fn identity(joint_count: usize) -> Self {
+        Self {
+            matrices: vec![Mat4::IDENTITY; joint_count],
+        }
+    }
+}
+
+/// One joint channel of a [`SkelClip`]: sorted keys per transform channel.
+///
+/// Field names follow the design (`t`/`r`/`s`); empty tracks mean
+/// "identity channel" (unlike object tracks, joints cannot leave a
+/// channel untouched or the chain would collapse).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointTrack {
+    /// Animated joint index into [`Skeleton`]/[`JointPose`].
+    pub joint: u32,
+    /// Translation keys; empty means zero translation.
+    pub translation: KeyTrack<Vec3>,
+    /// Rotation keys (unit quaternions); empty means identity.
+    pub rotation: KeyTrack<Quat>,
+    /// Scale keys; empty means unit scale.
+    pub scale: KeyTrack<Vec3>,
+}
+
+/// Shareable skeletal clip: cold data, sampled often, changed rarely.
+///
+/// Lives in the cold lane on a playlist entity; [`SkelPlayer`]s reference
+/// it through [`ClipId`]. Time wraps past `duration` (clips loop); a
+/// non-positive `duration` holds the pose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkelClip {
+    /// Clip length in seconds; player time wraps against it.
+    pub duration: f32,
+    /// Per-joint tracks; first track per joint wins on duplicates.
+    pub tracks: Vec<JointTrack>,
+}
+
+/// Hot per-root playback cursor into a [`SkelClip`].
+///
+/// Same shape as [`AnimPlayer`] (the playlist model is shared); `weight`
+/// is reserved for phase E blending and ignored here.
+///
+/// `Clone + Send + Sync` per the hot-lane contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkelPlayer {
+    /// Playlist entity holding the [`SkelClip`] in the cold lane.
+    pub clip: ClipId,
+    /// Current clip time in seconds; advanced by `dt * speed` each PostFrame.
+    pub time: f32,
+    /// Playback rate multiplier (`1.0` = real time; negative scrubs backwards).
+    pub speed: f32,
+    /// Blend weight, reserved for phase E (crossfade/masks); ignored here.
+    pub weight: f32,
+    /// Paused players hold their pose: time does not advance and the pose
+    /// is not rewritten.
+    pub playing: bool,
+}
+
+/// One skinned mesh: bind geometry plus joint influences and the CPU
+/// skinning output buffers.
+///
+/// Hot lane on the mesh entity (design §4.5); `skeleton` points at the
+/// root entity carrying [`Skeleton`] + [`JointPose`]. Bind arrays ride an
+/// [`Arc`] (shared with the loader/fallback soup); the `skinned_*` output
+/// buffers are owned world-space results, refreshed whole by
+/// `skel_skin_cpu`. `uvs`/`indices` are passthrough bind data for the
+/// future upload path (skinning never touches them).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinnedMesh {
+    /// Skeleton root entity ([`Skeleton`] + [`JointPose`] live there).
+    pub skeleton: Entity,
+    /// Influencing joints per vertex (glTF `JOINTS_0`, max 4, `u16`).
+    pub joints: Vec<[u16; 4]>,
+    /// Influence weights per vertex (glTF `WEIGHTS_0`, canonicalized at
+    /// skin time: finite positive sum normalizes, otherwise `(1,0,0,0)`).
+    pub weights: Vec<[f32; 4]>,
+    /// Bind-pose positions (engine units).
+    pub positions: Arc<[[f32; 3]]>,
+    /// Bind-pose shading normals (unit length).
+    pub normals: Arc<[[f32; 3]]>,
+    /// Bind-pose texture coordinates (passthrough).
+    pub uvs: Arc<[[f32; 2]]>,
+    /// Triangle index list (passthrough).
+    pub indices: Arc<[u32]>,
+    /// Skinned world-space positions, refreshed whole by `skel_skin_cpu`.
+    pub skinned_positions: Vec<[f32; 3]>,
+    /// Skinned world-space normals, refreshed whole by `skel_skin_cpu`.
+    pub skinned_normals: Vec<[f32; 3]>,
+}
+
+impl SkinnedMesh {
+    /// Builds a mesh; output buffers start as the bind pose (identity
+    /// skin) until `skel_skin_cpu` refreshes them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        skeleton: Entity,
+        joints: Vec<[u16; 4]>,
+        weights: Vec<[f32; 4]>,
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<u32>,
+    ) -> Self {
+        Self {
+            skeleton,
+            joints,
+            weights,
+            skinned_positions: positions.clone(),
+            skinned_normals: normals.clone(),
+            positions: Arc::from(positions),
+            normals: Arc::from(normals),
+            uvs: Arc::from(uvs),
+            indices: Arc::from(indices),
+        }
+    }
+
+    /// Vertex count of the bind pose (`positions.len()`).
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+}
+
+/// Per-run honesty counters of `skel_sample`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkelSampleStats {
+    /// Poses written into [`JointPose`] lanes.
+    pub sampled: u32,
+    /// Entities skipped for missing/invalid skeleton, clip or pose lane.
+    pub skipped_bad_skin: u32,
+}
+
+/// Per-run honesty counters of `skel_skin_cpu`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkelSkinStats {
+    /// Meshes skinned into their output buffers.
+    pub skinned: u32,
+    /// Skinned vertices across [`SkelSkinStats::skinned`] meshes.
+    pub skinned_vertices: u32,
+    /// Entities skipped for missing/invalid skeleton, pose or bind data.
+    pub skipped_bad_skin: u32,
+}
+
+/// Composes one joint-local matrix (`T·R·S`, the render convention).
+///
+/// Absent channels read as identity (zero translation, unit rotation,
+/// unit scale) so untracked joints hold the bind offset instead of
+/// collapsing the chain.
+///
+/// # Examples
+///
+/// ```
+/// # use glam::{Quat, Vec3};
+/// # use ornis_animation::joint_local_matrix;
+/// let local = joint_local_matrix(Some(Vec3::ONE), None, None);
+/// assert_eq!(local, glam::Mat4::from_translation(Vec3::ONE));
+/// assert_eq!(joint_local_matrix(None, None, None), glam::Mat4::IDENTITY);
+/// # let _ = Quat::IDENTITY;
+/// ```
+pub fn joint_local_matrix(
+    translation: Option<Vec3>,
+    rotation: Option<Quat>,
+    scale: Option<Vec3>,
+) -> Mat4 {
+    Mat4::from_scale_rotation_translation(
+        scale.unwrap_or(Vec3::ONE),
+        rotation.unwrap_or(Quat::IDENTITY),
+        translation.unwrap_or(Vec3::ZERO),
+    )
+}
+
+/// Resolves local matrices to model space along `parents`.
+///
+/// `models[joint] = root * ... * local[joint]` over each parent chain, so
+/// parent order is unrestricted; out-of-range parents and cycles resolve
+/// to [`None`]. Cost is `O(joints × depth)` (joints ≤ [`MAX_JOINTS`]).
+///
+/// Returns [`None`] when the topology is bad (empty, over-cap, length or
+/// parent defect) — the caller skips the entity and counts it.
+pub fn compose_model_matrices(
+    skeleton: &Skeleton,
+    locals: &[Mat4],
+    root: &Mat4,
+) -> Option<Vec<Mat4>> {
+    let count = checked_count(skeleton, locals.len())?;
+    (0..count)
+        .map(|joint| model_via_chain(&skeleton.parents, locals, root, joint))
+        .collect()
+}
+
+/// Joint count after the structural checks shared by sampling and skinning.
+///
+/// [`None`] on empty, over-cap or length defects (reasons live in
+/// [`Skeleton::validate`]; the hot path only needs the verdict).
+fn checked_count(skeleton: &Skeleton, locals_len: usize) -> Option<usize> {
+    let count = skeleton.parents.len();
+    if count == 0 || count > MAX_JOINTS {
+        return None;
+    }
+    if skeleton.inverse_bind.len() != count || locals_len != count {
+        return None;
+    }
+    Some(count)
+}
+
+/// Resolves one joint: multiplies `root * local` down its parent chain.
+///
+/// [`None`] on out-of-range parents or cycles. Terminates: every pushed
+/// link is new (the `contains` guard), drawn from a finite joint set.
+fn model_via_chain(parents: &[i32], locals: &[Mat4], root: &Mat4, joint: usize) -> Option<Mat4> {
+    let mut chain = vec![joint];
+    while let Some(&cursor) = chain.last() {
+        let parent = *parents.get(cursor)?;
+        if parent < 0 {
+            break;
+        }
+        let parent = parent as usize;
+        if parent >= parents.len() || chain.contains(&parent) {
+            return None;
+        }
+        chain.push(parent);
+    }
+    let mut model = *root;
+    for &link in chain.iter().rev() {
+        model *= locals[link];
+    }
+    Some(model)
+}
+
+/// Builds final skinning matrices: `model[joint] * inverse_bind[joint]`.
+///
+/// Lengths are caller-checked (systems validate first); extra entries of
+/// the longer slice are ignored.
+pub fn skinning_matrices(models: &[Mat4], inverse_bind: &[Mat4]) -> Vec<Mat4> {
+    models
+        .iter()
+        .zip(inverse_bind.iter())
+        .map(|(model, bind)| *model * *bind)
+        .collect()
+}
+
+/// Linear blend skinning over bind vertices (positions and normals).
+///
+/// `vertex' = Σ weight·M·vertex`; normals use the per-joint
+/// inverse-transpose 3×3 (degenerate joints contribute unrotated) and are
+/// renormalized unless they collapse to zero. Weights are canonicalized
+/// per vertex (finite positive sum normalizes, otherwise `(1,0,0,0)` on
+/// joint 0). Out-of-range joint indices read as identity; length defects
+/// truncate to the shortest input — callers (the systems) reject such
+/// meshes as bad skin before calling.
+pub fn skin_vertices(
+    joint_matrices: &[Mat4],
+    joints: &[[u16; 4]],
+    weights: &[[f32; 4]],
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let normal_matrices: Vec<Mat3> = joint_matrices.iter().map(normal_part).collect();
+    let count = joints
+        .len()
+        .min(weights.len())
+        .min(positions.len())
+        .min(normals.len());
+    let mut out_positions = Vec::with_capacity(count);
+    let mut out_normals = Vec::with_capacity(count);
+    for index in 0..count {
+        let weights = canonical_weights(weights[index]);
+        out_positions.push(blend_position(
+            joint_matrices,
+            joints[index],
+            weights,
+            positions[index],
+        ));
+        out_normals.push(blend_normal(
+            &normal_matrices,
+            joints[index],
+            weights,
+            normals[index],
+        ));
+    }
+    (out_positions, out_normals)
+}
+
+/// 3×3 inverse-transpose of a joint matrix for normal blending.
+///
+/// Degenerate (singular/non-finite) joints contribute [`Mat3::IDENTITY`]:
+/// positions still skin honestly, normals stay unrotated (documented
+/// fallback, not a silent entity-level stub).
+fn normal_part(joint: &Mat4) -> Mat3 {
+    let determinant = joint.determinant();
+    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+        return Mat3::IDENTITY;
+    }
+    Mat3::from_mat4(joint.inverse().transpose())
+}
+
+/// Canonical per-vertex weights: normalize a finite positive sum,
+/// otherwise fall back to full weight on joint 0 (design §2.1 rule).
+fn canonical_weights(weights: [f32; 4]) -> [f32; 4] {
+    let finite = weights.iter().all(|slot| slot.is_finite());
+    let sum: f32 = weights.iter().sum();
+    if finite && sum > 1e-6 {
+        [
+            weights[0] / sum,
+            weights[1] / sum,
+            weights[2] / sum,
+            weights[3] / sum,
+        ]
+    } else {
+        [1.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// Blends one bind position over its four influences.
+fn blend_position(
+    joint_matrices: &[Mat4],
+    joint_index: [u16; 4],
+    weights: [f32; 4],
+    position: [f32; 3],
+) -> [f32; 3] {
+    let vertex = Vec3::from_array(position);
+    let mut blended = Vec3::ZERO;
+    for slot in 0..4 {
+        let joint = joint_matrices
+            .get(joint_index[slot] as usize)
+            .copied()
+            .unwrap_or(Mat4::IDENTITY);
+        blended += joint.transform_point3(vertex) * weights[slot];
+    }
+    blended.to_array()
+}
+
+/// Blends one bind normal over its four influences, renormalized unless
+/// the blend collapses to zero (then the zero vector is kept, not NaN).
+fn blend_normal(
+    normal_matrices: &[Mat3],
+    joint_index: [u16; 4],
+    weights: [f32; 4],
+    normal: [f32; 3],
+) -> [f32; 3] {
+    let direction = Vec3::from_array(normal);
+    let mut blended = Vec3::ZERO;
+    for slot in 0..4 {
+        let joint = normal_matrices
+            .get(joint_index[slot] as usize)
+            .copied()
+            .unwrap_or(Mat3::IDENTITY);
+        blended += joint * direction * weights[slot];
+    }
+    if blended.length_squared() > 1e-12 {
+        blended.normalize().to_array()
+    } else {
+        blended.to_array()
+    }
+}
+
+/// Skeleton pose sampler (system name `skel_sample`).
+///
+/// PostFrame-only visual pose on variable [`Time`]: advances playing
+/// [`SkelPlayer`] cursors (clips wrap), samples their [`SkelClip`] tracks
+/// to joint-local matrices and resolves them to model space along
+/// [`Skeleton::parents`], rooted at the entity's [`TransformDesc`]
+/// (identity when the lane is absent). Poses publish whole into
+/// [`JointPose`]; lanes are never created for animation.
+///
+/// Ordering: register after `anim_sample`, pin
+/// `try_order_before("anim_sample", "skel_sample")` and
+/// `try_order_before("skel_sample", "skel_skin_cpu")` — the skel lanes
+/// are disjoint from `anim_sample`, the edges make the determinism
+/// explicit for the owner wiring the session.
+#[derive(Debug, Clone, Copy)]
+pub struct SkelSampleSystem;
+
+impl SkelSampleSystem {
+    /// Creates the sampler.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SkelSampleSystem {
+    /// Creates the sampler (see [`SkelSampleSystem::new`]).
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl System for SkelSampleSystem {
+    fn name(&self) -> &'static str {
+        "skel_sample"
+    }
+
+    fn access(&self) -> SystemAccess {
+        // Honest per schedule.rs:415-439 — every lane touched below is
+        // declared. One deliberate deviation from the design table (same
+        // as `anim_sample`): `SkelPlayer` is *written* (cursor advance),
+        // so it must be `writes_lane`, not `reads_lane`. `SkelClip`
+        // travels the cold lane: declared for level planning although
+        // cold reads need no enforcement grant.
+        SystemAccess::new()
+            .reads::<Time>()
+            .reads::<SmartStore>()
+            .reads_lane::<SkelClip>()
+            .reads_lane::<Skeleton>()
+            .reads_lane::<TransformDesc>()
+            .writes_lane::<SkelPlayer>()
+            .writes_lane::<JointPose>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        // The scheduled wrapper keeps the `System` contract; hosts and
+        // tests needing the per-run honesty counters call
+        // `run_skel_sample` directly (persistent counters land with the
+        // extraction wiring in phase C).
+        let _ = run_skel_sample(resources);
+    }
+}
+
+/// Advances playing cursors and publishes model-space poses.
+///
+/// Pure of schedule position: a deterministic function of lanes + `dt`.
+/// Returns per-run counters (sampled poses, bad-skin skips).
+pub fn run_skel_sample(resources: &Resources) -> SkelSampleStats {
+    let Some(time) = resources.get::<Time>() else {
+        return SkelSampleStats::default();
+    };
+    let Some(store) = resources.get::<SmartStore>() else {
+        return SkelSampleStats::default();
+    };
+    advance_skel_players(store, time.delta_seconds());
+    publish_poses(store)
+}
+
+/// Advances playing [`SkelPlayer`] cursors against their clip duration.
+///
+/// Missing clips hold their cursor (counted as bad skin at sample time,
+/// not here).
+fn advance_skel_players(store: &SmartStore, dt: f32) {
+    let Some(clips) = store.read_cold_lane::<SkelClip>() else {
+        return;
+    };
+    let Some(mut players) = store.write_lane::<SkelPlayer>() else {
+        return;
+    };
+    for index in 0..players.data.len() {
+        let player = &mut players.data[index];
+        if !player.playing {
+            continue;
+        }
+        let Some(clip) = clips.get(player.clip.0) else {
+            continue;
+        };
+        player.time = advance_player_time(player.time, dt, player.speed, clip.duration, true);
+    }
+}
+
+/// Samples playing cursors and publishes whole [`JointPose`] vectors.
+fn publish_poses(store: &SmartStore) -> SkelSampleStats {
+    let mut stats = SkelSampleStats::default();
+    let work = collect_pose_work(store, &mut stats);
+    if work.is_empty() {
+        return stats;
+    }
+    let Some(mut poses) = store.write_lane::<JointPose>() else {
+        return stats;
+    };
+    for (entity, matrices) in work {
+        if let Some(pose) = poses.get_mut(entity) {
+            pose.matrices = matrices;
+            stats.sampled += 1;
+        }
+    }
+    stats
+}
+
+/// Collects `(entity, model matrices)` without holding lane guards across
+/// the later write: every imperfect entity bumps `skipped_bad_skin`.
+fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> Vec<(Entity, Vec<Mat4>)> {
+    let Some(clips) = store.read_cold_lane::<SkelClip>() else {
+        return Vec::new();
+    };
+    let Some(players) = store.read_lane::<SkelPlayer>() else {
+        return Vec::new();
+    };
+    let Some(skeletons) = store.read_lane::<Skeleton>() else {
+        return Vec::new();
+    };
+    let transforms = store.read_lane::<TransformDesc>();
+    let poses = store.read_lane::<JointPose>();
+    let mut work = Vec::new();
+    for (entity, player) in players.entities.iter().zip(players.data.iter()) {
+        if !player.playing {
+            continue;
+        }
+        match sample_entity(
+            *entity,
+            player,
+            &clips,
+            &skeletons,
+            transforms.as_deref(),
+            poses.as_deref(),
+        ) {
+            Some(matrices) => work.push((*entity, matrices)),
+            None => stats.skipped_bad_skin += 1,
+        }
+    }
+    work
+}
+
+/// Samples one playing cursor: tracks → locals → model matrices.
+///
+/// [`None`] (bad skin) on missing clip/skeleton/pose lane or on invalid
+/// topology; the caller counts it. Absent [`TransformDesc`] roots at
+/// identity (lenient); everything else is strict.
+fn sample_entity(
+    entity: Entity,
+    player: &SkelPlayer,
+    clips: &ColdComponentStore<SkelClip>,
+    skeletons: &ComponentStore<Skeleton>,
+    transforms: Option<&ComponentStore<TransformDesc>>,
+    poses: Option<&ComponentStore<JointPose>>,
+) -> Option<Vec<Mat4>> {
+    let clip = clips.get(player.clip.0)?;
+    let skeleton = skeletons.get(entity)?;
+    if poses.is_none_or(|lane| lane.get(entity).is_none()) {
+        return None;
+    }
+    let locals = sample_locals(clip, skeleton.joint_count(), player.time);
+    compose_model_matrices(skeleton, &locals, &root_matrix(transforms, entity))
+}
+
+/// Samples every [`JointTrack`] at `time`; untracked joints stay identity.
+///
+/// First track per joint wins on duplicates (same rule as `AnimClip`).
+fn sample_locals(clip: &SkelClip, joint_count: usize, time: f32) -> Vec<Mat4> {
+    let mut locals = vec![Mat4::IDENTITY; joint_count];
+    let mut painted = vec![false; joint_count];
+    for track in &clip.tracks {
+        let joint = track.joint as usize;
+        if joint >= joint_count || painted[joint] {
+            continue;
+        }
+        painted[joint] = true;
+        locals[joint] = joint_local_matrix(
+            track.translation.sample(time),
+            track.rotation.sample(time),
+            track.scale.sample(time),
+        );
+    }
+    locals
+}
+
+/// Root matrix from the entity's [`TransformDesc`], identity when absent.
+fn root_matrix(transforms: Option<&ComponentStore<TransformDesc>>, entity: Entity) -> Mat4 {
+    let Some(desc) = transforms.and_then(|lane| lane.get(entity)) else {
+        return Mat4::IDENTITY;
+    };
+    Mat4::from_scale_rotation_translation(
+        Vec3::from_array(desc.scale),
+        normalized_skel_quat(desc.rotation),
+        Vec3::from_array(desc.translation),
+    )
+}
+
+/// Normalizes a placement quaternion, identity on degenerate input (same
+/// honesty as the render extraction: never NaN into matrices).
+fn normalized_skel_quat(rotation: [f32; 4]) -> Quat {
+    let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+    let length_squared = orientation.length_squared();
+    if length_squared.is_finite() && length_squared > 1e-12 {
+        orientation.normalize()
+    } else {
+        Quat::IDENTITY
+    }
+}
+
+/// CPU skinning pass (system name `skel_skin_cpu`).
+///
+/// PostFrame, after `skel_sample`: builds final joint matrices
+/// (`model * inverse_bind`) per valid skeleton and blends every
+/// [`SkinnedMesh`] into its own output buffers (world-space positions
+/// and normals — the future `CustomMeshEntry` payload with
+/// `model_matrix = IDENTITY`). Buffers publish whole; imperfect meshes
+/// keep their previous buffers and count as bad skin — never stubs.
+///
+/// Ordering: register after `skel_sample`, pin
+/// `try_order_before("skel_sample", "skel_skin_cpu")`.
+#[derive(Debug, Clone, Copy)]
+pub struct SkelSkinSystem;
+
+impl SkelSkinSystem {
+    /// Creates the CPU skinning pass.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SkelSkinSystem {
+    /// Creates the CPU skinning pass (see [`SkelSkinSystem::new`]).
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl System for SkelSkinSystem {
+    fn name(&self) -> &'static str {
+        "skel_skin_cpu"
+    }
+
+    fn access(&self) -> SystemAccess {
+        // `SkinnedMesh` is both read (bind data) and written (output
+        // buffers): declared `writes_lane` (which covers reads), and the
+        // implementation sequences read and write guards so they never
+        // overlap on the lane `RwLock`.
+        SystemAccess::new()
+            .reads::<SmartStore>()
+            .reads_lane::<Skeleton>()
+            .reads_lane::<JointPose>()
+            .writes_lane::<SkinnedMesh>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        // Same contract as `SkelSampleSystem::run`: per-run counters via
+        // `run_skel_skin`; persistent counters land with phase C wiring.
+        let _ = run_skel_skin(resources);
+    }
+}
+
+/// Skins every valid [`SkinnedMesh`] into its output buffers.
+///
+/// Returns per-run counters (skinned meshes/vertices, bad-skin skips).
+pub fn run_skel_skin(resources: &Resources) -> SkelSkinStats {
+    let mut stats = SkelSkinStats::default();
+    let Some(store) = resources.get::<SmartStore>() else {
+        return stats;
+    };
+    let palette = joint_palette(store);
+    let jobs = collect_skin_jobs(store, &palette, &mut stats);
+    if jobs.is_empty() {
+        return stats;
+    }
+    let Some(mut meshes) = store.write_lane::<SkinnedMesh>() else {
+        return stats;
+    };
+    for job in jobs {
+        if let Some(mesh) = meshes.get_mut(job.entity) {
+            mesh.skinned_positions = job.positions;
+            mesh.skinned_normals = job.normals;
+            stats.skinned += 1;
+            stats.skinned_vertices += job.vertex_count;
+        }
+    }
+    stats
+}
+
+/// Final joint matrices per valid skeleton root.
+///
+/// Roots fail the palette (stale pose length, invalid topology) without
+/// counting here: meshes pointing at them count the bad skin instead.
+fn joint_palette(store: &SmartStore) -> HashMap<Entity, Vec<Mat4>> {
+    let Some(skeletons) = store.read_lane::<Skeleton>() else {
+        return HashMap::new();
+    };
+    let Some(poses) = store.read_lane::<JointPose>() else {
+        return HashMap::new();
+    };
+    let mut palette = HashMap::new();
+    for (entity, skeleton) in skeletons.entities.iter().zip(skeletons.data.iter()) {
+        let Ok(count) = skeleton.validate() else {
+            continue;
+        };
+        let Some(pose) = poses.get(*entity) else {
+            continue;
+        };
+        if pose.matrices.len() != count {
+            continue;
+        }
+        palette.insert(
+            *entity,
+            skinning_matrices(&pose.matrices, &skeleton.inverse_bind),
+        );
+    }
+    palette
+}
+
+/// One committed skinning result: owned buffers plus their owner.
+struct SkinJob {
+    /// Mesh entity receiving the buffers.
+    entity: Entity,
+    /// World-space skinned positions.
+    positions: Vec<[f32; 3]>,
+    /// World-space skinned normals.
+    normals: Vec<[f32; 3]>,
+    /// `positions.len()` (saturates at `u32::MAX`).
+    vertex_count: u32,
+}
+
+/// Computes every mesh without holding the write guard: imperfect meshes
+/// bump `skipped_bad_skin`, nothing is published partially.
+fn collect_skin_jobs(
+    store: &SmartStore,
+    palette: &HashMap<Entity, Vec<Mat4>>,
+    stats: &mut SkelSkinStats,
+) -> Vec<SkinJob> {
+    let Some(meshes) = store.read_lane::<SkinnedMesh>() else {
+        return Vec::new();
+    };
+    let mut jobs = Vec::new();
+    for (entity, mesh) in meshes.entities.iter().zip(meshes.data.iter()) {
+        match skin_job(*entity, mesh, palette) {
+            Some(job) => jobs.push(job),
+            None => stats.skipped_bad_skin += 1,
+        }
+    }
+    jobs
+}
+
+/// Skins one mesh against the palette; [`None`] (bad skin) on missing
+/// skeleton/pose, array length defects, empty binds or out-of-range
+/// joint indices.
+fn skin_job(
+    entity: Entity,
+    mesh: &SkinnedMesh,
+    palette: &HashMap<Entity, Vec<Mat4>>,
+) -> Option<SkinJob> {
+    let matrices = palette.get(&mesh.skeleton)?;
+    if mesh.joints.len() != mesh.weights.len() {
+        return None;
+    }
+    if mesh.positions.len() != mesh.joints.len() || mesh.normals.len() != mesh.joints.len() {
+        return None;
+    }
+    if mesh.positions.is_empty() {
+        return None;
+    }
+    let known = matrices.len();
+    if mesh
+        .joints
+        .iter()
+        .flatten()
+        .any(|index| (*index as usize) >= known)
+    {
+        return None;
+    }
+    let (positions, normals) = skin_vertices(
+        matrices,
+        &mesh.joints,
+        &mesh.weights,
+        &mesh.positions,
+        &mesh.normals,
+    );
+    Some(SkinJob {
+        entity,
+        vertex_count: positions.len().min(u32::MAX as usize) as u32,
+        positions,
+        normals,
+    })
 }

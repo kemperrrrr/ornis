@@ -35,6 +35,8 @@ pub mod schedule_bridge;
 pub mod shaders;
 /// Typed plan systems + single declaration registry (d3).
 pub mod system;
+/// glTF texture image upload (`LoadedImage` → `wgpu` texture + sampler).
+pub mod textures;
 /// Transient pool — the dynamic half of the dissolved frame-plan shell
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
@@ -63,6 +65,9 @@ pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use system::{
     Access, AccessSet, ClearBlack, ClearTransparent, ClearValue, ClearWhite, Frame, FramePass,
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,
+};
+pub use textures::{
+    CpuImage, GpuTexture, MaterialTextureSet, TextureCache, TextureRole, TextureUploadError,
 };
 pub use transient_pool::{
     Budget, BudgetExceeded, FrameLayout, PassId, PassLayout, PoolSlot, ResourceId, ResourceLayout,

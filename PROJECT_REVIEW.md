@@ -44,6 +44,11 @@
   зацепка был 1 импорт в `property_tests.rs`; 4 proptest-инварианта
   переехали в `physics/tests/math_props.rs` как детерминированные LCG.
   Core lib: 147 тестов за 0.05 с рантайма, физики в графе больше нет.
+- **Текстуры в GPU — DONE (проверено).** `GpuTexture` + `TextureCache`,
+  бинд по ролям, sRGB — железо; шейдерный сэмплинг следующим шагом.
+- **Скелет B — DONE (проверено).** Суставы/позы/скин-CPU в `ornis-animation`,
+  6 тестов; `skinned: true` и приёмка glTF — фаза C.
+- **Load… в UI — DONE.** File-меню шлёт `load_scene {path}` (.ron/.glb/.gltf).
 - **P0 `ornis-assets` — DONE (проверено).** Нижний крейт (только core):
   desc-типы + `Scene` из render, `ColliderDesc` + явные рецепты,
   проекция в `physics::colliders`, gltf-wiring, `AssetServer` с живым
