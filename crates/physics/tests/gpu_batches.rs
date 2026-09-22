@@ -1001,7 +1001,7 @@ fn avbd_row_solve_device_round_trip() {
 
     assert!(oks[0] > 0.5, "dynamic system must solve on device");
     assert!(oks[1] < 0.5, "static system must break down on device");
-    // CPU сверка в допусках на каждом члене (never bit-identical by
+    // CPU cross-check within tolerance per member (never bit-identical by
     // promise: device float contraction may differ ±1 ulp per op over a
     // ~200-op factorization).
     let got = deltas[0].to_residual();

@@ -1,51 +1,53 @@
-//! GPU resources as ECS singletons — дизайн единого scheduler'а (S6→S7).
+//! GPU resources as ECS singletons — unified-scheduler design (S6→S7).
 //!
-//! Цель: `Device`/`Queue`/`Surface`/`SurfaceConfiguration`/`Renderer3D`/`RenderFrame3D`
-//! как ресурсы `World`, чтобы `RenderSubmit` (upload), `RenderPresent`
-//! (acquire → record) и `RenderFlush` (ordered submit → present) стали
-//! обычными `System` в `Engine::schedule` вместо императива
+//! Goal: `Device`/`Queue`/`Surface`/`SurfaceConfiguration`/`Renderer3D`/`RenderFrame3D`
+//! as `World` resources, so `RenderSubmit` (upload), `RenderPresent`
+//! (acquire → record) and `RenderFlush` (ordered submit → present) become
+//! ordinary `System`s in `Engine::schedule` instead of imperative
 //! `GameContext::render_frame`.
-//! Пассы уже типизированы (`FramePass` с `Reads`/`Writes`),
-//! их уровни — `bitset_level_plan` из `ornis-schedule` (единый движок с
-//! `Schedule`). Здесь фиксируется контракт, как GPU-объекты входят в мир.
+//! Passes are already typed (`FramePass` with `Reads`/`Writes`),
+//! their levels come from `bitset_level_plan` in `ornis-schedule` (one engine
+//! shared with `Schedule`). This module pins the contract for how GPU
+//! objects enter the world.
 //!
-//! # Контракт
-//! - `GpuDevice`/`GpuQueue` — тонкие обёртки над `wgpu` объектами, `Send+Sync`.
-//! - `GpuSurfaceState` — размер + формат + present mode, мутируется на resize.
-//! - `GpuSurface` — `wgpu::Surface` в `Mutex` (внутренняя изменяемость как у
-//!   `OrbitCamera`). Хранится отдельно от `GpuSurfaceState`,
-//!   чтобы `RenderSubmit` мог читать размер без блокировки `Surface`.
-//! - `GpuFrameState` — `Renderer3D` + `RenderFrame3D` в `Mutex`.
-//!   Хранит пул слотов `FrameExecutor` между кадрами.
-//! - `GpuMesh` — `Mesh` + кеш тесселяции в `Mutex` (X2): отдельный от
-//!   `GpuFrameState` ресурс, пересоздание из лейна не держит лок
-//!   renderer'а. Порядок локов: `GpuMesh` раньше `GpuFrameState`.
-//! - `RenderSubmit` — `System` читает лейны `TransformDesc`/`MeshDesc`/
-//!   `MaterialDesc` напрямую (`reads_lane`, X1/Extract-free, канон S5d)
-//!   + `OrbitCamera` + `RenderLights` (X3: ambient/направленные источники
-//!   из мира, не хардкод), пишет `GpuFrameState` (через `Mutex`), внутри
-//!   делает `set_camera`/`upload_*`. Зависимость от пишущих лейны систем —
-//!   RaW по лейнам; снапшотов больше нет (X4) — канон `extract_render_data`
-//!   читает лейны напрямую.
-//! - `RenderMesh` — `System` (X2) пишет только `Mutex<GpuMesh>`:
-//!   пересоздаёт сферу, когда `max_mesh_params` из лейна (тот же канон,
-//!   что у `extract_render_data`) отличается от кеша.
-//! - `RenderPresent` — `System` читает `GpuSurface`/`GpuSurfaceState`/
-//!   `GpuDevice`/`GpuQueue` + лейны (X4: instance count — прямой
-//!   `extract_render_data`) + `Mutex<GpuMesh>` (X2) и пишет
-//!   `GpuFrameState` (`&mut RenderFrame3D` для записи команд) + оба
-//!   E2-handover-ресурса. Делает `surface.get_current_texture → create_view →
+//! # Contract
+//! - `GpuDevice`/`GpuQueue` — thin wrappers over `wgpu` objects, `Send+Sync`.
+//! - `GpuSurfaceState` — size + format + present mode, mutated on resize.
+//! - `GpuSurface` — `wgpu::Surface` behind a `Mutex` (interior mutability as
+//!   in `OrbitCamera`). Stored separately from `GpuSurfaceState` so
+//!   `RenderSubmit` can read the size without locking the `Surface`.
+//! - `GpuFrameState` — `Renderer3D` + `RenderFrame3D` behind a `Mutex`.
+//!   Holds the `FrameExecutor` pool slots across frames.
+//! - `GpuMesh` — `Mesh` + tessellation cache behind a `Mutex` (X2): a
+//!   resource separate from `GpuFrameState`, so rebuilding from the lane
+//!   never holds the renderer lock. Lock order: `GpuMesh` before
+//!   `GpuFrameState`.
+//! - `RenderSubmit` — a `System` reading the `TransformDesc`/`MeshDesc`/
+//!   `MaterialDesc` lanes directly (`reads_lane`, X1/Extract-free, S5d canon)
+//!   + `OrbitCamera` + `RenderLights` (X3: ambient/directional lights from
+//!   the world, not hardcoded), writing `GpuFrameState` (through the
+//!   `Mutex`); internally it runs `set_camera`/`upload_*`. The dependency
+//!   on lane-writing systems is RaW over lanes; snapshots are gone (X4) —
+//!   the `extract_render_data` canon reads lanes directly.
+//! - `RenderMesh` — a `System` (X2) writing only `Mutex<GpuMesh>`:
+//!   rebuilds the sphere when `max_mesh_params` from the lane (same canon
+//!   as `extract_render_data`) differs from the cache.
+//! - `RenderPresent` — a `System` reading `GpuSurface`/`GpuSurfaceState`/
+//!   `GpuDevice`/`GpuQueue` + lanes (X4: instance count — direct
+//!   `extract_render_data`) + `Mutex<GpuMesh>` (X2) and writing
+//!   `GpuFrameState` (`&mut RenderFrame3D` for command recording) + both
+//!   E2-handover resources. Runs `surface.get_current_texture → create_view →
 //!   frame3d.render_to_buffers` (per-pass encoders → `FrameCommandBuffers`,
-//!   acquired frame → `FramePresentTarget`). Ошибки `Outdated`/`Lost` —
-//!   реконфигурируют `Surface` на месте; `Occluded`/`Timeout`/`Validation` —
-//!   пропускают кадр. `Suboptimal` трактуется как `Success`.
-//! - `RenderFlush` — `System` (E2) сливает `FrameCommandBuffers` одним
-//!   ordered submit (`FrameCommandBuffers::flush`) и презентует acquired
-//!   frame из `FramePresentTarget`. Порядок после `RenderPresent`
-//!   гарантирован WaW по обоим handover-ресурсам (регистрация следом).
-//!   После этого `GameApp::render_frame` сводится к `GameWorld::frame`
-//!   (`run_frame` в schedule + внеплановый `frame_upload`, чей результат
-//!   нативный путь отбрасывает — системы читают лейны сами).
+//!   acquired frame → `FramePresentTarget`). `Outdated`/`Lost` errors
+//!   reconfigure the `Surface` in place; `Occluded`/`Timeout`/`Validation`
+//!   skip the frame. `Suboptimal` counts as `Success`.
+//! - `RenderFlush` — a `System` (E2) draining `FrameCommandBuffers` with one
+//!   ordered submit (`FrameCommandBuffers::flush`) and presenting the
+//!   acquired frame from `FramePresentTarget`. Ordering after `RenderPresent`
+//!   is guaranteed by WaW over both handover resources (registered right
+//!   after). After this `GameApp::render_frame` reduces to `GameWorld::frame`
+//!   (`run_frame` in the schedule + an off-plan `frame_upload` whose result
+//!   the native path discards — the systems read the lanes themselves).
 
 use std::sync::Mutex;
 
@@ -58,39 +60,39 @@ use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
-/// Обёртка над `wgpu::Device` как ECS-ресурс.
+/// Wrapper over `wgpu::Device` as an ECS resource.
 pub struct GpuDevice(pub wgpu::Device);
 
-/// Обёртка над `wgpu::Queue` как ECS-ресурс.
+/// Wrapper over `wgpu::Queue` as an ECS resource.
 pub struct GpuQueue(pub wgpu::Queue);
 
-/// Поверхностное состояние, которое меняется на resize.
+/// Surface state that changes on resize.
 #[derive(Debug, Clone)]
 pub struct GpuSurfaceState {
-    /// Текущий размер поверхности.
+    /// Current surface size.
     pub size: (u32, u32),
-    /// Формат поверхности.
+    /// Surface format.
     pub format: wgpu::TextureFormat,
 }
 
-/// GPU-поверхность как ECS-ресурс.
+/// GPU surface as an ECS resource.
 ///
-/// Хранится в `Mutex`, чтобы `System::run(&Resources)` мог вызывать
-/// `get_current_texture` и `configure` через interior mutability.
+/// Held behind a `Mutex` so `System::run(&Resources)` can call
+/// `get_current_texture` and `configure` through interior mutability.
 pub struct GpuSurface(pub Mutex<wgpu::Surface<'static>>);
 
-/// Готовые command-буферы кадра, ожидающие submit (стадия 1 handover
-/// encoder'а в `World`, No-encoder doubling).
+/// Finished per-frame command buffers awaiting submit (stage 1 of the
+/// encoder handover into `World`, no encoder doubling).
 ///
-/// Живой `wgpu::CommandEncoder` остаётся frame-локальным: его создаёт
-/// `RenderPresent` на каждый кадр (`device.create_command_encoder`), потому
-/// что encoder — короткоживущее незавершённое состояние записи, а не
-/// разделяемый синглтон. Через `World` передаётся только завершённый
-/// продукт — `Vec<wgpu::CommandBuffer>` за `Mutex` (interior mutability,
-/// как у `GpuSurface`/`GpuFrameState`).
-/// Стадия 2 (не входит сюда): `RenderPresent` пушит сюда вместо прямого
-/// `queue.submit`, а отдельная система сливает буферы в порядке
-/// регистрации — тогда ни одна система не владеет encoder'ом напрямую.
+/// The live `wgpu::CommandEncoder` stays frame-local: `RenderPresent`
+/// creates it every frame (`device.create_command_encoder`) because an
+/// encoder is short-lived unfinished recording state, not a shared
+/// singleton. Only the finished product crosses `World` —
+/// `Vec<wgpu::CommandBuffer>` behind a `Mutex` (interior mutability,
+/// as in `GpuSurface`/`GpuFrameState`).
+/// Stage 2 (not here): `RenderPresent` pushes here instead of calling
+/// `queue.submit` directly, and a separate system drains the buffers in
+/// registration order — so no system owns an encoder outright.
 #[derive(Debug, Default)]
 pub struct FrameCommandBuffers(pub Mutex<Vec<wgpu::CommandBuffer>>);
 
@@ -117,70 +119,72 @@ impl FrameCommandBuffers {
 #[derive(Debug, Default)]
 pub struct FramePresentTarget(pub Mutex<Option<wgpu::SurfaceTexture>>);
 
-/// Регистрирует [`FrameCommandBuffers`] в мире движка (стадия 1 handover).
+/// Registers [`FrameCommandBuffers`] in the engine world (stage 1 handover).
 ///
-/// Вызывать один раз до первого `run_frame`; повторный вызов заменяет
-/// ресурс пустым (потеря pending-буферов — только при неверном порядке
-/// инициализации, в steady state не вызывается).
+/// Call once before the first `run_frame`; a repeat call replaces the
+/// resource with an empty one (losing pending buffers only happens on a
+/// wrong initialization order, never in steady state).
 pub fn install_frame_buffers(engine: &mut ornis_core::Engine) {
     let _ = engine.world_mut().insert(FrameCommandBuffers::default());
 }
-/// GPU-состояние кадра: renderer + frame plan, pooled между кадрами.
+/// Per-frame GPU state: renderer + frame plan, pooled across frames.
 ///
-/// Хранится как `Mutex<GpuFrameState>` ресурс, чтобы `System::run(&Resources)`
-/// мог мутировать его через interior mutability. Меш — отдельный ресурс
-/// [`GpuMesh`] (X2): пересоздание из лейна не держит лок renderer'а.
+/// Stored as a `Mutex<GpuFrameState>` resource so `System::run(&Resources)`
+/// can mutate it through interior mutability. The mesh is a separate
+/// [`GpuMesh`] resource (X2): rebuilding from the lane never holds the
+/// renderer lock.
 pub struct GpuFrameState {
     /// Deferred renderer (pipelines + buffers).
     pub renderer: Renderer3D,
-    /// Frame plan с пулом текстур (`FrameExecutor` внутри).
+    /// Frame plan with the texture pool (`FrameExecutor` inside).
     pub frame3d: RenderFrame3D,
 }
 
-/// GPU-меш кадра как отдельный ресурс (X2, Extract-free).
+/// Per-frame GPU mesh as a separate resource (X2, Extract-free).
 ///
-/// `params` — тесселяция, из которой `mesh` создан; критерий пересоздания —
-/// `max_mesh_params` из `MeshDesc`-лейна (тот же канон, что у
-/// `extract_render_data`). Система `RenderMesh` пишет только этот
-/// ресурс; читатели (`RenderPresent`) упорядочены RaW. Хранится как
-/// `Mutex<GpuMesh>` — interior mutability, как у `GpuFrameState`.
+/// `params` is the tessellation `mesh` was built from; the rebuild
+/// criterion is `max_mesh_params` from the `MeshDesc` lane (same canon as
+/// `extract_render_data`). The `RenderMesh` system is the only writer of
+/// this resource; readers (`RenderPresent`) order after it via RaW. Stored
+/// as `Mutex<GpuMesh>` — interior mutability, as in `GpuFrameState`.
 pub struct GpuMesh {
-    /// Сфера-меш кадра.
+    /// Per-frame sphere mesh.
     pub mesh: Mesh,
-    /// Тесселяция `mesh` — кеш критерия пересоздания.
+    /// Tessellation of `mesh` — rebuild-criterion cache.
     pub params: (u32, u32),
 }
 
-/// Регистрирует [`GpuMesh`] в мире и систему его пересоздания (X2).
+/// Registers [`GpuMesh`] in the world plus its rebuild system (X2).
 ///
-/// `RenderMesh` читает лейны (`reads_lane`, канон S5d) и пишет только
-/// `Mutex<GpuMesh>`; для `create_sphere` нужен `GpuDevice` в ресурсах —
-/// вставьте его до первого `run_frame` (`install_gpu_resources` делает
-/// это сам). Повторный вызов заменяет ресурс (steady state — не
-/// вызывается).
+/// `RenderMesh` reads the lanes (`reads_lane`, S5d canon) and writes only
+/// `Mutex<GpuMesh>`; `create_sphere` needs `GpuDevice` in the resources —
+/// insert it before the first `run_frame` (`install_gpu_resources` does
+/// that itself). A repeat call replaces the resource (never called in
+/// steady state).
 pub fn install_render_mesh(engine: &mut ornis_core::Engine, mesh: GpuMesh) {
     let _ = engine.world_mut().insert(Mutex::new(mesh));
     engine.schedule_mut().add_system(RenderMesh);
 }
 
-/// Публикует legacy-риг света, только если сцено-загрузчик ещё не опубликовал.
+/// Publishes the legacy light rig, but only if the scene loader has not yet published one.
 ///
-/// `GameWorld::replace_scene` пишет `RenderLights` из сцены, а
-/// `install_gpu_resources` в `GameApp::initialize` идёт после — слепой
-/// `insert` молча сбрасывал бы свет сцены к дефолту (`insert` заменяет).
-/// Для shipped-сцены оба рига совпадают, гард важен для остальных сцен.
+/// `GameWorld::replace_scene` writes `RenderLights` from the scene, while
+/// `install_gpu_resources` in `GameApp::initialize` runs after it — a blind
+/// `insert` would silently reset the scene lights to the default (`insert`
+/// replaces). Both rigs match for the shipped scene; the guard matters for
+/// every other scene.
 fn insert_render_lights_default(engine: &mut ornis_core::Engine) {
     if engine.world().resources().get::<RenderLights>().is_none() {
         let _ = engine.world_mut().insert(RenderLights::default());
     }
 }
 
-/// Регистрирует GPU-ресурсы в `engine`.
+/// Registers the GPU resources in `engine`.
 ///
-/// Вызывать после создания `Device`/`Queue`/`Surface`/`Renderer3D`/
-/// `RenderFrame3D`/`Mesh` в `GameApp::initialize` — до первого `run_frame`.
-/// После этого `RenderMesh`/`RenderSubmit`/`RenderPresent`/`RenderFlush`
-/// в `schedule` видят те же объекты без копирования.
+/// Call after creating `Device`/`Queue`/`Surface`/`Renderer3D`/
+/// `RenderFrame3D`/`Mesh` in `GameApp::initialize` — before the first `run_frame`.
+/// After that `RenderMesh`/`RenderSubmit`/`RenderPresent`/`RenderFlush`
+/// in the `schedule` observe the same objects without copying.
 pub fn install_gpu_resources(
     engine: &mut ornis_core::Engine,
     device: wgpu::Device,
@@ -204,13 +208,13 @@ pub fn install_gpu_resources(
     engine.schedule_mut().add_system(RenderFlush);
 }
 
-/// Система пересоздания меша (X2): тесселяция — из лейна, не из снапшота.
+/// Mesh rebuild system (X2): tessellation comes from the lane, not a snapshot.
 ///
-/// `max_mesh_params` — тот же канон, что у `extract_render_data`
-/// (полные сущности, пол (32, 24)). Пишет только `Mutex<GpuMesh>`;
-/// читатели (`RenderPresent`) упорядочены RaW, с `RenderSubmit` общих
-/// ресурсов нет. Порядок локов: `GpuMesh` раньше `GpuFrameState`
-/// (иначе — только здесь, один лок на систему).
+/// `max_mesh_params` is the same canon as `extract_render_data`
+/// (full entities, floor (32, 24)). Writes only `Mutex<GpuMesh>`;
+/// readers (`RenderPresent`) order after it via RaW, with no resources
+/// shared with `RenderSubmit`. Lock order: `GpuMesh` before `GpuFrameState`
+/// (otherwise — only here, one lock per system).
 struct RenderMesh;
 
 impl System for RenderMesh {
@@ -249,14 +253,15 @@ impl System for RenderMesh {
     }
 }
 
-/// Система сабмита кадра: читает лейны + камеру + свет, пишет GPU-состояние.
+/// Frame submit system: reads lanes + camera + lights, writes GPU state.
 ///
-/// S7-шаг 1: делает `set_camera`/`upload_*`. X1 (Extract-free): данные
-/// материалов/инстансов — прямое чтение `TransformDesc`/`MeshDesc`/
-/// `MaterialDesc`-лейн (канон S5d) через `extract_render_data`.
-/// X2: пересоздание меша ушло в `RenderMesh` (`GpuMesh`-ресурс).
-/// X3: свет — из `RenderLights`-ресурса (сцено-загрузчик), не хардкод.
-/// `frame3d.render_to_buffers` — в `RenderPresent` (S7-шаг 2).
+/// S7 step 1: runs `set_camera`/`upload_*`. X1 (Extract-free): material and
+/// instance data come from direct `TransformDesc`/`MeshDesc`/`MaterialDesc`
+/// lane reads (S5d canon) through `extract_render_data`.
+/// X2: mesh rebuild moved to `RenderMesh` (the `GpuMesh` resource).
+/// X3: lights come from the `RenderLights` resource (scene loader), not
+/// hardcoded. `frame3d.render_to_buffers` lives in `RenderPresent`
+/// (S7 step 2).
 struct RenderSubmit;
 
 impl System for RenderSubmit {
@@ -323,18 +328,18 @@ impl System for RenderSubmit {
     }
 }
 
-/// Система презента кадра: acquire → record (E2: encoder как frame-ресурс).
+/// Frame present system: acquire → record (E2: encoder as a frame resource).
 ///
-/// S7-шаг 2: переносит `Surface` acquire из `GameApp::render_frame`
-/// в `Engine::schedule`. E2 (S5e): запись идёт через per-pass encoders в
-/// `FrameCommandBuffers` (`RenderFrame3D::render_to_buffers`), acquired
-/// frame уходит в `FramePresentTarget`; submit + present выполняет
-/// отдельная система `RenderFlush` (регистрация следом — WaW по обоим
-/// handover-ресурсам). X2: меш читается из `GpuMesh`-ресурса (RaW после
-/// `RenderMesh`). X4: instance count — прямое чтение лейнов
-/// (`extract_render_data`), не снапшот. Зависимость от `RenderSubmit`
-/// выводится как WaW по `Mutex<GpuFrameState>`; порядок — регистрация
-/// после `RenderSubmit`.
+/// S7 step 2: moves the `Surface` acquire from `GameApp::render_frame`
+/// into `Engine::schedule`. E2 (S5e): recording goes through per-pass
+/// encoders into `FrameCommandBuffers` (`RenderFrame3D::render_to_buffers`);
+/// the acquired frame travels in `FramePresentTarget`; a separate
+/// `RenderFlush` system performs submit + present (registered right after —
+/// WaW over both handover resources). X2: the mesh is read from the
+/// `GpuMesh` resource (RaW after `RenderMesh`). X4: instance count is a
+/// direct lane read (`extract_render_data`), not a snapshot. The dependency
+/// on `RenderSubmit` derives as WaW over `Mutex<GpuFrameState>`; ordering
+/// comes from registering after `RenderSubmit`.
 struct RenderPresent;
 
 impl System for RenderPresent {
@@ -475,12 +480,12 @@ impl System for RenderPresent {
     }
 }
 
-/// Система слива кадра: ordered submit + present (E2).
+/// Frame drain system: ordered submit + present (E2).
 ///
-/// Отдельная система после `RenderPresent`: сливает `FrameCommandBuffers`
-/// в порядке регистрации (один submit) и презентует acquired frame из
-/// `FramePresentTarget`. Порядок гарантирован WaW по обоим
-/// handover-ресурсам при регистрации следом за `RenderPresent`.
+/// A separate system after `RenderPresent`: drains `FrameCommandBuffers`
+/// in registration order (single submit) and presents the acquired frame
+/// from `FramePresentTarget`. Ordering is guaranteed by WaW over both
+/// handover resources when registered right after `RenderPresent`.
 struct RenderFlush;
 
 impl System for RenderFlush {

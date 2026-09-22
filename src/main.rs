@@ -220,7 +220,7 @@ impl GameApp {
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
         let (mut runtime, entity_count) = Self::showcase_engine();
-        // S7: GPU состояние — ресурс Engine, RenderSubmit/RenderPresent в schedule.
+        // S7: GPU state lives as Engine resources, RenderSubmit/RenderPresent run in schedule.
         {
             use ornis_render::gpu_resources::{
                 GpuFrameState, GpuMesh, GpuSurfaceState, install_gpu_resources,
@@ -428,10 +428,10 @@ impl GameApp {
     }
 
     fn render_frame(ctx: &mut GameContext) {
-        // S7-шаг 2: весь GPU-кадр (upload + acquire → record → submit → present)
-        // — в Engine::schedule как RenderSubmit/RenderPresent. Здесь только
-        // frame (fixed + variable schedules + CPU extraction); Present система
-        // сама делает surface.get_current_texture и frame3d.render.
+        // S7 step 2: the whole GPU frame (upload + acquire → record → submit → present)
+        // runs in Engine::schedule as RenderSubmit/RenderPresent. Only the
+        // frame stays here (fixed + variable schedules + CPU extraction); the Present
+        // system acquires via surface.get_current_texture and renders via frame3d itself.
         ctx.runtime.frame(1.0 / 60.0);
     }
 }
@@ -486,8 +486,8 @@ impl ApplicationHandler for GameApp {
             }
             WindowEvent::Resized(size) => {
                 let (w, h) = (size.width.max(1), size.height.max(1));
-                // Синхронизируем ECS ресурсы с новым размером — реконфигурируем
-                // Surface (в ресурсе) и обновляем GpuFrameState.
+                // Sync the ECS resources with the new size — reconfigure the
+                // Surface (held in a resource) and update GpuFrameState.
                 let device = ctx
                     .runtime
                     .engine()
@@ -513,7 +513,7 @@ impl ApplicationHandler for GameApp {
                         .get::<ornis_render::gpu_resources::GpuSurface>(),
                 ) {
                     let guard = surface.0.lock().expect("gpu surface lock");
-                    // Формат берём из обновлённого GpuSurfaceState.
+                    // Take the format from the updated GpuSurfaceState.
                     let format = ctx
                         .runtime
                         .engine()
