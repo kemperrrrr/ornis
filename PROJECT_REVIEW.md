@@ -49,6 +49,10 @@
 - **Скелет B — DONE (проверено).** Суставы/позы/скин-CPU в `ornis-animation`,
   6 тестов; `skinned: true` и приёмка glTF — фаза C.
 - **Load… в UI — DONE.** File-меню шлёт `load_scene {path}` (.ron/.glb/.gltf).
+- **Шейдеры текстур + скелет C — DONE (проверено).** Сэмплинг по ролям
+  без ломки legacy; glTF-скин импортируется, `skinned: true` в экстракции.
+- **Хендлы удалены (проверено).** Позиция энтити ≠ identity, дедуп по
+  значению сильнее; сервер/события/dirty живы.
 - **P0 `ornis-assets` — DONE (проверено).** Нижний крейт (только core):
   desc-типы + `Scene` из render, `ColliderDesc` + явные рецепты,
   проекция в `physics::colliders`, gltf-wiring, `AssetServer` с живым

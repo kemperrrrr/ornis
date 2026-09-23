@@ -15,13 +15,10 @@ pub mod collider;
 pub mod import;
 /// RON-serializable scene description types (moved from `ornis-render`).
 pub mod scene;
-/// Typed asset registry: ids, handles, events and the reload dirty-set.
+/// Typed asset registry: ids, events and the reload dirty-set.
 pub mod server;
 
 pub use collider::{ColliderDesc, collider_for};
 pub use import::scene_from_gltf;
 pub use scene::{CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
-pub use server::{
-    AssetEvent, AssetId, AssetKind, AssetServer, MaterialHandle, MeshHandle, SceneLoadError,
-    parse_scene_ron,
-};
+pub use server::{AssetEvent, AssetId, AssetKind, AssetServer, SceneLoadError, parse_scene_ron};

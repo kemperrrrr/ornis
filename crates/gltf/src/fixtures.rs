@@ -33,6 +33,8 @@ pub(crate) struct FixtureNode {
     pub(crate) name: Option<String>,
     /// Whether mesh `0` attaches here.
     pub(crate) mesh: bool,
+    /// `skin` index (`None` = unskinned node).
+    pub(crate) skin: Option<usize>,
     /// TRS fields (`None` = glTF default).
     pub(crate) translation: Option<[f32; 3]>,
     /// Unit quaternion `(x, y, z, w)` (`None` = identity).
@@ -98,6 +100,48 @@ pub(crate) struct FixtureImage {
     pub(crate) mime_override: Option<String>,
 }
 
+/// Storage width of the `WEIGHTS_0` fixture attribute.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FixtureWeightsKind {
+    /// `f32` weights, verbatim.
+    F32,
+    /// `u8` weights, scaled by `255` (decoder normalizes back).
+    U8,
+    /// `u16` weights, scaled by `65535` (decoder normalizes back).
+    U16,
+}
+
+/// Per-vertex skin influences of the fixture primitive.
+#[derive(Debug, Clone)]
+pub(crate) struct FixtureInfluence {
+    /// `JOINTS_0` values, one entry per vertex.
+    pub(crate) joints: Vec<[u16; 4]>,
+    /// Emit `JOINTS_0` as `u16` (`false` = `u8`).
+    pub(crate) joints_u16: bool,
+    /// `WEIGHTS_0` values, one entry per vertex.
+    pub(crate) weights: Vec<[f32; 4]>,
+    /// Storage width of `WEIGHTS_0`.
+    pub(crate) weights_kind: FixtureWeightsKind,
+    /// Optional extra set (`JOINTS_1`/`WEIGHTS_1`, always `u16`/`f32`) for
+    /// the top-4 truncation case.
+    pub(crate) extra: Option<FixtureInfluenceSet>,
+}
+
+/// One dense skin-influence set: per-vertex joints + weights.
+pub(crate) type FixtureInfluenceSet = (Vec<[u16; 4]>, Vec<[f32; 4]>);
+
+/// One entry of the fixture `skins` array.
+#[derive(Debug, Clone)]
+pub(crate) struct FixtureSkin {
+    /// `joints` node indices, in skin order.
+    pub(crate) joints: Vec<usize>,
+    /// `inverseBindMatrices` row data (`None` = accessor absent → identity).
+    pub(crate) inverse_bind: Option<Vec<[f32; 16]>>,
+    /// Skin `name` (`None` = unnamed).
+    pub(crate) name: Option<String>,
+    /// Skeleton root node index (`None` = field absent).
+    pub(crate) skeleton: Option<usize>,
+}
 /// One primitive + node tree assembled to bytes by the builders below.
 #[derive(Debug, Clone)]
 pub(crate) struct Fixture {
@@ -111,8 +155,12 @@ pub(crate) struct Fixture {
     pub(crate) uvs: Option<Vec<[f32; 2]>>,
     /// glTF primitive `mode` number (`None` = default triangles).
     pub(crate) mode: Option<u32>,
-    /// Adds `JOINTS_0` + `WEIGHTS_0` (skin-skip case).
-    pub(crate) skinned: bool,
+    /// Skin influences (`JOINTS_0`/`WEIGHTS_0`, `None` = unskinned primitive).
+    pub(crate) influence: Option<FixtureInfluence>,
+    /// `skins` array; mesh nodes link by [`FixtureNode::skin`].
+    pub(crate) skins: Vec<FixtureSkin>,
+    /// Dummy `LINEAR` animations targeting node 0 (clip-skip counter case).
+    pub(crate) animations: usize,
     /// Node tree; scene roots at node `0`.
     pub(crate) nodes: Vec<FixtureNode>,
     /// Mesh `name` (`None` = unnamed).
@@ -142,10 +190,13 @@ pub(crate) fn triangle() -> Fixture {
         normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
         uvs: Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
         mode: None,
-        skinned: false,
+        influence: None,
+        skins: Vec::new(),
+        animations: 0,
         nodes: vec![FixtureNode {
             name: Some("tri-node".to_string()),
             mesh: true,
+            skin: None,
             translation: Some([1.0, 2.0, 3.0]),
             rotation: None,
             scale: None,
@@ -166,6 +217,27 @@ pub(crate) fn triangle() -> Fixture {
 /// Parses the default triangle fixture straight from generated `.glb` bytes.
 pub(crate) fn load_triangle() -> LoadedScene {
     load_slice(&build_glb(&triangle())).expect("fixture parses")
+}
+
+/// Single-joint skinned triangle: mesh node doubles as the only joint
+/// (`parents == [-1]`, identity bind), full weight on joint 0.
+pub(crate) fn skinned_triangle() -> Fixture {
+    let mut fixture = triangle();
+    fixture.nodes[0].skin = Some(0);
+    fixture.influence = Some(FixtureInfluence {
+        joints: vec![[0, 0, 0, 0]; 3],
+        joints_u16: false,
+        weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+        weights_kind: FixtureWeightsKind::F32,
+        extra: None,
+    });
+    fixture.skins = vec![FixtureSkin {
+        joints: vec![0],
+        inverse_bind: None,
+        name: Some("skin".to_string()),
+        skeleton: None,
+    }];
+    fixture
 }
 
 /// Assembles a `.glb` container (JSON + BIN chunks, 4-byte aligned).
@@ -323,20 +395,64 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
 
     let mut joint_accessor = None;
     let mut weight_accessor = None;
-    if fixture.skinned {
-        let joints = vec![[0u8, 0, 0, 0]; fixture.positions.len().max(1)];
+    let mut joint1_accessor = None;
+    let mut weight1_accessor = None;
+    if let Some(influence) = &fixture.influence {
+        let (component, raw) = if influence.joints_u16 {
+            let mut raw = Vec::new();
+            for joint in &influence.joints {
+                for slot in joint {
+                    raw.extend_from_slice(&slot.to_le_bytes());
+                }
+            }
+            (5123u32, raw)
+        } else {
+            let mut raw = Vec::new();
+            for joint in &influence.joints {
+                for slot in joint {
+                    raw.push(*slot as u8);
+                }
+            }
+            (5121u32, raw)
+        };
+        push(&raw, &mut bin, &mut views);
+        joint_accessor = Some((views.len() - 1, influence.joints.len(), component));
+        let (component, raw) = encode_weights(&influence.weights, influence.weights_kind);
+        push(&raw, &mut bin, &mut views);
+        weight_accessor = Some((views.len() - 1, influence.weights.len(), component));
+        if let Some((extra_joints, extra_weights)) = &influence.extra {
+            let mut raw = Vec::new();
+            for joint in extra_joints {
+                for slot in joint {
+                    raw.extend_from_slice(&slot.to_le_bytes());
+                }
+            }
+            push(&raw, &mut bin, &mut views);
+            joint1_accessor = Some((views.len() - 1, extra_joints.len()));
+            let (_, raw) = encode_weights(extra_weights, FixtureWeightsKind::F32);
+            push(&raw, &mut bin, &mut views);
+            weight1_accessor = Some((views.len() - 1, extra_weights.len()));
+        }
+    }
+
+    // Animation clip data: one shared keyframe pair per dummy clip (input
+    // times + translation outputs), referenced by the `animations` JSON below.
+    let mut anim_parts: Vec<(usize, usize)> = Vec::new();
+    for _ in 0..fixture.animations {
         let mut raw = Vec::new();
-        for joint in &joints {
-            raw.extend_from_slice(joint);
+        for time in [0.0f32, 1.0] {
+            raw.extend_from_slice(&time.to_le_bytes());
         }
         push(&raw, &mut bin, &mut views);
-        joint_accessor = Some((views.len() - 1, joints.len()));
+        let input_view = views.len() - 1;
         let mut raw = Vec::new();
-        for _ in &joints {
-            raw.extend_from_slice(&[1.0f32, 0.0, 0.0, 0.0].map(f32::to_le_bytes).concat());
+        for vertex in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]] {
+            for component in vertex {
+                raw.extend_from_slice(&component.to_le_bytes());
+            }
         }
         push(&raw, &mut bin, &mut views);
-        weight_accessor = Some((views.len() - 1, joints.len()));
+        anim_parts.push((input_view, views.len() - 1));
     }
 
     // Fixture images: encoded with the same `image` crate the loader uses.
@@ -408,25 +524,30 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
         accessors.push(accessor_json(view, 5126, count, "VEC2"));
         attributes += &format!(",\"TEXCOORD_0\":{index}");
     }
-    if let Some((view, count)) = joint_accessor {
+    if let Some((view, count, component)) = joint_accessor {
         let index = accessors.len();
-        accessors.push(accessor_json(view, 5121, count, "VEC4"));
+        accessors.push(accessor_json(view, component, count, "VEC4"));
         attributes += &format!(",\"JOINTS_0\":{index}");
     }
-    if let Some((view, count)) = weight_accessor {
+    if let Some((view, count, component)) = weight_accessor {
         let index = accessors.len();
-        accessors.push(accessor_json(view, 5126, count, "VEC4"));
+        accessors.push(accessor_json(view, component, count, "VEC4"));
         attributes += &format!(",\"WEIGHTS_0\":{index}");
     }
+    if let Some((view, count)) = joint1_accessor {
+        let index = accessors.len();
+        accessors.push(accessor_json(view, 5123, count, "VEC4"));
+        attributes += &format!(",\"JOINTS_1\":{index}");
+    }
+    if let Some((view, count)) = weight1_accessor {
+        let index = accessors.len();
+        accessors.push(accessor_json(view, 5126, count, "VEC4"));
+        attributes += &format!(",\"WEIGHTS_1\":{index}");
+    }
 
-    let views_json = views
-        .iter()
-        .map(|(offset, length)| {
-            format!("{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{length}}}")
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let accessors_json = accessors.join(",");
+    // NOTE: `views_json`/`accessors_json` render at the end of the
+    // builder (skin and animation accessors are pushed below), so the
+    // table strings below only cover the attribute accessors so far.
     let indices_json =
         indices_accessor.map_or(String::new(), |index| format!(",\"indices\":{index}"));
     let mode_json = fixture
@@ -519,6 +640,9 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
             if node.mesh {
                 fields.push("\"mesh\":0".to_string());
             }
+            if let Some(skin) = node.skin {
+                fields.push(format!("\"skin\":{skin}"));
+            }
             if let Some(translation) = node.translation {
                 fields.push(format!(
                     "\"translation\":[{:?},{:?},{:?}]",
@@ -564,19 +688,134 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    // Skin inverse-bind matrices: one MAT4 view per skin with an explicit
+    // bind, referenced by the `skins` JSON below (absent entry → identity).
+    let mut ibm_accessors: Vec<Option<usize>> = Vec::new();
+    for skin in &fixture.skins {
+        if let Some(matrices) = &skin.inverse_bind {
+            let mut raw = Vec::new();
+            for matrix in matrices {
+                for component in matrix {
+                    raw.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            push(&raw, &mut bin, &mut views);
+            let index = accessors.len();
+            accessors.push(accessor_json(views.len() - 1, 5126, matrices.len(), "MAT4"));
+            ibm_accessors.push(Some(index));
+        } else {
+            ibm_accessors.push(None);
+        }
+    }
+    // Dummy animation clips: one translation channel on node 0 per entry
+    // (input times + outputs from the shared `anim_parts` views above).
+    let mut anim_json_parts: Vec<String> = Vec::new();
+    for (clip, (input_view, output_view)) in anim_parts.iter().enumerate() {
+        let input = accessors.len();
+        accessors.push(accessor_json(*input_view, 5126, 2, "SCALAR"));
+        let output = accessors.len();
+        accessors.push(accessor_json(*output_view, 5126, 2, "VEC3"));
+        anim_json_parts.push(format!(
+            "{{\"name\":\"clip_{clip}\",\"channels\":[{{\"sampler\":0,\
+            \"target\":{{\"node\":0,\"path\":\"translation\"}}}}],\
+            \"samplers\":[{{\"input\":{input},\"interpolation\":\"LINEAR\",\
+            \"output\":{output}}}]}}"
+        ));
+    }
+    let animations_json = if anim_json_parts.is_empty() {
+        String::new()
+    } else {
+        format!("\"animations\":[{}],", anim_json_parts.join(","))
+    };
+    let skins_json = if fixture.skins.is_empty() {
+        String::new()
+    } else {
+        let parts = fixture
+            .skins
+            .iter()
+            .zip(ibm_accessors)
+            .map(|(skin, ibm)| {
+                let joints = skin
+                    .joints
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let ibm_json = ibm.map_or(String::new(), |index| {
+                    format!(",\"inverseBindMatrices\":{index}")
+                });
+                let name_json = skin
+                    .name
+                    .as_ref()
+                    .map_or(String::new(), |name| format!(",\"name\":\"{name}\""));
+                let skeleton_json = skin
+                    .skeleton
+                    .map_or(String::new(), |node| format!(",\"skeleton\":{node}"));
+                format!("{{\"joints\":[{joints}]{ibm_json}{name_json}{skeleton_json}}}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("\"skins\":[{parts}],")
+    };
     let buffer_json = match buffer_uri {
         None => format!("{{\"byteLength\":{}}}", bin.len()),
         Some(uri) => format!("{{\"byteLength\":{},\"uri\":\"{uri}\"}}", bin.len()),
     };
+    // NOTE: `accessors_json`/`views_json` are rendered after the skin and
+    // animation accessors above are pushed, so indices stay valid.
+    let views_json = views
+        .iter()
+        .map(|(offset, length)| {
+            format!("{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{length}}}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let accessors_json = accessors.join(",");
     let json = format!(
         "{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"ornis-gltf-fixture\"}},\
         \"scene\":0,\"scenes\":[{{{scene_name_json}\"nodes\":[{roots_json}]}}],\
         \"nodes\":[{nodes_json}],\
         \"meshes\":[{{\"primitives\":[{primitive_json}]{mesh_name_json}}}],\
-        {materials_json}{textures_json}{images_json}\"buffers\":[{buffer_json}],\
+        {materials_json}{textures_json}{images_json}{skins_json}{animations_json}\
+        \"buffers\":[{buffer_json}],\
         \"bufferViews\":[{views_json}],\"accessors\":[{accessors_json}]}}"
     );
     (json, bin, external_files)
+}
+
+/// Encodes fixture weights to raw bytes in the requested storage width.
+fn encode_weights(weights: &[[f32; 4]], kind: FixtureWeightsKind) -> (u32, Vec<u8>) {
+    match kind {
+        FixtureWeightsKind::F32 => {
+            let mut raw = Vec::new();
+            for weight in weights {
+                for component in weight {
+                    raw.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            (5126, raw)
+        }
+        FixtureWeightsKind::U8 => {
+            let mut raw = Vec::new();
+            for weight in weights {
+                for component in weight {
+                    raw.push((component.clamp(0.0, 1.0) * 255.0).round() as u8);
+                }
+            }
+            (5121, raw)
+        }
+        FixtureWeightsKind::U16 => {
+            let mut raw = Vec::new();
+            for weight in weights {
+                for component in weight {
+                    raw.extend_from_slice(
+                        &((component.clamp(0.0, 1.0) * 65535.0).round() as u16).to_le_bytes(),
+                    );
+                }
+            }
+            (5123, raw)
+        }
+    }
 }
 
 /// Encodes one fixture image with the same `image` decoders the loader uses.

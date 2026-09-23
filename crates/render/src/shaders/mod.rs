@@ -12,6 +12,7 @@ pub mod hdr_composite_generated;
 pub mod helpers;
 pub mod interface;
 pub mod lighting_generated;
+pub mod material_textures;
 pub mod math;
 pub mod naga_ir;
 pub mod pbr_generated;
@@ -692,6 +693,7 @@ mod tests {
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
         let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
+        let textured = material_textures::wgsl_source_textured();
         // (bundle/entry globals, assemblies containing them). QuadConsts is
         // shared by five vertex entries, so it pins against all five
         // assemblies carrying the quad constants.
@@ -729,6 +731,10 @@ mod tests {
                 vec![gbuffer_fragment],
             ),
             (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
+            (
+                material_textures::PbrTexturedContext::GLOBALS,
+                vec![textured.clone()],
+            ),
         ];
         let mut checked = 0;
         for (globals, assemblies) in pairs {
@@ -741,7 +747,7 @@ mod tests {
                 checked += 1;
             }
         }
-        // Seven bundles plus one lone `global` param declare 30 names today;
+        // Nine bundles plus one lone `global` param declare 30+ names today;
         // fewer means a declaration was dropped and the test passes vacuously.
         assert!(
             checked >= 30,
@@ -824,6 +830,11 @@ mod tests {
             },
             Entry {
                 src: pbr_generated::fs_main::wgsl_source(),
+                input: Some(GbufferFragmentInput::WGSL_FIELDS),
+                output: None,
+            },
+            Entry {
+                src: material_textures::fs_main_textured::wgsl_source(),
                 input: Some(GbufferFragmentInput::WGSL_FIELDS),
                 output: None,
             },
@@ -917,7 +928,7 @@ mod tests {
                 rest = after;
             }
         }
-        // Eleven entries, 151 resolved uses today; fewer means the
+        // Twelve entries, 151+ resolved uses today; fewer means the
         // extraction broke or coverage was dropped — update deliberately.
         assert!(checked >= 151, "expected field uses, found {checked}");
     }
@@ -999,6 +1010,7 @@ mod tests {
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
         let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
+        let textured = material_textures::wgsl_source_textured();
         let pairs: &[(&str, &str)] = &[
             (
                 composite_generated::vs_main::wgsl_source(),
@@ -1017,6 +1029,10 @@ mod tests {
                 gbuffer_fragment.as_str(),
             ),
             (pbr_generated::fs_main::wgsl_source(), pbr.as_str()),
+            (
+                material_textures::fs_main_textured::wgsl_source(),
+                textured.as_str(),
+            ),
             (
                 hdr_composite_generated::vs_main::wgsl_source(),
                 hdr_vertex.as_str(),
@@ -1054,7 +1070,7 @@ mod tests {
                 checked += 1;
             }
         }
-        // Eleven entries make 85 calls today; near-zero hits would mean
+        // Twelve entries make 85+ calls today; near-zero hits would mean
         // the extraction broke and the test passes vacuously.
         assert!(checked >= 85, "expected calls, found {checked}");
     }
@@ -1093,6 +1109,11 @@ mod tests {
             (
                 pbr_generated::PbrContext::GLOBALS,
                 &pbr_generated::PBR_RESOURCES,
+                ShaderStages::FRAGMENT,
+            ),
+            (
+                material_textures::PbrTexturedContext::GLOBALS,
+                &material_textures::TEXTURED_PBR_RESOURCES,
                 ShaderStages::FRAGMENT,
             ),
             (
@@ -1164,7 +1185,7 @@ mod tests {
 
     #[test]
     fn assembled_shaders_validate_with_naga() {
-        let shaders: [(&str, String); 9] = [
+        let shaders: [(&str, String); 10] = [
             ("composite_vertex", composite_vertex()),
             ("composite_fragment", composite_fragment()),
             ("bloom_fragment", bloom_fragment()),
@@ -1174,6 +1195,10 @@ mod tests {
             ("lighting_fragment", lighting_fragment()),
             ("pbr_vertex", pbr_vertex()),
             ("pbr_fragment", pbr_fragment()),
+            (
+                "textured_forward_fragment",
+                material_textures::wgsl_source_textured(),
+            ),
         ];
         for (name, source) in &shaders {
             assert_valid_wgsl(name, source);

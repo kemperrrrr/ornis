@@ -13,6 +13,10 @@ glam = "0.33"
 ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 ornis-gameplay = { path = "../gameplay" }
+# Phase C (animation-design §2.3): extraction reads the `SkinnedMesh` lane to
+# publish pre-skinned world vertices (`CustomMeshEntry.skinned`). One-way
+# edge — `ornis-animation` never depends on `ornis-render`.
+ornis-animation = { path = "../animation" }
 ornis-mesh-editor = { path = "../mesh-editor" }
 ornis-macros = { path = "../macros" }
 # Phase A (audit §7): shared engine for levels/edges/OrderError.

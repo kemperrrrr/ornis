@@ -2026,6 +2026,7 @@ dependencies = [
  "criterion",
  "glam",
  "naga",
+ "ornis-animation",
  "ornis-assets",
  "ornis-core",
  "ornis-gameplay",

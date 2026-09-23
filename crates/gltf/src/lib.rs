@@ -25,6 +25,9 @@
 //! | absent `NORMAL` | [`LoadedMesh::normals`] is `None`; [`LoadedMesh::resolved_normals`] recomputes area-weighted (as `custom_mesh_data`) | `mesh_upload::custom_mesh_data` |
 //! | primitive `TEXCOORD_0` | [`LoadedMesh::uvs`] (`Some`, cast to `f32`) | dropped: rebuilt at upload |
 //! | absent `TEXCOORD_0` | [`LoadedMesh::uvs`] is `None`; [`LoadedMesh::resolved_uvs`] rebuilds with a box projection (as `custom_mesh_data`) | `mesh_upload::custom_mesh_data` |
+//! | primitive `JOINTS_0` (+`JOINTS_1..` when present) | [`LoadedMesh::joints`] (`Some`, top-4 by weight, `u16`) | `SkinnedMesh.joints` via `ornis-animation` builders |
+//! | primitive `WEIGHTS_0` (+`WEIGHTS_1..` when present) | [`LoadedMesh::weights`] (`Some`, normalized, `sum == 1`) | `SkinnedMesh.weights` via `ornis-animation` builders |
+//! | `skins[]` + node `skin` | [`LoadedSkin`] (`parents`/`inverse_bind`/`joint_names`) + [`LoadedEntity::skin`] link | `Skeleton` via `ornis-animation` builders |
 //! | `baseColorFactor` / `metallicFactor` / `roughnessFactor` / `emissiveFactor` | [`LoadedMaterial`] scalars | `metallic >= 0.5` → `MaterialDesc::Metal`, else `Dielectric` |
 //! | `baseColorTexture` | [`LoadedMaterial::base_color_texture`] (RGBA8) | albedo bind at upload |
 //! | `metallicRoughnessTexture` | [`LoadedMaterial::metallic_roughness_texture`] (RGBA8; G = roughness, B = metallic) | roughness/metallic bind at upload |
@@ -35,12 +38,14 @@
 //! | Input | Outcome | Counter |
 //! |---|---|---|
 //! | `mode != TRIANGLES` (points/lines/strips/fans) | primitive skipped, no triangulation in v1 | [`ImportStats::skipped_non_triangle`] |
-//! | `JOINTS_0` or `WEIGHTS_0` present | primitive skipped (skin track owns it) | [`ImportStats::skipped_skinned`] |
+//! | `JOINTS_0`/`WEIGHTS_0` malformed (missing set, count or width mismatch) | primitive skipped, no stub skin | [`ImportStats::skipped_skinned`] |
+//! | more than 4 nonzero influences across sets | top-4 kept, renormalized, one stderr warn per load | — (no counter: shape stays importable) |
+//! | `animations[]` present | clips skipped honestly (phase C imports skin only) | [`ImportStats::skipped_clips`] |
 //! | no `POSITION` attribute | primitive skipped | [`ImportStats::skipped_no_position`] |
 //! | empty positions or indices | primitive skipped | [`ImportStats::skipped_empty`] |
 //! | index out of range, or unindexed count not a multiple of 3 | primitive skipped | [`ImportStats::skipped_bad_index`] |
 //! | morph targets, cameras, lights, extensions, samplers | ignored | — (documented here) |
-//! | animations, skins, skeletons | ignored (separate track) | — (documented here) |
+//! | animations, skeletons (beyond `skins[0]`-style topology above) | ignored (clip track lands later) | [`ImportStats::skipped_clips`] for animations |
 //! | node without a mesh | traversed for children only | — |
 //! | external buffer URI under [`load_slice`] | `Err(ExternalBuffer)` — use [`load_path`] | — |
 //!
@@ -50,8 +55,10 @@
 //!    sampler, and `MaterialDesc` binding in `ornis-render`. Sampling,
 //!    filtering, and `texCoord` sets live there, not here (samplers are
 //!    ignored on import).
-//! 2. Skin + animations per `docs/animation-design.md` §4 (`Skeleton`,
-//!    `JointPose`, `SkinnedMesh`, `SkelClip` contract).
+//! 2. `SkelClip` assembly from `animations[]` per `docs/animation-design.md`
+//!    §4: needs `glam` key types (a new dependency), so clips are skipped
+//!    with [`ImportStats::skipped_clips`]; topology and influences land here
+//!    ([`LoadedSkin`], [`LoadedMesh::joints`], [`LoadedMesh::weights`]).
 //! 3. Wiring: `LoadedScene` → `ornis-render` `Scene` (host keeps its own
 //!    camera/lights/ambient; [`LoadedMesh::into_custom`] feeds
 //!    `MeshDesc::Custom`; [`LoadedMaterial::is_metallic`] picks the
@@ -79,6 +86,9 @@ pub struct LoadedScene {
     pub name: String,
     /// One entry per imported mesh primitive, hierarchy flattened.
     pub entities: Vec<LoadedEntity>,
+    /// One entry per resolved `skins[]` element, in document order;
+    /// [`LoadedEntity::skin`] links into this table.
+    pub skins: Vec<LoadedSkin>,
     /// Primitive/skip counters; see the skip-rules table.
     pub stats: ImportStats,
 }
@@ -99,6 +109,9 @@ pub struct LoadedEntity {
     pub scale: [f32; 3],
     /// Triangle soup plus optional source attributes.
     pub mesh: LoadedMesh,
+    /// Skin link: index into [`LoadedScene::skins`] from the node's `skin`
+    /// field (`None` = unskinned node, or a skin with no joints).
+    pub skin: Option<usize>,
     /// Scalar PBR factors plus decoded texture slots.
     pub material: LoadedMaterial,
 }
@@ -121,6 +134,32 @@ pub struct LoadedMesh {
     /// Verbatim `TEXCOORD_0` (cast to `f32`) when present and well-formed,
     /// else `None`.
     pub uvs: Option<Vec<[f32; 2]>>,
+    /// Imported `JOINTS_0` (+`JOINTS_1..`, top-4 by weight) as `u16`
+    /// (`Some` = skinned primitive, one entry per vertex).
+    pub joints: Option<Vec<[u16; 4]>>,
+    /// Imported `WEIGHTS_0` (+`WEIGHTS_1..`) normalized per vertex
+    /// (`sum == 1`; zero/non-finite sums fall back to `(1,0,0,0)` on the
+    /// first slot, mirroring the animation canonical rule).
+    pub weights: Option<Vec<[f32; 4]>>,
+}
+
+/// One resolved `skins[]` element: joint topology plus bind inverses.
+///
+/// Plain arrays (no `glam`, no `ornis-animation` dependency): the wiring
+/// feeds these field-for-field into the animation builders
+/// (`skeleton_from_import`), which validate and convert.
+#[derive(Debug, Clone)]
+pub struct LoadedSkin {
+    /// Parent joint per joint (`-1` = root); length equals the joint count.
+    /// Resolved from the node hierarchy: the parent node of each
+    /// `skin.joints` entry, mapped back into skin order (`-1` when the
+    /// parent is not a joint of this skin).
+    pub parents: Vec<i32>,
+    /// Bind-pose inverses in glTF column-major layout (`m[col][row]`);
+    /// identity per joint when the accessor is absent or malformed.
+    pub inverse_bind: Vec<[[f32; 4]; 4]>,
+    /// Joint labels: node names, else `joint_{node_index}` (diagnostics only).
+    pub joint_names: Vec<String>,
 }
 
 impl LoadedMesh {
@@ -255,8 +294,12 @@ pub struct ImportStats {
     pub skipped_no_position: u32,
     /// Primitives whose `mode` is not `TRIANGLES`.
     pub skipped_non_triangle: u32,
-    /// Primitives carrying `JOINTS_0`/`WEIGHTS_0` (skin track owns them).
+    /// Skinned primitives that failed skin-attribute decoding (missing
+    /// set, vertex-count or component-width mismatch) — skipped, never stubbed.
     pub skipped_skinned: u32,
+    /// Document `animations[]` skipped: phase C imports skin data only,
+    /// clips need key types this crate must not depend on.
+    pub skipped_clips: u32,
     /// Primitives with empty positions or indices.
     pub skipped_empty: u32,
     /// Primitives with out-of-range indices or a malformed count.
@@ -269,6 +312,7 @@ impl ImportStats {
         self.skipped_no_position == 0
             && self.skipped_non_triangle == 0
             && self.skipped_skinned == 0
+            && self.skipped_clips == 0
             && self.skipped_empty == 0
             && self.skipped_bad_index == 0
     }

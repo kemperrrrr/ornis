@@ -6,6 +6,10 @@
 
 use crate::mesh::{Mesh, Vertex};
 use crate::shaders;
+use crate::textures::{
+    CpuImage, GpuTexture, MaterialTextureSet, TextureCache, TextureRole,
+    sampler_descriptor_for_role, upload_texture,
+};
 use glam::Mat4;
 use ornis_assets::scene::LightDesc;
 use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
@@ -315,6 +319,27 @@ pub struct ForwardPass {
     color_view: wgpu::TextureView,
 }
 
+/// Textured-forward pass: the legacy [`ForwardPass`] evaluation plus one
+/// bound [`MaterialTextureSet`] per draw (see
+/// [`crate::shaders::material_textures`]).
+///
+/// Built on demand by
+/// [`Renderer3D::ensure_textured_forward`](Renderer3D::ensure_textured_forward)
+/// (the constructor takes no queue, so upload happens there, not in
+/// [`new`](Renderer3D::new)); the legacy passes never reference it, so
+/// untextured frames stay pixel-identical by construction. Unbound role
+/// slots resolve to neutral 1x1 white fallbacks (`x * 1.0 == x`,
+/// IEEE-exact): color roles share one `Rgba8UnormSrgb` fallback (hardware
+/// sRGB-decodes to linear white), the data role owns one `Rgba8Unorm`
+/// fallback (linear white, so roughness/metallic factors stand alone).
+pub struct TexturedForwardPass {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    fallback_color: GpuTexture,
+    fallback_data: GpuTexture,
+    sampler: wgpu::Sampler,
+}
+
 /// Final blend pass mixing deferred HDR, forward HDR and bloom into the output.
 pub struct CompositePass {
     /// Full-screen triangle-strip pipeline targeting the surface format.
@@ -435,6 +460,10 @@ pub struct Renderer3D {
     gbuffer_bind_group: std::sync::RwLock<wgpu::BindGroup>,
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
+    /// Textured-forward pipeline plus fallbacks, built on demand by
+    /// [`ensure_textured_forward`](Renderer3D::ensure_textured_forward);
+    /// `None` until then (legacy flows never build it).
+    textured_forward: Option<TexturedForwardPass>,
     composite_pass: CompositePass,
     /// Linear sampler shared by composite/bloom full-screen passes.
     composite_sampler: wgpu::Sampler,
@@ -992,6 +1021,7 @@ impl Renderer3D {
             gbuffer_bind_group: std::sync::RwLock::new(gbuffer_bind_group),
             lighting_pass,
             forward_pass,
+            textured_forward: None,
             composite_pass,
             composite_sampler,
             bloom_pass,
@@ -2053,6 +2083,134 @@ impl Renderer3D {
         }
     }
 
+    /// Resolves the view sampled for `role`: the cache entry bound in
+    /// `textures`, or the neutral fallback (color roles share
+    /// `fallback_color`, the data role uses `fallback_data`) when the slot
+    /// is unbound or the handle is stale.
+    fn material_view<'a>(
+        textures: &MaterialTextureSet,
+        cache: &'a TextureCache,
+        fallback_color: &'a wgpu::TextureView,
+        fallback_data: &'a wgpu::TextureView,
+        role: TextureRole,
+    ) -> &'a wgpu::TextureView {
+        textures
+            .binding(role)
+            .and_then(|handle| cache.get(handle))
+            .map_or(
+                match role {
+                    TextureRole::MetallicRoughness => fallback_data,
+                    TextureRole::BaseColor | TextureRole::Emissive => fallback_color,
+                },
+                |texture| &texture.view,
+            )
+    }
+
+    /// Build the textured-forward pipeline and its neutral fallback
+    /// textures; idempotent (later calls are no-ops).
+    ///
+    /// The fallbacks are 1x1 white images uploaded through
+    /// [`upload_texture`](crate::textures::upload_texture) under their
+    /// roles (sRGB for color, linear for data), and the sampler carries
+    /// [`sampler_descriptor_for_role`](crate::textures::sampler_descriptor_for_role)
+    /// defaults. The fragment stage is
+    /// [`wgsl_source_textured`](crate::shaders::material_textures::wgsl_source_textured);
+    /// everything else (vertex entry, targets, depth, MSAA) mirrors
+    /// [`TransparencyOptions`]-aware [`ForwardPass`] construction, so only
+    /// textured draws change appearance.
+    pub fn ensure_textured_forward(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.textured_forward.is_some() {
+            return;
+        }
+        let white = CpuImage::from_rgba8(1, 1, vec![255; 4]).expect("1x1 white image validates");
+        let fallback_color = upload_texture(device, queue, &white, TextureRole::BaseColor)
+            .expect("1x1 fallback color texture uploads");
+        let fallback_data = upload_texture(device, queue, &white, TextureRole::MetallicRoughness)
+            .expect("1x1 fallback data texture uploads");
+        let sampler = device.create_sampler(&sampler_descriptor_for_role(TextureRole::BaseColor));
+
+        // Same table-driven layout as every other pass: entries from the
+        // textured resource table, so WGSL declarations and layout agree.
+        let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> =
+            shaders::material_textures::TEXTURED_PBR_RESOURCES
+                .iter()
+                .map(|r| shaders::bgl_entry(r, false))
+                .collect();
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("textured forward bind group layout"),
+            entries: &bgl_entries,
+        });
+
+        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("textured forward vertex"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_vertex())),
+        });
+        let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("textured forward fragment"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(
+                shaders::material_textures::wgsl_source_textured(),
+            )),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("textured forward pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("textured forward pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vs_module,
+                entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
+                buffers: &[Some(Vertex::desc())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fs_module,
+                entry_point: Some(shaders::material_textures::fs_main_textured::entry_point()),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(forward_blend_state(self.transparency)),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: self.sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+
+        self.textured_forward = Some(TexturedForwardPass {
+            pipeline,
+            bind_group_layout,
+            fallback_color,
+            fallback_data,
+            sampler,
+        });
+    }
+
     fn create_composite_pass(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
@@ -2981,6 +3139,131 @@ impl Renderer3D {
                 .expect("forward bind group lock");
             rpass.set_bind_group(0, &*bind_group, &[]);
         }
+        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+    }
+
+    /// Record the textured-forward pass: draws lit geometry with one bound
+    /// [`MaterialTextureSet`] (resolved against `cache`, unbound slots fall
+    /// back to neutral white) into the HDR `output` layer, depth-testing
+    /// against (and optionally clearing) `depth`. `clear_depth = true` when
+    /// the pass runs standalone; `false` when it follows the gbuffer pass
+    /// and must share its depth. Mirrors [`render_forward`](Self::render_forward);
+    /// the scalar `is_metallic` switch is untouched by bound textures.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`ensure_textured_forward`](Self::ensure_textured_forward)
+    /// was not called yet — the pipeline and fallbacks do not exist until
+    /// then (the constructor takes no queue, so they cannot be built there).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_forward_textured(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        mesh: &Mesh,
+        instance_count: u32,
+        clear_depth: bool,
+        textures: &MaterialTextureSet,
+        cache: &TextureCache,
+    ) {
+        let pass = self.textured_forward.as_ref().expect(
+            "textured forward pass not built: call ensure_textured_forward(device, queue) first",
+        );
+        // The bind group is rebuilt per frame: the material buffer may have
+        // grown and the bound set may have changed. Binding numbers come
+        // from the table; only the name → live resource mapping is here.
+        let material = self.material_buffer.read().expect("material buffer lock");
+        let per_object = self
+            .per_object_buffer
+            .read()
+            .expect("per-object buffer lock");
+        let base_color_view = Self::material_view(
+            textures,
+            cache,
+            &pass.fallback_color.view,
+            &pass.fallback_data.view,
+            TextureRole::BaseColor,
+        );
+        let data_view = Self::material_view(
+            textures,
+            cache,
+            &pass.fallback_color.view,
+            &pass.fallback_data.view,
+            TextureRole::MetallicRoughness,
+        );
+        let emissive_view = Self::material_view(
+            textures,
+            cache,
+            &pass.fallback_color.view,
+            &pass.fallback_data.view,
+            TextureRole::Emissive,
+        );
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("textured forward bind group (frame)"),
+            layout: &pass.bind_group_layout,
+            entries: &shaders::bind_group_entries(
+                &shaders::material_textures::TEXTURED_PBR_RESOURCES,
+                |r| match r.name {
+                    "camera" => self.camera_buffer.as_entire_binding(),
+                    "per_objects" => per_object.as_entire_binding(),
+                    "materials" => material.as_entire_binding(),
+                    "lighting" => self.lighting_buffer.as_entire_binding(),
+                    "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
+                    "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    "shadow_cube_tex" => {
+                        wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                    }
+                    "base_color_tex" => wgpu::BindingResource::TextureView(base_color_view),
+                    "metallic_roughness_tex" => wgpu::BindingResource::TextureView(data_view),
+                    "emissive_tex" => wgpu::BindingResource::TextureView(emissive_view),
+                    "material_sampler" => wgpu::BindingResource::Sampler(&pass.sampler),
+                    other => {
+                        panic!("textured forward bind group has no resource for `{other}`")
+                    }
+                },
+            ),
+        });
+
+        let depth_ops = wgpu::Operations {
+            load: if clear_depth {
+                wgpu::LoadOp::Clear(1.0)
+            } else {
+                wgpu::LoadOp::Load
+            },
+            store: wgpu::StoreOp::Store,
+        };
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("textured forward pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(depth_ops),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        rpass.set_pipeline(&pass.pipeline);
+        rpass.set_bind_group(0, &bind_group, &[]);
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);

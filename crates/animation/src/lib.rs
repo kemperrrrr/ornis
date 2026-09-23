@@ -698,10 +698,11 @@ pub struct SkelPlayer {
 pub struct SkinnedMesh {
     /// Skeleton root entity ([`Skeleton`] + [`JointPose`] live there).
     pub skeleton: Entity,
-    /// Influencing joints per vertex (glTF `JOINTS_0`, max 4, `u16`).
+    /// Influencing joints per vertex (top-4, `u16` — the seam contract
+    /// every loader truncates to).
     pub joints: Vec<[u16; 4]>,
-    /// Influence weights per vertex (glTF `WEIGHTS_0`, canonicalized at
-    /// skin time: finite positive sum normalizes, otherwise `(1,0,0,0)`).
+    /// Influence weights per vertex (canonicalized at skin time: finite
+    /// positive sum normalizes, otherwise `(1,0,0,0)`).
     pub weights: Vec<[f32; 4]>,
     /// Bind-pose positions (engine units).
     pub positions: Arc<[[f32; 3]]>,
@@ -1383,4 +1384,352 @@ fn skin_job(
         positions,
         normals,
     })
+}
+
+// ── Import bridge: format-neutral skin input (design
+// `docs/animation-design.md` §4) ──
+//
+// Loader crates are foreign leaves: this crate must not depend on them, so
+// the mapping travels through the plain input structs below. Their shape
+// is the multi-format contract, not one format's echo: any loader (glTF
+// today, FBX/Collada tomorrow) parses its own skin dialect and emits
+// these values; per-format code stays in loader crates. Top-4 `u16`
+// joints with normalized weights, parent links and inverse bind poses
+// are universal to skeletal animation (and to GPU skinning), not glTF
+// inventions — glTF names (`JOINTS_0`, `skins[]`) appear below only as
+// the first producer's vocabulary. The host fills the structs from the
+// import output and calls the builders, which validate. Local adapters in
+// tests play the importer's role — no loader types cross this boundary,
+// not even in `dev-dependencies`.
+
+/// Imported skin topology in plain values: the no-dependency bridge into
+/// [`skeleton_from_import`].
+///
+/// Multi-format contract: parent links, layout-explicit bind poses and
+/// labels — whatever loader (glTF `skins[]` today) fills them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinImport {
+    /// Parent joint per joint (`-1` = root); length equals the joint count.
+    pub parents: Vec<i32>,
+    /// Bind-pose inverses as layout-explicit matrices: each loader
+    /// converts its own convention once (glTF column-major via
+    /// `Mat4::from_cols_array_2d`, row-major sources via
+    /// `Mat4::from_rows_array`), so this seam never speaks a format
+    /// dialect.
+    pub inverse_bind: Vec<Mat4>,
+    /// Human-readable joint labels, diagnostics only.
+    pub joint_names: Vec<String>,
+}
+
+/// Imported skinned primitive in plain values: the no-dependency bridge
+/// into [`skinned_mesh_from_import`].
+///
+/// Multi-format contract: top-4 joints (`u16`) with normalized weights
+/// plus resolved bind data — truncation and canonicalization happen in
+/// the loader, idempotent re-normalization here. Positions stay verbatim
+/// primitive-local: when the mesh node carries a world offset against
+/// the skeleton root, the host bakes the relative transform with
+/// [`bake_bind_transform`] first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinnedMeshImport {
+    /// Influencing joints per vertex (top-4, `u16`).
+    pub joints: Vec<[u16; 4]>,
+    /// Influence weights per vertex (normalized, `sum == 1`).
+    pub weights: Vec<[f32; 4]>,
+    /// Bind-pose positions (engine units).
+    pub positions: Vec<[f32; 3]>,
+    /// Bind-pose shading normals (unit length).
+    pub normals: Vec<[f32; 3]>,
+    /// Bind-pose texture coordinates (passthrough to upload).
+    pub uvs: Vec<[f32; 2]>,
+    /// Triangle index list (passthrough to upload).
+    pub indices: Vec<u32>,
+}
+
+/// Why a [`SkinnedMeshImport`] cannot become a [`SkinnedMesh`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkinBuildError {
+    /// No vertices: nothing to skin.
+    Empty,
+    /// `joints`/`weights`/`positions`/`normals`/`uvs` length mismatch, or a
+    /// malformed index list (empty, not a multiple of 3, out of range).
+    LengthMismatch,
+    /// A joint index reaches past the skeleton joint count.
+    JointOutOfRange,
+}
+
+/// Builds a [`Skeleton`] from imported skin topology.
+///
+/// Bind poses arrive layout-explicit (see [`SkinImport`]), so this only
+/// runs the full [`Skeleton::validate`] — topology defects report as
+/// [`SkelError`], never as truncated skeletons.
+///
+/// # Errors
+///
+/// Returns [`SkelError`] on empty, over-cap, length-mismatched or cyclic
+/// topology (see [`Skeleton::validate`]).
+///
+/// # Examples
+///
+/// ```
+/// # use glam::Mat4;
+/// # use ornis_animation::{SkinImport, skeleton_from_import};
+/// let skeleton = skeleton_from_import(&SkinImport {
+///     parents: vec![-1, 0],
+///     inverse_bind: vec![Mat4::IDENTITY; 2],
+///     joint_names: vec!["root".to_string(), "tip".to_string()],
+/// })
+/// .expect("two-bone topology validates");
+/// assert_eq!(skeleton.joint_count(), 2);
+/// ```
+pub fn skeleton_from_import(import: &SkinImport) -> Result<Skeleton, SkelError> {
+    let skeleton = Skeleton::new(
+        import.parents.clone(),
+        import.inverse_bind.clone(),
+        import.joint_names.clone(),
+    );
+    skeleton.validate().map(|_| skeleton)
+}
+
+/// Builds a [`SkinnedMesh`] from an imported primitive.
+///
+/// Weights are canonicalized idempotently (finite positive sums normalize,
+/// otherwise `(1,0,0,0)` on the first slot — same rule as the importer, so
+/// double normalization is a no-op). Output buffers start as the bind pose
+/// until `skel_skin_cpu` refreshes them (see [`SkinnedMesh::new`]).
+///
+/// # Errors
+///
+/// Returns [`SkinBuildError::Empty`] on zero vertices,
+/// [`SkinBuildError::LengthMismatch`] on array or index-list defects, and
+/// [`SkinBuildError::JointOutOfRange`] when a joint index reaches past
+/// `joint_count`.
+///
+/// # Examples
+///
+/// ```
+/// # use ornis_animation::{SkinnedMeshImport, skinned_mesh_from_import};
+/// # use ornis_core::SmartStore;
+/// let mut store = SmartStore::new();
+/// let root = store.create_entity();
+/// let mesh = skinned_mesh_from_import(
+///     root,
+///     1,
+///     &SkinnedMeshImport {
+///         joints: vec![[0, 0, 0, 0]],
+///         weights: vec![[2.0, 2.0, 0.0, 0.0]],
+///         positions: vec![[1.0, 0.0, 0.0]],
+///         normals: vec![[0.0, 0.0, 1.0]],
+///         uvs: vec![[0.0, 0.0]],
+///         indices: vec![0, 0, 0],
+///     },
+/// )
+/// .expect("single-joint bind builds");
+/// assert_eq!(mesh.weights, vec![[0.5, 0.5, 0.0, 0.0]]);
+/// ```
+pub fn skinned_mesh_from_import(
+    skeleton: Entity,
+    joint_count: usize,
+    import: &SkinnedMeshImport,
+) -> Result<SkinnedMesh, SkinBuildError> {
+    if import.positions.is_empty() {
+        return Err(SkinBuildError::Empty);
+    }
+    if import.joints.len() != import.weights.len()
+        || import.positions.len() != import.joints.len()
+        || import.normals.len() != import.joints.len()
+        || import.uvs.len() != import.joints.len()
+    {
+        return Err(SkinBuildError::LengthMismatch);
+    }
+    if import.indices.is_empty()
+        || !import.indices.len().is_multiple_of(3)
+        || import
+            .indices
+            .iter()
+            .any(|index| (*index as usize) >= import.positions.len())
+    {
+        return Err(SkinBuildError::LengthMismatch);
+    }
+    if import
+        .joints
+        .iter()
+        .flatten()
+        .any(|index| (*index as usize) >= joint_count)
+    {
+        return Err(SkinBuildError::JointOutOfRange);
+    }
+    let weights = import
+        .weights
+        .iter()
+        .map(|weight| canonical_weights(*weight))
+        .collect();
+    Ok(SkinnedMesh::new(
+        skeleton,
+        import.joints.clone(),
+        weights,
+        import.positions.clone(),
+        import.normals.clone(),
+        import.uvs.clone(),
+        import.indices.clone(),
+    ))
+}
+
+/// Bakes a mesh-node offset into bind arrays before
+/// [`skinned_mesh_from_import`].
+///
+/// The skinning contract emits world-space vertices, so bind data must be
+/// expressed in the skeleton-root frame: the host passes
+/// `inverse(root_world) * mesh_world` as a layout-explicit [`Mat4`] here
+/// when the skinned mesh node is offset from the root (each loader builds
+/// it from its own matrix convention). Positions map as points, normals
+/// through the inverse-transpose 3×3 and renormalized unless they
+/// collapse (then kept as-is, never NaN).
+pub fn bake_bind_transform(positions: &mut [[f32; 3]], normals: &mut [[f32; 3]], matrix: Mat4) {
+    for position in positions.iter_mut() {
+        *position = matrix
+            .transform_point3(Vec3::from_array(*position))
+            .to_array();
+    }
+    let normals_part = normal_part(&matrix);
+    for normal in normals.iter_mut() {
+        let blended = normals_part * Vec3::from_array(*normal);
+        if blended.length_squared() > 1e-12 {
+            *normal = blended.normalize().to_array();
+        } else {
+            *normal = blended.to_array();
+        }
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn two_bone_import() -> SkinImport {
+        SkinImport {
+            parents: vec![-1, 0],
+            inverse_bind: vec![Mat4::IDENTITY; 2],
+            joint_names: vec!["root".to_string(), "tip".to_string()],
+        }
+    }
+
+    fn single_vertex_import() -> SkinnedMeshImport {
+        SkinnedMeshImport {
+            joints: vec![[0, 0, 0, 0]],
+            weights: vec![[1.0, 0.0, 0.0, 0.0]],
+            positions: vec![[1.0, 0.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]],
+            uvs: vec![[0.0, 0.0]],
+            indices: vec![0, 0, 0],
+        }
+    }
+
+    #[test]
+    fn skeleton_build_converts_binds_and_validates() {
+        let skeleton = skeleton_from_import(&two_bone_import()).expect("two bones build");
+        assert_eq!(skeleton.joint_count(), 2);
+        assert_eq!(skeleton.inverse_bind.as_ref(), &[Mat4::IDENTITY; 2]);
+        assert_eq!(
+            skeleton.joint_names.as_ref(),
+            &["root".to_string(), "tip".to_string()]
+        );
+    }
+
+    #[test]
+    fn skeleton_build_rejects_bad_topology() {
+        // Length mismatch.
+        let mut bad = two_bone_import();
+        bad.inverse_bind.pop();
+        assert_eq!(skeleton_from_import(&bad), Err(SkelError::LengthMismatch));
+        // Cycle.
+        let cyclic = SkinImport {
+            parents: vec![1, 0],
+            inverse_bind: vec![Mat4::IDENTITY; 2],
+            joint_names: vec!["a".to_string(), "b".to_string()],
+        };
+        assert_eq!(skeleton_from_import(&cyclic), Err(SkelError::Cycle));
+        // Empty.
+        let empty = SkinImport {
+            parents: Vec::new(),
+            inverse_bind: Vec::new(),
+            joint_names: Vec::new(),
+        };
+        assert_eq!(skeleton_from_import(&empty), Err(SkelError::Empty));
+    }
+
+    #[test]
+    fn skeleton_build_keeps_translation_bind() {
+        // Bind matrices arrive layout-explicit: a translated bind
+        // survives the build verbatim.
+        let mut import = two_bone_import();
+        import.inverse_bind[0].w_axis = glam::Vec4::new(5.0, 0.0, 0.0, 1.0);
+        let skeleton = skeleton_from_import(&import).expect("bind builds");
+        assert_eq!(
+            skeleton.inverse_bind[0].transform_point3(Vec3::ZERO),
+            Vec3::new(5.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn mesh_build_normalizes_weights_idempotently() {
+        let store_skeleton = SmartStore::new();
+        let root = store_skeleton.create_entity();
+        let mut import = single_vertex_import();
+        import.weights = vec![[2.0, 2.0, 0.0, 0.0]];
+        let mesh = skinned_mesh_from_import(root, 1, &import).expect("bind builds");
+        assert_eq!(mesh.weights, vec![[0.5, 0.5, 0.0, 0.0]]);
+        assert_eq!(mesh.vertex_count(), 1);
+        // Zero-sum falls back to the first slot, joints untouched.
+        import.weights = vec![[0.0, 0.0, 0.0, 0.0]];
+        import.joints = vec![[3, 0, 0, 0]];
+        let mesh = skinned_mesh_from_import(root, 4, &import).expect("fallback builds");
+        assert_eq!(mesh.weights, vec![[1.0, 0.0, 0.0, 0.0]]);
+        assert_eq!(mesh.joints, vec![[3, 0, 0, 0]]);
+    }
+
+    #[test]
+    fn mesh_build_rejects_defects() {
+        let store = SmartStore::new();
+        let root = store.create_entity();
+        // Empty.
+        let mut import = single_vertex_import();
+        import.positions.clear();
+        assert_eq!(
+            skinned_mesh_from_import(root, 1, &import),
+            Err(SkinBuildError::Empty)
+        );
+        // Length mismatch (uvs short).
+        let mut import = single_vertex_import();
+        import.uvs.clear();
+        assert_eq!(
+            skinned_mesh_from_import(root, 1, &import),
+            Err(SkinBuildError::LengthMismatch)
+        );
+        // Bad index list (out of range).
+        let mut import = single_vertex_import();
+        import.indices = vec![0, 0, 7];
+        assert_eq!(
+            skinned_mesh_from_import(root, 1, &import),
+            Err(SkinBuildError::LengthMismatch)
+        );
+        // Joint out of range.
+        let import = single_vertex_import();
+        assert_eq!(
+            skinned_mesh_from_import(root, 0, &import),
+            Err(SkinBuildError::JointOutOfRange)
+        );
+    }
+
+    #[test]
+    fn bake_applies_offset_to_positions_and_normals() {
+        // Translation +X plus a 90° Z spin: points ride fully, normals spin.
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let matrix = Mat4::from_rotation_translation(rotation, Vec3::new(1.0, 0.0, 0.0));
+        let mut positions = vec![[1.0, 0.0, 0.0]];
+        let mut normals = vec![[1.0, 0.0, 0.0]];
+        bake_bind_transform(&mut positions, &mut normals, matrix);
+        assert!((Vec3::from_array(positions[0]) - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-6);
+        assert!((Vec3::from_array(normals[0]) - Vec3::Y).length() < 1e-6);
+    }
 }

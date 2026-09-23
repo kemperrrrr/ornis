@@ -1,17 +1,20 @@
 //! Document traversal and primitive decoding behind [`load_slice`]/[`load_path`].
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use gltf::accessor::DataType;
 use gltf::mesh::Semantic;
-use gltf::mesh::util::{ReadIndices, ReadTexCoords};
+use gltf::mesh::util::{ReadIndices, ReadJoints, ReadTexCoords, ReadWeights};
 use gltf::scene::Transform;
-use gltf::{Buffer, Gltf, Node, Primitive};
+use gltf::{Buffer, Document, Gltf, Node, Primitive, Skin};
 
 use crate::base64;
 use crate::geom::{self, Mat4};
 use crate::textures::resolve_images;
 use crate::{
     ImportError, ImportStats, LoadedEntity, LoadedImage, LoadedMaterial, LoadedMesh, LoadedScene,
+    LoadedSkin,
 };
 
 /// Parses a `.glb` or `.gltf` document held in memory.
@@ -114,15 +117,36 @@ fn import_gltf(
         .default_scene()
         .or_else(|| document.scenes().next())
         .ok_or(ImportError::NoScene)?;
-    let mut import = Import::new(buffers, images);
+    let mut import = Import::new(buffers, images, parent_map(document));
     for node in scene.nodes() {
         import.visit_node(&node, &geom::IDENTITY);
     }
+    if import.truncated_influences {
+        eprintln!(
+            "ornis-gltf: scene '{}' keeps the top-4 influences per vertex \
+             (>4 nonzero weights across JOINTS_n/WEIGHTS_n sets are truncated)",
+            scene.name().unwrap_or("scene")
+        );
+    }
+    import.stats.skipped_clips = document.animations().len() as u32;
     Ok(LoadedScene {
         name: scene.name().unwrap_or("scene").to_string(),
         entities: import.entities,
+        skins: import.skins,
         stats: import.stats,
     })
+}
+
+/// Child → parent node index over the whole document (one walk; skins
+/// resolve joint parents through it without re-traversing per skin).
+fn parent_map(document: &Document) -> HashMap<usize, usize> {
+    let mut map = HashMap::new();
+    for node in document.nodes() {
+        for child in node.children() {
+            map.insert(child.index(), node.index());
+        }
+    }
+    map
 }
 
 /// Traversal state: output entities plus counters.
@@ -133,17 +157,34 @@ struct Import<'a> {
     images: &'a [LoadedImage],
     /// Finished entities in traversal order.
     entities: Vec<LoadedEntity>,
+    /// Resolved skins in document order (see [`LoadedScene::skins`]).
+    skins: Vec<LoadedSkin>,
+    /// Document skin index → [`Import::skins`] position.
+    skin_index: HashMap<usize, usize>,
+    /// Child → parent node index over the whole document.
+    parents: HashMap<usize, usize>,
+    /// Whether any vertex lost nonzero influences to the top-4 cap
+    /// (reported once per load, never per frame).
+    truncated_influences: bool,
     /// Counters (see the crate skip-rules table).
     stats: ImportStats,
 }
 
 impl<'a> Import<'a> {
     /// Borrows resolved buffers and images for one traversal.
-    fn new(buffers: &'a [Vec<u8>], images: &'a [LoadedImage]) -> Self {
+    fn new(
+        buffers: &'a [Vec<u8>],
+        images: &'a [LoadedImage],
+        parents: HashMap<usize, usize>,
+    ) -> Self {
         Self {
             buffers,
             images,
             entities: Vec::new(),
+            skins: Vec::new(),
+            skin_index: HashMap::new(),
+            parents,
+            truncated_influences: false,
             stats: ImportStats::default(),
         }
     }
@@ -172,6 +213,10 @@ impl<'a> Import<'a> {
     }
 
     /// Decodes one primitive to an entity, or counts a skip (never a stub).
+    ///
+    /// Skinned primitives (`JOINTS_0`/`WEIGHTS_0`) import like classic ones
+    /// plus the influence arrays; only malformed skin attributes skip the
+    /// primitive ([`ImportStats::skipped_skinned`]).
     fn import_primitive(
         &mut self,
         node: &Node<'_>,
@@ -184,14 +229,13 @@ impl<'a> Import<'a> {
             self.stats.skipped_non_triangle += 1;
             return None;
         }
-        let reader = primitive.reader(|buffer| self.buffer_bytes(buffer));
-        if primitive
+        // Local buffer alias: the reader closure below must not capture
+        // `self` (later counter writes would collide with that borrow).
+        let buffers = self.buffers;
+        let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
+        let skinned = primitive
             .attributes()
-            .any(|(semantic, _)| matches!(semantic, Semantic::Joints(_) | Semantic::Weights(_)))
-        {
-            self.stats.skipped_skinned += 1;
-            return None;
-        }
+            .any(|(semantic, _)| matches!(semantic, Semantic::Joints(_) | Semantic::Weights(_)));
         // Count guards before any read: the reader backend panics on empty
         // slices, and an empty soup is a skip either way.
         let positions_count = primitive
@@ -226,6 +270,20 @@ impl<'a> Import<'a> {
             return None;
         }
         let vertex_count = positions.len();
+        let influences = if skinned {
+            match read_influences(primitive, &reader, vertex_count) {
+                Some((joints, weights, truncated)) => {
+                    self.truncated_influences |= truncated;
+                    Some((joints, weights))
+                }
+                None => {
+                    self.stats.skipped_skinned += 1;
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let normals = reader
             .read_normals()
             .map(Iterator::collect)
@@ -235,6 +293,8 @@ impl<'a> Import<'a> {
             .map(collect_tex_coords)
             .filter(|uvs: &Vec<[f32; 2]>| uvs.len() == vertex_count);
         let (translation, rotation, scale) = geom::decompose(world);
+        let (joints, weights) = influences.unzip();
+        let skin = node.skin().and_then(|skin| self.resolve_skin(&skin));
         Some(LoadedEntity {
             name: entity_name(node, mesh_name, mesh_index, primitive.index()),
             translation,
@@ -245,14 +305,226 @@ impl<'a> Import<'a> {
                 indices,
                 normals,
                 uvs,
+                joints,
+                weights,
             },
+            skin,
             material: read_material(primitive, self.images),
         })
     }
 
-    /// Buffer bytes for the reader closure (`None` on unknown index).
-    fn buffer_bytes(&self, buffer: Buffer<'_>) -> Option<&[u8]> {
-        self.buffers.get(buffer.index()).map(Vec::as_slice)
+    /// Resolves a node skin to the scene-level [`LoadedSkin`] table,
+    /// memoizing by document skin index.
+    ///
+    /// Returns [`None`] (unskinned entity) when the skin carries no joints;
+    /// the vertex influences above are still imported, so the wiring fails
+    /// honestly at skeleton build time instead of reading a stub topology.
+    fn resolve_skin(&mut self, skin: &Skin<'_>) -> Option<usize> {
+        if let Some(&known) = self.skin_index.get(&skin.index()) {
+            return Some(known);
+        }
+        let loaded = load_skin(skin, self.buffers, &self.parents)?;
+        self.skins.push(loaded);
+        let position = self.skins.len() - 1;
+        self.skin_index.insert(skin.index(), position);
+        Some(position)
+    }
+}
+
+/// Resolves one `skins[]` element: joint parents from the node hierarchy,
+/// bind inverses verbatim (identity fallback), joint names for diagnostics.
+///
+/// Returns [`None`] when the skin names no joints (nothing to sample).
+fn load_skin(
+    skin: &Skin<'_>,
+    buffers: &[Vec<u8>],
+    parents: &HashMap<usize, usize>,
+) -> Option<LoadedSkin> {
+    let joints: Vec<Node<'_>> = skin.joints().collect();
+    if joints.is_empty() {
+        return None;
+    }
+    let order: HashMap<usize, usize> = joints
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (node.index(), position))
+        .collect();
+    let parents = joints
+        .iter()
+        .map(|node| {
+            parents
+                .get(&node.index())
+                .and_then(|parent| order.get(parent))
+                .map_or(-1, |&position| position as i32)
+        })
+        .collect();
+    let inverse_bind = skin
+        .reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice))
+        .read_inverse_bind_matrices()
+        .map(Iterator::collect)
+        .filter(|matrices: &Vec<[[f32; 4]; 4]>| matrices.len() == joints.len())
+        .unwrap_or_else(|| vec![identity_bind(); joints.len()]);
+    let joint_names = joints
+        .iter()
+        .map(|node| {
+            node.name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("joint_{}", node.index()))
+        })
+        .collect();
+    Some(LoadedSkin {
+        parents,
+        inverse_bind,
+        joint_names,
+    })
+}
+
+/// Column-major identity bind matrix (glTF layout, `m[col][row]`).
+fn identity_bind() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// Decoded skin influences: per-vertex top-4 joints plus normalized
+/// weights, and whether any nonzero influence was truncated.
+type SkinInfluences = (Vec<[u16; 4]>, Vec<[f32; 4]>, bool);
+
+/// Reads and merges all dense influence sets from `0` into top-4 `u16`
+/// joints plus normalized `f32` weights (design §4.3).
+///
+/// Returns the per-vertex arrays plus whether any nonzero influence was
+/// truncated. [`None`] = malformed skin attributes (missing set 0, vertex
+/// count or component-width mismatch): the caller skips the primitive.
+///
+/// Width guards precede every `read_joints`/`read_weights` call: those
+/// backends hit `unreachable!()` on unexpected component types, so a
+/// hostile file must fail here as a skip, never as a panic.
+fn read_influences<'a, 's, F>(
+    primitive: &Primitive<'a>,
+    reader: &gltf::mesh::Reader<'a, 's, F>,
+    vertex_count: usize,
+) -> Option<SkinInfluences>
+where
+    F: Clone + Fn(Buffer<'a>) -> Option<&'s [u8]>,
+{
+    if !valid_influence_set(primitive, 0) {
+        return None;
+    }
+    let mut pairs: Vec<Vec<(u16, f32)>> = vec![Vec::new(); vertex_count];
+    for set in 0..4 {
+        if primitive.get(&Semantic::Joints(set)).is_none() {
+            break;
+        }
+        if !valid_influence_set(primitive, set) {
+            return None;
+        }
+        let joints = read_joint_set(reader, set)?;
+        let weights = read_weight_set(reader, set)?;
+        if joints.len() != vertex_count || weights.len() != vertex_count {
+            return None;
+        }
+        for (slot, (joint, weight)) in joints.into_iter().zip(weights).enumerate() {
+            for lane in 0..4 {
+                pairs[slot].push((joint[lane], weight[lane]));
+            }
+        }
+    }
+    let mut truncated = false;
+    let mut out_joints = Vec::with_capacity(vertex_count);
+    let mut out_weights = Vec::with_capacity(vertex_count);
+    for mut slot in pairs {
+        // Heaviest first; the sort is stable, so ties keep set order.
+        slot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        truncated |= slot.iter().skip(4).any(|&(_, weight)| weight > 0.0);
+        let mut joints = [0u16; 4];
+        let mut weights = [0.0f32; 4];
+        for (lane, (joint, weight)) in slot.into_iter().take(4).enumerate() {
+            joints[lane] = joint;
+            weights[lane] = weight;
+        }
+        out_joints.push(joints);
+        out_weights.push(normalize_weights(weights));
+    }
+    Some((out_joints, out_weights, truncated))
+}
+
+/// Whether both influence accessors of `set` exist with decodable widths
+/// (`u8`/`u16` joints, `u8`/`u16`/`f32` weights).
+fn valid_influence_set(primitive: &Primitive<'_>, set: u32) -> bool {
+    let joints = primitive
+        .get(&Semantic::Joints(set))
+        .is_some_and(|accessor| matches!(accessor.data_type(), DataType::U8 | DataType::U16));
+    let weights = primitive
+        .get(&Semantic::Weights(set))
+        .is_some_and(|accessor| {
+            matches!(
+                accessor.data_type(),
+                DataType::U8 | DataType::U16 | DataType::F32
+            )
+        });
+    joints && weights
+}
+
+/// Decodes one joint set to `u16` (widths pre-checked by
+/// [`valid_influence_set`]).
+fn read_joint_set<'a, 's, F>(
+    reader: &gltf::mesh::Reader<'a, 's, F>,
+    set: u32,
+) -> Option<Vec<[u16; 4]>>
+where
+    F: Clone + Fn(Buffer<'a>) -> Option<&'s [u8]>,
+{
+    match reader.read_joints(set)? {
+        ReadJoints::U8(iter) => Some(iter.map(|joint| joint.map(u16::from)).collect()),
+        ReadJoints::U16(iter) => Some(iter.collect()),
+    }
+}
+
+/// Decodes one weight set to `f32` (widths pre-checked by
+/// [`valid_influence_set`]).
+///
+/// Integer storage scales exactly like the `gltf` crate's own `into_f32`
+/// cast (`u8 / 255`, `u16 / 65535`); that adapter cannot be built here
+/// (`CastingIter::new` is crate-private), so the scale is spelled out.
+fn read_weight_set<'a, 's, F>(
+    reader: &gltf::mesh::Reader<'a, 's, F>,
+    set: u32,
+) -> Option<Vec<[f32; 4]>>
+where
+    F: Clone + Fn(Buffer<'a>) -> Option<&'s [u8]>,
+{
+    match reader.read_weights(set)? {
+        ReadWeights::U8(iter) => Some(
+            iter.map(|weight| weight.map(|slot| f32::from(slot) / 255.0))
+                .collect(),
+        ),
+        ReadWeights::U16(iter) => Some(
+            iter.map(|weight| weight.map(|slot| f32::from(slot) / 65535.0))
+                .collect(),
+        ),
+        ReadWeights::F32(iter) => Some(iter.collect()),
+    }
+}
+
+/// Canonical per-vertex weights: a finite positive sum normalizes,
+/// otherwise the full weight falls back to the first slot (mirrors the
+/// animation canonical rule — joints are untouched).
+fn normalize_weights(weights: [f32; 4]) -> [f32; 4] {
+    let finite = weights.iter().all(|slot| slot.is_finite());
+    let sum: f32 = weights.iter().sum();
+    if finite && sum > 1e-6 {
+        [
+            weights[0] / sum,
+            weights[1] / sum,
+            weights[2] / sum,
+            weights[3] / sum,
+        ]
+    } else {
+        [1.0, 0.0, 0.0, 0.0]
     }
 }
 
@@ -331,8 +603,8 @@ fn collect_tex_coords(tex: ReadTexCoords<'_>) -> Vec<[f32; 2]> {
 mod tests {
     use super::*;
     use crate::fixtures::{
-        self, FixtureIndices, FixtureMaterial, FixtureNode, build_glb, build_gltf, load_triangle,
-        triangle,
+        self, FixtureIndices, FixtureInfluence, FixtureMaterial, FixtureNode, FixtureSkin,
+        FixtureWeightsKind, build_glb, build_gltf, load_triangle, skinned_triangle, triangle,
     };
 
     #[test]
@@ -429,6 +701,7 @@ mod tests {
             FixtureNode {
                 name: None,
                 mesh: false,
+                skin: None,
                 translation: Some([10.0, 0.0, 0.0]),
                 rotation: None,
                 scale: None,
@@ -438,6 +711,7 @@ mod tests {
             FixtureNode {
                 name: Some("child".to_string()),
                 mesh: true,
+                skin: None,
                 translation: Some([0.0, 5.0, 0.0]),
                 rotation: None,
                 scale: None,
@@ -471,12 +745,236 @@ mod tests {
     }
 
     #[test]
-    fn skinned_primitive_skipped_with_counter() {
-        let mut fixture = triangle();
-        fixture.skinned = true;
-        let scene = load_slice(&build_glb(&fixture)).expect("skinned parses");
-        assert!(scene.entities.is_empty());
+    fn skinned_primitive_imports_with_skin_link() {
+        // Phase C: `JOINTS_0`/`WEIGHTS_0` no longer skip the primitive — the
+        // influences import verbatim (already canonical here) and the node
+        // `skin` resolves to the scene-level table.
+        let scene = load_slice(&build_glb(&skinned_triangle())).expect("skinned parses");
+        assert_eq!(scene.entities.len(), 1);
+        let entity = &scene.entities[0];
+        assert_eq!(
+            entity.mesh.joints,
+            Some(vec![[0, 0, 0, 0]; 3]),
+            "u8 joints widen to u16"
+        );
+        assert_eq!(
+            entity.mesh.weights,
+            Some(vec![[1.0, 0.0, 0.0, 0.0]; 3]),
+            "unit weights stay canonical"
+        );
+        assert_eq!(entity.skin, Some(0), "node skin links to skins[0]");
+        assert_eq!(scene.skins.len(), 1);
+        assert_eq!(scene.skins[0].parents, vec![-1], "single joint is a root");
+        assert_eq!(scene.skins[0].joint_names, vec!["tri-node".to_string()]);
         assert_eq!(scene.stats.primitives_total, 1);
+        assert_eq!(scene.stats.entities, 1);
+        assert_eq!(scene.stats.skipped_skinned, 0);
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn unskinned_primitive_has_no_influences() {
+        // Classic path is untouched: no skin attributes, no skin link.
+        let scene = load_triangle();
+        assert_eq!(scene.entities[0].mesh.joints, None);
+        assert_eq!(scene.entities[0].mesh.weights, None);
+        assert_eq!(scene.entities[0].skin, None);
+        assert!(scene.skins.is_empty());
+    }
+
+    #[test]
+    fn weights_normalize_and_zero_sum_falls_back() {
+        // `[2, 2, 0, 0]` → `[0.5, 0.5, 0, 0]`; all-zero → `(1,0,0,0)` on
+        // the first slot (design §2.1 rule, joints untouched).
+        let mut fixture = skinned_triangle();
+        let influence = fixture.influence.as_mut().expect("skinned fixture");
+        influence.weights = vec![
+            [2.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ];
+        let scene = load_slice(&build_glb(&fixture)).expect("weights parse");
+        assert_eq!(
+            scene.entities[0].mesh.weights,
+            Some(vec![
+                [0.5, 0.5, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ])
+        );
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn u16_joints_and_u8_weights_decode() {
+        // Non-default storage widths: `u16` joints pass through, `u8`
+        // weights scale back (`255 → 1.0`, renormalized); `u16` weights
+        // scale by `65535` the same way.
+        let mut fixture = skinned_triangle();
+        let influence = fixture.influence.as_mut().expect("skinned fixture");
+        influence.joints_u16 = true;
+        influence.joints = vec![[1, 2, 3, 4], [0, 0, 0, 0], [5, 6, 7, 8]];
+        influence.weights_kind = FixtureWeightsKind::U8;
+        influence.weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
+        let scene = load_slice(&build_glb(&fixture)).expect("widths parse");
+        assert_eq!(
+            scene.entities[0].mesh.joints,
+            Some(vec![[1, 2, 3, 4], [0, 0, 0, 0], [5, 6, 7, 8]])
+        );
+        assert_eq!(
+            scene.entities[0].mesh.weights,
+            Some(vec![[1.0, 0.0, 0.0, 0.0]; 3])
+        );
+        assert!(scene.stats.is_clean());
+
+        let influence = fixture.influence.as_mut().expect("skinned fixture");
+        influence.weights_kind = FixtureWeightsKind::U16;
+        let scene = load_slice(&build_glb(&fixture)).expect("u16 weights parse");
+        assert_eq!(
+            scene.entities[0].mesh.weights,
+            Some(vec![[1.0, 0.0, 0.0, 0.0]; 3])
+        );
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn second_influence_set_truncates_to_top4() {
+        // `JOINTS_1`/`WEIGHTS_1` add a heavier fifth influence on vertex 0:
+        // the lightest set-0 weight drops out, the rest renormalize.
+        let mut fixture = skinned_triangle();
+        let influence = fixture.influence.as_mut().expect("skinned fixture");
+        influence.weights = vec![
+            [0.1, 0.2, 0.3, 0.4],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ];
+        influence.extra = Some((
+            vec![[9, 9, 9, 9], [0, 0, 0, 0], [0, 0, 0, 0]],
+            vec![
+                [0.0, 0.0, 0.0, 5.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+        ));
+        let scene = load_slice(&build_glb(&fixture)).expect("two sets parse");
+        let (joints, weights) = (
+            scene.entities[0].mesh.joints.clone().expect("joints kept"),
+            scene.entities[0]
+                .mesh
+                .weights
+                .clone()
+                .expect("weights kept"),
+        );
+        // Vertex 0 keeps the four heaviest: 5.0 (joint 9), 0.4, 0.3, 0.2 —
+        // the 0.1 influence is truncated, weights renormalize over 5.9.
+        assert_eq!(joints[0], [9, 0, 0, 0]);
+        let sum = 5.0 + 0.4 + 0.3 + 0.2;
+        for (got, want) in weights[0]
+            .iter()
+            .zip([5.0 / sum, 0.4 / sum, 0.3 / sum, 0.2 / sum])
+        {
+            assert!((got - want).abs() < 1e-6, "top-4 weights {weights:?}");
+        }
+        // Untouched vertices keep their set-0 data.
+        assert_eq!(joints[1], [0, 0, 0, 0]);
+        assert_eq!(weights[1], [1.0, 0.0, 0.0, 0.0]);
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn skin_parents_follow_node_hierarchy() {
+        // Root joint 0 with child joint 1: `parents == [-1, 0]`, names from
+        // the nodes, and the mesh node links the shared skin once.
+        let mut fixture = skinned_triangle();
+        fixture.nodes = vec![
+            FixtureNode {
+                name: Some("root".to_string()),
+                mesh: false,
+                skin: None,
+                translation: None,
+                rotation: None,
+                scale: None,
+                matrix: None,
+                children: vec![1],
+            },
+            FixtureNode {
+                name: Some("tip".to_string()),
+                mesh: true,
+                skin: Some(0),
+                translation: Some([1.0, 0.0, 0.0]),
+                rotation: None,
+                scale: None,
+                matrix: None,
+                children: Vec::new(),
+            },
+        ];
+        fixture.roots = vec![0];
+        fixture.skins = vec![FixtureSkin {
+            joints: vec![0, 1],
+            inverse_bind: None,
+            name: Some("arm".to_string()),
+            skeleton: Some(0),
+        }];
+        let scene = load_slice(&build_glb(&fixture)).expect("hierarchy skin parses");
+        assert_eq!(scene.entities.len(), 1);
+        assert_eq!(scene.entities[0].skin, Some(0));
+        assert_eq!(scene.skins[0].parents, vec![-1, 0]);
+        assert_eq!(
+            scene.skins[0].joint_names,
+            vec!["root".to_string(), "tip".to_string()]
+        );
+        // Identity fallback: no `inverseBindMatrices` in the fixture.
+        assert_eq!(scene.skins[0].inverse_bind.len(), 2);
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn inverse_bind_matrices_import_verbatim() {
+        // A non-identity bind (translation +X on joint 0) survives the
+        // import in column-major layout.
+        let mut fixture = skinned_triangle();
+        let skin = fixture
+            .skins
+            .get_mut(0)
+            .expect("skinned fixture has a skin");
+        skin.inverse_bind = Some(vec![[
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            5.0, 0.0, 0.0, 1.0,
+        ]]);
+        let scene = load_slice(&build_glb(&fixture)).expect("bind parses");
+        let bind = &scene.skins[0].inverse_bind[0];
+        assert_eq!(bind[3], [5.0, 0.0, 0.0, 1.0], "translation column kept");
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn animations_skip_with_counter() {
+        // Phase C imports skin only: two dummy clips skip honestly while
+        // the skinned primitive still imports.
+        let mut fixture = skinned_triangle();
+        fixture.animations = 2;
+        let scene = load_slice(&build_glb(&fixture)).expect("animated parses");
+        assert_eq!(scene.entities.len(), 1, "skin still imports");
+        assert_eq!(scene.stats.skipped_clips, 2);
+        assert!(!scene.stats.is_clean());
+    }
+
+    #[test]
+    fn malformed_skin_attributes_skip_with_counter() {
+        // Joints/weights count mismatch with the positions: malformed,
+        // never a stub.
+        let mut fixture = skinned_triangle();
+        fixture.influence = Some(FixtureInfluence {
+            joints: vec![[0, 0, 0, 0]; 2],
+            joints_u16: false,
+            weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+            weights_kind: FixtureWeightsKind::F32,
+            extra: None,
+        });
+        let scene = load_slice(&build_glb(&fixture)).expect("mismatched parses");
+        assert!(scene.entities.is_empty());
         assert_eq!(scene.stats.skipped_skinned, 1);
         assert!(!scene.stats.is_clean());
     }
@@ -614,6 +1112,7 @@ mod tests {
         fixture.nodes.push(FixtureNode {
             name: Some("lines".to_string()),
             mesh: true,
+            skin: None,
             translation: None,
             rotation: None,
             scale: None,

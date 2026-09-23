@@ -1,12 +1,12 @@
 //! Minimal typed asset registry over the existing scene contract.
 //!
 //! [`AssetServer`] owns CPU-side scene assets ([`Scene`](crate::scene::Scene)) behind typed
-//! [`AssetId`]s and emits [`AssetEvent`] load/error events. Per-entity
-//! [`MeshHandle`]/[`MaterialHandle`] components are the typed counterpart of
-//! the inline [`MeshDesc`](crate::scene::MeshDesc) /
-//! [`MaterialDesc`](crate::scene::MaterialDesc) lanes: extraction
-//! still reads those lanes today, and handles migrate progressively —
-//! nothing here invents geometry or material data.
+//! [`AssetId`]s and emits [`AssetEvent`] load/error events. Instantiated
+//! entities carry the inline [`MeshDesc`](crate::scene::MeshDesc) /
+//! [`MaterialDesc`](crate::scene::MaterialDesc) lanes that extraction
+//! reads directly; no separate handle lanes exist (checked 2026-09-23:
+//! `MeshHandle`/`MaterialHandle` were written by `instantiate` but never
+//! read by extraction, so they were removed rather than kept as dead weight).
 //!
 //! Residency reuses existing mechanisms instead of a new manager island:
 //! CPU residency is the server-owned [`Scene`](crate::scene::Scene) plus the [`SmartStore`](ornis_core::SmartStore)
@@ -18,10 +18,6 @@
 //! with the owner (editor `SceneFileWatch`). Loaders today: scene `.ron`
 //! ([`AssetServer::load_scene_ron`], wrapping [`Scene::from_ron`](crate::scene::Scene::from_ron))
 //! and glTF geometry ([`AssetServer::load_gltf`], via [`crate::import`]).
-//!
-//! `MeshHandle`/`MaterialHandle` as ECS lanes were assumed to exist already;
-//! they do not (checked 2026-09-18: only `MeshDesc`/`MaterialDesc` lanes and
-//! historical doc sketches). They are introduced here as new components.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -41,54 +37,6 @@ pub struct AssetId {
 impl AssetId {
     /// Raw generation counter, useful for deterministic ordering in tests.
     pub fn index(self) -> u64 {
-        self.index
-    }
-}
-
-/// Typed handle of one mesh inside a scene asset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MeshHandle {
-    asset: AssetId,
-    index: u32,
-}
-
-impl MeshHandle {
-    /// Creates a handle of mesh `index` inside scene asset `asset`.
-    pub fn new(asset: AssetId, index: u32) -> Self {
-        Self { asset, index }
-    }
-
-    /// Asset the mesh was instantiated from.
-    pub fn asset(self) -> AssetId {
-        self.asset
-    }
-
-    /// Position of the mesh inside the scene asset's entity list.
-    pub fn index(self) -> u32 {
-        self.index
-    }
-}
-
-/// Typed handle of one material inside a scene asset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MaterialHandle {
-    asset: AssetId,
-    index: u32,
-}
-
-impl MaterialHandle {
-    /// Creates a handle of material `index` inside scene asset `asset`.
-    pub fn new(asset: AssetId, index: u32) -> Self {
-        Self { asset, index }
-    }
-
-    /// Asset the material was instantiated from.
-    pub fn asset(self) -> AssetId {
-        self.asset
-    }
-
-    /// Position of the material inside the scene asset's entity list.
-    pub fn index(self) -> u32 {
         self.index
     }
 }
@@ -307,9 +255,9 @@ impl AssetServer {
 
     /// Spawns every entity of scene `id` into `engine`.
     ///
-    /// Writes the existing `Transform`/`Mesh`/`Material` lanes plus fresh
-    /// [`MeshHandle`]/[`MaterialHandle`] components; returns `None` for
-    /// unknown ids. Physics, gameplay and GPU state stay with the caller.
+    /// Writes the existing `Transform`/`Mesh`/`Material` lanes that
+    /// extraction reads directly; returns `None` for unknown ids.
+    /// Physics, gameplay and GPU state stay with the caller.
     pub fn instantiate(&self, engine: &mut Engine, id: AssetId) -> Option<Vec<Entity>> {
         let scene = self.scenes.get(&id)?;
         let store = engine
@@ -317,25 +265,18 @@ impl AssetServer {
             .store_mut()
             .expect("asset instantiate store");
         let mut out = Vec::with_capacity(scene.entities.len());
-        for (index, desc) in scene.entities.iter().enumerate() {
-            out.push(insert_asset_entity(store, id, index, desc));
+        for desc in scene.entities.iter() {
+            out.push(insert_asset_entity(store, desc));
         }
         Some(out)
     }
 }
 
-fn insert_asset_entity(
-    store: &mut SmartStore,
-    id: AssetId,
-    index: usize,
-    desc: &EntityDesc,
-) -> Entity {
+fn insert_asset_entity(store: &mut SmartStore, desc: &EntityDesc) -> Entity {
     let entity = store.create_entity();
     store.insert(entity, desc.transform.clone());
     store.insert(entity, desc.mesh.clone());
     store.insert(entity, desc.material.clone());
-    store.insert(entity, MeshHandle::new(id, index as u32));
-    store.insert(entity, MaterialHandle::new(id, index as u32));
     entity
 }
 
@@ -501,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn instantiate_populates_lanes_with_typed_handles() {
+    fn instantiate_populates_lanes() {
         let mut server = AssetServer::new();
         let scene = two_entity_scene();
         let id = server.load_scene(scene, None);
@@ -533,18 +474,6 @@ mod tests {
                 .len(),
             2
         );
-        for (position, entity) in entities.iter().enumerate() {
-            let mesh_lane = store.read_lane::<MeshHandle>().expect("mesh handle lane");
-            let mesh = mesh_lane.get(*entity).expect("mesh handle");
-            assert_eq!(mesh.asset(), id);
-            assert_eq!(mesh.index(), position as u32);
-            let material_lane = store
-                .read_lane::<MaterialHandle>()
-                .expect("material handle lane");
-            let material = material_lane.get(*entity).expect("material handle");
-            assert_eq!(material.asset(), id);
-            assert_eq!(material.index(), position as u32);
-        }
     }
 
     #[test]

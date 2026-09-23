@@ -86,7 +86,10 @@ mod tests {
                     indices: vec![0, 1, 2],
                     normals: None,
                     uvs: None,
+                    joints: None,
+                    weights: None,
                 },
+                skin: None,
                 material: ornis_gltf::LoadedMaterial {
                     base_color: [0.9, 0.8, 0.2],
                     metallic: 1.0,
@@ -97,6 +100,7 @@ mod tests {
                     emissive_texture: None,
                 },
             }],
+            skins: Vec::new(),
             stats: ornis_gltf::ImportStats::default(),
         };
         let scene = scene_from_gltf(&scene);

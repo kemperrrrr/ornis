@@ -16,6 +16,7 @@
 //! client to build its own physical GPU representation.
 
 use glam::{Mat4, Quat, Vec3};
+use ornis_animation::SkinnedMesh;
 use ornis_core::{Engine, Entity, OpenPBRMaterial, SmartStore};
 use serde::{Deserialize, Serialize};
 
@@ -65,12 +66,15 @@ pub struct CustomMeshEntry {
     /// `docs/animation-design.md` §2.3): then `vertices` are already in
     /// world space and `instance.model_matrix` is `IDENTITY`.
     ///
-    /// Always `false` on the classic soup path below (bind-pose geometry
-    /// transformed by `instance.model_matrix`, never pre-skinned). The
-    /// `true` arm arrives with the phase C wiring, which reads the skin
-    /// output lane — deliberately not probed here: `ornis-render` must
-    /// not depend on `ornis-animation` (same dependency direction as
-    /// `ornis-physics`), so no new manifest dependency is introduced.
+    /// `false` on the classic soup path below (bind-pose geometry
+    /// transformed by `instance.model_matrix`, never pre-skinned); `true`
+    /// exactly when the entity carries the [`SkinnedMesh`] lane — the
+    /// extraction reads its skin-system output buffers
+    /// (`skinned_positions`/`skinned_normals`) plus the bind `uvs`/`indices`
+    /// (see [`extract_render_data_with_stats`]). Freshness is the skin
+    /// system's contract (`skel_skin_cpu` runs PostFrame before the frame
+    /// upload); inconsistent lane arrays skip the entity with
+    /// [`ExtractionStats::skipped_bad_skin`], never a stub.
     pub skinned: bool,
 }
 
@@ -310,6 +314,12 @@ pub struct ExtractionStats {
     /// `MeshDesc::Custom` entities skipped for an empty soup or a soup
     /// failing validation (no panic, no sphere stub).
     pub skipped_bad_custom: u32,
+    /// `SkinnedMesh` entities skipped for inconsistent skin-lane arrays
+    /// (length defects, empty binds, bad indices — see
+    /// [`extract_render_data_with_stats`]). Missing skeleton/pose freshness
+    /// is the skin system's own counter; extraction only trusts the lane
+    /// buffers it can validate here.
+    pub skipped_bad_skin: u32,
     /// Entities reaching the match-exhaustiveness fallback for mesh
     /// variants the router does not know. Never fires for the known
     /// variants (`Sphere`, `Box`, `Plane`, `Cylinder`, `Custom`) —
@@ -339,6 +349,14 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 /// values share one [`FrameUpload::materials`] entry (see
 /// [`deduped_material_index`]), so `materials.len()` is the number of
 /// *distinct* materials, not entities.
+///
+/// Entities carrying the [`SkinnedMesh`] lane never take the classic paths
+/// below: their skin-system output buffers (`skinned_positions` /
+/// `skinned_normals`, world space) plus the bind `uvs`/`indices` land in
+/// `custom_meshes` with `skinned: true` and `IDENTITY` matrices (design
+/// §2.3). Inconsistent lane arrays skip the entity with
+/// [`ExtractionStats::skipped_bad_skin`] — even when its classic soup
+/// would decode, a claimed skin must not silently render unskinned.
 pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, ExtractionStats) {
     let mut extracted = FrameUpload::default();
     let mut stats = ExtractionStats::default();
@@ -351,6 +369,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
     let Some(materials) = store.read_lane::<MaterialDesc>() else {
         return (extracted, stats);
     };
+    let skinned = store.read_lane::<SkinnedMesh>();
 
     // Parallel to `extracted.materials`: the source descs, for exact
     // (`PartialEq`) dedup. Linear scan is fine — frames hold tens of
@@ -368,6 +387,30 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             stats.skipped_incomplete += 1;
             continue;
         };
+        // Skin path first: a `SkinnedMesh` lane claims the entity for the
+        // pre-skinned world-space payload (any `MeshDesc` variant — the
+        // lane's own bind arrays are authoritative, the desc only keeps
+        // the completeness triple). Lane defects skip with the skin
+        // counter; the classic soup below never runs for claimed entities.
+        if let Some(skin) = skinned.as_ref().and_then(|lane| lane.get(entity)) {
+            let Some((vertices, indices)) = skinned_entry(skin) else {
+                stats.skipped_bad_skin += 1;
+                continue;
+            };
+            let material_index =
+                deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
+            extracted.custom_meshes.push(CustomMeshEntry {
+                vertices,
+                indices,
+                instance: InstanceData {
+                    model_matrix: Mat4::IDENTITY,
+                    normal_matrix: Mat4::IDENTITY,
+                    material_index,
+                },
+                skinned: true,
+            });
+            continue;
+        }
         // Per-entity Custom path: CPU-side vertices via the mesh_upload
         // bridge, deduplicated by soup hash within the frame (identical
         // soups convert once). An empty or invalid soup skips the entity —
@@ -691,6 +734,61 @@ fn normalized_rotation(rotation: [f32; 4]) -> Quat {
     } else {
         Quat::IDENTITY
     }
+}
+
+/// Builds the pre-skinned payload of one [`SkinnedMesh`] entity: world-space
+/// output buffers as [`Vertex`] rows plus the passthrough bind indices.
+///
+/// [`None`] (bad skin) on empty binds, array length defects, or an empty /
+/// malformed index list — the caller counts
+/// [`ExtractionStats::skipped_bad_skin`]. Joint-index range against the
+/// skeleton is the skin system's verdict (it owns that counter); the lane
+/// buffers validated here are that system's output contract.
+fn skinned_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>)> {
+    let count = mesh.joints.len();
+    if count == 0
+        || mesh.weights.len() != count
+        || mesh.positions.len() != count
+        || mesh.normals.len() != count
+        || mesh.skinned_positions.len() != count
+        || mesh.skinned_normals.len() != count
+        || mesh.uvs.len() != count
+    {
+        return None;
+    }
+    if mesh.indices.is_empty()
+        || !mesh.indices.len().is_multiple_of(3)
+        || mesh.indices.iter().any(|index| (*index as usize) >= count)
+    {
+        return None;
+    }
+    let vertices = mesh
+        .skinned_positions
+        .iter()
+        .zip(mesh.skinned_normals.iter())
+        .zip(mesh.uvs.iter())
+        .map(|((&position, &normal), &uv)| Vertex {
+            position,
+            normal,
+            uv,
+            tangent: skinned_tangent(normal),
+        })
+        .collect();
+    Some((vertices, mesh.indices.to_vec()))
+}
+
+/// Any unit vector orthogonal to a skinned normal (tangent fallback).
+///
+/// Same contract as `mesh_upload::fallback_tangent` (duplicated here: that
+/// module is outside this track's file bounds, so the formula — not the
+/// function — is shared): degenerate normals fall back to `+X` so the
+/// vertex stays finite.
+fn skinned_tangent(normal: [f32; 3]) -> [f32; 3] {
+    let direction = Vec3::from_array(normal);
+    if direction.length_squared() <= f32::EPSILON {
+        return [1.0, 0.0, 0.0];
+    }
+    direction.normalize().any_orthonormal_vector().to_array()
 }
 
 #[cfg(test)]
@@ -1099,6 +1197,7 @@ mod tests {
             ExtractionStats {
                 skipped_incomplete: 2,
                 skipped_bad_custom: 0,
+                skipped_bad_skin: 0,
                 skipped_unknown_mesh: 0,
                 materials_deduped: 0,
             }

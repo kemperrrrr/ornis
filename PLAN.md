@@ -236,6 +236,15 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 `JointPose`/`SkinnedMesh`/`SkelClip`/`SkelPlayer`, `skel_sample` +
 `skel_skin_cpu`, кап 128, bad-skin = скип со счётчиком; gltf-приёмка
 (фаза C) и GPU-скининг (фаза D) — следом.
+✅ **2026-09-22 — шейдерный сэмплинг текстур (проверено).**
+`material_textures.rs` (только DSL): комбинаторы по ролям +
+`fs_main_textured`, бинды 7–10; legacy пиксель-в-пиксель цел.
+✅ **2026-09-22 — скелет C (проверено).** glTF-скин импортируется
+(топ-4, `skins[]`, клипы — `skipped_clips`); `skinned: true`
+заполняется в экстракции; GPU-скининг (D) — следом.
+✅ **2026-09-22 — хендлы удалены (вердикт проверен).**
+Позиция энтити ≠ identity, дедуп по значению сильнее, reload —
+replace; сервер/события/dirty живы.
 ✅ **2026-09-22 — загрузка сцен из UI**: File → Load… (`editor.js`,
 server-side path) шлёт `load_scene {path}` — `.ron` и `.glb`/`.gltf`.
 ✅ **2026-09-22 — `ornis-assets` (P0 контентного спринта):** desc-типы +
