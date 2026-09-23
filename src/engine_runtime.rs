@@ -1,5 +1,5 @@
-//! Domain systems that connect the core frame host to sequential-impulse physics and
-//! backend-neutral render extraction.
+//! Domain systems that connect the core frame host to sequential-impulse physics,
+//! XPBD soft bodies and backend-neutral render extraction.
 //!
 //! The runtime keeps `SequentialImpulseEngine` as a domain representation while
 //! `TransformDesc` and `RigidBody` remain ECS components in the logical
@@ -7,19 +7,27 @@
 //! boundary explicit; render extraction turns the same ECS lanes into a
 //! backend-neutral snapshot. GPU resource ownership and editor protocol
 //! details remain outside this module.
+//!
+//! Soft bodies (PLAN B2/D1.5) ride the same seam through a dedicated
+//! [`XpbdEngine`]: entities carrying a [`SoftBody`] lane component are bound
+//! to solver handles, stepped with the fixed clock, and written back as
+//! world-space [`MeshDesc::Custom`] soups (identity transform) that the
+//! existing extraction path draws unchanged.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
-use ornis_assets::scene::TransformDesc;
 #[cfg(test)]
-use ornis_assets::scene::{MaterialDesc, MeshDesc};
+use ornis_assets::scene::MaterialDesc;
+use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
-use ornis_physics::{BodyHandle, BodyType, PhysicsEngine, RigidBody, SolverKind};
+use ornis_physics::{
+    BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind, XpbdEngine,
+};
 #[cfg(test)]
 use ornis_render::extract_render_data;
 
@@ -31,9 +39,16 @@ use ornis_render::extract_render_data;
 /// vector to other domains. The common core engine host accumulates
 /// render-frame time and invokes this domain at a bounded fixed 60 Hz
 /// timestep.
+///
+/// Soft bodies live in a second solver ([`XpbdEngine`], PLAN B2/D1) with its
+/// own entity bindings: the rigid orchestrator does not know particles, so
+/// sharing one solver would silently drop the coupling. Mesh upload reads
+/// the soft solver directly (world-space soup, identity transform).
 pub struct PhysicsRuntime {
     solver: ornis_physics::Engine,
     bindings: HashMap<Entity, BodyHandle>,
+    soft_solver: XpbdEngine,
+    soft_bindings: HashMap<Entity, SoftHandle>,
     changed: bool,
 }
 
@@ -43,6 +58,8 @@ impl PhysicsRuntime {
         Self {
             solver: ornis_physics::Engine::new(SolverKind::SequentialImpulse, gravity),
             bindings: HashMap::new(),
+            soft_solver: XpbdEngine::new(gravity),
+            soft_bindings: HashMap::new(),
             changed: false,
         }
     }
@@ -150,6 +167,7 @@ impl PhysicsRuntime {
             .collect();
 
         self.solver.step(delta_seconds);
+        self.soft_solver.step(delta_seconds);
 
         self.changed |= before.iter().any(|(entity, position, orientation)| {
             let Some(&handle) = self.bindings.get(entity) else {
@@ -160,6 +178,7 @@ impl PhysicsRuntime {
             };
             body.position != *position || body.orientation != *orientation
         });
+        self.changed |= !self.soft_bindings.is_empty();
     }
 
     fn sync_out(
@@ -189,6 +208,90 @@ impl PhysicsRuntime {
     pub(crate) fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
     }
+
+    /// Binds newly added [`SoftBody`] lane components into the soft solver.
+    /// Solver state is authoritative after registration (no per-step pose
+    /// sync in D1 — there is no gameplay intent for particles yet).
+    fn sync_soft_in(&mut self, soft: &ComponentStore<SoftBody>) {
+        self.remove_stale_soft_bindings(soft);
+        for (&entity, source) in soft.entities.iter().zip(&soft.data) {
+            if self.soft_bindings.contains_key(&entity) {
+                continue;
+            }
+            let handle = self.soft_solver.add_soft_body(source.clone());
+            self.soft_bindings.insert(entity, handle);
+        }
+    }
+
+    /// Drops bindings whose lane component is gone, remapping the
+    /// swap-remove survivor exactly like the rigid path.
+    fn remove_stale_soft_bindings(&mut self, soft: &ComponentStore<SoftBody>) {
+        let mut stale: Vec<(Entity, SoftHandle)> = self
+            .soft_bindings
+            .iter()
+            .filter(|(entity, _)| !soft.contains(**entity))
+            .map(|(&entity, &handle)| (entity, handle))
+            .collect();
+        stale.sort_unstable_by_key(|&(_, handle)| Reverse(handle));
+
+        for (entity, handle) in stale {
+            let last = self.soft_bindings.len().saturating_sub(1);
+            let moved = if handle < last {
+                self.soft_bindings
+                    .iter()
+                    .find_map(|(&candidate, &bound)| (bound == last).then_some(candidate))
+            } else {
+                None
+            };
+            self.soft_solver.remove_soft_body(handle);
+            self.soft_bindings.remove(&entity);
+            if let Some(moved) = moved {
+                self.soft_bindings.insert(moved, handle);
+            }
+            self.changed = true;
+        }
+    }
+
+    /// Writes solver particle positions into [`MeshDesc::Custom`] soups and
+    /// pins the entity transform to identity (particles are already
+    /// world-space — the existing extraction path draws them unchanged).
+    /// Bodies without a render surface (chains) are skipped: line
+    /// rendering is out of D1 scope.
+    fn sync_soft_out(
+        &mut self,
+        meshes: &mut ComponentStore<MeshDesc>,
+        transforms: &mut ComponentStore<TransformDesc>,
+    ) {
+        for (&entity, &handle) in &self.soft_bindings {
+            let Some(body) = self.soft_solver.get_soft_body(handle) else {
+                continue;
+            };
+            if body.surface.is_empty() {
+                continue;
+            }
+            let positions: Vec<[f32; 3]> = body
+                .positions_snapshot()
+                .iter()
+                .map(Vec3::to_array)
+                .collect();
+            let indices: Vec<u32> = body
+                .surface
+                .iter()
+                .flat_map(|tri| [tri[0] as u32, tri[1] as u32, tri[2] as u32])
+                .collect();
+            let desc = MeshDesc::Custom { positions, indices };
+            if let Some(slot) = meshes.get_mut(entity) {
+                *slot = desc;
+            } else {
+                meshes.insert(entity, desc);
+            }
+            if let Some(transform) = transforms.get_mut(entity) {
+                transform.translation = [0.0, 0.0, 0.0];
+                transform.rotation = [0.0, 0.0, 0.0, 1.0];
+                transform.scale = [1.0, 1.0, 1.0];
+            }
+        }
+    }
 }
 
 /// Installs the physics resource and its sync/step/sync systems in `engine`.
@@ -205,10 +308,15 @@ pub fn install_physics(engine: &mut Engine, gravity: Vec3) {
     let _ = engine
         .world_mut()
         .insert(Mutex::new(PhysicsRuntime::new(gravity)));
+    // Prepends land at the front, so registration runs in reverse: the
+    // final fixed order is sync-in → soft-sync-in → step → sync-out →
+    // soft-sync-out (mesh upload last, reading settled solver state).
     engine
         .fixed_schedule_mut()
+        .prepend_system(SoftSyncOut)
         .prepend_system(PhysicsSyncOut)
         .prepend_system(PhysicsStep)
+        .prepend_system(SoftSyncIn)
         .prepend_system(PhysicsSyncIn);
 }
 
@@ -305,6 +413,73 @@ impl System for PhysicsSyncOut {
             .lock()
             .expect("physics runtime lock")
             .sync_out(&mut body_lane, &mut transform_lane);
+    }
+}
+
+/// ECS → soft-solver synchronization system (PLAN B2/D1.5).
+struct SoftSyncIn;
+
+impl System for SoftSyncIn {
+    fn name(&self) -> &'static str {
+        "soft_sync_in"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .reads::<SmartStore>()
+            .reads_lane::<SoftBody>()
+            .writes::<Mutex<PhysicsRuntime>>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let Some(store) = resources.get::<SmartStore>() else {
+            return;
+        };
+        let Some(soft_lane) = store.read_lane::<SoftBody>() else {
+            return;
+        };
+        let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
+            return;
+        };
+        let mut runtime = runtime_resource.lock().expect("physics runtime lock");
+        runtime.sync_soft_in(&soft_lane);
+    }
+}
+
+/// Soft-solver → mesh synchronization system (PLAN B2/D1.5): rewrites
+/// [`MeshDesc::Custom`] soups from solver particles every fixed update.
+struct SoftSyncOut;
+
+impl System for SoftSyncOut {
+    fn name(&self) -> &'static str {
+        "soft_sync_out"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .writes::<SmartStore>()
+            .reads::<Mutex<PhysicsRuntime>>()
+            .writes_lane::<MeshDesc>()
+            .writes_lane::<TransformDesc>()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let Some(store) = resources.get::<SmartStore>() else {
+            return;
+        };
+        let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
+            return;
+        };
+        let Some(mut mesh_lane) = store.write_lane::<MeshDesc>() else {
+            return;
+        };
+        let Some(mut transform_lane) = store.write_lane::<TransformDesc>() else {
+            return;
+        };
+        runtime_resource
+            .lock()
+            .expect("physics runtime lock")
+            .sync_soft_out(&mut mesh_lane, &mut transform_lane);
     }
 }
 
@@ -664,6 +839,104 @@ mod tests {
                 .access()
                 .writes_lanes
                 .contains(&std::any::TypeId::of::<TransformDesc>())
+        );
+        assert!(
+            SoftSyncIn
+                .access()
+                .reads_lanes
+                .contains(&std::any::TypeId::of::<SoftBody>())
+        );
+        assert!(
+            SoftSyncOut
+                .access()
+                .writes_lanes
+                .contains(&std::any::TypeId::of::<MeshDesc>())
+        );
+    }
+
+    /// PLAN B2/D1.5: a cloth entity's `MeshDesc::Custom` tracks solver
+    /// particles every frame, its transform is pinned to identity
+    /// (world-space soup), and the existing extraction path draws it.
+    #[test]
+    fn soft_body_mesh_tracks_solver_particles() {
+        use ornis_physics::{ClothPin, SoftBody};
+
+        let mut engine = Engine::new();
+        let entity = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .create_entity();
+        let origin = Vec3::new(0.0, 2.0, 0.0);
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            SoftBody::cloth_grid(origin, 4, 4, 0.25, 1.0, 0.0, 0.0, 1e-4, ClothPin::TopRow),
+        );
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MeshDesc::Custom {
+                positions: Vec::new(),
+                indices: Vec::new(),
+            },
+        );
+        // Deliberately non-identity: the bridge must reset it (world soup).
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, transform(Vec3::new(9.0, 9.0, 9.0)));
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MaterialDesc::Dielectric {
+                base_color: [0.5, 0.5, 0.5],
+                roughness: 0.5,
+                emission: [0.0, 0.0, 0.0],
+            },
+        );
+        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
+
+        // Kick the free particles sideways: a hanging sheet at rest is an
+        // exact equilibrium (nothing would move), so the solver run is
+        // proven by the resulting pendulum swing, not by gravity alone.
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .write_lane::<SoftBody>()
+            .expect("soft lane")
+            .get_mut(entity)
+            .expect("entity soft body")
+            .particles
+            .iter_mut()
+            .filter(|p| p.inv_mass > 0.0)
+            .for_each(|p| p.velocity.x = 1.5);
+        for _ in 0..60 {
+            engine.run_frame(1.0 / 60.0);
+        }
+
+        let store = engine.world().store().expect("world store");
+        let mesh_lane = store.read_lane::<MeshDesc>().expect("mesh lane");
+        let mesh = mesh_lane.get(entity).expect("entity mesh");
+        let (positions, indices) = mesh.as_custom().expect("still a Custom soup");
+        assert_eq!(positions.len(), 16, "one vertex per particle");
+        assert_eq!(indices.len(), 2 * 3 * 3 * 3, "two tris per cell");
+        // Pinned corner never moved; a free particle swung sideways.
+        assert_eq!(positions[0], origin.to_array());
+        let swung = positions
+            .iter()
+            .any(|p| (p[0] - origin.to_array()[0]).abs() > 0.05);
+        assert!(swung, "free cloth swung under its initial kick");
+        let transform_lane = store.read_lane::<TransformDesc>().expect("transform lane");
+        let transform = transform_lane.get(entity).expect("entity transform");
+        assert_eq!(transform.translation, [0.0, 0.0, 0.0]);
+        assert_eq!(transform.rotation, [0.0, 0.0, 0.0, 1.0]);
+        // The pre-existing extraction path draws the soup unchanged.
+        let extracted = extract_render_data(store);
+        assert_eq!(extracted.custom_meshes.len(), 1);
+        assert_eq!(extracted.custom_meshes[0].vertices.len(), 16);
+        assert_eq!(
+            extracted.custom_meshes[0].instance.model_matrix,
+            glam::Mat4::IDENTITY
         );
     }
 }

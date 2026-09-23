@@ -112,6 +112,12 @@ pub struct SoftBody {
     pub constraints: Vec<DeformConstraint>,
     /// Closed surface triangles (outward-wound) for the volume row.
     pub triangles: Vec<[usize; 3]>,
+    /// Render-only surface topology (D1.5): triangle indices into
+    /// `particles`, wound CCW from outside (same convention as the
+    /// asset-side `Custom` mesh soup). Unlike `triangles` this may describe
+    /// an OPEN sheet (cloth) — it never drives physics, only the per-frame
+    /// mesh upload. Bodies without a sheet (chains) leave it empty.
+    pub surface: Vec<[usize; 3]>,
     /// Rest volume (m³) captured at build time.
     pub volume_rest: f32,
     /// Volume compliance `α` (0 = incompressible).
@@ -140,6 +146,7 @@ impl SoftBody {
             particles,
             constraints,
             triangles: Vec::new(),
+            surface: Vec::new(),
             volume_rest: 0.0,
             volume_compliance: 0.0,
             volume_lambda: 0.0,
@@ -221,6 +228,7 @@ impl SoftBody {
             }
         }
         let mut constraints = Vec::new();
+        let mut surface = Vec::new();
         let mut link = |a: usize, b: usize, rest: f32, compliance: f32, kind: DeformKind| {
             if a < particles.len() && b < particles.len() && a != b {
                 constraints.push(DeformConstraint {
@@ -257,6 +265,9 @@ impl SoftBody {
                     let d = spacing * std::f32::consts::SQRT_2;
                     link(at(c, r), at(c + 1, r + 1), d, shear, DeformKind::Shear);
                     link(at(c + 1, r), at(c, r + 1), d, shear, DeformKind::Shear);
+                    // Render sheet: two triangles per cell, CCW from +z.
+                    surface.push([at(c, r), at(c, r + 1), at(c + 1, r + 1)]);
+                    surface.push([at(c, r), at(c + 1, r + 1), at(c + 1, r)]);
                 }
                 if c + 2 < cols {
                     link(
@@ -280,6 +291,7 @@ impl SoftBody {
         }
         let mut body = Self::raw(particles, constraints);
         body.contact_radius = spacing * 0.2;
+        body.surface = surface;
         body
     }
 
@@ -349,7 +361,8 @@ impl SoftBody {
         }
         let volume_rest = mesh_volume(&positions, &triangles).abs();
         let mut body = Self::raw(particles, constraints);
-        body.triangles = triangles;
+        body.triangles = triangles.clone();
+        body.surface = triangles;
         body.volume_rest = volume_rest;
         body.volume_compliance = volume_compliance;
         body.contact_radius = size * 0.1;
@@ -489,6 +502,13 @@ impl SoftBody {
         let positions: Vec<Vec3> = self.particles.iter().map(|p| p.position).collect();
         mesh_volume(&positions, &self.triangles)
     }
+
+    /// World-space particle positions in index order (render upload
+    /// source): pair with [`SoftBody::surface`] indices to build the mesh
+    /// soup. Allocates — the bridge calls it once per frame per body.
+    pub fn positions_snapshot(&self) -> Vec<Vec3> {
+        self.particles.iter().map(|p| p.position).collect()
+    }
 }
 
 /// Signed volume of a closed triangle surface (divergence theorem):
@@ -619,5 +639,48 @@ mod tests {
         for p in &body.particles {
             assert!(p.position.is_finite() && p.velocity.is_finite());
         }
+    }
+
+    /// Render surface (D1.5): cloth carries two CCW triangles per cell with
+    /// valid indices, the cube mirrors its volume surface, chains are empty.
+    #[test]
+    fn surface_topology_matches_builders() {
+        let (cols, rows) = (5, 4);
+        let cloth = SoftBody::cloth_grid(
+            Vec3::ZERO,
+            cols,
+            rows,
+            0.25,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            ClothPin::None,
+        );
+        assert_eq!(cloth.surface.len(), 2 * (cols - 1) * (rows - 1));
+        assert!(
+            cloth
+                .surface
+                .iter()
+                .flatten()
+                .all(|&i| i < cloth.particle_count()),
+            "cloth surface indices valid"
+        );
+        // CCW from +z: every triangle normal must point +z on the flat grid.
+        for [a, b, c] in &cloth.surface {
+            let (pa, pb, pc) = (
+                cloth.particles[*a].position,
+                cloth.particles[*b].position,
+                cloth.particles[*c].position,
+            );
+            assert!((pb - pa).cross(pc - pa).z > 0.0, "cloth winding +z");
+        }
+
+        let cube = SoftBody::soft_cube(Vec3::ZERO, 1.0, 1.0, 0.0, 0.0);
+        assert_eq!(cube.surface, cube.triangles);
+        assert_eq!(cube.positions_snapshot().len(), 8);
+
+        let chain = SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 4, 0.5, 1.0, 0.0);
+        assert!(chain.surface.is_empty(), "chains have no sheet");
     }
 }
