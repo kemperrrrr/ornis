@@ -206,7 +206,7 @@ jobs and line-table debug info (debug assertions stay enabled).
 - **Мутации мира (бывшая фаза 6 «Скриптинг», унифицирована 2026-09-22)**: реестр компонентов (F0) ✅ (`ComponentRegistry` + `#[derive(RegisterComponent)]`); единый протокол записи контента — `Mutation` + `apply_mutations` + `MutationBus` (`crates/core/src/mutation.rs`): редактор (`set_component`) и вычислительные продюсеры (будущие языки) говорят одним языком, отчёт один (`MutationReport`); продюсеры дренируются `mutation_tick` в PostFrame. Языковые адаптеры Rhai/Rune/Python и вендоренный `third_party/rustpython-vm` **удалены** (ноль prod-потребителей; шов под язык — `MutationProducer`, подключится когда появится контент). История фазы — в git и [audit-2026-08-22](docs/quality/audit-2026-08-22.md) (решения F0/D1)
 - **Asset Pipeline (фаза 7)**: build-time сканирование ассетов — ❌; hot reload сцены ✅ (`FileWatch`, mtime `editor/scene.ron`, без `notify`)
 - **NUMA-aware allocation** — ❌
-- **HVM2/Bend как compute-бэкенд** — ❌ (идея на будущее)
+- **BendRT как compute-бэкенд** — ❌ не портируем (свой компилятор, Metal/CUDA-only, bimodal); открыт только спайк cube-scheduler для однородных фаз (IDEAS §24.3)
 - **Мультиплатформенные тесты/miri (фаза 11)** — ❓ не верифицировано
 
 ## Roadmap
