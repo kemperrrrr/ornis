@@ -137,6 +137,11 @@ pub struct SoftBody {
     /// particle collides as a sphere of this radius via `shape_distance`.
     /// Zero disables the coupling for the whole body.
     pub contact_radius: f32,
+    /// Breakage threshold as a stretch ratio `dist / rest` (0 = unbreakable,
+    /// the default). When [`SoftBody::apply_breakage`] runs, structural rows
+    /// stretched beyond this ratio are removed. E.g. `2.0` tears rows pulled
+    /// past twice their rest length. Shear/bend rows never tear in D1.
+    pub tear_strain: f32,
 }
 
 impl SoftBody {
@@ -152,6 +157,7 @@ impl SoftBody {
             volume_lambda: 0.0,
             damping: 0.0,
             contact_radius: 0.0,
+            tear_strain: 0.0,
         }
     }
 
@@ -450,6 +456,57 @@ impl SoftBody {
         }
     }
 
+    /// Tears overstretched structural rows (separate pass, D1 leftover #2).
+    ///
+    /// Removes [`DeformKind::Structural`] rows whose live stretch ratio
+    /// `dist / rest` exceeds [`SoftBody::tear_strain`], then drops every
+    /// [`SoftBody::surface`] triangle containing both endpoints of any torn
+    /// row (the sheet gets a hole). Does nothing when `tear_strain <= 0`
+    /// (unbreakable). Shear/bend rows never tear in D1, `triangles` (the
+    /// physics volume surface) is left intact, and particles — pinned or
+    /// not — are never added, removed, or unpinned.
+    ///
+    /// This is holes-not-splits, without particle duplication: the two sides
+    /// of a tear keep sharing the same particles, so a tear opens as missing
+    /// triangles rather than two clean lips. The upgrade path (duplicating
+    /// particles along the tear for clean cuts) is out of scope.
+    ///
+    /// Call this once per step, outside the solver iterations — never inside
+    /// the [`SoftBody::solve_constraints`] sweep, which would fight the XPBD
+    /// projection within one substep.
+    pub fn apply_breakage(&mut self) {
+        if self.tear_strain <= 0.0 {
+            return;
+        }
+        let threshold = self.tear_strain;
+        let particles = &self.particles;
+        let mut torn: Vec<(usize, usize)> = Vec::new();
+        self.constraints.retain(|c| {
+            if c.kind != DeformKind::Structural {
+                return true;
+            }
+            if c.rest <= 1e-9 {
+                return true;
+            }
+            let (pa, pb) = match pair(particles, c.a, c.b) {
+                Some(pair) => pair,
+                None => return true,
+            };
+            let dist = (pa.position - pb.position).length();
+            if dist / c.rest > threshold {
+                torn.push((c.a, c.b));
+                false
+            } else {
+                true
+            }
+        });
+        if torn.is_empty() {
+            return;
+        }
+        self.surface
+            .retain(|tri| !torn.iter().any(|(a, b)| tri.contains(a) && tri.contains(b)));
+    }
+
     /// Global volume row (XPBD balloon model, Macklin et al. 2016 §6.5):
     /// `C = (V − V0)/V0` over the closed surface, solved as one equality.
     /// Skipped without triangles or with a degenerate rest volume.
@@ -682,5 +739,140 @@ mod tests {
 
         let chain = SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 4, 0.5, 1.0, 0.0);
         assert!(chain.surface.is_empty(), "chains have no sheet");
+    }
+
+    /// Overloaded strip tears structural rows and opens a surface hole.
+    #[test]
+    fn breakage_tears_overstretched_structural_and_opens_hole() {
+        let (cols, rows) = (4, 4);
+        let mut body = SoftBody::cloth_grid(
+            Vec3::ZERO,
+            cols,
+            rows,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            ClothPin::TopRow,
+        );
+        body.tear_strain = 1.5;
+        let constraints_before = body.constraint_count();
+        let surface_before = body.surface.len();
+        // Overload: drag the bottom half down — vertical structural rows
+        // crossing the middle stretch ~6x rest (shear/bend cross too, but
+        // only structural may tear in D1).
+        for r in 2..rows {
+            for c in 0..cols {
+                body.particles[r * cols + c].position.y -= 5.0;
+            }
+        }
+        body.apply_breakage();
+        // Exactly the `cols` vertical rows between row 1 and row 2 tear.
+        assert_eq!(body.constraint_count(), constraints_before - cols);
+        // Both triangles of every middle-strip cell reference a torn edge.
+        assert_eq!(body.surface.len(), surface_before - 2 * (cols - 1));
+        for c in 0..cols {
+            let (a, b) = (c + cols, c + 2 * cols);
+            assert!(
+                !body
+                    .constraints
+                    .iter()
+                    .any(|row| row.kind == DeformKind::Structural
+                        && ((row.a == a && row.b == b) || (row.a == b && row.b == a))),
+                "middle vertical structural row {c} is gone"
+            );
+        }
+    }
+
+    /// `tear_strain == 0` means unbreakable (also the builder default).
+    #[test]
+    fn breakage_disabled_by_default_zero_threshold() {
+        let mut body =
+            SoftBody::cloth_grid(Vec3::ZERO, 4, 4, 1.0, 1.0, 0.0, 0.0, 0.0, ClothPin::TopRow);
+        assert_eq!(body.tear_strain, 0.0, "raw() defaults to unbreakable");
+        for p in body.particles.iter_mut().skip(8) {
+            p.position.y -= 50.0;
+        }
+        let constraints_before = body.constraint_count();
+        let surface_before = body.surface.len();
+        body.apply_breakage();
+        assert_eq!(body.constraint_count(), constraints_before);
+        assert_eq!(body.surface.len(), surface_before);
+    }
+
+    /// Breakage only removes structural rows: shear/bend rows survive even
+    /// far past the threshold, and pins/particles are untouched.
+    #[test]
+    fn breakage_preserves_pins_and_non_structural() {
+        let (cols, rows) = (4, 4);
+        let mut body = SoftBody::cloth_grid(
+            Vec3::ZERO,
+            cols,
+            rows,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            ClothPin::TopRow,
+        );
+        body.tear_strain = 1.1;
+        let structural_before = body
+            .constraints
+            .iter()
+            .filter(|c| c.kind == DeformKind::Structural)
+            .count();
+        let shear_before = body
+            .constraints
+            .iter()
+            .filter(|c| c.kind == DeformKind::Shear)
+            .count();
+        let bend_before = body
+            .constraints
+            .iter()
+            .filter(|c| c.kind == DeformKind::Bend)
+            .count();
+        let pinned_before = body.particles.iter().filter(|p| p.is_pinned()).count();
+        let particles_before = body.particle_count();
+        // Stretch everything crossing the middle (structural + shear + bend).
+        for r in 2..rows {
+            for c in 0..cols {
+                body.particles[r * cols + c].position.y -= 5.0;
+            }
+        }
+        body.apply_breakage();
+        assert!(structural_before > 0 && shear_before > 0 && bend_before > 0);
+        assert_eq!(
+            body.constraints
+                .iter()
+                .filter(|c| c.kind == DeformKind::Shear)
+                .count(),
+            shear_before,
+            "shear rows never tear in D1"
+        );
+        assert_eq!(
+            body.constraints
+                .iter()
+                .filter(|c| c.kind == DeformKind::Bend)
+                .count(),
+            bend_before,
+            "bend rows never tear in D1"
+        );
+        assert!(
+            body.constraints
+                .iter()
+                .filter(|c| c.kind == DeformKind::Structural)
+                .count()
+                < structural_before,
+            "some structural rows did tear"
+        );
+        assert_eq!(body.particle_count(), particles_before);
+        assert_eq!(
+            body.particles.iter().filter(|p| p.is_pinned()).count(),
+            pinned_before,
+            "pins untouched"
+        );
+        assert_eq!(pinned_before, cols, "top row stays pinned");
     }
 }

@@ -326,10 +326,16 @@ impl XpbdEngine {
             for body in &mut self.soft_bodies {
                 body.solve_constraints(h);
                 body.solve_volume(h);
+                crate::soft_self::solve_self_collision(body, h);
             }
             for i in 0..soft_contacts.len() {
                 self.solve_soft_contact(i, &mut soft_contacts, alpha_c);
             }
+        }
+        // Topology surgery outside the constraint iterations: broken rows
+        // must not shift indices mid-sweep.
+        for body in &mut self.soft_bodies {
+            body.apply_breakage();
         }
         for b in &mut self.bodies {
             b.orientation = b.orientation.normalize();

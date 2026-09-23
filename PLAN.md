@@ -858,6 +858,16 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   physics lib 149, clippy чист).
   D1 закрыт целиком (вне скоупа остались: self-collision, разрывы
   топологии, line-рендер цепей).
+  ✅ **Остатки D1 DONE 2026-09-22** (три параллельных потока): (1)
+  self-collision (`soft_self.rs`: uniform-grid hash, cell=2r, скип
+  связанных констрейнтом пар и пин-пин, неравенства без lambda; хук в
+  итерации сабстепа); (2) разрывы (`SoftBody.tear_strain` + отдельный
+  проход `apply_breakage` вне итераций — рвутся только structural-ряды,
+  surface-дырки без дупликации частиц, holes-not-splits честно
+  задокументированы); (3) рендер цепей (`soft_render.rs`: tube-soup
+  parallel-transport фреймами + `RopeMesh`-компонент и ветка в
+  `sync_soft_out`; рендер-крейт не тронут). Lib-сьют 159, bin
+  engine_runtime 11/11, clippy/fmt чисто.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

@@ -25,11 +25,26 @@ use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
+use ornis_physics::soft_render::{tube_indices, tube_positions};
 use ornis_physics::{
     BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind, XpbdEngine,
 };
 #[cfg(test)]
 use ornis_render::extract_render_data;
+
+/// Render parameters for a chain/rope soft body (PLAN B2/D1 leftover #3).
+///
+/// Entities with a soft-solver binding, an empty [`SoftBody::surface`] and
+/// this lane component upload a tube soup along the solver particles every
+/// frame (see [`PhysicsRuntime::sync_soft_out`]). `radius` is the tube radius
+/// in world units, `sides` the cross-section resolution (minimum 3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RopeMesh {
+    /// Tube radius in world units (must be finite and positive).
+    pub radius: f32,
+    /// Cross-section sides (minimum 3).
+    pub sides: u32,
+}
 
 /// Physics domain state registered in a core [`Engine`] as a resource.
 ///
@@ -255,18 +270,48 @@ impl PhysicsRuntime {
     /// Writes solver particle positions into [`MeshDesc::Custom`] soups and
     /// pins the entity transform to identity (particles are already
     /// world-space — the existing extraction path draws them unchanged).
-    /// Bodies without a render surface (chains) are skipped: line
-    /// rendering is out of D1 scope.
+    /// Bodies with a render `surface` (cloth) upload it directly; bodies
+    /// with an empty `surface` but a [`RopeMesh`] lane upload a tube soup
+    /// along the chain (positions every frame, indices rebuilt). Chains
+    /// without [`RopeMesh`] are still skipped.
     fn sync_soft_out(
         &mut self,
         meshes: &mut ComponentStore<MeshDesc>,
         transforms: &mut ComponentStore<TransformDesc>,
+        ropes: Option<&ComponentStore<RopeMesh>>,
     ) {
         for (&entity, &handle) in &self.soft_bindings {
             let Some(body) = self.soft_solver.get_soft_body(handle) else {
                 continue;
             };
             if body.surface.is_empty() {
+                let Some(ropes) = ropes else { continue };
+                let Some(rope) = ropes.get(entity) else {
+                    continue;
+                };
+                if !rope.radius.is_finite() || rope.radius <= 0.0 || rope.sides < 3 {
+                    continue;
+                }
+                let count = body.particles.len();
+                if count < 2 {
+                    continue;
+                }
+                let positions = tube_positions(&body.particles, rope.radius, rope.sides);
+                if positions.is_empty() {
+                    continue;
+                }
+                let indices = tube_indices(count, rope.sides);
+                let desc = MeshDesc::Custom { positions, indices };
+                if let Some(slot) = meshes.get_mut(entity) {
+                    *slot = desc;
+                } else {
+                    meshes.insert(entity, desc);
+                }
+                if let Some(transform) = transforms.get_mut(entity) {
+                    transform.translation = [0.0, 0.0, 0.0];
+                    transform.rotation = [0.0, 0.0, 0.0, 1.0];
+                    transform.scale = [1.0, 1.0, 1.0];
+                }
                 continue;
             }
             let positions: Vec<[f32; 3]> = body
@@ -459,6 +504,7 @@ impl System for SoftSyncOut {
         SystemAccess::new()
             .writes::<SmartStore>()
             .reads::<Mutex<PhysicsRuntime>>()
+            .reads_lane::<RopeMesh>()
             .writes_lane::<MeshDesc>()
             .writes_lane::<TransformDesc>()
     }
@@ -476,10 +522,11 @@ impl System for SoftSyncOut {
         let Some(mut transform_lane) = store.write_lane::<TransformDesc>() else {
             return;
         };
+        let ropes = store.read_lane::<RopeMesh>();
         runtime_resource
             .lock()
             .expect("physics runtime lock")
-            .sync_soft_out(&mut mesh_lane, &mut transform_lane);
+            .sync_soft_out(&mut mesh_lane, &mut transform_lane, ropes.as_deref());
     }
 }
 
@@ -852,6 +899,12 @@ mod tests {
                 .writes_lanes
                 .contains(&std::any::TypeId::of::<MeshDesc>())
         );
+        assert!(
+            SoftSyncOut
+                .access()
+                .reads_lanes
+                .contains(&std::any::TypeId::of::<RopeMesh>())
+        );
     }
 
     /// PLAN B2/D1.5: a cloth entity's `MeshDesc::Custom` tracks solver
@@ -934,6 +987,104 @@ mod tests {
         let extracted = extract_render_data(store);
         assert_eq!(extracted.custom_meshes.len(), 1);
         assert_eq!(extracted.custom_meshes[0].vertices.len(), 16);
+        assert_eq!(
+            extracted.custom_meshes[0].instance.model_matrix,
+            glam::Mat4::IDENTITY
+        );
+    }
+
+    /// PLAN B2/D1 leftover #3: a chain entity (empty `surface`) with a
+    /// [`RopeMesh`] lane uploads a tube soup tracking the solver particles
+    /// every frame, its transform pinned to identity (world-space soup), and
+    /// the existing extraction path draws it.
+    #[test]
+    fn rope_mesh_uploads_tube_soup_tracking_solver() {
+        use ornis_physics::SoftBody;
+
+        let mut engine = Engine::new();
+        let entity = engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .create_entity();
+        let origin = Vec3::new(0.0, 2.0, 0.0);
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            SoftBody::chain(origin, Vec3::NEG_Y, 6, 0.25, 1.0, 0.0),
+        );
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            RopeMesh {
+                radius: 0.05,
+                sides: 6,
+            },
+        );
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MeshDesc::Custom {
+                positions: Vec::new(),
+                indices: Vec::new(),
+            },
+        );
+        // Deliberately non-identity: the bridge must reset it (world soup).
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, transform(Vec3::new(9.0, 9.0, 9.0)));
+        engine.world_mut().store_mut().expect("world store").insert(
+            entity,
+            MaterialDesc::Dielectric {
+                base_color: [0.5, 0.5, 0.5],
+                roughness: 0.5,
+                emission: [0.0, 0.0, 0.0],
+            },
+        );
+        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
+
+        // Same kick as the cloth test: a hanging chain at rest is an exact
+        // equilibrium, so motion is proven by the resulting pendulum swing.
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .write_lane::<SoftBody>()
+            .expect("soft lane")
+            .get_mut(entity)
+            .expect("entity soft body")
+            .particles
+            .iter_mut()
+            .filter(|p| p.inv_mass > 0.0)
+            .for_each(|p| p.velocity.x = 1.5);
+        for _ in 0..60 {
+            engine.run_frame(1.0 / 60.0);
+        }
+
+        let store = engine.world().store().expect("world store");
+        let mesh_lane = store.read_lane::<MeshDesc>().expect("mesh lane");
+        let mesh = mesh_lane.get(entity).expect("entity mesh");
+        let (positions, indices) = mesh.as_custom().expect("still a Custom soup");
+        assert_eq!(positions.len(), 6 * 6, "one ring of 6 per particle");
+        assert_eq!(indices.len(), (6 - 1) * 6 * 6, "two tris per side quad");
+        assert!(positions.len() > 6, "tube soup outnumbers the particles");
+        // Pinned particle never moved: its whole ring hugs the origin.
+        for v in &positions[0..6] {
+            let dist = Vec3::from_array(*v).distance(origin);
+            assert!((dist - 0.05).abs() < 1e-3, "pinned ring at radius: {v:?}");
+        }
+        // A free particle swung sideways under its initial kick.
+        let swung = positions
+            .iter()
+            .any(|p| (p[0] - origin.to_array()[0]).abs() > 0.05);
+        assert!(swung, "free chain swung under its initial kick");
+        let transform_lane = store.read_lane::<TransformDesc>().expect("transform lane");
+        let transform = transform_lane.get(entity).expect("entity transform");
+        assert_eq!(transform.translation, [0.0, 0.0, 0.0]);
+        assert_eq!(transform.rotation, [0.0, 0.0, 0.0, 1.0]);
+        // The pre-existing extraction path draws the soup unchanged.
+        let extracted = extract_render_data(store);
+        assert_eq!(extracted.custom_meshes.len(), 1);
+        assert_eq!(extracted.custom_meshes[0].vertices.len(), 6 * 6);
         assert_eq!(
             extracted.custom_meshes[0].instance.model_matrix,
             glam::Mat4::IDENTITY
