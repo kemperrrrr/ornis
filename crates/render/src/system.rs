@@ -38,8 +38,8 @@ use crate::frame_exec::PassViews;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer3D;
 use crate::transient_pool::{
-    Budget, BudgetExceeded, FrameLayout, PassId, PassNode, PoolInput, ResourceId, ResourceNode,
-    TextureSpec, TransientPool,
+    Budget, BudgetExceeded, FrameLayout, PassId, PassName, PassNode, PoolInput, ResourceId,
+    ResourceName, ResourceNode, TextureSpec, TransientPool,
 };
 
 /// How a resource enters the registry (see
@@ -97,7 +97,9 @@ impl ClearValue for ClearTransparent {
 pub trait Access {
     /// The resource being accessed.
     type Resource: FrameResource;
-    /// `true` for write accesses.
+    /// Typed read/write access (replaces `IS_WRITE`).
+    const ACCESS: crate::flags::Access;
+    /// `true` for write accesses (bool-compat view of [`Self::ACCESS`]).
     const IS_WRITE: bool;
     /// Clear value applied on first write, if any.
     fn clear() -> Option<wgpu::Color>;
@@ -116,6 +118,7 @@ pub struct WriteClear<R, C: ClearValue>(PhantomData<fn() -> (R, C)>);
 
 impl<R: FrameResource> Access for Read<R> {
     type Resource = R;
+    const ACCESS: crate::flags::Access = crate::flags::Access::Read;
     const IS_WRITE: bool = false;
     fn clear() -> Option<wgpu::Color> {
         None
@@ -124,6 +127,7 @@ impl<R: FrameResource> Access for Read<R> {
 
 impl<R: FrameResource> Access for Write<R> {
     type Resource = R;
+    const ACCESS: crate::flags::Access = crate::flags::Access::Write;
     const IS_WRITE: bool = true;
     fn clear() -> Option<wgpu::Color> {
         None
@@ -132,6 +136,7 @@ impl<R: FrameResource> Access for Write<R> {
 
 impl<R: FrameResource, C: ClearValue> Access for WriteClear<R, C> {
     type Resource = R;
+    const ACCESS: crate::flags::Access = crate::flags::Access::Write;
     const IS_WRITE: bool = true;
     fn clear() -> Option<wgpu::Color> {
         Some(C::COLOR)
@@ -145,10 +150,17 @@ pub struct AccessDesc {
     pub resource: TypeId,
     /// Debug name from [`FrameResource::NAME`].
     pub name: &'static str,
-    /// Write vs read access.
-    pub write: bool,
+    /// Read vs write access.
+    pub access: crate::flags::Access,
     /// Clear color carried by a `WriteClear` access.
     pub clear: Option<wgpu::Color>,
+}
+
+impl AccessDesc {
+    /// Legacy `write: bool` view of [`Self::access`] (kept for tests).
+    pub fn write(&self) -> bool {
+        self.access.is_write()
+    }
 }
 
 /// A type-level set of accesses: tuples of access markers, e.g.
@@ -196,7 +208,7 @@ macro_rules! impl_access_tuple {
                     out.push(AccessDesc {
                         resource: TypeId::of::<$name::Resource>(),
                         name: <$name::Resource as FrameResource>::NAME,
-                        write: $name::IS_WRITE,
+                        access: $name::ACCESS,
                         clear: $name::clear(),
                     });
                 )+
@@ -424,10 +436,18 @@ impl SystemSet {
     }
 
     /// Declares a frame-owned resource; returns its `ResourceId`.
-    pub fn create_resource(&mut self, name: &'static str, spec: TextureSpec) -> ResourceId {
+    ///
+    /// Accepts [`ResourceName`] or plain strings (`impl Into<ResourceName>`),
+    /// so existing `create_resource("a", …)` call sites keep compiling.
+    pub fn create_resource(
+        &mut self,
+        name: impl Into<ResourceName>,
+        spec: TextureSpec,
+    ) -> ResourceId {
+        let name = name.into();
         let id = ResourceId(self.resources.len() as u32);
         self.resources.push(ResourceNode {
-            name: name.to_owned(),
+            name,
             spec,
             imported: false,
             external: false,
@@ -437,10 +457,15 @@ impl SystemSet {
     }
 
     /// Declares an imported (read-only, externally backed) resource.
-    pub fn import_resource(&mut self, name: &'static str, spec: TextureSpec) -> ResourceId {
+    pub fn import_resource(
+        &mut self,
+        name: impl Into<ResourceName>,
+        spec: TextureSpec,
+    ) -> ResourceId {
+        let name = name.into();
         let id = ResourceId(self.resources.len() as u32);
         self.resources.push(ResourceNode {
-            name: name.to_owned(),
+            name,
             spec,
             imported: true,
             external: false,
@@ -451,10 +476,11 @@ impl SystemSet {
 
     /// Declares an externally backed output (e.g. the swapchain view);
     /// never pooled.
-    pub fn external_output(&mut self, name: &'static str) -> ResourceId {
+    pub fn external_output(&mut self, name: impl Into<ResourceName>) -> ResourceId {
+        let name = name.into();
         let id = ResourceId(self.resources.len() as u32);
         self.resources.push(ResourceNode {
-            name: name.to_owned(),
+            name,
             spec: TextureSpec::external(),
             imported: false,
             external: true,
@@ -467,10 +493,10 @@ impl SystemSet {
     ///
     /// # Panics
     /// Panics if no resource was declared under `name`.
-    pub fn resolve_resource(&self, name: &'static str) -> ResourceId {
+    pub fn resolve_resource(&self, name: &str) -> ResourceId {
         self.resources
             .iter()
-            .position(|r| r.name == name)
+            .position(|r| r.name.as_str() == name)
             .map(|i| ResourceId(i as u32))
             .unwrap_or_else(|| panic!("unknown resource '{name}'"))
     }
@@ -481,7 +507,7 @@ impl SystemSet {
     pub fn add_pass(&mut self, name: &'static str) -> PassBuilder<'_> {
         let id = PassId(self.passes.len() as u32);
         self.passes.push(PassNode {
-            name: name.to_owned(),
+            name: PassName::from(name),
             reads: Vec::new(),
             writes: Vec::new(),
             enabled: true,
@@ -516,7 +542,7 @@ impl SystemSet {
     /// Returns [`OrderError`] if either endpoint is out of range.
     pub fn try_order_before(&mut self, before: PassId, after: PassId) -> Result<(), OrderError> {
         validate_indexed_edge(before.0 as usize, after.0 as usize, |i| {
-            self.passes.get(i).map(|node| node.name.clone())
+            self.passes.get(i).map(|node| node.name.as_str().to_owned())
         })?;
         if !self.ordering.contains(&(before, after)) {
             self.ordering.push((before, after));
@@ -541,7 +567,7 @@ impl SystemSet {
     /// Returns [`OrderError`] on unknown name or reverse registration order.
     pub fn try_order_before_named(&mut self, before: &str, after: &str) -> Result<(), OrderError> {
         let (b, a) = resolve_named_edge(before, after, |name| {
-            self.passes.iter().position(|p| p.name == name)
+            self.passes.iter().position(|p| p.name.as_str() == name)
         })?;
         self.try_order_before(PassId(b as u32), PassId(a as u32))
     }
@@ -551,13 +577,18 @@ impl SystemSet {
     ///
     /// # Panics
     /// Panics if the pass is unknown.
-    pub fn set_pass_enabled(&mut self, id: PassId, enabled: bool) {
+    pub fn set_pass_state(&mut self, id: PassId, state: crate::flags::PassState) {
         let node = self
             .passes
             .get_mut(id.0 as usize)
             .unwrap_or_else(|| panic!("unknown pass {id:?}"));
-        node.enabled = enabled;
+        node.set_state(state);
         self.touch();
+    }
+
+    /// Boolean-compat wrapper for [`Self::set_pass_state`] (kept for tests).
+    pub fn set_pass_enabled(&mut self, id: PassId, enabled: bool) {
+        self.set_pass_state(id, crate::flags::PassState::from(enabled));
     }
 
     /// Set the transient-pool memory budget (S4).
@@ -878,7 +909,7 @@ mod tests {
         let mut out = Vec::new();
         A::collect_accesses(&mut out);
         out.into_iter()
-            .map(|d| (d.name.to_string(), d.write, d.clear))
+            .map(|d| (d.name.to_string(), d.write(), d.clear))
             .collect()
     }
 

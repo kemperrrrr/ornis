@@ -12,7 +12,9 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::render_backend::RenderContext;
-use ornis_render::{InstanceData, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique};
+use ornis_render::{
+    Bloom, InstanceData, MaterialIdx, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique,
+};
 
 const SIZE: u32 = 256;
 
@@ -84,7 +86,7 @@ fn bench_recording(c: &mut Criterion) {
     let instance = InstanceData {
         model_matrix: model,
         normal_matrix: model.inverse().transpose(),
-        material_index: 0,
+        material_index: MaterialIdx::from_raw(0),
     };
     renderer.upload_instances(&device, &queue, &[instance]);
     renderer.set_lights(
@@ -108,13 +110,13 @@ fn bench_recording(c: &mut Criterion) {
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,
-        true,
+        Bloom::On,
     );
     let mut par = RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,
-        true,
+        Bloom::On,
     );
     par.set_parallel_recording(true);
 

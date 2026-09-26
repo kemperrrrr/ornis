@@ -168,6 +168,7 @@ fn edge_name(set: &SystemSet, id: PassId) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flags::Bloom;
     use crate::frame_exec::{RenderFrame3D, Technique};
     use crate::system::{FrameResource, ResourceKind};
     use crate::transient_pool::{SizePolicy, TextureSpec};
@@ -179,7 +180,7 @@ mod tests {
     #[test]
     fn production_plans_project_with_matching_levels() {
         for technique in [Technique::Hybrid, Technique::Deferred, Technique::Forward] {
-            for bloom in [false, true] {
+            for bloom in [Bloom::Off, Bloom::On] {
                 let mut plan = RenderFrame3D::new_with(
                     wgpu::TextureFormat::Rgba8Unorm,
                     (32, 32),
@@ -191,7 +192,7 @@ mod tests {
                 assert_eq!(
                     schedule.levels(),
                     plan.systems_mut().build().levels(),
-                    "technique {technique:?} bloom {bloom}: adapter levels != layout levels"
+                    "technique {technique:?} bloom {bloom:?}: adapter levels != layout levels"
                 );
             }
         }
@@ -242,7 +243,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Hybrid,
-            false,
+            Bloom::Off,
         );
         let mut schedule =
             try_project_schedule(plan.systems()).expect("production resources are typed");

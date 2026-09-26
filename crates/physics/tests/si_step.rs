@@ -6,7 +6,7 @@ use ornis_physics::engine::{
     solve_normal_block, solve_small,
 };
 use ornis_physics::{
-    AxisConfig, BodyHandle, BroadPhaseKind, JointKind, PhysicsEngine, PrismaticLimit,
+    AxisConfig, BodyHandle, BroadPhaseKind, JointHandle, JointKind, PhysicsEngine, PrismaticLimit,
     PrismaticMotor, RevoluteMotor, RigidBody, SequentialImpulseEngine, StepBudget, WheelSuspension,
 };
 
@@ -74,14 +74,16 @@ fn determinism_snapshot_scene() -> SequentialImpulseEngine {
         Vec3::splat(0.5),
         1.0,
     ));
-    physics.add_joint(
-        anchor,
-        arm,
-        JointKind::Ball {
-            local_anchor_a: Vec3::new(0.0, -1.0, 0.0),
-            local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
-        },
-    );
+    physics
+        .add_joint(
+            anchor,
+            arm,
+            JointKind::Ball {
+                local_anchor_a: Vec3::new(0.0, -1.0, 0.0),
+                local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
+            },
+        )
+        .expect("valid joint");
     physics
 }
 
@@ -185,7 +187,7 @@ fn auto_broadphase_routes_small_scene_to_sweep_and_steps() {
         physics.auto_active_broadphase(),
         Some(BroadPhaseKind::SweepAndPrune)
     );
-    let body = physics.get_body(1).unwrap();
+    let body = physics.get_body(BodyHandle::from_raw(1)).unwrap();
     assert!(body.position.y < 5.0, "dynamic body still falls under Auto");
 
     // Explicit selections report no auto-active backend.
@@ -1866,8 +1868,16 @@ fn gear_ratio_couples_hinges() {
         let qb = physics.get_body(arm_b).unwrap().orientation;
         let raw_a = ornis_physics::engine::joints::hinge_twist(Quat::IDENTITY, qa, Vec3::Z);
         let raw_b = ornis_physics::engine::joints::hinge_twist(Quat::IDENTITY, qb, Vec3::Z);
-        ta = ornis_physics::migration::gear_coordinate(raw_a, true, Some((old_a, ta)));
-        tb = ornis_physics::migration::gear_coordinate(raw_b, true, Some((old_b, tb)));
+        ta = ornis_physics::migration::gear_coordinate(
+            raw_a,
+            ornis_physics::CoordKind::Angular,
+            Some((old_a, ta)),
+        );
+        tb = ornis_physics::migration::gear_coordinate(
+            raw_b,
+            ornis_physics::CoordKind::Angular,
+            Some((old_b, tb)),
+        );
         old_a = raw_a;
         old_b = raw_b;
     }
@@ -1893,12 +1903,12 @@ fn gear_validation_and_cleanup() {
                 a,
                 b,
                 JointKind::Gear {
-                    joint_a: 7,
-                    joint_b: 9,
+                    joint_a: JointHandle::from_raw(7),
+                    joint_b: JointHandle::from_raw(9),
                     ratio: 1.0,
                 },
             )
-            .is_none(),
+            .is_err(),
         "dangling gear refs must be rejected"
     );
     let ball = physics
@@ -1922,7 +1932,7 @@ fn gear_validation_and_cleanup() {
                     ratio: 1.0,
                 },
             )
-            .is_none(),
+            .is_err(),
         "gear over non-hinge joints must be rejected"
     );
     let hinge = physics
@@ -1950,7 +1960,7 @@ fn gear_validation_and_cleanup() {
                     ratio: 1.0,
                 },
             )
-            .is_none(),
+            .is_err(),
         "gear over a non-hinge joint must be rejected"
     );
     let hinge2 = physics

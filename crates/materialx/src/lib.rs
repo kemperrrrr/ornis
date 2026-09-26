@@ -17,7 +17,7 @@ pub use graph::{
     CodegenError, EvaluatedGraph, MaterialXConverter, MaterialXError, OpenPBRGraph, OutputValue,
     load_materialx_file, materialx_to_openpbr, parse_materialx,
 };
-pub use nodes::{Input, MaterialXDocument, Node, NodeDef, NodeGraph, Output};
+pub use nodes::{Input, MaterialXDocument, MtlxNodeKind, Node, NodeDef, NodeGraph, Output};
 pub use parser::MaterialXParser;
 
 use ornis_render::OpenPBRMaterial;

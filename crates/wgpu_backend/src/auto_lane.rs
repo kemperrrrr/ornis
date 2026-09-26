@@ -135,7 +135,9 @@ impl<T: bytemuck::Pod> AutoLane<T> {
         );
         sync.flush();
         self.buf.mark_gpu_dirty();
-        self.buf.sync_to_cpu_blocking(&self.device, &self.queue)
+        self.buf
+            .sync_to_cpu_blocking(&self.device, &self.queue)
+            .is_ok()
     }
 }
 

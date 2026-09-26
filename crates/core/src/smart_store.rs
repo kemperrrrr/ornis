@@ -239,6 +239,10 @@ impl SmartStore {
 
     /// Allocates a new live entity handle (recycling freed ids with a
     /// bumped generation).
+    ///
+    /// Intentionally phase-agnostic: allocation goes through the interior
+    /// [`RwLock`] allocator, so `&self` suffices in both the [`Building`](crate::Building)
+    /// and [`Running`](crate::Running) phases without a typestate split.
     pub fn create_entity(&self) -> Entity {
         self.allocator.write().unwrap().allocate()
     }

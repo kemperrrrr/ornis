@@ -19,6 +19,7 @@
 
 use glam::Vec3;
 
+use ornis_core::units::MetersPerSecond;
 use ornis_core::{Engine, FixedTime, Resources, SmartStore, System, SystemAccess, Time};
 use ornis_input::{InputMap, InputState};
 
@@ -29,6 +30,23 @@ pub struct Player;
 /// Linear velocity in world units per second (gameplay intent, not solver state).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Velocity(pub Vec3);
+
+impl Velocity {
+    /// Wraps a raw m/s vector.
+    pub fn from_mps(velocity: Vec3) -> Self {
+        Self(velocity)
+    }
+
+    /// Raw m/s vector.
+    pub fn as_mps(self) -> Vec3 {
+        self.0
+    }
+
+    /// Speed (magnitude) in m/s.
+    pub fn speed_units(self) -> MetersPerSecond {
+        MetersPerSecond::new(self.0.length())
+    }
+}
 
 impl Default for Velocity {
     fn default() -> Self {
@@ -44,6 +62,30 @@ impl Default for Velocity {
 /// placement for pure gameplay entities.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Position(pub Vec3);
+
+impl Position {
+    /// Wraps a raw world-space position (meters).
+    pub fn from_meters(position: Vec3) -> Self {
+        Self(position)
+    }
+
+    /// Raw position in meters.
+    pub fn as_meters(self) -> Vec3 {
+        self.0
+    }
+
+    /// Advance by `velocity * dt`: the shared integration step used by
+    /// [`physics_push`] (meters = m/s × s).
+    pub fn advanced_by(self, velocity: Velocity, dt_seconds: f32) -> Self {
+        Self(self.0 + velocity.0 * dt_seconds)
+    }
+
+    /// Typed alias of [`Position::advanced_by`] over
+    /// [`ornis_core::units::Seconds`] (meters = m/s × s, units checked).
+    pub fn advanced_by_secs(self, velocity: Velocity, dt: ornis_core::units::Seconds) -> Self {
+        self.advanced_by(velocity, dt.get())
+    }
+}
 
 impl Default for Position {
     fn default() -> Self {
@@ -89,6 +131,28 @@ impl GameplayPlugin {
     pub fn with_speed(mut self, speed: f32) -> Self {
         self.player_speed = speed;
         self
+    }
+
+    /// Typed speed override in m/s (`None` for non-finite input; negative
+    /// speeds clamp to zero instead of reversing the input mapping).
+    pub fn with_speed_units(mut self, speed: MetersPerSecond) -> Option<Self> {
+        let v = speed.get();
+        if !v.is_finite() {
+            return None;
+        }
+        self.player_speed = v.max(0.0);
+        Some(self)
+    }
+
+    /// Current speed in m/s (non-finite or negative raw values saturate to
+    /// zero so a corrupt field never reverses movement).
+    pub fn speed_units(&self) -> MetersPerSecond {
+        let v = self.player_speed;
+        if v.is_finite() {
+            MetersPerSecond::new(v.max(0.0))
+        } else {
+            MetersPerSecond::ZERO
+        }
     }
 
     /// Registers gameplay systems into `engine`.
@@ -198,7 +262,7 @@ pub fn physics_push(resources: &Resources) {
     let Some(fixed) = resources.get::<FixedTime>() else {
         return;
     };
-    let dt = fixed.delta_seconds();
+    let dt = fixed.delta();
     let Some(store) = resources.get::<SmartStore>() else {
         return;
     };
@@ -217,9 +281,9 @@ pub fn physics_push(resources: &Resources) {
     };
     for (entity, vel) in entities {
         if let Some(pos) = pos_lane.get_mut(entity) {
-            pos.0 += vel * dt;
+            *pos = pos.advanced_by_secs(Velocity::from_mps(vel), dt);
         } else {
-            pos_lane.insert(entity, Position(vel * dt));
+            pos_lane.insert(entity, Position::from_meters(vel * dt.get()));
         }
     }
 }

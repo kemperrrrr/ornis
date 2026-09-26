@@ -21,6 +21,37 @@ bitflags! {
     }
 }
 
+/// Why a [`SmartBuffer::sync_to_cpu_blocking`] download failed.
+///
+/// `Ok(())` means the CPU copy is current (either no download was needed
+/// or the bytes were copied); `Err` preserves `DIRTY_GPU` so the caller
+/// can retry instead of observing stale data as if it were current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuSyncError {
+    /// The GPU buffer was dropped and not yet recreated via
+    /// [`SmartBuffer::ensure_gpu_buffer`].
+    NoGpuBuffer,
+    /// The async map failed or its result channel was lost.
+    MapFailed,
+    /// The mapped range could not be read back.
+    ReadbackFailed,
+    /// The GPU returned a different element count than the CPU copy.
+    LengthMismatch,
+}
+
+impl std::fmt::Display for CpuSyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoGpuBuffer => write!(f, "no GPU buffer to download from"),
+            Self::MapFailed => write!(f, "GPU staging-buffer map failed"),
+            Self::ReadbackFailed => write!(f, "GPU staging-buffer readback failed"),
+            Self::LengthMismatch => write!(f, "GPU download length differs from CPU copy"),
+        }
+    }
+}
+
+impl std::error::Error for CpuSyncError {}
+
 /// A buffer resident on both CPU and GPU with dirty-flag synchronization.
 ///
 /// Mutating through [`cpu_data_mut`](Self::cpu_data_mut) or a GPU dispatch
@@ -115,17 +146,28 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
     /// Requires COPY_SRC usage on the buffer; the read goes through a
     /// MAP_READ staging buffer (a storage buffer cannot be mapped).
     ///
-    /// Returns `true` when the CPU copy was updated (or no download was
-    /// needed). On mapping or buffer errors it returns `false` and preserves
+    /// Returns `Ok(())` when the CPU copy is current (or no download was
+    /// needed). On mapping or buffer errors it returns `Err` and preserves
     /// `DIRTY_GPU`, allowing the caller to retry instead of observing stale
     /// data as if it were current.
-    pub fn sync_to_cpu_blocking(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+    ///
+    /// # Errors
+    /// [`CpuSyncError::NoGpuBuffer`] when the GPU buffer is missing,
+    /// [`CpuSyncError::MapFailed`] on mapping failure,
+    /// [`CpuSyncError::ReadbackFailed`] when the mapped range is
+    /// unreadable, [`CpuSyncError::LengthMismatch`] on element-count
+    /// drift between the sides.
+    pub fn sync_to_cpu_blocking(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), CpuSyncError> {
         if !self.flags.contains(ResidencyFlags::DIRTY_GPU) {
-            return true;
+            return Ok(());
         }
 
         let Some(buffer) = self.gpu_buffer.as_ref() else {
-            return false;
+            return Err(CpuSyncError::NoGpuBuffer);
         };
 
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -152,23 +194,23 @@ impl<T: bytemuck::Pod> SmartBuffer<T> {
             })
             .ok();
         let Ok(Ok(())) = receiver.recv() else {
-            return false;
+            return Err(CpuSyncError::MapFailed);
         };
         let Ok(view) = buffer_slice.get_mapped_range() else {
-            return false;
+            return Err(CpuSyncError::ReadbackFailed);
         };
         let downloaded: &[T] = bytemuck::cast_slice(&view);
         if downloaded.len() != self.cpu_data.len() {
             drop(view);
             staging.unmap();
-            return false;
+            return Err(CpuSyncError::LengthMismatch);
         }
         self.cpu_data.copy_from_slice(downloaded);
         drop(view);
         staging.unmap();
 
         self.flags.remove(ResidencyFlags::DIRTY_GPU);
-        true
+        Ok(())
     }
 
     /// Ensure GPU buffer exists (recreate if dropped).
@@ -250,7 +292,7 @@ mod tests {
     #[test]
     fn sync_to_cpu_is_noop_when_clean() {
         let (ctx, mut buf) = test_buffer(vec![1.0f32, 2.0, 3.0]);
-        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue));
+        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue).is_ok());
         assert_eq!(buf.flags(), ResidencyFlags::empty());
         assert_eq!(buf.cpu_data(), &[1.0, 2.0, 3.0]);
     }
@@ -263,7 +305,8 @@ mod tests {
         buf.cpu_data_mut().copy_from_slice(&[10, 20, 30, 40]);
         buf.sync_to_gpu(&ctx.queue);
         buf.mark_gpu_dirty();
-        buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue);
+        buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue)
+            .expect("roundtrip download succeeds");
 
         assert_eq!(buf.cpu_data(), &[10, 20, 30, 40]);
         assert_eq!(buf.flags(), ResidencyFlags::empty());
@@ -275,7 +318,7 @@ mod tests {
         // The initial contents were uploaded at construction; downloading
         // them must reproduce the same bytes.
         buf.mark_gpu_dirty();
-        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue));
+        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue).is_ok());
         assert_eq!(buf.cpu_data(), &[7.5, -1.25, 0.0]);
         assert_eq!(buf.flags(), ResidencyFlags::empty());
     }
@@ -299,7 +342,7 @@ mod tests {
         buf.cpu_data_mut()[0] = 43;
         buf.sync_to_gpu(&ctx.queue);
         buf.mark_gpu_dirty();
-        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue));
+        assert!(buf.sync_to_cpu_blocking(&ctx.device, &ctx.queue).is_ok());
         assert_eq!(buf.cpu_data(), &[43]);
     }
 }

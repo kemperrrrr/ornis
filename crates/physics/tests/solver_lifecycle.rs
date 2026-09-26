@@ -3,8 +3,8 @@
 
 use glam::{Quat, Vec3};
 use ornis_physics::{
-    AxisConfig, BodyType, ContactEventKind, Engine, JointKind, PhysicsEngine, Ray, RigidBody,
-    RoutingKind, Shape, SolverKind, TriggerEventKind,
+    AxisConfig, BodyHandle, BodyType, ContactEventKind, Engine, JointHandle, JointKind,
+    PhysicsEngine, Ray, RigidBody, RoutingKind, Shape, SolverKind, TriggerEventKind,
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -21,7 +21,7 @@ fn isolated(pos: Vec3, mass: f32) -> RigidBody {
     b
 }
 
-fn slider(a: usize, b: usize, engine: &mut Engine) -> usize {
+fn slider(a: BodyHandle, b: BodyHandle, engine: &mut Engine) -> JointHandle {
     engine
         .add_joint(
             a,
@@ -121,7 +121,7 @@ fn gear_references_survive_unrelated_and_dependent_joint_removal() {
             let sc = e.get_body(c).unwrap().position.x - 3.0;
             let sd = e.get_body(b).unwrap().position.x - 5.0;
             assert!((sc - sd).abs() < 0.1, "{kind:?}/{route:?}: {sc} vs {sd}");
-            e.remove_joint(0);
+            e.remove_joint(JointHandle::from_raw(0));
             assert_eq!(e.joint_count(), 1, "dependent gear must die with its side");
             e.step(DT);
         }
@@ -208,19 +208,19 @@ fn split_queries_see_add_edit_remove_without_a_step() {
         origin: Vec3::ZERO,
         direction: Vec3::X,
     };
-    assert_eq!(e.raycast(ray, 4.0).unwrap().handle, h);
+    assert_eq!(e.raycast(ray, 4.0).expect("valid").expect("hit").handle, h);
     let cast = Shape::Sphere { radius: 0.1 };
     assert_eq!(
         e.shapecast(&cast, Vec3::ZERO, Vec3::X * 4.0)
-            .unwrap()
+            .expect("hit")
             .handle,
         h
     );
     e.get_body_mut(h).unwrap().position.x = 8.0;
-    assert!(e.raycast(ray, 4.0).is_none());
+    assert!(e.raycast(ray, 4.0).unwrap_or(None).is_none());
     assert!(e.shapecast(&cast, Vec3::ZERO, Vec3::X * 4.0).is_none());
     e.remove_body(h);
-    assert!(e.raycast(ray, 20.0).is_none());
+    assert!(e.raycast(ray, 20.0).unwrap_or(None).is_none());
 }
 
 #[test]
@@ -238,15 +238,15 @@ fn split_fixed_time_is_independent_of_host_partition() {
             e.step(dt);
         }
         assert_eq!(e.split_metrics().unwrap().simulation_steps, 60);
-        (0..2)
+        (0..2usize)
             .map(|h| {
-                let b = e.get_body(h).unwrap();
+                let b = e.get_body(BodyHandle::from(h)).unwrap();
                 (
                     b.position,
                     b.orientation,
                     b.velocity,
                     b.angular_velocity,
-                    e.body_solver(h),
+                    e.body_solver(BodyHandle::from(h)),
                 )
             })
             .collect::<Vec<_>>()

@@ -169,22 +169,22 @@ fn a5_prismatic_high_load_release_both_signs_no_catapult() {
             for step in 0..3000 {
                 // Exercise the solver, not a sleeping pose: a frozen body
                 // can otherwise conceal a stale multiplier indefinitely.
-                e.wake_body(b);
+                e.wake_body(b.index());
                 if !e.sleep_timer.is_empty() {
-                    e.sleep_timer[b] = 0.0;
+                    e.sleep_timer[b.index()] = 0.0;
                 }
                 e.step(DT_STEP);
                 if step >= 200 {
-                    peak_speed = peak_speed.max(e.bodies[b].velocity.length());
+                    peak_speed = peak_speed.max(e.bodies[b.index()].velocity.length());
                     assert!(
-                        (e.bodies[b].position.y - rest).abs() < 0.02,
+                        (e.bodies[b.index()].position.y - rest).abs() < 0.02,
                         "load={load} sign={sign} step={step}: {:?}",
-                        e.bodies[b]
+                        e.bodies[b.index()]
                     );
                     assert!(
-                        e.bodies[b].velocity.length() < 1.0,
+                        e.bodies[b.index()].velocity.length() < 1.0,
                         "catapult load={load} sign={sign} step={step}: {:?}",
-                        e.bodies[b]
+                        e.bodies[b.index()]
                     );
                 }
             }
@@ -196,21 +196,21 @@ fn a5_prismatic_high_load_release_both_signs_no_catapult() {
             );
             eprintln!(
                 "load={load} sign={sign}: peak settled speed={peak_speed}, lambda={force}, y={}",
-                e.bodies[b].position.y
+                e.bodies[b.index()].position.y
             );
             e.gravity = Vec3::ZERO;
-            e.bodies[b].velocity = -sign * Vec3::Y;
+            e.bodies[b.index()].velocity = -sign * Vec3::Y;
             for step in 0..120 {
-                e.wake_body(b);
-                e.sleep_timer[b] = 0.0;
+                e.wake_body(b.index());
+                e.sleep_timer[b.index()] = 0.0;
                 e.step(DT_STEP);
                 assert!(
-                    e.bodies[b].velocity.length() < 2.0,
+                    e.bodies[b.index()].velocity.length() < 2.0,
                     "stale reaction after release load={load} step={step}"
                 );
             }
             assert!(
-                sign * (rest - e.bodies[b].position.y) > 0.5,
+                sign * (rest - e.bodies[b.index()].position.y) > 0.5,
                 "limit retained a phantom holding force after release"
             );
             assert_eq!(e.joints[0].lim_dual, 0.0);

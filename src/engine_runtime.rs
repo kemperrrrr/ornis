@@ -116,10 +116,10 @@ impl PhysicsRuntime {
 
         for (entity, handle) in stale {
             let last = self.bindings.len().saturating_sub(1);
-            let moved = if handle < last {
+            let moved = if handle.index() < last {
                 self.bindings
                     .iter()
-                    .find_map(|(&candidate, &bound)| (bound == last).then_some(candidate))
+                    .find_map(|(&candidate, &bound)| (bound.index() == last).then_some(candidate))
             } else {
                 None
             };
@@ -251,10 +251,10 @@ impl PhysicsRuntime {
 
         for (entity, handle) in stale {
             let last = self.soft_bindings.len().saturating_sub(1);
-            let moved = if handle < last {
+            let moved = if handle.index() < last {
                 self.soft_bindings
                     .iter()
-                    .find_map(|(&candidate, &bound)| (bound == last).then_some(candidate))
+                    .find_map(|(&candidate, &bound)| (bound.index() == last).then_some(candidate))
             } else {
                 None
             };
@@ -322,7 +322,7 @@ impl PhysicsRuntime {
             let indices: Vec<u32> = body
                 .surface
                 .iter()
-                .flat_map(|tri| [tri[0] as u32, tri[1] as u32, tri[2] as u32])
+                .flat_map(|tri| [tri[0].as_u32(), tri[1].as_u32(), tri[2].as_u32()])
                 .collect();
             let desc = MeshDesc::Custom { positions, indices };
             if let Some(slot) = meshes.get_mut(entity) {
@@ -748,9 +748,18 @@ mod tests {
             .expect("physics resource")
             .lock()
             .expect("physics runtime lock");
-        assert_eq!(runtime.bindings.get(&entities[0]), Some(&0));
-        assert_eq!(runtime.bindings.get(&entities[2]), Some(&2));
-        assert_eq!(runtime.bindings.get(&entities[3]), Some(&1));
+        assert_eq!(
+            runtime.bindings.get(&entities[0]),
+            Some(&BodyHandle::from_raw(0))
+        );
+        assert_eq!(
+            runtime.bindings.get(&entities[2]),
+            Some(&BodyHandle::from_raw(2))
+        );
+        assert_eq!(
+            runtime.bindings.get(&entities[3]),
+            Some(&BodyHandle::from_raw(1))
+        );
     }
 
     #[test]
@@ -790,7 +799,10 @@ mod tests {
         assert_eq!(extracted.mesh_params, (48, 32));
         assert_eq!(extracted.materials.len(), 1);
         assert_eq!(extracted.instances.len(), 1);
-        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(
+            extracted.instances[0].material_index,
+            ornis_render::MaterialIdx::from_raw(0)
+        );
         assert_eq!(
             extracted.instances[0].model_matrix.w_axis.truncate(),
             Vec3::new(1.0, 2.0, 3.0)

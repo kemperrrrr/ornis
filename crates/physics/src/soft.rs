@@ -20,7 +20,100 @@ use glam::Vec3;
 ///
 /// Dense like [`crate::body::BodyHandle`]: removal swaps the last body into
 /// the freed slot, so only the moved body's handle changes.
-pub type SoftHandle = usize;
+///
+/// Newtype over `u32` so soft-body handles never mix with rigid-body or
+/// joint handles at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SoftHandle(u32);
+
+impl SoftHandle {
+    /// Wraps a raw `u32` soft-body index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` soft-body index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Soft-body index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for SoftHandle {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for SoftHandle {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<SoftHandle> for u32 {
+    fn from(h: SoftHandle) -> Self {
+        h.0
+    }
+}
+
+impl From<SoftHandle> for usize {
+    fn from(h: SoftHandle) -> Self {
+        h.0 as usize
+    }
+}
+
+/// Index of one particle inside its owning [`SoftBody`].
+///
+/// Newtype over `u32` so particle indices never mix with body handles or
+/// raw triangle soup indices at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ParticleIdx(u32);
+
+impl ParticleIdx {
+    /// Wraps a raw `u32` particle index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` particle index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Particle index as `usize` for slice lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for ParticleIdx {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for ParticleIdx {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<ParticleIdx> for u32 {
+    fn from(h: ParticleIdx) -> Self {
+        h.0
+    }
+}
+
+impl From<ParticleIdx> for usize {
+    fn from(h: ParticleIdx) -> Self {
+        h.0 as usize
+    }
+}
 
 /// Constraint group inside a deformable: structural/shear/bend rows share
 /// one formula and differ only in topology and compliance (stiff stretch,
@@ -54,13 +147,58 @@ pub struct Particle {
 
 impl Particle {
     /// Free particle of `mass` at `position` (`mass <= 0` pins it).
+    ///
+    /// Legacy infallible wrapper over [`Particle::from_kind`]: non-positive
+    /// input pins the particle instead of failing, so existing builders are
+    /// bit-identical; new code should use [`Particle::try_new`] (checked
+    /// free particle) or [`Particle::pinned`] for anchors.
     pub fn new(position: Vec3, mass: f32) -> Self {
+        Self::from_kind(position, crate::invariants::MassKind::from_f32(mass))
+    }
+
+    /// Checked free particle at `position`: `Some` only when `mass` is
+    /// finite and `> 0`; `None` (instead of a silent pin) otherwise.
+    pub fn try_new(position: Vec3, mass: f32) -> Option<Self> {
+        let kind = crate::invariants::MassKind::try_free(mass)?;
+        Some(Self::from_kind(position, kind))
+    }
+
+    /// Pinned anchor particle at `position`.
+    pub fn pinned(position: Vec3) -> Self {
+        Self::from_kind(position, crate::invariants::MassKind::Fixed)
+    }
+
+    /// Free particle with a statically checked positive mass.
+    pub fn free(position: Vec3, mass: crate::invariants::PositiveF32) -> Self {
+        Self::from_kind(position, crate::invariants::MassKind::Free(mass))
+    }
+
+    /// Particle from an explicit [`crate::invariants::MassKind`].
+    pub fn from_kind(position: Vec3, kind: crate::invariants::MassKind) -> Self {
         Self {
             position,
             prev_position: position,
             velocity: Vec3::ZERO,
-            inv_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
+            inv_mass: kind.inv_mass_value(),
         }
+    }
+
+    /// Current mass classification.
+    pub fn mass_kind(&self) -> crate::invariants::MassKind {
+        if self.inv_mass <= 0.0 {
+            crate::invariants::MassKind::Fixed
+        } else {
+            match crate::invariants::PositiveF32::try_new(1.0 / self.inv_mass) {
+                Some(m) => crate::invariants::MassKind::Free(m),
+                None => crate::invariants::MassKind::Fixed,
+            }
+        }
+    }
+
+    /// Pin this particle in place (zero inverse mass).
+    pub fn pin(&mut self) {
+        self.inv_mass = 0.0;
+        self.velocity = Vec3::ZERO;
     }
 
     /// Whether the solver treats this particle as an immovable anchor.
@@ -73,9 +211,9 @@ impl Particle {
 #[derive(Debug, Clone)]
 pub struct DeformConstraint {
     /// First particle index.
-    pub a: usize,
+    pub a: ParticleIdx,
     /// Second particle index.
-    pub b: usize,
+    pub b: ParticleIdx,
     /// Rest length (m).
     pub rest: f32,
     /// Compliance `α` (inverse stiffness in m/N, 0 = inextensible).
@@ -111,13 +249,13 @@ pub struct SoftBody {
     /// Distance rows over the particles.
     pub constraints: Vec<DeformConstraint>,
     /// Closed surface triangles (outward-wound) for the volume row.
-    pub triangles: Vec<[usize; 3]>,
+    pub triangles: Vec<[ParticleIdx; 3]>,
     /// Render-only surface topology (D1.5): triangle indices into
     /// `particles`, wound CCW from outside (same convention as the
     /// asset-side `Custom` mesh soup). Unlike `triangles` this may describe
     /// an OPEN sheet (cloth) — it never drives physics, only the per-frame
     /// mesh upload. Bodies without a sheet (chains) leave it empty.
-    pub surface: Vec<[usize; 3]>,
+    pub surface: Vec<[ParticleIdx; 3]>,
     /// Rest volume (m³) captured at build time.
     pub volume_rest: f32,
     /// Volume compliance `α` (0 = incompressible).
@@ -162,8 +300,9 @@ impl SoftBody {
     }
 
     /// Rope/cable: `count` particles from `origin` along `dir` (normalized
-    /// internally) spaced `spacing` apart, each of `mass`, linked by
-    /// structural rows of `compliance`. The first particle is pinned.
+    /// internally; a zero/non-finite `dir` falls back to `-Y`) spaced
+    /// `spacing` apart, each of `mass`, linked by structural rows of
+    /// `compliance`. The first particle is pinned.
     pub fn chain(
         origin: Vec3,
         dir: Vec3,
@@ -177,15 +316,15 @@ impl SoftBody {
         for i in 0..count {
             let mut p = Particle::new(origin + dir * (i as f32 * spacing), mass);
             if i == 0 {
-                p.inv_mass = 0.0;
+                p.pin();
             }
             particles.push(p);
         }
         let mut constraints = Vec::with_capacity(count.saturating_sub(1));
         for i in 0..count.saturating_sub(1) {
             constraints.push(DeformConstraint {
-                a: i,
-                b: i + 1,
+                a: ParticleIdx::from(i),
+                b: ParticleIdx::from(i + 1),
                 rest: spacing,
                 compliance,
                 kind: DeformKind::Structural,
@@ -195,6 +334,34 @@ impl SoftBody {
         let mut body = Self::raw(particles, constraints);
         body.contact_radius = spacing * 0.2;
         body
+    }
+
+    /// Typed rope entry point: spacing as [`ornis_core::units::Meters`],
+    /// per-particle mass as [`ornis_core::units::Kilograms`]. Returns `None`
+    /// unless the spacing and mass are positive and finite and the
+    /// compliance is finite and `>= 0`.
+    pub fn try_chain_units(
+        origin: Vec3,
+        dir: Vec3,
+        count: usize,
+        spacing: ornis_core::units::Meters,
+        mass: ornis_core::units::Kilograms,
+        compliance: f32,
+    ) -> Option<Self> {
+        let (s, m) = (spacing.get(), mass.get());
+        if !(s.is_finite() && s > 0.0)
+            || !(m.is_finite() && m > 0.0)
+            || !compliance.is_finite()
+            || compliance < 0.0
+        {
+            return None;
+        }
+        Some(Self::chain(origin, dir, count, s, m, compliance))
+    }
+
+    /// Spacing-derived contact radius in meters.
+    pub fn contact_radius_units(&self) -> ornis_core::units::Meters {
+        ornis_core::units::Meters::new(self.contact_radius)
     }
 
     /// Cloth sheet in the local XY plane: `cols × rows` particles from
@@ -214,7 +381,7 @@ impl SoftBody {
         bend: f32,
         pin: ClothPin,
     ) -> Self {
-        let at = |c: usize, r: usize| r * cols + c;
+        let at = |c: usize, r: usize| ParticleIdx::from(r * cols + c);
         let pinned = |c: usize, r: usize| match pin {
             ClothPin::None => false,
             ClothPin::TopRow => r == 0,
@@ -228,25 +395,26 @@ impl SoftBody {
                     mass,
                 );
                 if pinned(c, r) {
-                    p.inv_mass = 0.0;
+                    p.pin();
                 }
                 particles.push(p);
             }
         }
         let mut constraints = Vec::new();
         let mut surface = Vec::new();
-        let mut link = |a: usize, b: usize, rest: f32, compliance: f32, kind: DeformKind| {
-            if a < particles.len() && b < particles.len() && a != b {
-                constraints.push(DeformConstraint {
-                    a,
-                    b,
-                    rest,
-                    compliance,
-                    kind,
-                    lambda: 0.0,
-                });
-            }
-        };
+        let mut link =
+            |a: ParticleIdx, b: ParticleIdx, rest: f32, compliance: f32, kind: DeformKind| {
+                if a.index() < particles.len() && b.index() < particles.len() && a != b {
+                    constraints.push(DeformConstraint {
+                        a,
+                        b,
+                        rest,
+                        compliance,
+                        kind,
+                        lambda: 0.0,
+                    });
+                }
+            };
         for r in 0..rows {
             for c in 0..cols {
                 if c + 1 < cols {
@@ -301,6 +469,34 @@ impl SoftBody {
         body
     }
 
+    /// Typed cloth entry point (`None` unless spacing/mass are positive
+    /// finite and all compliances are finite and `>= 0`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_cloth_grid_units(
+        origin: Vec3,
+        cols: usize,
+        rows: usize,
+        spacing: ornis_core::units::Meters,
+        mass: ornis_core::units::Kilograms,
+        structural: f32,
+        shear: f32,
+        bend: f32,
+        pin: ClothPin,
+    ) -> Option<Self> {
+        let (s, m) = (spacing.get(), mass.get());
+        if !(s.is_finite() && s > 0.0) || !(m.is_finite() && m > 0.0) {
+            return None;
+        }
+        for c in [structural, shear, bend] {
+            if !c.is_finite() || c < 0.0 {
+                return None;
+            }
+        }
+        Some(Self::cloth_grid(
+            origin, cols, rows, s, m, structural, shear, bend, pin,
+        ))
+    }
+
     /// Soft cube of edge `size` at `origin` (minimum corner): 8 particles,
     /// 12 structural edges of `edge_compliance`, and a closed 12-triangle
     /// surface driving the global volume row of `volume_compliance`
@@ -327,14 +523,14 @@ impl SoftBody {
         }
         // Index = x + 2*y + 4*z.
         let mut constraints = Vec::with_capacity(12);
-        for a in 0..8 {
+        for a in 0..8usize {
             for b in (a + 1)..8 {
                 let diff = (a ^ b) as u32;
                 // Exactly one coordinate differs: cube edge.
                 if diff == 1 || diff == 2 || diff == 4 {
                     constraints.push(DeformConstraint {
-                        a,
-                        b,
+                        a: ParticleIdx::from(a),
+                        b: ParticleIdx::from(b),
                         rest: size,
                         compliance: edge_compliance,
                         kind: DeformKind::Structural,
@@ -344,21 +540,53 @@ impl SoftBody {
             }
         }
         // Six quad faces as corner loops; triangulated + outward-fixed below.
-        let quads: [[usize; 4]; 6] = [
-            [1, 3, 7, 5],
-            [0, 4, 6, 2],
-            [2, 6, 7, 3],
-            [0, 1, 5, 4],
-            [4, 5, 7, 6],
-            [0, 2, 3, 1],
+        let quads: [[ParticleIdx; 4]; 6] = [
+            [
+                ParticleIdx::from_raw(1),
+                ParticleIdx::from_raw(3),
+                ParticleIdx::from_raw(7),
+                ParticleIdx::from_raw(5),
+            ],
+            [
+                ParticleIdx::from_raw(0),
+                ParticleIdx::from_raw(4),
+                ParticleIdx::from_raw(6),
+                ParticleIdx::from_raw(2),
+            ],
+            [
+                ParticleIdx::from_raw(2),
+                ParticleIdx::from_raw(6),
+                ParticleIdx::from_raw(7),
+                ParticleIdx::from_raw(3),
+            ],
+            [
+                ParticleIdx::from_raw(0),
+                ParticleIdx::from_raw(1),
+                ParticleIdx::from_raw(5),
+                ParticleIdx::from_raw(4),
+            ],
+            [
+                ParticleIdx::from_raw(4),
+                ParticleIdx::from_raw(5),
+                ParticleIdx::from_raw(7),
+                ParticleIdx::from_raw(6),
+            ],
+            [
+                ParticleIdx::from_raw(0),
+                ParticleIdx::from_raw(2),
+                ParticleIdx::from_raw(3),
+                ParticleIdx::from_raw(1),
+            ],
         ];
         let positions: Vec<Vec3> = particles.iter().map(|p| p.position).collect();
         let center = positions.iter().sum::<Vec3>() / positions.len() as f32;
-        let mut triangles = Vec::with_capacity(12);
+        let mut triangles: Vec<[ParticleIdx; 3]> = Vec::with_capacity(12);
         for [a, b, c, d] in quads {
             for (x, mut y, mut z) in [(a, b, c), (a, c, d)] {
-                let n = (positions[y] - positions[x]).cross(positions[z] - positions[x]);
-                let face_center = (positions[x] + positions[y] + positions[z]) / 3.0;
+                let n = (positions[y.index()] - positions[x.index()])
+                    .cross(positions[z.index()] - positions[x.index()]);
+                let face_center =
+                    (positions[x.index()] + positions[y.index()] + positions[z.index()]) / 3.0;
                 if n.dot(face_center - center) < 0.0 {
                     std::mem::swap(&mut y, &mut z);
                 }
@@ -373,6 +601,33 @@ impl SoftBody {
         body.volume_compliance = volume_compliance;
         body.contact_radius = size * 0.1;
         body
+    }
+
+    /// Typed soft-cube entry point (`None` unless the edge size and mass
+    /// are positive finite and both compliances are finite and `>= 0`).
+    pub fn try_soft_cube_units(
+        origin: Vec3,
+        size: ornis_core::units::Meters,
+        mass: ornis_core::units::Kilograms,
+        edge_compliance: f32,
+        volume_compliance: f32,
+    ) -> Option<Self> {
+        let (s, m) = (size.get(), mass.get());
+        if !(s.is_finite() && s > 0.0) || !(m.is_finite() && m > 0.0) {
+            return None;
+        }
+        for c in [edge_compliance, volume_compliance] {
+            if !c.is_finite() || c < 0.0 {
+                return None;
+            }
+        }
+        Some(Self::soft_cube(
+            origin,
+            s,
+            m,
+            edge_compliance,
+            volume_compliance,
+        ))
     }
 
     /// Number of particles.
@@ -480,7 +735,7 @@ impl SoftBody {
         }
         let threshold = self.tear_strain;
         let particles = &self.particles;
-        let mut torn: Vec<(usize, usize)> = Vec::new();
+        let mut torn: Vec<(ParticleIdx, ParticleIdx)> = Vec::new();
         self.constraints.retain(|c| {
             if c.kind != DeformKind::Structural {
                 return true;
@@ -522,17 +777,21 @@ impl SoftBody {
         let mut grads = vec![Vec3::ZERO; self.particles.len()];
         let mut valid = true;
         for [a, b, c] in &self.triangles {
-            if *a >= self.particles.len()
-                || *b >= self.particles.len()
-                || *c >= self.particles.len()
+            if a.index() >= self.particles.len()
+                || b.index() >= self.particles.len()
+                || c.index() >= self.particles.len()
             {
                 valid = false;
                 break;
             }
-            let (pa, pb, pc) = (positions[*a], positions[*b], positions[*c]);
-            grads[*a] += pb.cross(pc) / (6.0 * self.volume_rest);
-            grads[*b] += pc.cross(pa) / (6.0 * self.volume_rest);
-            grads[*c] += pa.cross(pb) / (6.0 * self.volume_rest);
+            let (pa, pb, pc) = (
+                positions[a.index()],
+                positions[b.index()],
+                positions[c.index()],
+            );
+            grads[a.index()] += pb.cross(pc) / (6.0 * self.volume_rest);
+            grads[b.index()] += pc.cross(pa) / (6.0 * self.volume_rest);
+            grads[c.index()] += pa.cross(pb) / (6.0 * self.volume_rest);
         }
         if !valid {
             return;
@@ -570,12 +829,14 @@ impl SoftBody {
 
 /// Signed volume of a closed triangle surface (divergence theorem):
 /// `V = Σ (pa × pb)·pc / 6`. Positive for outward-wound meshes.
-fn mesh_volume(positions: &[Vec3], triangles: &[[usize; 3]]) -> f32 {
+fn mesh_volume(positions: &[Vec3], triangles: &[[ParticleIdx; 3]]) -> f32 {
     let mut volume = 0.0;
     for [a, b, c] in triangles {
-        if let (Some(pa), Some(pb), Some(pc)) =
-            (positions.get(*a), positions.get(*b), positions.get(*c))
-        {
+        if let (Some(pa), Some(pb), Some(pc)) = (
+            positions.get(a.index()),
+            positions.get(b.index()),
+            positions.get(c.index()),
+        ) {
             volume += pa.cross(*pb).dot(*pc) / 6.0;
         }
     }
@@ -583,7 +844,8 @@ fn mesh_volume(positions: &[Vec3], triangles: &[[usize; 3]]) -> f32 {
 }
 
 /// Shared read of two distinct particles (`None` for bad indices).
-fn pair(particles: &[Particle], a: usize, b: usize) -> Option<(&Particle, &Particle)> {
+fn pair(particles: &[Particle], a: ParticleIdx, b: ParticleIdx) -> Option<(&Particle, &Particle)> {
+    let (a, b) = (a.index(), b.index());
     if a == b || a >= particles.len() || b >= particles.len() {
         return None;
     }
@@ -593,9 +855,10 @@ fn pair(particles: &[Particle], a: usize, b: usize) -> Option<(&Particle, &Parti
 /// Exclusive mutable borrow of two distinct particles.
 fn pair_mut(
     particles: &mut [Particle],
-    a: usize,
-    b: usize,
+    a: ParticleIdx,
+    b: ParticleIdx,
 ) -> Option<(&mut Particle, &mut Particle)> {
+    let (a, b) = (a.index(), b.index());
     if a == b || a >= particles.len() || b >= particles.len() {
         return None;
     }
@@ -611,6 +874,17 @@ fn pair_mut(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Checked particle construction: `try_new` admits only positive
+    /// finite masses, while the legacy `new` pins on bad input.
+    #[test]
+    fn try_new_rejects_non_positive_mass() {
+        assert!(Particle::try_new(Vec3::ZERO, 1.0).is_some());
+        assert!(Particle::try_new(Vec3::ZERO, 0.0).is_none());
+        assert!(Particle::try_new(Vec3::ZERO, -1.0).is_none());
+        assert!(Particle::try_new(Vec3::ZERO, f32::NAN).is_none());
+        assert!(Particle::new(Vec3::ZERO, 0.0).is_pinned());
+    }
 
     /// Builder topology: chain links neighbours, pins the first particle.
     #[test]
@@ -665,24 +939,24 @@ mod tests {
             ],
             vec![
                 DeformConstraint {
-                    a: 0,
-                    b: 0,
+                    a: ParticleIdx::from_raw(0),
+                    b: ParticleIdx::from_raw(0),
                     rest: 1.0,
                     compliance: 0.0,
                     kind: DeformKind::Structural,
                     lambda: 0.0,
                 },
                 DeformConstraint {
-                    a: 0,
-                    b: 7,
+                    a: ParticleIdx::from_raw(0),
+                    b: ParticleIdx::from_raw(7),
                     rest: 1.0,
                     compliance: 0.0,
                     kind: DeformKind::Structural,
                     lambda: 0.0,
                 },
                 DeformConstraint {
-                    a: 0,
-                    b: 1,
+                    a: ParticleIdx::from_raw(0),
+                    b: ParticleIdx::from_raw(1),
                     rest: 1.0,
                     compliance: 0.0,
                     kind: DeformKind::Structural,
@@ -720,15 +994,15 @@ mod tests {
                 .surface
                 .iter()
                 .flatten()
-                .all(|&i| i < cloth.particle_count()),
+                .all(|i| i.index() < cloth.particle_count()),
             "cloth surface indices valid"
         );
         // CCW from +z: every triangle normal must point +z on the flat grid.
         for [a, b, c] in &cloth.surface {
             let (pa, pb, pc) = (
-                cloth.particles[*a].position,
-                cloth.particles[*b].position,
-                cloth.particles[*c].position,
+                cloth.particles[a.index()].position,
+                cloth.particles[b.index()].position,
+                cloth.particles[c.index()].position,
             );
             assert!((pb - pa).cross(pc - pa).z > 0.0, "cloth winding +z");
         }
@@ -773,7 +1047,7 @@ mod tests {
         // Both triangles of every middle-strip cell reference a torn edge.
         assert_eq!(body.surface.len(), surface_before - 2 * (cols - 1));
         for c in 0..cols {
-            let (a, b) = (c + cols, c + 2 * cols);
+            let (a, b) = (ParticleIdx::from(c + cols), ParticleIdx::from(c + 2 * cols));
             assert!(
                 !body
                     .constraints

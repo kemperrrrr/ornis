@@ -140,7 +140,18 @@ mod tests {
         let err = GraphEvaluator::new(&converter, graph)
             .evaluate()
             .unwrap_err();
-        assert!(matches!(err, CodegenError::NodeDefNotFound(_)), "{err:?}");
+        assert!(
+            matches!(err, CodegenError::NodeDefNotFound { .. }),
+            "{err:?}"
+        );
+        // Structured payload carries both the missing type and the node.
+        match err {
+            CodegenError::NodeDefNotFound { node_type, node } => {
+                assert_eq!(node_type, "output");
+                assert_eq!(node, "out");
+            }
+            other => panic!("expected NodeDefNotFound, got {other:?}"),
+        }
     }
 
     #[test]

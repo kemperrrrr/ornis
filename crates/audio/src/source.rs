@@ -23,11 +23,59 @@ pub enum AudioState {
     Stopped,
 }
 
+/// Stable id of a clip in the engine's registry; ids are never reused.
+///
+/// Newtype over `u32` so clip ids never mix with entity ids or table
+/// lengths at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClipId(u32);
+
+impl ClipId {
+    /// Wraps a raw `u32` clip index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` clip index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Clip index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for ClipId {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for ClipId {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<ClipId> for u32 {
+    fn from(h: ClipId) -> Self {
+        h.0
+    }
+}
+
+impl From<ClipId> for usize {
+    fn from(h: ClipId) -> Self {
+        h.0 as usize
+    }
+}
+
 /// Per-entity playback component referencing a clip registered in the engine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioSource {
     /// Index of the clip in the engine's registry; `None` plays nothing.
-    pub clip_id: Option<usize>,
+    pub clip_id: Option<ClipId>,
     /// Linear gain multiplier, clamped to [0, 1] at mix time.
     pub volume: f32,
     /// Playback rate multiplier (1.0 = normal). Reserved for future resampling;

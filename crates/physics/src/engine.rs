@@ -12,6 +12,7 @@
 use glam::Vec3;
 
 use crate::body::{BodyHandle, RigidBody};
+use crate::errors::{JointError, QueryError};
 use crate::joint::{JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
 use crate::shape::Shape;
@@ -24,6 +25,15 @@ pub trait PhysicsEngine: Send + Sync {
     /// island partitioning → substepped velocity/position solving (contacts,
     /// friction, joints) → integration. `dt` must be > 0 and finite.
     fn step(&mut self, dt: f32);
+    /// Typed step entry point: advances by `dt` ([`ornis_core::units::Seconds`]).
+    /// Non-positive or non-finite deltas are a no-op (same policy as the
+    /// orchestrator's raw guard).
+    fn step_seconds(&mut self, dt: ornis_core::units::Seconds) {
+        use ornis_core::units::SecondsExt;
+        if dt.is_valid_step() {
+            self.step(dt.get());
+        }
+    }
     /// Register a body and return its stable handle.
     fn add_body(&mut self, body: RigidBody) -> BodyHandle;
     /// Remove a body, swapping the final body into its slot. The moved body's
@@ -36,19 +46,44 @@ pub trait PhysicsEngine: Send + Sync {
     /// pose edits take effect at the next [`PhysicsEngine::step`].
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody>;
     /// Create a joint between two existing, distinct bodies (G5).
-    /// Returns None on invalid handles or a self-joint.
+    ///
+    /// # Errors
+    ///
+    /// [`JointError`] naming the flaw: bad handles, self-joint,
+    /// non-finite/bad bounds/axes, unknown gear refs, or a kind the
+    /// solver does not support.
     fn add_joint(
         &mut self,
         body_a: BodyHandle,
         body_b: BodyHandle,
         kind: JointKind,
-    ) -> Option<JointHandle>;
+    ) -> Result<JointHandle, JointError>;
     /// Destroy a joint by handle; no-op for an invalid handle.
     fn remove_joint(&mut self, handle: JointHandle);
     /// Closest exact shape hit of `ray` against registered bodies within
-    /// `max_dist` (in units of the ray direction's length), or `None` if
-    /// nothing is hit. Pass a normalized direction for world-distance units.
-    fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit>;
+    /// `max_dist` (in units of the ray direction's length).
+    /// `Ok(None)` is a clean miss; `Err` is an invalid input
+    /// (non-finite/zero direction, bad `max_dist`). Pass a normalized
+    /// direction for world-distance units.
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::InvalidInput`] on degenerate queries.
+    fn raycast(&self, ray: Ray, max_dist: f32) -> Result<Option<RaycastHit>, QueryError>;
+    /// Typed raycast entry point: cutoff as [`ornis_core::units::Meters`].
+    /// Negative or non-finite cutoffs report no hit.
+    fn raycast_distance(
+        &self,
+        ray: Ray,
+        max_dist: ornis_core::units::Meters,
+    ) -> Option<RaycastHit> {
+        let d = max_dist.get();
+        if d.is_finite() && d >= 0.0 {
+            self.raycast(ray, d).unwrap_or(None)
+        } else {
+            None
+        }
+    }
     /// Sweep `shape` along the segment `from → to` and report the first body
     /// hit (hit distance measured along the sweep direction), or `None`.
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit>;
@@ -97,7 +132,9 @@ pub struct Manifold {
     pub body_b: BodyHandle,
     /// Contact normal (body A to body B).
     pub normal: Vec3,
-    /// Active point count (1..=4).
+    /// Active point count (1..=4). Enforced by the checked constructors
+    /// ([`Manifold::from_parts`], [`Manifold::from_nonempty`],
+    /// [`Manifold::try_from_points`]); direct writes bypass the invariant.
     pub point_count: usize,
     /// Contact points (only the first `point_count` are live).
     pub points: [ManifoldPoint; 4],
@@ -105,21 +142,91 @@ pub struct Manifold {
 
 impl Manifold {
     pub(crate) fn single(body_a: BodyHandle, body_b: BodyHandle, c: Contact) -> Self {
-        let mut points = [ManifoldPoint {
-            world_point: Vec3::ZERO,
-            penetration: 0.0,
-        }; 4];
-        points[0] = ManifoldPoint {
+        let point = ManifoldPoint {
             world_point: c.contact_point,
             penetration: c.penetration,
         };
+        Self::from_nonempty(
+            body_a,
+            body_b,
+            c.normal,
+            crate::invariants::NonEmpty4::single(point),
+        )
+    }
+
+    /// Checked constructor from a non-empty capped point set: the
+    /// `point_count`/`points` pair is built in one place, so the
+    /// count-invariant cannot drift.
+    pub fn from_nonempty(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        normal: Vec3,
+        points: crate::invariants::NonEmpty4<ManifoldPoint>,
+    ) -> Self {
+        let mut buf = [ManifoldPoint {
+            world_point: Vec3::ZERO,
+            penetration: 0.0,
+        }; 4];
+        for (k, p) in points.iter().enumerate() {
+            buf[k] = p;
+        }
         Self {
             body_a,
             body_b,
-            normal: c.normal,
-            point_count: 1,
-            points,
+            normal,
+            point_count: points.len(),
+            points: buf,
         }
+    }
+
+    /// Checked constructor from a slice: `None` when empty or longer than 4.
+    pub fn try_from_points(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        normal: Vec3,
+        points: &[ManifoldPoint],
+    ) -> Option<Self> {
+        crate::invariants::NonEmpty4::try_from_slice(points)
+            .map(|v| Self::from_nonempty(body_a, body_b, normal, v))
+    }
+
+    /// Checked constructor from a raw buffer plus count: `None` unless
+    /// `count` is in `1..=4`. Single validation site for narrow-phase code
+    /// that fills the `[ManifoldPoint; 4]` buffer by hand (only the first
+    /// `count` entries are live).
+    pub fn from_parts(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        normal: Vec3,
+        points: [ManifoldPoint; 4],
+        count: usize,
+    ) -> Option<Self> {
+        if !(1..=4).contains(&count) {
+            return None;
+        }
+        Some(Self {
+            body_a,
+            body_b,
+            normal,
+            point_count: count,
+            points,
+        })
+    }
+
+    /// Live contact points (`points[..point_count]`).
+    pub fn points_slice(&self) -> &[ManifoldPoint] {
+        &self.points[..self.point_count.min(4)]
+    }
+
+    /// Typed view of the live points as a [`crate::invariants::NonEmpty4`]:
+    /// `None` when the `point_count` invariant is broken.
+    pub fn nonempty(&self) -> Option<crate::invariants::NonEmpty4<ManifoldPoint>> {
+        crate::invariants::NonEmpty4::try_from_slice(self.points_slice())
+    }
+
+    /// Whether `point_count` satisfies the 1..=4 invariant.
+    pub fn has_valid_count(&self) -> bool {
+        (1..=4).contains(&self.point_count)
     }
 }
 /// Joint constraint kernels (hinge twist, coordinates, sub-solvers) shared
@@ -138,3 +245,48 @@ pub use crate::sequential_impulse::{
     kinematic_cast, mul_inv_inertia, obb_sat, point_velocity, remove_angular_approach,
     solve_normal_block, solve_small, sweep_gap,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(x: f32) -> ManifoldPoint {
+        ManifoldPoint {
+            world_point: Vec3::new(x, 0.0, 0.0),
+            penetration: 0.01,
+        }
+    }
+
+    /// `from_parts` admits exactly `1..=4` and the typed view mirrors it.
+    #[test]
+    fn from_parts_enforces_count_invariant() {
+        let buf = [point(0.0), point(1.0), point(2.0), point(3.0)];
+        let (a, b) = (BodyHandle::from_raw(0), BodyHandle::from_raw(1));
+        assert!(Manifold::from_parts(a, b, Vec3::Y, buf, 0).is_none());
+        assert!(Manifold::from_parts(a, b, Vec3::Y, buf, 5).is_none());
+        let m = Manifold::from_parts(a, b, Vec3::Y, buf, 2).expect("1..=4 builds");
+        assert_eq!(m.point_count, 2);
+        assert_eq!(m.points_slice().len(), 2);
+        assert_eq!(m.nonempty().expect("valid count").len(), 2);
+        assert!(m.has_valid_count());
+    }
+
+    /// The typed view catches a drifted `point_count` instead of trusting it.
+    #[test]
+    fn nonempty_rejects_drifted_count() {
+        let mut m = Manifold::single(
+            BodyHandle::from_raw(0),
+            BodyHandle::from_raw(1),
+            Contact {
+                normal: Vec3::Y,
+                penetration: 0.01,
+                contact_point: Vec3::ZERO,
+            },
+        );
+        assert!(m.nonempty().is_some());
+        m.point_count = 0;
+        assert!(!m.has_valid_count());
+        assert!(m.nonempty().is_none());
+        assert!(m.points_slice().is_empty());
+    }
+}

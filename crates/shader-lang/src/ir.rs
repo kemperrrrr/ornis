@@ -16,6 +16,56 @@ use crate::{ShaderBuiltin, ShaderType};
 /// (`no definition in scope`), never to pass silently.
 pub const UNSUPPORTED_MARKER: &str = "__wgsl_dsl_unsupported_statement__()";
 
+/// Opaque user-defined shader type (struct mirrors): a lexical name that is
+/// neither a [`ShaderType`] primitive nor `bool`.
+///
+/// Newtype enum (not a bare `String`) so custom-type names never mix with
+/// WGSL spellings, field names or call targets at the type level. The WGSL
+/// spelling is the name itself (see `writer::print_ty`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShaderCustomTy {
+    /// Named struct mirror (e.g. `CameraUniform`, `VertexOutput`).
+    Named(Box<str>),
+}
+
+impl ShaderCustomTy {
+    /// Wraps a custom type name.
+    pub fn new(name: impl Into<Box<str>>) -> Self {
+        Self::Named(name.into())
+    }
+
+    /// Custom type name as a string slice.
+    pub fn as_str(&self) -> &str {
+        match self {
+            ShaderCustomTy::Named(name) => name,
+        }
+    }
+}
+
+impl std::fmt::Display for ShaderCustomTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for ShaderCustomTy {
+    fn from(name: &str) -> Self {
+        Self::Named(name.into())
+    }
+}
+
+impl From<String> for ShaderCustomTy {
+    fn from(name: String) -> Self {
+        Self::Named(name.into_boxed_str())
+    }
+}
+
+impl From<&String> for ShaderCustomTy {
+    fn from(name: &String) -> Self {
+        Self::Named(name.as_str().into())
+    }
+}
+
 /// A lowered type: what the value IS, not how it prints. Scalar
 /// spellings come from the [`ShaderType`] registry; `Bool` is separate
 /// because the registry deliberately excludes it (call classification,
@@ -27,7 +77,7 @@ pub enum IrType {
     Bool,
     /// Opaque named type (struct mirrors): lexical, like [`IrExpr::Path`]
     /// segments — never a spelling.
-    Custom(String),
+    Custom(ShaderCustomTy),
     Array {
         elem: Box<IrType>,
         len: usize,

@@ -15,7 +15,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    ClipId, JointPose, JointTrack, Key, KeyTrack, SkelClip, SkelPlayer, SkelSampleSystem,
+    ClipId, JointId, JointPose, JointTrack, Key, KeyTrack, SkelClip, SkelPlayer, SkelSampleSystem,
     SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport, skeleton_from_import,
     skinned_mesh_from_import,
 };
@@ -86,7 +86,7 @@ fn two_bone_clip() -> SkelClip {
     SkelClip {
         duration: 1.0,
         tracks: vec![JointTrack {
-            joint: 1,
+            joint: JointId::from_raw(1),
             translation: KeyTrack {
                 keys: vec![Key {
                     time: 0.0,
@@ -182,7 +182,10 @@ fn skinned_primitive_extracts_world_vertices_with_identity() {
     assert!(entry.skinned, "skin lane claims the entry");
     assert_eq!(entry.instance.model_matrix, Mat4::IDENTITY);
     assert_eq!(entry.instance.normal_matrix, Mat4::IDENTITY);
-    assert_eq!(entry.instance.material_index, 0);
+    assert_eq!(
+        entry.instance.material_index,
+        ornis_render::MaterialIdx::from_raw(0)
+    );
     assert_eq!(upload.materials.len(), 1);
     // Hand-computed skinning (`M1 = T(1,0,0)·Rz(90°)`, identity binds):
     // v0 rides joint 1 fully, v1 stays on the root, v2 blends half.

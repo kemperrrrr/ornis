@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 
 use super::*;
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
+use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 
 /// Warm-start / restitution policy constants, shared by the CPU island path
 /// and the GPU single-point path (identical preamble semantics).
@@ -102,14 +103,14 @@ fn compute_restitution_bias(
     pen0: &[f32; 4],
     n: Vec3,
     e: f32,
-    allow_restitution: bool,
+    gate: RestitutionGate,
     sub_dt: f32,
 ) -> [f32; 4] {
     let mut bias = [0.0f32; 4];
-    if !allow_restitution {
+    if !gate.is_enabled() {
         return bias;
     }
-    let (i, j) = (m.body_a, m.body_b);
+    let (i, j) = (m.body_a.index(), m.body_b.index());
     for k in 0..m.point_count {
         if matched[k] || pen0[k] > RESTITUTION_MAX_PEN {
             continue;
@@ -192,14 +193,14 @@ fn apply_warm_start(
 /// legacy circular-cone path bit-identically.
 fn anisotropic_frame(bodies: &[RigidBody], i: usize, j: usize, n: Vec3) -> (Vec3, f32, f32) {
     let pick_dir = |b: &RigidBody| -> Option<Vec3> {
-        let local = b.friction_dir?;
-        let world = b.orientation * local;
+        let frame = b.friction_frame().ok()?;
+        let axis = match frame {
+            crate::invariants::FrictionFrame::Isotropic => return None,
+            crate::invariants::FrictionFrame::Aniso(u) => u.get(),
+        };
+        let world = b.orientation * axis;
         let proj = world - n * world.dot(n);
-        let len2 = proj.length_squared();
-        if len2 < 1e-12 || !len2.is_finite() {
-            return None;
-        }
-        Some(proj / len2.sqrt())
+        crate::invariants::UnitVec3::normalize_checked(proj).map(|u| u.get())
     };
     // Body A wins (documented priority); B only if A sets nothing.
     let t1 = pick_dir(&bodies[i])
@@ -223,16 +224,19 @@ fn prepare_manifold_state(
     m: &Manifold,
     key: (usize, usize),
     warm_in: &WarmCache,
-    allow_restitution: bool,
+    gate: RestitutionGate,
     sub_dt: f32,
     mi: usize,
 ) -> Option<ManifoldState> {
-    let (i, j) = (m.body_a, m.body_b);
+    let (i, j) = (m.body_a.index(), m.body_b.index());
     let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
     if total_inv < 1e-10 {
         return None;
     }
     let n = m.normal;
+    if !m.has_valid_count() {
+        return None;
+    }
     let count = m.point_count;
 
     // --- Body-frame anchors first: matching and G3 both need them ---
@@ -253,8 +257,7 @@ fn prepare_manifold_state(
     let mu_roll = bodies[i].rolling_friction.max(bodies[j].rolling_friction);
     let mu_spin = bodies[i].torsion_friction.max(bodies[j].torsion_friction);
     let target = speculative_targets(&pen0, count, sub_dt);
-    let bias =
-        compute_restitution_bias(bodies, m, &matched, &pen0, n, e, allow_restitution, sub_dt);
+    let bias = compute_restitution_bias(bodies, m, &matched, &pen0, n, e, gate, sub_dt);
     let warm_applied = apply_warm_start(bodies, m, i, j, n, &warm, &target);
 
     Some(ManifoldState {
@@ -298,7 +301,7 @@ impl SequentialImpulseEngine {
             m,
             key,
             ctx.warm_in,
-            ctx.allow_restitution,
+            ctx.gate,
             ctx.sub_dt,
             ctx.mi,
         )
@@ -315,7 +318,7 @@ impl SequentialImpulseEngine {
         &mut self,
         active: Vec<usize>,
         manifolds: &[Manifold],
-        allow_restitution: bool,
+        gate: RestitutionGate,
         sub_dt: f32,
         dt: f32,
     ) -> Vec<IslandWork> {
@@ -323,12 +326,12 @@ impl SequentialImpulseEngine {
         let mut global_states: Vec<ManifoldState> = Vec::with_capacity(active.len());
         for &mi in &active {
             let m = &manifolds[mi];
-            let (i, j) = (m.body_a, m.body_b);
+            let (i, j) = (m.body_a.index(), m.body_b.index());
             let key = (i.min(j), i.max(j));
             let mut ctx = ManifoldCtx {
                 bodies: &mut self.bodies,
                 warm_in: &self.warm_impulses,
-                allow_restitution,
+                gate,
                 sub_dt,
                 mi,
                 i,
@@ -359,7 +362,7 @@ impl SequentialImpulseEngine {
             if num_batches > 0 {
                 gpu.upload_bodies(&self.bodies);
                 gpu.upload_batches(&batches);
-                gpu.solve(num_batches, self.velocity_iterations, allow_restitution);
+                gpu.solve(num_batches, self.velocity_iterations, gate);
                 gpu.download_bodies(&mut self.bodies);
                 let mut dl_batches = batches;
                 gpu.download_acc(&mut dl_batches);
@@ -395,7 +398,7 @@ impl SequentialImpulseEngine {
             Vec::new()
         } else {
             let mut islands = self.partition_into_islands(&multi_mi, manifolds);
-            self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt, dt);
+            self.dispatch_islands_velocity(&mut islands, gate, sub_dt, dt);
             islands
         };
         self.warm_impulses.extend(gpu_warm);
@@ -414,7 +417,7 @@ impl SequentialImpulseEngine {
     pub(super) fn solve_contacts_velocity(
         &mut self,
         manifolds: &[Manifold],
-        allow_restitution: bool,
+        gate: RestitutionGate,
         sub_dt: f32,
         dt: f32,
     ) -> Vec<IslandWork> {
@@ -433,13 +436,7 @@ impl SequentialImpulseEngine {
         // correct but not bit-identical to the pure CPU path (see PLAN.md).
         #[cfg(feature = "gpu")]
         if self.gpu_solver.is_some() {
-            return self.solve_contacts_velocity_gpu(
-                active,
-                manifolds,
-                allow_restitution,
-                sub_dt,
-                dt,
-            );
+            return self.solve_contacts_velocity_gpu(active, manifolds, gate, sub_dt, dt);
         }
 
         // --- Partition into islands + dispatch (G7) ---
@@ -447,7 +444,7 @@ impl SequentialImpulseEngine {
         // concurrent solves are race-free and bit-identical for any thread
         // count (Strong Confluence).
         let mut islands = self.partition_into_islands(&active, manifolds);
-        self.dispatch_islands_velocity(&mut islands, allow_restitution, sub_dt, dt);
+        self.dispatch_islands_velocity(&mut islands, gate, sub_dt, dt);
         islands
     }
 
@@ -491,8 +488,10 @@ impl SequentialImpulseEngine {
                 self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
             })
             .collect();
-        let parallel = islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS;
-        Self::dispatch_islands(islands, parallel, |idx, isl| {
+        let mode = Dispatch::from(
+            islands.len() >= PAR_MIN_ISLANDS && total_manifolds >= PAR_MIN_MANIFOLDS,
+        );
+        Self::dispatch_islands(islands, mode, |idx, isl| {
             let iters = iters_per_island[idx];
             Self::solve_island_position(
                 &mut isl.bodies,
@@ -514,7 +513,7 @@ impl SequentialImpulseEngine {
     /// Wake the sleeper of a manifold pair iff the awake partner closes in faster
     /// than `threshold` (impact hysteresis; see `collect_active_manifolds`).
     fn wake_on_impact(&mut self, m: &Manifold, threshold: f32) {
-        let (i, j) = (m.body_a, m.body_b);
+        let (i, j) = (m.body_a.index(), m.body_b.index());
         let (s, o) = if self.asleep[i] { (i, j) } else { (j, i) };
         let p = m.points[0].world_point;
         let rs = p - self.bodies[s].position;
@@ -546,7 +545,7 @@ impl SequentialImpulseEngine {
         const WAKE_IMPACT_SPEED: f32 = 0.5;
         let mut active: Vec<usize> = Vec::with_capacity(manifolds.len());
         for (mi, m) in manifolds.iter().enumerate() {
-            let (i, j) = (m.body_a, m.body_b);
+            let (i, j) = (m.body_a.index(), m.body_b.index());
             let ai = self.asleep[i];
             let aj = self.asleep[j];
             if ai && aj {
@@ -616,8 +615,8 @@ impl SequentialImpulseEngine {
                     if best > crate::trigger::CONTACT_HIT_THRESHOLD {
                         self.scratch_hit_pairs.insert(key);
                         self.contact_events.push(crate::trigger::ContactEvent {
-                            body_a: i,
-                            body_b: j,
+                            body_a: crate::body::BodyHandle::from(i),
+                            body_b: crate::body::BodyHandle::from(j),
                             kind: crate::trigger::ContactEventKind::Hit {
                                 point: best_point,
                                 normal: m.normal,
@@ -637,9 +636,9 @@ impl SequentialImpulseEngine {
     /// restitution, cache persist), operating on an island-local body shard.
     /// All body indices in `manifolds` and the returned states are LOCAL;
     /// `keys` maps each local manifold to its global body-pair warm-cache key.
-    /// When `use_wide` is true, single-point manifolds are solved in
-    /// SIMD-wide batches (G7); multi-point (block LCP) stays scalar.
-    // The 8th parameter (`use_wide`, G7) tips this over clippy's default
+    /// When `path` is [`SolvePath::Wide`], single-point manifolds are solved
+    /// in SIMD-wide batches (G7); multi-point (block LCP) stays scalar.
+    // The 8th parameter (`path`, G7) tips this over clippy's default
     // 7-argument limit; packing them into a struct would only add churn.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn solve_island_velocity(
@@ -648,19 +647,18 @@ impl SequentialImpulseEngine {
         keys: &[(usize, usize)],
         warm_in: &WarmCache,
         velocity_iterations: u32,
-        allow_restitution: bool,
+        gate: RestitutionGate,
         sub_dt: f32,
-        use_wide: bool,
+        path: SolvePath,
     ) -> (Vec<ManifoldState>, WarmCache) {
-        let mut states =
-            prepare_island_states(bodies, manifolds, keys, warm_in, allow_restitution, sub_dt);
+        let mut states = prepare_island_states(bodies, manifolds, keys, warm_in, gate, sub_dt);
         // --- Velocity solve: Gauss-Seidel iterations over ALL manifolds ---
         // G7: single-point manifolds are packed into SIMD-wide batches
         // (disjoint body sets, original GS order preserved — every contact
         // stays in its place in the sequence); multi-point manifolds keep
         // the scalar block-LCP path. Steps run in manifold order, so the
         // computation is the same sequence either way.
-        let mut steps = if use_wide {
+        let mut steps = if path.use_wide() {
             build_solver_steps(bodies, manifolds, &states)
         } else {
             Vec::new()
@@ -671,12 +669,12 @@ impl SequentialImpulseEngine {
             &mut states,
             &mut steps,
             velocity_iterations,
-            use_wide,
+            path,
         );
         // Wide batches own the accumulated impulses of their lanes during
         // the iterations; write them back so the cache persist below sees
         // the final values.
-        if use_wide {
+        if path.use_wide() {
             for step in &steps {
                 if let SolverStep::Wide(b) = step {
                     b.write_back_acc(&mut states);
@@ -687,8 +685,8 @@ impl SequentialImpulseEngine {
         // One-shot per step: push the normal point velocity up to the stored
         // bounce target. NOT accumulated, NOT warm-started — this is what
         // keeps spinning bodies from pumping energy through the bounce.
-        if allow_restitution {
-            run_restitution_stage(bodies, manifolds, &states, &mut steps, use_wide);
+        if gate.is_enabled() {
+            run_restitution_stage(bodies, manifolds, &states, &mut steps, path);
         }
         let next = persist_warm_cache(manifolds, keys, &states);
         (states, next)
@@ -899,9 +897,39 @@ impl SequentialImpulseEngine {
             // by mu × normal impulse. Zero coefficients skip everything.
             if st.mu_roll > 0.0 || st.mu_spin > 0.0 {
                 let wrel = bodies[j].angular_velocity - bodies[i].angular_velocity;
-                Self::solve_scalar_rolling(bodies, i, j, st, k, st.t1, wrel, st.mu_roll, 0);
-                Self::solve_scalar_rolling(bodies, i, j, st, k, st.t2, wrel, st.mu_roll, 1);
-                Self::solve_scalar_rolling(bodies, i, j, st, k, m.normal, wrel, st.mu_spin, 2);
+                Self::solve_scalar_rolling(
+                    bodies,
+                    i,
+                    j,
+                    st,
+                    k,
+                    st.t1,
+                    wrel,
+                    st.mu_roll,
+                    RollAxis::RollU,
+                );
+                Self::solve_scalar_rolling(
+                    bodies,
+                    i,
+                    j,
+                    st,
+                    k,
+                    st.t2,
+                    wrel,
+                    st.mu_roll,
+                    RollAxis::RollV,
+                );
+                Self::solve_scalar_rolling(
+                    bodies,
+                    i,
+                    j,
+                    st,
+                    k,
+                    m.normal,
+                    wrel,
+                    st.mu_spin,
+                    RollAxis::Spin,
+                );
             }
         }
     }
@@ -909,9 +937,8 @@ impl SequentialImpulseEngine {
     /// One rolling/torsional axis for a single contact point: opposes the
     /// relative spin about `axis` with a pure couple (no linear part —
     /// MuJoCo contact-frame torque model), accumulated per point and
-    /// capped by `mu_axis × normal impulse`. `slot` selects the
-    /// accumulator: 0 = roll about `t1`, 1 = roll about `t2`, 2 = spin
-    /// about the normal.
+    /// capped by `mu_axis × normal impulse`. `axis_kind` selects the
+    /// accumulator: [`RollAxis::RollU`] / [`RollAxis::RollV`] / [`RollAxis::Spin`].
     // Nine parameters mirror the neighboring friction helpers (bodies,
     // pair, point, axis, spin, cap, slot); packing them would hide the
     // call-site symmetry of the three axes.
@@ -925,7 +952,7 @@ impl SequentialImpulseEngine {
         axis: Vec3,
         wrel: Vec3,
         mu_axis: f32,
-        slot: u8,
+        axis_kind: RollAxis,
     ) {
         if mu_axis <= 0.0 {
             return;
@@ -943,20 +970,20 @@ impl SequentialImpulseEngine {
             return;
         }
         let cap = mu_axis * st.acc[k];
-        let cur = match slot {
-            0 => st.acc_roll[k],
-            1 => st.acc_roll2[k],
-            _ => st.acc_spin[k],
+        let cur = match axis_kind {
+            RollAxis::RollU => st.acc_roll[k],
+            RollAxis::RollV => st.acc_roll2[k],
+            RollAxis::Spin => st.acc_spin[k],
         };
         let delta = -wrel.dot(axis) / k_rot;
         let new = (cur + delta).clamp(-cap, cap);
         debug_assert!(new.is_finite(), "rolling impulse overflowed");
         if new != cur {
             apply_angular_impulse(bodies, i, j, axis * (new - cur));
-            match slot {
-                0 => st.acc_roll[k] = new,
-                1 => st.acc_roll2[k] = new,
-                _ => st.acc_spin[k] = new,
+            match axis_kind {
+                RollAxis::RollU => st.acc_roll[k] = new,
+                RollAxis::RollV => st.acc_roll2[k] = new,
+                RollAxis::Spin => st.acc_spin[k] = new,
             }
         }
     }
@@ -1025,7 +1052,7 @@ fn prepare_island_states(
     manifolds: &[Manifold],
     keys: &[(usize, usize)],
     warm_in: &WarmCache,
-    allow_restitution: bool,
+    gate: RestitutionGate,
     sub_dt: f32,
 ) -> Vec<ManifoldState> {
     // G2b: warm-start cache matches points by proximity, not by index —
@@ -1033,9 +1060,7 @@ fn prepare_island_states(
     let mut states: Vec<ManifoldState> = Vec::with_capacity(manifolds.len());
     for (mi, m) in manifolds.iter().enumerate() {
         let key = keys[mi];
-        if let Some(st) =
-            prepare_manifold_state(bodies, m, key, warm_in, allow_restitution, sub_dt, mi)
-        {
+        if let Some(st) = prepare_manifold_state(bodies, m, key, warm_in, gate, sub_dt, mi) {
             states.push(st);
         }
     }
@@ -1043,7 +1068,7 @@ fn prepare_island_states(
 }
 
 /// Gauss-Seidel iterations over ALL manifolds: wide batches interleaved with
-/// scalar manifolds when `use_wide`, plain scalar sequence otherwise. Both
+/// scalar manifolds when `path` is wide, plain scalar sequence otherwise. Both
 /// orders visit the contacts in manifold order, so results are identical.
 fn run_velocity_iterations(
     bodies: &mut [RigidBody],
@@ -1051,10 +1076,10 @@ fn run_velocity_iterations(
     states: &mut [ManifoldState],
     steps: &mut [SolverStep],
     velocity_iterations: u32,
-    use_wide: bool,
+    path: SolvePath,
 ) {
     for _ in 0..velocity_iterations {
-        if use_wide {
+        if path.use_wide() {
             for step in steps.iter_mut() {
                 match step {
                     SolverStep::Wide(b) => {
@@ -1085,9 +1110,9 @@ fn run_restitution_stage(
     manifolds: &[Manifold],
     states: &[ManifoldState],
     steps: &mut [SolverStep],
-    use_wide: bool,
+    path: SolvePath,
 ) {
-    if use_wide {
+    if path.use_wide() {
         for step in steps.iter_mut() {
             match step {
                 SolverStep::Wide(b) => {

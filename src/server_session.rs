@@ -71,7 +71,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
-use ornis_core::{ComponentMeta, ComponentRegistry, Entity, InputState, SmartStore, World};
+use ornis_core::{
+    ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, SmartStore, World,
+};
 use ornis_gameplay::install_gameplay;
 use ornis_physics::RigidBody;
 
@@ -84,7 +86,7 @@ use ornis_assets::scene::{
 use ornis_assets::server::AssetServer;
 use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 
-use editor_backend::ipc::{GameEvent, UiCommand};
+use editor_backend::ipc::{EditorCommand, GameEvent, RequestId, UiCommand};
 
 /// Editor-side name component attached to every spawned entity.
 /// Newtype over `String`: its serde-canonical JSON is a plain string.
@@ -148,7 +150,11 @@ pub struct EditorSession {
     alive: Vec<Entity>,
     /// Scene label round-tripped through `Scene::name` on save/load.
     scene_name: String,
-    version: u64,
+    /// Monotonic scene-mutation counter: bumped by every entity or scene
+    /// mutation, never by frame execution alone. Serializes as the plain
+    /// underlying number, so `/api/status` and `/api/scene` payloads keep
+    /// their `"version": <n>` shape.
+    version: SceneVersion,
     /// Asset registry: parse entry point, retained sources and the
     /// reload dirty-set. Survives world replacement (see
     /// [`EditorSession::load_scene`]).
@@ -182,7 +188,7 @@ impl Default for EditorSession {
             world,
             alive: Vec::new(),
             scene_name: "scene".into(),
-            version: 0,
+            version: SceneVersion::ZERO,
             assets: AssetServer::new(),
         }
     }
@@ -207,6 +213,14 @@ impl EditorSession {
     /// Returns the shared logical world for setup and command processing.
     pub fn world_mut(&mut self) -> &mut World {
         self.world.engine_mut().world_mut()
+    }
+
+    /// Monotonic scene-mutation counter: bumped by every entity or scene
+    /// mutation, never by frame execution alone. Clients polling the
+    /// `version` field of `/api/status` or `/api/scene` observe it as a
+    /// plain JSON number.
+    pub fn version(&self) -> SceneVersion {
+        self.version
     }
 
     /// Advances the editor's domain schedule by one frame.
@@ -235,7 +249,7 @@ impl EditorSession {
             .unwrap_or(false);
         let applied = self.drain_mutations();
         if changed || applied > 0 {
-            self.version += 1;
+            self.version.bump();
         }
         changed || applied > 0 || assets_changed
     }
@@ -352,10 +366,12 @@ impl EditorSession {
         self.store_mut().insert(entity, transform);
         self.store_mut().insert(entity, mesh);
         self.store_mut().insert(entity, material);
-        if let Some(body) = physics_body {
+        // A broken collider (`Err`) spawns without a body, like the
+        // no-recipe (`Ok(None)`) case — transport never invents colliders.
+        if let Ok(Some(body)) = physics_body {
             self.store_mut().insert(entity, body);
         }
-        self.version += 1;
+        self.version.bump();
         entity
     }
 
@@ -367,7 +383,7 @@ impl EditorSession {
         }
         self.alive.retain(|e| *e != entity);
         self.store().destroy_entity(entity);
-        self.version += 1;
+        self.version.bump();
         Some(entity)
     }
 
@@ -402,7 +418,7 @@ impl EditorSession {
             ambient: scene.ambient,
         };
         fresh.scene_name = scene.name;
-        fresh.version = fresh.version.max(self.version + 1);
+        fresh.version = fresh.version.max(self.version.bumped());
         // The asset registry (load history, retained sources) survives the
         // replacement — it describes files, not the live world.
         fresh.assets = std::mem::take(&mut self.assets);
@@ -414,11 +430,13 @@ impl EditorSession {
     /// [`EditorSession::load_scene`]). An invalid RON string leaves the world
     /// untouched. Parsing goes through the asset server so the source is
     /// retained for round-trips.
-    pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, String> {
-        let id = self
-            .assets
-            .load_scene_ron(ron_str)
-            .map_err(|e| format!("invalid scene RON: {}", e.message()))?;
+    ///
+    /// # Errors
+    ///
+    /// [`SceneLoadError`](ornis_assets::SceneLoadError) when the text is
+    /// not a valid scene; the world is untouched.
+    pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, ornis_assets::SceneLoadError> {
+        let id = self.assets.load_scene_ron(ron_str)?;
         let scene = self
             .assets
             .get_scene(id)
@@ -448,7 +466,10 @@ impl EditorSession {
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("glb") || ext.eq_ignore_ascii_case("gltf"));
         if is_gltf {
-            let id = self.assets.load_gltf_file(path)?;
+            let id = self
+                .assets
+                .load_gltf_file(path)
+                .map_err(|e| e.to_string())?;
             let scene = self
                 .assets
                 .get_scene(id)
@@ -457,7 +478,7 @@ impl EditorSession {
             return Ok(self.load_scene(scene));
         }
         let ron = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        self.load_scene_ron(&ron)
+        self.load_scene_ron(&ron).map_err(|e| e.to_string())
     }
 
     /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
@@ -519,7 +540,7 @@ fn scene_json(world: &EditorSession) -> String {
     let lights = serde_json::to_value(&world.environment().lights).expect("LightDesc serializes");
     let camera = serde_json::to_value(&world.environment().camera).expect("CameraDesc serializes");
     serde_json::json!({
-        "version": world.version,
+        "version": world.version(),
         "entity_count": world.entity_count(),
         "entities": entities,
         "lights": lights,
@@ -534,7 +555,7 @@ fn status_json(world: &EditorSession) -> String {
     serde_json::json!({
         "entity_count": world.entity_count(),
         "name": "Ornis Engine",
-        "version": world.version,
+        "version": world.version(),
     })
     .to_string()
 }
@@ -680,21 +701,21 @@ fn execute_command(
     }
 }
 
-fn command_name(cmd: &UiCommand) -> String {
+fn command_name(cmd: &UiCommand) -> EditorCommand {
     match cmd {
-        UiCommand::CreateEntity => "create_entity".into(),
-        UiCommand::DestroyEntity { .. } => "destroy_entity".into(),
-        UiCommand::SetComponent { .. } => "set_component".into(),
+        UiCommand::CreateEntity => EditorCommand::CreateEntity,
+        UiCommand::DestroyEntity { .. } => EditorCommand::DestroyEntity,
+        UiCommand::SetComponent { .. } => EditorCommand::SetComponent,
         UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
-        UiCommand::Input { .. } => "input".into(),
+        UiCommand::Input { .. } => EditorCommand::Input,
         UiCommand::WithRequestId { command, .. } => command_name(command),
     }
 }
 
 fn emit_command_completed(
     ev_tx: &Sender<GameEvent>,
-    request_id: u64,
-    command: String,
+    request_id: RequestId,
+    command: EditorCommand,
     outcome: CommandOutcome,
 ) {
     ev_tx
@@ -716,16 +737,16 @@ fn handle_set_component(
     world: &mut EditorSession,
     entity_id: u32,
     generation: Option<u32>,
-    type_name: &str,
+    type_name: &editor_backend::ipc::ComponentName,
     json_data: &str,
     ev_tx: &Sender<GameEvent>,
 ) -> CommandOutcome {
-    match set_component(world, entity_id, generation, type_name, json_data) {
+    match set_component(world, entity_id, generation, type_name.as_str(), json_data) {
         Ok(value) => {
             ev_tx
                 .send(GameEvent::ComponentUpdated {
                     entity_id,
-                    type_name: type_name.into(),
+                    type_name: type_name.clone(),
                     json_data: value.to_string(),
                 })
                 .ok();
@@ -760,38 +781,38 @@ fn set_component(
         &REGISTRY,
         &[Mutation::Set {
             entity,
-            component: type_name.to_string(),
+            component: ornis_core::ComponentName::from(type_name),
             value: value.clone(),
         }],
     );
     if let Some(entry) = report.entries.first()
         && !entry.errors.is_empty()
     {
-        return Err(entry.errors.join("; "));
+        return Err(entry.error_messages().join("; "));
     }
     if type_name == "Collider" {
         // An explicit collider redefines collision: rebuild the lane body
         // from the current lanes (velocity state is preserved).
         resync_collider_body(world.store_mut(), entity);
     }
-    world.version += 1;
+    world.version.bump();
     Ok(value)
 }
 
 fn handle_custom(
     world: &mut EditorSession,
-    cmd_type: &str,
+    cmd_type: &EditorCommand,
     json_data: &str,
     ev_tx: &Sender<GameEvent>,
 ) -> CommandOutcome {
     let data = match parse_data(json_data) {
         Ok(data) => data,
         Err(e) => {
-            emit_error(ev_tx, cmd_type, &e);
+            emit_error(ev_tx, cmd_type.as_str(), &e);
             return CommandOutcome::failure(e);
         }
     };
-    match cmd_type {
+    match cmd_type.as_str() {
         "create_entity" => match cmd_create_entity(world, &data) {
             Ok(payload) => {
                 emit(ev_tx, "entity_created", payload);
@@ -799,7 +820,7 @@ fn handle_custom(
                 CommandOutcome::success()
             }
             Err(e) => {
-                emit_error(ev_tx, cmd_type, &e);
+                emit_error(ev_tx, cmd_type.as_str(), &e);
                 CommandOutcome::failure(e)
             }
         },
@@ -810,7 +831,7 @@ fn handle_custom(
                 CommandOutcome::success()
             }
             Err(e) => {
-                emit_error(ev_tx, cmd_type, &e);
+                emit_error(ev_tx, cmd_type.as_str(), &e);
                 CommandOutcome::failure(e)
             }
         },
@@ -835,7 +856,7 @@ fn handle_custom(
                     CommandOutcome::success()
                 }
                 Err(e) => {
-                    emit_error(ev_tx, cmd_type, &e);
+                    emit_error(ev_tx, cmd_type.as_str(), &e);
                     CommandOutcome::failure(e)
                 }
             }
@@ -858,7 +879,7 @@ fn handle_custom(
                     CommandOutcome::success()
                 }
                 Err(e) => {
-                    emit_error(ev_tx, cmd_type, &e);
+                    emit_error(ev_tx, cmd_type.as_str(), &e);
                     CommandOutcome::failure(e)
                 }
             }
@@ -1003,7 +1024,9 @@ fn resync_collider_body(store: &mut SmartStore, entity: Entity) {
     let previous = store
         .read_lane::<RigidBody>()
         .and_then(|lane| lane.get(entity).cloned());
-    if let Some(mut body) =
+    // A broken collider (`Err`) leaves the lane as-is, like the
+    // no-recipe (`Ok(None)`) case — failed edits never clear physics.
+    if let Ok(Some(mut body)) =
         ornis_physics::colliders::body_for(&transform, &mesh, collider.as_ref(), 0.0)
     {
         if let Some(prev) = previous {
@@ -1262,14 +1285,16 @@ mod tests {
                 GameEvent::CustomEvent {
                     cmd_type: t,
                     json_data,
-                } if t == cmd_type => Some(json_data.clone()),
+                } if t.as_str() == cmd_type => Some(json_data.clone()),
                 _ => None,
             })
             .collect()
     }
 
     /// Typed `ComponentUpdated` events as (entity_id, type_name, json_data).
-    fn component_updates(events: &[GameEvent]) -> Vec<(u32, String, String)> {
+    fn component_updates(
+        events: &[GameEvent],
+    ) -> Vec<(u32, editor_backend::ipc::ComponentName, String)> {
         events
             .iter()
             .filter_map(|ev| match ev {
@@ -1512,6 +1537,18 @@ mod tests {
         assert!(world.assets.take_dirty().is_empty());
     }
 
+    /// Invalid RON is a typed [`SceneLoadError`](ornis_assets::SceneLoadError),
+    /// not a `String`: the world is untouched and the message survives.
+    #[test]
+    fn load_scene_ron_reports_typed_errors() {
+        let mut world = EditorSession::new();
+        let error = world
+            .load_scene_ron("Scene(name: 42)")
+            .expect_err("malformed RON fails");
+        assert!(!error.message().is_empty());
+        assert_eq!(world.entity_count(), 0);
+    }
+
     /// The session installs object animation into the frame schedule
     /// (physics bodies skipped by the sampler itself).
     #[test]
@@ -1732,7 +1769,7 @@ mod tests {
         let (mut world, ev_tx, ev_rx) = world_and_events();
         world.handle_command(
             &UiCommand::WithRequestId {
-                request_id: 77,
+                request_id: RequestId::new(77),
                 command: Box::new(custom("create_entity", r#"{"name":"Hero"}"#)),
             },
             &ev_tx,
@@ -1748,7 +1785,10 @@ mod tests {
             } => Some((*request_id, command.clone(), *success, error.clone())),
             _ => None,
         });
-        assert_eq!(completion, Some((77, "create_entity".into(), true, None)));
+        assert_eq!(
+            completion,
+            Some((RequestId::new(77), EditorCommand::CreateEntity, true, None))
+        );
     }
 
     #[test]
@@ -1899,7 +1939,7 @@ mod tests {
         let events = drain_all(&ev_rx);
         assert_eq!(custom_events(&events, "error").len(), 4);
         assert_eq!(component_updates(&events).len(), 1);
-        assert_eq!(world.version, version + 1);
+        assert_eq!(world.version, version.bumped());
 
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
         let components = &scene["entities"][0]["components"];

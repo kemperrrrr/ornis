@@ -310,6 +310,13 @@ reload сцены уже есть: editor-world следит за mtime `editor/
    его до production сопоставимо с командой браузерного движка. Редактор —
    веб-приложение, сцена — WASM/WebGPU в `<canvas>`. История нативного стека —
    в git-истории.
+8. **Проектирование на уровне типов.** Инварианты — в типах: newtype-хендлы
+   (`BodyHandle`, `EntityId`, `TextureHandle`), единицы (`Meters`, `Seconds`,
+   `LinearRgb`, `UnitVec3`, `PositiveF32`, `Clamped01`), `enum` вместо
+   `bool`-флагов, `Result`/`thiserror` вместо `String`-ошибок, typestate фаз
+   (`World<Building/Running>`, `GameWorld<Authoritative/Replica>`).
+   GPU-контракт — подмена типа в DSL (`MaterialIdx` → `u32`, прецедент
+   `GpuBool`; `repr(transparent)` + `offset_of!`/`size_of` + naga).
 
 ## Документация
 

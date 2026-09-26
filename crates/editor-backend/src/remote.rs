@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use tiny_http::{Header, ReadWrite, Request, Response, Server};
 
-use crate::ipc::{GameEvent, UiCommand};
+use crate::ipc::{EditorCommand, EventSeq, GameEvent, RequestId, SetComponentPayload, UiCommand};
 
 /// Editor frontend root. Resolution order:
 ///   1. `--editor-dir <path>` CLI argument
@@ -120,7 +120,7 @@ const EMPTY_SCENE: &str = r#"{"version":0,"entity_count":0,"entities":[],"lights
 struct Snapshots {
     status: String,
     scene: String,
-    sequence: u64,
+    sequence: EventSeq,
 }
 
 impl Default for Snapshots {
@@ -128,7 +128,7 @@ impl Default for Snapshots {
         Self {
             status: EMPTY_STATUS.to_string(),
             scene: EMPTY_SCENE.to_string(),
-            sequence: 0,
+            sequence: EventSeq::new(0),
         }
     }
 }
@@ -138,7 +138,7 @@ const EVENT_HISTORY_CAPACITY: usize = 256;
 /// One user-facing event plus its server-side replay sequence.
 #[derive(Debug, Clone)]
 struct EventRecord {
-    sequence: u64,
+    sequence: EventSeq,
     event: GameEvent,
 }
 
@@ -149,35 +149,35 @@ struct EventRecord {
 #[derive(Debug)]
 struct EventLog {
     records: VecDeque<EventRecord>,
-    next_sequence: u64,
+    next_sequence: EventSeq,
 }
 
 impl Default for EventLog {
     fn default() -> Self {
         Self {
             records: VecDeque::new(),
-            next_sequence: 1,
+            next_sequence: EventSeq::new(1),
         }
     }
 }
 
 impl EventLog {
     fn push(&mut self, event: GameEvent) {
-        let sequence = self.next_sequence.max(1);
-        self.next_sequence = sequence.saturating_add(1);
+        let sequence = EventSeq::new(self.next_sequence.get().max(1));
+        self.next_sequence = EventSeq::new(sequence.get().saturating_add(1));
         if self.records.len() == EVENT_HISTORY_CAPACITY {
             self.records.pop_front();
         }
         self.records.push_back(EventRecord { sequence, event });
     }
 
-    fn after(&self, cursor: u64) -> Vec<EventRecord> {
+    fn after(&self, cursor: EventSeq) -> Vec<EventRecord> {
         let mut events = Vec::new();
         if let Some(first) = self.records.front()
-            && cursor.saturating_add(1) < first.sequence
+            && cursor.get().saturating_add(1) < first.sequence.get()
         {
             events.push(EventRecord {
-                sequence: first.sequence.saturating_sub(1),
+                sequence: EventSeq::new(first.sequence.get().saturating_sub(1)),
                 event: GameEvent::EventGap {
                     after: cursor,
                     oldest: first.sequence,
@@ -204,7 +204,7 @@ fn serve(
 ) {
     let event_log = Arc::new(Mutex::new(EventLog::default()));
     let mut snapshots = Snapshots::default();
-    let mut next_request_id = 1_u64;
+    let mut next_request_id = RequestId::new(1);
     let root = assets_root();
 
     loop {
@@ -284,7 +284,7 @@ fn serve_websocket(
     request: Request,
     event_log: Arc<Mutex<EventLog>>,
     stop: Arc<AtomicBool>,
-    mut cursor: u64,
+    mut cursor: EventSeq,
     server_port: u16,
     game_tx: Sender<UiCommand>,
 ) {
@@ -672,16 +672,16 @@ fn drain_game_events(game_rx: &Receiver<GameEvent>, buffer: &mut EventLog, snaps
             GameEvent::CustomEvent {
                 cmd_type,
                 json_data,
-            } if cmd_type == "status" => {
-                snaps.sequence = snaps.sequence.saturating_add(1);
+            } if cmd_type.as_str() == "status" => {
+                snaps.sequence = snaps.sequence.next();
                 snaps.status = add_sequence(json_data, snaps.sequence);
                 continue;
             }
             GameEvent::CustomEvent {
                 cmd_type,
                 json_data,
-            } if cmd_type == "scene" => {
-                snaps.sequence = snaps.sequence.saturating_add(1);
+            } if cmd_type.as_str() == "scene" => {
+                snaps.sequence = snaps.sequence.next();
                 snaps.scene = add_sequence(json_data, snaps.sequence);
                 continue;
             }
@@ -694,7 +694,7 @@ fn drain_game_events(game_rx: &Receiver<GameEvent>, buffer: &mut EventLog, snaps
 /// Add transport sequence metadata to an object snapshot while preserving
 /// its existing JSON shape. The scene's authoritative `version` remains a
 /// separate field and is never rewritten.
-fn add_sequence(body: &str, sequence: u64) -> String {
+fn add_sequence(body: &str, sequence: EventSeq) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.to_owned();
     };
@@ -710,7 +710,7 @@ fn add_sequence(body: &str, sequence: u64) -> String {
 /// message was validated and queued successfully.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandAck {
-    request_id: u64,
+    request_id: RequestId,
     accepted: bool,
     error: Option<String>,
 }
@@ -731,23 +731,24 @@ fn command_ack_json(ack: &CommandAck) -> String {
     }
 }
 
-fn allocate_request_id(next_request_id: &mut u64) -> u64 {
-    let request_id = (*next_request_id).max(1);
-    *next_request_id = request_id.saturating_add(1);
+fn allocate_request_id(next_request_id: &mut RequestId) -> RequestId {
+    let request_id = RequestId::new(next_request_id.get().max(1));
+    *next_request_id = request_id.next();
     request_id
 }
 
 /// Use a client-provided positive request id when present; otherwise allocate
 /// a monotonic server id. Advancing the allocator past a supplied id avoids
 /// collisions with subsequent generated ids.
-fn command_request_id(body: &str, next_request_id: &mut u64) -> u64 {
+fn command_request_id(body: &str, next_request_id: &mut RequestId) -> RequestId {
     let requested = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| value.get("request_id").and_then(|id| id.as_u64()))
-        .filter(|&id| id > 0);
+        .filter(|&id| id > 0)
+        .map(RequestId::new);
     if let Some(request_id) = requested {
         if request_id >= *next_request_id {
-            *next_request_id = request_id.saturating_add(1).max(1);
+            *next_request_id = request_id.next();
         }
         request_id
     } else {
@@ -765,7 +766,7 @@ fn route_request(
     buffer: &Arc<Mutex<EventLog>>,
     snapshots: &Snapshots,
     game_tx: &Sender<UiCommand>,
-    next_request_id: &mut u64,
+    next_request_id: &mut RequestId,
 ) -> Response<Cursor<Vec<u8>>> {
     let url = request.url().to_string();
     let method = request.method().as_str().to_string();
@@ -809,7 +810,7 @@ fn route_request(
     }
 }
 
-fn event_cursor(url: &str) -> u64 {
+fn event_cursor(url: &str) -> EventSeq {
     url.split_once('?')
         .and_then(|(_, query)| {
             query.split('&').find_map(|part| {
@@ -819,7 +820,8 @@ fn event_cursor(url: &str) -> u64 {
                     .flatten()
             })
         })
-        .unwrap_or(0)
+        .map(EventSeq::new)
+        .unwrap_or(EventSeq::new(0))
 }
 
 fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
@@ -844,7 +846,7 @@ fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
 /// Parse a posted command envelope `{"type": …, "data": …}` and forward it
 /// to the game thread. The returned acknowledgement distinguishes malformed
 /// input and a disconnected game channel from a successfully queued command.
-fn post_command(body: &str, game_tx: &Sender<UiCommand>, request_id: u64) -> CommandAck {
+fn post_command(body: &str, game_tx: &Sender<UiCommand>, request_id: RequestId) -> CommandAck {
     let cmd = match serde_json::from_str::<serde_json::Value>(body) {
         Ok(cmd) => cmd,
         Err(_) => {
@@ -904,93 +906,88 @@ pub fn parse_command_payload(body: &str) -> Option<UiCommand> {
 }
 
 /// Route a posted command to its `UiCommand`: `set_component` is the typed
-/// generic lane (registry); anything else is a Custom pass-through.
+/// generic lane (registry, via [`SetComponentPayload`]); anything else is a
+/// Custom pass-through keyed by the typed [`EditorCommand`] tag.
 /// Malformed `set_component` shapes are dropped (`None`) like any garbage
 /// on this endpoint.
 fn build_command(cmd_type: &str, data: Option<&serde_json::Value>) -> Option<UiCommand> {
-    if cmd_type == "set_component" {
+    if cmd_type == EditorCommand::SetComponent.as_str() {
         return parse_set_component(data);
     }
     let json_data = data.map(|v| v.to_string()).unwrap_or_default();
     Some(UiCommand::Custom {
-        cmd_type: cmd_type.to_string(),
+        cmd_type: EditorCommand::from(cmd_type),
         json_data,
     })
 }
 
 /// Build the typed generic upsert from `data` of a `set_component` post:
 /// `{"id": u32, "generation"?: u32, "component": "Transform", "value": {…}}`.
+/// Deserializes through [`SetComponentPayload`] (out-of-range integers are
+/// rejected, never truncated) and converts via `TryFrom`.
 /// `None` on any schema violation — the world emits no ack, and the
 /// malformed post is dropped like any other garbage on this endpoint.
 fn parse_set_component(data: Option<&serde_json::Value>) -> Option<UiCommand> {
     let data = data?;
-    let entity_id = data.get("id")?.as_u64()? as u32;
-    let generation = data
-        .get("generation")
-        .and_then(|v| v.as_u64())
-        .map(|g| g as u32);
-    let type_name = data.get("component")?.as_str()?.to_string();
-    let json_data = data.get("value")?.to_string();
-    Some(UiCommand::SetComponent {
-        entity_id,
-        generation,
-        type_name,
-        json_data,
-    })
+    let payload: SetComponentPayload = serde_json::from_value(data.clone()).ok()?;
+    UiCommand::try_from(payload).ok()
+}
+
+/// Lenient wire shape of a browser input snapshot: integer codes arrive as
+/// `u64` and are narrowed with `TryFrom` (out-of-range codes are dropped,
+/// never truncated); pointer pairs keep the first two entries so older
+/// payloads with trailing fields still parse.
+#[derive(Debug, Default, serde::Deserialize)]
+struct BrowserInputWire {
+    #[serde(default)]
+    pressed_keys: Vec<u64>,
+    #[serde(default)]
+    pressed_mouse_buttons: Vec<u64>,
+    #[serde(default)]
+    pointer_position: Vec<f64>,
+    #[serde(default)]
+    pointer_delta: Vec<f64>,
+    #[serde(default)]
+    wheel_delta: f64,
+}
+
+impl BrowserInputWire {
+    fn into_input(self) -> crate::ipc::BrowserInput {
+        fn pair(values: &[f64]) -> [f32; 2] {
+            [
+                values.first().copied().unwrap_or(0.0) as f32,
+                values.get(1).copied().unwrap_or(0.0) as f32,
+            ]
+        }
+        crate::ipc::BrowserInput {
+            pressed_keys: self
+                .pressed_keys
+                .into_iter()
+                .filter_map(|code| u32::try_from(code).ok())
+                .collect(),
+            pressed_mouse_buttons: self
+                .pressed_mouse_buttons
+                .into_iter()
+                .filter_map(|code| u8::try_from(code).ok())
+                .collect(),
+            pointer_position: pair(&self.pointer_position),
+            pointer_delta: pair(&self.pointer_delta),
+            wheel_delta: self.wheel_delta as f32,
+        }
+    }
 }
 
 fn parse_browser_input(bytes: &[u8]) -> Option<crate::ipc::BrowserInput> {
-    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let obj = if let Some(s) = v.as_str() {
-        serde_json::from_str::<serde_json::Value>(s).ok()?
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    // WS clients may double-encode the snapshot as a JSON string.
+    let value = if let Some(inner) = value.as_str() {
+        serde_json::from_str::<serde_json::Value>(inner).ok()?
     } else {
-        v
+        value
     };
-    let o = obj.as_object()?;
-    let pressed_keys = o
-        .get("pressed_keys")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_u64().map(|n| n as u32))
-                .collect()
-        })
-        .unwrap_or_default();
-    let pressed_mouse_buttons = o
-        .get("pressed_mouse_buttons")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_u64().map(|n| n as u8))
-                .collect()
-        })
-        .unwrap_or_default();
-    let pointer_position = o
-        .get("pointer_position")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            let x = a.first().and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
-            let y = a.get(1).and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
-            [x, y]
-        })
-        .unwrap_or([0.0, 0.0]);
-    let pointer_delta = o
-        .get("pointer_delta")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            let x = a.first().and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
-            let y = a.get(1).and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
-            [x, y]
-        })
-        .unwrap_or([0.0, 0.0]);
-    let wheel_delta = o.get("wheel_delta").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-    Some(crate::ipc::BrowserInput {
-        pressed_keys,
-        pressed_mouse_buttons,
-        pointer_position,
-        pointer_delta,
-        wheel_delta,
-    })
+    serde_json::from_value::<BrowserInputWire>(value)
+        .ok()
+        .map(BrowserInputWire::into_input)
 }
 
 fn json_response(body: &str) -> Response<Cursor<Vec<u8>>> {
@@ -1129,7 +1126,7 @@ mod tests {
                 json_data: r#"{"v":7}"#.into(),
             },
             GameEvent::CommandCompleted {
-                request_id: 4,
+                request_id: RequestId::new(4),
                 command: "set_component".into(),
                 success: true,
                 error: None,
@@ -1186,13 +1183,13 @@ mod tests {
     fn add_sequence_preserves_snapshot_fields() {
         let value = serde_json::from_str::<serde_json::Value>(&add_sequence(
             r#"{"version":9,"entities":[]}"#,
-            17,
+            EventSeq::new(17),
         ))
         .expect("sequenced snapshot must be valid JSON");
         assert_eq!(value["version"], 9);
         assert_eq!(value["sequence"], 17);
         assert_eq!(value["entities"], serde_json::json!([]));
-        assert_eq!(add_sequence("not-json", 4), "not-json");
+        assert_eq!(add_sequence("not-json", EventSeq::new(4)), "not-json");
     }
 
     // ── parse_set_component ────────────────────────────────────────────────
@@ -1258,6 +1255,48 @@ mod tests {
     #[test]
     fn parse_set_component_null_data() {
         assert!(parse_set_component(None).is_none());
+    }
+
+    #[test]
+    fn parse_set_component_rejects_u32_overflow_without_truncation() {
+        // `4_294_967_296` truncated with `as u32` would silently become `0`;
+        // the typed payload rejects it instead.
+        let data = serde_json::json!({
+            "id": 4_294_967_296u64,
+            "component": "T",
+            "value": {}
+        });
+        assert!(parse_set_component(Some(&data)).is_none());
+        let data = serde_json::json!({
+            "id": 1u64,
+            "generation": 4_294_967_296u64,
+            "component": "T",
+            "value": {}
+        });
+        assert!(parse_set_component(Some(&data)).is_none());
+    }
+
+    #[test]
+    fn parse_browser_input_drops_out_of_range_codes_without_truncation() {
+        // `4_294_967_296` truncated with `as u32` would silently become `0`
+        // (a held Left mouse button); the typed wire drops it instead, while
+        // valid codes and pointer pairs survive.
+        let input = parse_browser_input(
+            br#"{"pressed_keys":[17,4294967296],"pressed_mouse_buttons":[1,256],
+                "pointer_position":[3.5,4.5],"pointer_delta":[0.5,-0.5],"wheel_delta":1.25}"#,
+        )
+        .expect("valid shape parses");
+        assert_eq!(input.pressed_keys, vec![17]);
+        assert_eq!(input.pressed_mouse_buttons, vec![1]);
+        assert_eq!(input.pointer_position, [3.5, 4.5]);
+        assert_eq!(input.pointer_delta, [0.5, -0.5]);
+        assert_eq!(input.wheel_delta, 1.25);
+        // Missing fields default; double-encoded WS strings still parse.
+        let minimal = parse_browser_input(br#"{}"#).expect("empty object parses");
+        assert_eq!(minimal, crate::ipc::BrowserInput::default());
+        let encoded = parse_browser_input(br#""{\"pressed_keys\":[87]}""#)
+            .expect("string-wrapped snapshot parses");
+        assert_eq!(encoded.pressed_keys, vec![87]);
     }
 
     // ── build_command ──────────────────────────────────────────────────────
@@ -1329,12 +1368,12 @@ mod tests {
         let ack = post_command(
             r#"{"type":"set_component","data":{"id":5,"component":"T","value":{}}}"#,
             &tx,
-            42,
+            RequestId::new(42),
         );
         assert_eq!(
             ack,
             CommandAck {
-                request_id: 42,
+                request_id: RequestId::new(42),
                 accepted: true,
                 error: None,
             }
@@ -1359,14 +1398,14 @@ mod tests {
     fn post_command_garbage_returns_rejections_without_panicking() {
         let (tx, rx) = unbounded::<UiCommand>();
         // not JSON at all
-        let invalid_json = post_command("this is not json", &tx, 1);
+        let invalid_json = post_command("this is not json", &tx, RequestId::new(1));
         assert!(!invalid_json.accepted);
         assert_eq!(invalid_json.request_id, 1);
         // JSON but no "type"
-        let missing_type = post_command(r#"{"foo":1}"#, &tx, 2);
+        let missing_type = post_command(r#"{"foo":1}"#, &tx, RequestId::new(2));
         assert!(!missing_type.accepted);
         // JSON with unknown type (still a Custom, not dropped)
-        let accepted = post_command(r#"{"type":"unknown","data":{}}"#, &tx, 3);
+        let accepted = post_command(r#"{"type":"unknown","data":{}}"#, &tx, RequestId::new(3));
         assert!(accepted.accepted);
         // exactly one command should have been sent (the Custom unknown)
         let cmd = rx.try_recv().expect("one command");
@@ -1387,7 +1426,7 @@ mod tests {
 
     #[test]
     fn command_request_ids_are_monotonic_and_accept_client_ids() {
-        let mut next = 1;
+        let mut next = RequestId::new(1);
         assert_eq!(command_request_id(r#"{"type":"ping"}"#, &mut next), 1);
         assert_eq!(
             command_request_id(r#"{"type":"ping","request_id":41}"#, &mut next),
@@ -1404,7 +1443,7 @@ mod tests {
     #[test]
     fn command_ack_json_is_explicit_and_valid() {
         let accepted = serde_json::from_str::<serde_json::Value>(&command_ack_json(&CommandAck {
-            request_id: 7,
+            request_id: RequestId::new(7),
             accepted: true,
             error: None,
         }))
@@ -1414,7 +1453,7 @@ mod tests {
         assert!(accepted.get("error").is_none());
 
         let rejected = serde_json::from_str::<serde_json::Value>(&command_ack_json(&CommandAck {
-            request_id: 8,
+            request_id: RequestId::new(8),
             accepted: false,
             error: Some("bad request".into()),
         }))
@@ -1476,10 +1515,10 @@ mod tests {
 
     #[test]
     fn event_cursor_reads_optional_after_query() {
-        assert_eq!(event_cursor("/api/events"), 0);
-        assert_eq!(event_cursor("/api/events?after=41"), 41);
-        assert_eq!(event_cursor("/api/events?foo=1&after=9"), 9);
-        assert_eq!(event_cursor("/api/events?after=bad"), 0);
+        assert_eq!(event_cursor("/api/events"), EventSeq::new(0));
+        assert_eq!(event_cursor("/api/events?after=41"), EventSeq::new(41));
+        assert_eq!(event_cursor("/api/events?foo=1&after=9"), EventSeq::new(9));
+        assert_eq!(event_cursor("/api/events?after=bad"), EventSeq::new(0));
     }
 
     #[test]
@@ -1487,24 +1526,25 @@ mod tests {
         let mut log = EventLog::default();
         log.push(GameEvent::EntityCreated { entity_id: 1 });
         log.push(GameEvent::CommandCompleted {
-            request_id: 7,
+            request_id: RequestId::new(7),
             command: "create_entity".into(),
             success: true,
             error: None,
         });
 
-        let first = log.after(0);
+        let first = log.after(EventSeq::new(0));
         assert_eq!(first.len(), 2);
-        assert_eq!(first[0].sequence, 1);
-        assert_eq!(first[1].sequence, 2);
+        assert_eq!(first[0].sequence, EventSeq::new(1));
+        assert_eq!(first[1].sequence, EventSeq::new(2));
         assert!(matches!(
-            log.after(1).as_slice(),
-            [EventRecord {
-                sequence: 2,
-                event: GameEvent::CommandCompleted { request_id: 7, .. }
-            }]
+            log.after(EventSeq::new(1)).as_slice(),
+            [record] if record.sequence.get() == 2
+                && matches!(
+                    record.event,
+                    GameEvent::CommandCompleted { request_id, .. } if request_id.get() == 7
+                )
         ));
-        assert!(log.after(2).is_empty());
+        assert!(log.after(EventSeq::new(2)).is_empty());
         assert_eq!(log.records.len(), 2, "replay must not drain history");
     }
 
@@ -1515,25 +1555,27 @@ mod tests {
             log.push(GameEvent::EntityCreated { entity_id });
         }
 
-        let replay = log.after(0);
+        let replay = log.after(EventSeq::new(0));
         assert_eq!(replay.len(), EVENT_HISTORY_CAPACITY + 1);
         assert!(matches!(
             replay[0],
             EventRecord {
-                sequence: 2,
-                event: GameEvent::EventGap {
-                    after: 0,
-                    oldest: 3
-                }
-            }
+                event: GameEvent::EventGap { .. },
+                ..
+            } if replay[0].sequence.get() == 2
+                && matches!(
+                    replay[0].event,
+                    GameEvent::EventGap { after, oldest }
+                        if after.get() == 0 && oldest.get() == 3
+                )
         ));
-        assert_eq!(replay[1].sequence, 3);
+        assert_eq!(replay[1].sequence, EventSeq::new(3));
     }
 
     #[test]
     fn event_records_keep_legacy_event_shape_and_add_cursor_metadata() {
         let records = vec![EventRecord {
-            sequence: 9,
+            sequence: EventSeq::new(9),
             event: GameEvent::EntityCreated { entity_id: 4 },
         }];
         let value = serde_json::from_str::<serde_json::Value>(&format_event_records(&records))
@@ -1603,9 +1645,9 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&snaps.scene).expect("scene JSON")["sequence"],
             2
         );
-        assert_eq!(snaps.sequence, 2);
+        assert_eq!(snaps.sequence, EventSeq::new(2));
         assert_eq!(buffer.records.len(), 1);
-        assert_eq!(buffer.records[0].sequence, 1);
+        assert_eq!(buffer.records[0].sequence, EventSeq::new(1));
         assert!(matches!(
             buffer.records[0].event,
             GameEvent::EntityCreated { entity_id: 11 }

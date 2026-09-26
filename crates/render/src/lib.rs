@@ -9,6 +9,8 @@ pub mod camera;
 pub mod composite;
 /// Shared ECS-to-render extraction and logical render-world frame host.
 pub mod extraction;
+/// Typed replacements for `bool`/`u32` frame-plan flags.
+pub mod flags;
 /// wgpu executor mapping plan slots to textures and running passes.
 pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
@@ -47,6 +49,10 @@ pub use extraction::{
     ExtractionStats, FrameUpload, RenderLights, RenderWorld, extract_render_data,
     extract_render_data_with_stats, max_mesh_params,
 };
+pub use flags::{
+    Access as AccessKind, Bloom, CompositeTechnique, DepthOwnership, PassState, ResourceBacking,
+    SamplerKind, ShadowCast,
+};
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use mesh::{Mesh, Vertex, create_sphere};
 pub use mesh_upload::{UploadError, to_vertices, upload_mesh_data};
@@ -59,7 +65,7 @@ pub use render_backend::{
 };
 pub use renderer::{
     CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,
-    InstanceData, LightingPass, PerObjectGpu, Renderer3D,
+    InstanceData, LightingPass, MaterialIdx, PerObjectGpu, Renderer3D,
 };
 pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use system::{
@@ -67,9 +73,10 @@ pub use system::{
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,
 };
 pub use textures::{
-    CpuImage, GpuTexture, MaterialTextureSet, TextureCache, TextureRole, TextureUploadError,
+    CpuImage, GpuTexture, MaterialTextureSet, TextureCache, TextureHandle, TextureRole,
+    TextureUploadError,
 };
 pub use transient_pool::{
-    Budget, BudgetExceeded, FrameLayout, PassId, PassLayout, PoolSlot, ResourceId, ResourceLayout,
-    SizePolicy, TextureSpec, TransientPool, format_bytes_per_pixel,
+    Budget, BudgetExceeded, FrameLayout, PassId, PassLayout, PassName, PoolSlot, ResourceId,
+    ResourceLayout, ResourceName, SizePolicy, TextureSpec, TransientPool, format_bytes_per_pixel,
 };

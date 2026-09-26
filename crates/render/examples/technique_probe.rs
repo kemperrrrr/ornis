@@ -10,7 +10,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
-use ornis_render::{InstanceData, RenderFrame3D, Renderer3D, Technique};
+use ornis_render::{InstanceData, MaterialIdx, RenderFrame3D, Renderer3D, Technique};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -181,7 +181,7 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
         instances.push(InstanceData {
             model_matrix: model,
             normal_matrix: model.inverse().transpose(),
-            material_index: i as u32,
+            material_index: MaterialIdx::from(i as u32),
         });
     }
     renderer.upload_materials(&device, &queue, &materials);
@@ -219,7 +219,8 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     });
     let view_tex = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut frame = RenderFrame3D::new_with(format, (WIDTH, HEIGHT), technique, false);
+    let mut frame =
+        RenderFrame3D::new_with(format, (WIDTH, HEIGHT), technique, ornis_render::Bloom::Off);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("technique probe"),
     });

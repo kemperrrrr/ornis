@@ -24,5 +24,5 @@ mod map;
 mod state;
 
 pub use keys::{KeyCode, MouseButton};
-pub use map::{InputBinding, InputMap};
+pub use map::{ActionId, GameAction, InputBinding, InputMap};
 pub use state::InputState;

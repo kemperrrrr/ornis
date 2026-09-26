@@ -46,7 +46,9 @@ pub struct ManifoldState {
     pub i: usize,
     /// Second body handle.
     pub j: usize,
-    /// Active point count (1..=4).
+    /// Active point count (1..=4): indexes every parallel array below.
+    /// Enforced at the single construction site; direct writes bypass the
+    /// invariant (see [`ManifoldState::has_valid_count`]).
     pub count: usize,
     /// Accumulated normal impulse per point (warm start).
     pub acc: [f32; 4],
@@ -97,6 +99,33 @@ pub struct ManifoldState {
     pub pen0: [f32; 4],
 }
 
+impl ManifoldState {
+    /// Whether `count` satisfies the 1..=4 parallel-array invariant.
+    /// The single construction site
+    /// (`prepare_manifold_state`, via [`Manifold::has_valid_count`](crate::engine::Manifold::has_valid_count))
+    /// admits only valid counts; every parallel array below is indexed
+    /// `0..count`.
+    pub fn has_valid_count(&self) -> bool {
+        (1..=4).contains(&self.count)
+    }
+
+    /// Live lane count, clamped to the buffer size (defensive: construction
+    /// admits only `1..=4`, so this equals `count` on valid states).
+    pub fn live_count(&self) -> usize {
+        self.count.min(4)
+    }
+
+    /// Live normal impulses (`acc[..count]`).
+    pub fn acc_slice(&self) -> &[f32] {
+        &self.acc[..self.live_count()]
+    }
+
+    /// Live detection-time penetrations (`pen0[..count]`).
+    pub fn pen0_slice(&self) -> &[f32] {
+        &self.pen0[..self.live_count()]
+    }
+}
+
 /// Per-island work item for the G7 parallel solver: an island-local shard of
 /// the world. Body indices inside `manifolds` and `states` are LOCAL
 /// (positions in `body_idx`/`bodies`); `keys` maps each local manifold to its
@@ -127,7 +156,7 @@ pub(crate) struct IslandWork {
 pub(crate) struct ManifoldCtx<'a> {
     pub(crate) bodies: &'a mut [RigidBody],
     pub(crate) warm_in: &'a WarmCache,
-    pub(crate) allow_restitution: bool,
+    pub(crate) gate: crate::flags::RestitutionGate,
     pub(crate) sub_dt: f32,
     pub(crate) mi: usize,
     pub(crate) i: usize,
@@ -590,14 +619,14 @@ impl SequentialImpulseEngine {
             let orientation = swept_orientation(&self.bodies[h], sub_dt, hit.fraction);
             let e = self.bodies[h]
                 .restitution
-                .min(self.bodies[hit.handle].restitution);
+                .min(self.bodies[hit.handle.index()].restitution);
             let b = &mut self.bodies[h];
             // Back off a hair so the discrete narrow phase sees a clean
             // touching contact next substep, not a zero-gap flicker.
             b.position += disp * hit.fraction + hit.normal * 1e-3;
             b.orientation = orientation;
             skip[h] = true;
-            if hit.angular {
+            if hit.kind.is_angular() {
                 // Unified contact impulse: contact-point speed (spin counts),
                 // restitution-aware, tangential preserved. Subsumes the old
                 // split linear-bounce + spin-kill for angular hits.

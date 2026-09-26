@@ -11,7 +11,8 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
 use ornis_render::{
-    InstanceData, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+    InstanceData, MaterialIdx, RenderBackend, RenderBackendConfig, RenderContext,
+    create_render_backend,
 };
 
 const WIDTH: u32 = 1280;
@@ -204,7 +205,7 @@ fn build_scene_data(
         instances.push(InstanceData {
             model_matrix: model,
             normal_matrix,
-            material_index: i as u32,
+            material_index: MaterialIdx::from(i as u32),
         });
     }
     (mesh, materials, instances)

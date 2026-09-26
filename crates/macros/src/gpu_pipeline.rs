@@ -49,7 +49,7 @@
 
 use ornis_shader_lang::{
     ShaderType,
-    ir::{IrFieldAttr, IrGlobal, IrItem, IrStructField, IrTexture, IrType},
+    ir::{IrFieldAttr, IrGlobal, IrItem, IrStructField, IrTexture, IrType, ShaderCustomTy},
     writer::{print_builtin_param, print_item},
 };
 use proc_macro::TokenStream;
@@ -138,7 +138,7 @@ fn binding_leaf_ty(name: &str) -> IrType {
     }
     match ShaderType::from_rust(name) {
         Some(t) => IrType::Scalar(t),
-        None => IrType::Custom(name.to_string()),
+        None => IrType::Custom(ShaderCustomTy::from(name)),
     }
 }
 

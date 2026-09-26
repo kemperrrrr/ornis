@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use ornis_core::units::{Clamped01, Degrees, LinearRgb, Meters};
+
 /// Full scene description in RON format (see `assets/scene.ron`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
@@ -105,6 +107,68 @@ impl MeshDesc {
             }
         }
     }
+
+    /// Checked sphere: `None` unless `radius` is finite and `> 0`,
+    /// `segments >= 3` and `rings >= 2` (the documented generation minima).
+    pub fn try_sphere_units(radius: Meters, segments: u32, rings: u32) -> Option<Self> {
+        let r = radius.get();
+        if r.is_finite() && r > 0.0 && segments >= 3 && rings >= 2 {
+            Some(Self::Sphere {
+                radius: r,
+                segments,
+                rings,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Checked box: `None` unless every full extent is finite and `> 0`.
+    pub fn try_box_units(size: [Meters; 3]) -> Option<Self> {
+        let size = [size[0].get(), size[1].get(), size[2].get()];
+        if size.iter().all(|v| v.is_finite() && *v > 0.0) {
+            Some(Self::Box { size })
+        } else {
+            None
+        }
+    }
+
+    /// Checked plane: `None` unless both extents are finite and `> 0`.
+    pub fn try_plane_units(size: [Meters; 2]) -> Option<Self> {
+        let size = [size[0].get(), size[1].get()];
+        if size.iter().all(|v| v.is_finite() && *v > 0.0) {
+            Some(Self::Plane { size })
+        } else {
+            None
+        }
+    }
+
+    /// Checked cylinder: `None` unless radius/height are finite and `> 0`
+    /// and `radial_segments >= 3`.
+    pub fn try_cylinder_units(
+        radius: Meters,
+        height: Meters,
+        radial_segments: u32,
+    ) -> Option<Self> {
+        let (r, h) = (radius.get(), height.get());
+        if r.is_finite() && r > 0.0 && h.is_finite() && h > 0.0 && radial_segments >= 3 {
+            Some(Self::Cylinder {
+                radius: r,
+                height: h,
+                radial_segments,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Sphere radius in meters, or `None` for other variants.
+    pub fn sphere_radius_units(&self) -> Option<Meters> {
+        match self {
+            Self::Sphere { radius, .. } => Some(Meters::new(*radius)),
+            _ => None,
+        }
+    }
 }
 
 /// Material preset mapped onto the engine's OpenPBR surface model.
@@ -170,6 +234,120 @@ fn default_glass_ior() -> f32 {
     1.5
 }
 
+impl MaterialDesc {
+    /// Typed dielectric: albedo as [`LinearRgb`], roughness as [`Clamped01`].
+    pub fn dielectric_units(base_color: LinearRgb, roughness: Clamped01) -> Self {
+        Self::Dielectric {
+            base_color: base_color.as_array(),
+            roughness: roughness.get(),
+            emission: [0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Typed metal: reflectance as [`LinearRgb`], roughness as [`Clamped01`].
+    pub fn metal_units(base_color: LinearRgb, roughness: Clamped01) -> Self {
+        Self::Metal {
+            base_color: base_color.as_array(),
+            roughness: roughness.get(),
+            emission: [0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Typed matte: albedo as [`LinearRgb`], roughness as [`Clamped01`].
+    pub fn matte_units(base_color: LinearRgb, roughness: Clamped01) -> Self {
+        Self::Matte {
+            base_color: base_color.as_array(),
+            roughness: roughness.get(),
+        }
+    }
+
+    /// Typed coat: albedo as [`LinearRgb`], weights as [`Clamped01`].
+    pub fn coat_units(
+        base_color: LinearRgb,
+        coat_weight: Clamped01,
+        coat_roughness: Clamped01,
+    ) -> Self {
+        Self::Coat {
+            base_color: base_color.as_array(),
+            coat_weight: coat_weight.get(),
+            coat_roughness: coat_roughness.get(),
+            emission: [0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Typed glass: tint as [`LinearRgb`], roughness as [`Clamped01`];
+    /// `ior` is clamped to `>= 1.0` (same policy as the material setters).
+    pub fn glass_units(base_color: LinearRgb, roughness: Clamped01, ior: f32) -> Self {
+        Self::Glass {
+            base_color: base_color.as_array(),
+            roughness: roughness.get(),
+            ior: if ior.is_finite() { ior.max(1.0) } else { 1.5 },
+        }
+    }
+
+    /// Albedo/base color as [`LinearRgb`] (all variants).
+    pub fn base_color_units(&self) -> LinearRgb {
+        LinearRgb::new(match self {
+            Self::Dielectric { base_color, .. }
+            | Self::Metal { base_color, .. }
+            | Self::Coat { base_color, .. }
+            | Self::Matte { base_color, .. }
+            | Self::Glass { base_color, .. } => *base_color,
+        })
+    }
+
+    /// Roughness as [`Clamped01`] (clamps out-of-range legacy values).
+    pub fn roughness_units(&self) -> Clamped01 {
+        Clamped01::new(match self {
+            Self::Dielectric { roughness, .. }
+            | Self::Metal { roughness, .. }
+            | Self::Matte { roughness, .. }
+            | Self::Glass { roughness, .. } => *roughness,
+            Self::Coat { coat_roughness, .. } => *coat_roughness,
+        })
+    }
+}
+
+/// Whether a light casts a shadow map (typed replacement for the
+/// `shadow: bool` field on [`LightDesc`] variants).
+///
+/// The serialized form stays `bool` (older files default to off), so this
+/// enum is the in-memory polarity: construction takes [`ShadowCast`],
+/// storage keeps the serde-canonical `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ShadowCast {
+    /// No shadow map (default; absent in older files).
+    #[default]
+    Disabled,
+    /// Depth pre-pass + PCF sampling in the evaluators.
+    Enabled,
+}
+
+impl ShadowCast {
+    /// `true` for [`ShadowCast::Enabled`].
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl From<bool> for ShadowCast {
+    /// Legacy `shadow: bool` polarity.
+    fn from(shadow: bool) -> Self {
+        if shadow {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+impl From<ShadowCast> for bool {
+    /// Legacy `shadow: bool` polarity.
+    fn from(cast: ShadowCast) -> bool {
+        cast.is_enabled()
+    }
+}
+
 /// Light source description.
 ///
 /// Convention (shared by the shader evaluators): `direction` fields point
@@ -229,6 +407,148 @@ pub enum LightDesc {
     },
 }
 
+impl LightDesc {
+    /// Normalizes a raw direction; `None` for zero/non-finite input.
+    fn checked_dir(direction: [f32; 3]) -> Option<[f32; 3]> {
+        let len = (direction[0] * direction[0]
+            + direction[1] * direction[1]
+            + direction[2] * direction[2])
+            .sqrt();
+        if len.is_finite() && len > 1e-12 {
+            Some([direction[0] / len, direction[1] / len, direction[2] / len])
+        } else {
+            None
+        }
+    }
+
+    /// Checked intensity: `Some` only for finite values `>= 0`.
+    fn checked_intensity(intensity: f32) -> Option<f32> {
+        if intensity.is_finite() && intensity >= 0.0 {
+            Some(intensity)
+        } else {
+            None
+        }
+    }
+
+    /// Typed directional light (`None` for degenerate direction or
+    /// negative/non-finite intensity).
+    pub fn directional_units(
+        direction: [f32; 3],
+        intensity: f32,
+        color: LinearRgb,
+        shadow: ShadowCast,
+    ) -> Option<Self> {
+        Some(Self::Directional {
+            direction: Self::checked_dir(direction)?,
+            intensity: Self::checked_intensity(intensity)?,
+            color: color.as_array(),
+            shadow: shadow.is_enabled(),
+        })
+    }
+
+    /// Typed point light (`None` unless the position is finite, the
+    /// intensity is `>= 0` and the range is finite and `> 0`).
+    pub fn point_units(
+        position: [Meters; 3],
+        intensity: f32,
+        color: LinearRgb,
+        range: Meters,
+        shadow: ShadowCast,
+    ) -> Option<Self> {
+        let position = [position[0].get(), position[1].get(), position[2].get()];
+        if !position.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let range = range.get();
+        if !range.is_finite() || range <= 0.0 {
+            return None;
+        }
+        Some(Self::Point {
+            position,
+            intensity: Self::checked_intensity(intensity)?,
+            color: color.as_array(),
+            range,
+            shadow: shadow.is_enabled(),
+        })
+    }
+
+    /// Typed spot light (`None` unless position/range/angles/intensity
+    /// satisfy the documented invariants: finite position, `intensity >= 0`,
+    /// `range > 0`, `0 <= inner <= outer`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spot_units(
+        position: [Meters; 3],
+        direction: [f32; 3],
+        intensity: f32,
+        color: LinearRgb,
+        range: Meters,
+        inner_angle: Degrees,
+        outer_angle: Degrees,
+        shadow: ShadowCast,
+    ) -> Option<Self> {
+        let position = [position[0].get(), position[1].get(), position[2].get()];
+        if !position.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let range = range.get();
+        if !range.is_finite() || range <= 0.0 {
+            return None;
+        }
+        let (inner, outer) = (inner_angle.get(), outer_angle.get());
+        if !inner.is_finite() || !outer.is_finite() || inner < 0.0 || inner > outer {
+            return None;
+        }
+        Some(Self::Spot {
+            position,
+            direction: Self::checked_dir(direction)?,
+            intensity: Self::checked_intensity(intensity)?,
+            color: color.as_array(),
+            range,
+            inner_angle: inner,
+            outer_angle: outer,
+            shadow: shadow.is_enabled(),
+        })
+    }
+
+    /// Whether this light casts a shadow map (typed view of the
+    /// serde-canonical `shadow: bool` field).
+    pub fn shadow_cast(&self) -> ShadowCast {
+        let shadow = match self {
+            Self::Directional { shadow, .. }
+            | Self::Point { shadow, .. }
+            | Self::Spot { shadow, .. } => *shadow,
+        };
+        ShadowCast::from(shadow)
+    }
+
+    /// Sets shadow casting from a [`ShadowCast`].
+    pub fn set_shadow_cast(&mut self, cast: ShadowCast) {
+        let slot = match self {
+            Self::Directional { shadow, .. }
+            | Self::Point { shadow, .. }
+            | Self::Spot { shadow, .. } => shadow,
+        };
+        *slot = cast.is_enabled();
+    }
+
+    /// Emission color as [`LinearRgb`] (all variants).
+    pub fn color_units(&self) -> LinearRgb {
+        LinearRgb::new(match self {
+            Self::Directional { color, .. }
+            | Self::Point { color, .. }
+            | Self::Spot { color, .. } => *color,
+        })
+    }
+
+    /// Cutoff range in meters (`None` for directionals).
+    pub fn range_units(&self) -> Option<Meters> {
+        match self {
+            Self::Directional { .. } => None,
+            Self::Point { range, .. } | Self::Spot { range, .. } => Some(Meters::new(*range)),
+        }
+    }
+}
+
 /// Viewing camera described look-at style.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraDesc {
@@ -246,6 +566,76 @@ pub struct CameraDesc {
     pub far: f32,
 }
 
+impl CameraDesc {
+    /// Checked camera: `None` unless the fov is strictly inside
+    /// `(0, 180)` degrees, `near` is finite and `> 0`, `far > near`, all
+    /// positions are finite, and `up` is finite, non-zero and not parallel
+    /// to the view direction.
+    pub fn try_new_units(
+        position: [Meters; 3],
+        target: [Meters; 3],
+        up: [f32; 3],
+        fov: Degrees,
+        near: Meters,
+        far: Meters,
+    ) -> Option<Self> {
+        let position = [position[0].get(), position[1].get(), position[2].get()];
+        let target = [target[0].get(), target[1].get(), target[2].get()];
+        if !position.iter().chain(target.iter()).all(|v| v.is_finite()) {
+            return None;
+        }
+        let fov = fov.get();
+        if !fov.is_finite() || fov <= 0.0 || fov >= 180.0 {
+            return None;
+        }
+        let (near, far) = (near.get(), far.get());
+        if !near.is_finite() || near <= 0.0 || !far.is_finite() || far <= near {
+            return None;
+        }
+        if !up.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let view = [
+            target[0] - position[0],
+            target[1] - position[1],
+            target[2] - position[2],
+        ];
+        let view_len2 = view[0] * view[0] + view[1] * view[1] + view[2] * view[2];
+        let up_len2 = up[0] * up[0] + up[1] * up[1] + up[2] * up[2];
+        if !view_len2.is_finite() || view_len2 < 1e-12 || !up_len2.is_finite() || up_len2 < 1e-12 {
+            return None;
+        }
+        let dot = (view[0] * up[0] + view[1] * up[1] + view[2] * up[2]).abs()
+            / (view_len2.sqrt() * up_len2.sqrt());
+        if !dot.is_finite() || dot > 0.999 {
+            return None;
+        }
+        Some(Self {
+            position,
+            target,
+            up,
+            fov,
+            near,
+            far,
+        })
+    }
+
+    /// Vertical field of view in degrees.
+    pub fn fov_units(&self) -> Degrees {
+        Degrees::new(self.fov)
+    }
+
+    /// Near clip distance in meters.
+    pub fn near_units(&self) -> Meters {
+        Meters::new(self.near)
+    }
+
+    /// Far clip distance in meters.
+    pub fn far_units(&self) -> Meters {
+        Meters::new(self.far)
+    }
+}
+
 impl Scene {
     /// Load a scene from a RON file.
     pub fn from_ron(ron_str: &str) -> Result<Self, ron::error::SpannedError> {
@@ -255,6 +645,11 @@ impl Scene {
     /// Save scene to RON string.
     pub fn to_ron(&self) -> Result<String, ron::error::Error> {
         ron::ser::to_string_pretty(self, Default::default())
+    }
+
+    /// Ambient multiplier as [`LinearRgb`].
+    pub fn ambient_units(&self) -> LinearRgb {
+        LinearRgb::new(self.ambient)
     }
 }
 

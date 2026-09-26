@@ -11,6 +11,7 @@
 
 use glam::{Quat, Vec3};
 
+use crate::flags::Order;
 use crate::shape::Shape;
 
 #[path = "distance_box.rs"]
@@ -223,18 +224,18 @@ fn capsule_capsule(a: ShapeRef, ra: f32, ha: f32, b: ShapeRef, rb: f32, hb: f32)
 /// sample height. Deterministic row-major order over the full overlapped
 /// range (no stride sampling — a skipped column could ghost a contact).
 /// Each column reuses the analytic `shape_distance` oracles through its
-/// box placement; `hf_first` selects which side owns `point_a`.
+/// box placement; `order` selects which side owns `point_a`.
 fn heightfield_convex(
     hf_pos: Vec3,
     hf_rot: Quat,
     hf: &crate::shape::Heightfield,
     convex: ShapeRef,
-    hf_first: bool,
+    order: Order,
 ) -> Distance {
     let no_contact = || Distance {
         dist: f32::INFINITY,
-        point_a: if hf_first { hf_pos } else { convex.pos },
-        point_b: if hf_first { convex.pos } else { hf_pos },
+        point_a: if order.is_first() { hf_pos } else { convex.pos },
+        point_b: if order.is_first() { convex.pos } else { hf_pos },
     };
     if hf.heights.len() != hf.rows * hf.cols
         || hf.rows == 0
@@ -308,7 +309,7 @@ fn heightfield_convex(
         // Column winners already carry repaired witnesses (the column
         // query routes through `shape_distance`, including its GJK
         // refine arm); only the side order flips here.
-        Some(d) if hf_first => d,
+        Some(d) if order.is_first() => d,
         Some(d) => Distance {
             dist: d.dist,
             point_a: d.point_b,
@@ -381,7 +382,7 @@ fn refine_witnesses(
 /// witnesses included — the shared refine pass runs inside each triangle
 /// query against its own centroid placement). Deterministic leaf order;
 /// the full overlapped set is visited (no sampling — a skipped triangle
-/// could ghost a contact). `mesh_first` selects which side owns
+/// could ghost a contact). `order` selects which side owns
 /// `point_a`. The `convex` side must not be a mesh or heightfield (the
 /// dispatcher guarantees it).
 fn trimesh_convex(
@@ -389,12 +390,20 @@ fn trimesh_convex(
     mesh_rot: Quat,
     mesh: &crate::shape::TriMesh,
     convex: ShapeRef,
-    mesh_first: bool,
+    order: Order,
 ) -> Distance {
     let no_contact = || Distance {
         dist: f32::INFINITY,
-        point_a: if mesh_first { mesh_pos } else { convex.pos },
-        point_b: if mesh_first { convex.pos } else { mesh_pos },
+        point_a: if order.is_first() {
+            mesh_pos
+        } else {
+            convex.pos
+        },
+        point_b: if order.is_first() {
+            convex.pos
+        } else {
+            mesh_pos
+        },
     };
     if mesh.tris.is_empty() {
         return no_contact();
@@ -435,9 +444,9 @@ fn trimesh_convex(
         if disjoint {
             continue;
         }
-        if node.left == u32::MAX {
-            let end = (node.start + node.count) as usize;
-            for o in node.start as usize..end.min(mesh.order.len()) {
+        if let Some((start, count)) = node.link.leaf_range() {
+            let end = (start + count) as usize;
+            for o in start as usize..end.min(mesh.order.len()) {
                 let t = mesh.order[o] as usize;
                 if t >= mesh.tris.len() || t >= mesh.centroids.len() {
                     continue;
@@ -455,12 +464,12 @@ fn trimesh_convex(
                     best = Some(d);
                 }
             }
-        } else {
+        } else if let Some((left, right)) = node.link.children() {
             if len + 2 > 64 {
                 break; // Depth guard: keep the best so far (deterministic).
             }
-            stack[len] = node.left;
-            stack[len + 1] = node.right;
+            stack[len] = left;
+            stack[len + 1] = right;
             len += 2;
         }
     }
@@ -469,7 +478,7 @@ fn trimesh_convex(
         // Triangle winners already carry repaired witnesses (the per-tri
         // query routes through `shape_distance`, including its GJK refine
         // arm); only the side order flips here.
-        Some(d) if mesh_first => Distance {
+        Some(d) if order.is_first() => Distance {
             dist: d.dist,
             point_a: d.point_b,
             point_b: d.point_a,
@@ -494,10 +503,10 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
         };
     }
     if let Shape::Heightfield(hf) = a.shape {
-        return heightfield_convex(a.pos, a.rot, hf, b, true);
+        return heightfield_convex(a.pos, a.rot, hf, b, Order::First);
     }
     if let Shape::Heightfield(hf) = b.shape {
-        return heightfield_convex(b.pos, b.rot, hf, a, false);
+        return heightfield_convex(b.pos, b.rot, hf, a, Order::Second);
     }
     // Mesh-vs-mesh is undefined (concave-concave): report separation.
     if let (Shape::TriMesh(_), Shape::TriMesh(_)) = (a.shape, b.shape) {
@@ -508,10 +517,10 @@ pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
         };
     }
     if let Shape::TriMesh(mesh) = a.shape {
-        return trimesh_convex(a.pos, a.rot, mesh, b, true);
+        return trimesh_convex(a.pos, a.rot, mesh, b, Order::First);
     }
     if let Shape::TriMesh(mesh) = b.shape {
-        return trimesh_convex(b.pos, b.rot, mesh, a, false);
+        return trimesh_convex(b.pos, b.rot, mesh, a, Order::Second);
     }
     match (a.shape, b.shape) {
         (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => {
@@ -600,7 +609,7 @@ pub(crate) struct CastHit {
     pub t: f32,
     pub point: Vec3,
     pub normal: Vec3,
-    pub handle: usize,
+    pub handle: crate::body::BodyHandle,
 }
 
 /// Conservative advancement of `mover` along `delta` against `targets`.
@@ -613,7 +622,7 @@ pub(crate) struct CastHit {
 pub(crate) fn cast_shape<'t>(
     mover: ShapeRef,
     delta: Vec3,
-    targets: impl Iterator<Item = (usize, ShapeRef<'t>)>,
+    targets: impl Iterator<Item = (crate::body::BodyHandle, ShapeRef<'t>)>,
 ) -> Option<CastHit> {
     let len = delta.length();
     if len < 1e-9 {
@@ -1058,14 +1067,18 @@ mod tests {
         let hit = cast_shape(
             at(&s, Vec3::ZERO),
             Vec3::new(10.0, 0.0, 0.0),
-            [(7usize, at(&b, Vec3::new(5.0, 0.0, 0.0)))].into_iter(),
+            [(
+                crate::body::BodyHandle::from_raw(7),
+                at(&b, Vec3::new(5.0, 0.0, 0.0)),
+            )]
+            .into_iter(),
         )
         .expect("must hit");
         // Gap at t=0 is 3 (sphere surface x=1, box face x=4).
         assert!((hit.t - 3.0).abs() < 2e-3, "t = {}", hit.t);
         assert!((hit.point.x - 4.0).abs() < 2e-3);
         assert!((hit.normal.x - (-1.0)).abs() < 1e-3);
-        assert_eq!(hit.handle, 7);
+        assert_eq!(hit.handle, crate::body::BodyHandle::from_raw(7));
     }
 
     #[test]
@@ -1074,7 +1087,11 @@ mod tests {
         let hit = cast_shape(
             at(&s, Vec3::ZERO),
             Vec3::new(-10.0, 0.0, 0.0),
-            [(0usize, at(&b, Vec3::new(5.0, 0.0, 0.0)))].into_iter(),
+            [(
+                crate::body::BodyHandle::from_raw(0),
+                at(&b, Vec3::new(5.0, 0.0, 0.0)),
+            )]
+            .into_iter(),
         );
         assert!(hit.is_none());
     }
@@ -1086,7 +1103,11 @@ mod tests {
         let hit = cast_shape(
             at(&s, Vec3::ZERO),
             Vec3::new(10.0, 0.0, 0.0),
-            [(0usize, at(&b, Vec3::new(2.0, 0.0, 0.0)))].into_iter(),
+            [(
+                crate::body::BodyHandle::from_raw(0),
+                at(&b, Vec3::new(2.0, 0.0, 0.0)),
+            )]
+            .into_iter(),
         );
         assert!(hit.is_none());
     }
@@ -1097,7 +1118,11 @@ mod tests {
         let hit = cast_shape(
             at(&s, Vec3::ZERO),
             Vec3::ZERO,
-            [(0usize, at(&b, Vec3::new(5.0, 0.0, 0.0)))].into_iter(),
+            [(
+                crate::body::BodyHandle::from_raw(0),
+                at(&b, Vec3::new(5.0, 0.0, 0.0)),
+            )]
+            .into_iter(),
         );
         assert!(hit.is_none());
     }
@@ -1109,13 +1134,19 @@ mod tests {
             at(&s, Vec3::ZERO),
             Vec3::new(20.0, 0.0, 0.0),
             [
-                (1usize, at(&b, Vec3::new(9.0, 0.0, 0.0))),
-                (2usize, at(&b, Vec3::new(5.0, 0.0, 0.0))),
+                (
+                    crate::body::BodyHandle::from_raw(1),
+                    at(&b, Vec3::new(9.0, 0.0, 0.0)),
+                ),
+                (
+                    crate::body::BodyHandle::from_raw(2),
+                    at(&b, Vec3::new(5.0, 0.0, 0.0)),
+                ),
             ]
             .into_iter(),
         )
         .expect("must hit");
-        assert_eq!(hit.handle, 2);
+        assert_eq!(hit.handle, crate::body::BodyHandle::from_raw(2));
         assert!((hit.t - 3.0).abs() < 2e-3, "t = {}", hit.t);
     }
 }

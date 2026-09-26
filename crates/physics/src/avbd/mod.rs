@@ -129,6 +129,7 @@ use std::f32::consts::PI;
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
+use crate::errors::{JointError, QueryError};
 use crate::joint::{AxisConfig, JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit, tangent_basis};
 use crate::migration::{JointReference, JointSnapshot};
@@ -270,13 +271,13 @@ enum AvbdJointKind {
 }
 
 /// One gear side: referenced bodies, world axis, anchor levers and the
-/// live coordinate. `angular` selects torque (revolute) vs force
+/// live coordinate. `kind` selects torque (revolute) vs force
 /// (prismatic) gradients (mirrors the builtin `GearSideData`, minus the
 /// velocity terms AVBD doesn't need — BDF1 carries velocity).
 struct GearSide {
     a: usize,
     b: usize,
-    angular: bool,
+    kind: crate::flags::CoordKind,
     axis: Vec3,
     ra: Vec3,
     rb: Vec3,
@@ -437,8 +438,7 @@ impl AvbdEngine {
                 // transitions) — a missing entry means awake.
                 if self.asleep.get(h).copied().unwrap_or(false) && c.body_type == BodyType::Dynamic
                 {
-                    c.inv_mass = 1.0 / c.mass;
-                    c.inertia = c.shape.inertia(c.mass);
+                    c.restore_sleep_triple();
                 }
                 c
             })
@@ -458,8 +458,13 @@ impl AvbdEngine {
     }
 
     /// Restore a driver's within-step motion baseline after rebuilding.
-    pub(crate) fn restore_body_baseline(&mut self, h: usize, pose: crate::broadphase::PrevPose) {
+    pub(crate) fn restore_body_baseline(
+        &mut self,
+        h: crate::body::BodyHandle,
+        pose: crate::broadphase::PrevPose,
+    ) {
         self.ensure_scratch();
+        let h = h.index();
         if h < self.bodies.len() {
             self.prev_pos[h] = pose.pos;
             self.prev_rot[h] = pose.rot;
@@ -469,15 +474,43 @@ impl AvbdEngine {
     /// Completed-step event baseline for transparent solver migration.
     pub(crate) fn event_state(&self) -> crate::migration::EventState {
         crate::migration::EventState {
-            contacts: self.prev_touch.iter().copied().collect(),
-            triggers: self.prev_trigger.iter().copied().collect(),
+            contacts: self
+                .prev_touch
+                .iter()
+                .copied()
+                .map(|(a, b)| {
+                    (
+                        crate::body::BodyHandle::from(a),
+                        crate::body::BodyHandle::from(b),
+                    )
+                })
+                .collect(),
+            triggers: self
+                .prev_trigger
+                .iter()
+                .copied()
+                .map(|(a, b)| {
+                    (
+                        crate::body::BodyHandle::from(a),
+                        crate::body::BodyHandle::from(b),
+                    )
+                })
+                .collect(),
         }
     }
 
     /// Seed a rebuilt solver without manufacturing a new contact/trigger begin.
     pub(crate) fn restore_event_state(&mut self, state: crate::migration::EventState) {
-        self.prev_touch = state.contacts.into_iter().collect();
-        self.prev_trigger = state.triggers.into_iter().collect();
+        self.prev_touch = state
+            .contacts
+            .into_iter()
+            .map(|(a, b)| (a.index(), b.index()))
+            .collect();
+        self.prev_trigger = state
+            .triggers
+            .into_iter()
+            .map(|(a, b)| (a.index(), b.index()))
+            .collect();
     }
 
     /// Number of live joints in dense handle order.
@@ -496,9 +529,15 @@ impl AvbdEngine {
                     ..JointReference::default()
                 };
                 match j.kind {
-                    AvbdJointKind::Revolute => reference.angle = j.ref_val,
-                    AvbdJointKind::Prismatic | AvbdJointKind::Wheel => reference.length = j.ref_val,
-                    AvbdJointKind::Distance | AvbdJointKind::Gear => reference.distance = j.ref_val,
+                    AvbdJointKind::Revolute => {
+                        reference.angle = crate::invariants::Radians(j.ref_val);
+                    }
+                    AvbdJointKind::Prismatic | AvbdJointKind::Wheel => {
+                        reference.length = crate::invariants::Meters(j.ref_val);
+                    }
+                    AvbdJointKind::Distance | AvbdJointKind::Gear => {
+                        reference.distance = crate::invariants::Meters(j.ref_val);
+                    }
                     _ => {}
                 }
                 if j.kind == AvbdJointKind::Gear
@@ -511,12 +550,12 @@ impl AvbdEngine {
                         Self::joint_coordinate(side, &self.bodies[side.a], &self.bodies[side.b])
                             .unwrap_or(0.0)
                     };
-                    reference.distance -=
+                    reference.distance.0 -=
                         (a.coord - raw(j.gb[0])) + j.gratio * (b.coord - raw(j.gb[1]));
                 }
                 JointSnapshot {
-                    a: j.a,
-                    b: j.b,
+                    a: crate::body::BodyHandle::from(j.a),
+                    b: crate::body::BodyHandle::from(j.b),
                     spec: j.spec,
                     reference,
                 }
@@ -526,15 +565,15 @@ impl AvbdEngine {
 
     /// Restore the assembly pose after creating a migrated joint.
     pub(crate) fn restore_joint_reference(&mut self, h: JointHandle, r: JointReference) {
-        let Some(j) = self.joints.get_mut(h) else {
+        let Some(j) = self.joints.get_mut(h.index()) else {
             return;
         };
         j.q_ref = r.rotation;
         j.dref = r.anchor_delta;
         j.ref_val = match j.kind {
-            AvbdJointKind::Revolute => r.angle,
-            AvbdJointKind::Prismatic | AvbdJointKind::Wheel => r.length,
-            AvbdJointKind::Distance | AvbdJointKind::Gear => r.distance,
+            AvbdJointKind::Revolute => r.angle.0,
+            AvbdJointKind::Prismatic | AvbdJointKind::Wheel => r.length.0,
+            AvbdJointKind::Distance | AvbdJointKind::Gear => r.distance.0,
             _ => j.ref_val,
         };
     }
@@ -553,7 +592,7 @@ impl AvbdEngine {
                     joint_a, joint_b, ..
                 } = j.spec
                 {
-                    j.gb = [joint_a, joint_b];
+                    j.gb = [joint_a.index(), joint_b.index()];
                 }
             }
             keep
@@ -600,11 +639,7 @@ impl AvbdEngine {
         if h >= self.asleep.len() || self.bodies[h].body_type != BodyType::Dynamic {
             return;
         }
-        let b = &mut self.bodies[h];
-        b.velocity = Vec3::ZERO;
-        b.angular_velocity = Vec3::ZERO;
-        b.inv_mass = 0.0;
-        b.inertia = Vec3::ZERO;
+        self.bodies[h].sleep_staticify();
         self.asleep[h] = true;
     }
 
@@ -619,11 +654,7 @@ impl AvbdEngine {
         }
         self.asleep[h] = false;
         self.sleep_timer[h] = 0.0;
-        let b = &mut self.bodies[h];
-        if b.body_type == BodyType::Dynamic {
-            b.inv_mass = 1.0 / b.mass;
-            b.inertia = b.shape.inertia(b.mass);
-        }
+        self.bodies[h].wake_restore();
     }
 
     /// One fixed `DT_STEP` advance. Hit/contact events emit only on the
@@ -704,7 +735,7 @@ impl AvbdEngine {
                     })
                     .map(|o| {
                         (
-                            o,
+                            BodyHandle::from(o),
                             ShapeRef {
                                 shape: &self.bodies[o].shape,
                                 pos: self.bodies[o].position,
@@ -725,13 +756,14 @@ impl AvbdEngine {
                 let frac = (hit.t / len).clamp(0.0, 1.0);
                 let e = self.bodies[h]
                     .restitution
-                    .min(self.bodies[hit.handle].restitution);
-                let approach = -(self.pre_vel[h] - self.pre_vel[hit.handle]).dot(hit.normal);
+                    .min(self.bodies[hit.handle.index()].restitution);
+                let approach =
+                    -(self.pre_vel[h] - self.pre_vel[hit.handle.index()]).dot(hit.normal);
                 if approach > CONTACT_HIT_THRESHOLD {
-                    let (a, b, normal) = if h < hit.handle {
-                        (h, hit.handle, -hit.normal)
+                    let (a, b, normal) = if h < hit.handle.index() {
+                        (BodyHandle::from(h), hit.handle, -hit.normal)
                     } else {
-                        (hit.handle, h, hit.normal)
+                        (hit.handle, BodyHandle::from(h), hit.normal)
                     };
                     ccd_hits.push(ContactEvent {
                         body_a: a,
@@ -750,7 +782,7 @@ impl AvbdEngine {
                     let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
                     b.velocity -= hit.normal * (bounce * vn);
                 }
-                self.wake_body(hit.handle);
+                self.wake_body(hit.handle.index());
                 // Any sleeper now touching this relocated body feels the
                 // impact next pair pass (fresh-contact rule); its velocity
                 // field is authoritative below, so freeze it now.
@@ -1016,11 +1048,12 @@ impl PhysicsEngine for AvbdEngine {
     }
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
         self.bodies.push(body);
-        self.bodies.len() - 1
+        BodyHandle::from(self.bodies.len() - 1)
     }
 
     fn remove_body(&mut self, handle: BodyHandle) {
-        if handle >= self.bodies.len() {
+        let hi = handle.index();
+        if hi >= self.bodies.len() {
             return;
         }
         let last = self.bodies.len() - 1;
@@ -1028,32 +1061,28 @@ impl PhysicsEngine for AvbdEngine {
         let mut exited: Vec<(usize, usize)> = self
             .prev_trigger
             .iter()
-            .filter(|(a, b)| *a == handle || *b == handle)
+            .filter(|(a, b)| *a == hi || *b == hi)
             .map(|(a, b)| (*a, *b))
             .collect();
         exited.sort_unstable();
         for (a, b) in exited {
             self.trigger_events.push(TriggerEvent {
-                body_a: a,
-                body_b: b,
+                body_a: crate::body::BodyHandle::from(a),
+                body_b: crate::body::BodyHandle::from(b),
                 kind: TriggerEventKind::Exited,
             });
         }
-        self.bodies.swap_remove(handle);
-        let map = |h: usize| if h == last { handle } else { h };
+        self.bodies.swap_remove(hi);
+        let map = |h: usize| if h == last { hi } else { h };
         self.pairs.retain_mut(|p| {
-            if p.a == handle || p.b == handle {
+            if p.a == hi || p.b == hi {
                 return false;
             }
             p.a = map(p.a);
             p.b = map(p.b);
             true
         });
-        let removed = self
-            .joints
-            .iter()
-            .map(|j| j.a == handle || j.b == handle)
-            .collect();
+        let removed = self.joints.iter().map(|j| j.a == hi || j.b == hi).collect();
         self.retain_joints(removed);
         for j in &mut self.joints {
             j.a = map(j.a);
@@ -1061,8 +1090,7 @@ impl PhysicsEngine for AvbdEngine {
         }
         // Handle-keyed state is stale after the swap (builtin parity).
         self.prev_touch.clear();
-        self.prev_trigger
-            .retain(|(a, b)| *a != handle && *b != handle);
+        self.prev_trigger.retain(|(a, b)| *a != hi && *b != hi);
         let mut remapped = BTreeSet::new();
         for (a, b) in &self.prev_trigger {
             remapped.insert((map(*a).min(map(*b)), map(*a).max(map(*b))));
@@ -1071,13 +1099,13 @@ impl PhysicsEngine for AvbdEngine {
         self.contact_events.clear();
         // Sleep vecs stay parallel; indices shifted, so wake everything
         // (removal is rare and correctness beats one quiet timer).
-        if handle < self.sleep_timer.len() {
-            self.sleep_timer.swap_remove(handle);
-            self.asleep.swap_remove(handle);
+        if hi < self.sleep_timer.len() {
+            self.sleep_timer.swap_remove(hi);
+            self.asleep.swap_remove(hi);
         }
-        if handle < self.prev_pos.len() {
-            self.prev_pos.swap_remove(handle);
-            self.prev_rot.swap_remove(handle);
+        if hi < self.prev_pos.len() {
+            self.prev_pos.swap_remove(hi);
+            self.prev_rot.swap_remove(hi);
         }
         for h in 0..self.bodies.len() {
             self.wake_body(h);
@@ -1085,11 +1113,11 @@ impl PhysicsEngine for AvbdEngine {
     }
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
-        self.bodies.get(handle)
+        self.bodies.get(usize::from(handle))
     }
 
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody> {
-        self.bodies.get_mut(handle)
+        self.bodies.get_mut(usize::from(handle))
     }
 
     fn add_joint(
@@ -1097,17 +1125,19 @@ impl PhysicsEngine for AvbdEngine {
         body_a: BodyHandle,
         body_b: BodyHandle,
         kind: JointKind,
-    ) -> Option<JointHandle> {
-        if !crate::migration::valid_joint(&kind) {
-            return None;
-        }
+    ) -> Result<JointHandle, JointError> {
+        crate::migration::validate_joint(&kind)?;
         // A new constraint disturbs both assemblies (builtin wakes the
         // island; AVBD wakes per body). Spurious wake on rejected specs is
         // harmless — one quiet timer restarts.
-        self.wake_body(body_a);
-        self.wake_body(body_b);
-        if body_a >= self.bodies.len() || body_b >= self.bodies.len() || body_a == body_b {
-            return None;
+        self.wake_body(usize::from(body_a));
+        self.wake_body(usize::from(body_b));
+        let (ia, ib) = (usize::from(body_a), usize::from(body_b));
+        if ia == ib {
+            return Err(JointError::SelfJoint { handle: ia });
+        }
+        if ia >= self.bodies.len() || ib >= self.bodies.len() {
+            return Err(JointError::InvalidHandles { a: ia, b: ib });
         }
         // Gear holds no bodies of its own (coordinates other joints):
         // validate + capture the assembly constant up front; rows resolve
@@ -1119,15 +1149,24 @@ impl PhysicsEngine for AvbdEngine {
         } = kind
         {
             if !ratio.is_finite() {
-                return None;
+                return Err(JointError::NonFinite {
+                    field: "ratio".to_string(),
+                });
             }
-            let (Some(ja), Some(jb)) = (self.joints.get(joint_a), self.joints.get(joint_b)) else {
-                return None;
+            let (Some(ja), Some(jb)) = (
+                self.joints.get(joint_a.index()),
+                self.joints.get(joint_b.index()),
+            ) else {
+                return Err(JointError::UnknownRef {
+                    handle: self.joints.len(),
+                });
             };
             if !matches!(ja.kind, AvbdJointKind::Revolute | AvbdJointKind::Prismatic)
                 || !matches!(jb.kind, AvbdJointKind::Revolute | AvbdJointKind::Prismatic)
             {
-                return None;
+                return Err(JointError::Unsupported {
+                    detail: "gear must coordinate revolute/prismatic joints".to_string(),
+                });
             }
             // NOTE: coordinates read the REFERENCED joints' bodies.
             let ca = {
@@ -1139,8 +1178,8 @@ impl PhysicsEngine for AvbdEngine {
                 Self::joint_coordinate(jb, x, y).unwrap_or(0.0)
             };
             let joint = AvbdJoint {
-                a: body_a,
-                b: body_b,
+                a: ia,
+                b: ib,
                 la: Vec3::ZERO,
                 lb: Vec3::ZERO,
                 ax_a: Vec3::X,
@@ -1156,7 +1195,7 @@ impl PhysicsEngine for AvbdEngine {
                 mot: None,
                 acc_lim: 0.0,
                 lim_dual: 0.0,
-                gb: [joint_a, joint_b],
+                gb: [joint_a.index(), joint_b.index()],
                 gratio: ratio,
                 gear_mem: None,
                 six_lin: [AxisConfig::Free; 3],
@@ -1169,10 +1208,10 @@ impl PhysicsEngine for AvbdEngine {
                 pen_a: [JOINT_PENALTY_INIT; 3],
             };
             self.joints.push(joint);
-            return Some(self.joints.len() - 1);
+            return Ok(JointHandle::from(self.joints.len() - 1));
         }
-        let ba = &self.bodies[body_a];
-        let bb = &self.bodies[body_b];
+        let ba = &self.bodies[ia];
+        let bb = &self.bodies[ib];
         // Frames + assembly references, resolved once in the shared
         // `joint::resolve_joint` (same values the builtin engine captures).
         let r = crate::joint::resolve_joint(
@@ -1184,8 +1223,8 @@ impl PhysicsEngine for AvbdEngine {
         )
         .expect("non-gear/sixdof kinds resolve");
         let mut joint = AvbdJoint {
-            a: body_a,
-            b: body_b,
+            a: ia,
+            b: ib,
             la: r.la,
             lb: r.lb,
             ax_a: r.ax_a,
@@ -1219,7 +1258,9 @@ impl PhysicsEngine for AvbdEngine {
                 // Admission policy: degenerate hinge axes reject (the
                 // builtin substitutes a fallback instead).
                 if r.degenerate {
-                    return None;
+                    return Err(JointError::BadAxis {
+                        detail: "degenerate revolute hinge axis".to_string(),
+                    });
                 }
                 joint.kind = AvbdJointKind::Revolute;
                 joint.ref_val = r.ref_angle;
@@ -1228,7 +1269,9 @@ impl PhysicsEngine for AvbdEngine {
             }
             JointKind::Prismatic { limit, motor, .. } => {
                 if r.degenerate {
-                    return None;
+                    return Err(JointError::BadAxis {
+                        detail: "degenerate prismatic slide axis".to_string(),
+                    });
                 }
                 joint.kind = AvbdJointKind::Prismatic;
                 joint.ref_val = r.ref_length;
@@ -1253,7 +1296,9 @@ impl PhysicsEngine for AvbdEngine {
             }
             JointKind::Gear { .. } => {
                 // Handled by the early gear block above; unreachable here.
-                return None;
+                return Err(JointError::Unsupported {
+                    detail: "gear handled above".to_string(),
+                });
             }
             JointKind::SixDof {
                 linear, angular, ..
@@ -1266,24 +1311,22 @@ impl PhysicsEngine for AvbdEngine {
             }
         };
         self.joints.push(joint);
-        Some(self.joints.len() - 1)
+        Ok(JointHandle::from(self.joints.len() - 1))
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
-        if handle < self.joints.len() {
-            let (a, b) = (self.joints[handle].a, self.joints[handle].b);
+        if handle.index() < self.joints.len() {
+            let (a, b) = (self.joints[handle.index()].a, self.joints[handle.index()].b);
             self.wake_body(a);
             self.wake_body(b);
             let mut removed = vec![false; self.joints.len()];
-            removed[handle] = true;
+            removed[handle.index()] = true;
             self.retain_joints(removed);
         }
     }
 
-    fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
-        if max_dist.is_nan() || max_dist < 0.0 || !ray.direction.is_finite() {
-            return None;
-        }
+    fn raycast(&self, ray: Ray, max_dist: f32) -> Result<Option<RaycastHit>, QueryError> {
+        crate::errors::check_ray_input(ray.origin, ray.direction, max_dist)?;
         let mut closest: Option<RaycastHit> = None;
         for (h, body) in self.bodies.iter().enumerate() {
             let inverse = body.orientation.inverse();
@@ -1297,14 +1340,14 @@ impl PhysicsEngine for AvbdEngine {
             let nearer = closest.as_ref().is_none_or(|c| distance < c.distance);
             if nearer {
                 closest = Some(RaycastHit {
-                    handle: h,
+                    handle: BodyHandle::from(h),
                     point: ray.point_at(distance),
                     normal: (body.orientation * local_normal).normalize_or(Vec3::Y),
                     distance,
                 });
             }
         }
-        closest
+        Ok(closest)
     }
 
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit> {
@@ -1315,7 +1358,7 @@ impl PhysicsEngine for AvbdEngine {
         };
         let targets = self.bodies.iter().enumerate().map(|(h, b)| {
             (
-                h,
+                crate::body::BodyHandle::from(h),
                 ShapeRef {
                     shape: &b.shape,
                     pos: b.position,
@@ -1340,7 +1383,7 @@ impl PhysicsEngine for AvbdEngine {
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {
-        self.wake_body(handle);
+        self.wake_body(handle.index());
     }
 }
 
@@ -1351,8 +1394,8 @@ impl AvbdEngine {
             let (a, b) = (*a, *b);
             let entered = trigger_now.contains(&(a, b));
             self.trigger_events.push(TriggerEvent {
-                body_a: a,
-                body_b: b,
+                body_a: crate::body::BodyHandle::from(a),
+                body_b: crate::body::BodyHandle::from(b),
                 kind: if entered {
                     TriggerEventKind::Entered
                 } else {
@@ -1383,8 +1426,8 @@ impl AvbdEngine {
                     let approach = -((self.pre_vel[p.a] - self.pre_vel[p.b]).dot(p.n));
                     if approach > CONTACT_HIT_THRESHOLD {
                         hits.push(ContactEvent {
-                            body_a: p.a,
-                            body_b: p.b,
+                            body_a: crate::body::BodyHandle::from(p.a),
+                            body_b: crate::body::BodyHandle::from(p.b),
                             kind: ContactEventKind::Hit {
                                 point: witness,
                                 normal: -p.n,
@@ -1398,8 +1441,8 @@ impl AvbdEngine {
         for (a, b) in touch_now.symmetric_difference(&self.prev_touch) {
             let (a, b) = (*a, *b);
             self.contact_events.push(ContactEvent {
-                body_a: a,
-                body_b: b,
+                body_a: crate::body::BodyHandle::from(a),
+                body_b: crate::body::BodyHandle::from(b),
                 kind: if touch_now.contains(&(a, b)) {
                     ContactEventKind::Begin
                 } else {

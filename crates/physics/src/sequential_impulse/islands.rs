@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use ornis_schedule::run_levels;
 
 use super::*;
+use crate::flags::{Dispatch, RestitutionGate};
 
 impl SequentialImpulseEngine {
     /// Rebuild the constraint-graph islands (union-find over dynamic bodies
@@ -27,18 +28,23 @@ impl SequentialImpulseEngine {
         // other joints — union all four bodies through the (validated)
         // references so the geared assembly sleeps and wakes as one.
         for joint in &self.joints {
-            union_dynamic_pair(&mut parent, &self.bodies, joint.body_a, joint.body_b);
+            union_dynamic_pair(
+                &mut parent,
+                &self.bodies,
+                joint.body_a.index(),
+                joint.body_b.index(),
+            );
             if let JointKind::Gear {
                 joint_a, joint_b, ..
             } = &joint.kind
             {
                 for r in [*joint_a, *joint_b] {
-                    if let Some(referenced) = self.joints.get(r) {
+                    if let Some(referenced) = self.joints.get(r.index()) {
                         union_dynamic_pair(
                             &mut parent,
                             &self.bodies,
-                            referenced.body_a,
-                            referenced.body_b,
+                            referenced.body_a.index(),
+                            referenced.body_b.index(),
                         );
                     }
                 }
@@ -85,17 +91,13 @@ impl SequentialImpulseEngine {
         for h in 0..self.bodies.len() {
             if to_sleep.contains(&self.island[h]) {
                 self.asleep[h] = true;
-                let b = &mut self.bodies[h];
-                b.velocity = Vec3::ZERO;
-                b.angular_velocity = Vec3::ZERO;
                 // A sleeping body is STATIC for the solver (Jolt
                 // semantics): zero inverse mass/inertia makes every
                 // impulse and effective-mass computation treat it as
                 // immovable, so a resting contact with an awake body
                 // can never accumulate invisible velocity in the
                 // sleeper and detonate it on wake. Restored on wake.
-                b.inv_mass = 0.0;
-                b.inertia = Vec3::ZERO;
+                self.bodies[h].sleep_staticify();
             }
         }
     }
@@ -113,11 +115,7 @@ impl SequentialImpulseEngine {
             if self.island[h2] == root {
                 self.asleep[h2] = false;
                 // Undo the sleep-time staticification (see update_sleep).
-                let b = &mut self.bodies[h2];
-                if b.body_type == BodyType::Dynamic {
-                    b.inv_mass = 1.0 / b.mass;
-                    b.inertia = b.shape.inertia(b.mass);
-                }
+                self.bodies[h2].wake_restore();
             }
         }
         self.island_timers.insert(root, 0.0);
@@ -172,7 +170,7 @@ impl SequentialImpulseEngine {
         let mut parent = std::mem::take(&mut self.scratch_parent);
         for &mi in active {
             let m = &manifolds[mi];
-            let (a, b) = (m.body_a, m.body_b);
+            let (a, b) = (m.body_a.index(), m.body_b.index());
             if self.bodies[a].body_type == BodyType::Dynamic
                 && self.bodies[b].body_type == BodyType::Dynamic
             {
@@ -186,10 +184,10 @@ impl SequentialImpulseEngine {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for &mi in active {
             let m = &manifolds[mi];
-            let d = if self.bodies[m.body_a].body_type == BodyType::Dynamic {
-                m.body_a
+            let d = if self.bodies[m.body_a.index()].body_type == BodyType::Dynamic {
+                m.body_a.index()
             } else {
-                m.body_b
+                m.body_b.index()
             };
             let root = union_find(&mut parent, d);
             match group_of.entry(root) {
@@ -207,8 +205,8 @@ impl SequentialImpulseEngine {
         for group in groups {
             let mut body_idx: Vec<usize> = Vec::new();
             for &mi in &group {
-                body_idx.push(manifolds[mi].body_a);
-                body_idx.push(manifolds[mi].body_b);
+                body_idx.push(manifolds[mi].body_a.index());
+                body_idx.push(manifolds[mi].body_b.index());
             }
             body_idx.sort_unstable();
             body_idx.dedup();
@@ -218,8 +216,8 @@ impl SequentialImpulseEngine {
                 .iter()
                 .map(|&mi| {
                     let mut mc = manifolds[mi].clone();
-                    mc.body_a = local(manifolds[mi].body_a);
-                    mc.body_b = local(manifolds[mi].body_b);
+                    mc.body_a = crate::body::BodyHandle::from(local(manifolds[mi].body_a.index()));
+                    mc.body_b = crate::body::BodyHandle::from(local(manifolds[mi].body_b.index()));
                     mc
                 })
                 .collect();
@@ -227,7 +225,8 @@ impl SequentialImpulseEngine {
                 .iter()
                 .map(|&mi| {
                     let m = &manifolds[mi];
-                    (m.body_a.min(m.body_b), m.body_a.max(m.body_b))
+                    let (a, b) = (m.body_a.index(), m.body_b.index());
+                    (a.min(b), a.max(b))
                 })
                 .collect();
             islands.push(IslandWork {
@@ -242,17 +241,17 @@ impl SequentialImpulseEngine {
         islands
     }
 
-    /// Runs `f` over island work items: sequentially when `!parallel`, else
+    /// Runs `f` over island work items: sequentially when `Sequential`, else
     /// through one scheduler level with one node per island. Islands are
     /// disjoint over dynamic bodies, so concurrent execution is race-free;
     /// node order is fixed, so results stay deterministic for any thread
     /// count. Each node locks only its own island reference (uncontended);
     /// the single guard allocation is per dispatch, not per island.
-    pub(super) fn dispatch_islands<F>(islands: &mut [IslandWork], parallel: bool, f: F)
+    pub(super) fn dispatch_islands<F>(islands: &mut [IslandWork], mode: Dispatch, f: F)
     where
         F: Fn(usize, &mut IslandWork) + Sync,
     {
-        if !parallel {
+        if mode != Dispatch::Parallel {
             for (idx, isl) in islands.iter_mut().enumerate() {
                 f(idx, isl);
             }
@@ -270,7 +269,7 @@ impl SequentialImpulseEngine {
     pub(super) fn dispatch_islands_velocity(
         &mut self,
         islands: &mut [IslandWork],
-        allow_restitution: bool,
+        gate: RestitutionGate,
         sub_dt: f32,
         dt: f32,
     ) {
@@ -279,11 +278,13 @@ impl SequentialImpulseEngine {
         if islands.is_empty() {
             return;
         }
-        let parallel = islands.len() >= PAR_MIN_ISLANDS
-            && islands.iter().map(|i| i.manifolds.len()).sum::<usize>() >= PAR_MIN_MANIFOLDS;
+        let mode = Dispatch::from(
+            islands.len() >= PAR_MIN_ISLANDS
+                && islands.iter().map(|i| i.manifolds.len()).sum::<usize>() >= PAR_MIN_MANIFOLDS,
+        );
         let warm_in = &self.warm_impulses;
         let base_iters = self.velocity_iterations;
-        let wide_on = self.wide_solver;
+        let path = self.wide_solver;
         // per-island adaptive iters: precompute outside the dispatched closure
         // so we don't borrow `self` inside it (borrow checker).
         let iters_per_island: Vec<u32> = islands
@@ -303,7 +304,7 @@ impl SequentialImpulseEngine {
                 self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
             })
             .collect();
-        Self::dispatch_islands(islands, parallel, |idx, isl| {
+        Self::dispatch_islands(islands, mode, |idx, isl| {
             let iters = iters_per_island[idx];
             let (states, warm) = Self::solve_island_velocity(
                 &mut isl.bodies,
@@ -311,9 +312,9 @@ impl SequentialImpulseEngine {
                 &isl.keys,
                 warm_in,
                 iters,
-                allow_restitution,
+                gate,
                 sub_dt,
-                wide_on,
+                path,
             );
             isl.states = states;
             isl.warm = warm;
@@ -344,7 +345,7 @@ fn union_dynamic_pair(parent: &mut [usize], bodies: &[RigidBody], a: usize, b: u
 /// Union-find over the contact-graph edges of the fresh manifolds.
 fn union_contact_edges(parent: &mut [usize], bodies: &[RigidBody], manifolds: &[Manifold]) {
     for m in manifolds {
-        union_dynamic_pair(parent, bodies, m.body_a, m.body_b);
+        union_dynamic_pair(parent, bodies, m.body_a.index(), m.body_b.index());
     }
 }
 

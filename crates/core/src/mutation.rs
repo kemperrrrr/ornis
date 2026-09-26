@@ -24,9 +24,52 @@ use std::sync::{
 };
 
 use crate::{
-    ComponentMeta, ComponentRegistry, Engine, Entity, Resources, SmartStore, System, SystemAccess,
-    Time,
+    ComponentMeta, ComponentName, ComponentRegistry, Engine, Entity, Resources, SmartStore, System,
+    SystemAccess, Time,
 };
+
+/// Typed mutation failure: one rejection reason per entry.
+///
+/// Replaces the former `Vec<String>` free-form messages so producers can
+/// match on the reason while humans still get the same text via
+/// [`std::fmt::Display`] (legacy messages preserved verbatim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationError {
+    /// Component name is not registered.
+    UnknownComponent(ComponentName),
+    /// Target entity is not alive (id + generation for diagnostics).
+    EntityNotAlive {
+        /// Entity id.
+        id: u32,
+        /// Entity generation.
+        generation: u32,
+    },
+    /// Registry value failed to parse (`parse_json` message preserved).
+    Parse(String),
+    /// Parsed value failed to insert (internal type mismatch).
+    InsertMismatch(ComponentName),
+}
+
+impl std::fmt::Display for MutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MutationError::UnknownComponent(name) => {
+                write!(f, "unknown component `{}`", name.as_str())
+            }
+            MutationError::EntityNotAlive { id, generation } => {
+                write!(f, "entity {id}g{generation} is not alive")
+            }
+            MutationError::Parse(message) => f.write_str(message),
+            MutationError::InsertMismatch(name) => write!(
+                f,
+                "mutation for `{}` failed to insert (internal type mismatch)",
+                name.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MutationError {}
 
 /// One world-content change, producer-neutral.
 ///
@@ -41,7 +84,7 @@ pub enum Mutation {
         /// Target entity, generation included.
         entity: Entity,
         /// Registry name (see [`ComponentRegistry::by_name`]).
-        component: String,
+        component: ComponentName,
         /// New component value.
         value: serde_json::Value,
     },
@@ -75,8 +118,15 @@ pub struct AppliedMutation {
     /// Component writes performed. Zero with empty `errors` means
     /// "nothing to do"; zero with errors means "rejected".
     pub applied: usize,
-    /// One message per rejection.
-    pub errors: Vec<String>,
+    /// One typed rejection per failure.
+    pub errors: Vec<MutationError>,
+}
+
+impl AppliedMutation {
+    /// Legacy human-readable messages (verbatim [`MutationError`] texts).
+    pub fn error_messages(&self) -> Vec<String> {
+        self.errors.iter().map(|e| e.to_string()).collect()
+    }
 }
 
 /// Applies `mutations` to the world through `registry`.
@@ -112,13 +162,13 @@ fn apply_one(
             component,
             value,
         } => {
-            let meta = match registry.by_name(component) {
+            let meta = match registry.by_component(component) {
                 Some(meta) => meta,
                 None => {
                     return AppliedMutation {
                         index,
                         applied: 0,
-                        errors: vec![format!("unknown component `{component}`")],
+                        errors: vec![MutationError::UnknownComponent(component.clone())],
                     };
                 }
             };
@@ -126,11 +176,10 @@ fn apply_one(
                 return AppliedMutation {
                     index,
                     applied: 0,
-                    errors: vec![format!(
-                        "entity {}g{} is not alive",
-                        entity.id(),
-                        entity.generation()
-                    )],
+                    errors: vec![MutationError::EntityNotAlive {
+                        id: entity.id(),
+                        generation: entity.generation(),
+                    }],
                 };
             }
             match parse_and_insert(store, meta, *entity, value) {
@@ -139,10 +188,10 @@ fn apply_one(
                     applied: 1,
                     errors: Vec::new(),
                 },
-                Err(message) => AppliedMutation {
+                Err(error) => AppliedMutation {
                     index,
                     applied: 0,
-                    errors: vec![message],
+                    errors: vec![error],
                 },
             }
         }
@@ -156,15 +205,14 @@ fn parse_and_insert(
     meta: &ComponentMeta,
     entity: Entity,
     value: &serde_json::Value,
-) -> Result<(), String> {
-    let boxed = meta.parse_json(value).map_err(|error| error.to_string())?;
+) -> Result<(), MutationError> {
+    let boxed = meta
+        .parse_json(value)
+        .map_err(|error| MutationError::Parse(error.to_string()))?;
     if meta.insert_any(store, entity, boxed) {
         Ok(())
     } else {
-        Err(format!(
-            "mutation for `{}` failed to insert (internal type mismatch)",
-            meta.name()
-        ))
+        Err(MutationError::InsertMismatch(meta.component_name().clone()))
     }
 }
 

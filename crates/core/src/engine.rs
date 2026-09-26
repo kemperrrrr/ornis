@@ -6,6 +6,9 @@
 //! common bounded fixed-update boundary without coupling the core crate to a
 //! particular backend.
 
+use std::marker::PhantomData;
+
+use crate::typestate::{Building, FixedSteps, Frame, Phase, Running, Seconds, Tick};
 use crate::{InputState, Schedule, World};
 
 /// Default simulation step used by the backend-neutral fixed-update host.
@@ -41,6 +44,11 @@ impl Time {
         self.delta_seconds
     }
 
+    /// Duration of the current variable-rate frame as a [`Seconds`] newtype.
+    pub fn delta(self) -> Seconds {
+        Seconds::new(self.delta_seconds)
+    }
+
     /// Total elapsed variable-rate frame time in seconds.
     pub fn elapsed_seconds(self) -> f64 {
         self.elapsed_seconds
@@ -52,6 +60,11 @@ impl Time {
         self.frame
     }
 
+    /// Published frame count as a [`Frame`] newtype.
+    pub fn frame_id(self) -> Frame {
+        Frame::new(self.frame)
+    }
+
     fn advance(&mut self, delta_seconds: f32) {
         assert!(
             delta_seconds.is_finite() && delta_seconds >= 0.0,
@@ -60,6 +73,13 @@ impl Time {
         self.delta_seconds = delta_seconds;
         self.elapsed_seconds += f64::from(delta_seconds);
         self.frame = self.frame.saturating_add(1);
+    }
+
+    /// Advances the clock by a [`Seconds`] delta (same contract as the
+    /// `f32` path: finite and non-negative).
+    #[allow(dead_code)]
+    fn advance_secs(&mut self, delta: Seconds) {
+        self.advance(delta.get());
     }
 }
 
@@ -120,9 +140,22 @@ impl FixedTime {
         }
     }
 
+    /// Creates a fixed clock from [`Seconds`]/[`FixedSteps`] newtypes.
+    ///
+    /// Same contract as [`FixedTime::new`]: the step must be finite and
+    /// positive, the cap non-zero.
+    pub fn new_secs(fixed_delta: Seconds, max_steps_per_frame: FixedSteps) -> Self {
+        Self::new(fixed_delta.get(), max_steps_per_frame.get())
+    }
+
     /// Duration of one fixed simulation update in seconds.
     pub fn delta_seconds(self) -> f32 {
         self.delta_seconds
+    }
+
+    /// Duration of one fixed simulation update as a [`Seconds`] newtype.
+    pub fn delta(self) -> Seconds {
+        Seconds::new(self.delta_seconds)
     }
 
     /// Unconsumed fraction of simulation time after the current frame.
@@ -148,9 +181,19 @@ impl FixedTime {
         self.tick
     }
 
+    /// Fixed-update count as a [`Tick`] newtype.
+    pub fn tick_id(self) -> Tick {
+        Tick::new(self.tick)
+    }
+
     /// Number of fixed updates scheduled during the current frame.
     pub fn steps_this_frame(self) -> u32 {
         self.steps_this_frame
+    }
+
+    /// Fixed updates scheduled during the current frame as [`FixedSteps`].
+    pub fn steps(self) -> FixedSteps {
+        FixedSteps::new(self.steps_this_frame)
     }
 
     /// One-based index of the current frame's fixed update.
@@ -270,25 +313,121 @@ impl Stage {
 /// PostFrame` order; `PreUpdate`/`Input` are new once-per-frame schedules
 /// ahead of the fixed loop, while `Gameplay`/`PostFrame` delegate to the
 /// pre-existing `fixed_schedule`/`schedule` storage.
-pub struct Engine {
-    world: World,
+///
+/// The `State` phantom tracks the build/run phase ([`Building`]/[`Running`],
+/// default [`Running`]): a bare `Engine` keeps meaning a running engine, so
+/// every existing host compiles unchanged. Registration-heavy setup may
+/// start from [`Engine::new_building`] (or the [`EngineBuilder`]) and seal
+/// the engine with [`Engine::build`] before entering the frame loop. The
+/// phase is documentation-grade: `schedule_mut` stays available on a running
+/// engine for late-registration hosts (see the item-7 report), while the
+/// builder path is the opt-in strict route.
+pub struct Engine<State: Phase = Running> {
+    world: World<State>,
     schedule: Schedule,
     fixed_schedule: Schedule,
     pre_update: Schedule,
     input: Schedule,
+    phase: PhantomData<State>,
 }
 
-impl Default for Engine {
+impl<State: Phase> Default for Engine<State> {
+    /// Creates an empty engine with fresh [`World`], [`Time`], [`FixedTime`]
+    /// and [`InputState`] resources.
+    fn default() -> Self {
+        Self::new_in_phase()
+    }
+}
+
+impl Engine<Running> {
+    /// Creates an empty engine with fresh [`World`], [`Time`], [`FixedTime`]
+    /// and [`InputState`] resources.
+    pub fn new() -> Self {
+        Self::new_in_phase()
+    }
+}
+
+impl Engine<Building> {
+    /// Creates an empty build-phase engine for registration-heavy setup.
+    ///
+    /// Register systems and resources, then seal it with [`Engine::build`]
+    /// before entering the frame loop.
+    pub fn new_building() -> Self {
+        Self::new_in_phase()
+    }
+
+    /// Seals a build-phase engine into the running phase.
+    ///
+    /// The world (including the authoritative [`SmartStore`](crate::SmartStore))
+    /// and all staged schedules move over untouched; only the phase marker
+    /// changes. Frame execution should start after this call.
+    #[must_use]
+    pub fn build(self) -> Engine<Running> {
+        Engine {
+            world: self.world.build(),
+            schedule: self.schedule,
+            fixed_schedule: self.fixed_schedule,
+            pre_update: self.pre_update,
+            input: self.input,
+            phase: PhantomData,
+        }
+    }
+}
+
+/// `#[must_use]` builder for an [`Engine`] with a non-default fixed clock.
+///
+/// The builder itself is the phase discipline made ergonomic: configure the
+/// fixed step once, then `build()` hands back a sealed running engine, so
+/// the fixed configuration cannot be widened again by accident.
+#[must_use]
+#[derive(Debug)]
+pub struct EngineBuilder {
+    fixed_delta: Seconds,
+    max_steps: FixedSteps,
+}
+
+impl EngineBuilder {
+    /// Starts a builder with the default fixed clock
+    /// ([`DEFAULT_FIXED_DELTA_SECONDS`], [`DEFAULT_MAX_FIXED_STEPS_PER_FRAME`]).
+    pub fn new() -> Self {
+        Self {
+            fixed_delta: Seconds::new(DEFAULT_FIXED_DELTA_SECONDS),
+            max_steps: FixedSteps::new(DEFAULT_MAX_FIXED_STEPS_PER_FRAME),
+        }
+    }
+
+    /// Sets the fixed simulation step.
+    pub fn fixed_delta(mut self, fixed_delta: Seconds) -> Self {
+        self.fixed_delta = fixed_delta;
+        self
+    }
+
+    /// Sets the maximum fixed updates per frame (hitch protection cap).
+    pub fn max_steps(mut self, max_steps: FixedSteps) -> Self {
+        self.max_steps = max_steps;
+        self
+    }
+
+    /// Builds a sealed running engine with the configured fixed clock.
+    pub fn build(self) -> Engine<Running> {
+        let mut engine = Engine::new();
+        let _ = engine
+            .world_mut()
+            .insert(FixedTime::new(self.fixed_delta.get(), self.max_steps.get()));
+        engine
+    }
+}
+
+impl Default for EngineBuilder {
+    /// Starts a builder with the default fixed clock.
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Engine {
-    /// Creates an empty engine with fresh [`World`], [`Time`], [`FixedTime`]
-    /// and [`InputState`] resources.
-    pub fn new() -> Self {
-        let mut world = World::new();
+impl<State: Phase> Engine<State> {
+    fn new_in_phase() -> Self {
+        let mut world = World::<State>::new_in_phase();
         let _ = world.insert(Time::new());
         let _ = world.insert(FixedTime::default());
         let _ = world.insert(InputState::new());
@@ -298,11 +437,12 @@ impl Engine {
             fixed_schedule: Schedule::new(),
             pre_update: Schedule::new(),
             input: Schedule::new(),
+            phase: PhantomData,
         }
     }
 
     /// Returns the logical world for read-only inspection.
-    pub fn world(&self) -> &World {
+    pub fn world(&self) -> &World<State> {
         &self.world
     }
 
@@ -311,7 +451,7 @@ impl Engine {
     /// Domain resources should be registered between frame calls. Replacing
     /// the `Time` or `FixedTime` resource is supported; the next frame
     /// recreates a missing clock with its default configuration.
-    pub fn world_mut(&mut self) -> &mut World {
+    pub fn world_mut(&mut self) -> &mut World<State> {
         &mut self.world
     }
 
@@ -467,6 +607,12 @@ impl Engine {
         if let Some(input) = self.world.resources_mut().get_mut::<InputState>() {
             input.clear_frame_transients();
         }
+    }
+
+    /// Runs one frame with a [`Seconds`] delta (same contract as the `f32`
+    /// path: finite and non-negative).
+    pub fn run_frame_secs(&mut self, delta: Seconds) {
+        self.run_frame(delta.get());
     }
 }
 
@@ -824,5 +970,66 @@ mod tests {
     #[should_panic(expected = "maximum fixed steps per frame must be positive")]
     fn fixed_time_rejects_zero_step_cap() {
         let _ = FixedTime::new(DEFAULT_FIXED_DELTA_SECONDS, 0);
+    }
+
+    #[test]
+    fn secs_newtypes_mirror_raw_accessors() {
+        let mut time = Time::new();
+        time.advance_secs(Seconds::new(0.25));
+        assert_eq!(time.delta(), Seconds::new(0.25));
+        assert_eq!(time.frame_id(), Frame::new(1));
+
+        let fixed = FixedTime::new_secs(Seconds::new(1.0 / 60.0), FixedSteps::new(4));
+        assert_eq!(fixed.delta(), Seconds::new(1.0 / 60.0));
+        assert_eq!(fixed.tick_id(), Tick::ZERO);
+        assert_eq!(fixed.steps(), FixedSteps::ZERO);
+        assert_eq!(fixed.max_steps_per_frame(), 4);
+    }
+
+    #[test]
+    fn run_frame_secs_matches_raw_delta() {
+        let mut engine = Engine::new();
+        engine.run_frame_secs(Seconds::new(0.5));
+        let time = engine
+            .world()
+            .resources()
+            .get::<Time>()
+            .expect("engine publishes Time");
+        assert_eq!(time.frame_id(), Frame::new(1));
+        assert_eq!(time.delta(), Seconds::new(0.5));
+    }
+
+    #[test]
+    fn building_engine_seals_into_running() {
+        let mut building = Engine::new_building();
+        let _ = building
+            .world_mut()
+            .insert(TraceLog(Arc::new(Mutex::new(Vec::new()))));
+        building.schedule_mut().add_system(Trace { fixed: false });
+        let mut running = building.build();
+        running.run_frame(FixedTime::default().delta_seconds());
+        assert_eq!(running.schedule().len(), 1);
+    }
+
+    #[test]
+    fn builder_configures_fixed_clock_then_seals() {
+        let mut engine = EngineBuilder::new()
+            .fixed_delta(Seconds::new(1.0 / 30.0))
+            .max_steps(FixedSteps::new(4))
+            .build();
+        let fixed = engine
+            .world()
+            .resources()
+            .get::<FixedTime>()
+            .expect("engine publishes FixedTime");
+        assert_eq!(fixed.delta(), Seconds::new(1.0 / 30.0));
+        assert_eq!(fixed.max_steps_per_frame(), 4);
+        engine.run_frame(1.0 / 30.0);
+        let fixed = engine
+            .world()
+            .resources()
+            .get::<FixedTime>()
+            .expect("engine publishes FixedTime");
+        assert_eq!(fixed.tick_id(), Tick::new(1));
     }
 }

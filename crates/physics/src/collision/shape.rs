@@ -17,6 +17,7 @@
 
 use glam::{Quat, Vec2, Vec3};
 
+use crate::errors::MeshError;
 use crate::math::AABB;
 
 /// Convex collision primitives supported by the sequential-impulse engine.
@@ -93,6 +94,13 @@ pub struct ConvexHull {
 /// Heightfield terrain: a regular X/Z grid of heights, centered on the
 /// body origin (+Y up). `heights[row * cols + col]`, `rows` along +Z,
 /// `cols` along +X, uniform `cell` spacing.
+///
+/// Construction invariant (`heights.len() == rows * cols`, non-empty grid,
+/// positive finite `cell`, finite samples) is enforced by the checked
+/// [`Heightfield::new`] (plus [`Heightfield::validate`] /
+/// [`Heightfield::is_valid`] for re-checks); the fields stay `pub` for
+/// solver-adjacent compat, so queries keep defensive guards for
+/// legacy-constructed values instead of assuming validity.
 #[derive(Debug, Clone)]
 pub struct Heightfield {
     /// Row-major heights (`rows * cols` entries).
@@ -145,26 +153,148 @@ pub enum PairSupport {
     UnsupportedPair,
 }
 
+/// Link of one [`BvhNode`]: either a leaf owning a triangle range or an
+/// internal node branching to two children.
+///
+/// Replaces the legacy `left == u32::MAX` sentinel so leaf/internal
+/// confusion is a type error, not a silent wrong traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BvhLink {
+    /// Leaf owning `order[start..start+count]`.
+    Leaf {
+        /// First triangle in [`TriMesh::order`].
+        start: u32,
+        /// Triangle count.
+        count: u32,
+    },
+    /// Internal node branching to two children.
+    Node {
+        /// Left child node index.
+        left: u32,
+        /// Right child node index.
+        right: u32,
+    },
+}
+
+impl BvhLink {
+    /// Empty leaf owning no triangles.
+    pub(crate) const fn empty_leaf() -> Self {
+        Self::Leaf { start: 0, count: 0 }
+    }
+
+    /// Leaf range as `(start, count)`, or `None` for internal nodes.
+    pub(crate) const fn leaf_range(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Leaf { start, count } => Some((start, count)),
+            Self::Node { .. } => None,
+        }
+    }
+
+    /// Child indices, or `None` for leaves.
+    pub(crate) const fn children(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Node { left, right } => Some((left, right)),
+            Self::Leaf { .. } => None,
+        }
+    }
+}
+
 /// One median-split AABB BVH node in mesh-local space. Internal nodes
-/// branch to `left`/`right`; leaves (`left == u32::MAX`) own the
-/// triangle range `start..start+count`.
+/// branch via [`BvhLink::Node`]; leaves own their triangle range via
+/// [`BvhLink::Leaf`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BvhNode {
     /// Node bounding-box min.
     pub min: Vec3,
     /// Node bounding-box max.
     pub max: Vec3,
-    /// Left child index, or `u32::MAX` for leaves.
-    pub left: u32,
-    /// Right child index (leaves only: unused).
-    pub right: u32,
-    /// First triangle (leaves only).
-    pub start: u32,
-    /// Triangle count (leaves only).
-    pub count: u32,
+    /// Leaf vs internal link (replaces the `left == u32::MAX` sentinel).
+    pub link: BvhLink,
 }
 
 impl Shape {
+    /// Checked sphere: `None` unless `radius` is finite and `> 0`.
+    pub fn try_sphere(radius: ornis_core::units::Meters) -> Option<Self> {
+        let r = radius.get();
+        if r.is_finite() && r > 0.0 {
+            Some(Self::Sphere { radius: r })
+        } else {
+            None
+        }
+    }
+
+    /// Checked capsule: `None` unless both `radius` and `half_height` are
+    /// finite and `> 0`.
+    pub fn try_capsule(
+        radius: ornis_core::units::Meters,
+        half_height: ornis_core::units::Meters,
+    ) -> Option<Self> {
+        let (r, h) = (radius.get(), half_height.get());
+        if r.is_finite() && r > 0.0 && h.is_finite() && h > 0.0 {
+            Some(Self::Capsule {
+                radius: r,
+                half_height: h,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Checked cylinder: `None` unless both `radius` and `half_height` are
+    /// finite and `> 0`.
+    pub fn try_cylinder(
+        radius: ornis_core::units::Meters,
+        half_height: ornis_core::units::Meters,
+    ) -> Option<Self> {
+        let (r, h) = (radius.get(), half_height.get());
+        if r.is_finite() && r > 0.0 && h.is_finite() && h > 0.0 {
+            Some(Self::Cylinder {
+                radius: r,
+                half_height: h,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Checked cone: `None` unless both `radius` and `half_height` are
+    /// finite and `> 0`.
+    pub fn try_cone(
+        radius: ornis_core::units::Meters,
+        half_height: ornis_core::units::Meters,
+    ) -> Option<Self> {
+        let (r, h) = (radius.get(), half_height.get());
+        if r.is_finite() && r > 0.0 && h.is_finite() && h > 0.0 {
+            Some(Self::Cone {
+                radius: r,
+                half_height: h,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Checked heightfield over a typed cell spacing: `None` unless the
+    /// grid description satisfies [`Heightfield::new`].
+    pub fn try_heightfield(
+        heights: Vec<f32>,
+        rows: usize,
+        cols: usize,
+        cell: ornis_core::units::Meters,
+    ) -> Option<Self> {
+        Heightfield::new(heights, rows, cols, cell.get())
+            .ok()
+            .map(Self::Heightfield)
+    }
+
+    /// Sphere radius in meters, or `None` for non-sphere shapes.
+    pub fn sphere_radius(&self) -> Option<ornis_core::units::Meters> {
+        match self {
+            Self::Sphere { radius } => Some(ornis_core::units::Meters::new(*radius)),
+            _ => None,
+        }
+    }
+
     /// World-space AABB of the shape at `position` with `orientation`.
     pub fn aabb(&self, position: Vec3, orientation: Quat) -> AABB {
         match self {
@@ -579,7 +709,16 @@ impl ConvexHull {
     /// order). Degenerate input (fewer than 4 non-coplanar points) yields a
     /// hull with empty faces — collisions degrade to the vertex cloud, they
     /// never panic.
-    pub fn from_vertices(points: Vec<Vec3>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`MeshError::NonFiniteVertex`] when any input vertex is non-finite.
+    pub fn from_vertices(points: Vec<Vec3>) -> Result<Self, MeshError> {
+        for (index, p) in points.iter().enumerate() {
+            if !p.is_finite() {
+                return Err(MeshError::NonFiniteVertex { index });
+            }
+        }
         let mut vertices: Vec<Vec3> = Vec::with_capacity(points.len());
         for p in points {
             if !vertices
@@ -594,7 +733,7 @@ impl ConvexHull {
         } else {
             Vec::new()
         };
-        Self { vertices, faces }
+        Ok(Self { vertices, faces })
     }
 
     /// Outward triangles: every ordered triple whose plane keeps all other
@@ -657,10 +796,25 @@ impl ConvexHull {
     /// the origin, exact for closed hulls; off-diagonal products are
     /// dropped — the solver stores a body-frame diagonal). Falls back to
     /// the local bounding box when faces are missing.
+    ///
+    /// Legacy wrapper over [`ConvexHull::try_inertia`]: degenerate input
+    /// silently uses the bounding box so existing scenes are bit-identical.
     pub fn inertia(&self, mass: f32) -> Vec3 {
-        if self.faces.is_empty() || mass <= 0.0 {
+        self.try_inertia(mass).unwrap_or_else(|_| {
             let e = self.local_box();
-            return Shape::Box { half_extents: e }.inertia(mass);
+            Shape::Box { half_extents: e }.inertia(mass)
+        })
+    }
+
+    /// Exact diagonal inertia, or [`MeshError::DegenerateMesh`] when the
+    /// hull has no usable faces/volume for the Mirtich sum.
+    ///
+    /// # Errors
+    ///
+    /// `DegenerateMesh` on empty faces, non-positive mass, or near-zero volume.
+    pub fn try_inertia(&self, mass: f32) -> Result<Vec3, MeshError> {
+        if self.faces.is_empty() || mass <= 0.0 {
+            return Err(MeshError::DegenerateMesh);
         }
         // Signed volumes and second moments of tetrahedra (origin, a, b, c)
         // summed over faces (Mirtich-style, diagonal only).
@@ -686,17 +840,16 @@ impl ConvexHull {
                 v / 10.0 * (a.z * a.z + b.z * b.z + c.z * c.z + a.z * b.z + b.z * c.z + c.z * a.z);
         }
         if vol.abs() < 1e-9 {
-            let e = self.local_box();
-            return Shape::Box { half_extents: e }.inertia(mass);
+            return Err(MeshError::DegenerateMesh);
         }
         let density = mass / vol.abs();
         // I_xx = ∫(y²+z²), cyclic. Signed accumulation keeps orientation
         // consistent; density takes the absolute volume.
-        Vec3::new(
+        Ok(Vec3::new(
             density * (eyy + ezz).abs(),
             density * (ezz + exx).abs(),
             density * (exx + eyy).abs(),
-        )
+        ))
     }
 
     /// Local-space bounding half-extents (for inertia fallback).
@@ -725,6 +878,43 @@ impl ConvexHull {
 }
 
 impl Heightfield {
+    /// Checked constructor: `heights.len() == rows * cols`, non-empty grid,
+    /// positive finite `cell` and finite samples.
+    pub fn new(
+        heights: Vec<f32>,
+        rows: usize,
+        cols: usize,
+        cell: f32,
+    ) -> Result<Self, crate::invariants::HeightfieldError> {
+        crate::invariants::validate_heightfield(&heights, rows, cols, cell)?;
+        Ok(Self {
+            heights,
+            rows,
+            cols,
+            cell,
+        })
+    }
+
+    /// Whether this heightfield satisfies the construction invariant.
+    pub fn is_valid(&self) -> bool {
+        crate::invariants::validate_heightfield(&self.heights, self.rows, self.cols, self.cell)
+            .is_ok()
+    }
+
+    /// Explicit validation of the construction invariant.
+    pub fn validate(&self) -> Result<(), crate::invariants::HeightfieldError> {
+        crate::invariants::validate_heightfield(&self.heights, self.rows, self.cols, self.cell)
+    }
+
+    /// Explicit fallible height query: `None` for an invalid heightfield
+    /// instead of the silent `0.0` of [`Heightfield::height_at`].
+    pub fn try_height_at(&self, x: f32, z: f32) -> Option<f32> {
+        if !self.is_valid() || !x.is_finite() || !z.is_finite() {
+            return None;
+        }
+        Some(self.height_at(x, z))
+    }
+
     /// Bilinear height at local (x, z), clamped to the grid edge.
     /// Deterministic: pure arithmetic over the stored samples.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
@@ -781,6 +971,22 @@ impl Heightfield {
         Vec3::new(0.0, (lo + hi) * 0.5, 0.0)
     }
 
+    /// Typed cell-spacing entry point: same checks as [`Heightfield::new`]
+    /// with the spacing carried as [`ornis_core::units::Meters`].
+    pub fn try_new_units(
+        heights: Vec<f32>,
+        rows: usize,
+        cols: usize,
+        cell: ornis_core::units::Meters,
+    ) -> Result<Self, crate::invariants::HeightfieldError> {
+        Self::new(heights, rows, cols, cell.get())
+    }
+
+    /// Cell spacing in meters.
+    pub fn cell_units(&self) -> ornis_core::units::Meters {
+        ornis_core::units::Meters::new(self.cell)
+    }
+
     /// World-space AABB: the oriented bounding box of the local bounds.
     /// Conservative like the box arm (element-wise rotated extents).
     pub fn aabb(&self, position: Vec3, orientation: Quat) -> AABB {
@@ -801,10 +1007,20 @@ impl TriMesh {
 
     /// Build a mesh collider from a vertex soup and triangle indices.
     /// Degenerate triangles (area² below 1e-12) are dropped, like the
-    /// hull weld drops degenerate input; out-of-range indices panic
-    /// (programmer error, fail fast with the offending index).
+    /// hull weld drops degenerate input.
     /// Deterministic: median splits with a stable index sort, no RNG.
-    pub fn from_indexed(vertices: &[Vec3], indices: &[[u32; 3]]) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`MeshError::OutOfRangeIndex`] for dangling indices,
+    /// [`MeshError::NonFiniteVertex`] for non-finite vertices. An
+    /// all-degenerate soup is `Ok` with zero triangles (empty mesh).
+    pub fn from_indexed(vertices: &[Vec3], indices: &[[u32; 3]]) -> Result<Self, MeshError> {
+        for (index, v) in vertices.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(MeshError::NonFiniteVertex { index });
+            }
+        }
         let mut tris = Vec::with_capacity(indices.len());
         let mut centroids = Vec::with_capacity(indices.len());
         let mut local_min = Vec3::splat(f32::INFINITY);
@@ -813,24 +1029,27 @@ impl TriMesh {
         let mut min_feature = f32::INFINITY;
         for (t, idx) in indices.iter().enumerate() {
             let v = [
-                *vertices.get(idx[0] as usize).unwrap_or_else(|| {
-                    panic!(
-                        "TriMesh::from_indexed: index {} of triangle {t} out of range",
-                        idx[0]
-                    )
-                }),
-                *vertices.get(idx[1] as usize).unwrap_or_else(|| {
-                    panic!(
-                        "TriMesh::from_indexed: index {} of triangle {t} out of range",
-                        idx[1]
-                    )
-                }),
-                *vertices.get(idx[2] as usize).unwrap_or_else(|| {
-                    panic!(
-                        "TriMesh::from_indexed: index {} of triangle {t} out of range",
-                        idx[2]
-                    )
-                }),
+                *vertices
+                    .get(idx[0] as usize)
+                    .ok_or(MeshError::OutOfRangeIndex {
+                        triangle: t,
+                        index: idx[0],
+                        vertices: vertices.len(),
+                    })?,
+                *vertices
+                    .get(idx[1] as usize)
+                    .ok_or(MeshError::OutOfRangeIndex {
+                        triangle: t,
+                        index: idx[1],
+                        vertices: vertices.len(),
+                    })?,
+                *vertices
+                    .get(idx[2] as usize)
+                    .ok_or(MeshError::OutOfRangeIndex {
+                        triangle: t,
+                        index: idx[2],
+                        vertices: vertices.len(),
+                    })?,
             ];
             if (v[1] - v[0]).cross(v[2] - v[0]).length_squared() < 1e-12 {
                 continue; // Degenerate: zero-area sliver, no collision value.
@@ -849,7 +1068,9 @@ impl TriMesh {
             // triangle would get no faces (dead raycast, centroid-fallback
             // closest point). Set both windings explicitly: raycasts flip
             // the normal toward the ray and closest-point is winding-free.
-            let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c]);
+            // Vertices are validated finite above, so this cannot fail.
+            let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
+                .expect("validated finite triangle vertices");
             hull.faces = vec![[0, 1, 2], [0, 2, 1]];
             tris.push(Shape::ConvexHull(hull));
         }
@@ -859,7 +1080,7 @@ impl TriMesh {
             min_feature = 0.0;
         }
         let (nodes, order) = Self::build_bvh(&tris, &centroids);
-        Self {
+        Ok(Self {
             tris,
             centroids,
             nodes,
@@ -868,7 +1089,7 @@ impl TriMesh {
             local_max,
             bound_radius,
             min_feature,
-        }
+        })
     }
 
     /// Median-split AABB BVH over the triangle bounds (mesh-local space).
@@ -901,10 +1122,7 @@ impl TriMesh {
             nodes.push(BvhNode {
                 min: Vec3::ZERO,
                 max: Vec3::ZERO,
-                left: u32::MAX,
-                right: 0,
-                start: 0,
-                count: 0,
+                link: BvhLink::empty_leaf(),
             });
         }
         (nodes, order)
@@ -932,14 +1150,13 @@ impl TriMesh {
         nodes.push(BvhNode {
             min: lo,
             max: hi,
-            left: u32::MAX,
-            right: 0,
-            start: 0,
-            count: 0,
+            link: BvhLink::empty_leaf(),
         });
         if order.len() <= Self::LEAF_TRIS {
-            nodes[here as usize].start = base as u32;
-            nodes[here as usize].count = order.len() as u32;
+            nodes[here as usize].link = BvhLink::Leaf {
+                start: base as u32,
+                count: order.len() as u32,
+            };
             return here;
         }
         let e = hi - lo;
@@ -962,15 +1179,16 @@ impl TriMesh {
             centroids[order[order.len() - 1] as usize][axis],
         );
         if first == last {
-            nodes[here as usize].start = base as u32;
-            nodes[here as usize].count = order.len() as u32;
+            nodes[here as usize].link = BvhLink::Leaf {
+                start: base as u32,
+                count: order.len() as u32,
+            };
             return here;
         }
         let (left_order, right_order) = order.split_at_mut(mid);
         let left = Self::split(bounds, centroids, left_order, base, nodes);
         let right = Self::split(bounds, centroids, right_order, base + mid, nodes);
-        nodes[here as usize].left = left;
-        nodes[here as usize].right = right;
+        nodes[here as usize].link = BvhLink::Node { left, right };
         here
     }
 
@@ -1009,9 +1227,23 @@ impl TriMesh {
     /// meshes; falls back to the local bounding box on degenerate input.
     /// Inconsistent winding averages out instead of failing loudly — keep
     /// soup clean (outward, manifold) for dynamic bodies.
+    ///
+    /// Legacy wrapper over [`TriMesh::try_inertia`]: degenerate input
+    /// silently uses the bounding box so existing scenes are bit-identical.
     pub fn inertia(&self, mass: f32) -> Vec3 {
+        self.try_inertia(mass)
+            .unwrap_or_else(|_| self.fallback_inertia(mass))
+    }
+
+    /// Exact soup inertia, or [`MeshError::DegenerateMesh`] on empty soup,
+    /// non-positive mass, or near-zero signed volume.
+    ///
+    /// # Errors
+    ///
+    /// `DegenerateMesh` when no exact inertia exists (use the bounding box).
+    pub fn try_inertia(&self, mass: f32) -> Result<Vec3, MeshError> {
         if self.tris.is_empty() || mass <= 0.0 {
-            return self.fallback_inertia(mass);
+            return Err(MeshError::DegenerateMesh);
         }
         let mut vol = 0.0f32;
         let mut exx = 0.0f32;
@@ -1040,14 +1272,14 @@ impl TriMesh {
                 * (a.z * a.z + b.z * b.z + cc.z * cc.z + a.z * b.z + b.z * cc.z + cc.z * a.z);
         }
         if vol.abs() < 1e-9 {
-            return self.fallback_inertia(mass);
+            return Err(MeshError::DegenerateMesh);
         }
         let density = mass / vol.abs();
-        Vec3::new(
+        Ok(Vec3::new(
             density * (eyy + ezz).abs(),
             density * (ezz + exx).abs(),
             density * (exx + eyy).abs(),
-        )
+        ))
     }
 
     /// Bounding-box inertia fallback (degenerate/empty soup).
@@ -1123,6 +1355,7 @@ mod tests {
                 [2, 6, 7],
             ],
         )
+        .expect("valid cube mesh")
     }
 
     #[test]
@@ -1172,15 +1405,64 @@ mod tests {
             Vec3::new(2.0, 0.0, 0.0), // Collinear with the first two.
             Vec3::Y,
         ];
-        let mesh = TriMesh::from_indexed(&v, &[[0, 1, 2], [0, 1, 3]]);
+        let mesh = TriMesh::from_indexed(&v, &[[0, 1, 2], [0, 1, 3]])
+            .expect("degenerate drops, not errors");
         assert_eq!(mesh.tris.len(), 1);
     }
 
     #[test]
-    #[should_panic(expected = "out of range")]
     fn trimesh_rejects_out_of_range_indices() {
+        use crate::errors::MeshError;
         let v = [Vec3::ZERO, Vec3::X, Vec3::Y];
-        let _ = TriMesh::from_indexed(&v, &[[0, 1, 9]]);
+        let err = TriMesh::from_indexed(&v, &[[0, 1, 9]]).expect_err("dangling index errors");
+        assert_eq!(
+            err,
+            MeshError::OutOfRangeIndex {
+                triangle: 0,
+                index: 9,
+                vertices: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn trimesh_rejects_non_finite_vertices() {
+        use crate::errors::MeshError;
+        let v = [Vec3::ZERO, Vec3::X, Vec3::NAN];
+        let err = TriMesh::from_indexed(&v, &[[0, 1, 2]]).expect_err("non-finite errors");
+        assert_eq!(err, MeshError::NonFiniteVertex { index: 2 });
+    }
+
+    #[test]
+    fn convex_hull_rejects_non_finite_vertices() {
+        use crate::errors::MeshError;
+        let err = ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::NAN])
+            .expect_err("non-finite hull errors");
+        assert_eq!(err, MeshError::NonFiniteVertex { index: 1 });
+    }
+
+    #[test]
+    fn hull_and_mesh_try_inertia_report_degenerate() {
+        use crate::errors::MeshError;
+        let flat =
+            ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y]).expect("flat builds");
+        assert_eq!(flat.try_inertia(1.0), Err(MeshError::DegenerateMesh));
+        assert!(flat.inertia(1.0).is_finite());
+        let empty = TriMesh::from_indexed(&[], &[]).expect("empty soup builds");
+        assert_eq!(empty.try_inertia(1.0), Err(MeshError::DegenerateMesh));
+        assert!(empty.inertia(1.0).is_finite());
+    }
+
+    #[test]
+    fn heightfield_try_height_at_rejects_broken_grid() {
+        let broken = Heightfield {
+            heights: vec![0.0],
+            rows: 2,
+            cols: 2,
+            cell: 1.0,
+        };
+        assert!(broken.try_height_at(0.0, 0.0).is_none());
+        assert_eq!(broken.height_at(0.0, 0.0), 0.0);
     }
 
     /// `Shape` has no unit tests at all (night gate, 2026-08-24: 50 missed
@@ -1297,23 +1579,18 @@ mod tests {
                 radius: 0.3,
                 half_height: 0.5,
             },
-            Shape::ConvexHull(ConvexHull::from_vertices(vec![
-                Vec3::ZERO,
-                Vec3::X,
-                Vec3::Y,
-                Vec3::Z,
-            ])),
+            Shape::ConvexHull(
+                ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z])
+                    .expect("valid test hull"),
+            ),
         ] {
             assert!(shape.has_gjk_support(), "{shape:?} must answer GJK support");
         }
-        let terrain = Shape::Heightfield(Heightfield {
-            heights: vec![0.0],
-            rows: 1,
-            cols: 1,
-            cell: 1.0,
-        });
+        let terrain = Shape::Heightfield(
+            Heightfield::new(vec![0.0], 1, 1, 1.0).expect("valid test heightfield"),
+        );
         assert!(!terrain.has_gjk_support());
-        let empty = TriMesh::from_indexed(&[], &[]);
+        let empty = TriMesh::from_indexed(&[], &[]).expect("empty soup builds");
         assert!(
             empty.tris.is_empty(),
             "empty soup builds an empty mesh, never a placeholder"
@@ -1344,18 +1621,13 @@ mod tests {
             radius: 0.3,
             half_height: 0.5,
         };
-        let hull = Shape::ConvexHull(ConvexHull::from_vertices(vec![
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            Vec3::Z,
-        ]));
-        let terrain = Shape::Heightfield(Heightfield {
-            heights: vec![0.0; 4],
-            rows: 2,
-            cols: 2,
-            cell: 1.0,
-        });
+        let hull = Shape::ConvexHull(
+            ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z])
+                .expect("valid test hull"),
+        );
+        let terrain = Shape::Heightfield(
+            Heightfield::new(vec![0.0; 4], 2, 2, 1.0).expect("valid test heightfield"),
+        );
         let mesh = Shape::TriMesh(cube_mesh());
         let convex = [&sphere, &boxed, &capsule, &cylinder, &cone, &hull];
         // Convex-convex, convex-mesh, convex-terrain, mesh-terrain: supported.

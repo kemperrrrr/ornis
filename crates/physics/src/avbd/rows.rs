@@ -18,17 +18,20 @@ use std::f32::consts::TAU;
 /// basis. Per-axis coefficients take the `max` across the pair; a body
 /// without a direction contributes `(friction, friction)`.
 ///
+/// Directions validate through the shared typed view
+/// ([`RigidBody::friction_frame`](crate::body::RigidBody::friction_frame)),
+/// like the sequential-impulse path — an invalid axis is isotropic here,
+/// and a checked error at [`RigidBody::set_friction_axis`](crate::body::RigidBody::set_friction_axis)
+/// time for new input.
+///
 /// With all defaults the frame is exactly `tangent_basis(n)` with
 /// `mu == mu2`, routing through the legacy circular cone bit-identically.
 pub(super) fn friction_frame(a: &RigidBody, b: &RigidBody, n: Vec3) -> (Vec3, f32, f32) {
     let pick_dir = |body: &RigidBody| -> Option<Vec3> {
-        let world = body.orientation * body.friction_dir?;
+        let axis = body.friction_frame().ok()?.axis()?.get();
+        let world = body.orientation * axis;
         let proj = world - n * world.dot(n);
-        let len2 = proj.length_squared();
-        if len2 < 1e-12 || !len2.is_finite() {
-            return None;
-        }
-        Some(proj / len2.sqrt())
+        crate::invariants::UnitVec3::normalize_checked(proj).map(|u| u.get())
     };
     let t1 = pick_dir(a)
         .or_else(|| pick_dir(b))

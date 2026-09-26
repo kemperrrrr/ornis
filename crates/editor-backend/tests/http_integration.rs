@@ -7,6 +7,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crossbeam_channel::unbounded;
+use editor_backend::ipc::RequestId;
 use editor_backend::{GameEvent, RemoteEditor, UiCommand};
 
 /// Pick a free ephemeral port. We bind to port 0 (OS assigns one), read it
@@ -139,7 +140,7 @@ fn remote_editor_replays_events_after_cursor() {
 
     ev_tx
         .send(GameEvent::CommandCompleted {
-            request_id: 7,
+            request_id: RequestId::new(7),
             command: "create_entity".into(),
             success: true,
             error: None,
@@ -224,7 +225,7 @@ fn remote_editor_websocket_stream_replays_events() {
 
     ev_tx
         .send(GameEvent::CommandCompleted {
-            request_id: 17,
+            request_id: RequestId::new(17),
             command: "ping".into(),
             success: true,
             error: None,
@@ -300,7 +301,7 @@ fn remote_editor_websocket_reconnect_resumes_after_cursor() {
     let send_completed = |request_id: u64| {
         ev_tx
             .send(GameEvent::CommandCompleted {
-                request_id,
+                request_id: RequestId::new(request_id),
                 command: "ping".into(),
                 success: true,
                 error: None,

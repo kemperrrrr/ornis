@@ -29,11 +29,25 @@ pub(crate) fn quat_twist(q: Quat, axis: Vec3) -> f32 {
 
 /// World hinge frame for a revolute joint: normalized world axis plus its
 /// fixed tangent pair (the plane the angular correction lives in).
+#[allow(dead_code)]
 fn hinge_frame(orientation: Quat, axis: Vec3) -> (Vec3, Vec3, Vec3) {
-    let wa = (orientation * axis).normalize_or(Vec3::Z);
-    let t1 = crate::math::tangent_basis(wa).0;
-    let t2 = wa.cross(t1).normalize_or_zero();
-    (wa, t1, t2)
+    try_hinge_frame(orientation, axis).unwrap_or((Vec3::Z, Vec3::X, Vec3::Y))
+}
+
+/// Explicit fallible hinge frame: `None` for a zero/non-finite local axis
+/// or a degenerate world projection instead of silently substituting a
+/// default axis. Callers skip the angular correction on `None`.
+fn try_hinge_frame(orientation: Quat, axis: Vec3) -> Option<(Vec3, Vec3, Vec3)> {
+    if !axis.is_finite() || axis.length_squared() < 1e-12 {
+        return None;
+    }
+    let unit = crate::invariants::UnitVec3::normalize_checked(orientation * axis)?;
+    let wa = unit.get();
+    let (t1, t2) = crate::math::tangent_basis_unit(unit);
+    if t1.length_squared() < 1e-12 || t2.length_squared() < 1e-12 {
+        return None;
+    }
+    Some((wa, t1, t2))
 }
 
 impl SequentialImpulseEngine {
@@ -62,7 +76,7 @@ impl SequentialImpulseEngine {
         } = self;
 
         for joint in joints.iter_mut() {
-            let (a, b) = (joint.body_a, joint.body_b);
+            let (a, b) = (joint.body_a.index(), joint.body_b.index());
             // Gears resolve four bodies and check sleep in their own pass.
             if matches!(joint.kind, JointKind::Gear { .. }) {
                 continue;
@@ -150,7 +164,7 @@ impl SequentialImpulseEngine {
         } = self;
 
         for joint in joints.iter_mut() {
-            let (a, b) = (joint.body_a, joint.body_b);
+            let (a, b) = (joint.body_a.index(), joint.body_b.index());
             // Gears are velocity-only (Baumgarte-stabilized, no position
             // pass — same standing as the velocity-only hinge/slide limits).
             if matches!(joint.kind, JointKind::Gear { .. }) {
@@ -219,7 +233,8 @@ impl SequentialImpulseEngine {
             };
             // Resolve + validate the referenced joints (removals rebuild the
             // table, but a stale index must go quiet, never panic).
-            let (Some(ra), Some(rb)) = (self.joints.get(ja), self.joints.get(jb)) else {
+            let (Some(ra), Some(rb)) = (self.joints.get(ja.index()), self.joints.get(jb.index()))
+            else {
                 continue;
             };
             let (Some(sa), Some(sb)) = (
@@ -229,12 +244,12 @@ impl SequentialImpulseEngine {
                 continue;
             };
             let raw = [sa.coord, sb.coord];
-            let angular = [sa.angular, sb.angular];
+            let kinds = [sa.kind, sb.kind];
             let previous = self.joints[gi].gear_mem;
             let continuous = std::array::from_fn(|k| {
                 crate::migration::gear_coordinate(
                     raw[k],
-                    angular[k],
+                    kinds[k],
                     previous.map(|(r, c)| (r[k], c[k])),
                 )
             });
@@ -251,8 +266,8 @@ impl SequentialImpulseEngine {
             }
             // Re-read the sides after the warm start (axes/anchors moved).
             let (Some(sa), Some(sb)) = (
-                gear_side_data(&self.bodies, &self.joints[ja]),
-                gear_side_data(&self.bodies, &self.joints[jb]),
+                gear_side_data(&self.bodies, &self.joints[ja.index()]),
+                gear_side_data(&self.bodies, &self.joints[jb.index()]),
             ) else {
                 continue;
             };
@@ -310,7 +325,9 @@ fn joint_warm_start(
         }
     }
     if let Some((axis_a, _)) = revolute_axes {
-        let (_, t1, t2) = hinge_frame(bodies[a].orientation, axis_a);
+        let Some((_, t1, t2)) = try_hinge_frame(bodies[a].orientation, axis_a) else {
+            return;
+        };
         for (k, t) in [t1, t2].iter().enumerate() {
             let l = joint.acc_ang[k];
             if l.abs() > 1e-12 {
@@ -355,7 +372,9 @@ fn joint_angular_velocity_iteration(
     b: usize,
     axis_a: Vec3,
 ) {
-    let (_, t1, t2) = hinge_frame(bodies[a].orientation, axis_a);
+    let Some((_, t1, t2)) = try_hinge_frame(bodies[a].orientation, axis_a) else {
+        return;
+    };
     for (k, t) in [t1, t2].iter().enumerate() {
         let (ba, bb) = (&bodies[a], &bodies[b]);
         let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *t).dot(*t)
@@ -465,14 +484,15 @@ fn joint_prismatic_drive_velocity_iteration(
 /// needs no accumulator: the torque-clamped target solve converges in one
 /// iteration.
 ///
-/// Which travel bound (if any) the hinge violates: `Some(true)` = lower,
-/// `Some(false)` = upper, `None` = freely inside the window (or no limit).
+/// Which travel bound (if any) the hinge violates: `Some(Lower)` vs
+/// `Some(Upper)`, `None` = freely inside the window (or no limit).
 /// Pure classifier: the impulse application lives in the drive iteration.
-fn hinge_limit_state(angle: f32, limit: Option<RevoluteLimit>) -> Option<bool> {
+fn hinge_limit_state(angle: f32, limit: Option<RevoluteLimit>) -> Option<crate::flags::LimitSide> {
+    use crate::flags::LimitSide::{Lower, Upper};
     const ANGULAR_SLOP: f32 = 0.005; // ~0.3 deg of bound penetration
     match limit {
-        Some(lim) if angle <= lim.min + ANGULAR_SLOP => Some(true),
-        Some(lim) if angle >= lim.max - ANGULAR_SLOP => Some(false),
+        Some(lim) if angle <= lim.min + ANGULAR_SLOP => Some(Lower),
+        Some(lim) if angle >= lim.max - ANGULAR_SLOP => Some(Upper),
         _ => None,
     }
 }
@@ -514,9 +534,9 @@ fn joint_drive_velocity_iteration(
         // One-sided block: lower forbids w < 0 (accumulator >= 0), upper
         // forbids w > 0 (accumulator <= 0). The clamp self-corrects on side
         // flips by dumping the stale impulse in one step.
-        Some(lower) => {
+        Some(side) => {
             let dl = -w / k_eff;
-            let next = if lower {
+            let next = if side.is_lower() {
                 (joint.acc_limit + dl).max(0.0)
             } else {
                 (joint.acc_limit + dl).min(0.0)
@@ -607,8 +627,7 @@ fn joint_angular_position_pass(
 /// reference: hinge twist (revolute) or slide separation (prismatic).
 /// `None` for every other kind — gears only coordinate these two.
 pub(super) fn joint_coordinate(bodies: &[RigidBody], joint: &Joint) -> Option<f32> {
-    let a = joint.body_a;
-    let b = joint.body_b;
+    let (a, b) = (joint.body_a.index(), joint.body_b.index());
     match &joint.kind {
         JointKind::Revolute { local_axis_a, .. } => Some(
             hinge_twist(bodies[a].orientation, bodies[b].orientation, *local_axis_a)
@@ -633,7 +652,7 @@ pub(super) fn joint_coordinate(bodies: &[RigidBody], joint: &Joint) -> Option<f3
 }
 
 /// Precomputed dynamics of one gear side: bodies, world axis, anchor levers,
-/// coordinate, rate and effective mass. `angular` selects torque (revolute)
+/// coordinate, rate and effective mass. `kind` selects torque (revolute)
 /// vs force (prismatic) application.
 struct GearSideData {
     a: usize,
@@ -641,7 +660,7 @@ struct GearSideData {
     axis: Vec3,
     ra: Vec3,
     rb: Vec3,
-    angular: bool,
+    kind: crate::flags::CoordKind,
     coord: f32,
     rate: f32,
     eff: f32,
@@ -650,7 +669,7 @@ struct GearSideData {
 /// Dynamics of a gear-compatible joint side; `None` for other kinds or
 /// degenerate (zero-mass) axes.
 fn gear_side_data(bodies: &[RigidBody], joint: &Joint) -> Option<GearSideData> {
-    let (a, b) = (joint.body_a, joint.body_b);
+    let (a, b) = (joint.body_a.index(), joint.body_b.index());
     match &joint.kind {
         JointKind::Revolute { local_axis_a, .. } => {
             let wa = (bodies[a].orientation * *local_axis_a).normalize_or(Vec3::Z);
@@ -663,7 +682,7 @@ fn gear_side_data(bodies: &[RigidBody], joint: &Joint) -> Option<GearSideData> {
                 axis: wa,
                 ra: Vec3::ZERO,
                 rb: Vec3::ZERO,
-                angular: true,
+                kind: crate::flags::CoordKind::Angular,
                 coord: hinge_twist(ba.orientation, bb.orientation, *local_axis_a)
                     - joint.reference_angle,
                 rate: (bb.angular_velocity - ba.angular_velocity).dot(wa),
@@ -686,7 +705,7 @@ fn gear_side_data(bodies: &[RigidBody], joint: &Joint) -> Option<GearSideData> {
                 axis: wa,
                 ra,
                 rb,
-                angular: false,
+                kind: crate::flags::CoordKind::Linear,
                 coord: ((bodies[b].position + rb) - (bodies[a].position + ra)).dot(wa)
                     - joint.reference_length,
                 rate: (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(wa),
@@ -700,7 +719,7 @@ fn gear_side_data(bodies: &[RigidBody], joint: &Joint) -> Option<GearSideData> {
 /// Apply a generalized gear impulse: torque about the hinge axis
 /// (revolute) or force along the slide axis (prismatic).
 fn gear_apply_delta(bodies: &mut [RigidBody], side: &GearSideData, delta: f32) {
-    if side.angular {
+    if side.kind.is_angular() {
         apply_angular_impulse(bodies, side.a, side.b, side.axis * delta);
     } else {
         apply_impulse(bodies, side.a, side.b, side.axis * delta, side.ra, side.rb);

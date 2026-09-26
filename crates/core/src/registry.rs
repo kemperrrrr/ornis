@@ -45,7 +45,122 @@ use crate::smart_store::SmartStore;
 
 /// Dense lane index in the registry (0..len). Reserved for scheduler access
 /// bitsets (audit §3.6) — stable within a single registry.
-pub type LaneId = u32;
+///
+/// Newtype (not a `u32` alias) so lane indices never mix with entity ids,
+/// generations or resource ordinals at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LaneId(pub u32);
+
+impl LaneId {
+    /// Wraps a raw dense index.
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Raw dense index.
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Raw dense index as `usize` (registry table lookup).
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for LaneId {
+    fn from(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<LaneId> for u32 {
+    fn from(id: LaneId) -> Self {
+        id.0
+    }
+}
+
+impl From<LaneId> for usize {
+    fn from(id: LaneId) -> Self {
+        id.0 as usize
+    }
+}
+
+impl std::fmt::Display for LaneId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "lane{}", self.0)
+    }
+}
+
+/// Canonical component protocol name: the `by_name` registry key.
+///
+/// Owned (`Box<str>`) so both `'static` registrations and dynamic
+/// wire/JSON names share one type; `by_name` lookups accept `&str`
+/// through the [`std::borrow::Borrow`] impl, so existing call sites keep
+/// working while producers (`Mutation::Set`, editor payloads) carry the
+/// typed name instead of a bare `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ComponentName(pub(crate) Box<str>);
+
+impl ComponentName {
+    /// Wraps a `'static` protocol name without allocating.
+    pub fn from_static(name: &'static str) -> Self {
+        Self(name.into())
+    }
+
+    /// Protocol name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ComponentName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ComponentName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ComponentName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for ComponentName {
+    fn from(name: &str) -> Self {
+        Self(name.into())
+    }
+}
+
+impl From<String> for ComponentName {
+    fn from(name: String) -> Self {
+        Self(name.into_boxed_str())
+    }
+}
+
+impl From<&String> for ComponentName {
+    fn from(name: &String) -> Self {
+        Self(name.as_str().into())
+    }
+}
+
+impl serde::Serialize for ComponentName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ComponentName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
 
 /// Error of a type-erased registry operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,9 +289,9 @@ type SetResult = Result<(), RegistryError>;
 ///
 /// All operations delegate to monomorphic thunks created at
 /// [`ComponentRegistry::register`]; the struct is `Send + Sync` (fn pointers
-/// and `&'static str`), so the registry can be shared across threads (`Arc`).
+/// and owned [`ComponentName`]), so the registry can be shared across threads (`Arc`).
 pub struct ComponentMeta {
-    name: &'static str,
+    name: ComponentName,
     type_name: &'static str,
     type_id: TypeId,
     lane_id: LaneId,
@@ -192,8 +307,13 @@ pub struct ComponentMeta {
 
 impl ComponentMeta {
     /// Short name from registration (protocol key: JSON/FFI/scenes).
-    pub fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// Typed protocol name (same key as [`ComponentMeta::name`]).
+    pub fn component_name(&self) -> &ComponentName {
+        &self.name
     }
 
     /// Full Rust type path (diagnostics, not a protocol key).
@@ -275,7 +395,7 @@ impl ComponentMeta {
 #[derive(Default)]
 pub struct ComponentRegistry {
     by_id: HashMap<TypeId, LaneId>,
-    by_name: HashMap<&'static str, LaneId>,
+    by_name: HashMap<ComponentName, LaneId>,
     entries: Vec<ComponentMeta>,
 }
 
@@ -300,19 +420,20 @@ impl ComponentRegistry {
         T: 'static + Clone + Send + Sync + Serialize + DeserializeOwned,
     {
         let type_id = TypeId::of::<T>();
+        let key = ComponentName::from_static(name);
         assert!(
             !self.by_id.contains_key(&type_id),
             "component type `{}` is already registered",
             std::any::type_name::<T>()
         );
         assert!(
-            !self.by_name.contains_key(name),
+            !self.by_name.contains_key(key.as_str()),
             "component name `{name}` is already registered"
         );
 
-        let lane_id = self.entries.len() as LaneId;
+        let lane_id = LaneId(self.entries.len() as u32);
         self.entries.push(ComponentMeta {
-            name,
+            name: key.clone(),
             type_name: std::any::type_name::<T>(),
             type_id,
             lane_id,
@@ -326,7 +447,7 @@ impl ComponentRegistry {
             parse_json: parse_json_thunk::<T>,
         });
         self.by_id.insert(type_id, lane_id);
-        self.by_name.insert(name, lane_id);
+        self.by_name.insert(key, lane_id);
         self
     }
 
@@ -342,17 +463,26 @@ impl ComponentRegistry {
     pub fn by_id(&self, type_id: TypeId) -> Option<&ComponentMeta> {
         self.by_id
             .get(&type_id)
-            .map(|&id| &self.entries[id as usize])
+            .map(|&id| &self.entries[id.as_usize()])
     }
 
     /// Entry by protocol name.
     pub fn by_name(&self, name: &str) -> Option<&ComponentMeta> {
-        self.by_name.get(name).map(|&id| &self.entries[id as usize])
+        self.by_name
+            .get(name)
+            .map(|&id| &self.entries[id.as_usize()])
+    }
+
+    /// Entry by typed protocol name.
+    pub fn by_component(&self, name: &ComponentName) -> Option<&ComponentMeta> {
+        self.by_name
+            .get(name.as_str())
+            .map(|&id| &self.entries[id.as_usize()])
     }
 
     /// Entry by dense lane index.
     pub fn by_lane_id(&self, lane_id: LaneId) -> Option<&ComponentMeta> {
-        self.entries.get(lane_id as usize)
+        self.entries.get(lane_id.as_usize())
     }
 
     /// All entries in registration order.
@@ -402,18 +532,18 @@ mod tests {
         let pos = registry.by_name("position").expect("position");
         assert_eq!(pos.type_id(), TypeId::of::<Position>());
         assert_eq!(pos.type_name(), std::any::type_name::<Position>());
-        assert_eq!(pos.lane_id(), 0);
+        assert_eq!(pos.lane_id(), LaneId(0));
 
         let health = registry.by_id(TypeId::of::<Health>()).expect("health");
         assert_eq!(health.name(), "health");
-        assert_eq!(health.lane_id(), 1);
-        assert!(registry.by_lane_id(1).is_some());
+        assert_eq!(health.lane_id(), LaneId(1));
+        assert!(registry.by_lane_id(LaneId(1)).is_some());
 
         // LaneId is a dense projection: by_lane_id and lookup coincide.
-        assert!(std::ptr::eq(registry.by_lane_id(0).unwrap(), pos));
+        assert!(std::ptr::eq(registry.by_lane_id(LaneId(0)).unwrap(), pos));
         assert!(registry.by_name("ghost").is_none());
         assert!(registry.by_id(TypeId::of::<u8>()).is_none());
-        assert!(registry.by_lane_id(2).is_none());
+        assert!(registry.by_lane_id(LaneId(2)).is_none());
 
         assert_eq!(registry.len(), 2);
         assert!(!registry.is_empty());

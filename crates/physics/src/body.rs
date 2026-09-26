@@ -9,6 +9,7 @@
 
 use glam::{Quat, Vec3};
 
+use crate::invariants::{FrictionFrame, FrictionFrameError, Mass, MassKind, PositiveF32, UnitVec3};
 use crate::shape::Shape;
 
 /// Stable index of a body inside its owning [`SequentialImpulseEngine`](crate::engine::SequentialImpulseEngine).
@@ -16,7 +17,52 @@ use crate::shape::Shape;
 /// Solver/routing migrations preserve handles. Removal swaps the final body
 /// into the removed slot; only that surviving body's handle changes. A removed
 /// slot can be reused, so these are not generational entity identifiers.
-pub type BodyHandle = usize;
+///
+/// Newtype over `u32` (not a `usize` alias) so body handles never mix with
+/// joint handles, particle indices or entity ids at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BodyHandle(u32);
+
+impl BodyHandle {
+    /// Wraps a raw `u32` body index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` body index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Body index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for BodyHandle {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for BodyHandle {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<BodyHandle> for u32 {
+    fn from(h: BodyHandle) -> Self {
+        h.0
+    }
+}
+
+impl From<BodyHandle> for usize {
+    fn from(h: BodyHandle) -> Self {
+        h.0 as usize
+    }
+}
 
 /// How a body participates in simulation.
 ///
@@ -46,9 +92,13 @@ pub enum BodyType {
 
 /// A single rigid body: pose, motion state, material properties and shape.
 ///
-/// Mass properties are derived from [`Shape::inertia`] at construction; when
-/// mutating `mass` directly, keep `inv_mass` consistent (`1/mass` for
-/// dynamics, `0` for statics) — the solver reads only the inverse quantities.
+/// Mass properties are derived from [`Shape::inertia`] at construction
+/// through the single [`Mass`](crate::invariants::Mass) site
+/// ([`Mass::from_kind`](crate::invariants::Mass::from_kind)); mutate them
+/// only via [`RigidBody::set_mass_kind`], [`RigidBody::set_mass`],
+/// [`RigidBody::make_static`] or [`RigidBody::make_dynamic`] so `mass`,
+/// `inv_mass`, `inertia` and `body_type` move together — the solver reads
+/// only the inverse quantities. Direct field writes bypass the invariant.
 #[derive(Debug, Clone)]
 pub struct RigidBody {
     /// World-space position of the body's center of mass.
@@ -60,10 +110,14 @@ pub struct RigidBody {
     /// Angular velocity in world space (rad/s), about the center of mass.
     pub angular_velocity: Vec3,
     /// Total mass (kg). Zero mass means static/infinite-mass behavior.
+    /// Part of the mass triple — see the [`RigidBody`] docs; prefer
+    /// [`RigidBody::set_mass`] over direct writes.
     pub mass: f32,
     /// Cached `1 / mass` (0 for statics) — what the solver actually uses.
+    /// Part of the mass triple — see the [`RigidBody`] docs.
     pub inv_mass: f32,
-    /// Diagonal (body-frame) inertia tensor.
+    /// Diagonal (body-frame) inertia tensor. Part of the mass triple —
+    /// see the [`RigidBody`] docs.
     pub inertia: Vec3,
     /// Accumulated external torque (N·m), consumed and cleared each step.
     pub torque: Vec3,
@@ -109,6 +163,7 @@ pub struct RigidBody {
     pub collision_mask: u32,
     /// When true, the body reports overlap transitions but never applies
     /// contact or CCD impulses. Triggers still obey collision filters.
+    /// Prefer [`Self::role`] / [`Self::set_role`] with [`crate::flags::BodyRole`].
     pub is_trigger: bool,
     /// Impact speed (m/s) at which the [`crate::Engine`] fracture pass
     /// splits this body, compared against [`ContactEventKind::Hit`]
@@ -126,15 +181,15 @@ pub struct RigidBody {
 impl RigidBody {
     // Internal constructor: derives derived quantities from mass and shape.
     fn build(position: Vec3, mass: f32, restitution: f32, friction: f32, shape: Shape) -> Self {
-        let inv_mass = if mass > 0.0 { 1.0 / mass } else { 0.0 };
+        let props = Mass::from_kind(MassKind::from_f32(mass), &shape);
         Self {
             position,
             orientation: Quat::IDENTITY,
             velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
-            mass,
-            inv_mass,
-            inertia: shape.inertia(mass),
+            mass: props.mass(),
+            inv_mass: props.inv_mass(),
+            inertia: props.inertia(),
             torque: Vec3::ZERO,
             restitution,
             friction,
@@ -155,10 +210,169 @@ impl RigidBody {
         }
     }
 
+    /// Consistent mass triple backing this body.
+    pub fn mass_props(&self) -> Mass {
+        Mass::from_kind(MassKind::from_f32(self.mass), &self.shape)
+    }
+
+    /// Current mass classification.
+    pub fn mass_kind(&self) -> MassKind {
+        MassKind::from_f32(self.mass)
+    }
+
+    /// Replace the mass model in one consistent write (`mass`, `inv_mass`,
+    /// `inertia` and `body_type` move together).
+    pub fn set_mass_kind(&mut self, kind: MassKind) {
+        let props = Mass::from_kind(kind, &self.shape);
+        self.mass = props.mass();
+        self.inv_mass = props.inv_mass();
+        self.inertia = props.inertia();
+        self.body_type = if props.is_fixed() {
+            BodyType::Static
+        } else {
+            BodyType::Dynamic
+        };
+    }
+
+    /// Freeze for sleep: zero inverse mass/inertia without touching `mass`.
+    pub(crate) fn sleep_staticify(&mut self) {
+        self.velocity = Vec3::ZERO;
+        self.angular_velocity = Vec3::ZERO;
+        self.inv_mass = 0.0;
+        self.inertia = Vec3::ZERO;
+    }
+
+    /// Undo [`RigidBody::sleep_staticify`]: restore `inv_mass`/`inertia`
+    /// from `mass` + `shape`.
+    pub(crate) fn wake_restore(&mut self) {
+        if self.body_type == BodyType::Dynamic {
+            let props = Mass::from_kind(MassKind::from_f32(self.mass), &self.shape);
+            self.inv_mass = props.inv_mass();
+            self.inertia = props.inertia();
+        }
+    }
+
+    /// Restore a possibly zeroed sleep triple (migration path).
+    pub(crate) fn restore_sleep_triple(&mut self) {
+        if self.body_type == BodyType::Dynamic && self.inv_mass <= 0.0 {
+            self.wake_restore();
+        }
+    }
+
+    /// Replace the mass with a positive value in one consistent write
+    /// (`mass`, `inv_mass`, `inertia` and `body_type` move together;
+    /// the body becomes dynamic).
+    pub fn set_mass(&mut self, mass: PositiveF32) {
+        self.set_mass_kind(MassKind::Free(mass));
+    }
+
+    /// Make this body static (infinite mass) in one consistent write.
+    pub fn make_static(&mut self) {
+        self.set_mass_kind(MassKind::Fixed);
+    }
+
+    /// Make this body dynamic with a positive mass.
+    pub fn make_dynamic(&mut self, mass: PositiveF32) {
+        self.set_mass_kind(MassKind::Free(mass));
+    }
+
+    /// Typed view of [`RigidBody::friction_dir`]: `None` is isotropic,
+    /// `Some` must hold a normalizable axis.
+    pub fn friction_frame(&self) -> Result<FrictionFrame, FrictionFrameError> {
+        FrictionFrame::from_option(self.friction_dir)
+    }
+
+    /// Checked setter for the anisotropy axis: rejects zero/non-finite
+    /// input instead of silently falling back at solve time.
+    pub fn set_friction_axis(&mut self, dir: Vec3) -> Result<(), FrictionFrameError> {
+        match UnitVec3::normalize_checked(dir) {
+            Some(u) => {
+                self.friction_dir = Some(u.get());
+                Ok(())
+            }
+            None => Err(FrictionFrameError),
+        }
+    }
+
+    /// Clear the anisotropy axis (isotropic friction).
+    pub fn clear_friction_axis(&mut self) {
+        self.friction_dir = None;
+    }
+
     /// Sphere body with default material (restitution 0.5, friction 0.3).
     /// Mass > 0 yields a dynamic body; mass 0 a static one.
     pub fn new_sphere(position: Vec3, radius: f32, mass: f32) -> Self {
         Self::build(position, mass, 0.5, 0.3, Shape::Sphere { radius })
+    }
+
+    /// Typed sphere entry point: radius as [`ornis_core::units::Meters`],
+    /// mass as [`ornis_core::units::Kilograms`]. Returns `None` unless the
+    /// radius is finite and `> 0` and the mass is a valid model input
+    /// (finite, `>= 0`).
+    pub fn try_sphere_units(
+        position: Vec3,
+        radius: ornis_core::units::Meters,
+        mass: ornis_core::units::Kilograms,
+    ) -> Option<Self> {
+        if !(radius.get().is_finite() && radius.get() > 0.0) || !mass.is_valid() {
+            return None;
+        }
+        Some(Self::new_sphere(position, radius.get(), mass.get()))
+    }
+
+    /// Typed capsule entry point (`None` unless both extents are finite and
+    /// `> 0` and the mass is valid; same defaults as [`RigidBody::new_capsule`]).
+    pub fn try_capsule_units(
+        position: Vec3,
+        radius: ornis_core::units::Meters,
+        half_height: ornis_core::units::Meters,
+        mass: ornis_core::units::Kilograms,
+    ) -> Option<Self> {
+        if !(radius.get().is_finite() && radius.get() > 0.0)
+            || !(half_height.get().is_finite() && half_height.get() > 0.0)
+            || !mass.is_valid()
+        {
+            return None;
+        }
+        Some(Self::new_capsule(
+            position,
+            radius.get(),
+            half_height.get(),
+            mass.get(),
+        ))
+    }
+
+    /// Total mass in kilograms (`0` = static).
+    pub fn mass_units(&self) -> ornis_core::units::Kilograms {
+        ornis_core::units::Kilograms::new(self.mass)
+    }
+
+    /// Raw mass getter (kept for solver-adjacent code; prefer
+    /// [`RigidBody::mass_units`] plus [`RigidBody::set_mass_kind`]).
+    pub fn mass_raw(&self) -> f32 {
+        self.mass
+    }
+
+    /// Linear velocity in m/s (same storage as [`RigidBody::velocity`];
+    /// the name pins the unit at the type level).
+    pub fn linear_velocity_mps(&self) -> Vec3 {
+        self.velocity
+    }
+
+    /// Sets the linear velocity in m/s.
+    pub fn set_linear_velocity_mps(&mut self, velocity: Vec3) {
+        self.velocity = velocity;
+    }
+
+    /// Angular velocity in rad/s (same storage as
+    /// [`RigidBody::angular_velocity`).
+    pub fn angular_velocity_rad_s(&self) -> Vec3 {
+        self.angular_velocity
+    }
+
+    /// Accumulated torque in N·m (same storage as [`RigidBody::torque`).
+    pub fn torque_n_m(&self) -> Vec3 {
+        self.torque
     }
 
     /// Axis-aligned box body (half-extents per axis), restitution 0.3,
@@ -218,21 +432,54 @@ impl RigidBody {
     /// hulls are debris — without rolling resistance a tetra rocks on its
     /// vertices/edges indefinitely (measured perch at 0.52 with μr=0.1,
     /// face settle at 0.408 with μr=0.2). Slide friction is untouched.
+    ///
+    /// Legacy infallible wrapper over [`RigidBody::try_new_convex_hull`]:
+    /// non-finite vertices fall back to an empty hull so existing scenes
+    /// are bit-identical; new code should use the `try_` variant.
     pub fn new_convex_hull(position: Vec3, vertices: Vec<Vec3>, mass: f32) -> Self {
+        Self::try_new_convex_hull(position, vertices, mass).unwrap_or_else(|_| {
+            Self::build(
+                position,
+                mass,
+                0.3,
+                0.5,
+                Shape::ConvexHull(crate::shape::ConvexHull {
+                    vertices: Vec::new(),
+                    faces: Vec::new(),
+                }),
+            )
+        })
+    }
+
+    /// Checked convex-hull body: non-finite vertices are a typed error.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::MeshError::NonFiniteVertex`] on non-finite input.
+    pub fn try_new_convex_hull(
+        position: Vec3,
+        vertices: Vec<Vec3>,
+        mass: f32,
+    ) -> Result<Self, crate::errors::MeshError> {
         let mut body = Self::build(
             position,
             mass,
             0.3,
             0.5,
-            Shape::ConvexHull(crate::shape::ConvexHull::from_vertices(vertices)),
+            Shape::ConvexHull(crate::shape::ConvexHull::from_vertices(vertices)?),
         );
         body.rolling_friction = 0.2;
         body.torsion_friction = 0.05;
-        body
+        Ok(body)
     }
 
     /// Heightfield terrain body (static use intended: pass mass 0).
     /// Restitution 0.3, friction 0.6.
+    ///
+    /// Legacy infallible wrapper over [`RigidBody::try_new_heightfield`]:
+    /// an invalid grid description is kept verbatim (queries degrade to
+    /// separation/`0.0`) so existing scenes are bit-identical; new code
+    /// should use the `try_` variant.
     pub fn new_heightfield(
         position: Vec3,
         heights: Vec<f32>,
@@ -255,22 +502,68 @@ impl RigidBody {
         )
     }
 
+    /// Checked heightfield body: validates `len == rows * cols`, grid
+    /// extents and finite samples up front instead of degrading silently
+    /// in queries.
+    pub fn try_new_heightfield(
+        position: Vec3,
+        heights: Vec<f32>,
+        rows: usize,
+        cols: usize,
+        cell: f32,
+        mass: f32,
+    ) -> Result<Self, crate::invariants::HeightfieldError> {
+        let hf = crate::shape::Heightfield::new(heights, rows, cols, cell)?;
+        Ok(Self::build(
+            position,
+            mass,
+            0.3,
+            0.6,
+            Shape::Heightfield(hf),
+        ))
+    }
+
     /// Triangle-mesh collider body from a vertex soup and triangle
     /// indices (concave meshes welcome; static use intended: pass mass
     /// 0). Restitution 0.3, friction 0.5, rolling/torsion damping 0.2/0.05
     /// like hull debris. Inertia is exact (Mirtich) for closed, outwardly
     /// wound soup, bounding-box fallback otherwise.
+    ///
+    /// Legacy infallible wrapper over [`RigidBody::try_new_trimesh`]:
+    /// dangling indices fall back to an empty mesh instead of panicking,
+    /// so existing scenes are bit-identical on valid input.
     pub fn new_trimesh(position: Vec3, vertices: &[Vec3], indices: &[[u32; 3]], mass: f32) -> Self {
+        Self::try_new_trimesh(position, vertices, indices, mass).unwrap_or_else(|_| {
+            let empty = crate::shape::TriMesh::from_indexed(&[], &[]).expect("empty soup builds");
+            let mut body = Self::build(position, mass, 0.3, 0.5, Shape::TriMesh(empty));
+            body.rolling_friction = 0.2;
+            body.torsion_friction = 0.05;
+            body
+        })
+    }
+
+    /// Checked triangle-mesh body: dangling indices and non-finite
+    /// vertices are a typed error instead of a panic.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::MeshError`] from [`crate::shape::TriMesh::from_indexed`].
+    pub fn try_new_trimesh(
+        position: Vec3,
+        vertices: &[Vec3],
+        indices: &[[u32; 3]],
+        mass: f32,
+    ) -> Result<Self, crate::errors::MeshError> {
         let mut body = Self::build(
             position,
             mass,
             0.3,
             0.5,
-            Shape::TriMesh(crate::shape::TriMesh::from_indexed(vertices, indices)),
+            Shape::TriMesh(crate::shape::TriMesh::from_indexed(vertices, indices)?),
         );
         body.rolling_friction = 0.2;
         body.torsion_friction = 0.05;
-        body
+        Ok(body)
     }
 
     /// Builder-style collision-layer and mask configuration.
@@ -304,9 +597,27 @@ impl RigidBody {
         self
     }
 
+    /// Builder-style collision-role configuration (typed replacement for
+    /// [`Self::with_trigger`]).
+    pub fn with_role(mut self, role: crate::flags::BodyRole) -> Self {
+        self.set_role(role);
+        self
+    }
+
     /// Enables or disables overlap-event behavior in place.
     pub fn set_trigger(&mut self, is_trigger: bool) {
-        self.is_trigger = is_trigger;
+        self.set_role(crate::flags::BodyRole::from(is_trigger));
+    }
+
+    /// Sets the collision role in place (typed replacement for
+    /// [`Self::set_trigger`]).
+    pub fn set_role(&mut self, role: crate::flags::BodyRole) {
+        self.is_trigger = role.is_trigger();
+    }
+
+    /// Current collision role as a [`crate::flags::BodyRole`].
+    pub fn role(&self) -> crate::flags::BodyRole {
+        crate::flags::BodyRole::from(self.is_trigger)
     }
 
     /// Builder-style variant of [`RigidBody::set_orientation`].
@@ -325,9 +636,22 @@ impl RigidBody {
         self.angular_velocity = w;
     }
 
+    /// Typed alias of [`RigidBody::set_angular_velocity`]: the vector
+    /// carries rad/s per component, pinned in the name (raw storage stays
+    /// `Vec3` so the solver layout is untouched).
+    pub fn set_angular_velocity_rad_s(&mut self, w_rad_s: Vec3) {
+        self.set_angular_velocity(w_rad_s);
+    }
+
     /// Apply a torque (N·m) to the body; takes effect on the next step.
     pub fn apply_torque(&mut self, torque: Vec3) {
         self.torque += torque;
+    }
+
+    /// Typed alias of [`RigidBody::apply_torque`]: the vector carries N·m
+    /// per component, pinned in the name.
+    pub fn apply_torque_n_m(&mut self, torque_n_m: Vec3) {
+        self.apply_torque(torque_n_m);
     }
 }
 
@@ -434,5 +758,25 @@ mod tests {
         let body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0);
         assert_eq!(body.inv_mass, 0.0);
         assert_eq!(body.body_type, BodyType::Static);
+    }
+
+    /// `set_mass`/`make_static`/`make_dynamic` move the whole triple
+    /// (`mass`, `inv_mass`, `inertia`, `body_type`) in one write — no
+    /// manual resync.
+    #[test]
+    fn set_mass_moves_the_whole_triple() {
+        let mut body = RigidBody::new_sphere(Vec3::ZERO, 1.0, 2.0);
+        body.set_mass(PositiveF32::try_new(4.0).expect("valid mass"));
+        assert_eq!(body.mass, 4.0);
+        assert!((body.inv_mass - 0.25).abs() < 1e-6, "inv_mass = 1/mass");
+        assert_eq!(body.body_type, BodyType::Dynamic);
+        assert!(body.inertia.x > 0.0, "dynamic inertia is shape-derived");
+        body.make_static();
+        assert_eq!(body.mass, 0.0);
+        assert_eq!(body.inv_mass, 0.0);
+        assert_eq!(body.body_type, BodyType::Static);
+        body.make_dynamic(PositiveF32::try_new(1.0).expect("valid mass"));
+        assert_eq!(body.body_type, BodyType::Dynamic);
+        assert!((body.inv_mass - 1.0).abs() < 1e-6);
     }
 }

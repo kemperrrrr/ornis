@@ -51,7 +51,7 @@ impl AudioHost {
     }
 
     /// Store a clip and return its stable id for [`AudioSource::clip_id`].
-    pub fn register_clip(&self, clip: AudioClip) -> usize {
+    pub fn register_clip(&self, clip: AudioClip) -> crate::source::ClipId {
         self.engine
             .lock()
             .expect("audio host lock")

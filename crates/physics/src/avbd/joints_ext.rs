@@ -119,16 +119,16 @@ impl AvbdEngine {
         for (k, r) in rj.into_iter().enumerate() {
             let (ba, bb) = (&self.bodies[r.a], &self.bodies[r.b]);
             let raw = Self::joint_coordinate(r, ba, bb)?;
-            let (angular, axis, ra, rb) = match r.kind {
+            let (kind, axis, ra, rb) = match r.kind {
                 AvbdJointKind::Revolute => {
                     let wa = (ba.orientation * r.ax_a).normalize_or(Vec3::Z);
-                    (true, wa, Vec3::ZERO, Vec3::ZERO)
+                    (crate::flags::CoordKind::Angular, wa, Vec3::ZERO, Vec3::ZERO)
                 }
                 AvbdJointKind::Prismatic => {
                     let wa = (ba.orientation * r.ax_a).normalize_or(Vec3::Z);
                     let ra = ba.orientation * r.la;
                     let rb = bb.orientation * r.lb;
-                    (false, wa, ra, rb)
+                    (crate::flags::CoordKind::Linear, wa, ra, rb)
                 }
                 _ => return None,
             };
@@ -137,13 +137,15 @@ impl AvbdEngine {
             // hinge crossing PI teleports the ratio residual by 2*PI.
             // Linear sides skip the unwrap: meters wrap to garbage.
             let coord = match j.gear_mem {
-                Some((prev_raw, prev_cont)) if angular => prev_cont[k] + wrap_pi(raw - prev_raw[k]),
+                Some((prev_raw, prev_cont)) if kind.is_angular() => {
+                    prev_cont[k] + wrap_pi(raw - prev_raw[k])
+                }
                 _ => raw,
             };
             sides.push(GearSide {
                 a: r.a,
                 b: r.b,
-                angular,
+                kind,
                 axis,
                 ra,
                 rb,

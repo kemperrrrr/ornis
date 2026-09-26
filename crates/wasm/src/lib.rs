@@ -781,7 +781,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
         ctx.config.format,
         (ctx.config.width, ctx.config.height),
         Technique::Hybrid,
-        false,
+        ornis_render::Bloom::Off,
     );
 
     // Client-side input: orbit pointer/wheel plus gameplay keys share one

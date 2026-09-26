@@ -90,6 +90,63 @@ use ornis_schedule::{
 };
 pub use ornis_schedule::{OrderError, compute_levels};
 
+/// Typed system name: the `System::name()` ordering key.
+///
+/// Owned (`Box<str>`) so static declarations and dynamic frontends share
+/// one type; ordering APIs accept `impl Into<SystemName>`, so existing
+/// `order_before("a", "b")` call sites keep compiling while new code can
+/// pass the typed name around instead of a bare `&str`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SystemName(Box<str>);
+
+impl SystemName {
+    /// Wraps a `'static` system name without extra bookkeeping.
+    pub fn from_static(name: &'static str) -> Self {
+        Self(name.into())
+    }
+
+    /// System name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for SystemName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for SystemName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for SystemName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for SystemName {
+    fn from(name: &str) -> Self {
+        Self(name.into())
+    }
+}
+
+impl From<String> for SystemName {
+    fn from(name: String) -> Self {
+        Self(name.into_boxed_str())
+    }
+}
+
+impl From<&String> for SystemName {
+    fn from(name: &String) -> Self {
+        Self(name.as_str().into())
+    }
+}
+
 /// Singleton resource container ("world"): one value per type.
 /// Mutation via interior mutability (`Mutex<T>`, atomics) —
 /// parallel systems receive `&Resources`.
@@ -446,12 +503,82 @@ pub struct Schedule {
     /// of inferred access edges — e.g., for hidden dependencies (shared
     /// queue buffers) invisible in access sets.
     ordering: Vec<(usize, usize)>,
-    parallel: bool,
-    enforce_accesses: bool,
+    mode: ExecMode,
+    enforcement: Enforcement,
     /// Level plan cache with diagnostics (mirrors the render
     /// `FrameLayout` S1 cache): recomputed only after
     /// `add_system`/`order_before`.
     plan: PlanCache,
+}
+
+/// Schedule execution mode (typed replacement for `parallel: bool`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ExecMode {
+    /// Strictly sequential, bit-identical registration order.
+    Sequential,
+    /// Parallel levels via the scheduler (default).
+    #[default]
+    Parallel,
+}
+
+impl ExecMode {
+    /// `true` for [`ExecMode::Parallel`].
+    pub fn is_parallel(self) -> bool {
+        matches!(self, Self::Parallel)
+    }
+}
+
+impl From<bool> for ExecMode {
+    /// Legacy `parallel: bool` polarity.
+    fn from(parallel: bool) -> Self {
+        if parallel {
+            Self::Parallel
+        } else {
+            Self::Sequential
+        }
+    }
+}
+
+impl From<ExecMode> for bool {
+    /// Legacy `parallel: bool` polarity.
+    fn from(mode: ExecMode) -> bool {
+        mode.is_parallel()
+    }
+}
+
+/// Declared-access enforcement policy (typed replacement for
+/// `enforce_accesses: bool`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Enforcement {
+    /// Verify declared lane accesses at runtime.
+    Enforced,
+    /// Skip access verification.
+    Relaxed,
+}
+
+impl Enforcement {
+    /// `true` for [`Enforcement::Enforced`].
+    pub fn is_enforced(self) -> bool {
+        matches!(self, Self::Enforced)
+    }
+}
+
+impl From<bool> for Enforcement {
+    /// Legacy `enforce: bool` polarity.
+    fn from(enforce: bool) -> Self {
+        if enforce {
+            Self::Enforced
+        } else {
+            Self::Relaxed
+        }
+    }
+}
+
+impl From<Enforcement> for bool {
+    /// Legacy `enforce: bool` polarity.
+    fn from(e: Enforcement) -> bool {
+        e.is_enforced()
+    }
 }
 
 impl Default for Schedule {
@@ -467,8 +594,8 @@ impl Schedule {
             systems: Vec::new(),
             accesses: Vec::new(),
             ordering: Vec::new(),
-            parallel: true,
-            enforce_accesses: cfg!(debug_assertions),
+            mode: ExecMode::Parallel,
+            enforcement: Enforcement::from(cfg!(debug_assertions)),
             plan: PlanCache::new(),
         }
     }
@@ -507,20 +634,43 @@ impl Schedule {
     /// `after`, even if their accesses do not conflict (hidden
     /// dependency). Both are looked up by `name()`.
     ///
+    /// Accepts [`SystemName`] or plain strings (`impl Into<SystemName>`),
+    /// so existing `order_before("a", "b")` call sites keep compiling.
+    ///
     /// # Panics
     /// Panics if a name is not found (name uniqueness is the caller's
     /// responsibility) or `after` is registered before `before`:
     /// execution order is registration order (S3), explicit edges only
     /// split levels.
-    pub fn order_before(&mut self, before: &str, after: &str) -> &mut Self {
-        self.try_order_before(before, after)
-            .unwrap_or_else(|error| panic!("order_before('{before}', '{after}'): {error}"))
+    pub fn order_before(
+        &mut self,
+        before: impl Into<SystemName>,
+        after: impl Into<SystemName>,
+    ) -> &mut Self {
+        let before = before.into();
+        let after = after.into();
+        self.try_order_before(before.as_str(), after.as_str())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "order_before('{}', '{}'): {error}",
+                    before.as_str(),
+                    after.as_str()
+                )
+            })
     }
 
     /// Fallible [`Schedule::order_before`]: returns [`OrderError`] on
     /// failure instead of panicking (for phase-6 dynamic frontends).
-    pub fn try_order_before(&mut self, before: &str, after: &str) -> Result<&mut Self, OrderError> {
-        let (b, a) = resolve_named_edge(before, after, |name| self.try_system_index(name))?;
+    pub fn try_order_before(
+        &mut self,
+        before: impl Into<SystemName>,
+        after: impl Into<SystemName>,
+    ) -> Result<&mut Self, OrderError> {
+        let before = before.into();
+        let after = after.into();
+        let (b, a) = resolve_named_edge(before.as_str(), after.as_str(), |name| {
+            self.try_system_index(name)
+        })?;
         if !self.ordering.contains(&(b, a)) {
             self.ordering.push((b, a));
             self.invalidate_plan();
@@ -529,12 +679,20 @@ impl Schedule {
     }
 
     /// S5c: mirror of [`Schedule::order_before`].
-    pub fn order_after(&mut self, after: &str, before: &str) -> &mut Self {
+    pub fn order_after(
+        &mut self,
+        after: impl Into<SystemName>,
+        before: impl Into<SystemName>,
+    ) -> &mut Self {
         self.order_before(before, after)
     }
 
     /// Fallible [`Schedule::order_after`].
-    pub fn try_order_after(&mut self, after: &str, before: &str) -> Result<&mut Self, OrderError> {
+    pub fn try_order_after(
+        &mut self,
+        after: impl Into<SystemName>,
+        before: impl Into<SystemName>,
+    ) -> Result<&mut Self, OrderError> {
         self.try_order_before(before, after)
     }
 
@@ -542,18 +700,43 @@ impl Schedule {
         self.systems.iter().position(|sys| sys.name() == name)
     }
 
-    /// Parallel (true, default) or strictly sequential (bit-identical
+    /// Typed lookup of a system index by [`SystemName`].
+    pub fn system_index(&self, name: &SystemName) -> Option<usize> {
+        self.try_system_index(name.as_str())
+    }
+
+    /// Parallel (default) or strictly sequential (bit-identical
     /// registration order) execution.
-    pub fn set_parallel(&mut self, parallel: bool) -> &mut Self {
-        self.parallel = parallel;
+    pub fn set_exec_mode(&mut self, mode: ExecMode) -> &mut Self {
+        self.mode = mode;
         self
     }
 
-    /// Enforcement of declared accesses (see module docs): enabled by
-    /// default in debug builds, disabled in release.
-    pub fn set_enforce_accesses(&mut self, enforce: bool) -> &mut Self {
-        self.enforce_accesses = enforce;
+    /// Boolean-compat wrapper for [`Self::set_exec_mode`] (kept for tests).
+    pub fn set_parallel(&mut self, parallel: bool) -> &mut Self {
+        self.set_exec_mode(ExecMode::from(parallel))
+    }
+
+    /// Current execution mode.
+    pub fn exec_mode(&self) -> ExecMode {
+        self.mode
+    }
+
+    /// Enforcement of declared accesses (see module docs): enforced by
+    /// default in debug builds, relaxed in release.
+    pub fn set_enforcement(&mut self, enforcement: Enforcement) -> &mut Self {
+        self.enforcement = enforcement;
         self
+    }
+
+    /// Boolean-compat wrapper for [`Self::set_enforcement`] (kept for tests).
+    pub fn set_enforce_accesses(&mut self, enforce: bool) -> &mut Self {
+        self.set_enforcement(Enforcement::from(enforce))
+    }
+
+    /// Current enforcement policy.
+    pub fn enforcement(&self) -> Enforcement {
+        self.enforcement
     }
 
     /// Number of systems.
@@ -613,19 +796,19 @@ impl Schedule {
     /// Executes the schedule over the world.
     pub fn run(&self, resources: &Resources) {
         // Sequential mode does not compute the plan at all (as before).
-        let levels = if self.parallel {
+        let levels = if self.mode.is_parallel() {
             self.cached_levels()
         } else {
             Vec::new()
         };
-        run_levels(&levels, self.systems.len(), self.parallel, |i| {
+        run_levels(&levels, self.systems.len(), self.mode.is_parallel(), |i| {
             self.run_system(i, resources);
         });
     }
 
     fn run_system(&self, i: usize, resources: &Resources) {
         let system = &self.systems[i];
-        if self.enforce_accesses {
+        if self.enforcement.is_enforced() {
             let _frame = AccessFrameGuard::push(system.name(), &self.accesses[i]);
             system.run(resources);
         } else {

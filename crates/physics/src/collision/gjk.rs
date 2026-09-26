@@ -575,7 +575,7 @@ mod tests {
                 }
             }
         }
-        Shape::ConvexHull(ConvexHull::from_vertices(verts))
+        Shape::ConvexHull(ConvexHull::from_vertices(verts).expect("valid test hull"))
     }
 
     #[test]
@@ -624,12 +624,15 @@ mod tests {
     /// vertex and returned a false gap from the iteration budget.
     #[test]
     fn gjk_tetra_vertex_buried_reports_penetration() {
-        let tetra = Shape::ConvexHull(ConvexHull::from_vertices(vec![
-            Vec3::new(1.0, 0.0, -1.0 / 2.0f32.sqrt()),
-            Vec3::new(-1.0, 0.0, -1.0 / 2.0f32.sqrt()),
-            Vec3::new(0.0, 1.0, 1.0 / 2.0f32.sqrt()),
-            Vec3::new(0.0, -1.0, 1.0 / 2.0f32.sqrt()),
-        ]));
+        let tetra = Shape::ConvexHull(
+            ConvexHull::from_vertices(vec![
+                Vec3::new(1.0, 0.0, -1.0 / 2.0f32.sqrt()),
+                Vec3::new(-1.0, 0.0, -1.0 / 2.0f32.sqrt()),
+                Vec3::new(0.0, 1.0, 1.0 / 2.0f32.sqrt()),
+                Vec3::new(0.0, -1.0, 1.0 / 2.0f32.sqrt()),
+            ])
+            .expect("valid test tetra"),
+        );
         let floor = Shape::Box {
             half_extents: Vec3::new(5.0, 0.5, 5.0),
         };
@@ -746,7 +749,7 @@ mod tests {
     #[test]
     fn hull_over_cap_skips_faces_but_keeps_support() {
         let verts: Vec<Vec3> = (0..70).map(|i| Vec3::new(i as f32, 0.0, 0.0)).collect();
-        let hull = ConvexHull::from_vertices(verts);
+        let hull = ConvexHull::from_vertices(verts).expect("valid test hull");
         assert!(hull.faces.is_empty());
         assert_eq!(hull.vertices.len(), 70);
         let s = support(
@@ -760,12 +763,8 @@ mod tests {
 
     #[test]
     fn heightfield_height_at_bilinear() {
-        let hf = Heightfield {
-            heights: vec![0.0, 0.0, 0.0, 2.0],
-            rows: 2,
-            cols: 2,
-            cell: 1.0,
-        };
+        let hf =
+            Heightfield::new(vec![0.0, 0.0, 0.0, 2.0], 2, 2, 1.0).expect("valid test heightfield");
         // Corners clamp to edge samples.
         assert!((hf.height_at(-10.0, -10.0) - 0.0).abs() < EPS);
         assert!((hf.height_at(10.0, 10.0) - 2.0).abs() < EPS);

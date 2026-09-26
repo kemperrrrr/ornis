@@ -5,7 +5,7 @@
 
 use super::parse::{eval_combine2, eval_combine3, eval_combine4, eval_constant, eval_convert};
 use super::{CodegenError, EvaluatedGraph, MaterialXConverter, OutputValue};
-use crate::nodes::{Node, NodeGraph};
+use crate::nodes::{MtlxNodeKind, Node, NodeGraph};
 use std::collections::HashMap;
 
 pub(crate) struct GraphEvaluator<'a> {
@@ -36,7 +36,7 @@ impl<'a> GraphEvaluator<'a> {
             .graph
             .nodes
             .iter()
-            .filter(|n| n.node_type == "output")
+            .filter(|n| n.node_type == MtlxNodeKind::Output)
             .collect();
 
         for output_node in output_nodes {
@@ -44,14 +44,14 @@ impl<'a> GraphEvaluator<'a> {
         }
 
         for node in &self.graph.nodes {
-            if matches!(node.node_type.as_str(), "surface" | "edf") {
+            if matches!(node.node_type, MtlxNodeKind::Surface | MtlxNodeKind::Edf) {
                 self.evaluate_node(node)?;
             }
         }
 
         let mut outputs = HashMap::new();
         for node in &self.graph.nodes {
-            if node.node_type == "output" {
+            if node.node_type == MtlxNodeKind::Output {
                 // `<output ... nodename="..."/>` references its source node
                 // via the attribute instead of a child `<input>`.
                 if !node.nodename.is_empty()
@@ -77,8 +77,11 @@ impl<'a> GraphEvaluator<'a> {
         let node_def = self
             .converter
             .node_defs
-            .get(&node.node_type)
-            .ok_or_else(|| CodegenError::NodeDefNotFound(node.node_type.clone()))?;
+            .get(node.node_type.as_str())
+            .ok_or_else(|| CodegenError::NodeDefNotFound {
+                node_type: node.node_type.as_str().to_owned(),
+                node: node.name.clone(),
+            })?;
 
         let input_values = self.collect_input_values(node, node_def)?;
         let result = self.dispatch_node(node, &input_values)?;
@@ -110,21 +113,21 @@ impl<'a> GraphEvaluator<'a> {
         node: &Node,
         inputs: &HashMap<String, OutputValue>,
     ) -> Result<OutputValue, CodegenError> {
-        match node.node_type.as_str() {
-            "open_pbr_surface" => Ok(OutputValue::String("surface".to_string())),
-            "surface" => Ok(OutputValue::BSDF(node.name.clone())),
-            "oren_nayar_diffuse_bsdf" => Ok(OutputValue::BSDF("oren_nayar".to_string())),
-            "dielectric_bsdf" => Ok(OutputValue::BSDF("dielectric".to_string())),
-            "generalized_schlick_bsdf" => Ok(OutputValue::BSDF("schlick".to_string())),
-            "sheen_bsdf" => Ok(OutputValue::BSDF("sheen".to_string())),
-            "thin_film_bsdf" => Ok(OutputValue::BSDF("thin_film".to_string())),
-            "translucent_bsdf" => Ok(OutputValue::BSDF("translucent".to_string())),
-            "subsurface_bsdf" => Ok(OutputValue::BSDF("subsurface".to_string())),
-            "anisotropic_vdf" => Ok(OutputValue::VDF("anisotropic".to_string())),
-            "uniform_edf" => Ok(OutputValue::EDF("uniform".to_string())),
-            "generalized_schlick_edf" => Ok(OutputValue::EDF("schlick".to_string())),
-            "output" => self.eval_output_node(node, inputs),
-            _ => Err(CodegenError::UnsupportedNode(node.node_type.clone())),
+        match &node.node_type {
+            MtlxNodeKind::OpenPbrSurface => Ok(OutputValue::String("surface".to_string())),
+            MtlxNodeKind::Surface => Ok(OutputValue::BSDF(node.name.clone())),
+            MtlxNodeKind::OrenNayarDiffuseBsdf => Ok(OutputValue::BSDF("oren_nayar".to_string())),
+            MtlxNodeKind::DielectricBsdf => Ok(OutputValue::BSDF("dielectric".to_string())),
+            MtlxNodeKind::GeneralizedSchlickBsdf => Ok(OutputValue::BSDF("schlick".to_string())),
+            MtlxNodeKind::SheenBsdf => Ok(OutputValue::BSDF("sheen".to_string())),
+            MtlxNodeKind::ThinFilmBsdf => Ok(OutputValue::BSDF("thin_film".to_string())),
+            MtlxNodeKind::TranslucentBsdf => Ok(OutputValue::BSDF("translucent".to_string())),
+            MtlxNodeKind::SubsurfaceBsdf => Ok(OutputValue::BSDF("subsurface".to_string())),
+            MtlxNodeKind::AnisotropicVdf => Ok(OutputValue::VDF("anisotropic".to_string())),
+            MtlxNodeKind::UniformEdf => Ok(OutputValue::EDF("uniform".to_string())),
+            MtlxNodeKind::GeneralizedSchlickEdf => Ok(OutputValue::EDF("schlick".to_string())),
+            MtlxNodeKind::Output => self.eval_output_node(node, inputs),
+            other => Err(CodegenError::UnsupportedNode(other.as_str().to_owned())),
         }
     }
 

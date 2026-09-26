@@ -3,10 +3,10 @@
 //! exceeds it. Runs against random (technique x bloom x tail-culling x
 //! surface size) configurations.
 
-use ornis_render::{Budget, PassId, RenderFrame3D, Technique};
+use ornis_render::{Bloom, Budget, PassId, PassState, RenderFrame3D, Technique};
 use proptest::prelude::*;
 
-fn cfg(technique: Technique, bloom: bool, size: u32) -> RenderFrame3D {
+fn cfg(technique: Technique, bloom: Bloom, size: u32) -> RenderFrame3D {
     RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
         (size, size),
@@ -28,24 +28,26 @@ proptest! {
         let technique = [Technique::Forward, Technique::Deferred, Technique::Hybrid]
             [technique_idx];
         let size = [64u32, 320, 1280][size_idx];
+        let bloom = Bloom::from(bloom);
         let mut g3 = cfg(technique, bloom, size);
 
-        let max_tail = if bloom { 3 } else { 1 };
+        let max_tail = if bloom.is_on() { 3 } else { 1 };
         let drop_tail = drop_tail.min(max_tail);
         // Registration order = execution order, so trailing PassIds are the
         // tail passes. Totals are static per config (FrameLayout.passes is
         // pub(crate); an integration test counts them itself).
         let total = match (technique, bloom) {
-            (Technique::Forward, false) => 2,
-            (Technique::Forward, true) => 7,
-            (Technique::Deferred, false) => 3,
-            (Technique::Deferred, true) => 8,
-            (Technique::Hybrid, false) => 4,
-            (Technique::Hybrid, true) => 9,
+            (Technique::Forward, Bloom::Off) => 2,
+            (Technique::Forward, Bloom::On) => 7,
+            (Technique::Deferred, Bloom::Off) => 3,
+            (Technique::Deferred, Bloom::On) => 8,
+            (Technique::Hybrid, Bloom::Off) => 4,
+            (Technique::Hybrid, Bloom::On) => 9,
         };
         for i in 0..drop_tail {
             let idx = total - 1 - i;
-            g3.systems_mut().set_pass_enabled(PassId(idx as u32), false);
+            g3.systems_mut()
+                .set_pass_state(PassId(idx as u32), PassState::Disabled);
         }
 
         let planned = g3.systems_mut().try_layout().unwrap().planned_pool_bytes();

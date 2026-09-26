@@ -14,28 +14,37 @@ use ornis_assets::{
 };
 
 use crate::body::RigidBody;
+use crate::errors::ColliderError;
 
-/// Builds a solver body for an entity, or returns `None` when it has no
-/// collider.
+/// Builds a solver body for an entity: `Ok(None)` means "no collider"
+/// (no recipe, explicit `None`, or a non-`Custom` soup without an explicit
+/// `TriMesh` recipe); `Err` means "broken collider" (bad soup).
 ///
 /// Precedence: explicit [`ColliderDesc`] first (`None` suppresses even
 /// exact auto recipes), then the auto recipe for the mesh. `TriMesh`
-/// needs a `Custom` soup with triangular, in-range indices — anything
-/// else yields `None`. Pose comes from `transform` (translation +
-/// quaternion); `mass` follows the [`RigidBody`] convention (0 = static).
+/// needs a `Custom` soup with triangular, in-range indices. Pose comes
+/// from `transform` (translation + quaternion); `mass` follows the
+/// [`RigidBody`] convention (0 = static).
+///
+/// # Errors
+///
+/// [`ColliderError`] when an explicit `TriMesh` soup is malformed
+/// (non-triangular length or out-of-range indices).
 pub fn body_for(
     transform: &TransformDesc,
     mesh: &MeshDesc,
     collider: Option<&ColliderDesc>,
     mass: f32,
-) -> Option<RigidBody> {
+) -> Result<Option<RigidBody>, ColliderError> {
     let recipe = match collider {
         Some(recipe) => Some(recipe.clone()),
         None => collider_for(mesh),
     };
-    let recipe = recipe?;
+    let Some(recipe) = recipe else {
+        return Ok(None);
+    };
     if matches!(recipe, ColliderDesc::None) {
-        return None;
+        return Ok(None);
     }
     let position = Vec3::from_array(transform.translation);
     let rotation = transform.rotation;
@@ -47,34 +56,44 @@ pub fn body_for(
             RigidBody::new_cylinder(position, radius, height / 2.0, mass)
         }
         ColliderDesc::TriMesh => {
-            let (positions, indices) = mesh.as_custom()?;
+            let Some((positions, indices)) = mesh.as_custom() else {
+                return Ok(None);
+            };
             let vertices: Vec<Vec3> = positions.iter().map(|p| Vec3::from_array(*p)).collect();
             let triangles = validated_triangles(&vertices, indices)?;
             RigidBody::new_trimesh(position, &vertices, &triangles, mass)
         }
-        ColliderDesc::None => return None,
+        ColliderDesc::None => return Ok(None),
     };
     body.orientation = orientation;
-    Some(body)
+    Ok(Some(body))
 }
 
-/// Chunks a flat soup index list into triangles, rejecting anything the
-/// solver cannot consume: non-triangular length or out-of-range indices.
-fn validated_triangles(vertices: &[Vec3], indices: &[u32]) -> Option<Vec<[u32; 3]>> {
+/// Chunks a flat soup index list into triangles.
+///
+/// # Errors
+///
+/// [`ColliderError::BadIndexCount`] on non-triangular length,
+/// [`ColliderError::IndexOutOfRange`] on dangling indices.
+fn validated_triangles(vertices: &[Vec3], indices: &[u32]) -> Result<Vec<[u32; 3]>, ColliderError> {
     if !indices.len().is_multiple_of(3) {
-        return None;
+        return Err(ColliderError::BadIndexCount { len: indices.len() });
     }
     let triangles: Vec<[u32; 3]> = indices
         .chunks_exact(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
-    if triangles
-        .iter()
-        .any(|t| t.iter().any(|&i| (i as usize) >= vertices.len()))
-    {
-        return None;
+    for t in &triangles {
+        for &i in t {
+            if (i as usize) >= vertices.len() {
+                return Err(ColliderError::IndexOutOfRange {
+                    index: i,
+                    vertices: vertices.len(),
+                });
+            }
+        }
     }
-    Some(triangles)
+    Ok(triangles)
 }
 
 #[cfg(test)]
@@ -102,6 +121,7 @@ mod tests {
             None,
             0.0,
         )
+        .expect("sphere recipe infallible")
         .expect("sphere recipe builds");
         assert_eq!(body.position, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(body.orientation, Quat::IDENTITY);
@@ -114,10 +134,15 @@ mod tests {
             None,
             0.0,
         )
+        .expect("box recipe infallible")
         .expect("box recipe builds");
         assert_eq!(body.position, Vec3::new(1.0, 2.0, 3.0));
 
-        assert!(body_for(&transform, &MeshDesc::Plane { size: [3.0, 5.0] }, None, 0.0).is_none());
+        assert!(
+            body_for(&transform, &MeshDesc::Plane { size: [3.0, 5.0] }, None, 0.0)
+                .expect("plane infallible")
+                .is_none()
+        );
     }
 
     #[test]
@@ -137,10 +162,15 @@ mod tests {
             }),
             0.0,
         )
+        .expect("explicit recipe infallible")
         .expect("explicit recipe builds");
         assert_eq!(body.position, Vec3::new(1.0, 2.0, 3.0));
         // Explicit None suppresses even exact recipes.
-        assert!(body_for(&transform, &mesh, Some(&ColliderDesc::None), 0.0).is_none());
+        assert!(
+            body_for(&transform, &mesh, Some(&ColliderDesc::None), 0.0)
+                .expect("none infallible")
+                .is_none()
+        );
     }
 
     #[test]
@@ -150,12 +180,37 @@ mod tests {
             positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             indices: vec![0, 1, 2],
         };
-        assert!(body_for(&transform, &soup, None, 0.0).is_none());
-        assert!(body_for(&transform, &soup, Some(&ColliderDesc::TriMesh), 0.0,).is_some());
+        assert!(
+            body_for(&transform, &soup, None, 0.0)
+                .expect("auto soup infallible")
+                .is_none()
+        );
+        assert!(
+            body_for(&transform, &soup, Some(&ColliderDesc::TriMesh), 0.0,)
+                .expect("explicit soup infallible")
+                .is_some()
+        );
         let bad = MeshDesc::Custom {
             positions: vec![[0.0, 0.0, 0.0]],
             indices: vec![0, 1, 2],
         };
-        assert!(body_for(&transform, &bad, Some(&ColliderDesc::TriMesh), 0.0).is_none());
+        // Broken soup is now a typed error, not a silent `None`.
+        assert!(matches!(
+            body_for(&transform, &bad, Some(&ColliderDesc::TriMesh), 0.0),
+            Err(ColliderError::IndexOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn trimesh_bad_index_count_is_typed() {
+        let transform = transform();
+        let bad = MeshDesc::Custom {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            indices: vec![0, 1],
+        };
+        assert!(matches!(
+            body_for(&transform, &bad, Some(&ColliderDesc::TriMesh), 0.0),
+            Err(ColliderError::BadIndexCount { .. })
+        ));
     }
 }

@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use glam::Vec3;
-use ornis_physics::{PhysicsEngine, RigidBody, SequentialImpulseEngine, StepTiming};
+use ornis_physics::{BodyHandle, PhysicsEngine, RigidBody, SequentialImpulseEngine, StepTiming};
 
 fn setup_islands_grid(g: u32) -> SequentialImpulseEngine {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
@@ -126,9 +126,9 @@ fn log_stability(physics: &SequentialImpulseEngine, label: &str, count: usize) {
     let mut max_v = 0.0f32;
     let mut min_y = f32::MAX;
     for h in 0..count {
-        if let Some(b) = physics.get_body(h) {
+        if let Some(b) = physics.get_body(BodyHandle::from(h)) {
             min_y = min_y.min(b.position.y - 0.4);
-            if !physics.is_asleep(h) {
+            if !physics.is_asleep(BodyHandle::from(h)) {
                 awake += 1;
                 max_v = max_v.max(b.velocity.length());
             }
@@ -180,11 +180,11 @@ fn log_grid_sleep_summary(grid: &SequentialImpulseEngine) {
     let mut asleep = 0usize;
     let mut max_v = 0.0f32;
     let mut max_w = 0.0f32;
-    for h in 0..1025 {
-        if grid.is_asleep(h) {
+    for h in 0..1025usize {
+        if grid.is_asleep(BodyHandle::from(h)) {
             asleep += 1;
         }
-        if let Some(b) = grid.get_body(h) {
+        if let Some(b) = grid.get_body(BodyHandle::from(h)) {
             max_v = max_v.max(b.velocity.length());
             max_w = max_w.max(b.angular_velocity.length());
         }
@@ -198,10 +198,10 @@ fn log_awake_oscillation(grid: &mut SequentialImpulseEngine) {
         grid.step(1.0 / 60.0);
         let mut awake = 0usize;
         let mut mv = 0.0f32;
-        for h in 0..1025 {
-            if !grid.is_asleep(h) {
+        for h in 0..1025usize {
+            if !grid.is_asleep(BodyHandle::from(h)) {
                 awake += 1;
-                if let Some(b) = grid.get_body(h) {
+                if let Some(b) = grid.get_body(BodyHandle::from(h)) {
                     mv = mv.max(b.velocity.length());
                 }
             }
@@ -215,9 +215,9 @@ fn log_awake_oscillation(grid: &mut SequentialImpulseEngine) {
 /// Who stays awake? Print the positions/velocities of a few stubborn bodies.
 fn log_stubborn_bodies(grid: &mut SequentialImpulseEngine) {
     let mut stubborn = Vec::new();
-    for h in 0..1025 {
-        if !grid.is_asleep(h) && stubborn.len() < 6 {
-            let b = grid.get_body(h).unwrap();
+    for h in 0..1025usize {
+        if !grid.is_asleep(BodyHandle::from(h)) && stubborn.len() < 6 {
+            let b = grid.get_body(BodyHandle::from(h)).unwrap();
             println!(
                 "awake h={h} pos=({:.3},{:.3},{:.3}) v={:.4} w={:.4} island={:?}",
                 b.position.x,
@@ -225,7 +225,7 @@ fn log_stubborn_bodies(grid: &mut SequentialImpulseEngine) {
                 b.position.z,
                 b.velocity.length(),
                 b.angular_velocity.length(),
-                grid.debug_island_info(h)
+                grid.debug_island_info(BodyHandle::from(h))
             );
             stubborn.push(h);
         }
@@ -238,12 +238,20 @@ fn log_island_tracking(grid: &mut SequentialImpulseEngine) {
         grid.step(1.0 / 60.0);
         println!(
             "  track f+{f}: b29=(i{:?} c{} {}) b30=(i{:?} c{} {})",
-            grid.debug_island_info(29),
-            grid.debug_contact_count(29),
-            if grid.is_asleep(29) { "ZZ" } else { "  " },
-            grid.debug_island_info(30),
-            grid.debug_contact_count(30),
-            if grid.is_asleep(30) { "ZZ" } else { "  " },
+            grid.debug_island_info(BodyHandle::from_raw(29)),
+            grid.debug_contact_count(BodyHandle::from_raw(29)),
+            if grid.is_asleep(BodyHandle::from_raw(29)) {
+                "ZZ"
+            } else {
+                "  "
+            },
+            grid.debug_island_info(BodyHandle::from_raw(30)),
+            grid.debug_contact_count(BodyHandle::from_raw(30)),
+            if grid.is_asleep(BodyHandle::from_raw(30)) {
+                "ZZ"
+            } else {
+                "  "
+            },
         );
     }
 }
@@ -251,8 +259,8 @@ fn log_island_tracking(grid: &mut SequentialImpulseEngine) {
 /// Sleep summary plus per-frame manifold diagnostics for the big stack.
 fn log_stack_diagnostics(stack: &mut SequentialImpulseEngine) {
     let mut stack_asleep = 0;
-    for h in 0..33 {
-        if stack.is_asleep(h) {
+    for h in 0..33usize {
+        if stack.is_asleep(BodyHandle::from(h)) {
             stack_asleep += 1;
         }
     }
@@ -263,12 +271,18 @@ fn log_stack_diagnostics(stack: &mut SequentialImpulseEngine) {
         stack.step(1.0 / 60.0);
         let mut line = format!("stack f+{f}:");
         for h in 1..33usize {
-            if !stack.is_asleep(h) {
-                let b = stack.get_body(h).unwrap();
+            if !stack.is_asleep(BodyHandle::from(h)) {
+                let b = stack.get_body(BodyHandle::from(h)).unwrap();
                 line += &format!(
                     " {h}(i{},t{:.2},v{:.3},w{:.3})",
-                    stack.debug_island_info(h).map(|(r, _)| r).unwrap_or(0),
-                    stack.debug_island_info(h).map(|(_, t)| t).unwrap_or(0.0),
+                    stack
+                        .debug_island_info(BodyHandle::from(h))
+                        .map(|(r, _)| r)
+                        .unwrap_or(0),
+                    stack
+                        .debug_island_info(BodyHandle::from(h))
+                        .map(|(_, t)| t)
+                        .unwrap_or(0.0),
                     b.velocity.length(),
                     b.angular_velocity.length()
                 );
@@ -321,7 +335,7 @@ fn main() {
     {
         let mut hetero = setup_many_islands(256);
         // kick the top of the first tower (handle 3) — one fast island
-        if let Some(b) = hetero.get_body_mut(3) {
+        if let Some(b) = hetero.get_body_mut(BodyHandle::from_raw(3)) {
             b.velocity = Vec3::new(0.0, -40.0, 0.0);
         }
         time_steps(

@@ -175,6 +175,79 @@ pub(crate) struct GpuLight {
     pub shadow_vp: [[f32; 4]; 4],
 }
 
+/// Typed evaluation kind of a [`GpuLight`] entry (mirrors `LIGHT_KIND_*`
+/// scalars carried in `kind.x`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum GpuLightKind {
+    /// Directional light (`0.0`).
+    Directional,
+    /// Point light (`1.0`).
+    Point,
+    /// Spotlight (`2.0`).
+    Spot,
+}
+
+impl GpuLightKind {
+    /// Raw kind scalar (`kind.x`).
+    #[allow(dead_code)]
+    pub(crate) fn as_scalar(self) -> f32 {
+        match self {
+            Self::Directional => LIGHT_KIND_DIRECTIONAL,
+            Self::Point => LIGHT_KIND_POINT,
+            Self::Spot => LIGHT_KIND_SPOT,
+        }
+    }
+
+    /// Classifies a raw kind scalar; `None` for unknown values.
+    #[allow(dead_code)]
+    pub(crate) fn from_scalar(v: f32) -> Option<Self> {
+        if v == LIGHT_KIND_DIRECTIONAL {
+            Some(Self::Directional)
+        } else if v == LIGHT_KIND_POINT {
+            Some(Self::Point)
+        } else if v == LIGHT_KIND_SPOT {
+            Some(Self::Spot)
+        } else {
+            None
+        }
+    }
+}
+
+impl GpuLight {
+    /// Evaluation kind scalar carried in `kind.x` (0/1/2 =
+    /// directional/point/spot, see `LIGHT_KIND_*`).
+    #[allow(dead_code)]
+    pub(crate) fn kind_scalar(&self) -> f32 {
+        self.kind[0]
+    }
+
+    /// Typed evaluation kind from `kind.x`; `None` for unknown scalars.
+    /// Prefer [`GpuLight::kind_scalar`] only for raw shader debugging.
+    #[allow(dead_code)]
+    pub(crate) fn kind_units(&self) -> Option<GpuLightKind> {
+        GpuLightKind::from_scalar(self.kind[0])
+    }
+
+    /// Emission color (RGB, exposure-baked) plus radiometric intensity in
+    /// alpha, as linear RGBA.
+    #[allow(dead_code)]
+    pub(crate) fn color_units(&self) -> ornis_core::units::LinearRgba {
+        ornis_core::units::LinearRgba::new(self.color)
+    }
+
+    /// Range cutoff carried in `params.x` (point/spot).
+    #[allow(dead_code)]
+    pub(crate) fn range_cutoff(&self) -> f32 {
+        self.params[0]
+    }
+
+    /// Range cutoff in meters (point/spot).
+    #[allow(dead_code)]
+    pub(crate) fn range_units(&self) -> ornis_core::units::Meters {
+        ornis_core::units::Meters::new(self.params[0])
+    }
+}
+
 /// Lighting uniform block: ambient + fixed light array + count.
 ///
 /// The WGSL `Lighting` declaration is generated from this layout
@@ -197,6 +270,56 @@ pub(crate) struct LightingUniform {
     _pad: [u32; 3],
 }
 
+/// Index into the deduplicated material table ([`FrameUpload::materials`]).
+///
+/// Newtype over `u32` so material indices never mix with texture handles
+/// or entity ids at the type level. GPU records ([`PerObjectGpu`],
+/// shader interfaces) keep the raw `u32` layout; convert with
+/// [`MaterialIdx::as_u32`] at upload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MaterialIdx(u32);
+
+impl MaterialIdx {
+    /// Wraps a raw `u32` material table index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` material table index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Material index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for MaterialIdx {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for MaterialIdx {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<MaterialIdx> for u32 {
+    fn from(h: MaterialIdx) -> Self {
+        h.0
+    }
+}
+
+impl From<MaterialIdx> for usize {
+    fn from(h: MaterialIdx) -> Self {
+        h.0 as usize
+    }
+}
+
 /// CPU-side description of one drawn instance.
 #[derive(Debug, Clone, Copy)]
 pub struct InstanceData {
@@ -205,7 +328,7 @@ pub struct InstanceData {
     /// Normal matrix (inverse transpose of the linear part).
     pub normal_matrix: Mat4,
     /// Index into the material table.
-    pub material_index: u32,
+    pub material_index: MaterialIdx,
 }
 
 /// G-buffer texture views, fed either from persistent textures (legacy
@@ -680,6 +803,18 @@ const NO_SHADOW_VP: [[f32; 4]; 4] = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
+/// Packs a linear RGB scene color plus radiometric intensity into the GPU
+/// `vec4` (RGB exposure-scaled, intensity in alpha).
+fn pack_light_color(color: [f32; 3], intensity: f32, exposure: f32) -> [f32; 4] {
+    let rgb = ornis_core::units::LinearRgb::new(color).as_array();
+    [
+        rgb[0] * exposure,
+        rgb[1] * exposure,
+        rgb[2] * exposure,
+        intensity,
+    ]
+}
+
 /// Pure result of [`build_lighting_uniform`]: the uploadable uniform, the
 /// shadow VPs the depth pre-pass publishes (layers in assignment order,
 /// cube faces in slot-major order), and the upload report.
@@ -776,12 +911,7 @@ fn build_lighting_uniform(
                 }
                 GpuLight {
                     direction: norm_dir(*direction),
-                    color: [
-                        color[0] * exposure,
-                        color[1] * exposure,
-                        color[2] * exposure,
-                        *intensity,
-                    ],
+                    color: pack_light_color(*color, *intensity, exposure),
                     params: [0.0, 0.0, 0.0, layer],
                     shadow_vp: vp,
                     ..gpu_lights[i]
@@ -810,12 +940,7 @@ fn build_lighting_uniform(
                 GpuLight {
                     kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
                     position: [position[0], position[1], position[2], 1.0],
-                    color: [
-                        color[0] * exposure,
-                        color[1] * exposure,
-                        color[2] * exposure,
-                        *intensity,
-                    ],
+                    color: pack_light_color(*color, *intensity, exposure),
                     params: [range.max(1e-3), 0.0, 0.0, slot],
                     ..gpu_lights[i]
                 }
@@ -831,8 +956,14 @@ fn build_lighting_uniform(
                 shadow,
             } => {
                 // Cosineordered: inner must be the tighter cone.
-                let ci = inner_angle.to_radians().cos();
-                let co = outer_angle.to_radians().cos();
+                let ci = ornis_core::units::Degrees::new(*inner_angle)
+                    .to_radians()
+                    .get()
+                    .cos();
+                let co = ornis_core::units::Degrees::new(*outer_angle)
+                    .to_radians()
+                    .get()
+                    .cos();
                 let axis = norm3(*direction);
                 let (layer, vp) = shadow_layer!(
                     *shadow,
@@ -848,12 +979,7 @@ fn build_lighting_uniform(
                     kind: [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
                     direction: norm_dir(*direction),
                     position: [position[0], position[1], position[2], 1.0],
-                    color: [
-                        color[0] * exposure,
-                        color[1] * exposure,
-                        color[2] * exposure,
-                        *intensity,
-                    ],
+                    color: pack_light_color(*color, *intensity, exposure),
                     params: [range.max(1e-3), ci.max(co), co.min(ci), layer],
                     shadow_vp: vp,
                 }
@@ -865,13 +991,7 @@ fn build_lighting_uniform(
     let mut dropped_lights = 0u32;
     for light in lights.iter().skip(count) {
         dropped_lights += 1;
-        let wants = matches!(
-            light,
-            LightDesc::Directional { shadow: true, .. }
-                | LightDesc::Point { shadow: true, .. }
-                | LightDesc::Spot { shadow: true, .. }
-        );
-        if wants {
+        if light.shadow_cast().is_enabled() {
             dropped_shadows += 1;
         }
     }
@@ -988,13 +1108,8 @@ impl Renderer3D {
         let composite_pass = Self::create_composite_pass(device, format);
         let bloom_pass = Self::create_bloom_pass(device);
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
+            label: Some("composite sampler"),
+            ..crate::flags::SamplerKind::LinearClamp.descriptor()
         });
 
         Self {
@@ -1601,14 +1716,8 @@ impl Renderer3D {
         });
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow comparison sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
+            ..crate::flags::SamplerKind::LinearClamp.descriptor()
         });
         (
             shadow_maps,
@@ -1876,13 +1985,7 @@ impl Renderer3D {
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("lighting sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
+            ..crate::flags::SamplerKind::LinearClamp.descriptor()
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2868,7 +2971,7 @@ impl Renderer3D {
             gpu_objects.push(PerObjectGpu {
                 model: model_arr,
                 normal_matrix: normal_arr,
-                material_index: inst.material_index,
+                material_index: inst.material_index.as_u32(),
                 _padding: [0; 3],
             });
         }
@@ -3640,12 +3743,12 @@ mod tests {
         }
     }
 
-    fn dir_probe(direction: [f32; 3], shadow: bool) -> LightDesc {
+    fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::ShadowCast) -> LightDesc {
         LightDesc::Directional {
             direction,
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
-            shadow,
+            shadow: shadow.is_enabled(),
         }
     }
 
@@ -3667,7 +3770,9 @@ mod tests {
 
     #[test]
     fn ten_lights_upload_eight_and_drop_two() {
-        let lights: Vec<LightDesc> = (0..10).map(|_| dir_probe([1.0, 1.0, 1.0], false)).collect();
+        let lights: Vec<LightDesc> = (0..10)
+            .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
+            .collect();
         let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None);
         assert_eq!(
             built.stats,
@@ -3685,7 +3790,9 @@ mod tests {
     #[test]
     fn shadow_overflow_counts_dropped_shadows() {
         // Five shadowed directionals over four 2D layers.
-        let dirs: Vec<LightDesc> = (0..5).map(|_| dir_probe([0.0, 1.0, 0.0], true)).collect();
+        let dirs: Vec<LightDesc> = (0..5)
+            .map(|_| dir_probe([0.0, 1.0, 0.0], ornis_assets::scene::ShadowCast::Enabled))
+            .collect();
         let stats = count_light_drops(&dirs);
         assert_eq!(stats.uploaded, 5);
         assert_eq!(stats.dropped_lights, 0);
@@ -3703,10 +3810,17 @@ mod tests {
         let stats = count_light_drops(&points);
         assert_eq!(stats.dropped_shadows, 1, "{stats:?}");
         // A shadow request on a dropped excess light counts too.
-        let mut lights: Vec<LightDesc> =
-            (0..8).map(|_| dir_probe([1.0, 1.0, 1.0], false)).collect();
-        lights.push(dir_probe([0.0, 1.0, 0.0], true));
-        lights.push(dir_probe([0.0, 1.0, 0.0], true));
+        let mut lights: Vec<LightDesc> = (0..8)
+            .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
+            .collect();
+        lights.push(dir_probe(
+            [0.0, 1.0, 0.0],
+            ornis_assets::scene::ShadowCast::Enabled,
+        ));
+        lights.push(dir_probe(
+            [0.0, 1.0, 0.0],
+            ornis_assets::scene::ShadowCast::Enabled,
+        ));
         let stats = count_light_drops(&lights);
         assert_eq!(stats.dropped_lights, 2, "{stats:?}");
         assert_eq!(stats.dropped_shadows, 2, "{stats:?}");
@@ -3716,7 +3830,7 @@ mod tests {
     fn legacy_shadow_path_matches_dir_shadow_vp() {
         // `fit: None` must reproduce the legacy matrix bit-for-bit:
         // directional-only scenes stay pixel-identical.
-        let light = dir_probe([1.0, 1.0, 1.0], true);
+        let light = dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Enabled);
         let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None);
         let v = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
         assert_eq!(built.uniform.lights[0].shadow_vp, dir_shadow_vp(v));

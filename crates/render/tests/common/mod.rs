@@ -12,7 +12,9 @@
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_render::render_backend::RenderContext;
-use ornis_render::{InstanceData, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique};
+use ornis_render::{
+    InstanceData, MaterialIdx, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique,
+};
 
 /// Offscreen target edge in pixels (square).
 pub const SIZE: u32 = 128;
@@ -82,7 +84,7 @@ impl HeadlessScene {
         let instance = InstanceData {
             model_matrix: model,
             normal_matrix: model.inverse().transpose(),
-            material_index: 0,
+            material_index: MaterialIdx::from_raw(0),
         };
         renderer.upload_instances(&device, &queue, &[instance]);
         renderer.set_lights(
@@ -166,7 +168,7 @@ where
         wgpu::TextureFormat::Rgba8Unorm,
         (SIZE, SIZE),
         Technique::Hybrid,
-        true,
+        ornis_render::Bloom::On,
     );
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("pixel-parity encoder"),

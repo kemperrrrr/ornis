@@ -24,5 +24,6 @@ pub use decoder::{DecodeError, decode_bytes, decode_file};
 pub use engine::AudioEngine;
 pub use schedule::{AudioHost, AudioPlugin};
 pub use source::{
-    AudioClip, AudioListener, AudioSource, AudioState, MixInput, SampleBuffer, SpatialParams,
+    AudioClip, AudioListener, AudioSource, AudioState, ClipId, MixInput, SampleBuffer,
+    SpatialParams,
 };

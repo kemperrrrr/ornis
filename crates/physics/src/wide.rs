@@ -761,21 +761,22 @@ mod tests {
     }
 
     fn manifold(i: usize, j: usize, normal: Vec3, point: Vec3) -> Manifold {
-        let mut m = Manifold {
-            body_a: i,
-            body_b: j,
-            normal,
-            point_count: 1,
-            points: [ManifoldPoint {
-                world_point: Vec3::ZERO,
-                penetration: 0.0,
-            }; 4],
-        };
-        m.points[0] = ManifoldPoint {
+        let mut points = [ManifoldPoint {
+            world_point: Vec3::ZERO,
+            penetration: 0.0,
+        }; 4];
+        points[0] = ManifoldPoint {
             world_point: point,
             penetration: 0.01,
         };
-        m
+        Manifold::from_parts(
+            crate::body::BodyHandle::from(i),
+            crate::body::BodyHandle::from(j),
+            normal,
+            points,
+            1,
+        )
+        .expect("single-point test manifold satisfies 1..=4")
     }
 
     /// The wide lane solver must produce the same velocities and accumulated
@@ -806,7 +807,13 @@ mod tests {
         // Reference: run the scalar single-point solve by hand on clones.
         let mut scalar_bodies = bodies.clone();
         let mut scalar_states = states.clone();
-        run_scalar(&mut scalar_bodies, &manifolds, &mut scalar_states, 8, false);
+        run_scalar(
+            &mut scalar_bodies,
+            &manifolds,
+            &mut scalar_states,
+            8,
+            crate::flags::RestitutionGate::Suppressed,
+        );
 
         // Wide path.
         let items: Vec<(usize, &Manifold, &ManifoldState)> = states
@@ -863,7 +870,13 @@ mod tests {
 
         let mut scalar_bodies = bodies.clone();
         let mut scalar_states = states.clone();
-        run_scalar(&mut scalar_bodies, &manifolds, &mut scalar_states, 8, false);
+        run_scalar(
+            &mut scalar_bodies,
+            &manifolds,
+            &mut scalar_states,
+            8,
+            crate::flags::RestitutionGate::Suppressed,
+        );
 
         let items: Vec<(usize, &Manifold, &ManifoldState)> = vec![(0, &manifolds[0], &states[0])];
         let mut batch = WideBatch::build(&items, &bodies);
@@ -899,7 +912,7 @@ mod tests {
         manifolds: &[Manifold],
         states: &mut [ManifoldState],
         iterations: u32,
-        _allow_restitution: bool,
+        _gate: crate::flags::RestitutionGate,
     ) {
         // Delegate to the PRODUCTION scalar single-point step so the parity
         // test compares the wide path against the exact code it must match
@@ -940,7 +953,14 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(mi, m)| {
-                single_state(m.body_a, m.body_b, m.normal, m.points[0].world_point, 0.0).with_mi(mi)
+                single_state(
+                    m.body_a.index(),
+                    m.body_b.index(),
+                    m.normal,
+                    m.points[0].world_point,
+                    0.0,
+                )
+                .with_mi(mi)
             })
             .collect();
 

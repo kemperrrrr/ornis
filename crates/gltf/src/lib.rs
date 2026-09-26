@@ -319,18 +319,32 @@ impl ImportStats {
 }
 
 /// Geometry import failure.
-#[derive(Debug)]
+///
+/// Typed per cause: `Ok` values never carry error text, and each `Err`
+/// names its reason — a missing filesystem sibling ([`ExternalBuffer`])
+/// never mixes with undecodable bytes ([`Parse`]). Sample hierarchy:
+/// `TextureUploadError` in `ornis-render` (same struct-variant discipline).
+#[derive(Debug, thiserror::Error)]
 pub enum ImportError {
     /// Bytes are not a parseable glTF 2.0 asset (carries the parser message).
-    Parse(String),
+    #[error("invalid glTF asset: {message}")]
+    Parse {
+        /// Parser message (unstructured: the `gltf` crate reports text).
+        message: String,
+    },
     /// The document has no scenes to traverse.
+    #[error("glTF document has no scenes")]
     NoScene,
     /// A `BIN`-chunk buffer with no binary chunk (truncated `.glb`).
+    #[error("GLB buffer has no BIN chunk")]
     MissingBlob,
     /// An external buffer URI seen by [`load_slice`], which never touches
-    /// the filesystem — retry with [`load_path`].
-    ExternalBuffer(String),
+    /// the filesystem — retry with [`load_path`]. Typed as a path (not a
+    /// bare `String`) so hosts can join it against an asset directory.
+    #[error("external buffer '{0}' needs the filesystem: use load_path")]
+    ExternalBuffer(std::path::PathBuf),
     /// Declared `byteLength` exceeds the resolved buffer bytes.
+    #[error("buffer {index} too short: declared {expected} bytes, got {actual}")]
     BufferTooShort {
         /// Buffer index in the document.
         index: usize,
@@ -340,62 +354,27 @@ pub enum ImportError {
         actual: usize,
     },
     /// A `data:` URI that is not decodable base64 (carries the URI head).
-    InvalidDataUri(String),
+    #[error("undecodable buffer data URI near '{head}'")]
+    InvalidDataUri {
+        /// First 48 characters of the offending URI.
+        head: String,
+    },
     /// An image `mimeType` (or file extension) outside the core pair
     /// (`image/png`, `image/jpeg`; carries `image {index}` plus the
     /// offending type).
-    UnsupportedImage(String),
+    #[error("unsupported glTF image: {context}")]
+    UnsupportedImage {
+        /// `image {index}` plus the offending mime/extension.
+        context: String,
+    },
     /// Image bytes no PNG/JPEG decoder accepts (carries `image {index}`
     /// plus the size or range context).
-    InvalidImage(String),
+    #[error("invalid glTF image: {context}")]
+    InvalidImage {
+        /// `image {index}` plus the size or range context.
+        context: String,
+    },
     /// Filesystem failure inside [`load_path`] (asset or sibling buffer).
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for ImportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Parse(message) => write!(f, "invalid glTF asset: {message}"),
-            Self::NoScene => write!(f, "glTF document has no scenes"),
-            Self::MissingBlob => write!(f, "GLB buffer has no BIN chunk"),
-            Self::ExternalBuffer(uri) => write!(
-                f,
-                "external buffer '{uri}' needs the filesystem: use load_path"
-            ),
-            Self::BufferTooShort {
-                index,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "buffer {index} too short: declared {expected} bytes, got {actual}"
-            ),
-            Self::InvalidDataUri(head) => {
-                write!(f, "undecodable buffer data URI near '{head}'")
-            }
-            Self::UnsupportedImage(context) => {
-                write!(f, "unsupported glTF image: {context}")
-            }
-            Self::InvalidImage(context) => {
-                write!(f, "invalid glTF image: {context}")
-            }
-            Self::Io(error) => write!(f, "glTF IO error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ImportError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for ImportError {
-    /// Wraps filesystem failures from [`load_path`] buffer resolution.
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
+    #[error("glTF IO error: {0}")]
+    Io(#[from] std::io::Error),
 }

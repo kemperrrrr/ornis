@@ -217,20 +217,7 @@ pub fn texture_format_for_role(role: TextureRole) -> wgpu::TextureFormat {
 /// `None` so the descriptor is `'static`.
 pub fn sampler_descriptor_for_role(role: TextureRole) -> wgpu::SamplerDescriptor<'static> {
     let _ = role;
-    wgpu::SamplerDescriptor {
-        label: None,
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        address_mode_w: wgpu::AddressMode::Repeat,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::MipmapFilterMode::Linear,
-        lod_min_clamp: 0.0,
-        lod_max_clamp: 32.0,
-        compare: None,
-        anisotropy_clamp: 1,
-        border_color: None,
-    }
+    crate::flags::SamplerKind::LinearRepeat.descriptor()
 }
 
 /// Decodes one sRGB-encoded channel byte to linear light.
@@ -379,6 +366,54 @@ pub fn upload_texture(
     })
 }
 
+/// Handle of one uploaded image in [`TextureCache`]: entry index.
+///
+/// Newtype over `u32` so texture handles never mix with material indices
+/// or entity ids at the type level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TextureHandle(u32);
+
+impl TextureHandle {
+    /// Wraps a raw `u32` cache index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` cache index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Cache index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for TextureHandle {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for TextureHandle {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<TextureHandle> for u32 {
+    fn from(h: TextureHandle) -> Self {
+        h.0
+    }
+}
+
+impl From<TextureHandle> for usize {
+    fn from(h: TextureHandle) -> Self {
+        h.0 as usize
+    }
+}
+
 /// Owner of the frame's uploaded images, with content dedup.
 ///
 /// The caller (e.g. next to `Renderer3D` in `GpuFrameState`) owns one cache;
@@ -392,7 +427,7 @@ pub struct TextureCache {
     /// Uploaded entries, in upload order (the handle is the index).
     entries: Vec<GpuTexture>,
     /// Content key ([`texture_cache_key`]) to entry index.
-    index: HashMap<u64, u32>,
+    index: HashMap<u64, TextureHandle>,
 }
 
 impl TextureCache {
@@ -415,8 +450,8 @@ impl TextureCache {
     }
 
     /// Resolves a handle from [`TextureCache::upload_cached`], if live.
-    pub fn get(&self, handle: u32) -> Option<&GpuTexture> {
-        self.entries.get(handle as usize)
+    pub fn get(&self, handle: TextureHandle) -> Option<&GpuTexture> {
+        self.entries.get(handle.index())
     }
 
     /// Uploads `image` under `role`, or reuses the identical entry.
@@ -435,14 +470,14 @@ impl TextureCache {
         queue: &wgpu::Queue,
         image: &CpuImage,
         role: TextureRole,
-    ) -> Result<u32, TextureUploadError> {
+    ) -> Result<TextureHandle, TextureUploadError> {
         image.validate()?;
         let key = texture_cache_key(image, role);
         if let Some(handle) = self.index.get(&key) {
             return Ok(*handle);
         }
         let entry = upload_texture(device, queue, image, role)?;
-        let handle = self.entries.len() as u32;
+        let handle = TextureHandle::from(self.entries.len());
         self.entries.push(entry);
         self.index.insert(key, handle);
         Ok(handle)
@@ -459,17 +494,17 @@ impl TextureCache {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MaterialTextureSet {
     /// Handle of the albedo image ([`TextureRole::BaseColor`]), if bound.
-    pub base_color: Option<u32>,
+    pub base_color: Option<TextureHandle>,
     /// Handle of the roughness/metallic image
     /// ([`TextureRole::MetallicRoughness`]), if bound.
-    pub metallic_roughness: Option<u32>,
+    pub metallic_roughness: Option<TextureHandle>,
     /// Handle of the emission image ([`TextureRole::Emissive`]), if bound.
-    pub emissive: Option<u32>,
+    pub emissive: Option<TextureHandle>,
 }
 
 impl MaterialTextureSet {
     /// Binds `handle` to the `role` slot, replacing any previous bind.
-    pub fn set(&mut self, role: TextureRole, handle: u32) {
+    pub fn set(&mut self, role: TextureRole, handle: TextureHandle) {
         match role {
             TextureRole::BaseColor => self.base_color = Some(handle),
             TextureRole::MetallicRoughness => self.metallic_roughness = Some(handle),
@@ -478,7 +513,7 @@ impl MaterialTextureSet {
     }
 
     /// Returns the handle bound to the `role` slot, if any.
-    pub fn binding(&self, role: TextureRole) -> Option<u32> {
+    pub fn binding(&self, role: TextureRole) -> Option<TextureHandle> {
         match role {
             TextureRole::BaseColor => self.base_color,
             TextureRole::MetallicRoughness => self.metallic_roughness,
@@ -692,16 +727,28 @@ mod tests {
         let mut set = MaterialTextureSet::default();
         assert!(set.is_empty(), "untextured materials bind nothing");
         assert_eq!(set.binding(TextureRole::BaseColor), None);
-        set.set(TextureRole::BaseColor, 0);
-        set.set(TextureRole::MetallicRoughness, 2);
-        set.set(TextureRole::Emissive, 5);
+        set.set(TextureRole::BaseColor, TextureHandle::from_raw(0));
+        set.set(TextureRole::MetallicRoughness, TextureHandle::from_raw(2));
+        set.set(TextureRole::Emissive, TextureHandle::from_raw(5));
         assert!(!set.is_empty());
-        assert_eq!(set.binding(TextureRole::BaseColor), Some(0));
-        assert_eq!(set.binding(TextureRole::MetallicRoughness), Some(2));
-        assert_eq!(set.binding(TextureRole::Emissive), Some(5));
+        assert_eq!(
+            set.binding(TextureRole::BaseColor),
+            Some(TextureHandle::from_raw(0))
+        );
+        assert_eq!(
+            set.binding(TextureRole::MetallicRoughness),
+            Some(TextureHandle::from_raw(2))
+        );
+        assert_eq!(
+            set.binding(TextureRole::Emissive),
+            Some(TextureHandle::from_raw(5))
+        );
         // Rebinding replaces (one slot per role, never a list).
-        set.set(TextureRole::BaseColor, 7);
-        assert_eq!(set.binding(TextureRole::BaseColor), Some(7));
+        set.set(TextureRole::BaseColor, TextureHandle::from_raw(7));
+        assert_eq!(
+            set.binding(TextureRole::BaseColor),
+            Some(TextureHandle::from_raw(7))
+        );
     }
 
     #[test]
@@ -709,7 +756,7 @@ mod tests {
         let cache = TextureCache::new();
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
-        assert!(cache.get(0).is_none());
+        assert!(cache.get(TextureHandle::from_raw(0)).is_none());
     }
 
     #[test]
@@ -742,18 +789,26 @@ mod tests {
         let second = cache
             .upload_cached(&device, &queue, &image, TextureRole::BaseColor)
             .expect("identical reuses");
-        assert_eq!((first, second), (0, 0), "identical images deduplicate");
+        assert_eq!(
+            (first, second),
+            (TextureHandle::from_raw(0), TextureHandle::from_raw(0)),
+            "identical images deduplicate"
+        );
         assert_eq!(cache.len(), 1);
-        assert!(cache.get(0).is_some());
-        assert!(cache.get(1).is_none());
+        assert!(cache.get(TextureHandle::from_raw(0)).is_some());
+        assert!(cache.get(TextureHandle::from_raw(1)).is_none());
         // Same bytes under the data role must not alias the color entry.
         let data_handle = cache
             .upload_cached(&device, &queue, &image, TextureRole::MetallicRoughness)
             .expect("data role uploads separately");
-        assert_eq!(data_handle, 1);
+        assert_eq!(data_handle, TextureHandle::from_raw(1));
         assert_eq!(cache.len(), 2);
         assert_eq!(
-            cache.get(1).expect("data entry").texture.format(),
+            cache
+                .get(TextureHandle::from_raw(1))
+                .expect("data entry")
+                .texture
+                .format(),
             wgpu::TextureFormat::Rgba8Unorm
         );
         // Validation failures never populate the cache.

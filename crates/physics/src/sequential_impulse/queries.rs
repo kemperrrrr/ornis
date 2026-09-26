@@ -5,6 +5,7 @@ use glam::{Quat, Vec3};
 
 use crate::body::RigidBody;
 use crate::distance;
+use crate::flags::HitKind;
 use crate::math::{Ray, RaycastHit};
 use crate::shape::Shape;
 
@@ -52,12 +53,20 @@ pub struct ContinuousHit {
     /// Impact normal.
     pub normal: Vec3,
     /// Hit body handle.
-    pub handle: usize,
-    /// Whether the hit came from the angular sweep.
-    pub angular: bool,
+    pub handle: crate::body::BodyHandle,
+    /// Origin of the hit (linear vs angular sweep).
+    pub kind: HitKind,
     /// World contact point on the mover at the hit fraction (angular hits
     /// only): the response levers the spin off it instead of killing it.
     pub contact: Option<Vec3>,
+}
+
+impl ContinuousHit {
+    /// `true` when the hit came from the angular sweep (compat for the
+    /// legacy `angular: bool` field).
+    pub fn angular(&self) -> bool {
+        self.kind.is_angular()
+    }
 }
 
 pub(crate) fn shape_min_dimension(shape: &Shape) -> f32 {
@@ -426,7 +435,7 @@ fn find_linear_continuous_hit(
         })
         .map(|(handle, target)| {
             (
-                handle,
+                crate::body::BodyHandle::from(handle),
                 distance::ShapeRef {
                     shape: &target.shape,
                     pos: target.position,
@@ -438,7 +447,7 @@ fn find_linear_continuous_hit(
         fraction: (hit.t / length).clamp(0.0, 1.0),
         normal: hit.normal,
         handle: hit.handle,
-        angular: false,
+        kind: HitKind::Linear,
         contact: None,
     })
 }
@@ -574,8 +583,8 @@ pub fn find_angular_continuous_hit(
         let candidate = ContinuousHit {
             fraction,
             normal,
-            handle,
-            angular: true,
+            handle: crate::body::BodyHandle::from(handle),
+            kind: HitKind::Angular,
             contact: Some(distance.point_a),
         };
         best = choose_continuous_hit(best, Some(candidate));
@@ -1126,9 +1135,9 @@ fn ray_trimesh_hit(
         if ray_aabb_hit(origin, direction, node.min, node.max, limit).is_none() {
             continue;
         }
-        if node.left == u32::MAX {
-            let end = (node.start + node.count) as usize;
-            for o in node.start as usize..end.min(mesh.order.len()) {
+        if let Some((start, count)) = node.link.leaf_range() {
+            let end = (start + count) as usize;
+            for o in start as usize..end.min(mesh.order.len()) {
                 let t = mesh.order[o] as usize;
                 if t >= mesh.tris.len() || t >= mesh.centroids.len() {
                     continue;
@@ -1145,14 +1154,14 @@ fn ray_trimesh_hit(
                     best = Some((d, n));
                 }
             }
-        } else {
+        } else if let Some((left, right)) = node.link.children() {
             if len + 2 > 64 {
                 break; // Depth guard: keep the best hit so far.
             }
             // Near-first order is irrelevant for correctness (best-tracked
             // pruning); push right-then-left so left pops first.
-            stack[len] = node.right;
-            stack[len + 1] = node.left;
+            stack[len] = right;
+            stack[len + 1] = left;
             len += 2;
         }
     }
@@ -1224,13 +1233,13 @@ impl SequentialImpulseEngine {
     pub(crate) fn raycast_body(
         &self,
         ray: &Ray,
-        handle: usize,
+        handle: crate::body::BodyHandle,
         max_dist: f32,
     ) -> Option<RaycastHit> {
         if max_dist.is_nan() || max_dist < 0.0 || !vec3_finite(ray.direction) {
             return None;
         }
-        let body = &self.bodies[handle];
+        let body = &self.bodies[handle.index()];
         let inverse = body.orientation.inverse();
         let origin = inverse * (ray.origin - body.position);
         let direction = inverse * ray.direction;

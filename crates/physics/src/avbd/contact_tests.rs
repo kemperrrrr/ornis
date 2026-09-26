@@ -20,7 +20,7 @@ fn rolling_sphere_keeps_support_without_gaining_speed() {
         };
         for step in 0..1500 {
             engine.step(DT_STEP);
-            let b = &engine.bodies[h];
+            let b = &engine.bodies[h.index()];
             assert!(
                 (b.position.y - 0.5).abs() < 0.03,
                 "rolling support lost: reversed={reversed} step={step} y={}",

@@ -88,13 +88,7 @@ impl CompositePass {
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
+            ..crate::flags::SamplerKind::LinearClamp.descriptor()
         });
 
         Self {

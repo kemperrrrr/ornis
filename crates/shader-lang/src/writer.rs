@@ -18,7 +18,7 @@ pub fn print_ty(t: &IrType) -> String {
     match t {
         IrType::Scalar(s) => s.wgsl().to_string(),
         IrType::Bool => "bool".to_string(),
-        IrType::Custom(name) => name.clone(),
+        IrType::Custom(name) => name.as_str().to_owned(),
         IrType::Array { elem, len } => format!("array<{}, {len}>", print_ty(elem)),
         IrType::RuntimeArray(elem) => format!("array<{}>", print_ty(elem)),
     }

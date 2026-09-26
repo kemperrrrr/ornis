@@ -1,52 +1,16 @@
 //! MaterialX XML parser
 
-use crate::nodes::NodeDefInput;
+use crate::nodes::{MtlxNodeKind, NodeDefInput};
 use crate::{Input, MaterialXDocument, MaterialXError, Node, NodeDef, NodeGraph};
 use quick_xml::Reader;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 
 /// Every element that denotes a shading node inside a `<nodegraph>`.
-/// Kept in sync with the node types `GraphEvaluator` can execute; the same
-/// set is used for Start and End events so the two can never diverge
-/// (a node opened but never closed here is silently dropped).
+/// Typed through [`MtlxNodeKind`]: the same vocabulary the
+/// `GraphEvaluator` executes, used for Start and End events so the two can
+/// never diverge (a node opened but never closed here is silently dropped).
 fn is_node_element(name: &str) -> bool {
-    matches!(
-        name,
-        "node"
-            | "output"
-            | "open_pbr_surface"
-            | "open_pbr_anisotropy"
-            | "mix"
-            | "layer"
-            | "add"
-            | "multiply"
-            | "divide"
-            | "subtract"
-            | "invert"
-            | "clamp"
-            | "max"
-            | "min"
-            | "power"
-            | "sqrt"
-            | "ifgreater"
-            | "convert"
-            | "combine2"
-            | "combine3"
-            | "combine4"
-            | "constant"
-            | "subsurface_bsdf"
-            | "dielectric_bsdf"
-            | "conductor_bsdf"
-            | "oren_nayar_diffuse_bsdf"
-            | "sheen_bsdf"
-            | "thin_film_bsdf"
-            | "translucent_bsdf"
-            | "generalized_schlick_bsdf"
-            | "uniform_edf"
-            | "generalized_schlick_edf"
-            | "anisotropic_vdf"
-            | "surface"
-    )
+    MtlxNodeKind::is_element_name(name)
 }
 
 /// Streaming quick-xml parser producing a [`crate::nodes::MaterialXDocument`]
@@ -231,7 +195,7 @@ impl NodeGraph {
 impl Node {
     fn from_bytes_start(e: &BytesStart) -> Result<Self, MaterialXError> {
         let mut node = Node {
-            node_type: String::new(),
+            node_type: MtlxNodeKind::default(),
             name: String::new(),
             version: String::new(),
             nodename: String::new(),
@@ -240,7 +204,7 @@ impl Node {
 
         let name_binding = e.name();
         let name = name_binding.into_inner();
-        node.node_type = name.to_string();
+        node.node_type = MtlxNodeKind::from(name);
 
         for attr in e.attributes() {
             let attr = attr?;
@@ -478,7 +442,7 @@ mod tests {
         assert_eq!(graph.nodedef, "ND_test");
 
         let node = &graph.nodes[0];
-        assert_eq!(node.node_type, "multiply");
+        assert_eq!(node.node_type, MtlxNodeKind::Multiply);
         assert_eq!(node.name, "m");
         assert_eq!(node.version, "1.0");
         assert_eq!(node.inputs.len(), 2);
@@ -551,7 +515,7 @@ mod tests {
 
         let graph = &doc.nodegraphs[0];
         let output = &graph.nodes[1];
-        assert_eq!(output.node_type, "output");
+        assert_eq!(output.node_type, MtlxNodeKind::Output);
         assert_eq!(output.name, "out");
         assert_eq!(output.nodename, "c");
         // Nodes without the attribute default to an empty nodename.
@@ -570,6 +534,44 @@ mod tests {
         .unwrap();
 
         assert_eq!(node_names(&doc), ["inside"]);
+    }
+
+    #[test]
+    fn node_kind_round_trips_through_str_and_serde() {
+        use std::str::FromStr as _;
+        // Known elements map to variants and back byte-identically.
+        for (spelling, kind) in [
+            ("multiply", MtlxNodeKind::Multiply),
+            ("dielectric_bsdf", MtlxNodeKind::DielectricBsdf),
+            ("output", MtlxNodeKind::Output),
+            ("node", MtlxNodeKind::Node),
+        ] {
+            assert_eq!(MtlxNodeKind::from_str(spelling).unwrap(), kind);
+            assert_eq!(kind.as_str(), spelling);
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("{spelling:?}")
+            );
+        }
+        // Unknown elements stay visible as `Custom`, never rejected…
+        let custom = MtlxNodeKind::from_str("frob").unwrap();
+        assert!(matches!(custom, MtlxNodeKind::Custom(_)));
+        assert_eq!(custom.as_str(), "frob");
+        // …and old stored JSON with a plain string still parses.
+        let node: Node = serde_json::from_str(
+            r#"{"node_type":"multiply","name":"m","version":"","nodename":"","inputs":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(node.node_type, MtlxNodeKind::Multiply);
+        let unknown: Node = serde_json::from_str(
+            r#"{"node_type":"frob","name":"u","version":"","nodename":"","inputs":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown.node_type.as_str(), "frob");
+        // The parser whitelist is the kind vocabulary (plus generic `node`).
+        assert!(super::is_node_element("multiply"));
+        assert!(!super::is_node_element("frob"));
+        assert!(MtlxNodeKind::is_element_name("constant"));
     }
 
     #[test]

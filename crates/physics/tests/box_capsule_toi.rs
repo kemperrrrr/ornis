@@ -7,13 +7,13 @@
 //! and absence of tunneling under fast rotation.
 
 use glam::{Quat, Vec3};
-use ornis_physics::{PhysicsEngine, RigidBody, SequentialImpulseEngine};
+use ornis_physics::{BodyHandle, PhysicsEngine, RigidBody, SequentialImpulseEngine};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn is_asleep_pair(physics: &SequentialImpulseEngine, a: usize, b: usize) -> bool {
+fn is_asleep_pair(physics: &SequentialImpulseEngine, a: BodyHandle, b: BodyHandle) -> bool {
     physics.debug_contact_count(a) > 0 && physics.debug_contact_count(b) > 0
 }
 
@@ -402,8 +402,8 @@ fn multiple_capsules_and_boxes_interact_without_panic() {
     for _ in 0..60 {
         physics.step(1.0 / 60.0);
     }
-    for h in 0..7 {
-        if let Some(b) = physics.get_body(h) {
+    for h in 0..7usize {
+        if let Some(b) = physics.get_body(BodyHandle::from(h)) {
             assert!(
                 b.position.is_finite(),
                 "body {h} position must stay finite: {:?}",

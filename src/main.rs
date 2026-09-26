@@ -215,7 +215,7 @@ impl GameApp {
             surface_format,
             (surface_config.width, surface_config.height),
             Technique::Hybrid,
-            false,
+            ornis_render::Bloom::Off,
         );
         let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
 
@@ -394,13 +394,14 @@ impl GameApp {
         }
     }
 
-    fn command_name(command: &UiCommand) -> String {
+    fn command_name(command: &UiCommand) -> editor_backend::ipc::EditorCommand {
+        use editor_backend::ipc::EditorCommand;
         match command {
-            UiCommand::CreateEntity => "create_entity".into(),
-            UiCommand::DestroyEntity { .. } => "destroy_entity".into(),
-            UiCommand::SetComponent { .. } => "set_component".into(),
+            UiCommand::CreateEntity => EditorCommand::CreateEntity,
+            UiCommand::DestroyEntity { .. } => EditorCommand::DestroyEntity,
+            UiCommand::SetComponent { .. } => EditorCommand::SetComponent,
             UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
-            UiCommand::Input { .. } => "input".into(),
+            UiCommand::Input { .. } => EditorCommand::Input,
             UiCommand::WithRequestId { command, .. } => Self::command_name(command),
         }
     }

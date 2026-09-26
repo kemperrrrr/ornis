@@ -3,7 +3,9 @@
 //! hysteresis, wakes sane after sleep, keeps joints, and reruns bit-identical.
 
 use glam::Vec3;
-use ornis_physics::{Engine, JointKind, PhysicsEngine, RigidBody, RoutingKind, SolverKind};
+use ornis_physics::{
+    BodyHandle, Engine, JointKind, PhysicsEngine, RigidBody, RoutingKind, SolverKind,
+};
 
 const DT: f32 = 1.0 / 60.0;
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -17,7 +19,7 @@ fn box_at(x: f32, y: f32) -> RigidBody {
 }
 
 /// 2-stack at x=0 plus a lone migrant at x=5, dropped from rest.
-fn build_scene(engine: &mut Engine) -> (usize, usize, usize) {
+fn build_scene(engine: &mut Engine) -> (BodyHandle, BodyHandle, BodyHandle) {
     let f = engine.add_body(floor());
     let a = engine.add_body(box_at(0.0, 0.6));
     let b = engine.add_body(box_at(0.0, 1.7));
@@ -39,9 +41,9 @@ fn split_drop_settle_matches_single() {
         split.step(DT);
     }
     // Same rest state (behavioral tolerance — trajectories differ by solver).
-    for h in 1..3 {
-        let ps = single.get_body(h).unwrap().position;
-        let px = split.get_body(h).unwrap().position;
+    for h in 1..3usize {
+        let ps = single.get_body(BodyHandle::from(h)).unwrap().position;
+        let px = split.get_body(BodyHandle::from(h)).unwrap().position;
         assert!(
             (ps.y - px.y).abs() < 0.15,
             "body {h}: single y={} split y={}",
@@ -157,8 +159,8 @@ fn split_rerun_deterministic() {
         for _ in 0..240 {
             engine.step(DT);
         }
-        (0..3)
-            .map(|h| engine.get_body(h).unwrap().position)
+        (0..3usize)
+            .map(|h| engine.get_body(BodyHandle::from(h)).unwrap().position)
             .collect::<Vec<_>>()
     };
     let (a, b) = (run(), run());

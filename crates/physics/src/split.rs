@@ -10,9 +10,10 @@ use glam::{Quat, Vec3};
 use crate::broadphase::PrevPose;
 use crate::distance::{ShapeRef, cast_shape};
 use crate::engine::raycast_shape_hit;
+use crate::flags::{RoutePhase, SolverSide};
 use crate::migration::{EventState, JointSnapshot};
 use crate::{
-    AABB, AvbdEngine, BodyHandle, BodyType, ContactEvent, ContactEventKind, JointKind,
+    AABB, AvbdEngine, BodyHandle, BodyType, ContactEvent, ContactEventKind, JointHandle, JointKind,
     PhysicsEngine, Ray, RaycastHit, RigidBody, SequentialImpulseEngine, Shape, SolverKind,
     SplitTiming, TriggerEvent, TriggerEventKind,
 };
@@ -73,8 +74,8 @@ impl SplitBody {
 
 pub(super) struct SplitJoint {
     pub state: JointSnapshot,
-    pub local_avbd: Option<usize>,
-    pub local_si: Option<usize>,
+    pub local_avbd: Option<JointHandle>,
+    pub local_si: Option<JointHandle>,
 }
 
 impl SplitJoint {
@@ -116,10 +117,7 @@ fn link(root: &mut [usize], a: usize, b: usize) {
 }
 
 fn restore_mass(body: &mut RigidBody) {
-    if body.body_type == BodyType::Dynamic && body.inv_mass <= 0.0 {
-        body.inv_mass = 1.0 / body.mass;
-        body.inertia = body.shape.inertia(body.mass);
-    }
+    body.restore_sleep_triple();
 }
 
 /// Conservative one-tick occupancy, including acceleration and rotation.
@@ -163,11 +161,40 @@ impl SplitState {
     }
 
     /// Capture rest state at add_joint time, not at the later rebuild.
-    pub(super) fn add_joint(&mut self, a: usize, b: usize, spec: JointKind) -> Option<usize> {
-        if a == b || !crate::migration::valid_joint(&spec) {
-            return None;
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::JointError`] for self-joints, bad specs, unknown
+    /// bodies/gears, or degenerate hinges.
+    pub(super) fn add_joint(
+        &mut self,
+        a: BodyHandle,
+        b: BodyHandle,
+        spec: JointKind,
+    ) -> Result<JointHandle, crate::errors::JointError> {
+        use crate::errors::JointError;
+        if a == b {
+            return Err(JointError::SelfJoint { handle: a.index() });
         }
-        let (ba, bb) = (&self.bodies.get(a)?.body, &self.bodies.get(b)?.body);
+        crate::migration::validate_joint(&spec)?;
+        let (ba, bb) = (
+            &self
+                .bodies
+                .get(a.index())
+                .ok_or(JointError::InvalidHandles {
+                    a: a.index(),
+                    b: b.index(),
+                })?
+                .body,
+            &self
+                .bodies
+                .get(b.index())
+                .ok_or(JointError::InvalidHandles {
+                    a: a.index(),
+                    b: b.index(),
+                })?
+                .body,
+        );
         let reference = if let JointKind::Gear {
             joint_a,
             joint_b,
@@ -175,7 +202,14 @@ impl SplitState {
         } = spec
         {
             crate::migration::JointReference {
-                distance: self.coordinate(joint_a)? + ratio * self.coordinate(joint_b)?,
+                distance: crate::invariants::Meters(
+                    self.coordinate(joint_a).ok_or(JointError::UnknownRef {
+                        handle: joint_a.index(),
+                    })? + ratio
+                        * self.coordinate(joint_b).ok_or(JointError::UnknownRef {
+                            handle: joint_b.index(),
+                        })?,
+                ),
                 ..crate::migration::JointReference::default()
             }
         } else {
@@ -185,37 +219,45 @@ impl SplitState {
                 ba.orientation,
                 bb.position,
                 bb.orientation,
-            )?;
+            )
+            .ok_or_else(|| JointError::BadAxis {
+                detail: "unresolvable joint frames".to_string(),
+            })?;
             if r.degenerate
                 && matches!(
                     spec,
                     JointKind::Revolute { .. } | JointKind::Prismatic { .. }
                 )
             {
-                return None;
+                return Err(JointError::BadAxis {
+                    detail: "degenerate hinge/slide axis".to_string(),
+                });
             }
             r.into()
         };
-        let h = self.joints.len();
+        let h = JointHandle::from(self.joints.len());
         self.joints.push(SplitJoint::new(JointSnapshot {
             a,
             b,
             spec,
             reference,
         }));
-        Some(h)
+        Ok(h)
     }
 
-    fn coordinate(&self, h: usize) -> Option<f32> {
-        let j = &self.joints.get(h)?.state;
-        let (a, b) = (&self.bodies[j.a].body, &self.bodies[j.b].body);
+    fn coordinate(&self, h: JointHandle) -> Option<f32> {
+        let j = &self.joints.get(h.index())?.state;
+        let (a, b) = (
+            &self.bodies[j.a.index()].body,
+            &self.bodies[j.b.index()].body,
+        );
         match j.spec {
             JointKind::Revolute { local_axis_a, .. } => Some(
                 crate::engine::joints::hinge_twist(
                     a.orientation,
                     b.orientation,
                     local_axis_a.normalize_or(Vec3::Z),
-                ) - j.reference.angle,
+                ) - j.reference.angle.0,
             ),
             JointKind::Prismatic {
                 local_anchor_a,
@@ -229,7 +271,7 @@ impl SplitState {
                     ((b.position + b.orientation * local_anchor_b)
                         - (a.position + a.orientation * local_anchor_a))
                         .dot(axis)
-                        - j.reference.length,
+                        - j.reference.length.0,
                 )
             }
             _ => None,
@@ -262,8 +304,11 @@ impl SplitState {
         }
         for i in 0..self.joints.len() {
             let j = self.joints[i].state;
-            if let (Some(a), Some(b)) = (self.bodies[j.a].local_avbd, self.bodies[j.b].local_avbd) {
-                let spec = self.local_spec(j.spec, true);
+            if let (Some(a), Some(b)) = (
+                self.bodies[j.a.index()].local_avbd,
+                self.bodies[j.b.index()].local_avbd,
+            ) {
+                let spec = self.local_spec(j.spec, SolverSide::Avbd);
                 if let Some(spec) = spec {
                     let h = self
                         .avbd
@@ -273,8 +318,11 @@ impl SplitState {
                     self.joints[i].local_avbd = Some(h);
                 }
             }
-            if let (Some(a), Some(b)) = (self.bodies[j.a].local_si, self.bodies[j.b].local_si) {
-                let spec = self.local_spec(j.spec, false);
+            if let (Some(a), Some(b)) = (
+                self.bodies[j.a.index()].local_si,
+                self.bodies[j.b.index()].local_si,
+            ) {
+                let spec = self.local_spec(j.spec, SolverSide::SequentialImpulse);
                 if let Some(spec) = spec {
                     let h = self.si.add_joint(a, b, spec).expect("validated SI joint");
                     self.si.restore_joint_reference(h, j.reference);
@@ -282,22 +330,28 @@ impl SplitState {
                 }
             }
         }
-        self.avbd.restore_event_state(self.local_events(true));
-        self.si.restore_event_state(self.local_events(false));
+        self.avbd
+            .restore_event_state(self.local_events(SolverSide::Avbd));
+        self.si
+            .restore_event_state(self.local_events(SolverSide::SequentialImpulse));
         self.rebuilds += 1;
         self.timing.rebuild += timer.elapsed();
     }
 
-    fn local_spec(&self, spec: JointKind, avbd: bool) -> Option<JointKind> {
+    fn local_spec(&self, spec: JointKind, side: SolverSide) -> Option<JointKind> {
         if let JointKind::Gear {
             joint_a,
             joint_b,
             ratio,
         } = spec
         {
-            let local = |h: usize| {
-                let j = self.joints.get(h)?;
-                if avbd { j.local_avbd } else { j.local_si }
+            let local = |h: JointHandle| {
+                let j = self.joints.get(h.index())?;
+                if side.is_avbd() {
+                    j.local_avbd
+                } else {
+                    j.local_si
+                }
             };
             Some(JointKind::Gear {
                 joint_a: local(joint_a)?,
@@ -309,14 +363,18 @@ impl SplitState {
         }
     }
 
-    fn local_events(&self, avbd: bool) -> EventState {
-        let local = |pairs: &BTreeSet<(usize, usize)>| {
+    fn local_events(&self, side: SolverSide) -> EventState {
+        let local = |pairs: &BTreeSet<(BodyHandle, BodyHandle)>| {
             pairs
                 .iter()
                 .filter_map(|&(a, b)| {
-                    let get = |h: usize| {
-                        let r = self.bodies.get(h)?;
-                        if avbd { r.local_avbd } else { r.local_si }
+                    let get = |h: BodyHandle| {
+                        let r = self.bodies.get(h.index())?;
+                        if side.is_avbd() {
+                            r.local_avbd
+                        } else {
+                            r.local_si
+                        }
                     };
                     Some((get(a)?, get(b)?))
                 })
@@ -349,8 +407,8 @@ impl SplitState {
         for j in &mut self.joints {
             let state = j
                 .local_avbd
-                .and_then(|h| av.get(h))
-                .or_else(|| j.local_si.and_then(|h| si_joints.get(h)));
+                .and_then(|h| av.get(h.index()))
+                .or_else(|| j.local_si.and_then(|h| si_joints.get(h.index())));
             if let Some(state) = state {
                 j.state.reference = state.reference;
             }
@@ -358,7 +416,7 @@ impl SplitState {
     }
 
     pub(super) fn push_global(&mut self, global: BodyHandle) {
-        let Some(b) = self.bodies.get(global) else {
+        let Some(b) = self.bodies.get(global.index()) else {
             return;
         };
         if let Some(h) = b.local_avbd {
@@ -375,8 +433,8 @@ impl SplitState {
         }
     }
 
-    pub(super) fn wake_global(&mut self, h: usize) {
-        if let Some(b) = self.bodies.get_mut(h) {
+    pub(super) fn wake_global(&mut self, h: BodyHandle) {
+        if let Some(b) = self.bodies.get_mut(h.index()) {
             b.sleepy = 0;
             if let Some(local) = b.local_avbd {
                 self.avbd.wake_body(local);
@@ -389,7 +447,12 @@ impl SplitState {
 
     /// Ownership is decided before either solver advances. Static anchors
     /// do not join independent islands; gear dependencies join all four sides.
-    pub(super) fn route(&mut self, dt: f32, tick: bool, edited: &BTreeSet<usize>) -> usize {
+    pub(super) fn route(
+        &mut self,
+        dt: f32,
+        phase: RoutePhase,
+        edited: &BTreeSet<BodyHandle>,
+    ) -> usize {
         let timer = Instant::now();
         let n = self.bodies.len();
         let old: Vec<_> = self.bodies.iter().map(|b| b.owner).collect();
@@ -402,8 +465,8 @@ impl SplitState {
                 b.sleepy = 0;
                 restore_mass(&mut b.body);
             }
-            if tick && b.owner != SplitOwner::Static {
-                if edited.contains(&h)
+            if phase.is_tick() && b.owner != SplitOwner::Static {
+                if edited.contains(&BodyHandle::from(h))
                     || b.body.velocity.length() >= SLEEP_SPEED
                     || b.body.angular_velocity.length() >= SLEEP_SPEED
                     || b.body.torque.length_squared() > 0.0
@@ -440,19 +503,20 @@ impl SplitState {
                 joint_a, joint_b, ..
             } = j.state.spec
             {
-                let a = self.joints[joint_a].state;
-                let b = self.joints[joint_b].state;
+                let a = self.joints[joint_a.index()].state;
+                let b = self.joints[joint_b.index()].state;
                 [a.a, a.b, b.a, b.b]
             } else {
                 [j.state.a, j.state.b, j.state.a, j.state.b]
             };
-            let mut first = None;
+            let mut first: Option<usize> = None;
             for h in participants {
-                if self.bodies[h].owner != SplitOwner::Static {
+                let hi = h.index();
+                if self.bodies[hi].owner != SplitOwner::Static {
                     if let Some(a) = first {
-                        link(&mut root, a, h);
+                        link(&mut root, a, hi);
                     } else {
-                        first = Some(h);
+                        first = Some(hi);
                     }
                 }
             }
@@ -466,7 +530,7 @@ impl SplitState {
             }
             let r = find(&mut root, h);
             calm[r] &= b.sleepy >= QUIET_STEPS;
-            active[r] |= edited.contains(&h)
+            active[r] |= edited.contains(&BodyHandle::from(h))
                 || b.body.velocity.length() > WAKE_SPEED
                 || b.body.angular_velocity.length() > WAKE_SPEED
                 || b.body.torque.length_squared() > 0.0;
@@ -505,14 +569,15 @@ impl SplitState {
         let timer = Instant::now();
         self.si.step(DT);
         self.timing.si += timer.elapsed();
-        let mut av = vec![None; self.bodies.len()];
+        let mut av: Vec<Option<BodyHandle>> = vec![None; self.bodies.len()];
         let mut si_map = av.clone();
         for (global, b) in self.bodies.iter().enumerate() {
+            let global = BodyHandle::from(global);
             if let Some(h) = b.local_avbd {
-                av[h] = Some(global);
+                av[h.index()] = Some(global);
             }
             if let Some(h) = b.local_si {
-                si_map[h] = Some(global);
+                si_map[h.index()] = Some(global);
             }
         }
         let mut hits = Vec::new();
@@ -529,7 +594,8 @@ impl SplitState {
                 else {
                     continue;
                 };
-                let (Some(a), Some(b)) = (map[event.body_a], map[event.body_b]) else {
+                let (Some(a), Some(b)) = (map[event.body_a.index()], map[event.body_b.index()])
+                else {
                     continue;
                 };
                 if a > b {
@@ -553,11 +619,11 @@ impl SplitState {
             (self.avbd.event_state(), &av),
             (self.si.event_state(), &si_map),
         ] {
-            let remap = |pairs: BTreeSet<(usize, usize)>| {
+            let remap = |pairs: BTreeSet<(BodyHandle, BodyHandle)>| {
                 pairs
                     .into_iter()
                     .filter_map(|(a, b)| {
-                        let (a, b) = (map[a]?, map[b]?);
+                        let (a, b) = (map[a.index()]?, map[b.index()]?);
                         Some((a.min(b), a.max(b)))
                     })
                     .collect::<BTreeSet<_>>()
@@ -599,14 +665,12 @@ impl SplitState {
         (contacts, triggers)
     }
 
-    pub(super) fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
-        if max_dist.is_nan()
-            || max_dist < 0.0
-            || !ray.origin.is_finite()
-            || !ray.direction.is_finite()
-        {
-            return None;
-        }
+    pub(super) fn raycast(
+        &self,
+        ray: Ray,
+        max_dist: f32,
+    ) -> Result<Option<RaycastHit>, crate::errors::QueryError> {
+        crate::errors::check_ray_input(ray.origin, ray.direction, max_dist)?;
         let mut closest: Option<RaycastHit> = None;
         for (h, b) in self.bodies.iter().enumerate() {
             let inverse = b.body.orientation.conjugate();
@@ -617,14 +681,14 @@ impl SplitState {
                 && closest.as_ref().is_none_or(|old| distance < old.distance)
             {
                 closest = Some(RaycastHit {
-                    handle: h,
+                    handle: BodyHandle::from(h),
                     point: ray.point_at(distance),
                     normal: (b.body.orientation * normal).normalize_or(Vec3::Y),
                     distance,
                 });
             }
         }
-        closest
+        Ok(closest)
     }
 
     pub(super) fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit> {
@@ -638,7 +702,7 @@ impl SplitState {
         };
         let targets = self.bodies.iter().enumerate().map(|(h, b)| {
             (
-                h,
+                BodyHandle::from(h),
                 ShapeRef {
                     shape: &b.body.shape,
                     pos: b.body.position,

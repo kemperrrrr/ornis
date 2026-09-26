@@ -48,6 +48,7 @@ use crate::broadphase::{
     StepTiming,
 };
 use crate::distance;
+use crate::errors::QueryError;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuSequentialImpulse;
 use crate::joint::{Joint, JointHandle, JointKind};
@@ -140,9 +141,10 @@ pub struct SequentialImpulseEngine {
     last_shed: u32,
     /// Enter/exit transitions waiting for the caller to drain.
     trigger_events: Vec<TriggerEvent>,
-    /// G7: enable SIMD-wide contact solver for single-point manifolds.
-    /// Default true. Set to false for bit-exact scalar reproduction.
-    wide_solver: bool,
+    /// G7: SIMD-wide contact solver path for single-point manifolds.
+    /// Default [`SolvePath::Wide`]. Select [`SolvePath::Scalar`] for
+    /// bit-exact scalar reproduction.
+    wide_solver: crate::flags::SolvePath,
     /// Scratch buffers reused across substeps to avoid per-frame allocations.
     scratch_manifolds: Vec<Manifold>,
     pub scratch_pairs: Vec<(usize, usize)>,
@@ -187,7 +189,10 @@ fn rebuild_joints(
     *joint_pairs = joints
         .iter()
         .filter(|j| !matches!(j.kind, JointKind::Gear { .. }))
-        .map(|j| (j.body_a.min(j.body_b), j.body_a.max(j.body_b)))
+        .map(|j| {
+            let (a, b) = (j.body_a.index(), j.body_b.index());
+            (a.min(b), a.max(b))
+        })
         .collect();
 }
 
@@ -209,8 +214,8 @@ impl SequentialImpulseEngine {
     }
 
     /// Restore a driver's within-step motion baseline after rebuilding.
-    pub(crate) fn restore_body_baseline(&mut self, h: usize, pose: PrevPose) {
-        if let Some(old) = self.prev_pose.get_mut(h) {
+    pub(crate) fn restore_body_baseline(&mut self, h: BodyHandle, pose: PrevPose) {
+        if let Some(old) = self.prev_pose.get_mut(h.index()) {
             *old = pose;
         }
     }
@@ -218,15 +223,33 @@ impl SequentialImpulseEngine {
     /// Completed-step event baseline for transparent solver migration.
     pub(crate) fn event_state(&self) -> crate::migration::EventState {
         crate::migration::EventState {
-            contacts: self.contact_touch.iter().copied().collect(),
-            triggers: self.trigger_pairs.iter().copied().collect(),
+            contacts: self
+                .contact_touch
+                .iter()
+                .copied()
+                .map(|(a, b)| (BodyHandle::from(a), BodyHandle::from(b)))
+                .collect(),
+            triggers: self
+                .trigger_pairs
+                .iter()
+                .copied()
+                .map(|(a, b)| (BodyHandle::from(a), BodyHandle::from(b)))
+                .collect(),
         }
     }
 
     /// Seed a rebuilt solver without manufacturing a new contact/trigger begin.
     pub(crate) fn restore_event_state(&mut self, state: crate::migration::EventState) {
-        self.contact_touch = state.contacts.into_iter().collect();
-        self.trigger_pairs = state.triggers.into_iter().collect();
+        self.contact_touch = state
+            .contacts
+            .into_iter()
+            .map(|(a, b)| (a.index(), b.index()))
+            .collect();
+        self.trigger_pairs = state
+            .triggers
+            .into_iter()
+            .map(|(a, b)| (a.index(), b.index()))
+            .collect();
     }
 
     /// Physical joint state in handle order, independent of warm impulses.
@@ -235,9 +258,9 @@ impl SequentialImpulseEngine {
             .iter()
             .map(|j| {
                 let mut reference = JointReference {
-                    angle: j.reference_angle,
-                    length: j.reference_length,
-                    distance: j.reference_distance,
+                    angle: crate::invariants::Radians(j.reference_angle),
+                    length: crate::invariants::Meters(j.reference_length),
+                    distance: crate::invariants::Meters(j.reference_distance),
                     rotation: j.reference_quat,
                     anchor_delta: j.reference_anchor_delta,
                 };
@@ -247,14 +270,18 @@ impl SequentialImpulseEngine {
                     ratio,
                 } = j.kind
                 {
-                    let offset = |h: usize, k: usize| {
-                        let side = &self.joints[h];
+                    let offset = |h: JointHandle, k: usize| {
+                        let side = &self.joints[h.index()];
                         let raw = joints::joint_coordinate(&self.bodies, side).unwrap_or(0.0);
-                        let angular = matches!(side.kind, JointKind::Revolute { .. });
+                        let kind = if matches!(side.kind, JointKind::Revolute { .. }) {
+                            crate::flags::CoordKind::Angular
+                        } else {
+                            crate::flags::CoordKind::Linear
+                        };
                         let memory = j.gear_mem.map(|(r, c)| (r[k], c[k]));
-                        crate::migration::gear_coordinate(raw, angular, memory) - raw
+                        crate::migration::gear_coordinate(raw, kind, memory) - raw
                     };
-                    reference.distance -= offset(joint_a, 0) + ratio * offset(joint_b, 1);
+                    reference.distance.0 -= offset(joint_a, 0) + ratio * offset(joint_b, 1);
                 }
                 JointSnapshot {
                     a: j.body_a,
@@ -268,12 +295,12 @@ impl SequentialImpulseEngine {
 
     /// Restore physical assembly references after a solver migration.
     pub(crate) fn restore_joint_reference(&mut self, h: JointHandle, r: JointReference) {
-        let Some(j) = self.joints.get_mut(h) else {
+        let Some(j) = self.joints.get_mut(h.index()) else {
             return;
         };
-        j.reference_angle = r.angle;
-        j.reference_length = r.length;
-        j.reference_distance = r.distance;
+        j.reference_angle = r.angle.0;
+        j.reference_length = r.length.0;
+        j.reference_distance = r.distance.0;
         j.reference_quat = r.rotation;
         j.reference_anchor_delta = r.anchor_delta;
     }
@@ -308,7 +335,7 @@ impl SequentialImpulseEngine {
             step_budget: Some(StepBudget::default()),
             last_shed: 0,
             trigger_events: Vec::new(),
-            wide_solver: true,
+            wide_solver: crate::flags::SolvePath::Wide,
             scratch_manifolds: Vec::new(),
             scratch_pairs: Vec::new(),
             scratch_bucket_edges: Vec::new(),
@@ -378,11 +405,21 @@ impl SequentialImpulseEngine {
         self.last_step_timing
     }
 
-    /// Toggle the G7 SIMD-wide contact solver (default: enabled). Disabling
-    /// it forces the scalar single-point path, which is bit-exact with the
-    /// pre-G7 solver for scenes that predate the wide batches.
+    /// Selects the single-point contact-solver path (default: wide).
+    /// [`SolvePath::Scalar`] forces the scalar path, which is bit-exact
+    /// with the pre-G7 solver for scenes that predate the wide batches.
+    pub fn set_solve_path(&mut self, path: crate::flags::SolvePath) {
+        self.wide_solver = path;
+    }
+
+    /// Boolean-compat wrapper for [`Self::set_solve_path`] (kept for tests).
     pub fn set_wide_solver(&mut self, enabled: bool) {
-        self.wide_solver = enabled;
+        self.set_solve_path(crate::flags::SolvePath::from(enabled));
+    }
+
+    /// Current single-point solver path.
+    pub fn solve_path(&self) -> crate::flags::SolvePath {
+        self.wide_solver
     }
 
     /// Attach a GPU contact solver (G7, `gpu` feature). When the GPU solver
@@ -443,9 +480,10 @@ impl SequentialImpulseEngine {
     /// (Diagnostics) how many contact manifolds touched the body on the last
     /// substep of the previous step.
     pub fn debug_contact_count(&self, handle: BodyHandle) -> usize {
+        let hi = handle.index();
         self.debug_pairs
             .iter()
-            .filter(|&&(a, b)| a == handle || b == handle)
+            .filter(|&&(a, b)| a == hi || b == hi)
             .count()
     }
 }
@@ -684,7 +722,8 @@ impl PhysicsEngine for SequentialImpulseEngine {
             timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
             // Restitution is one-shot per step, evaluated on the first substep.
             let t0 = Instant::now();
-            let mut islands = self.solve_contacts_velocity(&manifolds_buf, s == 0, sub_dt, dt);
+            let gate = crate::flags::RestitutionGate::from(s == 0);
+            let mut islands = self.solve_contacts_velocity(&manifolds_buf, gate, sub_dt, dt);
             self.solve_joints_velocity(sub_dt);
             // Continuous pass on the solver-adjusted velocities: clamp fast
             // movers to their first impact and keep them there this substep.
@@ -712,8 +751,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // Diagnostics: contact-manifold partners per body from the last
         // substep (drives sleep/island debugging; tiny flat copy).
         self.debug_pairs.clear();
-        self.debug_pairs
-            .extend(last_manifolds_snapshot.iter().map(|m| (m.body_a, m.body_b)));
+        self.debug_pairs.extend(
+            last_manifolds_snapshot
+                .iter()
+                .map(|m| (m.body_a.index(), m.body_b.index())),
+        );
         let t_island = Instant::now();
         self.rebuild_islands(&last_manifolds_snapshot);
         self.update_sleep(dt);
@@ -745,7 +787,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         let n = self.bodies.len();
         let mut current_touch: FxHashSet<(usize, usize)> = FxHashSet::default();
         for m in &last_manifolds_snapshot {
-            let (a, b) = (m.body_a, m.body_b);
+            let (a, b) = (m.body_a.index(), m.body_b.index());
             if a >= n || b >= n {
                 continue;
             }
@@ -779,15 +821,15 @@ impl PhysicsEngine for SequentialImpulseEngine {
         ends.sort_unstable();
         for (a, b) in begins {
             self.contact_events.push(ContactEvent {
-                body_a: a,
-                body_b: b,
+                body_a: BodyHandle::from(a),
+                body_b: BodyHandle::from(b),
                 kind: ContactEventKind::Begin,
             });
         }
         for (a, b) in ends {
             self.contact_events.push(ContactEvent {
-                body_a: a,
-                body_b: b,
+                body_a: BodyHandle::from(a),
+                body_b: BodyHandle::from(b),
                 kind: ContactEventKind::End,
             });
         }
@@ -802,9 +844,9 @@ impl PhysicsEngine for SequentialImpulseEngine {
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
-        let handle = self.bodies.len();
+        let handle = BodyHandle::from(self.bodies.len());
         let island_id = if body.body_type == BodyType::Dynamic {
-            handle as u32
+            handle.as_u32()
         } else {
             u32::MAX
         };
@@ -824,17 +866,19 @@ impl PhysicsEngine for SequentialImpulseEngine {
     }
 
     fn remove_body(&mut self, handle: BodyHandle) {
-        if handle < self.bodies.len() {
-            let last = self.bodies.len() - 1;
+        if handle.index() < self.bodies.len() {
+            let last_idx = self.bodies.len() - 1;
+            let last = BodyHandle::from(last_idx);
+            let hi = handle.index();
             let previous_triggers = std::mem::take(&mut self.trigger_pairs);
-            let mut removed_triggers = Vec::new();
-            let mut remapped_triggers = FxHashSet::default();
+            let mut removed_triggers: Vec<(usize, usize)> = Vec::new();
+            let mut remapped_triggers: FxHashSet<(usize, usize)> = FxHashSet::default();
             for (body_a, body_b) in previous_triggers {
-                if body_a == handle || body_b == handle {
+                if body_a == hi || body_b == hi {
                     removed_triggers.push((body_a, body_b));
                     continue;
                 }
-                let map = |body: usize| if body == last { handle } else { body };
+                let map = |body: usize| if body == last_idx { hi } else { body };
                 let a = map(body_a);
                 let b = map(body_b);
                 remapped_triggers.insert((a.min(b), a.max(b)));
@@ -842,16 +886,16 @@ impl PhysicsEngine for SequentialImpulseEngine {
             removed_triggers.sort_unstable();
             for (body_a, body_b) in removed_triggers {
                 self.trigger_events.push(TriggerEvent {
-                    body_a,
-                    body_b,
+                    body_a: BodyHandle::from(body_a),
+                    body_b: BodyHandle::from(body_b),
                     kind: TriggerEventKind::Exited,
                 });
             }
             self.trigger_pairs = remapped_triggers;
-            self.bodies.swap_remove(handle);
-            self.island.swap_remove(handle);
-            self.asleep.swap_remove(handle);
-            self.prev_pose.swap_remove(handle);
+            self.bodies.swap_remove(handle.index());
+            self.island.swap_remove(handle.index());
+            self.asleep.swap_remove(handle.index());
+            self.prev_pose.swap_remove(handle.index());
             // Drop joints touching the removed body (gears die with their
             // referenced joints inside the rebuild — dangling joint indices
             // are never kept); remap the swapped-in body's index in the
@@ -887,12 +931,15 @@ impl PhysicsEngine for SequentialImpulseEngine {
         body_a: BodyHandle,
         body_b: BodyHandle,
         kind: JointKind,
-    ) -> Option<JointHandle> {
-        if !crate::migration::valid_joint(&kind) {
-            return None;
+    ) -> Result<JointHandle, crate::errors::JointError> {
+        use crate::errors::JointError;
+        crate::migration::validate_joint(&kind)?;
+        let (ia, ib) = (usize::from(body_a), usize::from(body_b));
+        if ia == ib {
+            return Err(JointError::SelfJoint { handle: ia });
         }
-        if body_a == body_b || body_a >= self.bodies.len() || body_b >= self.bodies.len() {
-            return None;
+        if ia >= self.bodies.len() || ib >= self.bodies.len() {
+            return Err(JointError::InvalidHandles { a: ia, b: ib });
         }
         // Resolve frames + assembly references once (shared with AVBD —
         // see `joint::resolve_joint`): axis normalization, axle
@@ -904,10 +951,10 @@ impl PhysicsEngine for SequentialImpulseEngine {
         } else {
             crate::joint::resolve_joint(
                 &kind,
-                self.bodies[body_a].position,
-                self.bodies[body_a].orientation,
-                self.bodies[body_b].position,
-                self.bodies[body_b].orientation,
+                self.bodies[ia].position,
+                self.bodies[ia].orientation,
+                self.bodies[ib].position,
+                self.bodies[ib].orientation,
             )
         };
         // Write the normalized frames back into the stored kind (the
@@ -979,12 +1026,19 @@ impl PhysicsEngine for SequentialImpulseEngine {
             ratio,
         } = &kind
         {
+            use crate::errors::JointError;
             if !ratio.is_finite() {
-                return None;
+                return Err(JointError::NonFinite {
+                    field: "ratio".to_string(),
+                });
             }
-            let (Some(ja), Some(jb)) = (self.joints.get(*joint_a), self.joints.get(*joint_b))
-            else {
-                return None;
+            let (Some(ja), Some(jb)) = (
+                self.joints.get(joint_a.index()),
+                self.joints.get(joint_b.index()),
+            ) else {
+                return Err(JointError::UnknownRef {
+                    handle: self.joints.len(),
+                });
             };
             if !matches!(
                 ja.kind,
@@ -993,23 +1047,24 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 jb.kind,
                 JointKind::Revolute { .. } | JointKind::Prismatic { .. }
             ) {
-                return None;
+                return Err(JointError::Unsupported {
+                    detail: "gear must coordinate revolute/prismatic joints".to_string(),
+                });
             }
         }
         // A new joint on a sleeping island changes its constraint set — wake
         // it so the joint state can settle coherently.
-        for h in [body_a, body_b] {
-            if self.bodies[h].body_type == BodyType::Dynamic
-                && self.asleep.get(h).copied().unwrap_or(false)
+        for (h, i) in [(body_a, ia), (body_b, ib)] {
+            if self.bodies[i].body_type == BodyType::Dynamic
+                && self.asleep.get(i).copied().unwrap_or(false)
             {
-                self.wake_island(h);
+                self.wake_island(usize::from(h));
             }
         }
         // Gears coordinate other joints instead of constraining a body pair —
         // the underlying joints already carry the no-collide entry.
         if !is_gear {
-            self.joint_pairs
-                .insert((body_a.min(body_b), body_a.max(body_b)));
+            self.joint_pairs.insert((ia.min(ib), ia.max(ib)));
         }
         // Limits/motors measure travel from the assembly pose (Box2D
         // `m_referenceAngle`): captured in `resolved` above.
@@ -1027,12 +1082,16 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 joint_b,
                 ratio,
             } => {
-                let ca =
-                    crate::engine::joints::joint_coordinate(&self.bodies, &self.joints[*joint_a])
-                        .unwrap_or(0.0);
-                let cb =
-                    crate::engine::joints::joint_coordinate(&self.bodies, &self.joints[*joint_b])
-                        .unwrap_or(0.0);
+                let ca = crate::engine::joints::joint_coordinate(
+                    &self.bodies,
+                    &self.joints[joint_a.index()],
+                )
+                .unwrap_or(0.0);
+                let cb = crate::engine::joints::joint_coordinate(
+                    &self.bodies,
+                    &self.joints[joint_b.index()],
+                )
+                .unwrap_or(0.0);
                 ca + ratio * cb
             }
             _ => 0.0,
@@ -1051,11 +1110,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
         joint.reference_quat = reference_quat;
         joint.reference_anchor_delta = reference_anchor_delta;
         self.joints.push(joint);
-        Some(self.joints.len() - 1)
+        Ok(JointHandle::from(self.joints.len() - 1))
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
-        if handle >= self.joints.len() {
+        if handle.index() >= self.joints.len() {
             return;
         }
         // Joint indices shift on removal, so gear references (joint indices)
@@ -1064,7 +1123,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // survivors keep pointing at the same joints.
         let old_len = self.joints.len();
         let mut drop_j = vec![false; old_len];
-        drop_j[handle] = true;
+        drop_j[handle.index()] = true;
         for (oi, j) in self.joints.iter().enumerate() {
             if drop_j[oi] {
                 continue;
@@ -1081,17 +1140,18 @@ impl PhysicsEngine for SequentialImpulseEngine {
     }
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
-        self.bodies.get(handle)
+        self.bodies.get(usize::from(handle))
     }
 
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody> {
-        self.bodies.get_mut(handle)
+        self.bodies.get_mut(usize::from(handle))
     }
 
-    fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
+    fn raycast(&self, ray: Ray, max_dist: f32) -> Result<Option<RaycastHit>, QueryError> {
+        crate::errors::check_ray_input(ray.origin, ray.direction, max_dist)?;
         let mut closest: Option<RaycastHit> = None;
         for handle in 0..self.bodies.len() {
-            if let Some(hit) = self.raycast_body(&ray, handle, max_dist) {
+            if let Some(hit) = self.raycast_body(&ray, BodyHandle::from(handle), max_dist) {
                 match &closest {
                     Some(best) if hit.distance < best.distance => closest = Some(hit),
                     None => closest = Some(hit),
@@ -1099,7 +1159,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 }
             }
         }
-        closest
+        Ok(closest)
     }
 
     /// Honest shapecast (G6): conservative advancement over exact pairwise
@@ -1115,7 +1175,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         };
         let targets = self.bodies.iter().enumerate().map(|(h, b)| {
             (
-                h,
+                BodyHandle::from(h),
                 distance::ShapeRef {
                     shape: &b.shape,
                     pos: b.position,
@@ -1140,8 +1200,8 @@ impl PhysicsEngine for SequentialImpulseEngine {
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {
-        if handle < self.bodies.len() {
-            self.wake_island(handle);
+        if handle.index() < self.bodies.len() {
+            self.wake_island(handle.index());
         }
     }
 }

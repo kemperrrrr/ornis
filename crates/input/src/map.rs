@@ -10,6 +10,115 @@ use std::collections::HashMap;
 
 use crate::{InputState, KeyCode, MouseButton};
 
+/// Typed action identifier: the [`InputMap`] key.
+///
+/// Owned (`Box<str>`) so static gameplay names and dynamic tool/test
+/// actions share one type. Accepts plain strings (`impl Into<ActionId>` on
+/// the write edge) and serves `&str` lookups on the read edge through the
+/// [`std::borrow::Borrow`] impl, so existing `bind("jump", …)` /
+/// `action_down(&input, "jump")` call sites keep compiling while new code
+/// can pass [`GameAction`] or `ActionId` instead of a bare `String`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ActionId(Box<str>);
+
+impl ActionId {
+    /// Wraps a `'static` action name without extra bookkeeping.
+    pub fn from_static(name: &'static str) -> Self {
+        Self(name.into())
+    }
+
+    /// Action name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ActionId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ActionId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ActionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for ActionId {
+    fn from(name: &str) -> Self {
+        Self(name.into())
+    }
+}
+
+impl From<String> for ActionId {
+    fn from(name: String) -> Self {
+        Self(name.into_boxed_str())
+    }
+}
+
+impl From<&String> for ActionId {
+    fn from(name: &String) -> Self {
+        Self(name.as_str().into())
+    }
+}
+
+/// Closed gameplay-action vocabulary over [`ActionId`].
+///
+/// The four movement directions are first-class variants (matching
+/// [`InputMap::default_gameplay`]); tools and tests keep their own words
+/// through [`GameAction::Custom`]. Converts into [`ActionId`] for the map,
+/// so typed and stringly call sites interoperate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GameAction {
+    /// Forward intent (`W` / Up by default).
+    MoveForward,
+    /// Back intent (`S` / Down by default).
+    MoveBack,
+    /// Strafe-left intent (`A` / Left by default).
+    MoveLeft,
+    /// Strafe-right intent (`D` / Right by default).
+    MoveRight,
+    /// Tool/test-defined action.
+    Custom(ActionId),
+}
+
+impl GameAction {
+    /// Canonical [`ActionId`] of this action.
+    pub fn id(&self) -> ActionId {
+        ActionId::from(self.as_str())
+    }
+
+    /// Canonical action name (`"move_forward"`, …, or the custom name).
+    pub fn as_str(&self) -> &str {
+        match self {
+            GameAction::MoveForward => InputMap::MOVE_FORWARD,
+            GameAction::MoveBack => InputMap::MOVE_BACK,
+            GameAction::MoveLeft => InputMap::MOVE_LEFT,
+            GameAction::MoveRight => InputMap::MOVE_RIGHT,
+            GameAction::Custom(id) => id.as_str(),
+        }
+    }
+}
+
+impl From<GameAction> for ActionId {
+    fn from(action: GameAction) -> Self {
+        action.id()
+    }
+}
+
+impl From<&GameAction> for ActionId {
+    fn from(action: &GameAction) -> Self {
+        action.id()
+    }
+}
+
 /// Raw-code set bound to one action: any held entry fires the action.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputBinding {
@@ -94,12 +203,13 @@ impl InputBinding {
 
 /// Named-action table over raw input codes.
 ///
-/// Actions are plain strings so gameplay, tools and tests can introduce
-/// their own vocabulary; the canonical movement names live on the
-/// associated constants and [`InputMap::default_gameplay`].
+/// Actions are keyed by [`ActionId`] (constructible from plain strings,
+/// so gameplay, tools and tests keep introducing their own vocabulary);
+/// the canonical movement names live on the associated constants,
+/// [`GameAction`] and [`InputMap::default_gameplay`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputMap {
-    bindings: HashMap<String, InputBinding>,
+    bindings: HashMap<ActionId, InputBinding>,
 }
 
 impl InputMap {
@@ -129,7 +239,11 @@ impl InputMap {
     }
 
     /// Binds `action` to `binding`, replacing any previous binding.
-    pub fn bind(&mut self, action: impl Into<String>, binding: InputBinding) -> &mut Self {
+    ///
+    /// Accepts [`ActionId`], [`GameAction`] or plain strings
+    /// (`impl Into<ActionId>`), so existing `bind("jump", …)` call sites
+    /// keep compiling.
+    pub fn bind(&mut self, action: impl Into<ActionId>, binding: InputBinding) -> &mut Self {
         self.bindings.insert(action.into(), binding);
         self
     }
@@ -138,7 +252,7 @@ impl InputMap {
     /// previous binding.
     pub fn bind_keys(
         &mut self,
-        action: impl Into<String>,
+        action: impl Into<ActionId>,
         keys: impl IntoIterator<Item = KeyCode>,
     ) -> &mut Self {
         self.bind(action, InputBinding::with_keys(keys))
@@ -147,7 +261,7 @@ impl InputMap {
     /// Binds `action` to raw key codes, replacing any previous binding.
     pub fn bind_key_codes(
         &mut self,
-        action: impl Into<String>,
+        action: impl Into<ActionId>,
         codes: impl IntoIterator<Item = u32>,
     ) -> &mut Self {
         self.bind(action, InputBinding::with_key_codes(codes))
@@ -157,7 +271,7 @@ impl InputMap {
     /// binding.
     pub fn bind_mouse(
         &mut self,
-        action: impl Into<String>,
+        action: impl Into<ActionId>,
         buttons: impl IntoIterator<Item = MouseButton>,
     ) -> &mut Self {
         self.bind(action, InputBinding::with_mouse(buttons))
@@ -168,9 +282,19 @@ impl InputMap {
         self.bindings.remove(action).is_some()
     }
 
+    /// Removes the binding for a typed action; returns `false` when absent.
+    pub fn unbind_id(&mut self, action: &ActionId) -> bool {
+        self.bindings.remove(action.as_str()).is_some()
+    }
+
     /// Returns the binding for `action`, if any.
     pub fn binding(&self, action: &str) -> Option<&InputBinding> {
         self.bindings.get(action)
+    }
+
+    /// Returns the binding for a typed action, if any.
+    pub fn binding_id(&self, action: &ActionId) -> Option<&InputBinding> {
+        self.bindings.get(action.as_str())
     }
 
     /// Whether the action's binding has any key/button currently held.
@@ -181,6 +305,12 @@ impl InputMap {
         self.bindings
             .get(action)
             .is_some_and(|binding| binding.is_down(input))
+    }
+
+    /// Typed [`action_down`](Self::action_down): accepts [`GameAction`] or
+    /// [`ActionId`] instead of a bare string.
+    pub fn action_down_id(&self, input: &InputState, action: &ActionId) -> bool {
+        self.action_down(input, action.as_str())
     }
 }
 
@@ -265,5 +395,30 @@ mod tests {
         assert_eq!(binding.mouse_buttons(), &[0]);
         assert!(binding.is_down(&pressed(&[87])));
         assert!(!binding.is_down(&InputState::new()));
+    }
+
+    #[test]
+    fn typed_action_ids_interoperate_with_strings() {
+        // `GameAction` covers the canonical vocabulary; `ActionId` carries
+        // tool-defined names — both land on the same map keys as strings.
+        assert_eq!(GameAction::MoveForward.as_str(), InputMap::MOVE_FORWARD);
+        assert_eq!(
+            GameAction::Custom(ActionId::from("jump")).id(),
+            ActionId::from("jump")
+        );
+        let mut map = InputMap::default_gameplay();
+        map.bind(
+            GameAction::MoveForward,
+            InputBinding::with_keys([KeyCode::KeyW]),
+        );
+        // Rebinding through the typed id replaces the string-keyed default.
+        assert!(map.action_down(&pressed(&[17]), InputMap::MOVE_FORWARD));
+        assert!(map.action_down_id(&pressed(&[87]), &GameAction::MoveForward.id()));
+        assert_eq!(
+            map.binding_id(&ActionId::from("move_forward")),
+            map.binding(InputMap::MOVE_FORWARD)
+        );
+        assert!(map.unbind_id(&GameAction::MoveBack.id()));
+        assert!(!map.action_down(&pressed(&[31]), InputMap::MOVE_BACK));
     }
 }

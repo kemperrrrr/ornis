@@ -4,8 +4,9 @@
 use glam::Vec3;
 use ornis_physics::trigger::{ContactEventKind, TriggerEventKind};
 use ornis_physics::{
-    AvbdEngine, AxisConfig, BodyHandle, JointKind, PhysicsEngine, PrismaticLimit, PrismaticMotor,
-    Ray, RevoluteLimit, RevoluteMotor, RigidBody, SequentialImpulseEngine, WheelSuspension,
+    AvbdEngine, AxisConfig, BodyHandle, JointHandle, JointKind, PhysicsEngine, PrismaticLimit,
+    PrismaticMotor, Ray, RevoluteLimit, RevoluteMotor, RigidBody, SequentialImpulseEngine,
+    WheelSuspension,
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -114,7 +115,7 @@ fn avbd_ball_joint_pendulum_holds_anchor() {
             local_anchor_b: lb,
         },
     );
-    assert!(joint.is_some());
+    assert!(joint.is_ok());
     for _ in 0..300 {
         physics.step(DT);
         let b = physics.get_body(bob).unwrap();
@@ -159,7 +160,7 @@ fn avbd_revolute_hinge_keeps_axis() {
             motor: None,
         },
     );
-    assert!(joint.is_some());
+    assert!(joint.is_ok());
     for _ in 0..300 {
         physics.step(DT);
     }
@@ -196,7 +197,7 @@ fn avbd_unsupported_joints_return_none() {
                     local_anchor_b: Vec3::ZERO,
                 }
             )
-            .is_none()
+            .is_err()
     );
     assert!(
         physics
@@ -204,12 +205,12 @@ fn avbd_unsupported_joints_return_none() {
                 b,
                 b,
                 JointKind::Gear {
-                    joint_a: 7,
-                    joint_b: 8,
+                    joint_a: JointHandle::from_raw(7),
+                    joint_b: JointHandle::from_raw(8),
                     ratio: 2.0
                 }
             )
-            .is_none(),
+            .is_err(),
         "gear with dangling references must be refused"
     );
     assert!(
@@ -218,12 +219,12 @@ fn avbd_unsupported_joints_return_none() {
                 a,
                 b,
                 JointKind::Gear {
-                    joint_a: 0,
-                    joint_b: 1,
+                    joint_a: JointHandle::from_raw(0),
+                    joint_b: JointHandle::from_raw(1),
                     ratio: f32::NAN,
                 },
             )
-            .is_none(),
+            .is_err(),
         "gear with non-finite ratio must be refused"
     );
     let ball = physics
@@ -247,7 +248,7 @@ fn avbd_unsupported_joints_return_none() {
                     ratio: 1.0,
                 },
             )
-            .is_none(),
+            .is_err(),
         "gear over non-hinge joints must be refused"
     );
 }
@@ -337,8 +338,14 @@ fn avbd_raycast_matches_builtin() {
         origin: Vec3::new(2.0, 5.0, 0.0),
         direction: Vec3::new(0.0, -1.0, 0.0),
     };
-    let ha = avbd.raycast(ray, 10.0).expect("avbd hit");
-    let hb = builtin.raycast(ray, 10.0).expect("builtin hit");
+    let ha = avbd
+        .raycast(ray, 10.0)
+        .expect("valid query")
+        .expect("avbd hit");
+    let hb = builtin
+        .raycast(ray, 10.0)
+        .expect("valid query")
+        .expect("builtin hit");
     assert_eq!(ha.handle, hb.handle);
     assert!((ha.distance - hb.distance).abs() < 1e-4);
     assert!((ha.point - hb.point).length() < 1e-4);
@@ -521,7 +528,7 @@ fn avbd_hinge_limit_holds_bound() {
                     motor: None,
                 },
             )
-            .is_some()
+            .is_ok()
     );
     let mut max_abs = 0.0f32;
     for _ in 0..300 {
@@ -568,7 +575,7 @@ fn avbd_hinge_motor_spins_up() {
                     }),
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..300 {
         physics.step(DT);
@@ -618,7 +625,7 @@ fn avbd_prismatic_slider_holds_line_and_limit() {
                     motor: None,
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..300 {
         physics.step(DT);
@@ -667,7 +674,7 @@ fn avbd_prismatic_limit_sustained_no_ratchet() {
                     motor: None,
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for i in 0..1500 {
         physics.step(DT);
@@ -795,7 +802,7 @@ fn avbd_prismatic_motor_drives() {
                     }),
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..300 {
         physics.step(DT);
@@ -910,7 +917,7 @@ fn avbd_fixed_weld_holds() {
                     local_anchor_b: Vec3::new(-0.5, 0.0, 0.0),
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..300 {
         physics.step(DT);
@@ -946,7 +953,7 @@ fn avbd_distance_rod_holds_length() {
                     local_anchor_b: Vec3::ZERO,
                 },
             )
-            .is_some()
+            .is_ok()
     );
     let mut swung = false;
     for _ in 0..300 {
@@ -994,7 +1001,7 @@ fn avbd_wheel_suspension_holds_chassis() {
                     motor: None,
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..300 {
         physics.step(DT);
@@ -1043,7 +1050,7 @@ fn avbd_wheel_motor_spins_axle() {
                     }),
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..240 {
         physics.step(DT);
@@ -1335,7 +1342,7 @@ fn avbd_wheel_degenerate_axle_falls_back() {
                     motor: None,
                 },
             )
-            .is_some()
+            .is_ok()
     );
     for _ in 0..60 {
         physics.step(DT);
@@ -1589,7 +1596,7 @@ fn avbd_snapshot_scene() -> (AvbdEngine, Vec<BodyHandle>) {
                     local_anchor_b: Vec3::new(0.0, 1.0, 0.0),
                 },
             )
-            .is_some(),
+            .is_ok(),
         "snapshot pendulum joint must build"
     );
     (physics, handles)

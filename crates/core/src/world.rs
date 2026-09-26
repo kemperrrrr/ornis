@@ -9,9 +9,11 @@
 //! registered as resources.
 
 use std::any::Any;
+use std::marker::PhantomData;
 
 use crate::schedule::{Resources, Schedule};
 use crate::smart_store::SmartStore;
+use crate::typestate::{Building, Phase, Running};
 
 /// The authoritative logical state container for one engine instance.
 ///
@@ -20,22 +22,62 @@ use crate::smart_store::SmartStore;
 /// This is a logical unification boundary: CPU and GPU representations may
 /// still be separate and are coordinated by their respective runtime
 /// resources and residency trackers.
-pub struct World {
+///
+/// The `State` phantom tracks the build/run phase ([`Building`]/[`Running`],
+/// default [`Running`]): a bare `World` keeps meaning a running world, so
+/// existing setup and inspection code compiles unchanged. Registration-heavy
+/// setup may start from [`World::new_building`] and seal the world with
+/// [`World::build`]; the phase grants no extra mutation rights by itself —
+/// it only documents where the world sits in the frame lifecycle.
+pub struct World<State: Phase = Running> {
     resources: Resources,
+    phase: PhantomData<State>,
 }
 
-impl Default for World {
+impl<State: Phase> Default for World<State> {
+    /// Creates a world with an empty authoritative [`SmartStore`].
     fn default() -> Self {
-        Self::new()
+        Self::new_in_phase()
     }
 }
 
-impl World {
+impl World<Running> {
     /// Creates a world with an empty authoritative [`SmartStore`].
     pub fn new() -> Self {
+        Self::new_in_phase()
+    }
+}
+
+impl World<Building> {
+    /// Creates a build-phase world with an empty authoritative [`SmartStore`].
+    ///
+    /// Register domain resources and systems against this world, then seal
+    /// it with [`World::build`] before entering the frame loop.
+    pub fn new_building() -> Self {
+        Self::new_in_phase()
+    }
+
+    /// Seals a build-phase world into the running phase.
+    ///
+    /// The resource map (including the authoritative [`SmartStore`]) moves
+    /// over untouched; only the phase marker changes.
+    #[must_use]
+    pub fn build(self) -> World<Running> {
+        World {
+            resources: self.resources,
+            phase: PhantomData,
+        }
+    }
+}
+
+impl<State: Phase> World<State> {
+    pub(crate) fn new_in_phase() -> Self {
         let mut resources = Resources::new();
         resources.insert(SmartStore::new());
-        Self { resources }
+        Self {
+            resources,
+            phase: PhantomData,
+        }
     }
 
     /// Returns the world's singleton resource container.
@@ -198,5 +240,14 @@ mod tests {
         let mut schedule = Schedule::new();
         schedule.add_system(ReadStore);
         world.run(&schedule);
+    }
+
+    #[test]
+    fn building_world_seals_into_running() {
+        let mut building = World::new_building();
+        building.insert(7_u32);
+        let running: World = building.build();
+        assert_eq!(running.resources().get::<u32>(), Some(&7));
+        assert!(running.store().is_some());
     }
 }

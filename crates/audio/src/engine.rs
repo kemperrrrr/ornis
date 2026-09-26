@@ -14,7 +14,7 @@ use ornis_core::{Entity, SmartStore};
 use ornis_gameplay::Position;
 
 use crate::backend::{AudioBackend, AudioBackendTrait};
-use crate::source::{AudioClip, AudioSource, AudioState, MixInput, SpatialParams};
+use crate::source::{AudioClip, AudioSource, AudioState, ClipId, MixInput, SpatialParams};
 
 /// Bridges the ECS world and the audio backend.
 ///
@@ -27,7 +27,7 @@ use crate::source::{AudioClip, AudioSource, AudioState, MixInput, SpatialParams}
 pub struct AudioEngine {
     backend: Box<dyn AudioBackendTrait>,
     clips: Vec<AudioClip>,
-    active: HashMap<Entity, usize>,
+    active: HashMap<Entity, ClipId>,
     _listener_pos: Vec3,
     _listener_gain: f32,
 }
@@ -60,8 +60,8 @@ impl AudioEngine {
 
     /// Store a clip and return its stable registration id for
     /// [`AudioSource::clip_id`]. Ids are never reused.
-    pub fn register_clip(&mut self, clip: AudioClip) -> usize {
-        let id = self.clips.len();
+    pub fn register_clip(&mut self, clip: AudioClip) -> ClipId {
+        let id = ClipId::from(self.clips.len());
         self.clips.push(clip);
         id
     }
@@ -122,7 +122,7 @@ impl AudioEngine {
             match source.state {
                 AudioState::Playing => {
                     let clip_id = match source.clip_id {
-                        Some(id) if id < self.clips.len() => id,
+                        Some(id) if id.index() < self.clips.len() => id,
                         _ => continue,
                     };
 
@@ -151,7 +151,7 @@ impl AudioEngine {
                         None
                     };
 
-                    let mut input = MixInput::new(&self.clips[clip_id], source, spatial);
+                    let mut input = MixInput::new(&self.clips[clip_id.index()], source, spatial);
                     // Master listener gain ducks every source equally.
                     input.volume *= self._listener_gain;
                     self.backend.play(input);
@@ -206,7 +206,7 @@ mod tests {
         }
     }
 
-    fn playing_source(clip_id: usize, spatial: bool) -> AudioSource {
+    fn playing_source(clip_id: ClipId, spatial: bool) -> AudioSource {
         AudioSource {
             clip_id: Some(clip_id),
             volume: 1.0,
@@ -217,7 +217,7 @@ mod tests {
         }
     }
 
-    fn stopped_source(clip_id: usize) -> AudioSource {
+    fn stopped_source(clip_id: ClipId) -> AudioSource {
         AudioSource {
             clip_id: Some(clip_id),
             volume: 1.0,

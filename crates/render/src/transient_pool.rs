@@ -146,6 +146,79 @@ pub struct ResourceId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PassId(pub u32);
 
+/// Canonical render-resource name: the declaration-registry key.
+///
+/// Owned (`Box<str>`) so `'static` plan names and dynamic tool names share
+/// one type; lookups accept `&str` through the [`std::borrow::Borrow`] impl,
+/// so existing `create_resource("a", …)` call sites keep compiling while
+/// declarations carry the typed name instead of a bare `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourceName(Box<str>);
+
+/// Canonical render-pass name: the declaration-registry key.
+///
+/// Same ownership story as [`ResourceName`]: `'static` pass names and
+/// dynamic tool names share one type, `order_before_named("a", "b")` call
+/// sites keep compiling through `impl Into<PassName>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PassName(Box<str>);
+
+/// Shared implementation of the `Box<str>` name newtypes above.
+macro_rules! impl_plan_name {
+    ($ty:ident) => {
+        impl $ty {
+            /// Wraps a `'static` plan name without extra bookkeeping.
+            pub fn from_static(name: &'static str) -> Self {
+                Self(name.into())
+            }
+
+            /// Plan name as a string slice.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::borrow::Borrow<str> for $ty {
+            fn borrow(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl From<&str> for $ty {
+            fn from(name: &str) -> Self {
+                Self(name.into())
+            }
+        }
+
+        impl From<String> for $ty {
+            fn from(name: String) -> Self {
+                Self(name.into_boxed_str())
+            }
+        }
+
+        impl From<&String> for $ty {
+            fn from(name: &String) -> Self {
+                Self(name.as_str().into())
+            }
+        }
+    };
+}
+
+impl_plan_name!(ResourceName);
+impl_plan_name!(PassName);
+
 /// Per-resource information in a layout.
 #[derive(Debug, Clone)]
 pub struct ResourceLayout {
@@ -171,6 +244,11 @@ impl ResourceLayout {
     /// Whether the resource is alive at the pass with `pass_index`.
     pub fn alive_at(&self, pass_index: usize) -> bool {
         self.first_use != usize::MAX && self.first_use <= pass_index && pass_index <= self.last_use
+    }
+
+    /// Where the storage comes from as a [`crate::flags::ResourceBacking`].
+    pub fn backing(&self) -> crate::flags::ResourceBacking {
+        crate::flags::ResourceBacking::from(self.external)
     }
 }
 
@@ -433,7 +511,7 @@ impl std::fmt::Display for BudgetExceeded {
 /// the import/external flags that shape validation and slot assignment.
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceNode {
-    pub name: String,
+    pub name: ResourceName,
     pub spec: TextureSpec,
     /// Imported (external) resource: the "first touch must be a write"
     /// rule does not apply.
@@ -443,13 +521,32 @@ pub(crate) struct ResourceNode {
     pub external: bool,
 }
 
+impl ResourceNode {
+    /// Where the storage comes from as a [`crate::flags::ResourceBacking`].
+    pub fn backing(&self) -> crate::flags::ResourceBacking {
+        crate::flags::ResourceBacking::from(self.external)
+    }
+}
+
 /// A declared pass, as seen by the pool compiler.
 #[derive(Debug, Clone)]
 pub(crate) struct PassNode {
-    pub name: String,
+    pub name: PassName,
     pub reads: Vec<ResourceId>,
     pub writes: Vec<(ResourceId, Option<wgpu::Color>)>,
     pub enabled: bool,
+}
+
+impl PassNode {
+    /// Execution state as a [`crate::flags::PassState`].
+    pub fn state(&self) -> crate::flags::PassState {
+        crate::flags::PassState::from(self.enabled)
+    }
+
+    /// Sets the execution state from a [`crate::flags::PassState`].
+    pub fn set_state(&mut self, state: crate::flags::PassState) {
+        self.enabled = state.is_enabled();
+    }
 }
 
 /// Borrowed declaration snapshot for one [`TransientPool::ensure`]
@@ -470,13 +567,13 @@ fn collect_enabled_passes(nodes: &[PassNode]) -> Vec<PassLayout> {
     nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| node.enabled)
+        .filter(|(_, node)| node.state().is_enabled())
         .map(|(i, node)| PassLayout {
             // `PassId` is positional in the full declaration order
             // (disabled passes keep their indices) — `layout_levels`
             // translates explicit edges through these ids.
             id: PassId(i as u32),
-            name: node.name.clone(),
+            name: node.name.as_str().to_owned(),
             reads: node.reads.clone(),
             writes: node.writes.clone(),
         })
@@ -489,12 +586,12 @@ fn init_resource_layout(nodes: &[ResourceNode]) -> Vec<ResourceLayout> {
         .enumerate()
         .map(|(i, node)| ResourceLayout {
             id: ResourceId(i as u32),
-            name: node.name.clone(),
+            name: node.name.as_str().to_owned(),
             spec: node.spec,
             first_use: usize::MAX,
             last_use: 0,
             slot: None,
-            external: node.external,
+            external: node.backing().is_external(),
         })
         .collect()
 }
@@ -542,7 +639,7 @@ fn validate_first_touch_is_write(
 fn assign_pool_slots(resources: &mut [ResourceLayout]) -> Vec<PoolSlot> {
     let mut used: Vec<ResourceId> = resources
         .iter()
-        .filter(|rl| rl.first_use != usize::MAX && !rl.external)
+        .filter(|rl| rl.first_use != usize::MAX && !rl.backing().is_external())
         .map(|rl| rl.id)
         .collect();
     used.sort_by_key(|&id| {
@@ -755,7 +852,7 @@ mod tests {
 
     fn res(name: &str, spec: TextureSpec) -> ResourceNode {
         ResourceNode {
-            name: name.to_owned(),
+            name: ResourceName::from(name),
             spec,
             imported: false,
             external: false,
@@ -764,7 +861,7 @@ mod tests {
 
     fn res_imported(name: &str, spec: TextureSpec) -> ResourceNode {
         ResourceNode {
-            name: name.to_owned(),
+            name: ResourceName::from(name),
             spec,
             imported: true,
             external: false,
@@ -773,7 +870,7 @@ mod tests {
 
     fn pass(name: &str, reads: &[usize], writes: &[usize]) -> PassNode {
         PassNode {
-            name: name.to_owned(),
+            name: PassName::from(name),
             reads: reads.iter().map(|&i| ResourceId(i as u32)).collect(),
             writes: writes
                 .iter()
@@ -785,7 +882,7 @@ mod tests {
 
     fn pass_disabled(name: &str, reads: &[usize], writes: &[usize]) -> PassNode {
         let mut p = pass(name, reads, writes);
-        p.enabled = false;
+        p.set_state(crate::flags::PassState::Disabled);
         p
     }
 
@@ -795,7 +892,7 @@ mod tests {
         writes: &[(usize, Option<wgpu::Color>)],
     ) -> PassNode {
         PassNode {
-            name: name.to_owned(),
+            name: PassName::from(name),
             reads: reads.iter().map(|&i| ResourceId(i as u32)).collect(),
             writes: writes
                 .iter()
@@ -962,7 +1059,7 @@ mod tests {
         let b = set.create_resource("b", spec(wgpu::TextureFormat::Rgba8Unorm, 1));
         let p1 = set.add_pass("p1").write(a).id();
         set.add_pass("p2").write(b);
-        set.set_pass_enabled(p1, false);
+        set.set_pass_state(p1, crate::flags::PassState::Disabled);
         let layout = set.build();
         assert_eq!(layout.passes.len(), 1);
         assert_eq!(layout.passes[0].name, "p2");

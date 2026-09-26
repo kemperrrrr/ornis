@@ -32,6 +32,10 @@ pub mod colliders;
 /// Collision detection: broadphase backends, shapes and distance queries.
 pub mod collision;
 mod contact_math;
+/// Typed physics failures (point 5: thiserror hierarchies).
+pub mod errors;
+/// Typed replacements for legacy `bool` flags (point 3: bool -> enum).
+pub mod flags;
 /// Scene snapshots and joint-remap helpers for solver migration.
 pub mod migration;
 mod split;
@@ -57,6 +61,8 @@ pub(crate) use collision::gjk;
 // is relaxed for this subtree; every hand-written public item stays documented.
 #[allow(missing_docs)]
 pub mod gpu;
+/// Invariant-preserving newtypes (mass, unit directions, capped manifolds).
+pub mod invariants;
 pub mod joint;
 pub mod math;
 /// Sequential-impulse solver internals (Genesis-style `solvers/rigid/` box).
@@ -87,13 +93,24 @@ pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, RigidBody};
 pub use collision::broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{PhysicsEngine, SequentialImpulseEngine};
+pub use errors::{ColliderError, JointError, MeshError, QueryError};
+pub use flags::{
+    AxisStatus, BodyRole, CachePolicy, CoordKind, Dispatch, HitKind, LimitSide, Order,
+    RestitutionGate, RollAxis, RoutePhase, SolvePath, SolverSide, StructuralState,
+};
+pub use invariants::{
+    Capped4, FrictionFrame, FrictionFrameError, HeightfieldError, Mass, MassKind, Meters,
+    NonEmpty4, PositiveF32, Radians, UnitVec3, validate_heightfield,
+};
 pub use joint::{
     AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, ResolvedJoint,
     RevoluteLimit, RevoluteMotor, WheelSuspension, resolve_joint,
 };
 pub use math::{AABB, Ray, RaycastHit};
 pub use shape::{ConvexHull, Heightfield, PairSupport, Shape, TriMesh};
-pub use soft::{ClothPin, DeformConstraint, DeformKind, Particle, SoftBody, SoftHandle};
+pub use soft::{
+    ClothPin, DeformConstraint, DeformKind, Particle, ParticleIdx, SoftBody, SoftHandle,
+};
 pub use soft_render::{tube_indices, tube_positions};
 pub use trigger::{
     CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, FractureEvent,
@@ -193,7 +210,7 @@ pub struct Engine {
     split: Option<Box<SplitState>>,
     /// Structural changes (add/remove) pending engine rebuild. Single
     /// mode applies them immediately, so this only ever sets in Islands.
-    structural_dirty: bool,
+    structural_dirty: StructuralState,
     /// Globals touched through `get_body_mut` since the last step; the
     /// owner engine wakes them before stepping (host edits do not wake
     /// sleeping solvers by themselves).
@@ -228,7 +245,7 @@ impl Engine {
             single_kind: kind,
             routing: RoutingKind::Single,
             split: None,
-            structural_dirty: false,
+            structural_dirty: StructuralState::Clean,
             wake_set: std::collections::BTreeSet::new(),
             migrations: 0,
         }
@@ -303,12 +320,12 @@ impl Engine {
         }
         split.joints = snapshot.joints.into_iter().map(SplitJoint::new).collect();
         split.events = snapshot.events;
-        split.route(split::DT, false, &self.wake_set);
+        split.route(split::DT, RoutePhase::Probe, &self.wake_set);
         split.rebuild();
         self.split = Some(split);
         self.routing = RoutingKind::Islands;
         self.migrations = 0;
-        self.structural_dirty = false;
+        self.structural_dirty = StructuralState::Clean;
         self.wake_set.clear();
         self.trigger_events.extend(triggers);
     }
@@ -325,6 +342,7 @@ impl Engine {
         }
         next.restore_joints(snapshot.joints);
         for (h, pose) in snapshot.previous.into_iter().enumerate() {
+            let h = BodyHandle::from(h);
             match &mut next.inner {
                 EngineInner::SequentialImpulse(e) => e.restore_body_baseline(h, pose),
                 EngineInner::Avbd(e) => e.restore_body_baseline(h, pose),
@@ -366,7 +384,7 @@ impl Engine {
     /// under Islands routing and return `None`, as do invalid handles.
     pub fn body_solver(&self, handle: BodyHandle) -> Option<SolverKind> {
         if let Some(s) = &self.split {
-            return match s.bodies.get(handle)?.owner {
+            return match s.bodies.get(handle.index())?.owner {
                 SplitOwner::Static => None,
                 SplitOwner::Avbd => Some(SolverKind::Avbd),
                 SplitOwner::SequentialImpulse => Some(SolverKind::SequentialImpulse),
@@ -423,12 +441,12 @@ impl Engine {
     /// Rebuild split engines from the registry when structural changes
     /// (add/remove) are pending. Cheap flag check on the hot path.
     fn split_ensure_built(&mut self) {
-        if self.structural_dirty {
+        if self.structural_dirty.is_dirty() {
             if let Some(s) = &mut self.split {
-                s.route(split::DT, false, &self.wake_set);
+                s.route(split::DT, RoutePhase::Probe, &self.wake_set);
                 s.rebuild();
             }
-            self.structural_dirty = false;
+            self.structural_dirty = StructuralState::Clean;
         }
     }
 
@@ -450,7 +468,7 @@ impl Engine {
             let edited = std::mem::take(&mut self.wake_set);
             let s = self.split.as_mut().expect("Islands state");
             s.time_debt -= f64::from(split::DT);
-            if s.route(split::DT, true, &edited) > 0 {
+            if s.route(split::DT, RoutePhase::Tick, &edited) > 0 {
                 s.rebuild();
                 self.migrations += 1;
             }
@@ -472,7 +490,7 @@ impl Engine {
         for event in contacts {
             if let ContactEventKind::Hit { approach_speed, .. } = event.kind {
                 for h in [event.body_a, event.body_b] {
-                    if let Some(body) = s.bodies.get(h).map(|b| &b.body)
+                    if let Some(body) = s.bodies.get(h.index()).map(|b| &b.body)
                         && body.body_type == BodyType::Dynamic
                         && approach_speed >= body.fracture_impact_speed
                     {
@@ -483,13 +501,13 @@ impl Engine {
         }
         let start = self.fracture_events.len();
         for parent in candidates.into_iter().rev() {
-            let Some(body) = s.bodies.get(parent).map(|b| b.body.clone()) else {
+            let Some(body) = s.bodies.get(parent.index()).map(|b| b.body.clone()) else {
                 continue;
             };
             let Some(halves) = Self::split_box(&body) else {
                 continue;
             };
-            let last = s.bodies.len() - 1;
+            let last = BodyHandle::from(s.bodies.len() - 1);
             Self::remap_fracture_pieces(&mut self.fracture_events[start..], parent, last);
             Self::split_remove_body(s, parent);
             for half in halves {
@@ -498,19 +516,19 @@ impl Engine {
             let n = s.bodies.len();
             self.fracture_events.push(FractureEvent {
                 parent,
-                pieces: [n - 2, n - 1],
+                pieces: [BodyHandle::from(n - 2), BodyHandle::from(n - 1)],
             });
-            self.structural_dirty = true;
+            self.structural_dirty = StructuralState::Dirty;
         }
     }
 
     /// Registry body removal with joint remap (swap_remove discipline,
     /// same as the engines: the tail moves into the hole, refs are patched).
     fn split_remove_body(s: &mut SplitState, handle: BodyHandle) {
-        if handle >= s.bodies.len() {
+        if handle.index() >= s.bodies.len() {
             return;
         }
-        let last = s.bodies.len() - 1;
+        let last = BodyHandle::from(s.bodies.len() - 1);
         let removed = s
             .joints
             .iter()
@@ -522,8 +540,8 @@ impl Engine {
             j.state.a = map(j.state.a);
             j.state.b = map(j.state.b);
         }
-        s.bodies.swap_remove(handle);
-        let remap = |set: &std::collections::BTreeSet<(usize, usize)>| {
+        s.bodies.swap_remove(handle.index());
+        let remap = |set: &std::collections::BTreeSet<(BodyHandle, BodyHandle)>| {
             set.iter()
                 .filter_map(|&(a, b)| {
                     if a == handle || b == handle {
@@ -539,12 +557,12 @@ impl Engine {
     }
 
     /// Registry joint removal with gear-ref remap.
-    fn split_remove_joint(s: &mut SplitState, handle: usize) {
-        if handle >= s.joints.len() {
+    fn split_remove_joint(s: &mut SplitState, handle: JointHandle) {
+        if handle.index() >= s.joints.len() {
             return;
         }
         let mut removed = vec![false; s.joints.len()];
-        removed[handle] = true;
+        removed[handle.index()] = true;
         Self::split_retain_joints(s, removed);
     }
 
@@ -562,7 +580,7 @@ impl Engine {
         });
     }
 
-    fn remap_fracture_pieces(events: &mut [FractureEvent], removed: usize, last: usize) {
+    fn remap_fracture_pieces(events: &mut [FractureEvent], removed: BodyHandle, last: BodyHandle) {
         for event in events {
             for h in &mut event.pieces {
                 if *h == last {
@@ -605,9 +623,11 @@ impl Engine {
             half.shape = Shape::Box { half_extents: h2 };
             half.position = parent.position + off * s;
             half.velocity = parent.velocity + parent.angular_velocity.cross(off * s);
-            half.mass = parent.mass * 0.5;
-            half.inv_mass = 1.0 / half.mass;
-            half.inertia = half.shape.inertia(half.mass);
+            if let Some(m) = crate::invariants::PositiveF32::try_new(parent.mass * 0.5) {
+                half.set_mass_kind(crate::invariants::MassKind::Free(m));
+            } else {
+                half.set_mass_kind(crate::invariants::MassKind::Fixed);
+            }
         }
         Some(halves)
     }
@@ -664,8 +684,8 @@ impl Engine {
                 continue;
             };
             let last = match inner {
-                EngineInner::SequentialImpulse(e) => e.body_count() - 1,
-                EngineInner::Avbd(e) => e.body_count() - 1,
+                EngineInner::SequentialImpulse(e) => BodyHandle::from(e.body_count() - 1),
+                EngineInner::Avbd(e) => BodyHandle::from(e.body_count() - 1),
             };
             Self::remap_fracture_pieces(&mut self.fracture_events[event_start..], parent, last);
             match inner {
@@ -702,9 +722,9 @@ impl PhysicsEngine for Engine {
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
         if let Some(s) = &mut self.split {
-            let h = s.bodies.len();
+            let h = BodyHandle::from(s.bodies.len());
             s.bodies.push(SplitBody::new(body, SolverKind::Avbd));
-            self.structural_dirty = true;
+            self.structural_dirty = StructuralState::Dirty;
             return h;
         }
         match &mut self.inner {
@@ -714,12 +734,12 @@ impl PhysicsEngine for Engine {
     }
 
     fn remove_body(&mut self, handle: BodyHandle) {
-        if handle >= self.body_count() {
+        if handle.index() >= self.body_count() {
             return;
         }
         self.contact_events.clear();
         if let Some(s) = &mut self.split {
-            let last = s.bodies.len() - 1;
+            let last = BodyHandle::from(s.bodies.len() - 1);
             for &(a, b) in &s.events.triggers {
                 if a == handle || b == handle {
                     self.trigger_events.push(TriggerEvent {
@@ -734,7 +754,7 @@ impl PhysicsEngine for Engine {
             if handle != last && self.wake_set.remove(&last) {
                 self.wake_set.insert(handle);
             }
-            self.structural_dirty = true;
+            self.structural_dirty = StructuralState::Dirty;
             return;
         }
         match &mut self.inner {
@@ -745,7 +765,12 @@ impl PhysicsEngine for Engine {
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
         if self.routing == RoutingKind::Islands {
-            return self.split.as_ref()?.bodies.get(handle).map(|r| &r.body);
+            return self
+                .split
+                .as_ref()?
+                .bodies
+                .get(handle.index())
+                .map(|r| &r.body);
         }
         match &self.inner {
             EngineInner::SequentialImpulse(e) => e.get_body(handle),
@@ -756,7 +781,7 @@ impl PhysicsEngine for Engine {
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody> {
         if self.routing == RoutingKind::Islands {
             let s = self.split.as_mut()?;
-            let r = s.bodies.get_mut(handle)?;
+            let r = s.bodies.get_mut(handle.index())?;
             // Host edit: wake the owner's copy before the next step (an
             // edit alone must not leave a stale sleeping copy behind).
             self.wake_set.insert(handle);
@@ -773,13 +798,13 @@ impl PhysicsEngine for Engine {
         body_a: BodyHandle,
         body_b: BodyHandle,
         kind: JointKind,
-    ) -> Option<JointHandle> {
+    ) -> Result<JointHandle, JointError> {
         if let Some(s) = &mut self.split {
             let h = s.add_joint(body_a, body_b, kind)?;
-            self.structural_dirty = true;
+            self.structural_dirty = StructuralState::Dirty;
             self.wake_set.insert(body_a);
             self.wake_set.insert(body_b);
-            return Some(h);
+            return Ok(h);
         }
         match &mut self.inner {
             EngineInner::SequentialImpulse(e) => e.add_joint(body_a, body_b, kind),
@@ -788,15 +813,15 @@ impl PhysicsEngine for Engine {
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
-        if handle >= self.joint_count() {
+        if handle.index() >= self.joint_count() {
             return;
         }
         if let Some(s) = &mut self.split {
-            let j = s.joints[handle].state;
+            let j = s.joints[handle.index()].state;
             self.wake_set.insert(j.a);
             self.wake_set.insert(j.b);
             Self::split_remove_joint(s, handle);
-            self.structural_dirty = true;
+            self.structural_dirty = StructuralState::Dirty;
             return;
         }
         match &mut self.inner {
@@ -805,7 +830,7 @@ impl PhysicsEngine for Engine {
         }
     }
 
-    fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
+    fn raycast(&self, ray: Ray, max_dist: f32) -> Result<Option<RaycastHit>, QueryError> {
         if let Some(s) = &self.split {
             return s.raycast(ray, max_dist);
         }
@@ -844,7 +869,7 @@ impl PhysicsEngine for Engine {
 
     fn wake_body(&mut self, handle: BodyHandle) {
         if let Some(s) = &mut self.split {
-            if handle < s.bodies.len() {
+            if handle.index() < s.bodies.len() {
                 self.wake_set.insert(handle);
                 s.wake_global(handle);
             }

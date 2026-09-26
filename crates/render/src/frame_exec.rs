@@ -10,6 +10,7 @@
 //! only owns GPU objects. On wgpu, barriers are handled by wgpu itself, so
 //! the executor is small by design.
 
+use crate::flags::Bloom;
 use crate::frame_passes::{
     Albedo, Bloom0, Bloom1, Bloom2, BloomBright, BloomDown1Pass, BloomDown2Pass, BloomUp0Pass,
     BloomUp1Pass, Composite, CompositeDeferred, CompositeDeferredBloom, CompositeForward,
@@ -405,7 +406,7 @@ impl<'a> PassViews<'a> {
             "resource {id:?} is not alive on pass {}",
             self.index
         );
-        if rl.external {
+        if rl.backing().is_external() {
             self.externals
                 .get(&id)
                 .unwrap_or_else(|| panic!("external view for {id:?} is not set"))
@@ -443,7 +444,7 @@ pub struct RenderFrame3D {
     /// declared as `FramePass` implementations
     /// (see [`crate::frame_passes`] and [`crate::system`]).
     systems: SystemSet,
-    bloom: bool,
+    bloom: crate::flags::Bloom,
     technique: Technique,
 }
 
@@ -477,11 +478,19 @@ impl Technique {
 
     /// Composite shader mode: 0 = deferred-only, 1 = forward-only,
     /// 2 = hybrid (deferred + forward over it).
+    ///
+    /// Prefer [`Self::technique`] with [`crate::flags::CompositeTechnique`].
     pub fn composite_mode(&self) -> u32 {
+        self.technique().shader_mode()
+    }
+
+    /// Which HDR layers this technique produces (typed replacement for
+    /// [`Self::composite_mode`]).
+    pub fn technique(&self) -> crate::flags::CompositeTechnique {
         match self {
-            Self::Forward => 1,
-            Self::Deferred => 0,
-            Self::Hybrid => 2,
+            Self::Forward => crate::flags::CompositeTechnique::Forward,
+            Self::Deferred => crate::flags::CompositeTechnique::Deferred,
+            Self::Hybrid => crate::flags::CompositeTechnique::Hybrid,
         }
     }
 }
@@ -522,7 +531,7 @@ impl RenderFrame3D {
     /// (the lighting pass writes into it); `surface_size` seeds
     /// `SizePolicy::MatchSurface` resources.
     pub fn new(surface_format: wgpu::TextureFormat, surface_size: (u32, u32)) -> Self {
-        Self::new_with(surface_format, surface_size, Technique::Hybrid, false)
+        Self::new_with(surface_format, surface_size, Technique::Hybrid, Bloom::Off)
     }
 
     /// Like [`new`](Self::new), plus the bloom cascade:
@@ -533,7 +542,7 @@ impl RenderFrame3D {
     /// The composite pass then mixes the final bloom level into the HDR
     /// result.
     pub fn new_with_bloom(surface_format: wgpu::TextureFormat, surface_size: (u32, u32)) -> Self {
-        Self::new_with(surface_format, surface_size, Technique::Hybrid, true)
+        Self::new_with(surface_format, surface_size, Technique::Hybrid, Bloom::On)
     }
 
     /// Builds the plan for a specific [`Technique`] with optional bloom.
@@ -545,7 +554,7 @@ impl RenderFrame3D {
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
         technique: Technique,
-        bloom: bool,
+        bloom: crate::flags::Bloom,
     ) -> Self {
         // S2: resources are registered by type; specs/names (and the
         // ResourceId order) mirror the imperative wiring exactly.
@@ -578,7 +587,7 @@ impl RenderFrame3D {
                 systems.add_system(Forward::<SharedDepth>::new());
             }
         }
-        if bloom {
+        if bloom.is_on() {
             // The bright-pass input is the HDR layer the active technique
             // produced: `hdr` (deferred/hybrid) or `hdr_fwd` (forward-only).
             if technique.has_deferred() {
@@ -594,22 +603,22 @@ impl RenderFrame3D {
         // The composite mode is a pure function of (technique, bloom):
         // which HDR layers exist and whether the bloom chain feeds the mix.
         match (technique, bloom) {
-            (Technique::Deferred, true) => {
+            (Technique::Deferred, Bloom::On) => {
                 systems.add_system(Composite::<CompositeDeferredBloom>::new());
             }
-            (Technique::Deferred, false) => {
+            (Technique::Deferred, Bloom::Off) => {
                 systems.add_system(Composite::<CompositeDeferred>::new());
             }
-            (Technique::Forward, true) => {
+            (Technique::Forward, Bloom::On) => {
                 systems.add_system(Composite::<CompositeForwardBloom>::new());
             }
-            (Technique::Forward, false) => {
+            (Technique::Forward, Bloom::Off) => {
                 systems.add_system(Composite::<CompositeForward>::new());
             }
-            (Technique::Hybrid, true) => {
+            (Technique::Hybrid, Bloom::On) => {
                 systems.add_system(Composite::<CompositeHybridBloom>::new());
             }
-            (Technique::Hybrid, false) => {
+            (Technique::Hybrid, Bloom::Off) => {
                 systems.add_system(Composite::<CompositeHybrid>::new());
             }
         }
@@ -635,6 +644,11 @@ impl RenderFrame3D {
 
     /// Whether the bloom cascade is wired into this plan.
     pub fn bloom_enabled(&self) -> bool {
+        self.bloom.is_on()
+    }
+
+    /// Bloom wiring as a [`crate::flags::Bloom`].
+    pub fn bloom_state(&self) -> crate::flags::Bloom {
         self.bloom
     }
 
@@ -946,22 +960,38 @@ mod tests {
         // Forward: no gbuffer/lighting, forward node present.
         assert!(!Technique::Forward.has_deferred());
         assert!(Technique::Forward.has_forward());
+        assert_eq!(
+            Technique::Forward.technique(),
+            crate::flags::CompositeTechnique::Forward
+        );
         assert_eq!(Technique::Forward.composite_mode(), 1);
         // Deferred: deferred chain only, no forward node.
         assert!(Technique::Deferred.has_deferred());
         assert!(!Technique::Deferred.has_forward());
+        assert_eq!(
+            Technique::Deferred.technique(),
+            crate::flags::CompositeTechnique::Deferred
+        );
         assert_eq!(Technique::Deferred.composite_mode(), 0);
         // Hybrid: both node sets.
         assert!(Technique::Hybrid.has_deferred());
         assert!(Technique::Hybrid.has_forward());
+        assert_eq!(
+            Technique::Hybrid.technique(),
+            crate::flags::CompositeTechnique::Hybrid
+        );
         assert_eq!(Technique::Hybrid.composite_mode(), 2);
     }
 
     #[test]
     fn technique_wires_expected_passes() {
         let pass_names = |technique: Technique| {
-            let mut plan =
-                RenderFrame3D::new_with(wgpu::TextureFormat::Rgba8Unorm, (32, 32), technique, true);
+            let mut plan = RenderFrame3D::new_with(
+                wgpu::TextureFormat::Rgba8Unorm,
+                (32, 32),
+                technique,
+                Bloom::On,
+            );
             plan.systems
                 .build()
                 .passes
@@ -1017,7 +1047,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Forward,
-            true,
+            Bloom::On,
         );
         let layout = forward.systems.build();
         let down0 = layout
@@ -1031,7 +1061,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Hybrid,
-            true,
+            Bloom::On,
         );
         let layout = hybrid.systems.build();
         let down0 = layout
@@ -1048,7 +1078,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
             Technique::Forward,
-            false,
+            Bloom::Off,
         );
         let layout = forward.systems.build();
         let fwd = layout
@@ -1128,14 +1158,14 @@ mod tests {
         // otherwise the default `render()` path would reorder passes.
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
         for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
-            for bloom in [false, true] {
+            for bloom in [Bloom::Off, Bloom::On] {
                 let mut plan = RenderFrame3D::new_with(fmt, (32, 32), technique, bloom);
                 let layout = plan.systems.build();
                 let flat: Vec<usize> = layout.levels().iter().flatten().copied().collect();
                 let registration: Vec<usize> = (0..layout.passes.len()).collect();
                 assert_eq!(
                     flat, registration,
-                    "technique {technique:?} bloom {bloom}: DAG order != registration order"
+                    "technique {technique:?} bloom {bloom:?}: DAG order != registration order"
                 );
             }
         }
@@ -1177,7 +1207,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Hybrid,
-            true,
+            Bloom::On,
         );
         // Two "frames" without mutations → one computation.
         let _ = g3.systems.layout();
@@ -1278,7 +1308,7 @@ mod tests {
 
     /// Verbatim pre-S2 pass wiring — the reference the typed systems
     /// (`add_system`) and the conditional passes have to match.
-    fn imperative_passes(plan: &mut SystemSet, ids: &FrameIds, technique: Technique, bloom: bool) {
+    fn imperative_passes(plan: &mut SystemSet, ids: &FrameIds, technique: Technique, bloom: Bloom) {
         if technique.has_deferred() {
             plan.add_pass("gbuffer")
                 .write(ids.albedo)
@@ -1305,7 +1335,7 @@ mod tests {
             };
             pass.write_clear(ids.hdr_fwd, wgpu::Color::TRANSPARENT);
         }
-        if bloom {
+        if bloom.is_on() {
             let bloom_input = if technique.has_deferred() {
                 ids.hdr
             } else {
@@ -1334,7 +1364,7 @@ mod tests {
         if technique.has_forward() {
             composite = composite.read(ids.hdr_fwd);
         }
-        if bloom {
+        if bloom.is_on() {
             composite.read(ids.bloom0);
         }
     }
@@ -1344,7 +1374,7 @@ mod tests {
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
         technique: Technique,
-        bloom: bool,
+        bloom: Bloom,
     ) -> SystemSet {
         let mut plan = SystemSet::new();
         plan.set_surface_size(surface_size);
@@ -1357,13 +1387,13 @@ mod tests {
     fn typed_wiring_matches_imperative_reference() {
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
         for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
-            for bloom in [false, true] {
+            for bloom in [Bloom::Off, Bloom::On] {
                 let mut typed = RenderFrame3D::new_with(fmt, (1280, 720), technique, bloom);
                 let mut reference = imperative_wiring(fmt, (1280, 720), technique, bloom);
                 assert_eq!(
                     typed.systems.build().debug_dump(),
                     reference.build().debug_dump(),
-                    "typed wiring diverged: {technique:?} bloom={bloom}"
+                    "typed wiring diverged: {technique:?} bloom={bloom:?}"
                 );
             }
         }
@@ -1371,7 +1401,7 @@ mod tests {
 
     // ── S3: golden layout tests — the pool must not change silently ────
 
-    fn slots_for(technique: Technique, bloom: bool) -> usize {
+    fn slots_for(technique: Technique, bloom: Bloom) -> usize {
         let mut g3 = RenderFrame3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
@@ -1387,19 +1417,19 @@ mod tests {
         // `hdr` shares the albedo spec group): 9 resources → 7 slots on the
         // deferred/hybrid path; the bloom cascade adds exactly its three
         // fraction levels (bloom0/1/2 have distinct TextureSpec keys).
-        assert_eq!(slots_for(Technique::Forward, false), 2);
-        assert_eq!(slots_for(Technique::Forward, true), 5);
-        assert_eq!(slots_for(Technique::Deferred, false), 7);
-        assert_eq!(slots_for(Technique::Deferred, true), 10);
-        assert_eq!(slots_for(Technique::Hybrid, false), 7);
-        assert_eq!(slots_for(Technique::Hybrid, true), 10);
+        assert_eq!(slots_for(Technique::Forward, Bloom::Off), 2);
+        assert_eq!(slots_for(Technique::Forward, Bloom::On), 5);
+        assert_eq!(slots_for(Technique::Deferred, Bloom::Off), 7);
+        assert_eq!(slots_for(Technique::Deferred, Bloom::On), 10);
+        assert_eq!(slots_for(Technique::Hybrid, Bloom::Off), 7);
+        assert_eq!(slots_for(Technique::Hybrid, Bloom::On), 10);
     }
 
     #[test]
     fn golden_bloom_adds_exactly_three_slots() {
         for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
             assert_eq!(
-                slots_for(technique, true) - slots_for(technique, false),
+                slots_for(technique, Bloom::On) - slots_for(technique, Bloom::Off),
                 3,
                 "bloom cascade must add exactly its three fraction levels"
             );
@@ -1414,7 +1444,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Forward,
-            true,
+            Bloom::On,
         );
         let ids = fwd.ids();
         let layout = fwd.systems.layout().clone();
@@ -1428,7 +1458,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Hybrid,
-            false,
+            Bloom::Off,
         );
         let ids = plain.ids();
         let layout = plain.systems.layout();
@@ -1443,7 +1473,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Hybrid,
-            true,
+            Bloom::On,
         );
         let ids = g3.ids();
         let layout = g3.systems.layout();
@@ -1469,7 +1499,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Hybrid,
-            true,
+            Bloom::On,
         );
         let levels = g3.systems.layout().levels();
         let pass_count = levels.iter().map(|l| l.len()).sum::<usize>();
@@ -1491,7 +1521,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Hybrid,
-            true,
+            Bloom::On,
         );
         let planned = g3.systems.layout().planned_pool_bytes();
         // Exact budget — fits.
@@ -1521,7 +1551,7 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             (1280, 720),
             Technique::Forward,
-            false,
+            Bloom::Off,
         );
         let layout = g3.systems.layout();
         assert_eq!(layout.planned_pool_bytes(), 12 * 1280 * 720);

@@ -102,10 +102,18 @@ const PARAMS_CAP: u64 = 64;
 /// dispatch: pass `k` reads entry `k`, so the shader sees the same
 /// per-iteration values as the old one-dispatch-per-iteration loop.
 /// Pure (no device) so unit tests pin the layout.
-pub fn solve_params(iterations: u32, allow_restitution: bool) -> Vec<[u32; 4]> {
+pub fn solve_params(iterations: u32, gate: crate::flags::RestitutionGate) -> Vec<[u32; 4]> {
     (0..iterations)
-        .map(|k| [k, iterations, u32::from(allow_restitution), 0])
+        .map(|k| [k, iterations, u32::from(gate.is_enabled()), 0])
         .collect()
+}
+
+/// Boolean-compat wrapper for [`solve_params`] (kept for tests).
+pub fn solve_params_bool(iterations: u32, allow_restitution: bool) -> Vec<[u32; 4]> {
+    solve_params(
+        iterations,
+        crate::flags::RestitutionGate::from(allow_restitution),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +440,7 @@ impl GpuSequentialImpulse {
     }
 
     /// Run the GPU contact solver for `iterations` GS iterations plus one
-    /// restitution pass if `allow_restitution` (folded into the last
+    /// restitution pass if `gate` is enabled (folded into the last
     /// iteration by the shader, as before).
     ///
     /// Bulk dispatch (v2): all iterations go into ONE command encoder as
@@ -444,7 +452,7 @@ impl GpuSequentialImpulse {
     /// `k`: identical `(iter, total, rest)` values to the old loop).
     /// One upload, one submit, one blocking wait per call instead of one
     /// CPU round-trip per iteration.
-    pub fn solve(&self, num_batches: u32, iterations: u32, allow_restitution: bool) {
+    pub fn solve(&self, num_batches: u32, iterations: u32, gate: crate::flags::RestitutionGate) {
         assert!(
             u64::from(iterations) <= PARAMS_CAP,
             "solve iterations {iterations} exceed params-table cap {PARAMS_CAP}"
@@ -454,10 +462,7 @@ impl GpuSequentialImpulse {
         }
         // One upload for all passes (entries padded to the device stride).
         let mut blob = vec![0u8; iterations as usize * self.param_stride as usize];
-        for (k, entry) in solve_params(iterations, allow_restitution)
-            .iter()
-            .enumerate()
-        {
+        for (k, entry) in solve_params(iterations, gate).iter().enumerate() {
             let bytes: &[u8] = bytemuck::cast_slice(entry.as_slice());
             let base = k * self.param_stride as usize;
             blob[base..base + bytes.len()].copy_from_slice(bytes);

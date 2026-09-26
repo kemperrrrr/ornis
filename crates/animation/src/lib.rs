@@ -526,17 +526,75 @@ pub enum SkelError {
     Cycle,
 }
 
+/// Index of one joint inside its owning [`Skeleton`].
+///
+/// Newtype over `u32` so joint indices never mix with entity ids or
+/// particle indices at the type level. Parents use `None` for roots
+/// (replacing the legacy `-1` sentinel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct JointId(u32);
+
+impl JointId {
+    /// Wraps a raw `u32` joint index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Maps a raw `i32` parent link: negative means root (`None`).
+    pub const fn from_raw_opt(raw: i32) -> Option<Self> {
+        if raw < 0 {
+            None
+        } else {
+            Some(Self(raw as u32))
+        }
+    }
+
+    /// Raw `u32` joint index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Joint index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for JointId {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for JointId {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<JointId> for u32 {
+    fn from(h: JointId) -> Self {
+        h.0
+    }
+}
+
+impl From<JointId> for usize {
+    fn from(h: JointId) -> Self {
+        h.0 as usize
+    }
+}
+
 /// Topology of one skeleton: joint parents plus per-joint inverse bind matrices.
 ///
 /// Hot lane on the skeleton root. `parents`/`inverse_bind` (and names) ride
 /// an [`Arc`] so cloning the lane never copies the arrays. Lengths of
 /// `parents` and `inverse_bind` must match; `parents[joint]` is the parent
-/// joint index or `-1` for a root. Parent order is unrestricted — chains
+/// joint (`None` = root). Parent order is unrestricted — chains
 /// are resolved per joint, cycles are rejected.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Skeleton {
-    /// Parent joint per joint (`-1` = root); length equals the joint count.
-    pub parents: Arc<[i32]>,
+    /// Parent joint per joint (`None` = root); length equals the joint count.
+    pub parents: Arc<[Option<JointId>]>,
     /// Bind-pose inverses; skinning uses `model[joint] * inverse_bind[joint]`.
     pub inverse_bind: Arc<[Mat4]>,
     /// Human-readable joint labels, diagnostics only (length unchecked).
@@ -546,7 +604,11 @@ pub struct Skeleton {
 impl Skeleton {
     /// Builds a skeleton; topology is checked by [`Skeleton::validate`],
     /// not here, so loaders can assemble first and fail with a reason.
-    pub fn new(parents: Vec<i32>, inverse_bind: Vec<Mat4>, joint_names: Vec<String>) -> Self {
+    pub fn new(
+        parents: Vec<Option<JointId>>,
+        inverse_bind: Vec<Mat4>,
+        joint_names: Vec<String>,
+    ) -> Self {
         Self {
             parents: Arc::from(parents),
             inverse_bind: Arc::from(inverse_bind),
@@ -585,16 +647,23 @@ impl Skeleton {
 }
 
 /// Validates one joint's ancestor chain: every link must index a joint,
-/// `-1` terminates at a root, anything else is [`SkelError::BadParent`];
+/// `None` terminates at a root, anything else is [`SkelError::BadParent`];
 /// more links than joints means a cycle ([`SkelError::Cycle`]).
 ///
 /// `joint` ranges over `0..count` (caller-checked), so the first lookup
 /// always hits.
-fn validate_chain(parents: &[i32], joint: usize, count: usize) -> Result<(), SkelError> {
+fn validate_chain(
+    parents: &[Option<JointId>],
+    joint: usize,
+    count: usize,
+) -> Result<(), SkelError> {
     let mut cursor = joint;
     let mut steps = 0;
-    while cursor < parents.len() && parents[cursor] >= 0 {
-        let parent = parents[cursor] as usize;
+    while cursor < parents.len() {
+        let Some(parent) = parents[cursor] else {
+            break;
+        };
+        let parent = parent.index();
         if parent >= count {
             return Err(SkelError::BadParent);
         }
@@ -642,7 +711,7 @@ impl JointPose {
 #[derive(Debug, Clone, PartialEq)]
 pub struct JointTrack {
     /// Animated joint index into [`Skeleton`]/[`JointPose`].
-    pub joint: u32,
+    pub joint: JointId,
     /// Translation keys; empty means zero translation.
     pub translation: KeyTrack<Vec3>,
     /// Rotation keys (unit quaternions); empty means identity.
@@ -836,14 +905,18 @@ fn checked_count(skeleton: &Skeleton, locals_len: usize) -> Option<usize> {
 ///
 /// [`None`] on out-of-range parents or cycles. Terminates: every pushed
 /// link is new (the `contains` guard), drawn from a finite joint set.
-fn model_via_chain(parents: &[i32], locals: &[Mat4], root: &Mat4, joint: usize) -> Option<Mat4> {
+fn model_via_chain(
+    parents: &[Option<JointId>],
+    locals: &[Mat4],
+    root: &Mat4,
+    joint: usize,
+) -> Option<Mat4> {
     let mut chain = vec![joint];
     while let Some(&cursor) = chain.last() {
-        let parent = *parents.get(cursor)?;
-        if parent < 0 {
+        let Some(parent) = *parents.get(cursor)? else {
             break;
-        }
-        let parent = parent as usize;
+        };
+        let parent = parent.index();
         if parent >= parents.len() || chain.contains(&parent) {
             return None;
         }
@@ -1165,7 +1238,7 @@ fn sample_locals(clip: &SkelClip, joint_count: usize, time: f32) -> Vec<Mat4> {
     let mut locals = vec![Mat4::IDENTITY; joint_count];
     let mut painted = vec![false; joint_count];
     for track in &clip.tracks {
-        let joint = track.joint as usize;
+        let joint = track.joint.index();
         if joint >= joint_count || painted[joint] {
             continue;
         }
@@ -1484,7 +1557,11 @@ pub enum SkinBuildError {
 /// ```
 pub fn skeleton_from_import(import: &SkinImport) -> Result<Skeleton, SkelError> {
     let skeleton = Skeleton::new(
-        import.parents.clone(),
+        import
+            .parents
+            .iter()
+            .map(|&raw| JointId::from_raw_opt(raw))
+            .collect(),
         import.inverse_bind.clone(),
         import.joint_names.clone(),
     );

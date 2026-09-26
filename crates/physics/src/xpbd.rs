@@ -52,9 +52,10 @@ use glam::{Quat, Vec3};
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
+use crate::errors::{JointError, QueryError};
 use crate::joint::{JointHandle, JointKind, resolve_joint};
 use crate::math::{Ray, RaycastHit, tangent_basis};
-use crate::migration::valid_joint;
+use crate::migration::validate_joint;
 use crate::shape::Shape;
 use crate::soft::{SoftBody, SoftHandle};
 
@@ -249,15 +250,15 @@ impl XpbdEngine {
     /// Register a soft body and return its handle (PLAN B2/D1).
     pub fn add_soft_body(&mut self, body: SoftBody) -> SoftHandle {
         self.soft_bodies.push(body);
-        self.soft_bodies.len() - 1
+        SoftHandle::from(self.soft_bodies.len() - 1)
     }
 
     /// Remove a soft body, swapping the last into its slot. Invalid
     /// handles are a no-op. No joints reference particles in D1.1, so no
     /// remap is needed beyond the swap.
     pub fn remove_soft_body(&mut self, handle: SoftHandle) {
-        if handle < self.soft_bodies.len() {
-            self.soft_bodies.swap_remove(handle);
+        if handle.index() < self.soft_bodies.len() {
+            self.soft_bodies.swap_remove(handle.index());
         }
     }
 
@@ -268,13 +269,13 @@ impl XpbdEngine {
 
     /// Read-only access to a soft body, or `None` for an invalid handle.
     pub fn get_soft_body(&self, handle: SoftHandle) -> Option<&SoftBody> {
-        self.soft_bodies.get(handle)
+        self.soft_bodies.get(handle.index())
     }
 
     /// Mutable access to a soft body, or `None` for an invalid handle.
     /// Direct particle edits take effect at the next [`PhysicsEngine::step`].
     pub fn get_soft_body_mut(&mut self, handle: SoftHandle) -> Option<&mut SoftBody> {
-        self.soft_bodies.get_mut(handle)
+        self.soft_bodies.get_mut(handle.index())
     }
 
     /// Whether the body is simulated by this engine (dynamic with mass).
@@ -835,7 +836,7 @@ impl XpbdEngine {
         let direction = inverse * ray.direction;
         let (distance, local_normal) = raycast_shape_hit(&body.shape, origin, direction, max_dist)?;
         Some(RaycastHit {
-            handle,
+            handle: BodyHandle::from(handle),
             point: ray.point_at(distance),
             normal: (body.orientation * local_normal).normalize_or(Vec3::Y),
             distance,
@@ -859,17 +860,18 @@ impl PhysicsEngine for XpbdEngine {
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
         self.bodies.push(body);
-        self.bodies.len() - 1
+        BodyHandle::from(self.bodies.len() - 1)
     }
 
     fn remove_body(&mut self, handle: BodyHandle) {
-        if handle >= self.bodies.len() {
+        let hi = handle.index();
+        if hi >= self.bodies.len() {
             return;
         }
         let last = self.bodies.len() - 1;
-        self.bodies.swap_remove(handle);
-        let map = |h: usize| if h == last { handle } else { h };
-        self.joints.retain(|j| j.a != handle && j.b != handle);
+        self.bodies.swap_remove(hi);
+        let map = |h: usize| if h == last { hi } else { h };
+        self.joints.retain(|j| j.a != hi && j.b != hi);
         for j in &mut self.joints {
             j.a = map(j.a);
             j.b = map(j.b);
@@ -878,11 +880,11 @@ impl PhysicsEngine for XpbdEngine {
     }
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
-        self.bodies.get(handle)
+        self.bodies.get(usize::from(handle))
     }
 
     fn get_body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody> {
-        self.bodies.get_mut(handle)
+        self.bodies.get_mut(usize::from(handle))
     }
 
     fn add_joint(
@@ -890,12 +892,14 @@ impl PhysicsEngine for XpbdEngine {
         body_a: BodyHandle,
         body_b: BodyHandle,
         kind: JointKind,
-    ) -> Option<JointHandle> {
-        if !valid_joint(&kind) {
-            return None;
+    ) -> Result<JointHandle, JointError> {
+        validate_joint(&kind)?;
+        let (ia, ib) = (usize::from(body_a), usize::from(body_b));
+        if ia == ib {
+            return Err(JointError::SelfJoint { handle: ia });
         }
-        if body_a >= self.bodies.len() || body_b >= self.bodies.len() || body_a == body_b {
-            return None;
+        if ia >= self.bodies.len() || ib >= self.bodies.len() {
+            return Err(JointError::InvalidHandles { a: ia, b: ib });
         }
         let model = match kind {
             JointKind::Ball { .. } => XpbdJointKind::Ball,
@@ -907,19 +911,24 @@ impl PhysicsEngine for XpbdEngine {
             // joints and six-DOF needs per-axis configs: all rejected rather
             // than silently mis-solved.
             JointKind::Wheel { .. } | JointKind::Gear { .. } | JointKind::SixDof { .. } => {
-                return None;
+                return Err(JointError::Unsupported {
+                    detail: "xpbd supports ball/revolute/prismatic/fixed/distance only".to_string(),
+                });
             }
         };
         let resolved = resolve_joint(
             &kind,
-            self.bodies[body_a].position,
-            self.bodies[body_a].orientation,
-            self.bodies[body_b].position,
-            self.bodies[body_b].orientation,
-        )?;
+            self.bodies[ia].position,
+            self.bodies[ia].orientation,
+            self.bodies[ib].position,
+            self.bodies[ib].orientation,
+        )
+        .ok_or_else(|| JointError::BadAxis {
+            detail: "unresolvable joint frames".to_string(),
+        })?;
         self.joints.push(XpbdJoint {
-            a: body_a,
-            b: body_b,
+            a: ia,
+            b: ib,
             kind: model,
             la: resolved.la,
             lb: resolved.lb,
@@ -929,18 +938,19 @@ impl PhysicsEngine for XpbdEngine {
             q_ref: resolved.ref_quat,
         });
         self.rebuild_joint_pairs();
-        Some(self.joints.len() - 1)
+        Ok(JointHandle::from(self.joints.len() - 1))
     }
 
     fn remove_joint(&mut self, handle: JointHandle) {
-        if handle >= self.joints.len() {
+        if handle.index() >= self.joints.len() {
             return;
         }
-        self.joints.swap_remove(handle);
+        self.joints.swap_remove(handle.index());
         self.rebuild_joint_pairs();
     }
 
-    fn raycast(&self, ray: Ray, max_dist: f32) -> Option<RaycastHit> {
+    fn raycast(&self, ray: Ray, max_dist: f32) -> Result<Option<RaycastHit>, QueryError> {
+        crate::errors::check_ray_input(ray.origin, ray.direction, max_dist)?;
         let mut closest: Option<RaycastHit> = None;
         for handle in 0..self.bodies.len() {
             if let Some(hit) = self.raycast_body(&ray, handle, max_dist) {
@@ -951,7 +961,7 @@ impl PhysicsEngine for XpbdEngine {
                 }
             }
         }
-        closest
+        Ok(closest)
     }
 
     fn shapecast(&self, shape: &Shape, from: Vec3, to: Vec3) -> Option<RaycastHit> {
@@ -962,7 +972,7 @@ impl PhysicsEngine for XpbdEngine {
         };
         let targets = self.bodies.iter().enumerate().map(|(h, b)| {
             (
-                h,
+                BodyHandle::from(h),
                 ShapeRef {
                     shape: &b.shape,
                     pos: b.position,
@@ -1221,12 +1231,12 @@ mod tests {
                     a,
                     b,
                     JointKind::Gear {
-                        joint_a: 0,
-                        joint_b: 0,
+                        joint_a: JointHandle::from_raw(0),
+                        joint_b: JointHandle::from_raw(0),
                         ratio: 1.0,
                     },
                 )
-                .is_none(),
+                .is_err(),
             "gear must be rejected"
         );
         assert_eq!(engine.joint_count(), 0);
@@ -1253,7 +1263,8 @@ mod tests {
         );
         let mut worst = 0.0f32;
         for c in &body.constraints {
-            let d = (body.particles[c.a].position - body.particles[c.b].position).length();
+            let d = (body.particles[c.a.index()].position - body.particles[c.b.index()].position)
+                .length();
             worst = worst.max((d - c.rest).abs() / c.rest);
         }
         assert!(worst < 0.02, "max link stretch {worst}, want <2%");
@@ -1301,7 +1312,8 @@ mod tests {
             .iter()
             .filter(|c| c.kind == DeformKind::Structural)
         {
-            let d = (body.particles[c.a].position - body.particles[c.b].position).length();
+            let d = (body.particles[c.a.index()].position - body.particles[c.b.index()].position)
+                .length();
             worst = worst.max((d - c.rest).abs() / c.rest);
         }
         assert!(worst < 0.08, "max structural stretch {worst}, want <8%");

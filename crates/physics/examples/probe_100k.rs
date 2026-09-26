@@ -18,7 +18,9 @@
 use std::time::Instant;
 
 use glam::Vec3;
-use ornis_physics::{BodyType, BroadPhaseKind, PhysicsEngine, RigidBody, SequentialImpulseEngine};
+use ornis_physics::{
+    BodyHandle, BodyType, BroadPhaseKind, PhysicsEngine, RigidBody, SequentialImpulseEngine,
+};
 
 fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
@@ -219,7 +221,7 @@ fn run_probe(
             let stats_now = physics.broadphase_stats();
             let mut fallen = Vec::new();
             for h in 0..stats_now.body_count {
-                let Some(b) = physics.get_body(h) else {
+                let Some(b) = physics.get_body(BodyHandle::from(h)) else {
                     continue;
                 };
                 if b.body_type == BodyType::Dynamic && b.position.y < -10.0 {
@@ -227,7 +229,7 @@ fn run_probe(
                 }
             }
             for h in fallen.into_iter().rev() {
-                physics.remove_body(h);
+                physics.remove_body(BodyHandle::from(h));
             }
         }
         // Skip the first step (broadphase warm-up / initial pair build).
@@ -265,7 +267,7 @@ fn run_probe(
             // Sleeping-world diagnostics: chunk-sleep work starts from how
             // much of a settled scene the island sleeper actually freezes.
             let asleep = (0..stats.body_count)
-                .filter(|&h| physics.is_asleep(h))
+                .filter(|&h| physics.is_asleep(BodyHandle::from(h)))
                 .count();
             println!(
                 "sleep after step {step}: asleep={asleep}/{}",
@@ -276,10 +278,10 @@ fn run_probe(
             let mut max_v = 0.0f32;
             let mut max_w = 0.0f32;
             for h in 0..stats.body_count {
-                if physics.is_asleep(h) {
+                if physics.is_asleep(BodyHandle::from(h)) {
                     continue;
                 }
-                let Some(b) = physics.get_body(h) else {
+                let Some(b) = physics.get_body(BodyHandle::from(h)) else {
                     continue;
                 };
                 if b.body_type != BodyType::Dynamic {
@@ -294,10 +296,10 @@ fn run_probe(
             );
             let mut min_y = f32::INFINITY;
             for h in 0..stats.body_count {
-                if physics.is_asleep(h) {
+                if physics.is_asleep(BodyHandle::from(h)) {
                     continue;
                 }
-                let Some(b) = physics.get_body(h) else {
+                let Some(b) = physics.get_body(BodyHandle::from(h)) else {
                     continue;
                 };
                 if b.body_type != BodyType::Dynamic {

@@ -49,27 +49,70 @@ pub enum ExecutionTarget {
 #[derive(Debug, Clone, Copy)]
 pub struct Dispatcher {
     cpu_threshold: usize,
-    gpu_available: bool,
+    gpu: GpuAvailability,
+}
+
+/// Whether a GPU is available for dispatch (typed replacement for
+/// `gpu_available: bool`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum GpuAvailability {
+    /// No GPU; always stay on CPU.
+    #[default]
+    Unavailable,
+    /// GPU may be used above the threshold.
+    Available,
+}
+
+impl GpuAvailability {
+    /// `true` for [`GpuAvailability::Available`].
+    pub fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
+impl From<bool> for GpuAvailability {
+    /// Legacy `gpu_available: bool` polarity.
+    fn from(available: bool) -> Self {
+        if available {
+            Self::Available
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+impl From<GpuAvailability> for bool {
+    /// Legacy `gpu_available: bool` polarity.
+    fn from(g: GpuAvailability) -> bool {
+        g.is_available()
+    }
 }
 
 /// High-level dispatcher that combines CPU and GPU execution
 impl Dispatcher {
-    /// Create a new dispatcher with a CPU threshold and GPU availability
-    pub fn new(cpu_threshold: usize, gpu_available: bool) -> Self {
-        Self {
-            cpu_threshold,
-            gpu_available,
-        }
+    /// Create a new dispatcher with a CPU threshold and GPU availability.
+    pub fn with_availability(cpu_threshold: usize, gpu: GpuAvailability) -> Self {
+        Self { cpu_threshold, gpu }
     }
 
-    /// Create from a PipelineConfig type
+    /// Boolean-compat constructor (kept for tests and call sites).
+    pub fn new(cpu_threshold: usize, gpu_available: bool) -> Self {
+        Self::with_availability(cpu_threshold, GpuAvailability::from(gpu_available))
+    }
+
+    /// Create from a PipelineConfig type (typed).
+    pub fn from_config_with<T: PipelineConfig>(gpu: GpuAvailability) -> Self {
+        Self::with_availability(T::THRESHOLD, gpu)
+    }
+
+    /// Boolean-compat config constructor (kept for tests and call sites).
     pub fn from_config<T: PipelineConfig>(gpu_available: bool) -> Self {
         Self::new(T::THRESHOLD, gpu_available)
     }
 
     /// Decide execution target based on element count
     pub fn decide(&self, element_count: usize) -> ExecutionTarget {
-        if element_count >= self.cpu_threshold && self.gpu_available {
+        if element_count >= self.cpu_threshold && self.gpu.is_available() {
             ExecutionTarget::Gpu
         } else {
             ExecutionTarget::Cpu

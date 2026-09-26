@@ -12,7 +12,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
-use ornis_render::{InstanceData, RenderFrame3D, Renderer3D, Technique};
+use ornis_render::{InstanceData, MaterialIdx, RenderFrame3D, Renderer3D, Technique};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -211,7 +211,7 @@ fn build_scene_data(
         instances.push(InstanceData {
             model_matrix: model,
             normal_matrix,
-            material_index: i as u32,
+            material_index: MaterialIdx::from(i as u32),
         });
     }
     (mesh, materials, instances)
@@ -350,7 +350,7 @@ impl<'a> Probe<'a> {
         &self,
         format: wgpu::TextureFormat,
         technique: Technique,
-        bloom: bool,
+        bloom: ornis_render::Bloom,
         label: &str,
     ) -> TechniqueStats {
         let (tex, view) = make_target(self.device, format, label);
@@ -412,17 +412,27 @@ impl<'a> Probe<'a> {
         legacy_pixels: &[u8],
     ) -> (TechniqueStats, TechniqueStats, TechniqueStats) {
         let mut forward = self
-            .render_technique(format, Technique::Forward, false, "probe forward target")
+            .render_technique(
+                format,
+                Technique::Forward,
+                ornis_render::Bloom::Off,
+                "probe forward target",
+            )
             .await;
         let mut deferred = self
-            .render_technique(format, Technique::Deferred, false, "probe deferred target")
+            .render_technique(
+                format,
+                Technique::Deferred,
+                ornis_render::Bloom::Off,
+                "probe deferred target",
+            )
             .await;
         // Forward + bloom: the bright-pass must read hdr_fwd (hdr is dead).
         let fwd_bloom = self
             .render_technique(
                 format,
                 Technique::Forward,
-                true,
+                ornis_render::Bloom::On,
                 "probe forward bloom target",
             )
             .await;

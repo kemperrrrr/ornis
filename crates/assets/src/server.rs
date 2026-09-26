@@ -71,8 +71,9 @@ pub enum AssetEvent {
     Failed {
         /// Kind that failed to load.
         kind: AssetKind,
-        /// Human-readable reason.
-        error: String,
+        /// Typed reason (scene parse failure; glTF failures return
+        /// directly from `load_gltf` without emitting an event).
+        error: SceneLoadError,
     },
 }
 
@@ -101,6 +102,10 @@ impl std::error::Error for SceneLoadError {}
 ///
 /// Thin wrapper over [`Scene::from_ron`]; the editor routes its scene-file
 /// parsing through here so native, editor and tests share one loader.
+///
+/// # Errors
+///
+/// [`SceneLoadError`] when the text is not a valid scene.
 pub fn parse_scene_ron(ron_str: &str) -> Result<Scene, SceneLoadError> {
     Scene::from_ron(ron_str).map_err(|error| SceneLoadError {
         message: error.to_string(),
@@ -177,7 +182,7 @@ impl AssetServer {
             Err(error) => {
                 self.events.push(AssetEvent::Failed {
                     kind: AssetKind::Scene,
-                    error: error.message.clone(),
+                    error: error.clone(),
                 });
                 Err(error)
             }
@@ -203,9 +208,9 @@ impl AssetServer {
     ///
     /// # Errors
     ///
-    /// Returns the import error; the registry is untouched.
-    pub fn load_gltf(&mut self, bytes: &[u8]) -> Result<AssetId, String> {
-        let loaded = ornis_gltf::load_slice(bytes).map_err(|error| error.to_string())?;
+    /// Returns the typed [`ornis_gltf::ImportError`]; the registry is untouched.
+    pub fn load_gltf(&mut self, bytes: &[u8]) -> Result<AssetId, ornis_gltf::ImportError> {
+        let loaded = ornis_gltf::load_slice(bytes)?;
         Ok(self.load_scene(crate::import::scene_from_gltf(&loaded), None))
     }
 
@@ -214,9 +219,13 @@ impl AssetServer {
     ///
     /// # Errors
     ///
-    /// Returns the IO/import error; the registry is untouched.
-    pub fn load_gltf_file(&mut self, path: &std::path::Path) -> Result<AssetId, String> {
-        let loaded = ornis_gltf::load_path(path).map_err(|error| error.to_string())?;
+    /// Returns the IO/import error typed as [`ornis_gltf::ImportError`];
+    /// the registry is untouched.
+    pub fn load_gltf_file(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<AssetId, ornis_gltf::ImportError> {
+        let loaded = ornis_gltf::load_path(path)?;
         Ok(self.load_scene(crate::import::scene_from_gltf(&loaded), None))
     }
 
@@ -415,15 +424,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_event_carries_kind_and_reason() {
+    fn failed_event_carries_kind_and_typed_reason() {
         let mut server = AssetServer::new();
-        let _ = server.load_scene_ron("not a scene at all");
+        let error = server
+            .load_scene_ron("not a scene at all")
+            .expect_err("malformed RON fails");
         let events = server.take_events();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AssetEvent::Failed { kind, error } => {
+            AssetEvent::Failed {
+                kind,
+                error: event_error,
+            } => {
                 assert_eq!(*kind, AssetKind::Scene);
-                assert!(!error.is_empty());
+                assert_eq!(*event_error, error);
+                assert!(!event_error.message().is_empty());
             }
             AssetEvent::Loaded { .. } => panic!("expected Failed, got Loaded"),
         }
@@ -566,5 +581,21 @@ mod tests {
                 kind: AssetKind::Scene
             }]
         );
+    }
+
+    #[test]
+    fn load_gltf_garbage_is_a_typed_import_error() {
+        // Broken bytes are `ImportError`, not a `String`: the registry
+        // stays untouched and the reason keeps its variant.
+        let mut server = AssetServer::new();
+        let error = server
+            .load_gltf(b"definitely not gltf")
+            .expect_err("garbage bytes fail");
+        assert!(
+            matches!(error, ornis_gltf::ImportError::Parse { .. }),
+            "{error:?}"
+        );
+        assert!(server.is_empty());
+        assert!(server.take_events().is_empty());
     }
 }

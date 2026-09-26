@@ -118,7 +118,7 @@ pub fn install_gameplay_audio_bridge(engine: &mut Engine) {
 mod tests {
     use super::*;
     use crate::backend::AudioBackendTrait;
-    use crate::source::{AudioClip, AudioState, MixInput};
+    use crate::source::{AudioClip, AudioState, ClipId, MixInput};
     use ornis_core::Entity;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -161,7 +161,7 @@ mod tests {
         }
     }
 
-    fn playing_source(clip_id: usize, spatial: bool) -> AudioSource {
+    fn playing_source(clip_id: ClipId, spatial: bool) -> AudioSource {
         AudioSource {
             clip_id: Some(clip_id),
             volume: 1.0,

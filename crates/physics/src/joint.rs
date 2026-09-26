@@ -12,9 +12,54 @@ use crate::math::orthogonalize_axle;
 
 /// Stable index of a joint inside its owning engine.
 ///
-/// Like [`BodyHandle`] this is a vector index:
-/// removal shifts subsequent handles.
-pub type JointHandle = usize;
+/// Like [`BodyHandle`](crate::body::BodyHandle) this is a dense vector index:
+/// removal rebuilds the dense map (see `rebuild_joints`).
+///
+/// Newtype over `u32` so joint handles never mix with body handles at the
+/// type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct JointHandle(u32);
+
+impl JointHandle {
+    /// Wraps a raw `u32` joint index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` joint index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Joint index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for JointHandle {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for JointHandle {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<JointHandle> for u32 {
+    fn from(h: JointHandle) -> Self {
+        h.0
+    }
+}
+
+impl From<JointHandle> for usize {
+    fn from(h: JointHandle) -> Self {
+        h.0 as usize
+    }
+}
 
 /// What the user supplies when creating a joint. Local anchors/axes are
 /// specified in each body's frame; the joint is satisfied when the world
@@ -149,6 +194,42 @@ pub enum JointKind {
     },
 }
 
+impl JointKind {
+    /// Checked gear coupling: `None` unless `ratio` is finite and non-zero
+    /// (a zero ratio would freeze `coord_a` at its assembly constant).
+    pub fn gear_checked(joint_a: JointHandle, joint_b: JointHandle, ratio: f32) -> Option<Self> {
+        ornis_core::units::GearRatio::try_new(ratio).map(|r| Self::Gear {
+            joint_a,
+            joint_b,
+            ratio: r.get(),
+        })
+    }
+
+    /// Typed gear coupling over [`ornis_core::units::GearRatio`] (infallible:
+    /// the ratio is valid by construction).
+    pub fn gear_checked_units(
+        joint_a: JointHandle,
+        joint_b: JointHandle,
+        ratio: ornis_core::units::GearRatio,
+    ) -> Self {
+        Self::Gear {
+            joint_a,
+            joint_b,
+            ratio: ratio.get(),
+        }
+    }
+
+    /// Transmission ratio of a [`JointKind::Gear`] as
+    /// [`ornis_core::units::GearRatio`], or `None` for other joints and for
+    /// degenerate stored ratios (legacy raw construction paths).
+    pub fn gear_ratio_units(&self) -> Option<ornis_core::units::GearRatio> {
+        match self {
+            Self::Gear { ratio, .. } => ornis_core::units::GearRatio::try_new(*ratio),
+            _ => None,
+        }
+    }
+}
+
 /// Spring parameters of a [`JointKind::Wheel`] suspension, Box2D
 /// `b2WheelJoint` semantics: `frequency_hz` is the suspension resonance,
 /// `damping_ratio` the dimensionless damping (1 = critically damped).
@@ -158,6 +239,25 @@ pub struct WheelSuspension {
     pub frequency_hz: f32,
     /// Dimensionless damping ratio (0 = undamped, 1 = critical).
     pub damping_ratio: f32,
+}
+
+impl WheelSuspension {
+    /// Checked constructor: `None` unless the frequency is a live spring
+    /// (`finite && > 0`) and the damping ratio is finite and `>= 0`.
+    pub fn try_new(frequency: ornis_core::units::Hertz, damping_ratio: f32) -> Option<Self> {
+        if !frequency.is_live() || !damping_ratio.is_finite() || damping_ratio < 0.0 {
+            return None;
+        }
+        Some(Self {
+            frequency_hz: frequency.get(),
+            damping_ratio,
+        })
+    }
+
+    /// Resonance frequency in hertz.
+    pub fn frequency_units(&self) -> ornis_core::units::Hertz {
+        ornis_core::units::Hertz::new(self.frequency_hz)
+    }
 }
 
 /// Per-axis configuration of a [`JointKind::SixDof`] joint.
@@ -189,6 +289,29 @@ pub struct PrismaticLimit {
     pub max: f32,
 }
 
+impl PrismaticLimit {
+    /// Checked constructor: `None` unless both bounds are finite and
+    /// `min <= max`.
+    pub fn try_new(min: ornis_core::units::Meters, max: ornis_core::units::Meters) -> Option<Self> {
+        let (lo, hi) = (min.get(), max.get());
+        if lo.is_finite() && hi.is_finite() && lo <= hi {
+            Some(Self { min: lo, max: hi })
+        } else {
+            None
+        }
+    }
+
+    /// Lower bound in meters.
+    pub fn min_units(&self) -> ornis_core::units::Meters {
+        ornis_core::units::Meters::new(self.min)
+    }
+
+    /// Upper bound in meters.
+    pub fn max_units(&self) -> ornis_core::units::Meters {
+        ornis_core::units::Meters::new(self.max)
+    }
+}
+
 /// Velocity motor along a prismatic joint's slide axis. Same
 /// force-clamped target-speed semantics as [`RevoluteMotor`].
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +320,34 @@ pub struct PrismaticMotor {
     pub target_speed: f32,
     /// Force budget: bounds the per-substep motor impulse.
     pub max_force: f32,
+}
+
+impl PrismaticMotor {
+    /// Checked constructor: `None` unless the target speed is finite and
+    /// the force budget is finite and `>= 0`.
+    pub fn try_new(
+        target_speed: ornis_core::units::MetersPerSecond,
+        max_force: f32,
+    ) -> Option<Self> {
+        if !target_speed.is_finite() || !max_force.is_finite() || max_force < 0.0 {
+            return None;
+        }
+        Some(Self {
+            target_speed: target_speed.get(),
+            max_force,
+        })
+    }
+
+    /// Desired slide speed in m/s.
+    pub fn target_speed_units(&self) -> ornis_core::units::MetersPerSecond {
+        ornis_core::units::MetersPerSecond::new(self.target_speed)
+    }
+
+    /// Raw slide-speed getter (kept for solver-adjacent code; prefer
+    /// [`PrismaticMotor::target_speed_units`]).
+    pub fn target_speed_raw(&self) -> f32 {
+        self.target_speed
+    }
 }
 
 /// Angular travel window for a revolute joint, in radians relative to the
@@ -213,6 +364,32 @@ pub struct RevoluteLimit {
     pub max: f32,
 }
 
+impl RevoluteLimit {
+    /// Checked constructor: `None` unless both bounds are finite and
+    /// `min <= max` (degenerate `min == max` locks the axis).
+    pub fn try_new(
+        min: ornis_core::units::Radians,
+        max: ornis_core::units::Radians,
+    ) -> Option<Self> {
+        let (lo, hi) = (min.get(), max.get());
+        if lo.is_finite() && hi.is_finite() && lo <= hi {
+            Some(Self { min: lo, max: hi })
+        } else {
+            None
+        }
+    }
+
+    /// Lower bound in radians.
+    pub fn min_units(&self) -> ornis_core::units::Radians {
+        ornis_core::units::Radians::new(self.min)
+    }
+
+    /// Upper bound in radians.
+    pub fn max_units(&self) -> ornis_core::units::Radians {
+        ornis_core::units::Radians::new(self.max)
+    }
+}
+
 /// Velocity motor for a revolute joint: drives the hinge toward
 /// `target_speed` (rad/s, signed about the hinge axis). The per-substep
 /// impulse is clamped to `max_torque * sub_dt`, so a weak motor spins up
@@ -224,6 +401,41 @@ pub struct RevoluteMotor {
     pub target_speed: f32,
     /// Torque budget: bounds the per-substep motor impulse.
     pub max_torque: f32,
+}
+
+impl RevoluteMotor {
+    /// Checked constructor: `None` unless the target speed is finite and
+    /// the torque budget is finite and `>= 0`.
+    pub fn try_new(target_speed: f32, max_torque: f32) -> Option<Self> {
+        if !target_speed.is_finite() || !max_torque.is_finite() || max_torque < 0.0 {
+            return None;
+        }
+        Some(Self {
+            target_speed,
+            max_torque,
+        })
+    }
+
+    /// Typed constructor over [`ornis_core::units::RadiansPerSecond`]: the
+    /// same finiteness checks as [`RevoluteMotor::try_new`] with the hinge
+    /// speed pinned to rad/s at the type level.
+    pub fn try_new_units(
+        target_speed: ornis_core::units::RadiansPerSecond,
+        max_torque: f32,
+    ) -> Option<Self> {
+        Self::try_new(target_speed.get(), max_torque)
+    }
+
+    /// Desired hinge speed in rad/s.
+    pub fn target_speed_units(&self) -> ornis_core::units::RadiansPerSecond {
+        ornis_core::units::RadiansPerSecond::new(self.target_speed)
+    }
+
+    /// Raw hinge-speed getter (kept for solver-adjacent code; prefer
+    /// [`RevoluteMotor::target_speed_units`]).
+    pub fn target_speed_raw(&self) -> f32 {
+        self.target_speed
+    }
 }
 
 /// Solver-agnostic joint setup, resolved once at creation from a
@@ -266,7 +478,15 @@ pub struct ResolvedJoint {
     /// Anchor separation (fixed/wheel/sixdof) at assembly, in A's frame.
     pub ref_anchor_delta: Vec3,
     /// True when an axis needed its fallback (see above).
+    /// Prefer [`Self::status`] with [`crate::flags::AxisStatus`].
     pub degenerate: bool,
+}
+
+impl ResolvedJoint {
+    /// Axis health as a [`crate::flags::AxisStatus`].
+    pub fn status(&self) -> crate::flags::AxisStatus {
+        crate::flags::AxisStatus::from(self.degenerate)
+    }
 }
 
 /// Degenerate-axis boundary (squared length): mirrors AVBD's historical
@@ -676,8 +896,8 @@ mod tests {
         assert!(
             resolve_joint(
                 &JointKind::Gear {
-                    joint_a: 0,
-                    joint_b: 1,
+                    joint_a: JointHandle::from_raw(0),
+                    joint_b: JointHandle::from_raw(1),
                     ratio: 2.0
                 },
                 Vec3::ZERO,

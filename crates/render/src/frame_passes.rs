@@ -298,11 +298,11 @@ pub trait ForwardMode: Sized + 'static {
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     /// Writes of the mode's forward pass.
     type Writes: AccessSet + for<'a> ViewsFor<'a>;
-    /// `true` when this technique clears the depth buffer itself.
-    const OWNS_DEPTH: bool;
-    /// `true` when this pass must render the shadow pre-pass itself:
-    /// only forward-only (no `LightingPass` runs its own).
-    const OWNS_SHADOWS: bool;
+    /// Who owns (clears) the depth buffer in this technique.
+    const DEPTH: crate::flags::DepthOwnership;
+    /// Whether this pass renders the shadow pre-pass itself: only
+    /// forward-only (no `LightingPass` runs its own).
+    const SHADOWS: crate::flags::ShadowCast;
 }
 
 /// Forward-only technique: the pass owns (clears) the depth buffer.
@@ -313,8 +313,8 @@ impl ForwardMode for OwnsDepth {
         WriteClear<Depth, ClearWhite>,
         WriteClear<HdrFwd, ClearTransparent>,
     );
-    const OWNS_DEPTH: bool = true;
-    const OWNS_SHADOWS: bool = true;
+    const DEPTH: crate::flags::DepthOwnership = crate::flags::DepthOwnership::Owned;
+    const SHADOWS: crate::flags::ShadowCast = crate::flags::ShadowCast::Enabled;
 }
 
 /// Hybrid technique: the gbuffer pass owns the depth buffer.
@@ -322,8 +322,8 @@ pub struct SharedDepth;
 impl ForwardMode for SharedDepth {
     type Reads = (Read<Depth>,);
     type Writes = (WriteClear<HdrFwd, ClearTransparent>,);
-    const OWNS_DEPTH: bool = false;
-    const OWNS_SHADOWS: bool = false;
+    const DEPTH: crate::flags::DepthOwnership = crate::flags::DepthOwnership::Shared;
+    const SHADOWS: crate::flags::ShadowCast = crate::flags::ShadowCast::Disabled;
 }
 
 /// The forward pass; `M` selects the depth-ownership mode.
@@ -350,7 +350,7 @@ impl<M: ForwardMode> FramePass for Forward<M> {
         // Forward-only owns its shadow pre-pass too: no LightingPass
         // runs in that technique, so without this the shadow maps stay
         // at texture-init zero and every shadowed light goes fully dark.
-        if M::OWNS_SHADOWS {
+        if M::SHADOWS.is_enabled() {
             frame.renderer.render_shadows(
                 frame.device,
                 frame.encoder,
@@ -364,7 +364,7 @@ impl<M: ForwardMode> FramePass for Forward<M> {
             views.get::<HdrFwd>(),
             frame.mesh,
             frame.instance_count,
-            M::OWNS_DEPTH,
+            M::DEPTH.clears_depth(),
         );
     }
 }
@@ -435,13 +435,13 @@ impl<I: BrightInput> FramePass for BloomBright<I> {
 pub trait CompositeMode: Sized + 'static {
     /// This mode's live layers (dead ones bind a zeroed view instead).
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
-    /// Value of the shader's layer-mix selector (`CompositeInputs::mode`).
-    const SHADER_MODE: u32;
+    /// Which HDR layers exist (value of the shader's layer-mix selector).
+    const TECHNIQUE: crate::flags::CompositeTechnique;
     /// Whether the bloom chain contributes to the mix.
-    const BLOOM: bool;
+    const BLOOM: crate::flags::Bloom;
     /// Binds the shader inputs from this mode's declared views. Dead
     /// layers (the ones this technique does not produce) are bound to a
-    /// live view with zero effect — the shader picks by `SHADER_MODE`.
+    /// live view with zero effect — the shader picks by `TECHNIQUE`.
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a>;
 }
 
@@ -449,8 +449,8 @@ pub trait CompositeMode: Sized + 'static {
 pub struct CompositeDeferredBloom;
 impl CompositeMode for CompositeDeferredBloom {
     type Reads = (Read<Hdr>, Read<Bloom0>);
-    const SHADER_MODE: u32 = 0;
-    const BLOOM: bool = true;
+    const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
+    const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
         let hdr = views.get::<Hdr>();
         CompositeInputs {
@@ -458,8 +458,8 @@ impl CompositeMode for CompositeDeferredBloom {
             hdr,
             hdr_fwd: hdr,
             bloom: views.get::<Bloom0>(),
-            bloom_intensity: 1.0,
-            mode: Self::SHADER_MODE,
+            bloom_intensity: Self::BLOOM.intensity(),
+            mode: Self::TECHNIQUE.shader_mode(),
         }
     }
 }
@@ -468,8 +468,8 @@ impl CompositeMode for CompositeDeferredBloom {
 pub struct CompositeDeferred;
 impl CompositeMode for CompositeDeferred {
     type Reads = (Read<Hdr>,);
-    const SHADER_MODE: u32 = 0;
-    const BLOOM: bool = false;
+    const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
+    const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
         let hdr = views.get::<Hdr>();
         CompositeInputs {
@@ -477,8 +477,8 @@ impl CompositeMode for CompositeDeferred {
             hdr,
             hdr_fwd: hdr,
             bloom: hdr,
-            bloom_intensity: 0.0,
-            mode: Self::SHADER_MODE,
+            bloom_intensity: Self::BLOOM.intensity(),
+            mode: Self::TECHNIQUE.shader_mode(),
         }
     }
 }
@@ -487,16 +487,16 @@ impl CompositeMode for CompositeDeferred {
 pub struct CompositeHybridBloom;
 impl CompositeMode for CompositeHybridBloom {
     type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Bloom0>);
-    const SHADER_MODE: u32 = 2;
-    const BLOOM: bool = true;
+    const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
+    const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
         CompositeInputs {
             target: views.get::<Target>(),
             hdr: views.get::<Hdr>(),
             hdr_fwd: views.get::<HdrFwd>(),
             bloom: views.get::<Bloom0>(),
-            bloom_intensity: 1.0,
-            mode: Self::SHADER_MODE,
+            bloom_intensity: Self::BLOOM.intensity(),
+            mode: Self::TECHNIQUE.shader_mode(),
         }
     }
 }
@@ -505,8 +505,8 @@ impl CompositeMode for CompositeHybridBloom {
 pub struct CompositeHybrid;
 impl CompositeMode for CompositeHybrid {
     type Reads = (Read<Hdr>, Read<HdrFwd>);
-    const SHADER_MODE: u32 = 2;
-    const BLOOM: bool = false;
+    const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
+    const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
         let hdr_fwd = views.get::<HdrFwd>();
         CompositeInputs {
@@ -514,8 +514,8 @@ impl CompositeMode for CompositeHybrid {
             hdr: views.get::<Hdr>(),
             hdr_fwd,
             bloom: hdr_fwd,
-            bloom_intensity: 0.0,
-            mode: Self::SHADER_MODE,
+            bloom_intensity: Self::BLOOM.intensity(),
+            mode: Self::TECHNIQUE.shader_mode(),
         }
     }
 }
@@ -524,8 +524,8 @@ impl CompositeMode for CompositeHybrid {
 pub struct CompositeForwardBloom;
 impl CompositeMode for CompositeForwardBloom {
     type Reads = (Read<HdrFwd>, Read<Bloom0>);
-    const SHADER_MODE: u32 = 1;
-    const BLOOM: bool = true;
+    const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
+    const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
         let hdr_fwd = views.get::<HdrFwd>();
         CompositeInputs {
@@ -533,8 +533,8 @@ impl CompositeMode for CompositeForwardBloom {
             hdr: hdr_fwd,
             hdr_fwd,
             bloom: views.get::<Bloom0>(),
-            bloom_intensity: 1.0,
-            mode: Self::SHADER_MODE,
+            bloom_intensity: Self::BLOOM.intensity(),
+            mode: Self::TECHNIQUE.shader_mode(),
         }
     }
 }
@@ -543,8 +543,8 @@ impl CompositeMode for CompositeForwardBloom {
 pub struct CompositeForward;
 impl CompositeMode for CompositeForward {
     type Reads = (Read<HdrFwd>,);
-    const SHADER_MODE: u32 = 1;
-    const BLOOM: bool = false;
+    const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
+    const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
     fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
         let hdr_fwd = views.get::<HdrFwd>();
         CompositeInputs {
@@ -552,8 +552,8 @@ impl CompositeMode for CompositeForward {
             hdr: hdr_fwd,
             hdr_fwd,
             bloom: hdr_fwd,
-            bloom_intensity: 0.0,
-            mode: Self::SHADER_MODE,
+            bloom_intensity: Self::BLOOM.intensity(),
+            mode: Self::TECHNIQUE.shader_mode(),
         }
     }
 }
@@ -747,14 +747,14 @@ mod tests {
     fn reads_of<P: FramePass>() -> Vec<&'static str> {
         let mut v = Vec::new();
         P::Reads::collect_accesses(&mut v);
-        assert!(v.iter().all(|a| !a.write && a.clear.is_none()));
+        assert!(v.iter().all(|a| !a.write() && a.clear.is_none()));
         v.iter().map(|a| a.name).collect()
     }
 
     fn writes_of<P: FramePass>() -> Vec<(&'static str, Option<wgpu::Color>)> {
         let mut v = Vec::new();
         P::Writes::collect_accesses(&mut v);
-        assert!(v.iter().all(|a| a.write));
+        assert!(v.iter().all(|a| a.write()));
         v.iter().map(|a| (a.name, a.clear)).collect()
     }
 
@@ -814,8 +814,16 @@ mod tests {
 
     #[test]
     fn forward_modes_select_depth_ownership() {
-        const { assert!(OwnsDepth::OWNS_DEPTH) };
-        const { assert!(!SharedDepth::OWNS_DEPTH) };
+        assert!(matches!(
+            OwnsDepth::DEPTH,
+            crate::flags::DepthOwnership::Owned
+        ));
+        assert!(matches!(
+            SharedDepth::DEPTH,
+            crate::flags::DepthOwnership::Shared
+        ));
+        assert!(OwnsDepth::SHADOWS.is_enabled());
+        assert!(!SharedDepth::SHADOWS.is_enabled());
 
         assert_eq!(Forward::<OwnsDepth>::new().name(), "forward");
         assert_eq!(Forward::<SharedDepth>::default().name(), "forward");
@@ -895,44 +903,48 @@ mod tests {
         );
         assert_eq!(Composite::<CompositeForward>::default().name(), "composite");
 
-        // (mode constant, bloom flag, expected reads)
-        let cases: [(u32, bool, &[&str]); 6] = [
+        // (technique, bloom, expected reads)
+        let cases: [(
+            crate::flags::CompositeTechnique,
+            crate::flags::Bloom,
+            &[&str],
+        ); 6] = [
             (
-                CompositeDeferredBloom::SHADER_MODE,
+                CompositeDeferredBloom::TECHNIQUE,
                 CompositeDeferredBloom::BLOOM,
                 &["hdr", "bloom0"],
             ),
             (
-                CompositeDeferred::SHADER_MODE,
+                CompositeDeferred::TECHNIQUE,
                 CompositeDeferred::BLOOM,
                 &["hdr"],
             ),
             (
-                CompositeHybridBloom::SHADER_MODE,
+                CompositeHybridBloom::TECHNIQUE,
                 CompositeHybridBloom::BLOOM,
                 &["hdr", "hdr_fwd", "bloom0"],
             ),
             (
-                CompositeHybrid::SHADER_MODE,
+                CompositeHybrid::TECHNIQUE,
                 CompositeHybrid::BLOOM,
                 &["hdr", "hdr_fwd"],
             ),
             (
-                CompositeForwardBloom::SHADER_MODE,
+                CompositeForwardBloom::TECHNIQUE,
                 CompositeForwardBloom::BLOOM,
                 &["hdr_fwd", "bloom0"],
             ),
             (
-                CompositeForward::SHADER_MODE,
+                CompositeForward::TECHNIQUE,
                 CompositeForward::BLOOM,
                 &["hdr_fwd"],
             ),
         ];
         let expected_modes = [0, 0, 2, 2, 1, 1];
         let expected_bloom = [true, false, true, false, true, false];
-        for (i, (mode, bloom, _)) in cases.iter().enumerate() {
-            assert_eq!(*mode, expected_modes[i], "case {i}");
-            assert_eq!(*bloom, expected_bloom[i], "case {i}");
+        for (i, (technique, bloom, _)) in cases.iter().enumerate() {
+            assert_eq!(technique.shader_mode(), expected_modes[i], "case {i}");
+            assert_eq!(bloom.is_on(), expected_bloom[i], "case {i}");
         }
 
         assert_eq!(

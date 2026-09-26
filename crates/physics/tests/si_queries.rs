@@ -3,7 +3,8 @@
 use glam::{Quat, Vec3};
 use ornis_physics::trigger::{ContactEventKind, TriggerEventKind};
 use ornis_physics::{
-    ContactEvent, PhysicsEngine, Ray, RigidBody, SequentialImpulseEngine, Shape, TriggerEvent,
+    BodyHandle, ContactEvent, PhysicsEngine, Ray, RigidBody, SequentialImpulseEngine, Shape,
+    TriggerEvent,
 };
 
 #[test]
@@ -180,7 +181,7 @@ fn contact_end_fires_on_separation() {
     let _ = physics.drain_contact_events();
     physics.get_body_mut(klein).unwrap().velocity = Vec3::new(0.0, 10.0, 0.0);
     // Wake it: the test sets velocity directly (a driver would too).
-    physics.wake_island(klein);
+    physics.wake_island(klein.index());
     let mut ended = false;
     for _ in 0..60 {
         physics.step(1.0 / 60.0);
@@ -307,7 +308,10 @@ fn removing_trigger_body_queues_exit_and_clears_pair_state() {
             kind: TriggerEventKind::Exited,
         }]
     );
-    physics.get_body_mut(second - 1).unwrap().position = Vec3::ZERO;
+    physics
+        .get_body_mut(BodyHandle::from(second.index() - 1))
+        .unwrap()
+        .position = Vec3::ZERO;
     physics.step(1.0 / 60.0);
     let events = physics.drain_trigger_events();
     assert!(events.is_empty());
@@ -318,7 +322,7 @@ fn raycast_hits_sphere() {
     let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.add_body(RigidBody::new_sphere(Vec3::new(0.0, 0.0, -5.0), 1.0, 1.0));
     let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
-    let hit = physics.raycast(ray, 10.0);
+    let hit = physics.raycast(ray, 10.0).expect("valid query");
     assert!(hit.is_some());
     let hit = hit.unwrap();
     assert!((hit.distance - 4.0).abs() < 0.01);
@@ -335,6 +339,7 @@ fn raycast_obb_uses_exact_surface_and_normal() {
     let ray = Ray::new(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
     let hit = physics
         .raycast(ray, 10.0)
+        .expect("valid query")
         .expect("ray must hit the rotated box");
     let expected_distance = 2.0 - 0.25 * std::f32::consts::SQRT_2;
     let expected_normal = rotation * Vec3::Y;
@@ -351,6 +356,7 @@ fn raycast_capsule_uses_spherical_cap_normal() {
     let ray = Ray::new(Vec3::new(0.4, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
     let hit = physics
         .raycast(ray, 10.0)
+        .expect("valid query")
         .expect("ray must hit the capsule cap");
     let expected_distance = 2.0 - (1.0 + 0.3);
     let expected_normal = Vec3::new(0.8, 0.6, 0.0);
@@ -363,9 +369,11 @@ fn raycast_capsule_uses_spherical_cap_normal() {
 fn raycast_ignores_zero_length_rays() {
     let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
     physics.add_body(RigidBody::new_sphere(Vec3::ZERO, 1.0, 0.0));
+    // Degenerate direction is a typed error, never a hit.
     assert!(
         physics
             .raycast(Ray::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO), 10.0)
+            .unwrap_or(None)
             .is_none()
     );
 }
@@ -379,7 +387,7 @@ fn shapecast_hits_body() {
     let hit = physics.shapecast(&shape, Vec3::ZERO, Vec3::new(0.0, 0.0, -10.0));
     assert!(hit.is_some(), "conservative shapecast should hit");
     let hit = hit.unwrap();
-    assert_eq!(hit.handle, 0);
+    assert_eq!(hit.handle, BodyHandle::from_raw(0));
     assert!(
         hit.distance > 3.0 && hit.distance < 10.0,
         "hit distance={}",
@@ -447,6 +455,7 @@ fn raycast_hits_trimesh() {
     ));
     let hit = physics
         .raycast(Ray::new(Vec3::new(1.0, 4.0, 2.0), Vec3::NEG_Y), 10.0)
+        .expect("valid query")
         .expect("ray must hit the mesh quad");
     assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
     assert!(hit.normal.dot(Vec3::Y) > 0.999);
@@ -460,6 +469,7 @@ fn raycast_hits_cylinder_cone_hull_heightfield() {
     physics.add_body(RigidBody::new_cylinder(Vec3::ZERO, 1.0, 1.0, 0.0));
     let hit = physics
         .raycast(Ray::new(Vec3::new(0.0, 0.0, -5.0), Vec3::Z), 10.0)
+        .expect("valid query")
         .expect("ray must hit the cylinder wall");
     assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
     assert!(hit.normal.dot(Vec3::NEG_Z) > 0.999);
@@ -469,6 +479,7 @@ fn raycast_hits_cylinder_cone_hull_heightfield() {
     // Cone wall at y=0 has radius 0.5: ray along +X from x=-5.
     let hit = physics
         .raycast(Ray::new(Vec3::new(-5.0, 0.0, 0.0), Vec3::X), 10.0)
+        .expect("valid query")
         .expect("ray must hit the cone wall");
     assert!((hit.distance - 4.5).abs() < 1e-4, "got {}", hit.distance);
 
@@ -489,6 +500,7 @@ fn raycast_hits_cylinder_cone_hull_heightfield() {
     ));
     let hit = physics
         .raycast(Ray::new(Vec3::new(0.0, 0.0, -5.0), Vec3::Z), 10.0)
+        .expect("valid query")
         .expect("ray must hit the hull face");
     assert!((hit.distance - 4.0).abs() < 1e-4, "got {}", hit.distance);
     assert!(hit.normal.dot(Vec3::NEG_Z) > 0.999);
@@ -504,6 +516,7 @@ fn raycast_hits_cylinder_cone_hull_heightfield() {
     ));
     let hit = physics
         .raycast(Ray::new(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y), 10.0)
+        .expect("valid query")
         .expect("ray must hit the heightfield top");
     assert!((hit.distance - 3.0).abs() < 1e-4, "got {}", hit.distance);
     assert!(hit.normal.dot(Vec3::Y) > 0.999);

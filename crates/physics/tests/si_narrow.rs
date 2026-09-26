@@ -271,7 +271,7 @@ fn angular_gate_fires_below_15deg_for_thin_bodies() {
 
     let hit = find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt)
         .expect("thin fast spinner must arm angular CCD below 15°/substep");
-    assert!(hit.angular);
+    assert!(hit.angular());
     assert!(hit.fraction > 0.0 && hit.fraction < 1.0);
     assert!(hit.contact.is_some(), "angular hit must carry its contact");
 }
@@ -550,8 +550,8 @@ fn angular_sweep_finds_rotating_box_impact() {
 
     let hit = find_angular_continuous_hit(&bodies, 0, Vec3::ZERO, dt)
         .expect("angular sweep must find the rotating box impact");
-    assert_eq!(hit.handle, 1);
-    assert!(hit.angular);
+    assert_eq!(hit.handle, ornis_physics::BodyHandle::from_raw(1));
+    assert!(hit.angular());
     assert!(hit.fraction > 0.0 && hit.fraction < 1.0);
 }
 

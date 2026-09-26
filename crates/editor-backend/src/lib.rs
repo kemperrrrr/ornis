@@ -11,5 +11,8 @@ pub mod ipc;
 pub mod remote;
 
 // Re-export the common protocol types at the crate root for convenience.
-pub use ipc::{BrowserInput, GameConnection, GameEvent, IpcChannel, UiCommand};
+pub use ipc::{
+    BrowserInput, CommandName, ComponentName, EditorCommand, EventSeq, GameConnection, GameEvent,
+    IpcChannel, RequestId, SetComponentError, SetComponentPayload, UiCommand,
+};
 pub use remote::RemoteEditor;

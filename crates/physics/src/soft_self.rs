@@ -49,7 +49,7 @@ pub(crate) fn solve_self_collision(body: &mut SoftBody, h: f32) {
     }
     let diameter = cell;
 
-    let linked: HashSet<(usize, usize)> = body
+    let linked: HashSet<(crate::soft::ParticleIdx, crate::soft::ParticleIdx)> = body
         .constraints
         .iter()
         .filter(|c| c.a != c.b)
@@ -89,7 +89,10 @@ pub(crate) fn solve_self_collision(body: &mut SoftBody, h: f32) {
                             continue;
                         }
                         // Canonical pair key (`i < j` by construction).
-                        if linked.contains(&(i, j)) {
+                        if linked.contains(&(
+                            crate::soft::ParticleIdx::from(i),
+                            crate::soft::ParticleIdx::from(j),
+                        )) {
                             continue;
                         }
                         let wa = body.particles[i].inv_mass;
@@ -173,8 +176,8 @@ mod tests {
         let r = 0.1;
         let mut body = free_body(Vec3::ZERO, Vec3::new(0.05, 0.0, 0.0), r);
         body.constraints.push(DeformConstraint {
-            a: 0,
-            b: 1,
+            a: crate::soft::ParticleIdx::from_raw(0),
+            b: crate::soft::ParticleIdx::from_raw(1),
             rest: 0.05,
             compliance: 0.0,
             kind: DeformKind::Structural,

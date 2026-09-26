@@ -1,6 +1,6 @@
-//! Single game world: one type, two instances.
+//! Single game world: one type, two roles.
 //!
-//! [`GameWorld`] is the only scene-backed world type: it owns one [`Engine`] plus the scene entity list and a monotonic mutation counter, and serves both the authoritative native/editor host and the browser replica — the two instances differ only in how scenes cross the serialization boundary (IDEAS §28), never in the world type itself.
+//! [`GameWorld`] is the only scene-backed world type: it owns one [`Engine`] plus the scene entity list and a monotonic mutation counter, and serves both the authoritative native/editor host and the browser replica — the two instances differ only in their [`SceneRole`] phantom parameter ([`Authoritative`](ornis_core::Authoritative) vs [`Replica`](ornis_core::Replica)) and in how scenes cross the serialization boundary (IDEAS §28), never in the world layout itself.
 //!
 //! System registration uses the staged [`Engine`](ornis_core::Engine) plan
 //! directly ([`Stage`](ornis_core::Stage) via
@@ -10,58 +10,98 @@
 //! intent and physics at the fixed step, `PostFrame` runs the variable
 //! script tick, propagates poses and extracts audio/render views.
 
+use std::marker::PhantomData;
+
 use glam::Vec3;
 use ornis_assets::scene::{EntityDesc, Scene};
-use ornis_core::{Engine, Entity};
+use ornis_core::{
+    Authoritative, Engine, Entity, Replica, SceneEntities, SceneRole, SceneVersion, Seconds,
+};
 use ornis_physics::RigidBody;
 use ornis_render::FrameUpload;
 use ornis_render::extraction::{RenderLights, extract_render_data};
 
 /// Centre of the hidden showcase static floor in world units.
-const FLOOR_CENTER: [f32; 3] = [0.0, -2.0, 0.0];
+pub const FLOOR_CENTER: [f32; 3] = [0.0, -2.0, 0.0];
 /// Half-extents of the hidden showcase static floor in world units.
 const FLOOR_HALF_EXTENTS: [f32; 3] = [20.0, 1.0, 20.0];
 
 /// Single scene-backed game world: one [`Engine`] plus its scene entities.
 ///
-/// The native showcase and the editor server run the authoritative instance;
-/// the browser viewport runs a replica instance populated from serialized
-/// snapshots across the boundary (IDEAS §28). Physics, audio, scripting and
+/// The native showcase and the editor server run the authoritative instance
+/// ([`Authoritative`](ornis_core::Authoritative), the default: a bare
+/// `GameWorld` keeps meaning the authoritative world); the browser viewport
+/// runs a [`ReplicaGameWorld`] populated from serialized snapshots across
+/// the boundary (IDEAS §28). Physics, audio, scripting and
 /// GPU state stay specialized resources installed by the platform through
 /// [`GameWorld::engine_mut`], never duplicated here.
-pub struct GameWorld {
+///
+/// Scene membership lives in a [`SceneEntities`](ornis_core::SceneEntities)
+/// newtype and the mutation counter in a
+/// [`SceneVersion`](ornis_core::SceneVersion): both serialize as the plain
+/// underlying JSON numbers, so snapshots and the WASM boundary are unchanged.
+pub struct GameWorld<Role: SceneRole = Authoritative> {
     engine: Engine,
-    entities: Vec<Entity>,
-    version: u64,
+    entities: SceneEntities,
+    version: SceneVersion,
+    role: PhantomData<Role>,
 }
 
-impl Default for GameWorld {
+/// Browser replica of the scene-backed world: same layout as the
+/// authoritative [`GameWorld`], only the transport differs (snapshots cross
+/// the serialization boundary instead of shared memory).
+pub type ReplicaGameWorld = GameWorld<Replica>;
+
+impl<Role: SceneRole> Default for GameWorld<Role> {
     fn default() -> Self {
-        Self::new()
+        Self::new_in_role()
     }
 }
 
 impl GameWorld {
-    /// Creates an empty world with no scene entities.
+    /// Creates an empty authoritative world with no scene entities.
     pub fn new() -> Self {
-        Self {
-            engine: Engine::new(),
-            entities: Vec::new(),
-            version: 0,
-        }
+        Self::new_in_role()
     }
 
-    /// Creates a world populated from a serialized scene description.
+    /// Creates an authoritative world populated from a serialized scene
+    /// description.
     pub fn from_scene(scene: &Scene) -> Self {
         let mut world = Self::new();
         world.replace_scene(scene);
         world
     }
+}
+
+impl GameWorld<Replica> {
+    /// Creates an empty replica world with no scene entities.
+    pub fn new_replica() -> Self {
+        Self::new_in_role()
+    }
+
+    /// Creates a replica world populated from a serialized scene
+    /// description (the snapshot side of the serialization boundary).
+    pub fn from_scene_replica(scene: &Scene) -> Self {
+        let mut world = Self::new_replica();
+        world.replace_scene(scene);
+        world
+    }
+}
+
+impl<Role: SceneRole> GameWorld<Role> {
+    fn new_in_role() -> Self {
+        Self {
+            engine: Engine::new(),
+            entities: SceneEntities::new(),
+            version: SceneVersion::ZERO,
+            role: PhantomData,
+        }
+    }
 
     /// Monotonic scene-mutation counter: bumped by every
     /// [`Self::replace_scene`] (and therefore once by [`Self::from_scene`]).
     /// Frame execution alone never bumps it.
-    pub fn version(&self) -> u64 {
+    pub fn version(&self) -> SceneVersion {
         self.version
     }
 
@@ -91,6 +131,15 @@ impl GameWorld {
     /// [`Self::engine_mut`], which lets a platform attach hidden runtime
     /// components such as physics bodies without changing the scene count.
     pub fn entities(&self) -> &[Entity] {
+        self.entities.as_slice()
+    }
+
+    /// Returns the scene-entity membership as a
+    /// [`SceneEntities`](ornis_core::SceneEntities) newtype.
+    ///
+    /// Same handles as [`Self::entities`], kept distinct from auxiliary
+    /// runtime entities at the type level.
+    pub fn scene_entities(&self) -> &SceneEntities {
         &self.entities
     }
 
@@ -103,18 +152,18 @@ impl GameWorld {
     pub fn replace_scene(&mut self, scene: &Scene) {
         let previous = std::mem::take(&mut self.entities);
         if let Some(store) = self.engine.world().store() {
-            for entity in previous {
+            for entity in previous.iter().copied() {
                 if store.is_alive(entity) {
                     store.destroy_entity(entity);
                 }
             }
         }
-        self.entities = insert_scene_entities(&mut self.engine, &scene.entities);
+        self.entities = insert_scene_entities(&mut self.engine, &scene.entities).into();
         let _ = self
             .engine
             .world_mut()
             .insert(RenderLights::from_scene(scene));
-        self.version = self.version.saturating_add(1);
+        self.version.bump();
     }
 
     /// Reads the frame payload directly from the component lanes.
@@ -132,7 +181,14 @@ impl GameWorld {
     /// Platform GPU presentation (`RenderFrame3D` / WASM adapter) consumes
     /// the returned [`FrameUpload`] through its own existing path.
     pub fn frame(&mut self, delta_seconds: f32) -> FrameUpload {
-        self.engine.run_frame(delta_seconds);
+        self.frame_secs(Seconds::new(delta_seconds))
+    }
+
+    /// Runs one frame with a [`Seconds`] delta and returns its CPU-side
+    /// render payload (same contract as [`Self::frame`]: finite and
+    /// non-negative).
+    pub fn frame_secs(&mut self, delta: Seconds) -> FrameUpload {
+        self.engine.run_frame_secs(delta);
         self.frame_upload()
     }
 }
@@ -267,8 +323,8 @@ mod tests {
         assert_eq!(upload.instances.len(), 2);
         // Identical materials dedup to one table entry (render extraction canon).
         assert_eq!(upload.materials.len(), 1);
-        assert_eq!(upload.instances[0].material_index, 0);
-        assert_eq!(upload.instances[1].material_index, 0);
+        assert_eq!(upload.instances[0].material_index.as_u32(), 0);
+        assert_eq!(upload.instances[1].material_index.as_u32(), 0);
         let time = world
             .engine()
             .world()
@@ -340,6 +396,24 @@ mod tests {
     }
 
     #[test]
+    fn replica_role_shares_layout_with_typed_version_and_secs_frame() {
+        use ornis_core::{SceneVersion, Seconds};
+        // A bare `GameWorld` stays authoritative; the browser replica is
+        // the same layout under the `Replica` role.
+        let authoritative = GameWorld::from_scene(&two_sphere_scene());
+        let mut replica: ReplicaGameWorld =
+            ReplicaGameWorld::from_scene_replica(&two_sphere_scene());
+        assert_eq!(authoritative.version(), SceneVersion::new(1));
+        assert_eq!(replica.version(), 1);
+        assert_eq!(replica.scene_entities().len(), 2);
+        assert_eq!(replica.entities(), authoritative.entities());
+        let upload = replica.frame_secs(Seconds::new(1.0 / 60.0));
+        assert_eq!(upload.instances.len(), 2);
+        // Frame execution alone never bumps the scene version.
+        assert_eq!(replica.version(), SceneVersion::new(1));
+    }
+
+    #[test]
     fn core_stage_names_are_stable() {
         assert_eq!(CoreStage::PreUpdate.name(), "pre_update");
         assert_eq!(CoreStage::Input.name(), "input");
@@ -405,7 +479,7 @@ mod tests {
         assert_eq!(extracted.mesh_params, (48, 32));
         assert_eq!(extracted.materials.len(), 1);
         assert_eq!(extracted.instances.len(), 1);
-        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(extracted.instances[0].material_index.as_u32(), 0);
         assert_eq!(
             extracted.instances[0].model_matrix.w_axis.truncate(),
             Vec3::new(1.0, 2.0, 3.0)

@@ -51,24 +51,29 @@ fn image_bytes(
     match image.source() {
         gltf::image::Source::View { view, mime_type } => {
             check_mime(Some(mime_type), None, context)?;
-            let buffer = buffers.get(view.buffer().index()).ok_or_else(|| {
-                ImportError::InvalidImage(format!(
-                    "{context}: references missing buffer {}",
-                    view.buffer().index()
-                ))
-            })?;
+            let buffer =
+                buffers
+                    .get(view.buffer().index())
+                    .ok_or_else(|| ImportError::InvalidImage {
+                        context: format!(
+                            "{context}: references missing buffer {}",
+                            view.buffer().index()
+                        ),
+                    })?;
             let end = view.offset().checked_add(view.length()).ok_or_else(|| {
-                ImportError::InvalidImage(format!("{context}: buffer view range overflows"))
+                ImportError::InvalidImage {
+                    context: format!("{context}: buffer view range overflows"),
+                }
             })?;
             buffer
                 .get(view.offset()..end)
                 .map(<[u8]>::to_vec)
-                .ok_or_else(|| {
-                    ImportError::InvalidImage(format!(
+                .ok_or_else(|| ImportError::InvalidImage {
+                    context: format!(
                         "{context}: buffer view [{}..{end}) out of {} bytes",
                         view.offset(),
                         buffer.len()
-                    ))
+                    ),
                 })
         }
         gltf::image::Source::Uri { uri, mime_type } => {
@@ -76,11 +81,12 @@ fn image_bytes(
                 let mime = mime_type.or_else(|| data_uri_mime(uri));
                 check_mime(mime, None, context)?;
                 let payload = uri.split_once(',').map_or("", |(_, after)| after);
-                base64::decode(payload).map_err(|_| {
-                    ImportError::InvalidImage(format!("{context}: undecodable image data URI"))
+                base64::decode(payload).map_err(|_| ImportError::InvalidImage {
+                    context: format!("{context}: undecodable image data URI"),
                 })
             } else {
-                let base = base_dir.ok_or_else(|| ImportError::ExternalBuffer(uri.to_string()))?;
+                let base = base_dir
+                    .ok_or_else(|| ImportError::ExternalBuffer(std::path::PathBuf::from(uri)))?;
                 reject_remote_uri(uri)?;
                 let extension = Path::new(uri).extension().and_then(|stem| stem.to_str());
                 check_mime(mime_type, extension, context)?;
@@ -109,15 +115,15 @@ fn check_mime(
 ) -> Result<(), ImportError> {
     match mime {
         Some("image/png") | Some("image/jpeg") => Ok(()),
-        Some(other) => Err(ImportError::UnsupportedImage(format!(
-            "{context}: mime '{other}'"
-        ))),
+        Some(other) => Err(ImportError::UnsupportedImage {
+            context: format!("{context}: mime '{other}'"),
+        }),
         None => match extension {
             None => Ok(()),
             Some("png" | "jpg" | "jpeg") => Ok(()),
-            Some(other) => Err(ImportError::UnsupportedImage(format!(
-                "{context}: extension '.{other}'"
-            ))),
+            Some(other) => Err(ImportError::UnsupportedImage {
+                context: format!("{context}: extension '.{other}'"),
+            }),
         },
     }
 }
@@ -125,10 +131,12 @@ fn check_mime(
 /// Sniffs PNG/JPEG bytes into RGBA8 (`to_rgba8` gives JPEG opaque alpha).
 fn decode_image(bytes: &[u8], context: &str) -> Result<LoadedImage, ImportError> {
     if bytes.is_empty() {
-        return Err(ImportError::InvalidImage(format!("{context}: empty")));
+        return Err(ImportError::InvalidImage {
+            context: format!("{context}: empty"),
+        });
     }
-    let decoded = image::load_from_memory(bytes).map_err(|_| {
-        ImportError::InvalidImage(format!("{context}: undecodable ({} bytes)", bytes.len()))
+    let decoded = image::load_from_memory(bytes).map_err(|_| ImportError::InvalidImage {
+        context: format!("{context}: undecodable ({} bytes)", bytes.len()),
     })?;
     let (width, height) = decoded.dimensions();
     Ok(LoadedImage {
@@ -153,14 +161,14 @@ mod tests {
         assert!(check_mime(Some("image/jpeg"), None, "ctx").is_ok());
         assert!(matches!(
             check_mime(Some("image/webp"), None, "ctx"),
-            Err(ImportError::UnsupportedImage(_))
+            Err(ImportError::UnsupportedImage { .. })
         ));
         assert!(check_mime(None, Some("png"), "ctx").is_ok());
         assert!(check_mime(None, Some("jpg"), "ctx").is_ok());
         assert!(check_mime(None, Some("jpeg"), "ctx").is_ok());
         assert!(matches!(
             check_mime(None, Some("webp"), "ctx"),
-            Err(ImportError::UnsupportedImage(_))
+            Err(ImportError::UnsupportedImage { .. })
         ));
         // Unknown entirely: the decoder sniffs, so the gate passes.
         assert!(check_mime(None, None, "ctx").is_ok());
@@ -184,16 +192,16 @@ mod tests {
     fn decode_rejects_garbage_and_empty() {
         assert!(matches!(
             decode_image(b"definitely not png or jpeg", "image 0"),
-            Err(ImportError::InvalidImage(_))
+            Err(ImportError::InvalidImage { .. })
         ));
         assert!(matches!(
             decode_image(&[], "image 0"),
-            Err(ImportError::InvalidImage(_))
+            Err(ImportError::InvalidImage { .. })
         ));
         // Truncated PNG signature: sniffs as PNG, then fails.
         assert!(matches!(
             decode_image(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A], "image 0"),
-            Err(ImportError::InvalidImage(_))
+            Err(ImportError::InvalidImage { .. })
         ));
     }
 
@@ -405,7 +413,7 @@ mod tests {
         fixture.base_color_texture = Some(0);
         assert!(matches!(
             load_slice(&build_glb(&fixture)),
-            Err(ImportError::UnsupportedImage(_))
+            Err(ImportError::UnsupportedImage { .. })
         ));
     }
 

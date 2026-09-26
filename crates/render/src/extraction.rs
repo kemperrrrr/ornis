@@ -638,14 +638,14 @@ fn deduped_material_index(
     seen: &mut Vec<MaterialDesc>,
     material: &MaterialDesc,
     stats: &mut ExtractionStats,
-) -> u32 {
+) -> crate::renderer::MaterialIdx {
     if let Some(index) = seen.iter().position(|known| known == material) {
         stats.materials_deduped += 1;
-        return index as u32;
+        return crate::renderer::MaterialIdx::from(index as u32);
     }
     seen.push(material.clone());
     extracted.materials.push(material_to_gpu(material));
-    extracted.materials.len() as u32 - 1
+    crate::renderer::MaterialIdx::from_raw(extracted.materials.len() as u32 - 1)
 }
 
 fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
@@ -853,11 +853,17 @@ mod tests {
         // Both valid entities share one material: dedup yields one entry,
         // no material leak from skips.
         assert_eq!(extracted.materials.len(), 1, "deduped, no leak");
-        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(
+            extracted.instances[0].material_index,
+            crate::renderer::MaterialIdx::from_raw(0)
+        );
         let entry = &extracted.custom_meshes[0];
         assert_eq!(entry.vertices.len(), 4);
         assert_eq!(entry.indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(entry.instance.material_index, 0);
+        assert_eq!(
+            entry.instance.material_index,
+            crate::renderer::MaterialIdx::from_raw(0)
+        );
         // Custom geometry never feeds the shared sphere tessellation.
         assert_eq!(extracted.mesh_params, (32, 24));
     }
@@ -911,7 +917,12 @@ mod tests {
                 .iter()
                 .map(|instance| instance.material_index)
                 .collect::<Vec<_>>(),
-            vec![0, 0, 0, 1],
+            vec![
+                crate::renderer::MaterialIdx::from_raw(0),
+                crate::renderer::MaterialIdx::from_raw(0),
+                crate::renderer::MaterialIdx::from_raw(0),
+                crate::renderer::MaterialIdx::from_raw(1)
+            ],
             "shared entries reuse the first index"
         );
     }
@@ -1001,10 +1012,9 @@ mod tests {
         assert_eq!(extracted.instances.len(), 3);
         assert_eq!(extracted.materials.len(), 1, "3 identical → 1 entry");
         assert!(
-            extracted
-                .instances
-                .iter()
-                .all(|instance| instance.material_index == 0)
+            extracted.instances.iter().all(
+                |instance| instance.material_index == crate::renderer::MaterialIdx::from_raw(0)
+            )
         );
     }
 
@@ -1388,7 +1398,7 @@ mod tests {
                 instance: InstanceData {
                     model_matrix: model,
                     normal_matrix: model.inverse().transpose(),
-                    material_index: 0,
+                    material_index: crate::renderer::MaterialIdx::from_raw(0),
                 },
                 skinned: false,
             });
@@ -1417,7 +1427,7 @@ mod tests {
             upload.instances.push(InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             });
         }
         sort_by_depth(&mut upload, &Mat4::IDENTITY);

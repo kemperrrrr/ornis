@@ -29,7 +29,9 @@ use crate::{
 /// [`ImportError::Parse`] on malformed bytes, [`ImportError::NoScene`] on a
 /// sceneless document, buffer errors as documented per variant.
 pub fn load_slice(bytes: &[u8]) -> Result<LoadedScene, ImportError> {
-    let gltf = Gltf::from_slice(bytes).map_err(|error| ImportError::Parse(error.to_string()))?;
+    let gltf = Gltf::from_slice(bytes).map_err(|error| ImportError::Parse {
+        message: error.to_string(),
+    })?;
     let buffers = resolve_buffers(&gltf, None)?;
     let images = resolve_images(&gltf, &buffers, None)?;
     import_gltf(&gltf, &buffers, &images)
@@ -46,7 +48,9 @@ pub fn load_slice(bytes: &[u8]) -> Result<LoadedScene, ImportError> {
 /// Same as [`load_slice`], plus [`ImportError::Io`] for unreadable files.
 pub fn load_path(path: &Path) -> Result<LoadedScene, ImportError> {
     let bytes = std::fs::read(path)?;
-    let gltf = Gltf::from_slice(&bytes).map_err(|error| ImportError::Parse(error.to_string()))?;
+    let gltf = Gltf::from_slice(&bytes).map_err(|error| ImportError::Parse {
+        message: error.to_string(),
+    })?;
     let parent = path.parent();
     let buffers = resolve_buffers(&gltf, parent)?;
     let images = resolve_images(&gltf, &buffers, parent)?;
@@ -65,7 +69,8 @@ fn resolve_buffers(gltf: &Gltf, base_dir: Option<&Path>) -> Result<Vec<Vec<u8>>,
             gltf::buffer::Source::Bin => gltf.blob.clone().ok_or(ImportError::MissingBlob)?,
             gltf::buffer::Source::Uri(uri) if is_data_uri(uri) => decode_data_uri(uri)?,
             gltf::buffer::Source::Uri(uri) => {
-                let base = base_dir.ok_or_else(|| ImportError::ExternalBuffer(uri.to_string()))?;
+                let base = base_dir
+                    .ok_or_else(|| ImportError::ExternalBuffer(std::path::PathBuf::from(uri)))?;
                 reject_remote_uri(uri)?;
                 std::fs::read(base.join(uri))?
             }
@@ -90,13 +95,15 @@ pub(crate) fn is_data_uri(uri: &str) -> bool {
 /// Extracts and decodes the payload after the first comma.
 pub(crate) fn decode_data_uri(uri: &str) -> Result<Vec<u8>, ImportError> {
     let payload = uri.split_once(',').map_or("", |(_, after)| after);
-    base64::decode(payload).map_err(|_| ImportError::InvalidDataUri(short_head(uri)))
+    base64::decode(payload).map_err(|_| ImportError::InvalidDataUri {
+        head: short_head(uri),
+    })
 }
 
 /// Rejects absolute paths and remote schemes before any filesystem access.
 pub(crate) fn reject_remote_uri(uri: &str) -> Result<(), ImportError> {
     if uri.contains("://") || uri.starts_with("//") || uri.starts_with("data:") {
-        return Err(ImportError::ExternalBuffer(uri.to_string()));
+        return Err(ImportError::ExternalBuffer(std::path::PathBuf::from(uri)));
     }
     Ok(())
 }
@@ -1083,9 +1090,17 @@ mod tests {
     fn garbage_bytes_fail_parse() {
         assert!(matches!(
             load_slice(b"definitely not gltf"),
-            Err(ImportError::Parse(_))
+            Err(ImportError::Parse { .. })
         ));
-        assert!(matches!(load_slice(&[]), Err(ImportError::Parse(_))));
+        assert!(matches!(load_slice(&[]), Err(ImportError::Parse { .. })));
+    }
+
+    #[test]
+    fn parse_error_carries_the_parser_message() {
+        let Err(ImportError::Parse { message }) = load_slice(b"definitely not gltf") else {
+            panic!("garbage bytes must fail with Parse");
+        };
+        assert!(!message.is_empty(), "parser message must survive typing");
     }
 
     #[test]
@@ -1102,7 +1117,7 @@ mod tests {
         let bytes = br#"{"asset":{"version":"2.0"},"scenes":[]}"#;
         assert!(matches!(
             load_slice(bytes),
-            Err(ImportError::NoScene) | Err(ImportError::Parse(_))
+            Err(ImportError::NoScene) | Err(ImportError::Parse { .. })
         ));
     }
 

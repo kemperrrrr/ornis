@@ -13,9 +13,9 @@ use std::f32::consts::FRAC_PI_2;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    ClipId, JointPose, JointTrack, Key, KeyTrack, MAX_JOINTS, SkelClip, SkelError, SkelPlayer,
-    SkelSampleStats, SkelSampleSystem, SkelSkinStats, SkelSkinSystem, Skeleton, SkinnedMesh,
-    run_skel_sample, run_skel_skin,
+    ClipId, JointId, JointPose, JointTrack, Key, KeyTrack, MAX_JOINTS, SkelClip, SkelError,
+    SkelPlayer, SkelSampleStats, SkelSampleSystem, SkelSkinStats, SkelSkinSystem, Skeleton,
+    SkinnedMesh, run_skel_sample, run_skel_skin,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Engine, Entity, Resources, SmartStore, Stage, System, Time};
@@ -83,7 +83,7 @@ fn no_scale() -> KeyTrack<Vec3> {
 /// Two-joint skeleton: root plus one child (bind matrices identity).
 fn two_bone_skeleton() -> Skeleton {
     Skeleton::new(
-        vec![-1, 0],
+        vec![None, Some(JointId::from_raw(0))],
         vec![Mat4::IDENTITY, Mat4::IDENTITY],
         vec!["root".to_string(), "tip".to_string()],
     )
@@ -177,13 +177,13 @@ fn sample_resolves_parent_chain() {
         duration: 1.0,
         tracks: vec![
             JointTrack {
-                joint: 0,
+                joint: JointId::from_raw(0),
                 translation: no_translation(),
                 rotation: quat_keys(Quat::from_rotation_z(FRAC_PI_2)),
                 scale: no_scale(),
             },
             JointTrack {
-                joint: 1,
+                joint: JointId::from_raw(1),
                 translation: vec_keys(Vec3::new(1.0, 0.0, 0.0)),
                 rotation: no_rotation(),
                 scale: no_scale(),
@@ -219,7 +219,7 @@ fn skin_two_bone_chain_with_known_matrices() {
     let clip = SkelClip {
         duration: 1.0,
         tracks: vec![JointTrack {
-            joint: 1,
+            joint: JointId::from_raw(1),
             translation: vec_keys(Vec3::new(1.0, 0.0, 0.0)),
             rotation: quat_keys(Quat::from_rotation_z(FRAC_PI_2)),
             scale: no_scale(),
@@ -299,7 +299,7 @@ fn bad_skin_skips_entity_and_counts() {
     let root = store.create_entity();
     store.insert(
         root,
-        Skeleton::new(vec![-1], vec![Mat4::IDENTITY], vec!["root".to_string()]),
+        Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["root".to_string()]),
     );
     store.insert(root, JointPose::identity(1));
     let ghost = store.create_entity();
@@ -352,7 +352,7 @@ fn joint_cap_is_128() {
     assert_eq!(MAX_JOINTS, 128, "cap is a design constant");
     let names = |count: usize| vec!["joint".to_string(); count];
     let bones = |count: usize| vec![Mat4::IDENTITY; count];
-    let roots = |count: usize| vec![-1; count];
+    let roots = |count: usize| vec![None; count];
     assert_eq!(
         Skeleton::new(roots(128), bones(128), names(128)).validate(),
         Ok(128),

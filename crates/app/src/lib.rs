@@ -19,7 +19,7 @@ pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 
 pub mod game_world;
 
-pub use game_world::{GameWorld, spawn_static_floor};
+pub use game_world::{GameWorld, ReplicaGameWorld, spawn_static_floor};
 
 /// Installs the unified runtime into `engine`.
 ///

@@ -2,7 +2,7 @@
 //! Timing metrics are intentionally excluded from authoritative state equality.
 
 use glam::Vec3;
-use ornis_physics::{Engine, PhysicsEngine, RigidBody, RoutingKind, SolverKind};
+use ornis_physics::{BodyHandle, Engine, PhysicsEngine, RigidBody, RoutingKind, SolverKind};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -23,8 +23,8 @@ fn initial_solver_assignment_does_not_change_rest_state() {
         for _ in 0..600 {
             e.step(DT);
         }
-        (1..4)
-            .map(|h| e.get_body(h).unwrap().position)
+        (1..4usize)
+            .map(|h| e.get_body(BodyHandle::from(h)).unwrap().position)
             .collect::<Vec<_>>()
     };
     let avbd = run(SolverKind::Avbd);
@@ -82,13 +82,13 @@ fn routed_world_is_bit_identical_with_one_or_many_workers() {
             }
             let states = (0..e.body_count())
                 .map(|h| {
-                    let b = e.get_body(h).unwrap();
+                    let b = e.get_body(BodyHandle::from(h)).unwrap();
                     (
                         b.position.to_array().map(f32::to_bits),
                         b.orientation.to_array().map(f32::to_bits),
                         b.velocity.to_array().map(f32::to_bits),
                         b.angular_velocity.to_array().map(f32::to_bits),
-                        e.body_solver(h),
+                        e.body_solver(BodyHandle::from(h)),
                     )
                 })
                 .collect::<Vec<_>>();

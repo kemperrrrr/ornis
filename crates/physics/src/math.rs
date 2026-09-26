@@ -6,6 +6,8 @@
 //! back the exact sphere/OBB/capsule ray intersections and the analytic
 //! `distance::cast_shape` TOI path.
 
+use crate::errors::MeshError;
+
 pub use glam::Vec3;
 
 /// World-space axis-aligned bounding box, stored by its two extreme corners.
@@ -13,7 +15,7 @@ pub use glam::Vec3;
 /// Invariant: every component of `min` is `<=` the matching component of
 /// `max` (a degenerate zero-volume box is valid and used as a point seed).
 /// All containment/overlap tests are boundary-inclusive.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AABB {
     /// Corner with the smallest coordinates on every axis.
     pub min: Vec3,
@@ -36,13 +38,33 @@ impl AABB {
         }
     }
 
-    /// Smallest box containing all points. Panics on an empty slice.
+    /// Smallest box containing all points.
+    ///
+    /// Legacy wrapper over [`AABB::try_from_points`]: panics on an empty
+    /// slice so existing call sites stay bit-identical; new code should
+    /// match on the typed error instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `points` is empty (see [`AABB::try_from_points`]).
     pub fn from_points(points: &[Vec3]) -> Self {
-        let mut aabb = Self::from_point(points[0]);
-        for p in &points[1..] {
+        Self::try_from_points(points).expect("AABB::from_points needs at least one point")
+    }
+
+    /// Fallible smallest box containing all points.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshError::EmptyPoints`] when `points` is empty.
+    pub fn try_from_points(points: &[Vec3]) -> Result<Self, MeshError> {
+        let [first, rest @ ..] = points else {
+            return Err(MeshError::EmptyPoints);
+        };
+        let mut aabb = Self::from_point(*first);
+        for p in rest {
             aabb.expand(*p);
         }
-        aabb
+        Ok(aabb)
     }
 
     /// Grow the box to include `point` (per-axis min/max); never shrinks.
@@ -110,7 +132,7 @@ impl Ray {
 #[derive(Debug, Clone, Copy)]
 pub struct RaycastHit {
     /// Handle of the body that was hit.
-    pub handle: usize,
+    pub handle: crate::body::BodyHandle,
     /// World-space point of first contact.
     pub point: Vec3,
     /// Surface normal at the hit point, pointing out of the surface
@@ -130,6 +152,20 @@ pub fn tangent_basis(n: Vec3) -> (Vec3, Vec3) {
     let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
     let t1 = n.cross(axis).normalize_or(Vec3::Z);
     (t1, t1.cross(n))
+}
+
+/// Tangent frame for a statically checked unit normal.
+///
+/// Takes [`crate::invariants::UnitVec3`] so the unit-length precondition
+/// is enforced at construction time instead of assumed at the call site.
+pub fn tangent_basis_unit(n: crate::invariants::UnitVec3) -> (Vec3, Vec3) {
+    tangent_basis(n.get())
+}
+
+/// Explicit fallible tangent frame: `None` for zero/non-finite/non-unit
+/// input instead of silently substituting a default axis.
+pub fn tangent_basis_checked(n: Vec3) -> Option<(Vec3, Vec3)> {
+    crate::invariants::UnitVec3::try_from(n).map(tangent_basis_unit)
 }
 
 /// Wheel/joint axle orthogonalized against its reference axis (SI
@@ -215,6 +251,16 @@ mod tests {
         // Just outside on a single axis must NOT be contained.
         assert!(!aabb.contains_point(Vec3::new(2.0001, 1.0, 1.0)));
         assert!(!aabb.contains_point(Vec3::new(1.0, -0.0001, 1.0)));
+    }
+
+    #[test]
+    fn aabb_try_from_points_rejects_empty_slice() {
+        assert_eq!(
+            AABB::try_from_points(&[]),
+            Err(crate::errors::MeshError::EmptyPoints)
+        );
+        let pts = [Vec3::new(1.0, 2.0, 3.0)];
+        assert_eq!(AABB::try_from_points(&pts), Ok(AABB::from_point(pts[0])));
     }
 
     #[test]

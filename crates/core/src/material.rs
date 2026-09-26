@@ -7,6 +7,8 @@
 //! `#[repr(C)]` groups preserve the exact flat memory layout expected by
 //! the WGSL uniform/storage buffers.
 
+use crate::units::{Clamped01, LinearRgb, LinearRgba};
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 /// Base (diffuse) parameters — GPU slot 0.
@@ -162,6 +164,23 @@ impl BaseGroup {
         self.color[2] = rgb[2];
         self
     }
+    /// Sets base color from a linear RGBA value (typed entry point).
+    pub fn color_rgba(&mut self, color: impl Into<[f32; 4]>) -> &mut Self {
+        self.color = color.into();
+        self
+    }
+    /// Sets base color from a linear RGB value (alpha unchanged).
+    pub fn color_rgb_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.color_rgb(rgb.as_array())
+    }
+    /// Sets base color from a linear RGBA value (typed alias).
+    pub fn color_typed(&mut self, color: LinearRgba) -> &mut Self {
+        self.color_rgba(color.as_array())
+    }
+    /// Sets diffuse weight from a clamped unit value.
+    pub fn weight_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.weight(v.get())
+    }
 }
 
 impl SpecularGroup {
@@ -197,6 +216,14 @@ impl SpecularGroup {
         self.color[1] = rgb[1];
         self.color[2] = rgb[2];
         self
+    }
+    /// Sets metallic edge tint from a linear RGB value (typed entry point).
+    pub fn edge_tint_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.edge_tint_rgb(rgb.as_array())
+    }
+    /// Sets specular weight from a clamped unit value.
+    pub fn weight_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.weight(v.get())
     }
 }
 
@@ -245,6 +272,18 @@ impl TransmissionGroup {
         self.scatter[3] = v.clamp(-1.0, 1.0);
         self
     }
+    /// Sets transmission tint from a linear RGB value (typed entry point).
+    pub fn color_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.color_rgb(rgb.as_array())
+    }
+    /// Sets volume scattering color from a linear RGB value (typed entry point).
+    pub fn scatter_color_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.scatter_color(rgb.as_array()[0], rgb.as_array()[1], rgb.as_array()[2])
+    }
+    /// Sets transmission weight from a clamped unit value.
+    pub fn weight_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.weight(v.get())
+    }
 }
 
 impl SubsurfaceGroup {
@@ -292,6 +331,14 @@ impl SubsurfaceGroup {
         self.radius_scale_gb[1] = v.max(0.0);
         self
     }
+    /// Sets subsurface color from a linear RGB value (typed entry point).
+    pub fn color_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.color_rgb(rgb.as_array())
+    }
+    /// Sets subsurface weight from a clamped unit value.
+    pub fn weight_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.weight(v.get())
+    }
 }
 
 impl FuzzGroup {
@@ -317,6 +364,14 @@ impl FuzzGroup {
         self.color[1] = rgb[1];
         self.color[2] = rgb[2];
         self
+    }
+    /// Sets fuzz tint from a linear RGB value (typed entry point).
+    pub fn color_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.color_rgb(rgb.as_array())
+    }
+    /// Sets fuzz weight from a clamped unit value.
+    pub fn weight_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.weight(v.get())
     }
 }
 
@@ -360,6 +415,14 @@ impl CoatGroup {
         self.ior[0] = v.max(1.0);
         self
     }
+    /// Sets coat tint from a linear RGB value (typed entry point).
+    pub fn color_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.color_rgb(rgb.as_array())
+    }
+    /// Sets coat weight from a clamped unit value.
+    pub fn weight_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.weight(v.get())
+    }
 }
 
 impl ThinFilmGroup {
@@ -398,6 +461,10 @@ impl EmissionGroup {
         self.color[2] = rgb[2];
         self
     }
+    /// Sets emission color from a linear RGB value (typed entry point).
+    pub fn color_typed(&mut self, rgb: LinearRgb) -> &mut Self {
+        self.color_rgb(rgb.as_array())
+    }
 }
 
 impl GeometryGroup {
@@ -406,10 +473,60 @@ impl GeometryGroup {
         self.params[0] = v.clamp(0.0, 1.0);
         self
     }
-    /// Toggles thin-walled geometry mode.
+    /// Sets surface opacity from a clamped unit value.
+    pub fn opacity_unit(&mut self, v: Clamped01) -> &mut Self {
+        self.opacity(v.get())
+    }
+    /// Toggles thin-walled geometry mode (bool-compat wrapper kept for tests).
     pub fn thin_walled(&mut self, v: bool) -> &mut Self {
-        self.params[1] = if v { 1.0 } else { 0.0 };
+        self.set_transparency(Transparency::from(v))
+    }
+    /// Sets thin-walled geometry mode via [`Transparency`].
+    pub fn set_transparency(&mut self, t: Transparency) -> &mut Self {
+        self.params[1] = f32::from(t);
         self
+    }
+    /// Current geometry transparency mode.
+    pub fn transparency(&self) -> Transparency {
+        Transparency::from(self.params[1] >= 0.5)
+    }
+}
+
+/// Geometry transparency mode (typed replacement for `thin_walled: bool`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Transparency {
+    /// Solid closed geometry (default).
+    #[default]
+    Opaque,
+    /// Thin-walled geometry (single-sided, e.g. glass).
+    ThinWalled,
+}
+
+impl Transparency {
+    /// `true` for [`Transparency::ThinWalled`].
+    pub fn is_thin_walled(self) -> bool {
+        matches!(self, Self::ThinWalled)
+    }
+}
+
+impl From<bool> for Transparency {
+    /// Legacy `thin_walled: bool` polarity.
+    fn from(thin: bool) -> Self {
+        if thin { Self::ThinWalled } else { Self::Opaque }
+    }
+}
+
+impl From<Transparency> for bool {
+    /// Legacy `thin_walled: bool` polarity.
+    fn from(t: Transparency) -> bool {
+        t.is_thin_walled()
+    }
+}
+
+impl From<Transparency> for f32 {
+    /// GPU slot encoding (`params[1]`: 1.0 = thin-walled).
+    fn from(t: Transparency) -> f32 {
+        if t.is_thin_walled() { 1.0 } else { 0.0 }
     }
 }
 

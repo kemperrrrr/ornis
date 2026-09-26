@@ -7,7 +7,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use ornis_render::{RenderFrame3D, Technique};
+use ornis_render::{Bloom, RenderFrame3D, Technique};
 
 /// The three production wirings (bloom on — the heaviest variant):
 /// Forward 7 passes / Deferred 8 / Hybrid 9, 10–12 declared resources.
@@ -16,7 +16,7 @@ fn make(technique: Technique) -> RenderFrame3D {
         wgpu::TextureFormat::Rgba8Unorm,
         (1920, 1080),
         technique,
-        true,
+        Bloom::On,
     )
 }
 

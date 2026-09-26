@@ -743,6 +743,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "glam",
+ "ornis-input",
  "serde",
  "serde_json",
  "tiny_http",
@@ -1957,6 +1958,7 @@ version = "0.1.0"
 dependencies = [
  "gltf",
  "image",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1989,6 +1991,7 @@ dependencies = [
  "ornis-render",
  "quick-xml 0.42.0",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -2010,11 +2013,13 @@ dependencies = [
  "glam",
  "naga",
  "ornis-assets",
+ "ornis-core",
  "ornis-macros",
  "ornis-schedule",
  "pollster",
  "rayon",
  "rustc-hash 2.1.3",
+ "thiserror 2.0.20",
  "wgpu",
 ]
 

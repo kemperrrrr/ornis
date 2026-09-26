@@ -56,13 +56,13 @@ pub(crate) fn update_trigger_events(
     entered.sort_unstable();
     exited.sort_unstable();
     events.extend(entered.into_iter().map(|(body_a, body_b)| TriggerEvent {
-        body_a,
-        body_b,
+        body_a: crate::body::BodyHandle::from(body_a),
+        body_b: crate::body::BodyHandle::from(body_b),
         kind: TriggerEventKind::Entered,
     }));
     events.extend(exited.into_iter().map(|(body_a, body_b)| TriggerEvent {
-        body_a,
-        body_b,
+        body_a: crate::body::BodyHandle::from(body_a),
+        body_b: crate::body::BodyHandle::from(body_b),
         kind: TriggerEventKind::Exited,
     }));
     current_set

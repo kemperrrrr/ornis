@@ -25,6 +25,21 @@
   помечать в отчёте.
 - При расхождении документации с кодом верить коду и чинить документацию.
 
+## Проектирование на уровне типов
+
+- Инварианты — в типах, а не в комментариях: newtype-обёртки
+  (`BodyHandle`, `EntityId`, `Meters`, `Seconds`, `LinearRgb`,
+  `UnitVec3`, `PositiveF32`, `Clamped01`), `enum` вместо `bool`/`u32`-флагов
+  (`BodyRole`, `ExecMode`, `CompositeMode`), `Result` с `thiserror`
+  вместо `String`/`Option`/`bool` для ошибок.
+- GPU-контракт — подмена типа в DSL: Rust хранит `MaterialIdx`/`TextureHandle`,
+  `#[derive(WgslStruct)]`/`WgslInterface` транслируют их в стандартные `u32`
+  (прецедент — `GpuBool` → `u32`); `repr(transparent)` + `Pod` дают нулевую
+  стоимость на CPU, layout проверяется `offset_of!`/`size_of` + naga.
+- Фазы — typestate (`World<Building/Running>`, `Engine<Building/Running>`,
+  `GameWorld<Authoritative/Replica>`); `schedule_mut` — только построение,
+  транспорт (`/api/*`, WASM) остаётся `u64`/`String`-совместимым.
+
 ## Документы
 
 - `README.md` — текущее состояние (верифицировано по коду).

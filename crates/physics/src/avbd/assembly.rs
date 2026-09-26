@@ -345,7 +345,7 @@ impl AvbdEngine {
                         let f = j.pen_l[0] * c + j.lam_l[0];
                         if row_live(c, f) {
                             for (side, coef) in [(&sa, 1.0), (&sb, j.gratio)] {
-                                if side.angular {
+                                if side.kind.is_angular() {
                                     continue;
                                 }
                                 if h != side.a && h != side.b {
@@ -557,7 +557,7 @@ impl AvbdEngine {
                         let f = j.pen_l[0] * c + j.lam_l[0];
                         if row_live(c, f) {
                             for (side, coef) in [(&sa, 1.0), (&sb, j.gratio)] {
-                                if !side.angular {
+                                if !side.kind.is_angular() {
                                     continue;
                                 }
                                 if h != side.a && h != side.b {

@@ -10,7 +10,7 @@
 use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
 
-use crate::entity::Entity;
+use crate::entity::{DenseIndex, Entity};
 use crate::page_table::PageTable;
 use crate::prefetch::{PREFETCH_STRIDE, prefetch_iter};
 
@@ -77,7 +77,7 @@ impl<T> ComponentStore<T> {
     /// the stored handle (a newer generation must be able to read its own
     /// write). A first insertion appends to the dense arrays.
     pub fn insert(&mut self, entity: Entity, component: T) {
-        let id = entity.id() as usize;
+        let id = entity.entity_id().index();
         if self.bitset.contains(id)
             && let Some(&dense_idx) = self.sparse.get(id)
         {
@@ -102,7 +102,7 @@ impl<T> ComponentStore<T> {
     /// changes (the moved component's sparse mapping is updated). Returns
     /// `None` if the entity has no component here or the handle is stale.
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
-        let id = entity.id() as usize;
+        let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
             return None;
         }
@@ -119,7 +119,7 @@ impl<T> ComponentStore<T> {
             self.data.swap(dense_idx, last);
             self.entities.swap(dense_idx, last);
             let moved_entity = self.entities[dense_idx];
-            self.sparse.set(moved_entity.id() as usize, dense_idx);
+            self.sparse.set(moved_entity.entity_id().index(), dense_idx);
         }
 
         let component = self.data.pop();
@@ -130,7 +130,7 @@ impl<T> ComponentStore<T> {
     /// Returns the component for `entity`, or `None` if absent or the
     /// handle refers to a destroyed generation.
     pub fn get(&self, entity: Entity) -> Option<&T> {
-        let id = entity.id() as usize;
+        let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
             return None;
         }
@@ -144,7 +144,7 @@ impl<T> ComponentStore<T> {
     /// Mutable variant of [`get`](ComponentStore::get) with the same
     /// generation-checked semantics.
     pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        let id = entity.id() as usize;
+        let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
             return None;
         }
@@ -158,7 +158,7 @@ impl<T> ComponentStore<T> {
     /// Returns `true` if `entity` currently owns a component here (with
     /// a matching generation).
     pub fn contains(&self, entity: Entity) -> bool {
-        let id = entity.id() as usize;
+        let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
             return false;
         }
@@ -214,8 +214,8 @@ impl<T> ComponentStore<T> {
     /// Maps an entity handle to its index in the dense array, verifying
     /// both presence and generation. Exposed for callers that need to pair
     /// this store with packed GPU-side layouts by index.
-    pub fn dense_index(&self, entity: Entity) -> Option<usize> {
-        let id = entity.id() as usize;
+    pub fn dense_index(&self, entity: Entity) -> Option<DenseIndex> {
+        let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
             return None;
         }
@@ -223,7 +223,7 @@ impl<T> ComponentStore<T> {
         if entity.generation() != self.entities[dense_idx].generation() {
             return None;
         }
-        Some(dense_idx)
+        Some(DenseIndex::from_raw(dense_idx))
     }
 
     /// Iterates `(entity, &A, &B)` pairs for every entity present in both
@@ -318,7 +318,7 @@ impl<T> ComponentStore<T> {
         self.data.clear();
         self.entities.clear();
         for (entity, component) in sorted {
-            self.sparse.set(entity.id() as usize, self.data.len());
+            self.sparse.set(entity.entity_id().index(), self.data.len());
             self.data.push(component);
             self.entities.push(entity);
         }
@@ -682,8 +682,8 @@ mod tests {
         store.insert(a, 1);
         store.insert(b, 2);
 
-        assert_eq!(store.dense_index(a), Some(0));
-        assert_eq!(store.dense_index(b), Some(1));
+        assert_eq!(store.dense_index(a), Some(DenseIndex::from_raw(0)));
+        assert_eq!(store.dense_index(b), Some(DenseIndex::from_raw(1)));
 
         // A stale generation must not map to the live entry.
         let stale = Entity::new_with_gen(a.id(), a.generation() + 1);

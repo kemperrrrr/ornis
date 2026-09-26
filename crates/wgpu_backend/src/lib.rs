@@ -50,4 +50,4 @@ pub use leak::{LeakDispatch, leak_wgsl, leak_wgsl_typed};
 pub use profiler::{AutoProfiler, ProfilerConfig};
 pub use pso_cache::PsoCache;
 pub use router::PipelineRouter;
-pub use smart_buffer::{ResidencyFlags, SmartBuffer};
+pub use smart_buffer::{CpuSyncError, ResidencyFlags, SmartBuffer};

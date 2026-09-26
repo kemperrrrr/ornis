@@ -173,6 +173,7 @@ pub mod renderer3d_backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flags::ShadowCast;
 
     #[test]
     fn default_config_matches_documented_defaults() {
@@ -282,7 +283,7 @@ mod tests {
                 &[crate::renderer::InstanceData {
                     model_matrix: model,
                     normal_matrix: model.inverse().transpose(),
-                    material_index: 0,
+                    material_index: crate::renderer::MaterialIdx::from_raw(0),
                 }],
             );
             renderer.set_camera(&queue, &view_proj, [0.0, 0.0, 5.0]);
@@ -388,7 +389,7 @@ mod tests {
             .map(|i| InstanceData {
                 model_matrix: glam::Mat4::from_translation(glam::Vec3::new(i as f32, 0.0, 0.0)),
                 normal_matrix: glam::Mat4::IDENTITY,
-                material_index: (i % 70) as u32,
+                material_index: crate::renderer::MaterialIdx::from((i % 70) as u32),
             })
             .collect();
         backend.upload_instances(&device, &queue, &instances);
@@ -500,7 +501,7 @@ mod tests {
             &[InstanceData {
                 model_matrix: glam::Mat4::IDENTITY,
                 normal_matrix: glam::Mat4::IDENTITY,
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }],
         );
 
@@ -706,7 +707,7 @@ mod tests {
             instances.push(crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: i as u32,
+                material_index: crate::renderer::MaterialIdx::from(i as u32),
             });
         }
         backend.upload_materials(&device, &queue, &materials);
@@ -937,7 +938,7 @@ mod tests {
             crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }
         };
         // Receiver r=2 at origin; occluder r=0.9 on the light axis
@@ -960,7 +961,7 @@ mod tests {
         );
         backend.set_camera(&queue, &(proj * view).to_cols_array_2d(), [0.0, 3.0, 10.0]);
 
-        let mut render = |shadow: bool| -> Vec<u8> {
+        let mut render = |shadow: ShadowCast| -> Vec<u8> {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
@@ -968,7 +969,7 @@ mod tests {
                     direction: [0.42, 0.84, 0.3],
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
-                    shadow,
+                    shadow: shadow.is_enabled(),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1031,8 +1032,8 @@ mod tests {
             pixels
         };
 
-        let on = render(true);
-        let off = render(false);
+        let on = render(ShadowCast::Enabled);
+        let off = render(ShadowCast::Disabled);
         assert_eq!(on.len(), off.len());
         let lum = |px: &[u8]| -> f64 {
             px.chunks_exact(4)
@@ -1130,7 +1131,7 @@ mod tests {
             &[crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }],
         );
         let view = glam::camera::rh::view::look_at_mat4(
@@ -1145,7 +1146,7 @@ mod tests {
             100.0,
         );
         backend.set_camera(&queue, &(proj * view).to_cols_array_2d(), [0.0, 3.0, 10.0]);
-        let mut render = |shadow: bool| -> Vec<u8> {
+        let mut render = |shadow: ShadowCast| -> Vec<u8> {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
@@ -1153,7 +1154,7 @@ mod tests {
                     direction: [0.42, 0.84, 0.3],
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
-                    shadow,
+                    shadow: shadow.is_enabled(),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1215,8 +1216,8 @@ mod tests {
             readback.unmap();
             pixels
         };
-        let on = render(true);
-        let off = render(false);
+        let on = render(ShadowCast::Enabled);
+        let off = render(ShadowCast::Disabled);
         let mut diff_px = 0usize;
         for (a, b) in on.chunks_exact(4).zip(off.chunks_exact(4)) {
             let d = (a[0] as i16 - b[0] as i16).abs()
@@ -1299,7 +1300,7 @@ mod tests {
             &[crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }],
         );
         let view = glam::camera::rh::view::look_at_mat4(
@@ -1314,7 +1315,7 @@ mod tests {
             100.0,
         );
         backend.set_camera(&queue, &(proj * view).to_cols_array_2d(), [0.0, 3.0, 10.0]);
-        let mut render = |shadow: bool| -> Vec<u8> {
+        let mut render = |shadow: ShadowCast| -> Vec<u8> {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
@@ -1323,7 +1324,7 @@ mod tests {
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
                     range: 30.0,
-                    shadow,
+                    shadow: shadow.is_enabled(),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1385,8 +1386,8 @@ mod tests {
             readback.unmap();
             pixels
         };
-        let on = render(true);
-        let off = render(false);
+        let on = render(ShadowCast::Enabled);
+        let off = render(ShadowCast::Disabled);
         let mut diff_px = 0usize;
         for (a, b) in on.chunks_exact(4).zip(off.chunks_exact(4)) {
             let d = (a[0] as i16 - b[0] as i16).abs()
@@ -1466,7 +1467,7 @@ mod tests {
             crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }
         };
         // Receiver r=2 at origin; occluder r=0.7 at +X under a
@@ -1490,7 +1491,7 @@ mod tests {
             100.0,
         );
         backend.set_camera(&queue, &(proj * view).to_cols_array_2d(), [0.0, 3.0, 10.0]);
-        let mut render = |shadow: bool| -> Vec<u8> {
+        let mut render = |shadow: ShadowCast| -> Vec<u8> {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
@@ -1502,7 +1503,7 @@ mod tests {
                     range: 30.0,
                     inner_angle: 25.0,
                     outer_angle: 35.0,
-                    shadow,
+                    shadow: shadow.is_enabled(),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1564,8 +1565,8 @@ mod tests {
             readback.unmap();
             pixels
         };
-        let on = render(true);
-        let off = render(false);
+        let on = render(ShadowCast::Enabled);
+        let off = render(ShadowCast::Disabled);
         // Changed pixels (shadowed in `on`, lit in `off`): their
         // centroid must sit on the +X half (true blob ≈ x178; the
         // mirrored lookup would center it at ≈ x142 instead).
@@ -1629,7 +1630,7 @@ mod tests {
             crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }
         };
         renderer.upload_instances(
@@ -1763,7 +1764,7 @@ mod tests {
             crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }
         };
         // Receiver r=2 at origin; occluder r=0.6 on the light axis.
@@ -1791,7 +1792,7 @@ mod tests {
         );
         backend.set_camera(&queue, &(proj * view).to_cols_array_2d(), [0.0, 3.0, 10.0]);
 
-        let render = |technique: crate::frame_exec::Technique, shadow: bool| -> Vec<u8> {
+        let render = |technique: crate::frame_exec::Technique, shadow: ShadowCast| -> Vec<u8> {
             backend.set_lights(
                 &queue,
                 [0.05, 0.05, 0.08],
@@ -1800,11 +1801,15 @@ mod tests {
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
                     range: 30.0,
-                    shadow,
+                    shadow: shadow.is_enabled(),
                 }],
             );
-            let mut plan =
-                crate::frame_exec::RenderFrame3D::new_with(format, (W, H), technique, false);
+            let mut plan = crate::frame_exec::RenderFrame3D::new_with(
+                format,
+                (W, H),
+                technique,
+                crate::flags::Bloom::Off,
+            );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("point shadow probe encoder"),
             });
@@ -1871,8 +1876,8 @@ mod tests {
             crate::frame_exec::Technique::Forward,
             crate::frame_exec::Technique::Hybrid,
         ] {
-            let on = render(technique, true);
-            let off = render(technique, false);
+            let on = render(technique, ShadowCast::Enabled);
+            let off = render(technique, ShadowCast::Disabled);
             assert_eq!(on.len(), off.len());
             let lum = |px: &[u8]| -> f64 {
                 px.chunks_exact(4)
@@ -2090,7 +2095,7 @@ mod tests {
             &[crate::renderer::InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: 0,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
             }],
         );
         // Camera above-front looking at the quad center; the light comes

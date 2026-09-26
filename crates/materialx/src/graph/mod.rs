@@ -24,8 +24,13 @@ pub enum CodegenError {
     #[error("Node graph not found: {0}")]
     GraphNotFound(String),
     /// A node's type has no matching nodedef in the document.
-    #[error("Node definition not found: {0}")]
-    NodeDefNotFound(String),
+    #[error("Node definition not found for node '{node}' (type '{node_type}')")]
+    NodeDefNotFound {
+        /// Node type that was looked up (`Node.node_type`).
+        node_type: String,
+        /// Node instance name that needed the definition.
+        node: String,
+    },
     /// An input with no connection, literal value or nodedef default.
     #[error("Required input not found: {0}")]
     InputNotFound(String),
@@ -159,6 +164,11 @@ impl MaterialXConverter {
 /// One-shot conversion of MaterialX XML text to an [`OpenPBRMaterial`]:
 /// parse → evaluate → extract. Evaluation failures surface wrapped in
 /// [`MaterialXError::Codegen`].
+///
+/// # Errors
+///
+/// [`MaterialXError`] from the parse stage, or `Codegen` wrapping the
+/// evaluation failure (missing graph, unresolved nodedef, bad input).
 pub fn materialx_to_openpbr(mtlx_content: &str) -> Result<OpenPBRMaterial, MaterialXError> {
     let document = crate::parser::MaterialXParser::new().parse(mtlx_content)?;
     let converter = MaterialXConverter::new(document);
