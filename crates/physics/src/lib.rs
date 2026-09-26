@@ -90,7 +90,7 @@ use split::{SplitBody, SplitJoint, SplitOwner, SplitState};
 pub(crate) use collision::{broadphase, broadphase_tree};
 
 pub use avbd::AvbdEngine;
-pub use body::{BodyHandle, BodyType, RigidBody};
+pub use body::{BodyHandle, BodyType, LocalAvbdBody, LocalSiBody, RigidBody};
 pub use collision::broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{PhysicsEngine, SequentialImpulseEngine};
 pub use errors::{ColliderError, JointError, MeshError, QueryError};
@@ -103,11 +103,11 @@ pub use invariants::{
     NonEmpty4, PositiveF32, Radians, UnitVec3, validate_heightfield,
 };
 pub use joint::{
-    AxisConfig, JointHandle, JointKind, PrismaticLimit, PrismaticMotor, ResolvedJoint,
-    RevoluteLimit, RevoluteMotor, WheelSuspension, resolve_joint,
+    AxisConfig, JointHandle, JointKind, LocalAvbdJoint, LocalSiJoint, PrismaticLimit,
+    PrismaticMotor, ResolvedJoint, RevoluteLimit, RevoluteMotor, WheelSuspension, resolve_joint,
 };
 pub use math::{AABB, Ray, RaycastHit};
-pub use shape::{ConvexHull, Heightfield, PairSupport, Shape, TriMesh};
+pub use shape::{ConvexHull, Heightfield, PairSupport, Shape, TriIndex, TriMesh, Triangle};
 pub use soft::{
     ClothPin, DeformConstraint, DeformKind, Particle, ParticleIdx, SoftBody, SoftHandle,
 };

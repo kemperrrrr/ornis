@@ -20,6 +20,7 @@ use ornis_animation::{
     skinned_mesh_from_import,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_core::units::Clamped01;
 use ornis_core::{Engine, Entity, Stage};
 
 /// Registers the skeletal lanes (the engine runs both phase B systems on
@@ -107,7 +108,7 @@ fn two_bone_clip() -> SkelClip {
 fn test_material() -> MaterialDesc {
     MaterialDesc::Dielectric {
         base_color: [0.8, 0.2, 0.2],
-        roughness: 0.4,
+        roughness: Clamped01::new(0.4),
         emission: [0.0, 0.0, 0.0],
     }
 }

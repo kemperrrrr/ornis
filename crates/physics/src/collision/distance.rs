@@ -237,11 +237,9 @@ fn heightfield_convex(
         point_a: if order.is_first() { hf_pos } else { convex.pos },
         point_b: if order.is_first() { convex.pos } else { hf_pos },
     };
-    if hf.heights.len() != hf.rows * hf.cols
-        || hf.rows == 0
-        || hf.cols == 0
-        || !hf.cell.is_sign_positive()
-    {
+    // Canonical validity gate: legacy-constructed grids degrade to
+    // separation instead of walking garbage (see `Heightfield::is_valid`).
+    if !hf.is_valid() {
         return no_contact();
     }
     // Convex AABB into heightfield-local space for the column window.
@@ -447,10 +445,9 @@ fn trimesh_convex(
         if let Some((start, count)) = node.link.leaf_range() {
             let end = (start + count) as usize;
             for o in start as usize..end.min(mesh.order.len()) {
-                let t = mesh.order[o] as usize;
-                if t >= mesh.tris.len() || t >= mesh.centroids.len() {
+                let Some(t) = mesh.ordered_triangle(o) else {
                     continue;
-                }
+                };
                 let d = shape_distance(
                     ShapeRef {
                         shape: &mesh.tris[t],

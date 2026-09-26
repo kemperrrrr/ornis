@@ -869,7 +869,7 @@ fn body_max_extent(body: &RigidBody) -> f32 {
         } => (half_height + radius) * 2.0,
         crate::shape::Shape::ConvexHull(hull) => {
             let mut m = 0.0f32;
-            for v in &hull.vertices {
+            for v in hull.vertices() {
                 m = m.max(v.abs().max_element());
             }
             m * 2.0
@@ -879,7 +879,8 @@ fn body_max_extent(body: &RigidBody) -> f32 {
             e.x.max(e.z).max(1.0) * 2.0
         }
         crate::shape::Shape::TriMesh(mesh) => {
-            let e = (mesh.local_max - mesh.local_min) * 0.5;
+            let (lo, hi) = mesh.local_bounds();
+            let e = (hi - lo) * 0.5;
             e.x.max(e.y).max(e.z).max(0.5) * 2.0
         }
     }

@@ -260,22 +260,33 @@ impl<'a> Import<'a> {
             return None;
         };
         let positions: Vec<[f32; 3]> = read_positions.collect();
-        let indices = match reader.read_indices() {
+        let flat: Vec<u32> = match reader.read_indices() {
             Some(indices) => collect_indices(indices),
             None => (0..positions.len() as u32).collect(),
         };
-        if positions.is_empty() || indices.is_empty() {
+        if positions.is_empty() || flat.is_empty() {
             self.stats.skipped_empty += 1;
             return None;
         }
-        if indices.len() % 3 != 0
-            || indices
-                .iter()
-                .any(|index| (*index as usize) >= positions.len())
+        // Typed validation: chunk through `Triangle::from_raw`, then check
+        // triple alignment and vertex range via `TriIndex::index`.
+        if !flat.len().is_multiple_of(3) {
+            self.stats.skipped_bad_index += 1;
+            return None;
+        }
+        let triangles: Vec<crate::Triangle> = flat
+            .chunks_exact(3)
+            .map(|c| crate::Triangle::from_raw([c[0], c[1], c[2]]))
+            .collect();
+        if triangles
+            .iter()
+            .flat_map(|t| t.as_u32())
+            .any(|index| crate::TriIndex::from_raw(index).index() >= positions.len())
         {
             self.stats.skipped_bad_index += 1;
             return None;
         }
+        let indices: Vec<u32> = triangles.iter().flat_map(|t| t.as_u32()).collect();
         let vertex_count = positions.len();
         let influences = if skinned {
             match read_influences(primitive, &reader, vertex_count) {
@@ -1084,6 +1095,17 @@ mod tests {
         let (positions, indices) = scene.entities[0].mesh.clone().into_custom();
         assert_eq!(positions.len(), 3);
         assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn triangles_view_round_trips_raw() {
+        use crate::{TriIndex, Triangle};
+        let scene = load_triangle();
+        let tris = scene.entities[0].mesh.triangles();
+        assert_eq!(tris, vec![Triangle::from_raw([0, 1, 2])]);
+        assert_eq!(tris[0].as_u32(), [0, 1, 2]);
+        assert_eq!(tris[0].index(2), TriIndex::from_raw(2));
+        assert_eq!(std::mem::size_of::<Triangle>(), 12);
     }
 
     #[test]

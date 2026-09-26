@@ -493,3 +493,40 @@ fn contained_boxes_and_face_crossing_capsules_are_not_missing_overlaps() {
         }
     }
 }
+
+/// Islands gear coordination across a structural rebuild: global joint refs
+/// are remapped into each engine's local joint space (`local_spec`), so the
+/// `coord_a - coord_b = const` coupling must hold after an added body
+/// forces both engines to rebuild with live gear refs.
+#[test]
+fn islands_structural_rebuild_keeps_gear_coordination() {
+    let mut e = Engine::new(SolverKind::Avbd, Vec3::ZERO);
+    let a = e.add_body(isolated(Vec3::ZERO, 0.0));
+    let b = e.add_body(isolated(Vec3::X, 1.0));
+    let c = e.add_body(isolated(Vec3::X * 3.0, 1.0));
+    let ja = slider(a, b, &mut e);
+    let jb = slider(a, c, &mut e);
+    e.add_joint(
+        a,
+        c,
+        JointKind::Gear {
+            joint_a: ja,
+            joint_b: jb,
+            ratio: -1.0,
+        },
+    )
+    .unwrap();
+    e.set_routing(RoutingKind::Islands);
+    // Structural edit forces a full rebuild with live gear refs on both sides.
+    e.add_body(isolated(Vec3::X * 20.0, 1.0));
+    e.get_body_mut(b).unwrap().velocity.x = 1.0;
+    for _ in 0..120 {
+        e.step(DT);
+    }
+    let sb = e.get_body(b).unwrap().position.x - 1.0;
+    let sc = e.get_body(c).unwrap().position.x - 3.0;
+    assert!(
+        (sb - sc).abs() < 0.15,
+        "gear coupling lost across rebuild: {sb} vs {sc}"
+    );
+}

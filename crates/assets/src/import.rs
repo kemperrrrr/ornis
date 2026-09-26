@@ -39,7 +39,14 @@ pub fn scene_from_gltf(loaded: &LoadedScene) -> Scene {
 }
 
 fn entity_from_gltf(entity: &ornis_gltf::LoadedEntity) -> EntityDesc {
+    // `into_custom` already round-trips the flat list through
+    // `Triangle::from_raw`/`as_u32`, so the soup stays triple-aligned by
+    // construction; the typed view below is the loud counterpart.
     let (positions, indices) = entity.mesh.clone().into_custom();
+    let _typed: Vec<ornis_gltf::Triangle> = indices
+        .chunks_exact(3)
+        .map(|c| ornis_gltf::Triangle::from_raw([c[0], c[1], c[2]]))
+        .collect();
     EntityDesc {
         name: entity.name.clone(),
         transform: TransformDesc {
@@ -53,16 +60,19 @@ fn entity_from_gltf(entity: &ornis_gltf::LoadedEntity) -> EntityDesc {
 }
 
 fn material_from_gltf(material: &ornis_gltf::LoadedMaterial) -> MaterialDesc {
+    // glTF roughness is already in [0, 1]; the clamp keeps malformed
+    // payloads loadable (same leniency as the `serde` impl).
+    let roughness = ornis_core::units::Clamped01::new(material.roughness);
     if material.is_metallic() {
         MaterialDesc::Metal {
             base_color: material.base_color,
-            roughness: material.roughness,
+            roughness,
             emission: material.emission,
         }
     } else {
         MaterialDesc::Dielectric {
             base_color: material.base_color,
-            roughness: material.roughness,
+            roughness,
             emission: material.emission,
         }
     }

@@ -309,13 +309,13 @@ mod tests {
                 scale: [1.0, 1.0, 1.0],
             },
             mesh: MeshDesc::Sphere {
-                radius: 1.0,
+                radius: ornis_core::units::PositiveF32::expect_valid(1.0),
                 segments: 16,
                 rings: 8,
             },
             material: MaterialDesc::Metal {
                 base_color: [0.9, 0.7, 0.1],
-                roughness: 0.2,
+                roughness: ornis_core::units::Clamped01::new(0.2),
                 emission: [0.0, 0.0, 0.0],
             },
         }

@@ -5,7 +5,7 @@ use ornis_physics::engine::{
     Manifold, NarrowShardPool, SatCache, box_manifold, ccd_impact_velocity, detect_collisions_into,
     find_angular_continuous_hit, kinematic_cast, obb_sat, remove_angular_approach, sweep_gap,
 };
-use ornis_physics::{PhysicsEngine, RigidBody, SequentialImpulseEngine, Shape};
+use ornis_physics::{PhysicsEngine, RigidBody, SequentialImpulseEngine, Shape, Triangle};
 
 /// Rotational kinetic energy oracle for the CCD energy-cap tests.
 fn rotational_energy(body: &RigidBody) -> f32 {
@@ -835,6 +835,7 @@ fn hull_cube_rests_on_floor() {
 #[test]
 fn ball_rests_on_trimesh_floor() {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let floor_tris = [Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 3, 1])];
     physics.add_body(RigidBody::new_trimesh(
         Vec3::ZERO,
         &[
@@ -843,7 +844,7 @@ fn ball_rests_on_trimesh_floor() {
             Vec3::new(5.0, 0.0, -5.0),
             Vec3::new(-5.0, 0.0, 5.0),
         ],
-        &[[0, 1, 2], [0, 3, 1]],
+        &floor_tris,
         0.0,
     ));
     let ball = physics.add_body(RigidBody::new_sphere(Vec3::new(0.4, 4.0, -0.3), 0.5, 1.0));
@@ -883,7 +884,7 @@ fn mesh_cube_rests_on_floor() {
         Vec3::new(-0.5, 0.5, 0.5),
         Vec3::new(0.5, 0.5, 0.5),
     ];
-    let idx = [
+    let raw = [
         [0, 3, 1],
         [0, 2, 3],
         [4, 5, 7],
@@ -897,6 +898,7 @@ fn mesh_cube_rests_on_floor() {
         [2, 7, 3],
         [2, 6, 7],
     ];
+    let idx: Vec<Triangle> = raw.iter().map(|t| Triangle::from_raw(*t)).collect();
     let body = physics.add_body(RigidBody::new_trimesh(
         Vec3::new(0.0, 2.0, 0.0),
         &v,
@@ -934,7 +936,7 @@ fn mesh_vs_mesh_reports_no_contact() {
         Vec3::new(-0.5, 0.5, 0.5),
         Vec3::new(0.5, 0.5, 0.5),
     ];
-    let idx = [
+    let raw = [
         [0, 3, 1],
         [0, 2, 3],
         [4, 5, 7],
@@ -948,6 +950,7 @@ fn mesh_vs_mesh_reports_no_contact() {
         [2, 7, 3],
         [2, 6, 7],
     ];
+    let idx: Vec<Triangle> = raw.iter().map(|t| Triangle::from_raw(*t)).collect();
     physics.add_body(RigidBody::new_trimesh(Vec3::ZERO, &v, &idx, 0.0));
     let top = physics.add_body(RigidBody::new_trimesh(
         Vec3::new(0.0, 0.4, 0.0),

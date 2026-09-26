@@ -525,6 +525,7 @@ impl System for RenderFlush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_assets::scene::ShadowCast;
     use ornis_core::Engine;
 
     fn assert_send_sync<T: Send + Sync>() {}
@@ -565,7 +566,7 @@ mod tests {
                 direction: [0.0, -1.0, 0.0],
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
-                shadow: false,
+                shadow: ShadowCast::Disabled,
             }],
             ambient_intensity: 1.0,
             exposure: 1.0,

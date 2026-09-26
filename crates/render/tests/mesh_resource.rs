@@ -13,6 +13,7 @@ mod common;
 use std::sync::Mutex;
 
 use ornis_assets::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_render::RenderWorld;
 use ornis_render::gpu_resources::{GpuDevice, GpuMesh, install_render_mesh};
 use ornis_render::mesh::create_sphere;
@@ -31,13 +32,13 @@ fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
                     scale: [1.0, 1.0, 1.0],
                 },
                 mesh: MeshDesc::Sphere {
-                    radius: 1.0,
+                    radius: PositiveF32::expect_valid(1.0),
                     segments,
                     rings,
                 },
                 material: MaterialDesc::Dielectric {
                     base_color: [0.8, 0.2, 0.2],
-                    roughness: 0.4,
+                    roughness: Clamped01::new(0.4),
                     emission: [0.0, 0.0, 0.0],
                 },
             })

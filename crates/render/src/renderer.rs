@@ -48,7 +48,7 @@ pub struct PerObjectGpu {
     /// Inverse-transpose model matrix (normal transform).
     pub normal_matrix: [[f32; 4]; 4],
     /// Index into the material buffer uploaded by `upload_materials`.
-    pub material_index: u32,
+    pub material_index: MaterialIdx,
     /// Aligns the record to 16-byte stride (padding: not shader-visible).
     #[wgsl(skip)]
     _padding: [u32; 3],
@@ -85,7 +85,7 @@ pub struct LightUploadStats {
     pub uploaded: u32,
     /// Scene lights beyond [`MAX_LIGHTS`] that were not uploaded.
     pub dropped_lights: u32,
-    /// Shadow requests (`shadow: true`) that received no map slot: 2D
+    /// Shadow requests (`shadow: ShadowCast::Enabled`) that received no map slot: 2D
     /// layers ([`SHADOW_LAYERS`]) for directional/spot lights and cube
     /// slots ([`POINT_SHADOW_CUBES`]) for point lights, including requests
     /// on dropped excess lights. These lights render unshadowed.
@@ -97,7 +97,7 @@ pub const SHADOW_LAYERS: usize = 4;
 /// Shadow-map resolution in pixels (square).
 ///
 /// Depth is `Depth32Float`; 1024² × 4 layers ≈ 16 MiB, allocated once
-/// at construction. Only lights with `shadow: true` render into a
+/// at construction. Only lights with `shadow: ShadowCast::Enabled` render into a
 /// layer; the rest of the array stays cleared and is never sampled
 /// (`params.w = -1.0` skips the lookup branchlessly).
 pub const SHADOW_SIZE: u32 = 1024;
@@ -273,10 +273,14 @@ pub(crate) struct LightingUniform {
 /// Index into the deduplicated material table ([`FrameUpload::materials`]).
 ///
 /// Newtype over `u32` so material indices never mix with texture handles
-/// or entity ids at the type level. GPU records ([`PerObjectGpu`],
-/// shader interfaces) keep the raw `u32` layout; convert with
-/// [`MaterialIdx::as_u32`] at upload.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// or entity ids at the type level. The DSL substitutes it to WGSL `u32`
+/// (like the CPU compiler erases `repr(transparent)` wrappers), so GPU
+/// records ([`PerObjectGpu`], shader interfaces) spell it directly.
+#[repr(transparent)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod,
+    bytemuck::Zeroable,
+)]
 pub struct MaterialIdx(u32);
 
 impl MaterialIdx {
@@ -902,8 +906,8 @@ fn build_lighting_uniform(
                     None => dir_shadow_vp(to_light),
                     Some((center, half)) => dir_shadow_vp_fitted(to_light, center, half),
                 };
-                let (layer, vp) = shadow_layer!(*shadow, vp);
-                if *shadow && layer < 0.0 {
+                let (layer, vp) = shadow_layer!(shadow.is_enabled(), vp);
+                if shadow.is_enabled() && layer < 0.0 {
                     dropped_shadows += 1;
                 }
                 if layer >= 0.0 {
@@ -926,7 +930,7 @@ fn build_lighting_uniform(
             } => {
                 // Cube slots live in a separate index space from the
                 // 2D layers (the evaluator picks the pool by kind).
-                let slot = if *shadow && (cube_count as usize) < POINT_SHADOW_CUBES {
+                let slot = if shadow.is_enabled() && (cube_count as usize) < POINT_SHADOW_CUBES {
                     let s = cube_count as usize;
                     cube_count += 1;
                     cube_lights.push((*position, *range, s));
@@ -934,7 +938,7 @@ fn build_lighting_uniform(
                 } else {
                     -1.0
                 };
-                if *shadow && slot < 0.0 {
+                if shadow.is_enabled() && slot < 0.0 {
                     dropped_shadows += 1;
                 }
                 GpuLight {
@@ -966,10 +970,10 @@ fn build_lighting_uniform(
                     .cos();
                 let axis = norm3(*direction);
                 let (layer, vp) = shadow_layer!(
-                    *shadow,
+                    shadow.is_enabled(),
                     spot_shadow_vp(*position, axis, *outer_angle, *range)
                 );
-                if *shadow && layer < 0.0 {
+                if shadow.is_enabled() && layer < 0.0 {
                     dropped_shadows += 1;
                 }
                 if layer >= 0.0 {
@@ -2691,7 +2695,7 @@ impl Renderer3D {
     /// `ambient_intensity = 1.0` and `exposure = [`exposure`](Self::exposure)
     /// (`1.0` by default — the exact no-op).
     ///
-    /// Shadowed lights (directional/spot with `shadow: true`) are
+    /// Shadowed lights (directional/spot with `shadow: ShadowCast::Enabled`) are
     /// assigned map layers `0..shadow_count` (`params.w`); their
     /// light-space clip matrices go both into [`GpuLight::shadow_vp`]
     /// (sampled by the evaluators) and into the per-layer VP uniform
@@ -2971,7 +2975,7 @@ impl Renderer3D {
             gpu_objects.push(PerObjectGpu {
                 model: model_arr,
                 normal_matrix: normal_arr,
-                material_index: inst.material_index.as_u32(),
+                material_index: inst.material_index,
                 _padding: [0; 3],
             });
         }
@@ -3599,6 +3603,7 @@ impl Renderer3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_assets::scene::ShadowCast;
 
     fn clip_of(vp: [[f32; 4]; 4], p: [f32; 3]) -> glam::Vec4 {
         glam::Mat4::from_cols_array_2d(&vp) * glam::Vec4::new(p[0], p[1], p[2], 1.0)
@@ -3748,8 +3753,53 @@ mod tests {
             direction,
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
-            shadow: shadow.is_enabled(),
+            shadow,
         }
+    }
+
+    #[test]
+    fn per_object_material_index_substitutes_to_u32() {
+        use crate::shaders::interface::{GbufferFragmentInput, GbufferVertexOutput};
+        // The DSL substitutes the transparent `MaterialIdx` newtype to WGSL
+        // `u32`: the declaration texts are unchanged from the raw-`u32` era.
+        assert!(
+            PerObjectGpu::WGSL_SOURCE.contains("material_index: u32"),
+            "{}",
+            PerObjectGpu::WGSL_SOURCE
+        );
+        assert_eq!(
+            PerObjectGpu::FIELD_NAMES,
+            &["model", "normal_matrix", "material_index"]
+        );
+        assert!(
+            GbufferVertexOutput::WGSL_SOURCE.contains("material_index: u32"),
+            "{}",
+            GbufferVertexOutput::WGSL_SOURCE
+        );
+        assert!(
+            GbufferFragmentInput::WGSL_SOURCE.contains("material_index: u32"),
+            "{}",
+            GbufferFragmentInput::WGSL_SOURCE
+        );
+        // CPU layout is unchanged: transparent wrapper, same offsets/size.
+        assert_eq!(std::mem::size_of::<MaterialIdx>(), 4);
+        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 144);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 128);
+        // The derived declaration validates with naga.
+        let mut module = naga::Module::default();
+        let handle = PerObjectGpu::naga_add_type(&mut module);
+        let naga::TypeInner::Struct { members, span } = &module.types[handle].inner
+        else {
+            panic!("PerObjectGpu must lower to a naga struct");
+        };
+        assert_eq!(*span, 144);
+        assert_eq!(members[2].offset, 128);
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("PerObjectGpu declaration must validate");
     }
 
     #[test]
@@ -3804,7 +3854,7 @@ mod tests {
                 intensity: 100.0,
                 color: [1.0, 1.0, 1.0],
                 range: 30.0,
-                shadow: true,
+                shadow: ShadowCast::Enabled,
             })
             .collect();
         let stats = count_light_drops(&points);
@@ -3896,7 +3946,7 @@ mod tests {
             direction: [1.0, 1.0, 1.0],
             intensity: 2.0,
             color: [0.5, 0.25, 0.125],
-            shadow: false,
+            shadow: ShadowCast::Disabled,
         }];
         let base = build_lighting_uniform([0.5, 0.25, 0.125], 1.0, 1.0, &lights, None);
         assert_eq!(base.uniform.ambient_color, [0.5, 0.25, 0.125, 1.0]);

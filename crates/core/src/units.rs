@@ -11,6 +11,8 @@
 //! checked constructors instead of silent defaults.
 
 use glam::{Quat, Vec3};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::de::Error as _;
 
 /// Duration in seconds at the frame boundary (canonical definition).
 ///
@@ -363,7 +365,7 @@ pub struct PositiveF32(f32);
 
 impl PositiveF32 {
     /// Checked constructor: `Some` only for finite values `> 0`.
-    pub fn try_new(value: f32) -> Option<Self> {
+    pub const fn try_new(value: f32) -> Option<Self> {
         if value.is_finite() && value > 0.0 {
             Some(Self(value))
         } else {
@@ -371,9 +373,41 @@ impl PositiveF32 {
         }
     }
 
+    /// Constant-payload constructor: the checked value, panicking on
+    /// non-positive or non-finite input. For literals validated by
+    /// inspection (tests, probes, default rigs) where `try_new(...).expect`
+    /// would drown the payload in noise.
+    ///
+    /// # Panics
+    /// Panics when `value` is not finite and `> 0`.
+    pub const fn expect_valid(value: f32) -> Self {
+        match Self::try_new(value) {
+            Some(valid) => valid,
+            None => panic!("PositiveF32 requires a finite value > 0"),
+        }
+    }
+
     /// Raw positive value.
     pub const fn get(self) -> f32 {
         self.0
+    }
+}
+
+impl Serialize for PositiveF32 {
+    /// Wire form is the raw `f32` (transport schemas stay unchanged).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PositiveF32 {
+    /// Reads the raw `f32` wire form; rejects non-positive or non-finite
+    /// input instead of building degenerate geometry.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = f32::deserialize(deserializer)?;
+        Self::try_new(value).ok_or_else(|| {
+            D::Error::custom(format!("PositiveF32 requires a finite value > 0, got {value}"))
+        })
     }
 }
 
@@ -429,6 +463,98 @@ impl Clamped01 {
 impl From<Clamped01> for f32 {
     fn from(value: Clamped01) -> Self {
         value.get()
+    }
+}
+
+impl Serialize for Clamped01 {
+    /// Wire form is the raw `f32` (transport schemas stay unchanged).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Clamped01 {
+    /// Reads the raw `f32` wire form, clamping into `[0, 1]` (same
+    /// leniency as [`Clamped01::new`], so legacy payloads keep loading).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(f32::deserialize(deserializer)?))
+    }
+}
+
+/// Rejected [`Ior`] input for the fallible path (must be finite and `>= 1.0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IorError;
+
+/// Index of refraction for transmissive surfaces (thin-walled glass).
+/// Values below `1.0` are unphysical (faster than light in vacuum).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ior(f32);
+
+impl Ior {
+    /// Crown-glass default (`1.5`); also the `serde` default for older
+    /// payloads without an `ior` field.
+    pub const DEFAULT: Self = Self(1.5);
+
+    /// Infallible constructor: values below `1.0` clamp up to `1.0`,
+    /// non-finite input falls back to [`Ior::DEFAULT`] (same policy as the
+    /// typed glass constructors).
+    pub const fn new(value: f32) -> Self {
+        if !value.is_finite() {
+            Self::DEFAULT
+        } else if value < 1.0 {
+            Self(1.0)
+        } else {
+            Self(value)
+        }
+    }
+
+    /// Checked constructor: `Some` only for finite values `>= 1.0`.
+    pub const fn try_new(value: f32) -> Option<Self> {
+        if value.is_finite() && value >= 1.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Raw index of refraction (`>= 1.0`).
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for Ior {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<Ior> for f32 {
+    fn from(value: Ior) -> Self {
+        value.get()
+    }
+}
+
+impl TryFrom<f32> for Ior {
+    type Error = IorError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::try_new(value).ok_or(IorError)
+    }
+}
+
+impl Serialize for Ior {
+    /// Wire form is the raw `f32` (transport schemas stay unchanged).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Ior {
+    /// Reads the raw `f32` wire form through [`Ior::new`] (same leniency
+    /// as the typed constructors, so legacy payloads keep loading).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(f32::deserialize(deserializer)?))
     }
 }
 
@@ -698,6 +824,19 @@ mod tests {
         assert!(PositiveF32::try_new(f32::NAN).is_none());
         assert!(PositiveF32::try_from(2.0).is_ok());
         assert!(PositiveF32::try_from(0.0).is_err());
+        assert_eq!(PositiveF32::expect_valid(2.0).get(), 2.0);
+    }
+
+    #[test]
+    fn ior_clamps_up_and_defaults() {
+        assert_eq!(Ior::new(1.33).get(), 1.33);
+        assert_eq!(Ior::new(0.5).get(), 1.0);
+        assert_eq!(Ior::new(f32::NAN).get(), 1.5);
+        assert_eq!(Ior::default().get(), 1.5);
+        assert!(Ior::try_new(1.0).is_some());
+        assert!(Ior::try_new(0.9).is_none());
+        assert!(Ior::try_from(2.0).is_ok());
+        assert!(Ior::try_from(0.5).is_err());
     }
 
     #[test]

@@ -44,3 +44,25 @@ fn instance_varying_wgsl_source() {
     assert!(src.contains("@location(0) world_position: vec3<f32>"));
     assert!(src.contains("@location(4) @interpolate(flat) material_index: u32"));
 }
+
+/// Transparent `u32` newtypes substitute to WGSL `u32` in interfaces too.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+struct MaterialIdx(u32);
+
+#[derive(Clone, Copy, Debug, WgslInterface)]
+#[wgsl(name = "IndexedVarying")]
+#[allow(dead_code)]
+struct IndexedVarying {
+    #[wgsl(builtin = "position")]
+    clip_position: [f32; 4],
+    #[wgsl(location = 4, interpolate = "flat")]
+    material_index: MaterialIdx,
+}
+
+#[test]
+fn transparent_u32_newtype_spells_u32() {
+    let src = IndexedVarying::WGSL_SOURCE;
+    assert!(src.contains("struct IndexedVarying"));
+    assert!(src.contains("@location(4) @interpolate(flat) material_index: u32"));
+}

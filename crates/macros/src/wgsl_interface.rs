@@ -19,7 +19,9 @@
 //!   `linear`, …); only together with `location`.
 //!
 //! Field types are limited to scalars and `[T; 2..=4]` (WGSL scalars and
-//! vectors) — interfaces never carry matrices or nested structs. Boolean
+//! vectors) — interfaces never carry matrices or nested structs. Transparent
+//! `u32` newtypes (`MaterialIdx`/`TextureHandle`) substitute to `u32`, like
+//! the CPU compiler erases `repr(transparent)` wrappers. Boolean
 //! interface fields are rejected because their interpolation/storage rules
 //! are not portable across shader stages.
 //!
@@ -97,6 +99,7 @@ fn interface_name(input: &DeriveInput) -> syn::Result<String> {
 }
 
 /// Map a mirror field type to WGSL: scalars and `[T; 2..=4]` only.
+/// Transparent `u32` newtypes substitute to `u32`.
 fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
     if let syn::Type::Path(tp) = ty {
         match tp
@@ -107,7 +110,7 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
             .as_deref()
         {
             Some("f32") => return Ok("f32".to_string()),
-            Some("u32") => return Ok("u32".to_string()),
+            Some("u32" | "MaterialIdx" | "TextureHandle") => return Ok("u32".to_string()),
             Some("i32") => return Ok("i32".to_string()),
             _ => {}
         }
@@ -145,7 +148,9 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
                 .as_deref()
             {
                 Some("f32") => return Ok(format!("vec{len}<f32>")),
-                Some("u32") => return Ok(format!("vec{len}<u32>")),
+                Some("u32" | "MaterialIdx" | "TextureHandle") => {
+                    return Ok(format!("vec{len}<u32>"));
+                }
                 Some("i32") => return Ok(format!("vec{len}<i32>")),
                 _ => {}
             }
@@ -153,7 +158,7 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
     }
     Err(syn::Error::new(
         ty.span(),
-        "WgslInterface: unsupported field type; use f32/u32/i32 or fixed-size arrays of them",
+        "WgslInterface: unsupported field type; use f32/u32/i32/MaterialIdx/TextureHandle or fixed-size arrays of them",
     ))
 }
 

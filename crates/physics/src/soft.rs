@@ -151,7 +151,8 @@ impl Particle {
     /// Legacy infallible wrapper over [`Particle::from_kind`]: non-positive
     /// input pins the particle instead of failing, so existing builders are
     /// bit-identical; new code should use [`Particle::try_new`] (checked
-    /// free particle) or [`Particle::pinned`] for anchors.
+    /// free particle) or [`Particle::pinned`] for anchors. Deprecated —
+    /// do not use in new code, kept only for compat.
     pub fn new(position: Vec3, mass: f32) -> Self {
         Self::from_kind(position, crate::invariants::MassKind::from_f32(mass))
     }
@@ -314,7 +315,8 @@ impl SoftBody {
         let dir = dir.normalize_or(Vec3::NEG_Y);
         let mut particles = Vec::with_capacity(count);
         for i in 0..count {
-            let mut p = Particle::new(origin + dir * (i as f32 * spacing), mass);
+            let pos = origin + dir * (i as f32 * spacing);
+            let mut p = Particle::try_new(pos, mass).unwrap_or_else(|| Particle::pinned(pos));
             if i == 0 {
                 p.pin();
             }
@@ -390,10 +392,9 @@ impl SoftBody {
         let mut particles = Vec::with_capacity(cols * rows);
         for r in 0..rows {
             for c in 0..cols {
-                let mut p = Particle::new(
-                    origin + Vec3::new(c as f32 * spacing, -(r as f32) * spacing, 0.0),
-                    mass,
-                );
+                let pos = origin + Vec3::new(c as f32 * spacing, -(r as f32) * spacing, 0.0);
+                let mut p =
+                    Particle::try_new(pos, mass).unwrap_or_else(|| Particle::pinned(pos));
                 if pinned(c, r) {
                     p.pin();
                 }
@@ -517,7 +518,10 @@ impl SoftBody {
         for z in 0..2 {
             for y in 0..2 {
                 for x in 0..2 {
-                    particles.push(Particle::new(corner(x, y, z), mass));
+                    let pos = corner(x, y, z);
+                    particles.push(
+                        Particle::try_new(pos, mass).unwrap_or_else(|| Particle::pinned(pos)),
+                    );
                 }
             }
         }

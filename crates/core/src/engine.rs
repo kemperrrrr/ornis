@@ -303,25 +303,30 @@ impl Stage {
 ///
 /// The variable-rate schedule runs once per frame after zero or more runs of
 /// the fixed-rate schedule. Physics and fixed gameplay systems belong in
-/// [`Engine::fixed_schedule_mut`]; render extraction and other once-per-frame
-/// consumers belong in [`Engine::schedule_mut`]. This is intentionally a
-/// small, backend-neutral host: domain algorithms remain registered by
-/// higher layers and the core runner does not choose a physics or render
-/// backend.
+/// the fixed plan; render extraction and other once-per-frame consumers
+/// belong in the variable plan. This is intentionally a small,
+/// backend-neutral host: domain algorithms remain registered by higher
+/// layers and the core runner does not choose a physics or render backend.
 ///
 /// Staged plans ([`Stage`]) run in `PreUpdate → Input → Gameplay(fixed) →
 /// PostFrame` order; `PreUpdate`/`Input` are new once-per-frame schedules
 /// ahead of the fixed loop, while `Gameplay`/`PostFrame` delegate to the
 /// pre-existing `fixed_schedule`/`schedule` storage.
 ///
-/// The `State` phantom tracks the build/run phase ([`Building`]/[`Running`],
-/// default [`Running`]): a bare `Engine` keeps meaning a running engine, so
-/// every existing host compiles unchanged. Registration-heavy setup may
-/// start from [`Engine::new_building`] (or the [`EngineBuilder`]) and seal
-/// the engine with [`Engine::build`] before entering the frame loop. The
-/// phase is documentation-grade: `schedule_mut` stays available on a running
-/// engine for late-registration hosts (see the item-7 report), while the
-/// builder path is the opt-in strict route.
+/// Typestate: the `State` phantom tracks the build/run phase
+/// ([`Building`]/[`Running`], default [`Running`]). The canonical
+/// construction route is [`EngineBuilder`] (or [`Engine::new_building`] +
+/// [`Engine::build`]): schedule/system registration (`schedule_mut`,
+/// `fixed_schedule_mut`, `stage_schedule_mut`, `add_stage_system`,
+/// `add_fixed_system`) belongs to the [`Building`] phase, and `build()`
+/// seals the engine before the frame loop starts. The same `*_mut`
+/// accessors stay available on [`Engine<Running>`] as a documented
+/// legacy escape hatch for late-registration hosts (the `install_*`
+/// family: `install_gameplay`, `install_orbit_camera`,
+/// `install_gpu_resources`, `install_unified_runtime` and siblings take
+/// `&mut Engine<Running>`), so every existing host compiles unchanged.
+/// New setup code should prefer the builder; the `Running` mutators must
+/// only run between frames, never while systems execute.
 pub struct Engine<State: Phase = Running> {
     world: World<State>,
     schedule: Schedule,
@@ -340,8 +345,12 @@ impl<State: Phase> Default for Engine<State> {
 }
 
 impl Engine<Running> {
-    /// Creates an empty engine with fresh [`World`], [`Time`], [`FixedTime`]
-    /// and [`InputState`] resources.
+    /// Creates an empty running engine with fresh [`World`], [`Time`],
+    /// [`FixedTime`] and [`InputState`] resources.
+    ///
+    /// This direct constructor stays for the late-registration hosts that
+    /// install systems after the engine exists (the `install_*` family);
+    /// new setup code should prefer the canonical [`EngineBuilder`].
     pub fn new() -> Self {
         Self::new_in_phase()
     }
@@ -350,7 +359,9 @@ impl Engine<Running> {
 impl Engine<Building> {
     /// Creates an empty build-phase engine for registration-heavy setup.
     ///
-    /// Register systems and resources, then seal it with [`Engine::build`]
+    /// This is the canonical construction route (together with
+    /// [`EngineBuilder`]): register systems and resources through the
+    /// `*_mut` accessors below, then seal the engine with [`Engine::build`]
     /// before entering the frame loop.
     pub fn new_building() -> Self {
         Self::new_in_phase()
@@ -374,47 +385,121 @@ impl Engine<Building> {
     }
 }
 
-/// `#[must_use]` builder for an [`Engine`] with a non-default fixed clock.
+/// Canonical `#[must_use]` builder for an [`Engine`].
 ///
-/// The builder itself is the phase discipline made ergonomic: configure the
-/// fixed step once, then `build()` hands back a sealed running engine, so
-/// the fixed configuration cannot be widened again by accident.
+/// The builder owns an [`Engine<Building>`] and is the strict construction
+/// route: configure the fixed clock, register systems and resources through
+/// the `*_mut` accessors, then `build()` seals a running engine. The fixed
+/// configuration is applied once at seal time, so it cannot be widened
+/// again by accident afterwards.
+///
+/// [`Engine<Running>`] keeps its own `schedule_mut`/`fixed_schedule_mut`/
+/// `stage_schedule_mut` accessors as a documented legacy escape hatch for
+/// the `install_*` family (50+ call sites taking `&mut Engine`), which is
+/// deliberately not migrated; new code should register on the builder.
 #[must_use]
-#[derive(Debug)]
 pub struct EngineBuilder {
+    inner: Engine<Building>,
     fixed_delta: Seconds,
     max_steps: FixedSteps,
 }
 
+impl std::fmt::Debug for EngineBuilder {
+    /// Shows the pending fixed-clock configuration (not the schedules).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineBuilder")
+            .field("fixed_delta", &self.fixed_delta)
+            .field("max_steps", &self.max_steps)
+            .finish_non_exhaustive()
+    }
+}
+
 impl EngineBuilder {
     /// Starts a builder with the default fixed clock
-    /// ([`DEFAULT_FIXED_DELTA_SECONDS`], [`DEFAULT_MAX_FIXED_STEPS_PER_FRAME`]).
+    /// ([`DEFAULT_FIXED_DELTA_SECONDS`], [`DEFAULT_MAX_FIXED_STEPS_PER_FRAME`])
+    /// and empty build-phase schedules.
     pub fn new() -> Self {
         Self {
+            inner: Engine::new_building(),
             fixed_delta: Seconds::new(DEFAULT_FIXED_DELTA_SECONDS),
             max_steps: FixedSteps::new(DEFAULT_MAX_FIXED_STEPS_PER_FRAME),
         }
     }
 
-    /// Sets the fixed simulation step.
+    /// Sets the fixed simulation step (applied to the sealed engine).
     pub fn fixed_delta(mut self, fixed_delta: Seconds) -> Self {
         self.fixed_delta = fixed_delta;
         self
     }
 
-    /// Sets the maximum fixed updates per frame (hitch protection cap).
+    /// Sets the maximum fixed updates per frame (applied to the sealed
+    /// engine; hitch protection cap).
     pub fn max_steps(mut self, max_steps: FixedSteps) -> Self {
         self.max_steps = max_steps;
         self
     }
 
-    /// Builds a sealed running engine with the configured fixed clock.
+    /// Returns the build-phase world for setup and resource registration.
+    ///
+    /// Canonical registration accessor: domain resources registered here
+    /// move into the sealed engine untouched.
+    pub fn world_mut(&mut self) -> &mut World<Building> {
+        self.inner.world_mut()
+    }
+
+    /// Returns the build-phase variable-rate schedule for registration.
+    ///
+    /// Canonical accessor for the [`Stage::PostFrame`] plan; runs once
+    /// after all fixed updates for the frame.
+    pub fn schedule_mut(&mut self) -> &mut Schedule {
+        self.inner.schedule_mut()
+    }
+
+    /// Returns the build-phase fixed-rate schedule for registration.
+    ///
+    /// Canonical accessor for the [`Stage::Gameplay`] plan; every system
+    /// runs once per fixed update selected by the accumulator.
+    pub fn fixed_schedule_mut(&mut self) -> &mut Schedule {
+        self.inner.fixed_schedule_mut()
+    }
+
+    /// Returns the build-phase schedule backing a named [`Stage`].
+    ///
+    /// Canonical staged registration route; execution order stays
+    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`.
+    pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
+        self.inner.stage_schedule_mut(stage)
+    }
+
+    /// Registers one system into a named [`Stage`] plan of the
+    /// build-phase engine.
+    pub fn add_stage_system<S: crate::System + 'static>(
+        &mut self,
+        stage: Stage,
+        system: S,
+    ) -> &mut Self {
+        self.inner.add_stage_system(stage, system);
+        self
+    }
+
+    /// Registers one fixed-rate system into the build-phase engine.
+    pub fn add_fixed_system<S: crate::System + 'static>(&mut self, system: S) -> &mut Self {
+        self.inner.add_fixed_system(system);
+        self
+    }
+
+    /// Seals the builder into a running engine with the configured fixed
+    /// clock (replaces the default [`FixedTime`] published at creation).
     pub fn build(self) -> Engine<Running> {
-        let mut engine = Engine::new();
-        let _ = engine
+        let Self {
+            mut inner,
+            fixed_delta,
+            max_steps,
+        } = self;
+        let _ = inner
             .world_mut()
-            .insert(FixedTime::new(self.fixed_delta.get(), self.max_steps.get()));
-        engine
+            .insert(FixedTime::new(fixed_delta.get(), max_steps.get()));
+        inner.build()
     }
 }
 
@@ -446,15 +531,6 @@ impl<State: Phase> Engine<State> {
         &self.world
     }
 
-    /// Returns the logical world for setup and resource registration.
-    ///
-    /// Domain resources should be registered between frame calls. Replacing
-    /// the `Time` or `FixedTime` resource is supported; the next frame
-    /// recreates a missing clock with its default configuration.
-    pub fn world_mut(&mut self) -> &mut World<State> {
-        &mut self.world
-    }
-
     /// Returns the variable-rate frame schedule for read-only inspection.
     ///
     /// This is the [`Stage::PostFrame`] storage: it runs once after all
@@ -463,32 +539,11 @@ impl<State: Phase> Engine<State> {
         &self.schedule
     }
 
-    /// Returns the variable-rate frame schedule for system registration.
-    ///
-    /// It runs once after all fixed updates for the frame. Render extraction
-    /// should normally be registered here so it observes final fixed-step
-    /// poses without being repeated for each substep. This is the
-    /// [`Stage::PostFrame`] plan; see [`Engine::stage_schedule_mut`] for the
-    /// named routing over the same storage.
-    pub fn schedule_mut(&mut self) -> &mut Schedule {
-        &mut self.schedule
-    }
-
     /// Returns the fixed-rate schedule for read-only inspection.
     ///
     /// This is the [`Stage::Gameplay`] storage.
     pub fn fixed_schedule(&self) -> &Schedule {
         &self.fixed_schedule
-    }
-
-    /// Returns the fixed-rate schedule for system registration.
-    ///
-    /// Every system in this schedule runs once per fixed update selected by
-    /// the accumulator. Systems should read [`FixedTime`] for the exact step
-    /// duration and declare all resource/lane accesses normally. This is the
-    /// [`Stage::Gameplay`] plan.
-    pub fn fixed_schedule_mut(&mut self) -> &mut Schedule {
-        &mut self.fixed_schedule
     }
 
     /// Returns the schedule backing a named [`Stage`] for inspection.
@@ -504,10 +559,42 @@ impl<State: Phase> Engine<State> {
             Stage::PostFrame => &self.schedule,
         }
     }
+}
 
-    /// Returns the schedule backing a named [`Stage`] for registration.
+impl Engine<Building> {
+    /// Returns the build-phase world for setup and resource registration.
     ///
-    /// Routing only; execution order stays
+    /// Canonical registration accessor: domain resources registered here
+    /// move into the sealed engine untouched. Replacing the `Time` or
+    /// `FixedTime` resource is supported; the next frame recreates a
+    /// missing clock with its default configuration.
+    pub fn world_mut(&mut self) -> &mut World<Building> {
+        &mut self.world
+    }
+
+    /// Returns the build-phase variable-rate schedule for registration.
+    ///
+    /// Canonical accessor for the [`Stage::PostFrame`] plan: it runs once
+    /// after all fixed updates for the frame. Render extraction should
+    /// normally be registered here so it observes final fixed-step poses
+    /// without being repeated for each substep.
+    pub fn schedule_mut(&mut self) -> &mut Schedule {
+        &mut self.schedule
+    }
+
+    /// Returns the build-phase fixed-rate schedule for registration.
+    ///
+    /// Canonical accessor for the [`Stage::Gameplay`] plan: every system
+    /// runs once per fixed update selected by the accumulator. Systems
+    /// should read [`FixedTime`] for the exact step duration and declare
+    /// all resource/lane accesses normally.
+    pub fn fixed_schedule_mut(&mut self) -> &mut Schedule {
+        &mut self.fixed_schedule
+    }
+
+    /// Returns the build-phase schedule backing a named [`Stage`].
+    ///
+    /// Canonical staged registration route; execution order stays
     /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`.
     pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
         match stage {
@@ -518,7 +605,8 @@ impl<State: Phase> Engine<State> {
         }
     }
 
-    /// Registers one system into a named [`Stage`] plan.
+    /// Registers one system into a named [`Stage`] plan of the
+    /// build-phase engine.
     ///
     /// Delegates to [`Engine::stage_schedule_mut`]; variable-rate gameplay
     /// ticks (`mutation_tick`) belong in [`Stage::PostFrame`] storage: the
@@ -536,13 +624,91 @@ impl<State: Phase> Engine<State> {
         self
     }
 
-    /// Registers one fixed-rate system and returns the engine for chaining.
+    /// Registers one fixed-rate system into the build-phase engine.
+    pub fn add_fixed_system<S: crate::System + 'static>(&mut self, system: S) -> &mut Self {
+        self.fixed_schedule.add_system(system);
+        self
+    }
+}
+
+impl Engine<Running> {
+    /// Returns the running world for operational setup between frames.
+    ///
+    /// Legacy-compatible accessor: the `install_*` family and scene
+    /// replacement (`GameWorld::replace_scene`) take `&mut Engine<Running>`
+    /// and register through this. Must only run between frames, never
+    /// while systems execute. New setup code should prefer
+    /// [`EngineBuilder::world_mut`]; replacing the `Time` or `FixedTime`
+    /// resource stays supported and the next frame recreates a missing
+    /// clock with its default configuration.
+    pub fn world_mut(&mut self) -> &mut World<Running> {
+        &mut self.world
+    }
+
+    /// Returns the variable-rate schedule for late system registration.
+    ///
+    /// Legacy escape hatch (the [`Stage::PostFrame`] plan): the `install_*`
+    /// family registers here after the engine already runs, so this
+    /// accessor deliberately stays on the running phase. New setup code
+    /// should prefer [`EngineBuilder::schedule_mut`]; calls must happen
+    /// between frames, never while systems execute.
+    pub fn schedule_mut(&mut self) -> &mut Schedule {
+        &mut self.schedule
+    }
+
+    /// Returns the fixed-rate schedule for late system registration.
+    ///
+    /// Legacy escape hatch (the [`Stage::Gameplay`] plan) for the
+    /// `install_*` family; new setup code should prefer
+    /// [`EngineBuilder::fixed_schedule_mut`]. Between frames only.
+    pub fn fixed_schedule_mut(&mut self) -> &mut Schedule {
+        &mut self.fixed_schedule
+    }
+
+    /// Returns the schedule backing a named [`Stage`] for late registration.
+    ///
+    /// Legacy escape hatch routing to the same storage as the build-phase
+    /// accessor; execution order stays
+    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`. New setup code
+    /// should prefer [`EngineBuilder::stage_schedule_mut`].
+    pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
+        match stage {
+            Stage::PreUpdate => &mut self.pre_update,
+            Stage::Input => &mut self.input,
+            Stage::Gameplay => &mut self.fixed_schedule,
+            Stage::PostFrame => &mut self.schedule,
+        }
+    }
+
+    /// Registers one system into a named [`Stage`] plan between frames.
+    ///
+    /// Legacy escape hatch delegating to
+    /// [`Engine::stage_schedule_mut`]; same `PostFrame`-for-variable-tick
+    /// routing as the build-phase variant. New setup code should prefer
+    /// [`EngineBuilder::add_stage_system`].
+    pub fn add_stage_system<S: crate::System + 'static>(
+        &mut self,
+        stage: Stage,
+        system: S,
+    ) -> &mut Self {
+        self.stage_schedule_mut(stage).add_system(system);
+        self
+    }
+
+    /// Registers one fixed-rate system between frames.
+    ///
+    /// Legacy escape hatch; new setup code should prefer
+    /// [`EngineBuilder::add_fixed_system`].
     pub fn add_fixed_system<S: crate::System + 'static>(&mut self, system: S) -> &mut Self {
         self.fixed_schedule.add_system(system);
         self
     }
 
     /// Runs one frame with `delta_seconds` and publishes [`Time`] first.
+    ///
+    /// Available only on [`Engine<Running>`]: a build-phase engine must be
+    /// sealed with [`Engine::build`] (or built via [`EngineBuilder`])
+    /// before entering the frame loop.
     ///
     /// Staged order is `PreUpdate → Input → Gameplay(fixed × N) → PostFrame`.
     /// The fixed accumulator is advanced before the staged schedules run so
@@ -1009,6 +1175,23 @@ mod tests {
         let mut running = building.build();
         running.run_frame(FixedTime::default().delta_seconds());
         assert_eq!(running.schedule().len(), 1);
+    }
+
+    #[test]
+    fn builder_registers_systems_then_seals() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut builder = EngineBuilder::new();
+        builder.add_stage_system(Stage::PostFrame, CaptureTime(seen.clone()));
+        builder
+            .fixed_schedule_mut()
+            .add_system(CaptureFixedTime(Arc::new(Mutex::new(Vec::new()))));
+        let _ = builder.world_mut().insert(7_u32);
+        let mut engine = builder.build();
+        engine.run_frame(FixedTime::default().delta_seconds());
+        let seen = seen.lock().expect("capture lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].frame(), 1);
+        assert_eq!(engine.world().resources().get::<u32>(), Some(&7));
     }
 
     #[test]

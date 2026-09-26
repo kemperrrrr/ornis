@@ -578,6 +578,65 @@ impl AvbdEngine {
         };
     }
 
+    /// Local-space body read: `h` is an AVBD-table index, not a global handle.
+    /// Thin reinterpretation over [`PhysicsEngine::get_body`]; same lookup.
+    pub(crate) fn get_body_local(
+        &self,
+        h: crate::body::LocalAvbdBody,
+    ) -> Option<&RigidBody> {
+        self.bodies.get(h.index())
+    }
+
+    /// Local-space body write: `h` is an AVBD-table index, not a global handle.
+    pub(crate) fn get_body_mut_local(
+        &mut self,
+        h: crate::body::LocalAvbdBody,
+    ) -> Option<&mut RigidBody> {
+        self.bodies.get_mut(h.index())
+    }
+
+    /// Local-space wake: `h` is an AVBD-table index, not a global handle.
+    pub(crate) fn wake_body_local(&mut self, h: crate::body::LocalAvbdBody) {
+        if h.index() < self.bodies.len() {
+            self.wake_body(h.index());
+        }
+    }
+
+    /// Local-space baseline restore: `h` is an AVBD-table index.
+    pub(crate) fn restore_body_baseline_local(
+        &mut self,
+        h: crate::body::LocalAvbdBody,
+        pose: crate::broadphase::PrevPose,
+    ) {
+        self.restore_body_baseline(crate::body::BodyHandle::from(h), pose);
+    }
+
+    /// Local-space joint restore: `h` is an AVBD-table index.
+    pub(crate) fn restore_joint_reference_local(
+        &mut self,
+        h: crate::joint::LocalAvbdJoint,
+        r: JointReference,
+    ) {
+        self.restore_joint_reference(JointHandle::from(h), r);
+    }
+
+    /// Local-space joint creation: inputs and output are AVBD-table indices.
+    /// Returns the local joint handle (a lossless `u32` reinterpretation of
+    /// the engine's dense [`JointHandle`]).
+    pub(crate) fn add_joint_local(
+        &mut self,
+        a: crate::body::LocalAvbdBody,
+        b: crate::body::LocalAvbdBody,
+        spec: JointKind,
+    ) -> Result<crate::joint::LocalAvbdJoint, JointError> {
+        self.add_joint(
+            crate::body::BodyHandle::from(a),
+            crate::body::BodyHandle::from(b),
+            spec,
+        )
+        .map(crate::joint::LocalAvbdJoint::from)
+    }
+
     /// Dense removal also removes dependent gears before remapping survivors.
     fn retain_joints(&mut self, removed: Vec<bool>) {
         let kinds: Vec<_> = self.joints.iter().map(|j| j.spec).collect();

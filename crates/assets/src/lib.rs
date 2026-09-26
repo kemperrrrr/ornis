@@ -20,5 +20,8 @@ pub mod server;
 
 pub use collider::{ColliderDesc, collider_for};
 pub use import::scene_from_gltf;
-pub use scene::{CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+pub use scene::{
+    CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc, TriIndex,
+    Triangle,
+};
 pub use server::{AssetEvent, AssetId, AssetKind, AssetServer, SceneLoadError, parse_scene_ron};

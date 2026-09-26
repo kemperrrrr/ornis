@@ -1,12 +1,16 @@
 //! Phantom phases and scalar newtypes for the frame boundary.
 //!
 //! [`Building`] and [`Running`] are zero-sized markers carried as phantom
-//! parameters by [`World`](crate::World), [`Engine`](crate::Engine) and
-//! `GameWorld`: schedule/system registration belongs to the building phase,
-//! the frame loop owns mutation once built. The parameters default to the
-//! running role, so existing `World`/`Engine` paths keep compiling; the
-//! phased constructors (`new_building` + `build`) are the opt-in strict
-//! route. Scalar newtypes ([`Seconds`], [`Frame`], [`Tick`],
+//! parameters by [`World`](crate::World) and [`Engine`](crate::Engine),
+//! with the scene [`Replica`]/[`Authoritative`] role carried the same way
+//! by `GameWorld`: schedule/system registration belongs to the building
+//! phase (canonical route: [`EngineBuilder`](crate::EngineBuilder) or
+//! `new_building` + `build`), the frame loop (`run_frame`, on [`Running`]
+//! only) owns mutation once built. The parameters default to the
+//! running/authoritative role, so existing `World`/`Engine`/`GameWorld`
+//! paths keep compiling; `Engine<Running>` keeps its `*_mut` accessors as
+//! a documented legacy escape hatch for the late-registration `install_*`
+//! family. Scalar newtypes ([`Seconds`], [`Frame`], [`Tick`],
 //! [`FixedSteps`], [`SceneVersion`]) replace bare `f32`/`u64`/`u32` at the
 //! boundary without changing serialization: each one encodes as the plain
 //! underlying number, keeping serde JSON and WASM snapshots stable.

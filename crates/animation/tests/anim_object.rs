@@ -13,6 +13,7 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use glam::{Quat, Vec3};
 use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, Key, KeyTrack};
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{Engine, Entity, Resources, Stage, System, SystemAccess};
 use ornis_gameplay::Position;
 use ornis_render::{ExtractionStats, extract_render_data_with_stats};
@@ -103,7 +104,7 @@ fn spawn_sphere(engine: &mut Engine) -> Entity {
     store.insert(
         entity,
         MeshDesc::Sphere {
-            radius: 1.0,
+            radius: PositiveF32::expect_valid(1.0),
             segments: 16,
             rings: 8,
         },
@@ -112,7 +113,7 @@ fn spawn_sphere(engine: &mut Engine) -> Entity {
         entity,
         MaterialDesc::Dielectric {
             base_color: [0.5, 0.5, 0.5],
-            roughness: 0.9,
+            roughness: Clamped01::new(0.9),
             emission: [0.0, 0.0, 0.0],
         },
     );

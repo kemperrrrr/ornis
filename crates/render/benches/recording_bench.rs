@@ -12,6 +12,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::render_backend::RenderContext;
+use ornis_assets::scene::ShadowCast;
 use ornis_render::{
     Bloom, InstanceData, MaterialIdx, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique,
 };
@@ -96,7 +97,7 @@ fn bench_recording(c: &mut Criterion) {
             direction: [0.3, -1.0, 0.5],
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
-            shadow: false,
+            shadow: ShadowCast::Disabled,
         }],
     );
     let view = glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);

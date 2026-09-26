@@ -1047,7 +1047,7 @@ fn default_transform() -> TransformDesc {
 
 fn default_mesh() -> MeshDesc {
     MeshDesc::Sphere {
-        radius: 1.0,
+        radius: PositiveF32::expect_valid(1.0),
         segments: 32,
         rings: 24,
     }
@@ -1056,7 +1056,7 @@ fn default_mesh() -> MeshDesc {
 fn default_material() -> MaterialDesc {
     MaterialDesc::Dielectric {
         base_color: [0.5, 0.5, 0.5],
-        roughness: 0.5,
+        roughness: Clamped01::new(0.5),
         emission: [0.0, 0.0, 0.0],
     }
 }
@@ -1244,6 +1244,7 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
+    use ornis_core::units::{Clamped01, PositiveF32};
 
     fn world_and_events() -> (EditorSession, Sender<GameEvent>, Receiver<GameEvent>) {
         let (ev_tx, ev_rx) = unbounded();
@@ -1590,7 +1591,7 @@ mod tests {
                 scale: [1.0, 1.0, 1.0],
             },
             MeshDesc::Box {
-                size: [2.0, 4.0, 6.0],
+                size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
             },
             default_material(),
         );
@@ -2122,13 +2123,13 @@ mod tests {
                 scale: [2.0, 2.0, 2.0],
             },
             MeshDesc::Sphere {
-                radius: 0.5,
+                radius: PositiveF32::expect_valid(0.5),
                 segments: 8,
                 rings: 4,
             },
             MaterialDesc::Metal {
                 base_color: [1.0, 0.0, 0.0],
-                roughness: 0.3,
+                roughness: Clamped01::new(0.3),
                 emission: [0.0, 0.0, 0.0],
             },
         );

@@ -4,7 +4,8 @@
 
 use glam::Vec3;
 use ornis_physics::{
-    BodyHandle, Engine, JointKind, PhysicsEngine, RigidBody, RoutingKind, SolverKind,
+    BodyHandle, Engine, JointHandle, JointKind, LocalAvbdBody, LocalAvbdJoint, LocalSiBody,
+    LocalSiJoint, PhysicsEngine, RigidBody, RoutingKind, SolverKind,
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -165,4 +166,54 @@ fn split_rerun_deterministic() {
     };
     let (a, b) = (run(), run());
     assert_eq!(a, b, "Islands routing must rerun bit-identical");
+}
+
+/// Handle-space separation: local indices round-trip losslessly inside
+/// their own space and reinterpret into the same `u32` globally. A local
+/// AVBD index must never compare equal to (or be usable as) an SI index —
+/// the types simply do not convert.
+#[test]
+fn local_handle_spaces_round_trip_losslessly() {
+    let avbd = LocalAvbdBody::from_raw(3);
+    assert_eq!(avbd.index(), 3);
+    assert_eq!(avbd.as_u32(), 3);
+    assert_eq!(BodyHandle::from(avbd).as_u32(), 3);
+    assert_eq!(LocalAvbdBody::from(BodyHandle::from_raw(3)), avbd);
+
+    let si = LocalSiBody::from(7usize);
+    assert_eq!(usize::from(si), 7);
+    assert_eq!(BodyHandle::from(si).index(), 7);
+    assert_eq!(LocalSiBody::from(BodyHandle::from(si)), si);
+
+    let aj = LocalAvbdJoint::from_raw(1);
+    assert_eq!(JointHandle::from(aj).as_u32(), 1);
+    assert_eq!(LocalAvbdJoint::from(JointHandle::from(aj)), aj);
+    let sj = LocalSiJoint::from(2u32);
+    assert_eq!(u32::from(sj), 2);
+    assert_eq!(LocalSiJoint::from(JointHandle::from(sj)), sj);
+}
+
+/// Global handles are registry slots: structural rebuilds under Islands
+/// (migration + an added body) keep every pre-existing global resolving
+/// to the same body, and the static floor never moves.
+#[test]
+fn global_handles_survive_islands_rebuilds() {
+    let mut engine = Engine::new(SolverKind::Avbd, GRAVITY);
+    let (f, a, b) = build_scene(&mut engine);
+    engine.set_routing(RoutingKind::Islands);
+    for _ in 0..120 {
+        engine.step(DT);
+    }
+    // Structural edit forces a full rebuild with live locals on both sides.
+    let c = engine.add_body(box_at(5.0, 0.6));
+    for _ in 0..240 {
+        engine.step(DT);
+    }
+    for h in [f, a, b, c] {
+        let body = engine.get_body(h).unwrap_or_else(|| panic!("global {h:?} lost"));
+        assert!(body.position.is_finite(), "global {h:?} went non-finite");
+    }
+    let floor = engine.get_body(f).unwrap();
+    assert_eq!(floor.position, Vec3::new(0.0, -0.5, 0.0));
+    assert!(engine.split_metrics().is_some());
 }

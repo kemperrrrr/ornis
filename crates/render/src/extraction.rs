@@ -26,7 +26,8 @@ use crate::camera::Frustum;
 use crate::mesh::Vertex;
 use crate::mesh_upload::custom_vertices_cached;
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
-use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
+use ornis_core::units::PositiveF32;
 
 /// CPU-side render data read from the ECS lanes for one frame (X4
 /// Extract-free: a direct-read payload, not a scheduled snapshot —
@@ -138,13 +139,13 @@ const LEGACY_KEY_LIGHT: LightDesc = LightDesc::Directional {
     direction: [1.0, 1.0, 1.0],
     intensity: 0.6,
     color: [1.0, 1.0, 1.0],
-    shadow: false,
+    shadow: ShadowCast::Disabled,
 };
 const LEGACY_FILL_LIGHT: LightDesc = LightDesc::Directional {
     direction: [-0.5, 0.5, -0.5],
     intensity: 0.3,
     color: [0.8, 0.8, 1.0],
-    shadow: false,
+    shadow: ShadowCast::Disabled,
 };
 
 impl Default for RenderLights {
@@ -462,18 +463,20 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             } => {
                 extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
                 extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
-                Vec3::from_array(transform.scale) * *radius
+                Vec3::from_array(transform.scale) * radius.get()
             }
-            MeshDesc::Box { size } => Vec3::from_array(transform.scale) * Vec3::from_array(*size),
+            MeshDesc::Box { size } => {
+                Vec3::from_array(transform.scale) * Vec3::from_array(size.map(PositiveF32::get))
+            }
             MeshDesc::Plane { size } => Vec3::new(
-                transform.scale[0] * size[0],
+                transform.scale[0] * size[0].get(),
                 transform.scale[1],
-                transform.scale[2] * size[1],
+                transform.scale[2] * size[1].get(),
             ),
             MeshDesc::Cylinder { radius, height, .. } => Vec3::new(
-                transform.scale[0] * *radius,
-                transform.scale[1] * *height,
-                transform.scale[2] * *radius,
+                transform.scale[0] * radius.get(),
+                transform.scale[1] * height.get(),
+                transform.scale[2] * radius.get(),
             ),
             // `as_custom` above handles every `Custom`; this arm is only
             // the match-exhaustiveness fallback (never a stub).
@@ -657,7 +660,7 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut output = OpenPBRMaterial::dielectric();
             output.base.color_rgb(*base_color);
-            output.specular.roughness(*roughness);
+            output.specular.roughness(roughness.get());
             apply_emission(&mut output, *emission);
             output
         }
@@ -668,7 +671,7 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut output = OpenPBRMaterial::metal();
             output.base.color_rgb(*base_color);
-            output.specular.roughness(*roughness);
+            output.specular.roughness(roughness.get());
             apply_emission(&mut output, *emission);
             output
         }
@@ -680,8 +683,8 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut output = OpenPBRMaterial::coat();
             output.base.color_rgb(*base_color);
-            output.coat.weight(*coat_weight);
-            output.coat.roughness(*coat_roughness);
+            output.coat.weight(coat_weight.get());
+            output.coat.roughness(coat_roughness.get());
             apply_emission(&mut output, *emission);
             output
         }
@@ -691,7 +694,7 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut output = OpenPBRMaterial::dielectric();
             output.base.color_rgb(*base_color);
-            output.base.diffuse_roughness(*roughness);
+            output.base.diffuse_roughness(roughness.get());
             // Matte is diffuse-only: no specular lobe.
             output.specular.weight(0.0);
             output
@@ -703,8 +706,8 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut output = OpenPBRMaterial::glass();
             output.transmission.color_rgb(*base_color);
-            output.specular.roughness(*roughness);
-            output.specular.ior(*ior);
+            output.specular.roughness(roughness.get());
+            output.specular.ior(ior.get());
             output
         }
     }
@@ -794,6 +797,7 @@ fn skinned_tangent(normal: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::units::{Clamped01, Ior};
 
     #[test]
     fn custom_quad_routes_per_entity_and_bad_soups_skip_without_stub() {
@@ -819,13 +823,13 @@ mod tests {
                 handle,
                 MaterialDesc::Dielectric {
                     base_color: [0.8, 0.2, 0.2],
-                    roughness: 0.4,
+                    roughness: Clamped01::new(0.4),
                     emission: [0.0, 0.0, 0.0],
                 },
             );
         };
         add(MeshDesc::Sphere {
-            radius: 1.0,
+            radius: PositiveF32::expect_valid(1.0),
             segments: 16,
             rings: 12,
         });
@@ -875,12 +879,12 @@ mod tests {
         // second, and every instance index points at its own entry.
         let shared = MaterialDesc::Metal {
             base_color: [0.9, 0.7, 0.1],
-            roughness: 0.2,
+            roughness: Clamped01::new(0.2),
             emission: [0.0, 0.0, 0.0],
         };
         let other = MaterialDesc::Matte {
             base_color: [0.2, 0.2, 0.2],
-            roughness: 0.8,
+            roughness: Clamped01::new(0.8),
         };
         let mut engine = Engine::new();
         for (i, material) in [shared.clone(), shared.clone(), shared.clone(), other]
@@ -900,7 +904,7 @@ mod tests {
             store.insert(
                 handle,
                 MeshDesc::Sphere {
-                    radius: 1.0,
+                    radius: PositiveF32::expect_valid(1.0),
                     segments: 16,
                     rings: 12,
                 },
@@ -932,7 +936,7 @@ mod tests {
         // Emission `[2, 1, 0.5]`: peak 2 nits, normalized chromaticity.
         let gpu = material_to_gpu(&MaterialDesc::Dielectric {
             base_color: [0.5, 0.5, 0.5],
-            roughness: 0.9,
+            roughness: Clamped01::new(0.9),
             emission: [2.0, 1.0, 0.5],
         });
         assert_eq!(gpu.emission.params[0], 2.0);
@@ -942,14 +946,14 @@ mod tests {
         // Black emission leaves the preset default (luminance 0 = off).
         let off = material_to_gpu(&MaterialDesc::Metal {
             base_color: [0.9, 0.7, 0.1],
-            roughness: 0.2,
+            roughness: Clamped01::new(0.2),
             emission: [0.0, 0.0, 0.0],
         });
         assert_eq!(off.emission.params[0], 0.0);
         // Matte: diffuse albedo + roughness, no specular lobe.
         let matte = material_to_gpu(&MaterialDesc::Matte {
             base_color: [0.2, 0.4, 0.6],
-            roughness: 0.7,
+            roughness: Clamped01::new(0.7),
         });
         assert_eq!(matte.base.color[0], 0.2);
         assert_eq!(matte.base.color[1], 0.4);
@@ -965,8 +969,8 @@ mod tests {
         // the preset keeps full transmission over thin walls.
         let gpu = material_to_gpu(&MaterialDesc::Glass {
             base_color: [0.9, 0.95, 1.0],
-            roughness: 0.05,
-            ior: 1.33,
+            roughness: Clamped01::new(0.05),
+            ior: Ior::new(1.33),
         });
         assert_eq!(gpu.transmission.color[0], 0.9);
         assert_eq!(gpu.transmission.color[1], 0.95);
@@ -982,8 +986,8 @@ mod tests {
         // `FrameUpload::materials` entry, every instance pointing at it.
         let shared = MaterialDesc::Glass {
             base_color: [0.9, 0.95, 1.0],
-            roughness: 0.05,
-            ior: 1.5,
+            roughness: Clamped01::new(0.05),
+            ior: Ior::new(1.5),
         };
         let mut engine = Engine::new();
         for i in 0..3 {
@@ -1000,7 +1004,7 @@ mod tests {
             store.insert(
                 handle,
                 MeshDesc::Sphere {
-                    radius: 1.0,
+                    radius: PositiveF32::expect_valid(1.0),
                     segments: 16,
                     rings: 12,
                 },
@@ -1028,7 +1032,7 @@ mod tests {
         // dedup yields one entry.
         let material = || MaterialDesc::Dielectric {
             base_color: [0.8, 0.2, 0.2],
-            roughness: 0.4,
+            roughness: Clamped01::new(0.4),
             emission: [0.0, 0.0, 0.0],
         };
         let mut engine = Engine::new();
@@ -1047,17 +1051,17 @@ mod tests {
             store.insert(handle, material());
         };
         add(MeshDesc::Sphere {
-            radius: 1.0,
+            radius: PositiveF32::expect_valid(1.0),
             segments: 48,
             rings: 32,
         });
         add(MeshDesc::Box {
-            size: [2.0, 4.0, 6.0],
+            size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
         });
-        add(MeshDesc::Plane { size: [3.0, 5.0] });
+        add(MeshDesc::Plane { size: [PositiveF32::expect_valid(3.0), PositiveF32::expect_valid(5.0)] });
         add(MeshDesc::Cylinder {
-            radius: 2.0,
-            height: 7.0,
+            radius: PositiveF32::expect_valid(2.0),
+            height: PositiveF32::expect_valid(7.0),
             radial_segments: 64,
         });
         let quad = MeshDesc::Custom {
@@ -1164,14 +1168,14 @@ mod tests {
     fn test_material() -> MaterialDesc {
         MaterialDesc::Dielectric {
             base_color: [0.8, 0.2, 0.2],
-            roughness: 0.4,
+            roughness: Clamped01::new(0.4),
             emission: [0.0, 0.0, 0.0],
         }
     }
 
     fn test_sphere() -> MeshDesc {
         MeshDesc::Sphere {
-            radius: 1.0,
+            radius: PositiveF32::expect_valid(1.0),
             segments: 16,
             rings: 12,
         }
@@ -1254,12 +1258,12 @@ mod tests {
         for mesh in [
             test_sphere(),
             MeshDesc::Box {
-                size: [2.0, 4.0, 6.0],
+                size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
             },
-            MeshDesc::Plane { size: [3.0, 5.0] },
+            MeshDesc::Plane { size: [PositiveF32::expect_valid(3.0), PositiveF32::expect_valid(5.0)] },
             MeshDesc::Cylinder {
-                radius: 2.0,
-                height: 7.0,
+                radius: PositiveF32::expect_valid(2.0),
+                height: PositiveF32::expect_valid(7.0),
                 radial_segments: 12,
             },
             test_quad(),
@@ -1283,7 +1287,7 @@ mod tests {
         let mut engine = Engine::new();
         let other = MaterialDesc::Matte {
             base_color: [0.2, 0.2, 0.2],
-            roughness: 0.8,
+            roughness: Clamped01::new(0.8),
         };
         for material in [test_material(), test_material(), test_material(), other] {
             push_test_entity(&mut engine, Some(test_sphere()), Some(material));
@@ -1329,13 +1333,13 @@ mod tests {
                     direction: [1.0, 1.0, 1.0],
                     intensity: key,
                     color: [1.0, 1.0, 1.0],
-                    shadow: false,
+                    shadow: ShadowCast::Disabled,
                 },
                 LightDesc::Directional {
                     direction: [-0.5, 0.5, -0.5],
                     intensity: fill,
                     color: [0.8, 0.8, 1.0],
-                    shadow: false,
+                    shadow: ShadowCast::Disabled,
                 },
             ] if *key == 0.6 && *fill == 0.3
         ));

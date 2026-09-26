@@ -48,6 +48,15 @@ impl From<ResolvedJoint> for JointReference {
 }
 
 /// A joint in a registry's handle space, including its original rest state.
+///
+/// Handle-space policy: at the [`crate::Engine`] boundary this is the
+/// GLOBAL registry space ([`BodyHandle`](crate::body::BodyHandle) /
+/// [`JointHandle`](crate::joint::JointHandle)); inside an engine's
+/// `joint_snapshots` the same struct carries that engine's LOCAL table
+/// indices. The split registry (`split.rs`) converts between the two with
+/// the explicit [`LocalAvbdBody`](crate::body::LocalAvbdBody) /
+/// [`LocalSiBody`](crate::body::LocalSiBody) (and joint) newtypes —
+/// never by reinterpreting a bare `u32`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct JointSnapshot {
     pub a: BodyHandle,
@@ -126,6 +135,10 @@ pub fn gear_coordinate(raw: f32, kind: CoordKind, previous: Option<(f32, f32)>) 
 }
 
 /// Completed-step contact baselines, transported separately from event queues.
+///
+/// Same handle-space policy as [`JointSnapshot`]: global at the
+/// [`crate::Engine`] boundary, engine-local inside an engine's
+/// `event_state`. Remapped explicitly at the split boundary.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EventState {
     pub contacts: std::collections::BTreeSet<(BodyHandle, BodyHandle)>,

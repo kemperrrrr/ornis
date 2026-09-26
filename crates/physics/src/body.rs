@@ -64,6 +64,129 @@ impl From<BodyHandle> for usize {
     }
 }
 
+/// Local body index inside an [`AvbdEngine`](crate::avbd::AvbdEngine).
+///
+/// Same `u32` representation as [`BodyHandle`], but a different handle
+/// space: the AVBD engine's dense table, not the [`Engine`](crate::Engine)
+/// global registry. Convert explicitly at the split-registry boundary
+/// (`split.rs`); the conversion is a lossless `u32` reinterpretation, so
+/// simulation behavior is bit-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalAvbdBody(u32);
+
+impl LocalAvbdBody {
+    /// Wraps a raw `u32` local body index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` local body index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Local body index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for LocalAvbdBody {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for LocalAvbdBody {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<LocalAvbdBody> for u32 {
+    fn from(h: LocalAvbdBody) -> Self {
+        h.0
+    }
+}
+
+impl From<LocalAvbdBody> for usize {
+    fn from(h: LocalAvbdBody) -> Self {
+        h.0 as usize
+    }
+}
+
+impl From<LocalAvbdBody> for BodyHandle {
+    fn from(h: LocalAvbdBody) -> Self {
+        Self::from_raw(h.0)
+    }
+}
+
+impl From<BodyHandle> for LocalAvbdBody {
+    fn from(h: BodyHandle) -> Self {
+        Self::from_raw(h.as_u32())
+    }
+}
+
+/// Local body index inside a [`SequentialImpulseEngine`](crate::engine::SequentialImpulseEngine).
+///
+/// Same contract as [`LocalAvbdBody`]: the SI engine's dense table, not
+/// the global registry. Explicit conversions only, at the split boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalSiBody(u32);
+
+impl LocalSiBody {
+    /// Wraps a raw `u32` local body index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` local body index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Local body index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for LocalSiBody {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for LocalSiBody {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<LocalSiBody> for u32 {
+    fn from(h: LocalSiBody) -> Self {
+        h.0
+    }
+}
+
+impl From<LocalSiBody> for usize {
+    fn from(h: LocalSiBody) -> Self {
+        h.0 as usize
+    }
+}
+
+impl From<LocalSiBody> for BodyHandle {
+    fn from(h: LocalSiBody) -> Self {
+        Self::from_raw(h.0)
+    }
+}
+
+impl From<BodyHandle> for LocalSiBody {
+    fn from(h: BodyHandle) -> Self {
+        Self::from_raw(h.as_u32())
+    }
+}
+
 /// How a body participates in simulation.
 ///
 /// Determines which solver terms apply: static bodies have zero inverse mass
@@ -435,7 +558,13 @@ impl RigidBody {
     ///
     /// Legacy infallible wrapper over [`RigidBody::try_new_convex_hull`]:
     /// non-finite vertices fall back to an empty hull so existing scenes
-    /// are bit-identical; new code should use the `try_` variant.
+    /// are bit-identical. Deprecated — do not use in new code, kept only
+    /// for compat; new code should use the `try_` variant.
+    ///
+    /// # Errors
+    ///
+    /// This wrapper never fails (see [`RigidBody::try_new_convex_hull`]
+    /// for the fallible canonical path and its errors).
     pub fn new_convex_hull(position: Vec3, vertices: Vec<Vec3>, mass: f32) -> Self {
         Self::try_new_convex_hull(position, vertices, mass).unwrap_or_else(|_| {
             Self::build(
@@ -478,8 +607,14 @@ impl RigidBody {
     ///
     /// Legacy infallible wrapper over [`RigidBody::try_new_heightfield`]:
     /// an invalid grid description is kept verbatim (queries degrade to
-    /// separation/`0.0`) so existing scenes are bit-identical; new code
-    /// should use the `try_` variant.
+    /// separation/`0.0`) so existing scenes are bit-identical. Deprecated —
+    /// do not use in new code, kept only for compat; new code should use
+    /// the `try_` variant.
+    ///
+    /// # Errors
+    ///
+    /// This wrapper never fails (see [`RigidBody::try_new_heightfield`]
+    /// for the fallible canonical path and its errors).
     pub fn new_heightfield(
         position: Vec3,
         heights: Vec<f32>,
@@ -488,18 +623,21 @@ impl RigidBody {
         cell: f32,
         mass: f32,
     ) -> Self {
-        Self::build(
-            position,
-            mass,
-            0.3,
-            0.6,
-            Shape::Heightfield(crate::shape::Heightfield {
-                heights,
-                rows,
-                cols,
-                cell,
-            }),
-        )
+        Self::try_new_heightfield(position, heights.clone(), rows, cols, cell, mass)
+            .unwrap_or_else(|_| {
+                Self::build(
+                    position,
+                    mass,
+                    0.3,
+                    0.6,
+                    Shape::Heightfield(crate::shape::Heightfield {
+                        heights,
+                        rows,
+                        cols,
+                        cell,
+                    }),
+                )
+            })
     }
 
     /// Checked heightfield body: validates `len == rows * cols`, grid
@@ -531,10 +669,23 @@ impl RigidBody {
     ///
     /// Legacy infallible wrapper over [`RigidBody::try_new_trimesh`]:
     /// dangling indices fall back to an empty mesh instead of panicking,
-    /// so existing scenes are bit-identical on valid input.
-    pub fn new_trimesh(position: Vec3, vertices: &[Vec3], indices: &[[u32; 3]], mass: f32) -> Self {
-        Self::try_new_trimesh(position, vertices, indices, mass).unwrap_or_else(|_| {
-            let empty = crate::shape::TriMesh::from_indexed(&[], &[]).expect("empty soup builds");
+    /// so existing scenes are bit-identical on valid input. Deprecated —
+    /// do not use in new code, kept only for compat; new code should use
+    /// the `try_` variant.
+    ///
+    /// # Errors
+    ///
+    /// This wrapper never fails (see [`RigidBody::try_new_trimesh`]
+    /// for the fallible canonical path and its errors).
+    pub fn new_trimesh(
+        position: Vec3,
+        vertices: &[Vec3],
+        triangles: &[crate::shape::Triangle],
+        mass: f32,
+    ) -> Self {
+        Self::try_new_trimesh(position, vertices, triangles, mass).unwrap_or_else(|_| {
+            let empty =
+                crate::shape::TriMesh::from_triangles(&[], &[]).expect("empty soup builds");
             let mut body = Self::build(position, mass, 0.3, 0.5, Shape::TriMesh(empty));
             body.rolling_friction = 0.2;
             body.torsion_friction = 0.05;
@@ -547,11 +698,37 @@ impl RigidBody {
     ///
     /// # Errors
     ///
-    /// [`crate::errors::MeshError`] from [`crate::shape::TriMesh::from_indexed`].
+    /// [`crate::errors::MeshError`] from [`crate::shape::TriMesh::from_triangles`].
     pub fn try_new_trimesh(
         position: Vec3,
         vertices: &[Vec3],
-        indices: &[[u32; 3]],
+        triangles: &[crate::shape::Triangle],
+        mass: f32,
+    ) -> Result<Self, crate::errors::MeshError> {
+        let mut body = Self::build(
+            position,
+            mass,
+            0.3,
+            0.5,
+            Shape::TriMesh(crate::shape::TriMesh::from_triangles(vertices, triangles)?),
+        );
+        body.rolling_friction = 0.2;
+        body.torsion_friction = 0.05;
+        Ok(body)
+    }
+
+    /// Checked triangle-mesh body from a flat index list.
+    ///
+    /// Chunks `indices` into [`crate::shape::Triangle`] via
+    /// [`crate::shape::TriMesh::from_indexed`].
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::MeshError`] from [`crate::shape::TriMesh::from_indexed`].
+    pub fn try_new_trimesh_indexed(
+        position: Vec3,
+        vertices: &[Vec3],
+        indices: &[u32],
         mass: f32,
     ) -> Result<Self, crate::errors::MeshError> {
         let mut body = Self::build(

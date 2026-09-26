@@ -264,7 +264,7 @@ fn bound_radius(shape: &Shape) -> f32 {
             half_height,
         } => (radius * radius + half_height * half_height).sqrt(),
         Shape::ConvexHull(hull) => hull
-            .vertices
+            .vertices()
             .iter()
             .map(|v| v.length())
             .fold(0.0f32, f32::max),
@@ -312,8 +312,8 @@ pub(super) fn shape_min_dimension(shape: &Shape) -> f32 {
             half_height,
         } => 0.5 * radius.min(*half_height),
         Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
-        Shape::Heightfield(hf) => 0.5 * hf.cell,
-        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature,
+        Shape::Heightfield(hf) => 0.5 * hf.cell(),
+        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature(),
     }
 }
 

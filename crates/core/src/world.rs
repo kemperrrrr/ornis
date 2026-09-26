@@ -23,12 +23,21 @@ use crate::typestate::{Building, Phase, Running};
 /// still be separate and are coordinated by their respective runtime
 /// resources and residency trackers.
 ///
-/// The `State` phantom tracks the build/run phase ([`Building`]/[`Running`],
-/// default [`Running`]): a bare `World` keeps meaning a running world, so
-/// existing setup and inspection code compiles unchanged. Registration-heavy
-/// setup may start from [`World::new_building`] and seal the world with
-/// [`World::build`]; the phase grants no extra mutation rights by itself —
-/// it only documents where the world sits in the frame lifecycle.
+/// Typestate: the `State` phantom tracks the build/run phase
+/// ([`Building`]/[`Running`], default [`Running`]). Registration-heavy
+/// setup starts from [`World::new_building`] (or the owning
+/// [`Engine`](crate::Engine) builder) and seals the world with
+/// [`World::build`] before the frame loop; a bare `World` keeps meaning a
+/// running world so existing setup and inspection code compiles unchanged.
+/// The phase grants no extra mutation rights by itself — it only documents
+/// where the world sits in the frame lifecycle. The `&mut` accessors
+/// (`resources_mut`, `store_mut`, `insert`, `remove`) stay available on
+/// [`World<Running>`] as the operational route: scene replacement
+/// (`GameWorld::replace_scene`), per-frame resource updates and platform
+/// setup run between frames through them, never while systems execute.
+/// [`SmartStore`] itself stays phase-agnostic by design (interior
+/// `RwLock` mutability under `&self`; the scheduler's declared
+/// resource/lane contract — not the phase marker — guards system access).
 pub struct World<State: Phase = Running> {
     resources: Resources,
     phase: PhantomData<State>,

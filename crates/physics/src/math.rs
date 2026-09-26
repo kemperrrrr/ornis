@@ -42,11 +42,13 @@ impl AABB {
     ///
     /// Legacy wrapper over [`AABB::try_from_points`]: panics on an empty
     /// slice so existing call sites stay bit-identical; new code should
-    /// match on the typed error instead.
+    /// match on the typed error instead (deprecated — do not use in new
+    /// code, kept only for compat).
     ///
     /// # Panics
     ///
-    /// Panics when `points` is empty (see [`AABB::try_from_points`]).
+    /// Panics when `points` is empty (see [`AABB::try_from_points`]
+    /// for the fallible canonical path and its `# Errors`).
     pub fn from_points(points: &[Vec3]) -> Self {
         Self::try_from_points(points).expect("AABB::from_points needs at least one point")
     }

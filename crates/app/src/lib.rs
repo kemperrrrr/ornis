@@ -217,6 +217,7 @@ pub fn apply_browser_input(world: &mut World, input: InputState) {
 mod tests {
     use super::*;
     use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
+    use ornis_core::units::{Clamped01, PositiveF32};
     #[allow(unused_imports)]
     use ornis_core::Entity;
     use ornis_core::{Engine, World};
@@ -294,7 +295,7 @@ mod tests {
         engine.world_mut().store_mut().unwrap().insert(
             entity,
             MeshDesc::Sphere {
-                radius: 1.0,
+                radius: PositiveF32::expect_valid(1.0),
                 segments: 16,
                 rings: 8,
             },
@@ -303,7 +304,7 @@ mod tests {
             entity,
             MaterialDesc::Dielectric {
                 base_color: [1.0, 0.0, 0.0],
-                roughness: 0.5,
+                roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
             },
         );

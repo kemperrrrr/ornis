@@ -18,6 +18,7 @@ use ornis_animation::{
     SkinnedMesh, run_skel_sample, run_skel_skin,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
+use ornis_core::units::Clamped01;
 use ornis_core::{Engine, Entity, Resources, SmartStore, Stage, System, Time};
 use ornis_render::extract_render_data;
 
@@ -471,7 +472,7 @@ fn classic_custom_entries_report_unskinned() {
         entity,
         MaterialDesc::Dielectric {
             base_color: [0.8, 0.2, 0.2],
-            roughness: 0.4,
+            roughness: Clamped01::new(0.4),
             emission: [0.0, 0.0, 0.0],
         },
     );

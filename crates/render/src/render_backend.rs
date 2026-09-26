@@ -294,7 +294,7 @@ mod tests {
                     direction: [1.0, 1.0, 1.0],
                     intensity: 1.0,
                     color: [1.0, 1.0, 1.0],
-                    shadow: false,
+                    shadow: ornis_assets::scene::ShadowCast::Disabled,
                 }],
             );
             let target_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -491,7 +491,7 @@ mod tests {
                 direction: [0.0, 1.0, 1.0],
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
-                shadow: false,
+                shadow: ornis_assets::scene::ShadowCast::Disabled,
             }],
         );
         backend.upload_materials(&device, &queue, &[OpenPBRMaterial::default()]);
@@ -622,16 +622,19 @@ mod tests {
                 radius,
                 segments,
                 rings,
-            } => crate::mesh::create_sphere(&device, *radius, *segments, *rings),
-            ornis_assets::scene::MeshDesc::Box { size } => crate::mesh::create_box(&device, *size),
+            } => crate::mesh::create_sphere(&device, radius.get(), *segments, *rings),
+            ornis_assets::scene::MeshDesc::Box { size } => crate::mesh::create_box(
+                &device,
+                size.map(ornis_core::units::PositiveF32::get),
+            ),
             ornis_assets::scene::MeshDesc::Plane { size } => {
-                crate::mesh::create_plane(&device, *size)
+                crate::mesh::create_plane(&device, size.map(ornis_core::units::PositiveF32::get))
             }
             ornis_assets::scene::MeshDesc::Cylinder {
                 radius,
                 height,
                 radial_segments,
-            } => crate::mesh::create_cylinder(&device, *radius, *height, *radial_segments),
+            } => crate::mesh::create_cylinder(&device, radius.get(), height.get(), *radial_segments),
             // The golden probe renders procedural scenes; Custom soups
             // have no upload path here yet.
             ornis_assets::scene::MeshDesc::Custom { .. } => {
@@ -649,7 +652,7 @@ mod tests {
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::dielectric();
                     m.base.color_rgb(*base_color);
-                    m.specular.roughness(*roughness);
+                    m.specular.roughness(roughness.get());
                     m
                 }
                 ornis_assets::scene::MaterialDesc::Metal {
@@ -659,7 +662,7 @@ mod tests {
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::metal();
                     m.base.color_rgb(*base_color);
-                    m.specular.roughness(*roughness);
+                    m.specular.roughness(roughness.get());
                     m
                 }
                 ornis_assets::scene::MaterialDesc::Coat {
@@ -670,8 +673,8 @@ mod tests {
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::coat();
                     m.base.color_rgb(*base_color);
-                    m.coat.weight(*coat_weight);
-                    m.coat.roughness(*coat_roughness);
+                    m.coat.weight(coat_weight.get());
+                    m.coat.roughness(coat_roughness.get());
                     m
                 }
                 ornis_assets::scene::MaterialDesc::Matte {
@@ -680,7 +683,7 @@ mod tests {
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::dielectric();
                     m.base.color_rgb(*base_color);
-                    m.base.diffuse_roughness(*roughness);
+                    m.base.diffuse_roughness(roughness.get());
                     m.specular.weight(0.0);
                     m
                 }
@@ -691,8 +694,8 @@ mod tests {
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::glass();
                     m.transmission.color_rgb(*base_color);
-                    m.specular.roughness(*roughness);
-                    m.specular.ior(*ior);
+                    m.specular.roughness(roughness.get());
+                    m.specular.ior(ior.get());
                     m
                 }
             };
@@ -873,8 +876,8 @@ mod tests {
         assert!(center[2] > 80, "center blue must dominate: {center:?}");
     }
 
-    /// Shadow regression: a directional light with `shadow: true` must
-    /// darken the receiver behind the occluder versus `shadow: false`.
+    /// Shadow regression: a directional light with `shadow: ShadowCast::Enabled` must
+    /// darken the receiver behind the occluder versus `shadow: ShadowCast::Disabled`.
     /// Exercises the full chain (layer assignment → depth pre-pass →
     /// PCF compare). Skipped when no adapter is available.
     #[test]
@@ -969,7 +972,7 @@ mod tests {
                     direction: [0.42, 0.84, 0.3],
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
-                    shadow: shadow.is_enabled(),
+                    shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1154,7 +1157,7 @@ mod tests {
                     direction: [0.42, 0.84, 0.3],
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
-                    shadow: shadow.is_enabled(),
+                    shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1324,7 +1327,7 @@ mod tests {
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
                     range: 30.0,
-                    shadow: shadow.is_enabled(),
+                    shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1503,7 +1506,7 @@ mod tests {
                     range: 30.0,
                     inner_angle: 25.0,
                     outer_angle: 35.0,
-                    shadow: shadow.is_enabled(),
+                    shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1649,7 +1652,7 @@ mod tests {
                 range: 30.0,
                 inner_angle: 25.0,
                 outer_angle: 35.0,
-                shadow: true,
+                shadow: ornis_assets::scene::ShadowCast::Enabled,
             }],
         );
         // CPU prediction with the same glam calls as `spot_shadow_vp`.
@@ -1704,7 +1707,7 @@ mod tests {
     }
 
     /// Point-shadow regression: a shadowed point light must darken the
-    /// receiver behind the occluder versus `shadow: false`, in every
+    /// receiver behind the occluder versus `shadow: ShadowCast::Disabled`, in every
     /// technique (deferred, forward, hybrid). Exercises the full chain
     /// (cube-slot assignment → 6 face renders with the hardware
     /// sampler frame → analytic major-axis compare), including the
@@ -1801,7 +1804,7 @@ mod tests {
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
                     range: 30.0,
-                    shadow: shadow.is_enabled(),
+                    shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
             let mut plan = crate::frame_exec::RenderFrame3D::new_with(
@@ -1919,7 +1922,7 @@ mod tests {
                 direction: [1.0, 1.0, 1.0],
                 intensity: 0.6,
                 color: [1.0, 1.0, 1.0],
-                shadow: false,
+                shadow: ornis_assets::scene::ShadowCast::Disabled,
             })
             .collect();
         let rig = crate::extraction::RenderLights {
@@ -2003,7 +2006,7 @@ mod tests {
                 direction: [0.0, 1.0, 1.0],
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
-                shadow: false,
+                shadow: ornis_assets::scene::ShadowCast::Disabled,
             })
             .collect();
         let stats = renderer.set_lights_full(&queue, [0.1, 0.1, 0.15], 1.0, 1.0, &lights);
@@ -2119,7 +2122,7 @@ mod tests {
                 direction: [0.2, 1.0, 0.3],
                 intensity: 1.2,
                 color: [1.0, 1.0, 1.0],
-                shadow: false,
+                shadow: ornis_assets::scene::ShadowCast::Disabled,
             }],
         );
         let render = |count: u32| -> Vec<u8> {

@@ -84,8 +84,8 @@ pub(crate) fn shape_min_dimension(shape: &Shape) -> f32 {
             half_height,
         } => 0.5 * radius.min(*half_height),
         Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
-        Shape::Heightfield(hf) => 0.5 * hf.cell,
-        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature,
+        Shape::Heightfield(hf) => 0.5 * hf.cell(),
+        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature(),
     }
 }
 
@@ -106,12 +106,12 @@ fn shape_max_radius(shape: &Shape) -> f32 {
             half_height,
         } => (radius * radius + half_height * half_height).sqrt(),
         Shape::ConvexHull(hull) => hull
-            .vertices
+            .vertices()
             .iter()
             .map(|v| v.length())
             .fold(0.0f32, f32::max),
         Shape::Heightfield(hf) => hf.local_extents().length() + hf.local_center().length(),
-        Shape::TriMesh(mesh) => mesh.bound_radius,
+        Shape::TriMesh(mesh) => mesh.bound_radius(),
     }
 }
 
@@ -952,9 +952,9 @@ fn ray_hull_hit(
     let mut best: Option<(f32, Vec3)> = None;
     for f in &hull.faces {
         let (a, b, c) = (
-            hull.vertices[f[0] as usize],
-            hull.vertices[f[1] as usize],
-            hull.vertices[f[2] as usize],
+            hull.vertices[f.0.index()],
+            hull.vertices[f.1.index()],
+            hull.vertices[f.2.index()],
         );
         let n = (b - a).cross(c - a);
         let denom = n.dot(direction);
@@ -996,12 +996,9 @@ fn ray_heightfield_hit(
     hf: &crate::shape::Heightfield,
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
-    if hf.rows == 0
-        || hf.cols == 0
-        || !hf.cell.is_sign_positive()
-        || hf.heights.len() != hf.rows * hf.cols
-        || max_dist < 0.0
-    {
+    // Canonical validity gate: legacy-constructed grids degrade to a miss
+    // instead of walking garbage (see `Heightfield::try_height_at`).
+    if !hf.is_valid() || max_dist < 0.0 {
         return None;
     }
     // Local grid coordinates (float cell indices).
@@ -1138,10 +1135,9 @@ fn ray_trimesh_hit(
         if let Some((start, count)) = node.link.leaf_range() {
             let end = (start + count) as usize;
             for o in start as usize..end.min(mesh.order.len()) {
-                let t = mesh.order[o] as usize;
-                if t >= mesh.tris.len() || t >= mesh.centroids.len() {
+                let Some(t) = mesh.ordered_triangle(o) else {
                     continue;
-                }
+                };
                 let crate::shape::Shape::ConvexHull(hull) = &mesh.tris[t] else {
                     continue;
                 };

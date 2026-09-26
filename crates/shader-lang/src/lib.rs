@@ -56,13 +56,15 @@ pub enum ShaderType {
 
 impl ShaderType {
     /// Map a Rust type name to a primitive, both casings where the old
-    /// tables accepted them (`Vec2`/`vec2`, `Mat4`/`mat4`). `None` for
+    /// tables accepted them (`Vec2`/`vec2`, `Mat4`/`mat4`). Transparent `u32`
+    /// newtypes (`MaterialIdx`, `TextureHandle`) substitute to [`Self::U32`],
+    /// like the CPU compiler erases `repr(transparent)` wrappers. `None` for
     /// everything else — mirrors, bundles, markers, bare `bool`.
     pub fn from_rust(name: &str) -> Option<Self> {
         Some(match name {
             "f32" => Self::F32,
             "i32" => Self::I32,
-            "u32" => Self::U32,
+            "u32" | "MaterialIdx" | "TextureHandle" => Self::U32,
             "Vec2" | "vec2" | "Vec2A" => Self::Vec2,
             "Vec3" | "vec3" | "Vec3A" => Self::Vec3,
             "Vec4" | "vec4" | "Quat" => Self::Vec4,
@@ -449,6 +451,8 @@ mod tests {
             ("f32", "f32"),
             ("i32", "i32"),
             ("u32", "u32"),
+            ("MaterialIdx", "u32"),
+            ("TextureHandle", "u32"),
             ("Vec2", "vec2<f32>"),
             ("vec3", "vec3<f32>"),
             ("Vec4", "vec4<f32>"),

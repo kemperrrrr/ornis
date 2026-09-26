@@ -4,9 +4,11 @@
 //! asset (`assets/scene.ron`), the editor protocol and the WASM viewport:
 //! component payloads travel over the wire in exactly this shape.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use ornis_core::units::{Clamped01, Degrees, LinearRgb, Meters};
+use ornis_core::units::{Clamped01, Degrees, Ior, LinearRgb, Meters, PositiveF32};
+
+pub use ornis_gltf::{TriIndex, Triangle};
 
 /// Full scene description in RON format (see `assets/scene.ron`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,8 +54,8 @@ pub struct TransformDesc {
 pub enum MeshDesc {
     /// UV sphere centered at the transform origin.
     Sphere {
-        /// Radius in world units.
-        radius: f32,
+        /// Radius in world units (positive; checked at construction).
+        radius: PositiveF32,
         /// Longitude divisions (minimum 3 at generation time).
         segments: u32,
         /// Latitude divisions (minimum 2 at generation time).
@@ -61,22 +63,22 @@ pub enum MeshDesc {
     },
     /// Axis-aligned box centered at the transform origin.
     Box {
-        /// Full extents per axis in world units.
-        size: [f32; 3],
+        /// Full extents per axis in world units (all positive).
+        size: [PositiveF32; 3],
     },
     /// Flat quad in the local XZ plane (`+Y` face normal), centered at
     /// the transform origin.
     Plane {
-        /// Full extents in world units: `[width_x, depth_z]`.
-        size: [f32; 2],
+        /// Full extents in world units: `[width_x, depth_z]` (both positive).
+        size: [PositiveF32; 2],
     },
     /// Right circular cylinder around local `+Y`, centered at the
     /// transform origin.
     Cylinder {
-        /// Radius in world units.
-        radius: f32,
-        /// Height along `+Y` in world units.
-        height: f32,
+        /// Radius in world units (positive; checked at construction).
+        radius: PositiveF32,
+        /// Height along `+Y` in world units (positive; checked at construction).
+        height: PositiveF32,
         /// Radial divisions (minimum 3 at generation time).
         radial_segments: u32,
     },
@@ -99,6 +101,8 @@ impl MeshDesc {
     /// `Cylinder`). The render extraction routes `Some` into the per-entity
     /// upload path (`mesh_upload::custom_vertices`); the transport itself
     /// never validates shapes — see `MeshData::validate` in the mesh editor.
+    /// The flat list stays triple-aligned by construction (see
+    /// [`MeshDesc::try_custom`], built through [`Triangle::from_raw`]).
     pub fn as_custom(&self) -> Option<(&[[f32; 3]], &[u32])> {
         match self {
             Self::Custom { positions, indices } => Some((positions, indices)),
@@ -108,13 +112,60 @@ impl MeshDesc {
         }
     }
 
+    /// Checked inline soup: `None` unless `indices.len() % 3 == 0` and every
+    /// index is in range for `positions` (checked through
+    /// [`Triangle::from_raw`] / [`TriIndex::index`).
+    pub fn try_custom(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Option<Self> {
+        if !indices.len().is_multiple_of(3) {
+            return None;
+        }
+        let triangles: Vec<Triangle> = indices
+            .chunks_exact(3)
+            .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
+            .collect();
+        if triangles
+            .iter()
+            .flat_map(|t| t.as_u32())
+            .any(|index| TriIndex::from_raw(index).index() >= positions.len())
+        {
+            return None;
+        }
+        Some(Self::Custom { positions, indices })
+    }
+
+    /// Typed triangle view over a [`MeshDesc::Custom`] soup.
+    ///
+    /// Returns `None` for procedural variants or malformed soups
+    /// (non-triple length or out-of-range indices) — the physics projection
+    /// (`body_for`) reports those as typed errors instead.
+    pub fn as_triangles(&self) -> Option<Vec<Triangle>> {
+        let (positions, indices) = self.as_custom()?;
+        if !indices.len().is_multiple_of(3) {
+            return None;
+        }
+        let triangles: Vec<Triangle> = indices
+            .chunks_exact(3)
+            .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
+            .collect();
+        if triangles
+            .iter()
+            .flat_map(|t| t.as_u32())
+            .any(|index| TriIndex::from_raw(index).index() >= positions.len())
+        {
+            return None;
+        }
+        Some(triangles)
+    }
+
     /// Checked sphere: `None` unless `radius` is finite and `> 0`,
     /// `segments >= 3` and `rings >= 2` (the documented generation minima).
+    /// This is the canonical sphere constructor: the `Sphere` fields are
+    /// typed, so direct literals need [`PositiveF32`] values.
     pub fn try_sphere_units(radius: Meters, segments: u32, rings: u32) -> Option<Self> {
-        let r = radius.get();
-        if r.is_finite() && r > 0.0 && segments >= 3 && rings >= 2 {
+        let radius = PositiveF32::try_new(radius.get())?;
+        if segments >= 3 && rings >= 2 {
             Some(Self::Sphere {
-                radius: r,
+                radius,
                 segments,
                 rings,
             })
@@ -124,37 +175,40 @@ impl MeshDesc {
     }
 
     /// Checked box: `None` unless every full extent is finite and `> 0`.
+    /// Canonical constructor for the typed `Box` fields.
     pub fn try_box_units(size: [Meters; 3]) -> Option<Self> {
-        let size = [size[0].get(), size[1].get(), size[2].get()];
-        if size.iter().all(|v| v.is_finite() && *v > 0.0) {
-            Some(Self::Box { size })
-        } else {
-            None
-        }
+        let size = [
+            PositiveF32::try_new(size[0].get())?,
+            PositiveF32::try_new(size[1].get())?,
+            PositiveF32::try_new(size[2].get())?,
+        ];
+        Some(Self::Box { size })
     }
 
     /// Checked plane: `None` unless both extents are finite and `> 0`.
+    /// Canonical constructor for the typed `Plane` fields.
     pub fn try_plane_units(size: [Meters; 2]) -> Option<Self> {
-        let size = [size[0].get(), size[1].get()];
-        if size.iter().all(|v| v.is_finite() && *v > 0.0) {
-            Some(Self::Plane { size })
-        } else {
-            None
-        }
+        let size = [
+            PositiveF32::try_new(size[0].get())?,
+            PositiveF32::try_new(size[1].get())?,
+        ];
+        Some(Self::Plane { size })
     }
 
     /// Checked cylinder: `None` unless radius/height are finite and `> 0`
-    /// and `radial_segments >= 3`.
+    /// and `radial_segments >= 3`. Canonical constructor for the typed
+    /// `Cylinder` fields.
     pub fn try_cylinder_units(
         radius: Meters,
         height: Meters,
         radial_segments: u32,
     ) -> Option<Self> {
-        let (r, h) = (radius.get(), height.get());
-        if r.is_finite() && r > 0.0 && h.is_finite() && h > 0.0 && radial_segments >= 3 {
+        let radius = PositiveF32::try_new(radius.get())?;
+        let height = PositiveF32::try_new(height.get())?;
+        if radial_segments >= 3 {
             Some(Self::Cylinder {
-                radius: r,
-                height: h,
+                radius,
+                height,
                 radial_segments,
             })
         } else {
@@ -162,10 +216,18 @@ impl MeshDesc {
         }
     }
 
-    /// Sphere radius in meters, or `None` for other variants.
-    pub fn sphere_radius_units(&self) -> Option<Meters> {
+    /// Sphere radius as [`PositiveF32`], or `None` for other variants.
+    pub fn sphere_radius_units(&self) -> Option<PositiveF32> {
         match self {
-            Self::Sphere { radius, .. } => Some(Meters::new(*radius)),
+            Self::Sphere { radius, .. } => Some(*radius),
+            _ => None,
+        }
+    }
+
+    /// Full box extents in meters, or `None` for other variants.
+    pub fn box_size_units(&self) -> Option<[Meters; 3]> {
+        match self {
+            Self::Box { size } => Some(size.map(|v| Meters::new(v.get()))),
             _ => None,
         }
     }
@@ -179,7 +241,7 @@ pub enum MaterialDesc {
         /// Albedo color in linear space.
         base_color: [f32; 3],
         /// Microfacet roughness in [0, 1].
-        roughness: f32,
+        roughness: Clamped01,
         /// Emissive RGB in linear space (`[0, 0, 0]` = no emission).
         /// Absent in older files — defaults to off.
         #[serde(default)]
@@ -190,7 +252,7 @@ pub enum MaterialDesc {
         /// Reflectance color in linear space.
         base_color: [f32; 3],
         /// Microfacet roughness in [0, 1].
-        roughness: f32,
+        roughness: Clamped01,
         /// Emissive RGB in linear space (`[0, 0, 0]` = no emission).
         /// Absent in older files — defaults to off.
         #[serde(default)]
@@ -201,9 +263,9 @@ pub enum MaterialDesc {
         /// Albedo color of the base layer.
         base_color: [f32; 3],
         /// Clearcoat strength in [0, 1].
-        coat_weight: f32,
+        coat_weight: Clamped01,
         /// Clearcoat roughness in [0, 1].
-        coat_roughness: f32,
+        coat_roughness: Clamped01,
         /// Emissive RGB in linear space (`[0, 0, 0]` = no emission).
         /// Absent in older files — defaults to off.
         #[serde(default)]
@@ -214,24 +276,24 @@ pub enum MaterialDesc {
         /// Albedo color in linear space.
         base_color: [f32; 3],
         /// Diffuse roughness in [0, 1].
-        roughness: f32,
+        roughness: Clamped01,
     },
     /// Transparent refractive surface (thin-walled glass).
     Glass {
         /// Transmitted tint in linear space.
         base_color: [f32; 3],
         /// Microfacet roughness in [0, 1].
-        roughness: f32,
+        roughness: Clamped01,
         /// Index of refraction (>= 1.0). Absent in older files —
         /// defaults to 1.5.
         #[serde(default = "default_glass_ior")]
-        ior: f32,
+        ior: Ior,
     },
 }
 
 /// Default [`MaterialDesc::Glass`] index of refraction (crown glass).
-fn default_glass_ior() -> f32 {
-    1.5
+fn default_glass_ior() -> Ior {
+    Ior::default()
 }
 
 impl MaterialDesc {
@@ -239,7 +301,7 @@ impl MaterialDesc {
     pub fn dielectric_units(base_color: LinearRgb, roughness: Clamped01) -> Self {
         Self::Dielectric {
             base_color: base_color.as_array(),
-            roughness: roughness.get(),
+            roughness,
             emission: [0.0, 0.0, 0.0],
         }
     }
@@ -248,7 +310,7 @@ impl MaterialDesc {
     pub fn metal_units(base_color: LinearRgb, roughness: Clamped01) -> Self {
         Self::Metal {
             base_color: base_color.as_array(),
-            roughness: roughness.get(),
+            roughness,
             emission: [0.0, 0.0, 0.0],
         }
     }
@@ -257,7 +319,7 @@ impl MaterialDesc {
     pub fn matte_units(base_color: LinearRgb, roughness: Clamped01) -> Self {
         Self::Matte {
             base_color: base_color.as_array(),
-            roughness: roughness.get(),
+            roughness,
         }
     }
 
@@ -269,19 +331,19 @@ impl MaterialDesc {
     ) -> Self {
         Self::Coat {
             base_color: base_color.as_array(),
-            coat_weight: coat_weight.get(),
-            coat_roughness: coat_roughness.get(),
+            coat_weight,
+            coat_roughness,
             emission: [0.0, 0.0, 0.0],
         }
     }
 
-    /// Typed glass: tint as [`LinearRgb`], roughness as [`Clamped01`];
-    /// `ior` is clamped to `>= 1.0` (same policy as the material setters).
-    pub fn glass_units(base_color: LinearRgb, roughness: Clamped01, ior: f32) -> Self {
+    /// Typed glass: tint as [`LinearRgb`], roughness as [`Clamped01`],
+    /// index of refraction as [`Ior`] (values below `1.0` clamp up).
+    pub fn glass_units(base_color: LinearRgb, roughness: Clamped01, ior: Ior) -> Self {
         Self::Glass {
             base_color: base_color.as_array(),
-            roughness: roughness.get(),
-            ior: if ior.is_finite() { ior.max(1.0) } else { 1.5 },
+            roughness,
+            ior,
         }
     }
 
@@ -296,24 +358,33 @@ impl MaterialDesc {
         })
     }
 
-    /// Roughness as [`Clamped01`] (clamps out-of-range legacy values).
+    /// Roughness as [`Clamped01`] (stored typed; legacy out-of-range
+    /// values were clamped on load through the `serde` impl).
     pub fn roughness_units(&self) -> Clamped01 {
-        Clamped01::new(match self {
+        match self {
             Self::Dielectric { roughness, .. }
             | Self::Metal { roughness, .. }
             | Self::Matte { roughness, .. }
             | Self::Glass { roughness, .. } => *roughness,
             Self::Coat { coat_roughness, .. } => *coat_roughness,
-        })
+        }
+    }
+
+    /// Index of refraction as [`Ior`] (`None` for non-glass variants).
+    pub fn ior_units(&self) -> Option<Ior> {
+        match self {
+            Self::Glass { ior, .. } => Some(*ior),
+            _ => None,
+        }
     }
 }
 
-/// Whether a light casts a shadow map (typed replacement for the
-/// `shadow: bool` field on [`LightDesc`] variants).
+/// Whether a light casts a shadow map (typed storage for the `shadow`
+/// field on [`LightDesc`] variants).
 ///
-/// The serialized form stays `bool` (older files default to off), so this
-/// enum is the in-memory polarity: construction takes [`ShadowCast`],
-/// storage keeps the serde-canonical `bool`.
+/// The serialized form stays `bool` (older files default to off), so the
+/// wire schema is unchanged: construction and storage take [`ShadowCast`],
+/// `serde` reads/writes the legacy `bool` polarity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ShadowCast {
     /// No shadow map (default; absent in older files).
@@ -321,6 +392,20 @@ pub enum ShadowCast {
     Disabled,
     /// Depth pre-pass + PCF sampling in the evaluators.
     Enabled,
+}
+
+impl Serialize for ShadowCast {
+    /// Wire form is the legacy `shadow: bool` (transport schemas stay unchanged).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(self.is_enabled())
+    }
+}
+
+impl<'de> Deserialize<'de> for ShadowCast {
+    /// Reads the legacy `shadow: bool` wire form.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(bool::deserialize(deserializer)?))
+    }
 }
 
 impl ShadowCast {
@@ -364,9 +449,10 @@ pub enum LightDesc {
         /// Emission color in linear space.
         color: [f32; 3],
         /// Cast a shadow map (depth pre-pass + PCF in the evaluators).
-        /// Absent in older files — defaults to off.
+        /// Absent in older files — defaults to off. Wire form is the
+        /// legacy `bool`.
         #[serde(default)]
-        shadow: bool,
+        shadow: ShadowCast,
     },
     /// Local light with inverse-square falloff and a finite range.
     Point {
@@ -380,9 +466,10 @@ pub enum LightDesc {
         range: f32,
         /// Cast a shadow cube (6 depth faces + analytic major-axis
         /// sample in the evaluators).
-        /// Absent in older files — defaults to off.
+        /// Absent in older files — defaults to off. Wire form is the
+        /// legacy `bool`.
         #[serde(default)]
-        shadow: bool,
+        shadow: ShadowCast,
     },
     /// Local light inside a cone aimed into the scene.
     Spot {
@@ -401,9 +488,10 @@ pub enum LightDesc {
         /// Outer cone angle in degrees (zero outside, soft edge between).
         outer_angle: f32,
         /// Cast a shadow map (depth pre-pass + PCF in the evaluators).
-        /// Absent in older files — defaults to off.
+        /// Absent in older files — defaults to off. Wire form is the
+        /// legacy `bool`.
         #[serde(default)]
-        shadow: bool,
+        shadow: ShadowCast,
     },
 }
 
@@ -442,7 +530,7 @@ impl LightDesc {
             direction: Self::checked_dir(direction)?,
             intensity: Self::checked_intensity(intensity)?,
             color: color.as_array(),
-            shadow: shadow.is_enabled(),
+            shadow,
         })
     }
 
@@ -468,7 +556,7 @@ impl LightDesc {
             intensity: Self::checked_intensity(intensity)?,
             color: color.as_array(),
             range,
-            shadow: shadow.is_enabled(),
+            shadow,
         })
     }
 
@@ -506,19 +594,18 @@ impl LightDesc {
             range,
             inner_angle: inner,
             outer_angle: outer,
-            shadow: shadow.is_enabled(),
+            shadow,
         })
     }
 
-    /// Whether this light casts a shadow map (typed view of the
-    /// serde-canonical `shadow: bool` field).
+    /// Whether this light casts a shadow map (stored typed; the wire
+    /// form is the legacy `shadow: bool`).
     pub fn shadow_cast(&self) -> ShadowCast {
-        let shadow = match self {
+        match self {
             Self::Directional { shadow, .. }
             | Self::Point { shadow, .. }
             | Self::Spot { shadow, .. } => *shadow,
-        };
-        ShadowCast::from(shadow)
+        }
     }
 
     /// Sets shadow casting from a [`ShadowCast`].
@@ -528,7 +615,7 @@ impl LightDesc {
             | Self::Point { shadow, .. }
             | Self::Spot { shadow, .. } => shadow,
         };
-        *slot = cast.is_enabled();
+        *slot = cast;
     }
 
     /// Emission color as [`LinearRgb`] (all variants).
@@ -722,7 +809,7 @@ Scene(
                 emission,
             } => {
                 assert_eq!(*base_color, [0.5, 0.5, 0.5]);
-                assert_eq!(*roughness, 0.9);
+                assert_eq!(roughness.get(), 0.9);
                 // Old RON without `emission` defaults to no emission.
                 assert_eq!(*emission, [0.0, 0.0, 0.0]);
             }
@@ -738,8 +825,8 @@ Scene(
                 coat_roughness,
                 ..
             } => {
-                assert_eq!(*coat_weight, 1.0);
-                assert_eq!(*coat_roughness, 0.1);
+                assert_eq!(coat_weight.get(), 1.0);
+                assert_eq!(coat_roughness.get(), 0.1);
             }
             other => panic!("expected Coat, got {other:?}"),
         }
@@ -750,7 +837,7 @@ Scene(
                 segments,
                 rings,
             } => {
-                assert_eq!(*radius, 2.0);
+                assert_eq!(radius.get(), 2.0);
                 assert_eq!(*segments, 16);
                 assert_eq!(*rings, 8);
             }
@@ -850,7 +937,7 @@ Scene(
             MaterialDesc::Matte {
                 base_color: [0.2, 0.4, 0.6],
                 roughness,
-            } if (roughness - 0.7).abs() < f32::EPSILON
+            } if (roughness.get() - 0.7).abs() < f32::EPSILON
         ));
         let reserialized = matte.to_ron().expect("serialize");
         let reparsed = Scene::from_ron(&reserialized).expect("re-parse");
@@ -871,7 +958,8 @@ Scene(
                 base_color: [0.9, 0.95, 1.0],
                 roughness,
                 ior,
-            } if (roughness - 0.05).abs() < f32::EPSILON && (ior - 1.5).abs() < f32::EPSILON
+            } if (roughness.get() - 0.05).abs() < f32::EPSILON
+                && (ior.get() - 1.5).abs() < f32::EPSILON
         ));
 
         let with_ior = FULL_SCENE_RON.replace(
@@ -881,7 +969,7 @@ Scene(
         let explicit = Scene::from_ron(&with_ior).expect("glass ior parses");
         assert!(matches!(
             explicit.entities[0].material,
-            MaterialDesc::Glass { ior, .. } if (ior - 1.33).abs() < f32::EPSILON
+            MaterialDesc::Glass { ior, .. } if (ior.get() - 1.33).abs() < f32::EPSILON
         ));
         let serialized = explicit.to_ron().expect("serialize");
         let reparsed = Scene::from_ron(&serialized).expect("re-parse");
@@ -916,11 +1004,11 @@ Scene(
         let scene = Scene::from_ron(&ron).expect("procedural variants parse");
         assert!(matches!(
             scene.entities[0].mesh,
-            MeshDesc::Box { size } if size == [2.0, 4.0, 6.0]
+            MeshDesc::Box { size } if size.map(PositiveF32::get) == [2.0, 4.0, 6.0]
         ));
         assert!(matches!(
             scene.entities[1].mesh,
-            MeshDesc::Plane { size } if size == [3.0, 5.0]
+            MeshDesc::Plane { size } if size.map(PositiveF32::get) == [3.0, 5.0]
         ));
         assert!(matches!(
             scene.entities[2].mesh,
@@ -928,7 +1016,7 @@ Scene(
                 radius,
                 height,
                 radial_segments,
-            } if radius == 1.5 && height == 7.0 && radial_segments == 12
+            } if radius.get() == 1.5 && height.get() == 7.0 && radial_segments == 12
         ));
         let serialized = scene.to_ron().expect("serialize");
         let reparsed = Scene::from_ron(&serialized).expect("re-parse");
@@ -940,17 +1028,26 @@ Scene(
     fn as_custom_returns_none_for_procedurals() {
         let variants = [
             MeshDesc::Sphere {
-                radius: 1.0,
+                radius: PositiveF32::expect_valid(1.0),
                 segments: 16,
                 rings: 8,
             },
             MeshDesc::Box {
-                size: [1.0, 2.0, 3.0],
+                size: [
+                    PositiveF32::expect_valid(1.0),
+                    PositiveF32::expect_valid(2.0),
+                    PositiveF32::expect_valid(3.0),
+                ],
             },
-            MeshDesc::Plane { size: [1.0, 2.0] },
+            MeshDesc::Plane {
+                size: [
+                    PositiveF32::expect_valid(1.0),
+                    PositiveF32::expect_valid(2.0),
+                ],
+            },
             MeshDesc::Cylinder {
-                radius: 1.0,
-                height: 2.0,
+                radius: PositiveF32::expect_valid(1.0),
+                height: PositiveF32::expect_valid(2.0),
                 radial_segments: 8,
             },
         ];
@@ -964,5 +1061,27 @@ Scene(
         let (positions, indices) = custom.as_custom().expect("custom borrows soup");
         assert_eq!(positions.len(), 1);
         assert_eq!(indices.len(), 3);
+    }
+
+    #[test]
+    fn try_custom_validates_triples_and_range() {
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let valid = MeshDesc::try_custom(positions.clone(), vec![0, 1, 2])
+            .expect("triple builds");
+        let tris = valid.as_triangles().expect("typed view");
+        assert_eq!(tris, vec![Triangle::from_raw([0, 1, 2])]);
+        assert_eq!(tris[0].as_u32(), [0, 1, 2]);
+        assert_eq!(tris[0].index(1), TriIndex::from_raw(1));
+        assert!(MeshDesc::try_custom(positions.clone(), vec![0, 1]).is_none());
+        assert!(MeshDesc::try_custom(positions, vec![0, 1, 9]).is_none());
+        assert!(
+            MeshDesc::Sphere {
+                radius: PositiveF32::expect_valid(1.0),
+                segments: 16,
+                rings: 8,
+            }
+            .as_triangles()
+            .is_none()
+        );
     }
 }

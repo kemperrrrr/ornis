@@ -1,6 +1,14 @@
 //! Deterministic island ownership over a shared body/joint registry.
 //! Routing precedes integration; rebuilds preserve assembly references and
 //! completed-step event baselines, never use kinematic collision proxies.
+//!
+//! Handle spaces: [`BodyHandle`]/[`JointHandle`] are GLOBAL (slots in
+//! [`SplitState::bodies`]/[`SplitState::joints`); [`SplitBody`] stores no
+//! global copy — its position is its identity, so `swap_remove` cannot go
+//! stale). [`LocalAvbdBody`]/[`LocalSiBody`] ([`LocalAvbdJoint`]/
+//! [`LocalSiJoint`]) are engine-table indices. Conversions live only in
+//! this file (plus one-line typed accessors on the engines); every other
+//! `BodyHandle` in `avbd`/`sequential_impulse` is engine-local.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -14,8 +22,9 @@ use crate::flags::{RoutePhase, SolverSide};
 use crate::migration::{EventState, JointSnapshot};
 use crate::{
     AABB, AvbdEngine, BodyHandle, BodyType, ContactEvent, ContactEventKind, JointHandle, JointKind,
-    PhysicsEngine, Ray, RaycastHit, RigidBody, SequentialImpulseEngine, Shape, SolverKind,
-    SplitTiming, TriggerEvent, TriggerEventKind,
+    LocalAvbdBody, LocalAvbdJoint, LocalSiBody, LocalSiJoint, PhysicsEngine, Ray, RaycastHit,
+    RigidBody, SequentialImpulseEngine, Shape, SolverKind, SplitTiming, TriggerEvent,
+    TriggerEventKind,
 };
 
 pub(super) const DT: f32 = 1.0 / 60.0;
@@ -44,10 +53,27 @@ impl SplitOwner {
 pub(super) struct SplitBody {
     pub body: RigidBody,
     pub owner: SplitOwner,
-    pub local_avbd: Option<BodyHandle>,
-    pub local_si: Option<BodyHandle>,
+    /// AVBD-table index, not a global handle. `None` when the body is not
+    /// mirrored into AVBD (SI-owned).
+    pub local_avbd: Option<LocalAvbdBody>,
+    /// SI-table index, not a global handle. `None` when the body is not
+    /// mirrored into SI (AVBD-owned).
+    pub local_si: Option<LocalSiBody>,
     pub sleepy: u32,
     pub previous: PrevPose,
+}
+
+/// Global handle for the registry slot at `index`: the body's position in
+/// [`SplitState::bodies`] IS its global identity (stored nowhere per body
+/// so `swap_remove` can never leave a stale copy behind).
+pub(super) fn global_handle(index: usize) -> BodyHandle {
+    BodyHandle::from(index)
+}
+
+/// Global joint handle for the registry slot at `index` (same discipline
+/// as [`global_handle`]).
+pub(super) fn global_joint(index: usize) -> JointHandle {
+    JointHandle::from(index)
 }
 
 impl SplitBody {
@@ -74,8 +100,10 @@ impl SplitBody {
 
 pub(super) struct SplitJoint {
     pub state: JointSnapshot,
-    pub local_avbd: Option<JointHandle>,
-    pub local_si: Option<JointHandle>,
+    /// AVBD-table joint index, not a global joint handle.
+    pub local_avbd: Option<LocalAvbdJoint>,
+    /// SI-table joint index, not a global joint handle.
+    pub local_si: Option<LocalSiJoint>,
 }
 
 impl SplitJoint {
@@ -235,7 +263,7 @@ impl SplitState {
             }
             r.into()
         };
-        let h = JointHandle::from(self.joints.len());
+        let h = global_joint(self.joints.len());
         self.joints.push(SplitJoint::new(JointSnapshot {
             a,
             b,
@@ -279,6 +307,11 @@ impl SplitState {
     }
 
     /// Rebuilds retain joint rest data, driver baselines and contact history.
+    ///
+    /// Global handles index [`SplitState::bodies`]/[`SplitState::joints`];
+    /// engine tables are filled in the same order, so each fresh local index
+    /// is captured here — the only global↔local conversion site for bodies
+    /// (joints convert just below).
     pub(super) fn rebuild(&mut self) {
         let timer = Instant::now();
         self.avbd = AvbdEngine::new(self.gravity);
@@ -288,13 +321,13 @@ impl SplitState {
             b.local_avbd = None;
             b.local_si = None;
             if b.owner != SplitOwner::SequentialImpulse {
-                let h = self.avbd.add_body(b.body.clone());
-                self.avbd.restore_body_baseline(h, b.previous);
+                let h = LocalAvbdBody::from(self.avbd.add_body(b.body.clone()));
+                self.avbd.restore_body_baseline_local(h, b.previous);
                 b.local_avbd = Some(h);
             }
             if b.owner != SplitOwner::Avbd {
-                let h = self.si.add_body(b.body.clone());
-                self.si.restore_body_baseline(h, b.previous);
+                let h = LocalSiBody::from(self.si.add_body(b.body.clone()));
+                self.si.restore_body_baseline_local(h, b.previous);
                 b.local_si = Some(h);
             }
         }
@@ -312,9 +345,9 @@ impl SplitState {
                 if let Some(spec) = spec {
                     let h = self
                         .avbd
-                        .add_joint(a, b, spec)
+                        .add_joint_local(a, b, spec)
                         .expect("validated AVBD joint");
-                    self.avbd.restore_joint_reference(h, j.reference);
+                    self.avbd.restore_joint_reference_local(h, j.reference);
                     self.joints[i].local_avbd = Some(h);
                 }
             }
@@ -324,8 +357,11 @@ impl SplitState {
             ) {
                 let spec = self.local_spec(j.spec, SolverSide::SequentialImpulse);
                 if let Some(spec) = spec {
-                    let h = self.si.add_joint(a, b, spec).expect("validated SI joint");
-                    self.si.restore_joint_reference(h, j.reference);
+                    let h = self
+                        .si
+                        .add_joint_local(a, b, spec)
+                        .expect("validated SI joint");
+                    self.si.restore_joint_reference_local(h, j.reference);
                     self.joints[i].local_si = Some(h);
                 }
             }
@@ -338,6 +374,9 @@ impl SplitState {
         self.timing.rebuild += timer.elapsed();
     }
 
+    /// Remap a global-space gear spec into one engine's local joint space.
+    /// Global joint refs enter here; local refs leave. Returns `None` when a
+    /// referenced joint is not mirrored into this engine.
     fn local_spec(&self, spec: JointKind, side: SolverSide) -> Option<JointKind> {
         if let JointKind::Gear {
             joint_a,
@@ -345,12 +384,12 @@ impl SplitState {
             ratio,
         } = spec
         {
-            let local = |h: JointHandle| {
+            let local = |h: JointHandle| -> Option<JointHandle> {
                 let j = self.joints.get(h.index())?;
                 if side.is_avbd() {
-                    j.local_avbd
+                    j.local_avbd.map(JointHandle::from)
                 } else {
-                    j.local_si
+                    j.local_si.map(JointHandle::from)
                 }
             };
             Some(JointKind::Gear {
@@ -363,17 +402,20 @@ impl SplitState {
         }
     }
 
+    /// Remap the global completed-step event baseline into one engine's
+    /// local body space. Pairs touching bodies absent from this engine are
+    /// dropped (the engine never sees them).
     fn local_events(&self, side: SolverSide) -> EventState {
         let local = |pairs: &BTreeSet<(BodyHandle, BodyHandle)>| {
             pairs
                 .iter()
                 .filter_map(|&(a, b)| {
-                    let get = |h: BodyHandle| {
+                    let get = |h: BodyHandle| -> Option<BodyHandle> {
                         let r = self.bodies.get(h.index())?;
                         if side.is_avbd() {
-                            r.local_avbd
+                            r.local_avbd.map(BodyHandle::from)
                         } else {
-                            r.local_si
+                            r.local_si.map(BodyHandle::from)
                         }
                     };
                     Some((get(a)?, get(b)?))
@@ -389,8 +431,10 @@ impl SplitState {
     pub(super) fn pull(&mut self) {
         for b in &mut self.bodies {
             let src = match b.owner {
-                SplitOwner::Avbd => b.local_avbd.and_then(|h| self.avbd.get_body(h)),
-                SplitOwner::SequentialImpulse => b.local_si.and_then(|h| self.si.get_body(h)),
+                SplitOwner::Avbd => b.local_avbd.and_then(|h| self.avbd.get_body_local(h)),
+                SplitOwner::SequentialImpulse => {
+                    b.local_si.and_then(|h| self.si.get_body_local(h))
+                }
                 SplitOwner::Static => None, // host owns non-dynamic poses/properties
             };
             if let Some(live) = src {
@@ -415,32 +459,34 @@ impl SplitState {
         }
     }
 
+    /// Push a host-edited GLOBAL body into both engine mirrors (local writes).
     pub(super) fn push_global(&mut self, global: BodyHandle) {
         let Some(b) = self.bodies.get(global.index()) else {
             return;
         };
         if let Some(h) = b.local_avbd {
-            self.avbd.wake_body(h);
-            if let Some(dst) = self.avbd.get_body_mut(h) {
+            self.avbd.wake_body_local(h);
+            if let Some(dst) = self.avbd.get_body_mut_local(h) {
                 *dst = b.body.clone();
             }
         }
         if let Some(h) = b.local_si {
-            self.si.wake_body(h);
-            if let Some(dst) = self.si.get_body_mut(h) {
+            self.si.wake_body_local(h);
+            if let Some(dst) = self.si.get_body_mut_local(h) {
                 *dst = b.body.clone();
             }
         }
     }
 
-    pub(super) fn wake_global(&mut self, h: BodyHandle) {
-        if let Some(b) = self.bodies.get_mut(h.index()) {
+    /// Wake a GLOBAL body in both engine mirrors (local wakes).
+    pub(super) fn wake_global(&mut self, global: BodyHandle) {
+        if let Some(b) = self.bodies.get_mut(global.index()) {
             b.sleepy = 0;
             if let Some(local) = b.local_avbd {
-                self.avbd.wake_body(local);
+                self.avbd.wake_body_local(local);
             }
             if let Some(local) = b.local_si {
-                self.si.wake_body(local);
+                self.si.wake_body_local(local);
             }
         }
     }
@@ -466,7 +512,7 @@ impl SplitState {
                 restore_mass(&mut b.body);
             }
             if phase.is_tick() && b.owner != SplitOwner::Static {
-                if edited.contains(&BodyHandle::from(h))
+                if edited.contains(&global_handle(h))
                     || b.body.velocity.length() >= SLEEP_SPEED
                     || b.body.angular_velocity.length() >= SLEEP_SPEED
                     || b.body.torque.length_squared() > 0.0
@@ -530,7 +576,7 @@ impl SplitState {
             }
             let r = find(&mut root, h);
             calm[r] &= b.sleepy >= QUIET_STEPS;
-            active[r] |= edited.contains(&BodyHandle::from(h))
+            active[r] |= edited.contains(&global_handle(h))
                 || b.body.velocity.length() > WAKE_SPEED
                 || b.body.angular_velocity.length() > WAKE_SPEED
                 || b.body.torque.length_squared() > 0.0;
@@ -562,6 +608,10 @@ impl SplitState {
     }
 
     /// Drain/map before any rebuild so migration cannot swallow events.
+    ///
+    /// Engine event queues speak LOCAL handles; `av`/`si_map` translate each
+    /// local index back to its GLOBAL owner. Every other pair in this file
+    /// (`now`, `contacts`, `triggers`, `self.events`) is global.
     pub(super) fn step(&mut self) -> (Vec<ContactEvent>, Vec<TriggerEvent>) {
         let timer = Instant::now();
         self.avbd.step(DT);
@@ -572,7 +622,7 @@ impl SplitState {
         let mut av: Vec<Option<BodyHandle>> = vec![None; self.bodies.len()];
         let mut si_map = av.clone();
         for (global, b) in self.bodies.iter().enumerate() {
-            let global = BodyHandle::from(global);
+            let global = global_handle(global);
             if let Some(h) = b.local_avbd {
                 av[h.index()] = Some(global);
             }
@@ -681,7 +731,7 @@ impl SplitState {
                 && closest.as_ref().is_none_or(|old| distance < old.distance)
             {
                 closest = Some(RaycastHit {
-                    handle: BodyHandle::from(h),
+                    handle: global_handle(h),
                     point: ray.point_at(distance),
                     normal: (b.body.orientation * normal).normalize_or(Vec3::Y),
                     distance,
@@ -702,7 +752,7 @@ impl SplitState {
         };
         let targets = self.bodies.iter().enumerate().map(|(h, b)| {
             (
-                BodyHandle::from(h),
+                global_handle(h),
                 ShapeRef {
                     shape: &b.body.shape,
                     pos: b.body.position,

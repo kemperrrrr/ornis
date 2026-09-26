@@ -32,14 +32,22 @@ const FLOOR_HALF_EXTENTS: [f32; 3] = [20.0, 1.0, 20.0];
 /// ([`Authoritative`](ornis_core::Authoritative), the default: a bare
 /// `GameWorld` keeps meaning the authoritative world); the browser viewport
 /// runs a [`ReplicaGameWorld`] populated from serialized snapshots across
-/// the boundary (IDEAS §28). Physics, audio, scripting and
-/// GPU state stay specialized resources installed by the platform through
-/// [`GameWorld::engine_mut`], never duplicated here.
+/// the boundary (IDEAS §28) — construct it with
+/// [`ReplicaGameWorld::new_replica`]/[`ReplicaGameWorld::from_scene_replica`],
+/// never by reusing the authoritative constructors. Physics, audio,
+/// scripting and GPU state stay specialized resources installed by the
+/// platform through [`GameWorld::engine_mut`], never duplicated here.
+/// That `engine_mut` (a `&mut Engine<Running>` late-registration hatch, in
+/// the `install_*` family style) is the deliberate legacy seam: the 50+
+/// platform installers are not migrated to the builder, so scene-backed
+/// setup keeps registering between frames here.
 ///
 /// Scene membership lives in a [`SceneEntities`](ornis_core::SceneEntities)
 /// newtype and the mutation counter in a
 /// [`SceneVersion`](ornis_core::SceneVersion): both serialize as the plain
-/// underlying JSON numbers, so snapshots and the WASM boundary are unchanged.
+/// underlying JSON numbers, so snapshots and the WASM boundary are unchanged
+/// — the `/api/*` transport stays `u64` on the wire and `SceneVersion`
+/// converts with `From` at the edges.
 pub struct GameWorld<Role: SceneRole = Authoritative> {
     engine: Engine,
     entities: SceneEntities,
@@ -227,7 +235,8 @@ pub fn spawn_static_floor(engine: &mut Engine) -> Entity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_assets::scene::{CameraDesc, MaterialDesc, MeshDesc, TransformDesc};
+    use ornis_assets::scene::{CameraDesc, MaterialDesc, MeshDesc, ShadowCast, TransformDesc};
+    use ornis_core::units::{Clamped01, PositiveF32};
     use ornis_core::{Stage as CoreStage, Time};
 
     /// Minimal probe system for staged-plan lookups.
@@ -252,13 +261,13 @@ mod tests {
                 scale: [1.0, 1.0, 1.0],
             },
             mesh: MeshDesc::Sphere {
-                radius: 1.0,
+                radius: PositiveF32::expect_valid(1.0),
                 segments: 16,
                 rings: 8,
             },
             material: MaterialDesc::Dielectric {
                 base_color: [0.8, 0.2, 0.2],
-                roughness: 0.5,
+                roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
             },
         };
@@ -289,13 +298,13 @@ mod tests {
                     scale: [1.0, 1.0, 1.0],
                 },
                 mesh: MeshDesc::Sphere {
-                    radius: 2.0,
+                    radius: PositiveF32::expect_valid(2.0),
                     segments: 48,
                     rings: 32,
                 },
                 material: MaterialDesc::Metal {
                     base_color: [0.9, 0.8, 0.2],
-                    roughness: 0.2,
+                    roughness: Clamped01::new(0.2),
                     emission: [0.0, 0.0, 0.0],
                 },
             }],
@@ -518,13 +527,13 @@ mod tests {
                         scale: [1.0, 1.0, 1.0],
                     },
                     mesh: MeshDesc::Sphere {
-                        radius: 2.0,
+                        radius: PositiveF32::expect_valid(2.0),
                         segments: 24,
                         rings: 16,
                     },
                     material: MaterialDesc::Dielectric {
                         base_color: [0.8, 0.2, 0.2],
-                        roughness: 0.4,
+                        roughness: Clamped01::new(0.4),
                         emission: [0.0, 0.0, 0.0],
                     },
                 },
@@ -536,13 +545,13 @@ mod tests {
                         scale: [2.0, 2.0, 2.0],
                     },
                     mesh: MeshDesc::Sphere {
-                        radius: 0.5,
+                        radius: PositiveF32::expect_valid(0.5),
                         segments: 48,
                         rings: 32,
                     },
                     material: MaterialDesc::Metal {
                         base_color: [0.9, 0.8, 0.2],
-                        roughness: 0.2,
+                        roughness: Clamped01::new(0.2),
                         emission: [0.0, 0.0, 0.0],
                     },
                 },
@@ -554,14 +563,14 @@ mod tests {
                         scale: [1.0, 1.0, 1.0],
                     },
                     mesh: MeshDesc::Sphere {
-                        radius: 1.0,
+                        radius: PositiveF32::expect_valid(1.0),
                         segments: 32,
                         rings: 24,
                     },
                     material: MaterialDesc::Coat {
                         base_color: [0.2, 0.4, 0.9],
-                        coat_weight: 0.7,
-                        coat_roughness: 0.1,
+                        coat_weight: Clamped01::new(0.7),
+                        coat_roughness: Clamped01::new(0.1),
                         emission: [0.0, 0.0, 0.0],
                     },
                 },
@@ -618,13 +627,13 @@ mod tests {
                         scale: [1.0, 1.0, 1.0],
                     },
                     mesh: MeshDesc::Sphere {
-                        radius: 1.0,
+                        radius: PositiveF32::expect_valid(1.0),
                         segments: 48,
                         rings: 32,
                     },
                     material: MaterialDesc::Metal {
                         base_color: [0.9, 0.8, 0.2],
-                        roughness: 0.2,
+                        roughness: Clamped01::new(0.2),
                         emission: [0.0, 0.0, 0.0],
                     },
                 },
@@ -636,13 +645,13 @@ mod tests {
                         scale: [1.0, 1.0, 1.0],
                     },
                     mesh: MeshDesc::Sphere {
-                        radius: 1.0,
+                        radius: PositiveF32::expect_valid(1.0),
                         segments: 16,
                         rings: 12,
                     },
                     material: MaterialDesc::Dielectric {
                         base_color: [0.2, 0.8, 0.2],
-                        roughness: 0.5,
+                        roughness: Clamped01::new(0.5),
                         emission: [0.0, 0.0, 0.0],
                     },
                 },
@@ -666,7 +675,7 @@ mod tests {
         store.insert(
             incomplete,
             MeshDesc::Sphere {
-                radius: 1.0,
+                radius: PositiveF32::expect_valid(1.0),
                 segments: 96,
                 rings: 64,
             },
@@ -675,8 +684,8 @@ mod tests {
             incomplete,
             MaterialDesc::Coat {
                 base_color: [0.2, 0.4, 0.9],
-                coat_weight: 0.7,
-                coat_roughness: 0.1,
+                coat_weight: Clamped01::new(0.7),
+                coat_roughness: Clamped01::new(0.1),
                 emission: [0.0, 0.0, 0.0],
             },
         );
@@ -698,7 +707,7 @@ mod tests {
                 direction: [0.0, -1.0, 0.0],
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
-                shadow: false,
+                shadow: ShadowCast::Disabled,
             }],
             ambient: [0.2, 0.2, 0.2],
             ..scene()
@@ -717,7 +726,7 @@ mod tests {
                 direction: [0.0, -1.0, 0.0],
                 intensity: v,
                 color: [1.0, 0.9, 0.8],
-                shadow: false,
+                shadow: ShadowCast::Disabled,
             }] if *v == 2.0
         ));
     }

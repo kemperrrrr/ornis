@@ -151,11 +151,15 @@ fn mat3_det(m: &[[f32; 3]; 3]) -> f32 {
 /// (the importer rejects them; this stays panic-free regardless).
 pub(crate) fn area_weighted_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut acc = vec![[0.0f32; 3]; positions.len()];
-    for tri in indices.chunks_exact(3) {
+    for tri in indices
+        .chunks_exact(3)
+        .map(|c| crate::Triangle::from_raw([c[0], c[1], c[2]]))
+    {
+        let raw = tri.as_u32();
         let (Some(&pa), Some(&pb), Some(&pc)) = (
-            positions.get(tri[0] as usize),
-            positions.get(tri[1] as usize),
-            positions.get(tri[2] as usize),
+            positions.get(raw[0] as usize),
+            positions.get(raw[1] as usize),
+            positions.get(raw[2] as usize),
         ) else {
             continue;
         };
@@ -166,7 +170,7 @@ pub(crate) fn area_weighted_normals(positions: &[[f32; 3]], indices: &[u32]) -> 
             ab[2] * ac[0] - ab[0] * ac[2],
             ab[0] * ac[1] - ab[1] * ac[0],
         ];
-        for &idx in tri {
+        for idx in raw {
             if let Some(slot) = acc.get_mut(idx as usize) {
                 slot[0] += n[0];
                 slot[1] += n[1];

@@ -61,6 +61,129 @@ impl From<JointHandle> for usize {
     }
 }
 
+/// Local joint index inside an [`AvbdEngine`](crate::avbd::AvbdEngine).
+///
+/// Same `u32` representation as [`JointHandle`], but a different handle
+/// space: the AVBD engine's dense joint table, not the
+/// [`Engine`](crate::Engine) global registry. Convert explicitly at the
+/// split-registry boundary (`split.rs`); lossless `u32` reinterpretation,
+/// bit-identical behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalAvbdJoint(u32);
+
+impl LocalAvbdJoint {
+    /// Wraps a raw `u32` local joint index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` local joint index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Local joint index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for LocalAvbdJoint {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for LocalAvbdJoint {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<LocalAvbdJoint> for u32 {
+    fn from(h: LocalAvbdJoint) -> Self {
+        h.0
+    }
+}
+
+impl From<LocalAvbdJoint> for usize {
+    fn from(h: LocalAvbdJoint) -> Self {
+        h.0 as usize
+    }
+}
+
+impl From<LocalAvbdJoint> for JointHandle {
+    fn from(h: LocalAvbdJoint) -> Self {
+        Self::from_raw(h.0)
+    }
+}
+
+impl From<JointHandle> for LocalAvbdJoint {
+    fn from(h: JointHandle) -> Self {
+        Self::from_raw(h.as_u32())
+    }
+}
+
+/// Local joint index inside a [`SequentialImpulseEngine`](crate::engine::SequentialImpulseEngine).
+///
+/// Same contract as [`LocalAvbdJoint`]: the SI engine's dense joint table,
+/// not the global registry. Explicit conversions only, at the split boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalSiJoint(u32);
+
+impl LocalSiJoint {
+    /// Wraps a raw `u32` local joint index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw `u32` local joint index.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Local joint index as `usize` for table lookups.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for LocalSiJoint {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<usize> for LocalSiJoint {
+    fn from(v: usize) -> Self {
+        Self(v as u32)
+    }
+}
+
+impl From<LocalSiJoint> for u32 {
+    fn from(h: LocalSiJoint) -> Self {
+        h.0
+    }
+}
+
+impl From<LocalSiJoint> for usize {
+    fn from(h: LocalSiJoint) -> Self {
+        h.0 as usize
+    }
+}
+
+impl From<LocalSiJoint> for JointHandle {
+    fn from(h: LocalSiJoint) -> Self {
+        Self::from_raw(h.0)
+    }
+}
+
+impl From<JointHandle> for LocalSiJoint {
+    fn from(h: JointHandle) -> Self {
+        Self::from_raw(h.as_u32())
+    }
+}
+
 /// What the user supplies when creating a joint. Local anchors/axes are
 /// specified in each body's frame; the joint is satisfied when the world
 /// anchors coincide (and, for revolute, the world axes are parallel).

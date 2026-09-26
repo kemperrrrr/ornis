@@ -69,18 +69,103 @@ pub enum Shape {
     /// contact (terrain-vs-terrain is undefined).
     Heightfield(Heightfield),
     /// Triangle-soup mesh collider in body-local space (concave meshes
-    /// welcome). Built with [`TriMesh::from_indexed`]: each triangle
-    /// becomes a prebuilt convex primitive under a median-split AABB BVH,
-    /// so narrow phase reuses the exact GJK/EPA path per triangle.
+    /// welcome). Built with [`TriMesh::from_triangles`] (flat
+    /// [`TriMesh::from_indexed`]): each triangle becomes a prebuilt convex
+    /// primitive under a median-split AABB BVH, so narrow phase reuses the
+    /// exact GJK/EPA path per triangle.
     /// Mesh-vs-mesh reports no contact (concave-concave is undefined —
     /// split compound colliders with `Fixed` joints instead).
     TriMesh(TriMesh),
+}
+
+/// Vertex index into a mesh vertex list.
+///
+/// Newtype over raw `u32` soup so vertex indices never mix with triangle
+/// ordinals or body handles at the type level. Layout is `repr(transparent)`
+/// over `u32` (12 bytes per [`Triangle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct TriIndex(pub u32);
+
+impl TriIndex {
+    /// Wraps a raw vertex index without validation.
+    pub const fn from_raw(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Raw `u32` vertex index (for GPU/upload transports).
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Vertex position in a slice (`as usize`).
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for TriIndex {
+    fn from(index: u32) -> Self {
+        Self::from_raw(index)
+    }
+}
+
+/// One triangle as three vertex indices (CCW from outside).
+///
+/// Stored as three [`TriIndex`] (12 bytes, `repr(C)`); use
+/// [`Triangle::from_raw`]/[`Triangle::as_u32`] at transport boundaries and
+/// [`Triangle::index`] for checked-position access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct Triangle(pub TriIndex, pub TriIndex, pub TriIndex);
+
+impl Triangle {
+    /// Wraps three raw vertex indices without validation.
+    pub const fn from_raw(indices: [u32; 3]) -> Self {
+        Self(
+            TriIndex(indices[0]),
+            TriIndex(indices[1]),
+            TriIndex(indices[2]),
+        )
+    }
+
+    /// Raw `[u32; 3]` triple (for GPU/upload transports).
+    pub const fn as_u32(self) -> [u32; 3] {
+        [self.0.0, self.1.0, self.2.0]
+    }
+
+    /// `i`-th corner (`0..3`) as a vertex index.
+    ///
+    /// # Panics
+    ///
+    /// Panics on `i >= 3` (same contract as array indexing).
+    pub const fn index(self, i: usize) -> TriIndex {
+        match i {
+            0 => self.0,
+            1 => self.1,
+            2 => self.2,
+            _ => panic!("triangle corner out of range"),
+        }
+    }
+}
+
+impl From<[u32; 3]> for Triangle {
+    fn from(indices: [u32; 3]) -> Self {
+        Self::from_raw(indices)
+    }
 }
 
 /// Explicit convex polyhedron: deduplicated local vertices plus outward
 /// faces triangulated at construction. Built with
 /// [`ConvexHull::from_vertices`]; faces exist only for small hulls (see the
 /// constructor cap) — GJK support queries need vertices alone.
+///
+/// Construction invariant (finite vertices; faces valid triangle indices)
+/// is enforced by the checked [`ConvexHull::from_vertices`]. The fields
+/// stay `pub` for solver-adjacent compat (reads in `gjk`, `broadphase`,
+/// `queries`, `avbd` and tests exceed the privatization budget), so prefer
+/// the [`ConvexHull::vertices`]/[`ConvexHull::faces`] accessors and the
+/// `try_` queries in new code instead of reaching into the fields.
 #[derive(Debug, Clone)]
 pub struct ConvexHull {
     /// Deduplicated vertices in body-local space.
@@ -88,7 +173,7 @@ pub struct ConvexHull {
     /// Outward-oriented triangles as vertex indices. Empty when the input
     /// exceeded the triangulation cap (support/GJK still work; face-slab
     /// raycasts report no hit).
-    pub faces: Vec<[u32; 3]>,
+    pub faces: Vec<Triangle>,
 }
 
 /// Heightfield terrain: a regular X/Z grid of heights, centered on the
@@ -99,8 +184,13 @@ pub struct ConvexHull {
 /// positive finite `cell`, finite samples) is enforced by the checked
 /// [`Heightfield::new`] (plus [`Heightfield::validate`] /
 /// [`Heightfield::is_valid`] for re-checks); the fields stay `pub` for
-/// solver-adjacent compat, so queries keep defensive guards for
-/// legacy-constructed values instead of assuming validity.
+/// solver-adjacent compat (reads in `distance`, `queries` and tests exceed
+/// the privatization budget — kept deliberately, not by oversight), so
+/// queries keep defensive guards for legacy-constructed values instead of
+/// assuming validity. New code should construct via [`Heightfield::new`] /
+/// [`Heightfield::try_new_units`] / [`TryFrom`] and read via the
+/// [`Heightfield::heights`]/[`Heightfield::rows`]/[`Heightfield::cols`]/
+/// [`Heightfield::cell`] accessors.
 #[derive(Debug, Clone)]
 pub struct Heightfield {
     /// Row-major heights (`rows * cols` entries).
@@ -117,7 +207,15 @@ pub struct Heightfield {
 /// with a prebuilt AABB BVH. Each surviving triangle is stored as a
 /// centroid-relative [`Shape::ConvexHull`] (zero per-query allocation in
 /// narrow phase) under `centroids`; `nodes` accelerates both the narrow
-/// walk and raycasts. Built with [`TriMesh::from_indexed`].
+/// walk and raycasts. Built with [`TriMesh::from_triangles`] (flat
+/// [`TriMesh::from_indexed`]).
+///
+/// Derived aggregates (`local_min`/`local_max`, `bound_radius`,
+/// `min_feature`) are computed at construction; the fields stay `pub` for
+/// solver-adjacent compat (reads in `broadphase`, `queries`, `avbd` and
+/// tests exceed the privatization budget), so new code should read via the
+/// [`TriMesh::tris`]/[`TriMesh::centroids`]/[`TriMesh::bound_radius`]/
+/// [`TriMesh::min_feature`]/[`TriMesh::local_bounds`] accessors.
 #[derive(Debug, Clone)]
 pub struct TriMesh {
     /// One convex primitive per surviving triangle, vertices relative to
@@ -357,17 +455,45 @@ impl Shape {
         }
     }
 
-    /// Diagonal (body-frame) inertia tensor for a given mass.
-    /// One entry per principal axis; a sphere is isotropic, a box and a
-    /// capsule are symmetric about their local +Y.
-    pub fn inertia(&self, mass: f32) -> Vec3 {
+    /// Fallible diagonal (body-frame) inertia tensor for a given mass.
+    /// `Ok` on every shape with exact inertia (sphere/box/capsule/
+    /// cylinder/cone, plus hull/mesh soup with usable volume); `Err` when
+    /// no exact inertia exists — hull/mesh [`MeshError::DegenerateMesh`]
+    /// (empty faces/soup, non-positive mass, near-zero volume) or the
+    /// heightfield box fallback below. The solver-facing total query is
+    /// [`Shape::inertia`], which substitutes the bounding-box fallback.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshError::DegenerateMesh`] for hull/mesh soup without usable
+    /// volume, and for heightfields (terrain has no exact inertia — use
+    /// the bounding box like [`Shape::inertia`] does).
+    pub fn try_inertia(&self, mass: f32) -> Result<Vec3, MeshError> {
         match self {
-            Shape::Sphere { radius } => {
-                let i = 0.4 * mass * radius * radius;
-                Vec3::splat(i)
+            Self::Sphere { radius } => {
+                if !radius.is_finite() || *radius <= 0.0 || !mass.is_finite() || mass <= 0.0 {
+                    return Err(MeshError::DegenerateMesh);
+                }
+                Ok(Vec3::splat(0.4 * mass * radius * radius))
             }
+            _ => self
+                .convex_try_inertia(mass)
+                .or_else(|_| self.soup_try_inertia(mass)),
+        }
+    }
+
+    /// Exact inertia for the analytic convex arms (box/capsule/cylinder/
+    /// cone); `Err` for everything else (sphere is handled by the caller,
+    /// hull/mesh/heightfield go through [`Shape::soup_try_inertia`]).
+    fn convex_try_inertia(&self, mass: f32) -> Result<Vec3, MeshError> {
+        if !mass.is_finite() || mass <= 0.0 {
+            return Err(MeshError::DegenerateMesh);
+        }
+        let inertia = match self {
             Shape::Box { half_extents } => {
-                // The cuboid formula uses full side lengths, not half extents.
+                if !half_extents.is_finite() || *half_extents == Vec3::ZERO {
+                    return Err(MeshError::DegenerateMesh);
+                }
                 let sides = *half_extents * 2.0;
                 let (x, y, z) = (right2(sides.x), right2(sides.y), right2(sides.z));
                 Vec3::new(
@@ -380,12 +506,11 @@ impl Shape {
                 radius,
                 half_height,
             } => {
-                // h = total half-length along the axis (excluding radius), like a cylinder.
-                let h = half_height;
-                let r = radius;
-                // Uniform about the axis:
+                if !radius.is_finite() || !half_height.is_finite() {
+                    return Err(MeshError::DegenerateMesh);
+                }
+                let (h, r) = (half_height, radius);
                 let i_y = 0.5 * mass * r * r;
-                // Perpendicular, approximating a cylinder + sphere caps.
                 let i_xz = 0.25 * mass * (r * r) + (mass / 3.0) * h * r + 0.25 * mass * h * h;
                 Vec3::new(i_xz, i_y, i_xz)
             }
@@ -393,8 +518,9 @@ impl Shape {
                 radius,
                 half_height,
             } => {
-                // Solid cylinder, height H = 2 * half_height: standard
-                // I_y = M*R^2/2, I_xz = M*(3*R^2 + H^2)/12.
+                if !radius.is_finite() || !half_height.is_finite() {
+                    return Err(MeshError::DegenerateMesh);
+                }
                 let (r, h) = (radius, half_height);
                 let i_y = 0.5 * mass * r * r;
                 let i_xz = mass * (3.0 * r * r + 4.0 * h * h) / 12.0;
@@ -404,27 +530,66 @@ impl Shape {
                 radius,
                 half_height,
             } => {
-                // Solid cone about the geometric center (mid-height), not
-                // the center of mass (which sits half_height/2 toward the
-                // base): axial I_y = 3/10*M*R^2; transverse folds the
-                // parallel-axis shift in —
-                // I_xz = 3*M/80*(4*R^2 + H^2) + M*(H/4)^2, H = 2*h.
-                // Both formulas verified by Monte-Carlo integration
-                // (see the cone check in the P3 work notes).
+                if !radius.is_finite() || !half_height.is_finite() {
+                    return Err(MeshError::DegenerateMesh);
+                }
                 let (r, h) = (radius, half_height);
                 let i_y = 0.3 * mass * r * r;
                 let i_xz = mass * (3.0 * r * r + 8.0 * h * h) / 20.0;
                 Vec3::new(i_xz, i_y, i_xz)
             }
-            Shape::ConvexHull(hull) => hull.inertia(mass),
-            Shape::Heightfield(hf) => {
-                // Terrain is static in practice; report the inertia of the
-                // bounding box so a dynamic heightfield at least tumbles
-                // like its bounds instead of dividing by zero.
-                let e = hf.local_extents();
-                Shape::Box { half_extents: e }.inertia(mass)
+            _ => return Err(MeshError::DegenerateMesh),
+        };
+        if inertia.is_finite() {
+            Ok(inertia)
+        } else {
+            Err(MeshError::DegenerateMesh)
+        }
+    }
+
+    /// Exact inertia for the soup arms: hull/mesh delegate to their
+    /// [`ConvexHull::try_inertia`]/[`TriMesh::try_inertia`]; heightfields
+    /// have no exact inertia and always report `DegenerateMesh` (the total
+    /// [`Shape::inertia`] substitutes the bounding box).
+    fn soup_try_inertia(&self, mass: f32) -> Result<Vec3, MeshError> {
+        match self {
+            Shape::ConvexHull(hull) => hull.try_inertia(mass),
+            Shape::TriMesh(mesh) => mesh.try_inertia(mass),
+            _ => Err(MeshError::DegenerateMesh),
+        }
+    }
+
+    /// Diagonal (body-frame) inertia tensor for a given mass.
+    /// One entry per principal axis; a sphere is isotropic, a box and a
+    /// capsule are symmetric about their local +Y.
+    ///
+    /// Total (never fails) solver query over [`Shape::try_inertia`]:
+    /// degenerate hull/mesh soup and heightfields silently use the local
+    /// bounding box so a degenerate dynamic body still tumbles instead of
+    /// dividing by zero. New code that must distinguish exact from
+    /// fallback inertia should match on `try_inertia` directly.
+    /// Deprecated as an exactness claim — kept as the total solver query.
+    pub fn inertia(&self, mass: f32) -> Vec3 {
+        if let Ok(exact) = self.try_inertia(mass) {
+            return exact;
+        }
+        // Fallback site (single): bounding-box inertia for degenerate
+        // soup and terrain. Terrain is static in practice; a dynamic
+        // heightfield at least tumbles like its bounds. Non-soup shapes
+        // only reach here on non-positive/non-finite mass and report zero.
+        match self {
+            Shape::ConvexHull(hull) => Shape::Box {
+                half_extents: hull.local_box(),
             }
-            Shape::TriMesh(mesh) => mesh.inertia(mass),
+            .convex_try_inertia(mass)
+            .unwrap_or(Vec3::ZERO),
+            Shape::Heightfield(hf) => Shape::Box {
+                half_extents: hf.local_extents(),
+            }
+            .convex_try_inertia(mass)
+            .unwrap_or(Vec3::ZERO),
+            Shape::TriMesh(mesh) => mesh.fallback_inertia(mass),
+            _ => Vec3::ZERO,
         }
     }
 
@@ -435,7 +600,7 @@ impl Shape {
     /// `distance::shape_distance`), so both report `false` here and their
     /// `support` arms are unreachable-by-construction fallbacks. A custom
     /// render soup has no implicit collider: hosts must build it explicitly
-    /// with [`TriMesh::from_indexed`] (`RigidBody::new_trimesh` for bodies)
+    /// with [`TriMesh::from_triangles`] ([`RigidBody::try_new_trimesh`] for bodies)
     /// — physics never substitutes a sphere placeholder.
     pub fn has_gjk_support(&self) -> bool {
         !matches!(self, Shape::Heightfield(_) | Shape::TriMesh(_))
@@ -452,7 +617,7 @@ impl Shape {
     /// separation, so no contact and no cast hit ever forms. This marker is
     /// the loud counterpart of that silent separation — hosts bridging
     /// per-entity custom colliders must check it up front (a custom render
-    /// soup arrives as [`TriMesh::from_indexed`], which pairs with every
+    /// soup arrives as [`TriMesh::from_triangles`], which pairs with every
     /// convex shape and with heightfields) and either split the compound
     /// with `Fixed` joints or fail loudly instead of expecting contacts
     /// that never come. The solver behavior is unchanged by this query.
@@ -607,13 +772,13 @@ fn closest_hull_point(hull: &ConvexHull, p: Vec3) -> Vec3 {
         }
         return hull.vertices.iter().sum::<Vec3>() / hull.vertices.len() as f32;
     }
-    let mut best = hull.vertices[hull.faces[0][0] as usize];
+    let mut best = hull.vertices[hull.faces[0].0.index()];
     let mut bd = (p - best).length_squared();
     for f in &hull.faces {
         let (a, b, c) = (
-            hull.vertices[f[0] as usize],
-            hull.vertices[f[1] as usize],
-            hull.vertices[f[2] as usize],
+            hull.vertices[f.0.index()],
+            hull.vertices[f.1.index()],
+            hull.vertices[f.2.index()],
         );
         let (q, _, _, _) = crate::gjk::closest_triangle(a - p, b - p, c - p);
         let q = q + p;
@@ -740,7 +905,7 @@ impl ConvexHull {
     /// points on the non-positive side (coplanar points tolerated, so quad
     /// faces triangulate into overlapping-but-harmless triangles sharing
     /// one normal). O(n^4), index-ordered, deterministic.
-    fn triangulate(vertices: &[Vec3]) -> Vec<[u32; 3]> {
+    fn triangulate(vertices: &[Vec3]) -> Vec<Triangle> {
         const COPLANAR_EPS: f32 = 1e-5;
         let n = vertices.len();
         let mut faces = Vec::new();
@@ -768,12 +933,24 @@ impl ConvexHull {
                         }
                     }
                     if !outside {
-                        faces.push([i as u32, j as u32, k as u32]);
+                        faces.push(Triangle::from_raw([i as u32, j as u32, k as u32]));
                     }
                 }
             }
         }
         faces
+    }
+
+    /// Deduplicated local vertices (accessor over the compat `pub` field;
+    /// see the struct docs for the privatization note).
+    pub fn vertices(&self) -> &[Vec3] {
+        &self.vertices
+    }
+
+    /// Outward-oriented triangle indices (accessor over the compat `pub`
+    /// field; empty past the triangulation cap).
+    pub fn faces(&self) -> &[Triangle] {
+        &self.faces
     }
 
     /// World-space AABB over the rotated vertices.
@@ -799,6 +976,8 @@ impl ConvexHull {
     ///
     /// Legacy wrapper over [`ConvexHull::try_inertia`]: degenerate input
     /// silently uses the bounding box so existing scenes are bit-identical.
+    /// Deprecated — do not use in new code, kept only for compat; match on
+    /// `try_inertia` (exact) or [`Shape::inertia`] (total solver query).
     pub fn inertia(&self, mass: f32) -> Vec3 {
         self.try_inertia(mass).unwrap_or_else(|_| {
             let e = self.local_box();
@@ -824,9 +1003,9 @@ impl ConvexHull {
         let mut ezz = 0.0f32;
         for f in &self.faces {
             let (a, b, c) = (
-                self.vertices[f[0] as usize],
-                self.vertices[f[1] as usize],
-                self.vertices[f[2] as usize],
+                self.vertices[f.0.index()],
+                self.vertices[f.1.index()],
+                self.vertices[f.2.index()],
             );
             let v = a.dot(b.cross(c)) / 6.0;
             vol += v;
@@ -901,6 +1080,27 @@ impl Heightfield {
             .is_ok()
     }
 
+    /// Row-major height samples (accessor over the compat `pub` field).
+    pub fn heights(&self) -> &[f32] {
+        &self.heights
+    }
+
+    /// Sample count along +Z (accessor over the compat `pub` field).
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Sample count along +X (accessor over the compat `pub` field).
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Uniform grid spacing along X and Z in meters (accessor over the
+    /// compat `pub` field).
+    pub fn cell(&self) -> f32 {
+        self.cell
+    }
+
     /// Explicit validation of the construction invariant.
     pub fn validate(&self) -> Result<(), crate::invariants::HeightfieldError> {
         crate::invariants::validate_heightfield(&self.heights, self.rows, self.cols, self.cell)
@@ -917,6 +1117,11 @@ impl Heightfield {
 
     /// Bilinear height at local (x, z), clamped to the grid edge.
     /// Deterministic: pure arithmetic over the stored samples.
+    ///
+    /// Legacy wrapper: a broken grid (length mismatch, empty dims) silently
+    /// reports `0.0`. Deprecated — do not use in new code, kept only for
+    /// compat; use [`Heightfield::try_height_at`] (explicit `None` for
+    /// invalid grids) instead.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
         if self.heights.len() != self.rows * self.cols || self.rows == 0 || self.cols == 0 {
             return 0.0;
@@ -1005,7 +1210,7 @@ impl TriMesh {
     /// walks: few leaves visited, little per-leaf GJK fan-out).
     const LEAF_TRIS: usize = 4;
 
-    /// Build a mesh collider from a vertex soup and triangle indices.
+    /// Build a mesh collider from a vertex soup and typed triangles.
     /// Degenerate triangles (area² below 1e-12) are dropped, like the
     /// hull weld drops degenerate input.
     /// Deterministic: median splits with a stable index sort, no RNG.
@@ -1015,39 +1220,40 @@ impl TriMesh {
     /// [`MeshError::OutOfRangeIndex`] for dangling indices,
     /// [`MeshError::NonFiniteVertex`] for non-finite vertices. An
     /// all-degenerate soup is `Ok` with zero triangles (empty mesh).
-    pub fn from_indexed(vertices: &[Vec3], indices: &[[u32; 3]]) -> Result<Self, MeshError> {
+    pub fn from_triangles(vertices: &[Vec3], triangles: &[Triangle]) -> Result<Self, MeshError> {
         for (index, v) in vertices.iter().enumerate() {
             if !v.is_finite() {
                 return Err(MeshError::NonFiniteVertex { index });
             }
         }
-        let mut tris = Vec::with_capacity(indices.len());
-        let mut centroids = Vec::with_capacity(indices.len());
+        let mut tris = Vec::with_capacity(triangles.len());
+        let mut centroids = Vec::with_capacity(triangles.len());
         let mut local_min = Vec3::splat(f32::INFINITY);
         let mut local_max = Vec3::splat(f32::NEG_INFINITY);
         let mut bound_radius = 0.0f32;
         let mut min_feature = f32::INFINITY;
-        for (t, idx) in indices.iter().enumerate() {
+        for (t, tri) in triangles.iter().enumerate() {
+            let raw = tri.as_u32();
             let v = [
                 *vertices
-                    .get(idx[0] as usize)
+                    .get(raw[0] as usize)
                     .ok_or(MeshError::OutOfRangeIndex {
                         triangle: t,
-                        index: idx[0],
+                        index: raw[0],
                         vertices: vertices.len(),
                     })?,
                 *vertices
-                    .get(idx[1] as usize)
+                    .get(raw[1] as usize)
                     .ok_or(MeshError::OutOfRangeIndex {
                         triangle: t,
-                        index: idx[1],
+                        index: raw[1],
                         vertices: vertices.len(),
                     })?,
                 *vertices
-                    .get(idx[2] as usize)
+                    .get(raw[2] as usize)
                     .ok_or(MeshError::OutOfRangeIndex {
                         triangle: t,
-                        index: idx[2],
+                        index: raw[2],
                         vertices: vertices.len(),
                     })?,
             ];
@@ -1071,7 +1277,10 @@ impl TriMesh {
             // Vertices are validated finite above, so this cannot fail.
             let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
                 .expect("validated finite triangle vertices");
-            hull.faces = vec![[0, 1, 2], [0, 2, 1]];
+            hull.faces = vec![
+                Triangle::from_raw([0, 1, 2]),
+                Triangle::from_raw([0, 2, 1]),
+            ];
             tris.push(Shape::ConvexHull(hull));
         }
         if tris.is_empty() {
@@ -1089,6 +1298,67 @@ impl TriMesh {
             local_max,
             bound_radius,
             min_feature,
+        })
+    }
+
+    /// Build a mesh collider from a vertex soup and a flat index list.
+    ///
+    /// The flat list is chunked into [`Triangle`]s via
+    /// [`Triangle::from_raw`]; degenerate triangles are dropped by
+    /// [`TriMesh::from_triangles`].
+    ///
+    /// # Errors
+    ///
+    /// [`MeshError::BadIndexCount`] when `indices.len() % 3 != 0`,
+    /// plus the [`TriMesh::from_triangles`] errors for dangling or
+    /// non-finite input.
+    pub fn from_indexed(vertices: &[Vec3], indices: &[u32]) -> Result<Self, MeshError> {
+        if !indices.len().is_multiple_of(3) {
+            return Err(MeshError::BadIndexCount { len: indices.len() });
+        }
+        let triangles: Vec<Triangle> = indices
+            .chunks_exact(3)
+            .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
+            .collect();
+        Self::from_triangles(vertices, &triangles)
+    }
+
+    /// One convex primitive per surviving triangle (accessor over the
+    /// compat `pub` field).
+    pub fn tris(&self) -> &[Shape] {
+        &self.tris
+    }
+
+    /// Triangle centroids in mesh-local space (accessor over the compat
+    /// `pub` field).
+    pub fn centroids(&self) -> &[Vec3] {
+        &self.centroids
+    }
+
+    /// Precomputed mesh-local bounding box (accessor over the compat `pub`
+    /// fields).
+    pub fn local_bounds(&self) -> (Vec3, Vec3) {
+        (self.local_min, self.local_max)
+    }
+
+    /// Support radius about the body origin (accessor over the compat
+    /// `pub` field).
+    pub fn bound_radius(&self) -> f32 {
+        self.bound_radius
+    }
+
+    /// Smallest triangle edge over the soup (accessor over the compat
+    /// `pub` field).
+    pub fn min_feature(&self) -> f32 {
+        self.min_feature
+    }
+
+    /// Triangle ordinal at BVH permutation position `pos`, or `None` when
+    /// out of range. Centralizes the `order[o] as usize` walk so narrow
+    /// phase never indexes blindly.
+    pub(crate) fn ordered_triangle(&self, pos: usize) -> Option<usize> {
+        self.order.get(pos).map(|id| *id as usize).filter(|t| {
+            *t < self.tris.len() && *t < self.centroids.len()
         })
     }
 
@@ -1230,6 +1500,8 @@ impl TriMesh {
     ///
     /// Legacy wrapper over [`TriMesh::try_inertia`]: degenerate input
     /// silently uses the bounding box so existing scenes are bit-identical.
+    /// Deprecated — do not use in new code, kept only for compat; match on
+    /// `try_inertia` (exact) or [`Shape::inertia`] (total solver query).
     pub fn inertia(&self, mass: f32) -> Vec3 {
         self.try_inertia(mass)
             .unwrap_or_else(|_| self.fallback_inertia(mass))
@@ -1305,9 +1577,9 @@ impl TriMesh {
             }
             for f in &hull.faces {
                 let (a, b, cc) = (
-                    hull.vertices[f[0] as usize] + *c,
-                    hull.vertices[f[1] as usize] + *c,
-                    hull.vertices[f[2] as usize] + *c,
+                    hull.vertices[f.0.index()] + *c,
+                    hull.vertices[f.1.index()] + *c,
+                    hull.vertices[f.2.index()] + *c,
                 );
                 let (q, _, _, _) = crate::gjk::closest_triangle(a - p, b - p, cc - p);
                 let q = q + p;
@@ -1338,24 +1610,23 @@ mod tests {
             Vec3::new(-0.5, 0.5, 0.5),
             Vec3::new(0.5, 0.5, 0.5),
         ];
-        TriMesh::from_indexed(
-            &v,
-            &[
-                [0, 3, 1],
-                [0, 2, 3],
-                [4, 5, 7],
-                [4, 7, 6],
-                [0, 4, 6],
-                [0, 6, 2],
-                [1, 3, 7],
-                [1, 7, 5],
-                [0, 1, 5],
-                [0, 5, 4],
-                [2, 7, 3],
-                [2, 6, 7],
-            ],
-        )
-        .expect("valid cube mesh")
+        let raw = [
+            [0, 3, 1],
+            [0, 2, 3],
+            [4, 5, 7],
+            [4, 7, 6],
+            [0, 4, 6],
+            [0, 6, 2],
+            [1, 3, 7],
+            [1, 7, 5],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 7, 3],
+            [2, 6, 7],
+        ];
+        let triangles: Vec<Triangle> =
+            raw.iter().map(|t| Triangle::from_raw(*t)).collect();
+        TriMesh::from_triangles(&v, &triangles).expect("valid cube mesh")
     }
 
     #[test]
@@ -1405,8 +1676,12 @@ mod tests {
             Vec3::new(2.0, 0.0, 0.0), // Collinear with the first two.
             Vec3::Y,
         ];
-        let mesh = TriMesh::from_indexed(&v, &[[0, 1, 2], [0, 1, 3]])
-            .expect("degenerate drops, not errors");
+        let triangles = [
+            Triangle::from_raw([0, 1, 2]),
+            Triangle::from_raw([0, 1, 3]),
+        ];
+        let mesh =
+            TriMesh::from_triangles(&v, &triangles).expect("degenerate drops, not errors");
         assert_eq!(mesh.tris.len(), 1);
     }
 
@@ -1414,7 +1689,8 @@ mod tests {
     fn trimesh_rejects_out_of_range_indices() {
         use crate::errors::MeshError;
         let v = [Vec3::ZERO, Vec3::X, Vec3::Y];
-        let err = TriMesh::from_indexed(&v, &[[0, 1, 9]]).expect_err("dangling index errors");
+        let err = TriMesh::from_triangles(&v, &[Triangle::from_raw([0, 1, 9])])
+            .expect_err("dangling index errors");
         assert_eq!(
             err,
             MeshError::OutOfRangeIndex {
@@ -1426,10 +1702,44 @@ mod tests {
     }
 
     #[test]
+    fn trimesh_indexed_rejects_bad_count_and_delegates_range() {
+        use crate::errors::MeshError;
+        let v = [Vec3::ZERO, Vec3::X, Vec3::Y];
+        assert_eq!(
+            TriMesh::from_indexed(&v, &[0, 1]).expect_err("odd count errors"),
+            MeshError::BadIndexCount { len: 2 }
+        );
+        let err = TriMesh::from_indexed(&v, &[0, 1, 9]).expect_err("dangling flat errors");
+        assert_eq!(
+            err,
+            MeshError::OutOfRangeIndex {
+                triangle: 0,
+                index: 9,
+                vertices: 3,
+            }
+        );
+        let mesh = TriMesh::from_indexed(&v, &[0, 1, 2]).expect("flat triple builds");
+        assert_eq!(mesh.tris.len(), 1);
+    }
+
+    #[test]
+    fn triangle_round_trips_raw_and_indexes_corners() {
+        let tri = Triangle::from_raw([2, 5, 7]);
+        assert_eq!(tri.as_u32(), [2, 5, 7]);
+        assert_eq!(tri.index(0), TriIndex::from_raw(2));
+        assert_eq!(tri.index(1).as_u32(), 5);
+        assert_eq!(tri.index(2).index(), 7);
+        assert_eq!(TriIndex::from_raw(9).as_u32(), 9);
+        assert_eq!(TriIndex::from_raw(9).index(), 9);
+        assert_eq!(std::mem::size_of::<Triangle>(), 12);
+    }
+
+    #[test]
     fn trimesh_rejects_non_finite_vertices() {
         use crate::errors::MeshError;
         let v = [Vec3::ZERO, Vec3::X, Vec3::NAN];
-        let err = TriMesh::from_indexed(&v, &[[0, 1, 2]]).expect_err("non-finite errors");
+        let err = TriMesh::from_triangles(&v, &[Triangle::from_raw([0, 1, 2])])
+            .expect_err("non-finite errors");
         assert_eq!(err, MeshError::NonFiniteVertex { index: 2 });
     }
 

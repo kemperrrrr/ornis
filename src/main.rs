@@ -284,7 +284,7 @@ impl GameApp {
             for (index, entity) in entities.into_iter().enumerate() {
                 let description = &scene.entities[index];
                 let radius = match &description.mesh {
-                    ornis_assets::scene::MeshDesc::Sphere { radius, .. } => *radius,
+                    ornis_assets::scene::MeshDesc::Sphere { radius, .. } => radius.get(),
                     // Custom/Box/Plane/Cylinder need an explicit validated collider recipe.
                     ornis_assets::scene::MeshDesc::Custom { .. }
                     | ornis_assets::scene::MeshDesc::Box { .. }

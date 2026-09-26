@@ -15,6 +15,7 @@
 
 #![allow(dead_code)]
 
+use crate::renderer::MaterialIdx;
 use ornis_macros::WgslInterface;
 
 /// HDR composite vertex output (fullscreen quad).
@@ -102,9 +103,9 @@ pub(crate) struct GbufferVertexOutput {
     /// World-space tangent.
     #[wgsl(location = 3)]
     pub world_tangent: [f32; 3],
-    /// Material index (flat: no interpolation).
+    /// Material index (flat: no interpolation; DSL substitutes `MaterialIdx` to WGSL `u32`).
     #[wgsl(location = 4, interpolate = "flat")]
-    pub material_index: u32,
+    pub material_index: MaterialIdx,
 }
 
 /// G-buffer / forward-PBR fragment input (matches the vertex output).
@@ -123,9 +124,9 @@ pub(crate) struct GbufferFragmentInput {
     /// World-space tangent.
     #[wgsl(location = 3)]
     pub world_tangent: [f32; 3],
-    /// Material index (flat: no interpolation).
+    /// Material index (flat: no interpolation; DSL substitutes `MaterialIdx` to WGSL `u32`).
     #[wgsl(location = 4, interpolate = "flat")]
-    pub material_index: u32,
+    pub material_index: MaterialIdx,
 }
 
 /// G-buffer (5-MRT) fragment output.

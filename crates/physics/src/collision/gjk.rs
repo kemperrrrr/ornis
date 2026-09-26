@@ -736,9 +736,9 @@ mod tests {
         assert_eq!(hull.faces.len(), 72);
         for f in &hull.faces {
             let (a, b, c) = (
-                hull.vertices[f[0] as usize],
-                hull.vertices[f[1] as usize],
-                hull.vertices[f[2] as usize],
+                hull.vertices[f.0.index()],
+                hull.vertices[f.1.index()],
+                hull.vertices[f.2.index()],
             );
             let n = (b - a).cross(c - a).normalize();
             let center = (a + b + c) / 3.0;

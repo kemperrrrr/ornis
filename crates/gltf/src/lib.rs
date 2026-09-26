@@ -116,6 +116,83 @@ pub struct LoadedEntity {
     pub material: LoadedMaterial,
 }
 
+/// Vertex index into a mesh vertex list.
+///
+/// Newtype over raw `u32` soup so vertex indices never mix with document
+/// node ids at the type level. Layout is `repr(transparent)` over `u32`
+/// (12 bytes per [`Triangle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct TriIndex(pub u32);
+
+impl TriIndex {
+    /// Wraps a raw vertex index without validation.
+    pub const fn from_raw(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Raw `u32` vertex index (for upload transports).
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Vertex position in a slice (`as usize`).
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for TriIndex {
+    fn from(index: u32) -> Self {
+        Self::from_raw(index)
+    }
+}
+
+/// One triangle as three vertex indices (CCW from outside).
+///
+/// Stored as three [`TriIndex`] (12 bytes, `repr(C)`); use
+/// [`Triangle::from_raw`]/[`Triangle::as_u32`] at transport boundaries and
+/// [`Triangle::index`] for corner access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct Triangle(pub TriIndex, pub TriIndex, pub TriIndex);
+
+impl Triangle {
+    /// Wraps three raw vertex indices without validation.
+    pub const fn from_raw(indices: [u32; 3]) -> Self {
+        Self(
+            TriIndex(indices[0]),
+            TriIndex(indices[1]),
+            TriIndex(indices[2]),
+        )
+    }
+
+    /// Raw `[u32; 3]` triple (for upload transports).
+    pub const fn as_u32(self) -> [u32; 3] {
+        [self.0.0, self.1.0, self.2.0]
+    }
+
+    /// `i`-th corner (`0..3`) as a vertex index.
+    ///
+    /// # Panics
+    ///
+    /// Panics on `i >= 3` (same contract as array indexing).
+    pub const fn index(self, i: usize) -> TriIndex {
+        match i {
+            0 => self.0,
+            1 => self.1,
+            2 => self.2,
+            _ => panic!("triangle corner out of range"),
+        }
+    }
+}
+
+impl From<[u32; 3]> for Triangle {
+    fn from(indices: [u32; 3]) -> Self {
+        Self::from_raw(indices)
+    }
+}
+
 /// Triangle soup of one primitive; positions/indices feed `MeshDesc::Custom`.
 ///
 /// Attribute presence is preserved (`Some` = verbatim source data) so hosts
@@ -167,8 +244,33 @@ impl LoadedMesh {
     ///
     /// Drops the optional source attributes — the upload path rebuilds them
     /// via [`LoadedMesh::resolved_normals`] / [`LoadedMesh::resolved_uvs`].
+    /// Indices round-trip through [`Triangle::from_raw`] /
+    /// [`Triangle::as_u32`] so the flat transport stays triple-aligned by
+    /// construction (12 bytes per triangle).
     pub fn into_custom(self) -> (Vec<[f32; 3]>, Vec<u32>) {
-        (self.positions, self.indices)
+        let mut flat = Vec::with_capacity(self.indices.len());
+        for c in self.indices.chunks_exact(3) {
+            flat.extend_from_slice(&Triangle::from_raw([c[0], c[1], c[2]]).as_u32());
+        }
+        // Defensive: a hand-built mesh with a non-triple tail keeps its tail
+        // verbatim (the importer rejects such soups earlier with
+        // `skipped_bad_index`; this stays panic-free regardless).
+        let rem = self.indices.len() % 3;
+        if rem != 0 {
+            flat.extend_from_slice(&self.indices[self.indices.len() - rem..]);
+        }
+        (self.positions, flat)
+    }
+
+    /// Typed triangle view over the flat index list.
+    ///
+    /// Chunks via [`Triangle::from_raw`]; a non-triple tail is dropped (the
+    /// importer rejects it earlier — see `skipped_bad_index`).
+    pub fn triangles(&self) -> Vec<Triangle> {
+        self.indices
+            .chunks_exact(3)
+            .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
+            .collect()
     }
 
     /// Stored normals, or area-weighted recomputation when absent.

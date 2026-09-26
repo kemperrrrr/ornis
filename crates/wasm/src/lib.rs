@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 //!
 //! Renders the live scene from `/api/scene` (polled ~1/s) through
-//! the shared [`GameWorld`](ornis_app::GameWorld), [`FrameUpload`], and
+//! the shared [`ReplicaGameWorld`](ornis_app::ReplicaGameWorld), [`FrameUpload`], and
 //! [`RenderFrame3D`] frame contract. There is no static fallback: without
 //! the remote server [`start_renderer`] fails instead of rendering a stale
 //! scene — the browser is a view over the editor's live world. The orbit
@@ -18,7 +18,7 @@ use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-use ornis_app::GameWorld;
+use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_render::{
     FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
@@ -79,7 +79,7 @@ async fn fetch_live_scene() -> Option<LiveScene> {
 /// GPU-side scene built from the ECS direct-read payload
 /// ([`FrameUpload`], no scheduled snapshot — X4 Extract-free). The scene
 /// description remains the serialization boundary; renderable components
-/// are inserted into [`GameWorld`] and extracted by its
+/// are inserted into [`ReplicaGameWorld`] and extracted by its
 /// `Engine` frame before this GPU adapter runs.
 struct GpuScene {
     mesh: ornis_render::Mesh,
@@ -91,7 +91,11 @@ struct GpuScene {
     ambient: [f32; 3],
 }
 
-fn build_gpu_scene(device: &wgpu::Device, render_world: &GameWorld, scene: &Scene) -> GpuScene {
+fn build_gpu_scene(
+    device: &wgpu::Device,
+    render_world: &ReplicaGameWorld,
+    scene: &Scene,
+) -> GpuScene {
     let extracted = render_world.frame_upload();
     // RenderFrame3D draws one shared mesh instanced. Each sphere's radius is
     // already folded into its extracted model scale, so the maximum
@@ -539,7 +543,7 @@ struct FrameState<'a> {
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer3D,
     frame3d: RenderFrame3D,
-    render_world: GameWorld,
+    render_world: ReplicaGameWorld,
     mesh: ornis_render::Mesh,
     mesh_params: (u32, u32),
     instance_count: u32,
@@ -767,8 +771,9 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let (scene, initial_version, live_mode) = load_initial_scene().await?;
     // Keep the browser-side ECS explicitly separate from the server's
     // authoritative world: the serialized scene crosses the boundary once,
-    // then the same `GameWorld` frame contract as native is used locally.
-    let mut render_world = GameWorld::from_scene(&scene);
+    // then the same `GameWorld` frame contract as native is used locally
+    // through the `Replica` role.
+    let mut render_world = ReplicaGameWorld::from_scene_replica(&scene);
     install_orbit_camera(
         render_world.engine_mut(),
         OrbitCamera::from_desc(&scene.camera),
@@ -823,7 +828,7 @@ fn spawn_render_loop(
     ctx: GpuContext,
     renderer: Renderer3D,
     frame3d: RenderFrame3D,
-    render_world: GameWorld,
+    render_world: ReplicaGameWorld,
     gpu_scene: GpuScene,
     initial_version: u64,
 ) -> Result<(), JsValue> {
@@ -949,7 +954,7 @@ mod integration_tests {
     fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
-        let mut render_world = GameWorld::from_scene(&live.scene);
+        let mut render_world = ReplicaGameWorld::from_scene_replica(&live.scene);
 
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
         // X4: no scheduled extraction system — the lanes are read directly.
@@ -973,11 +978,11 @@ mod integration_tests {
         // Contract fallback for the browser visual e2e (snapshot → WASM):
         // a live pixel run needs a browser + WebGPU, which CI has not.
         // This pins the same chain headlessly instead — `/api/scene` JSON
-        // → `GameWorld::replace_scene` → `frame` → `frame_upload`
+        // → `ReplicaGameWorld::replace_scene` → `frame` → `frame_upload`
         // (`frame_upload`), with lights published as the shared resource.
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
-        let mut render_world = GameWorld::new();
+        let mut render_world = ReplicaGameWorld::new_replica();
         render_world.replace_scene(&live.scene);
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
         render_world.frame(0.0);
@@ -1089,7 +1094,7 @@ mod integration_tests {
         assert_eq!(live.version, 5);
         assert_eq!(live.sequence, 12);
 
-        let mut render_world = GameWorld::from_scene(&live.scene);
+        let mut render_world = ReplicaGameWorld::from_scene_replica(&live.scene);
         render_world.frame(0.0);
         let extracted = render_world.frame_upload();
 
@@ -1144,7 +1149,7 @@ mod integration_tests {
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
-        let mut render_world = GameWorld::new();
+        let mut render_world = ReplicaGameWorld::new_replica();
         render_world.replace_scene(&live.scene);
         render_world.frame(0.0);
         assert_eq!(render_world.frame_upload().instances.len(), 1);

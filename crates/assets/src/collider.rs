@@ -53,16 +53,24 @@ pub enum ColliderDesc {
 ///
 /// Sphere/Box/Cylinder meshes map to their analytic collider; Plane and
 /// Custom meshes map to `None` — a transport mesh is not a collision
-/// promise. Pair with an explicit [`ColliderDesc`] lane entry for those.
+/// promise. Pair with an explicit [`ColliderDesc`] lane entry for those
+/// (`TriMesh` validates the `Custom` soup through [`MeshDesc::as_triangles`]
+/// at the physics projection).
 pub fn collider_for(mesh: &MeshDesc) -> Option<ColliderDesc> {
     match mesh {
-        MeshDesc::Sphere { radius, .. } => Some(ColliderDesc::Sphere { radius: *radius }),
+        MeshDesc::Sphere { radius, .. } => Some(ColliderDesc::Sphere {
+            radius: radius.get(),
+        }),
         MeshDesc::Box { size } => Some(ColliderDesc::Box {
-            half: [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0],
+            half: [
+                size[0].get() / 2.0,
+                size[1].get() / 2.0,
+                size[2].get() / 2.0,
+            ],
         }),
         MeshDesc::Cylinder { radius, height, .. } => Some(ColliderDesc::Cylinder {
-            radius: *radius,
-            height: *height,
+            radius: radius.get(),
+            height: height.get(),
         }),
         MeshDesc::Plane { .. } | MeshDesc::Custom { .. } => None,
     }
@@ -71,12 +79,13 @@ pub fn collider_for(mesh: &MeshDesc) -> Option<ColliderDesc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::units::PositiveF32;
 
     #[test]
     fn exact_recipes_derive_from_meshes() {
         assert_eq!(
             collider_for(&MeshDesc::Sphere {
-                radius: 2.0,
+                radius: PositiveF32::expect_valid(2.0),
                 segments: 16,
                 rings: 8,
             }),
@@ -84,7 +93,11 @@ mod tests {
         );
         assert_eq!(
             collider_for(&MeshDesc::Box {
-                size: [2.0, 4.0, 6.0]
+                size: [
+                    PositiveF32::expect_valid(2.0),
+                    PositiveF32::expect_valid(4.0),
+                    PositiveF32::expect_valid(6.0),
+                ]
             }),
             Some(ColliderDesc::Box {
                 half: [1.0, 2.0, 3.0]
@@ -92,8 +105,8 @@ mod tests {
         );
         assert_eq!(
             collider_for(&MeshDesc::Cylinder {
-                radius: 1.5,
-                height: 7.0,
+                radius: PositiveF32::expect_valid(1.5),
+                height: PositiveF32::expect_valid(7.0),
                 radial_segments: 12,
             }),
             Some(ColliderDesc::Cylinder {
@@ -105,7 +118,15 @@ mod tests {
 
     #[test]
     fn plane_and_custom_have_no_auto_recipe() {
-        assert_eq!(collider_for(&MeshDesc::Plane { size: [3.0, 5.0] }), None);
+        assert_eq!(
+            collider_for(&MeshDesc::Plane {
+                size: [
+                    PositiveF32::expect_valid(3.0),
+                    PositiveF32::expect_valid(5.0),
+                ]
+            }),
+            None
+        );
         assert_eq!(
             collider_for(&MeshDesc::Custom {
                 positions: vec![[0.0, 0.0, 0.0]],

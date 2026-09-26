@@ -305,6 +305,58 @@ impl SequentialImpulseEngine {
         j.reference_anchor_delta = r.anchor_delta;
     }
 
+    /// Local-space body read: `h` is an SI-table index, not a global handle.
+    /// Thin reinterpretation over [`PhysicsEngine::get_body`]; same lookup.
+    pub(crate) fn get_body_local(&self, h: crate::body::LocalSiBody) -> Option<&RigidBody> {
+        self.bodies.get(h.index())
+    }
+
+    /// Local-space body write: `h` is an SI-table index, not a global handle.
+    pub(crate) fn get_body_mut_local(
+        &mut self,
+        h: crate::body::LocalSiBody,
+    ) -> Option<&mut RigidBody> {
+        self.bodies.get_mut(h.index())
+    }
+
+    /// Local-space wake: `h` is an SI-table index, not a global handle.
+    pub(crate) fn wake_body_local(&mut self, h: crate::body::LocalSiBody) {
+        if h.index() < self.bodies.len() {
+            self.wake_island(h.index());
+        }
+    }
+
+    /// Local-space baseline restore: `h` is an SI-table index.
+    pub(crate) fn restore_body_baseline_local(
+        &mut self,
+        h: crate::body::LocalSiBody,
+        pose: PrevPose,
+    ) {
+        self.restore_body_baseline(BodyHandle::from(h), pose);
+    }
+
+    /// Local-space joint restore: `h` is an SI-table index.
+    pub(crate) fn restore_joint_reference_local(
+        &mut self,
+        h: crate::joint::LocalSiJoint,
+        r: JointReference,
+    ) {
+        self.restore_joint_reference(JointHandle::from(h), r);
+    }
+
+    /// Local-space joint creation: inputs and output are SI-table indices.
+    /// Returns the local joint handle (a lossless `u32` reinterpretation of
+    /// the engine's dense [`JointHandle`]).
+    pub(crate) fn add_joint_local(
+        &mut self,
+        a: crate::body::LocalSiBody,
+        b: crate::body::LocalSiBody,
+        spec: JointKind,
+    ) -> Result<crate::joint::LocalSiJoint, crate::errors::JointError> {
+        self.add_joint(BodyHandle::from(a), BodyHandle::from(b), spec)
+            .map(crate::joint::LocalSiJoint::from)
+    }
+
     /// Empty engine with the default tuning: 12 substeps, 8 velocity
     /// iterations, 4 position iterations, rigid contacts, SIMD-wide solver
     /// on, no gravity until set here. `gravity` is a constant world-space

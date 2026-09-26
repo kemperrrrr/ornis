@@ -549,6 +549,7 @@ pub(crate) fn apply_transform_to_body(body: &mut RigidBody, transform: &Transfor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::units::{Clamped01, PositiveF32};
 
     fn dynamic_body(position: Vec3) -> RigidBody {
         RigidBody::new_sphere(position, 0.5, 1.0)
@@ -778,7 +779,7 @@ mod tests {
         engine.world_mut().store_mut().expect("world store").insert(
             entity,
             MeshDesc::Sphere {
-                radius: 2.0,
+                radius: PositiveF32::expect_valid(2.0),
                 segments: 48,
                 rings: 32,
             },
@@ -787,7 +788,7 @@ mod tests {
             entity,
             MaterialDesc::Metal {
                 base_color: [0.9, 0.8, 0.2],
-                roughness: 0.2,
+                roughness: Clamped01::new(0.2),
                 emission: [0.0, 0.0, 0.0],
             },
         );
@@ -830,7 +831,7 @@ mod tests {
         engine.world_mut().store_mut().expect("world store").insert(
             entity,
             MeshDesc::Sphere {
-                radius: 0.5,
+                radius: PositiveF32::expect_valid(0.5),
                 segments: 16,
                 rings: 8,
             },
@@ -839,7 +840,7 @@ mod tests {
             entity,
             MaterialDesc::Dielectric {
                 base_color: [0.5, 0.5, 0.5],
-                roughness: 0.5,
+                roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
             },
         );
@@ -954,7 +955,7 @@ mod tests {
             entity,
             MaterialDesc::Dielectric {
                 base_color: [0.5, 0.5, 0.5],
-                roughness: 0.5,
+                roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
             },
         );
@@ -1048,7 +1049,7 @@ mod tests {
             entity,
             MaterialDesc::Dielectric {
                 base_color: [0.5, 0.5, 0.5],
-                roughness: 0.5,
+                roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
             },
         );

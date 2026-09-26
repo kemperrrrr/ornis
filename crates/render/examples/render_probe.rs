@@ -9,6 +9,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
+use ornis_core::units::PositiveF32;
 use ornis_core::OpenPBRMaterial;
 use ornis_render::{
     InstanceData, MaterialIdx, RenderBackend, RenderBackendConfig, RenderContext,
@@ -37,7 +38,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut mat = OpenPBRMaterial::dielectric();
             mat.base.color_rgb(*base_color);
-            mat.specular.roughness(*roughness);
+            mat.specular.roughness(roughness.get());
             apply_emission(&mut mat, *emission);
             mat
         }
@@ -48,7 +49,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut mat = OpenPBRMaterial::metal();
             mat.base.color_rgb(*base_color);
-            mat.specular.roughness(*roughness);
+            mat.specular.roughness(roughness.get());
             apply_emission(&mut mat, *emission);
             mat
         }
@@ -60,8 +61,8 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut mat = OpenPBRMaterial::coat();
             mat.base.color_rgb(*base_color);
-            mat.coat.weight(*coat_weight);
-            mat.coat.roughness(*coat_roughness);
+            mat.coat.weight(coat_weight.get());
+            mat.coat.roughness(coat_roughness.get());
             apply_emission(&mut mat, *emission);
             mat
         }
@@ -71,7 +72,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut mat = OpenPBRMaterial::dielectric();
             mat.base.color_rgb(*base_color);
-            mat.base.diffuse_roughness(*roughness);
+            mat.base.diffuse_roughness(roughness.get());
             // Matte is diffuse-only: no specular lobe.
             mat.specular.weight(0.0);
             mat
@@ -83,8 +84,8 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         } => {
             let mut mat = OpenPBRMaterial::glass();
             mat.transmission.color_rgb(*base_color);
-            mat.specular.roughness(*roughness);
-            mat.specular.ior(*ior);
+            mat.specular.roughness(roughness.get());
+            mat.specular.ior(ior.get());
             mat
         }
     }
@@ -174,14 +175,14 @@ fn build_scene_data(
             radius,
             segments,
             rings,
-        } => ornis_render::create_sphere(device, *radius, *segments, *rings),
-        MeshDesc::Box { size } => ornis_render::mesh::create_box(device, *size),
-        MeshDesc::Plane { size } => ornis_render::mesh::create_plane(device, *size),
+        } => ornis_render::create_sphere(device, radius.get(), *segments, *rings),
+        MeshDesc::Box { size } => ornis_render::mesh::create_box(device, size.map(PositiveF32::get)),
+        MeshDesc::Plane { size } => ornis_render::mesh::create_plane(device, size.map(PositiveF32::get)),
         MeshDesc::Cylinder {
             radius,
             height,
             radial_segments,
-        } => ornis_render::mesh::create_cylinder(device, *radius, *height, *radial_segments),
+        } => ornis_render::mesh::create_cylinder(device, radius.get(), height.get(), *radial_segments),
         // This probe renders procedural scenes; Custom soups have no
         // upload path here yet.
         MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),

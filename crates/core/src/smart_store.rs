@@ -116,6 +116,17 @@ impl<'g, T> std::ops::Deref for LockFreeReadGuard<'g, T> {
 /// + swap) for wait-free reads via crossbeam epochs.
 ///
 /// Cold lanes isolate rarely used components from the hot working set.
+///
+/// Phase-agnostic by design: the store takes no `Building`/`Running`
+/// parameter. Lane mutation goes through interior mutability (`RwLock`
+/// guards under `&self`), and system access is guarded by the scheduler's
+/// declared resource/lane contract — not by the build/run marker. Phasing
+/// is enforced one level up, at [`World`](crate::World)/[`Engine`](crate::Engine):
+/// registration (`EngineBuilder`, `World::new_building` + `build`) owns
+/// setup order, while systems and frame code share `&SmartStore`. Threading
+/// a phase phantom through every lane would buy no checking (lanes are
+/// already `&`-shared during execution) and would only ripple the
+/// typestate into the scheduler, GPU upload paths and every `Pack` impl.
 pub struct SmartStore {
     lanes: HashMap<TypeId, Box<dyn Lane>>,
     cold_lanes: HashMap<TypeId, Box<dyn Lane>>,

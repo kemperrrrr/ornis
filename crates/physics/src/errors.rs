@@ -62,6 +62,12 @@ pub enum MeshError {
     /// Degenerate soup: no usable triangles for an exact inertia.
     #[error("degenerate mesh: no usable triangles")]
     DegenerateMesh,
+    /// Flat index list length is not a multiple of 3.
+    #[error("triangle index list length {len} is not a multiple of 3")]
+    BadIndexCount {
+        /// Offending length.
+        len: usize,
+    },
 }
 
 /// Collider projection failure: `Ok(None)` means "no collider", `Err` means "broken".

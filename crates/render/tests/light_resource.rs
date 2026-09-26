@@ -13,8 +13,9 @@
 mod common;
 
 use ornis_assets::scene::{
-    CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
+    CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc,
 };
+use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_render::RenderLights;
 
 /// The legacy rig as scene data — what `RenderLights::default`
@@ -30,13 +31,13 @@ fn legacy_scene() -> Scene {
                 scale: [1.0, 1.0, 1.0],
             },
             mesh: MeshDesc::Sphere {
-                radius: 2.0,
+                radius: PositiveF32::expect_valid(2.0),
                 segments: 48,
                 rings: 32,
             },
             material: MaterialDesc::Metal {
                 base_color: [0.9, 0.8, 0.2],
-                roughness: 0.2,
+                roughness: Clamped01::new(0.2),
                 emission: [0.0, 0.0, 0.0],
             },
         }],
@@ -45,13 +46,13 @@ fn legacy_scene() -> Scene {
                 direction: [1.0, 1.0, 1.0],
                 intensity: 0.6,
                 color: [1.0, 1.0, 1.0],
-                shadow: false,
+                shadow: ShadowCast::Disabled,
             },
             LightDesc::Directional {
                 direction: [-0.5, 0.5, -0.5],
                 intensity: 0.3,
                 color: [0.8, 0.8, 1.0],
-                shadow: false,
+                shadow: ShadowCast::Disabled,
             },
         ],
         camera: CameraDesc {
@@ -79,13 +80,13 @@ fn world_lights_reproduce_legacy_rig_pixels() {
                         direction: [1.0, 1.0, 1.0],
                         intensity: 0.6,
                         color: [1.0, 1.0, 1.0],
-                        shadow: false,
+                        shadow: ShadowCast::Disabled,
                     },
                     LightDesc::Directional {
                         direction: [-0.5, 0.5, -0.5],
                         intensity: 0.3,
                         color: [0.8, 0.8, 1.0],
-                        shadow: false,
+                        shadow: ShadowCast::Disabled,
                     },
                 ],
             );

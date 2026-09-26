@@ -140,6 +140,36 @@ fn gpu_bool_has_explicit_wgsl_u32_representation() {
     assert!(Flags::WGSL_SOURCE.contains("enabled: u32"));
 }
 
+/// Transparent `u32` newtypes substitute to WGSL `u32`, like the CPU
+/// compiler erases `repr(transparent)` wrappers. The derive matches by
+/// type name, so local stubs exercise the same path as the real
+/// `MaterialIdx`/`TextureHandle`.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+struct MaterialIdx(u32);
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+struct TextureHandle(u32);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, WgslStruct)]
+struct Indices {
+    material: MaterialIdx,
+    texture: TextureHandle,
+    uv: [MaterialIdx; 2],
+}
+
+#[test]
+fn transparent_u32_newtypes_spell_u32() {
+    assert_eq!(std::mem::size_of::<MaterialIdx>(), 4);
+    assert_eq!(std::mem::size_of::<TextureHandle>(), 4);
+    let src = Indices::WGSL_SOURCE;
+    assert!(src.contains("material: u32"), "{src}");
+    assert!(src.contains("texture: u32"), "{src}");
+    assert!(src.contains("uv: vec2<u32>"), "{src}");
+}
+
 // A realistic wide GPU buffer used to produce an exponential const expression.
 // The fixture macro keeps the intentionally repetitive field list compact.
 macro_rules! wide_layout {

@@ -61,7 +61,8 @@ pub fn body_for(
             };
             let vertices: Vec<Vec3> = positions.iter().map(|p| Vec3::from_array(*p)).collect();
             let triangles = validated_triangles(&vertices, indices)?;
-            RigidBody::new_trimesh(position, &vertices, &triangles, mass)
+            RigidBody::try_new_trimesh(position, &vertices, &triangles, mass)
+                .map_err(ColliderError::InvalidMesh)?
         }
         ColliderDesc::None => return Ok(None),
     };
@@ -69,25 +70,29 @@ pub fn body_for(
     Ok(Some(body))
 }
 
-/// Chunks a flat soup index list into triangles.
+/// Chunks a flat soup index list into typed triangles.
 ///
 /// # Errors
 ///
 /// [`ColliderError::BadIndexCount`] on non-triangular length,
 /// [`ColliderError::IndexOutOfRange`] on dangling indices.
-fn validated_triangles(vertices: &[Vec3], indices: &[u32]) -> Result<Vec<[u32; 3]>, ColliderError> {
+fn validated_triangles(
+    vertices: &[Vec3],
+    indices: &[u32],
+) -> Result<Vec<crate::shape::Triangle>, ColliderError> {
     if !indices.len().is_multiple_of(3) {
         return Err(ColliderError::BadIndexCount { len: indices.len() });
     }
-    let triangles: Vec<[u32; 3]> = indices
+    let triangles: Vec<crate::shape::Triangle> = indices
         .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
+        .map(|c| crate::shape::Triangle::from_raw([c[0], c[1], c[2]]))
         .collect();
-    for t in &triangles {
-        for &i in t {
-            if (i as usize) >= vertices.len() {
+    for (t, tri) in triangles.iter().enumerate() {
+        for raw in tri.as_u32() {
+            if (raw as usize) >= vertices.len() {
+                let _ = t;
                 return Err(ColliderError::IndexOutOfRange {
-                    index: i,
+                    index: raw,
                     vertices: vertices.len(),
                 });
             }
@@ -99,6 +104,7 @@ fn validated_triangles(vertices: &[Vec3], indices: &[u32]) -> Result<Vec<[u32; 3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::units::PositiveF32;
 
     fn transform() -> TransformDesc {
         TransformDesc {
@@ -114,7 +120,7 @@ mod tests {
         let body = body_for(
             &transform,
             &MeshDesc::Sphere {
-                radius: 2.0,
+                radius: PositiveF32::expect_valid(2.0),
                 segments: 16,
                 rings: 8,
             },
@@ -129,7 +135,7 @@ mod tests {
         let body = body_for(
             &transform,
             &MeshDesc::Box {
-                size: [2.0, 4.0, 6.0],
+                size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
             },
             None,
             0.0,
@@ -139,7 +145,7 @@ mod tests {
         assert_eq!(body.position, Vec3::new(1.0, 2.0, 3.0));
 
         assert!(
-            body_for(&transform, &MeshDesc::Plane { size: [3.0, 5.0] }, None, 0.0)
+            body_for(&transform, &MeshDesc::Plane { size: [PositiveF32::expect_valid(3.0), PositiveF32::expect_valid(5.0)] }, None, 0.0)
                 .expect("plane infallible")
                 .is_none()
         );
@@ -149,7 +155,7 @@ mod tests {
     fn explicit_collider_wins_and_none_suppresses() {
         let transform = transform();
         let mesh = MeshDesc::Sphere {
-            radius: 2.0,
+            radius: PositiveF32::expect_valid(2.0),
             segments: 16,
             rings: 8,
         };

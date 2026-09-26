@@ -12,6 +12,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_render::render_backend::RenderContext;
+use ornis_assets::scene::ShadowCast;
 use ornis_render::{
     InstanceData, MaterialIdx, OpenPBRMaterial, RenderFrame3D, Renderer3D, Technique,
 };
@@ -94,7 +95,7 @@ impl HeadlessScene {
                 direction: [0.3, -1.0, 0.5],
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
-                shadow: false,
+                shadow: ShadowCast::Disabled,
             }],
         );
 

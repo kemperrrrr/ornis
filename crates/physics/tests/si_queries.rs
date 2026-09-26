@@ -4,7 +4,7 @@ use glam::{Quat, Vec3};
 use ornis_physics::trigger::{ContactEventKind, TriggerEventKind};
 use ornis_physics::{
     BodyHandle, ContactEvent, PhysicsEngine, Ray, RigidBody, SequentialImpulseEngine, Shape,
-    TriggerEvent,
+    Triangle, TriggerEvent,
 };
 
 #[test]
@@ -442,6 +442,7 @@ fn shapecast_thin_wall_no_tunnel() {
 #[test]
 fn raycast_hits_trimesh() {
     let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
+    let tris = [Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 3, 1])];
     physics.add_body(RigidBody::new_trimesh(
         Vec3::ZERO,
         &[
@@ -450,7 +451,7 @@ fn raycast_hits_trimesh() {
             Vec3::new(5.0, 0.0, -5.0),
             Vec3::new(-5.0, 0.0, 5.0),
         ],
-        &[[0, 1, 2], [0, 3, 1]],
+        &tris,
         0.0,
     ));
     let hit = physics

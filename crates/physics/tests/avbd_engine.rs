@@ -6,7 +6,7 @@ use ornis_physics::trigger::{ContactEventKind, TriggerEventKind};
 use ornis_physics::{
     AvbdEngine, AxisConfig, BodyHandle, JointHandle, JointKind, PhysicsEngine, PrismaticLimit,
     PrismaticMotor, Ray, RevoluteLimit, RevoluteMotor, RigidBody, SequentialImpulseEngine,
-    WheelSuspension,
+    Triangle, WheelSuspension,
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -1817,6 +1817,7 @@ fn avbd_bounced_retouch_catches_at_offset() {
 fn avbd_ball_rests_on_trimesh_floor() {
     use ornis_physics::PairSupport;
     let mut physics = AvbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let floor_tris = [Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 3, 1])];
     let floor = physics.add_body(RigidBody::new_trimesh(
         Vec3::ZERO,
         &[
@@ -1825,7 +1826,7 @@ fn avbd_ball_rests_on_trimesh_floor() {
             Vec3::new(5.0, 0.0, -5.0),
             Vec3::new(-5.0, 0.0, 5.0),
         ],
-        &[[0, 1, 2], [0, 3, 1]],
+        &floor_tris,
         0.0,
     ));
     // The bridge pair is on the closed supported list — a custom soup is a

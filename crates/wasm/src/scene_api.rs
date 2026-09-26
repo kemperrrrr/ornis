@@ -60,7 +60,10 @@ pub struct RenderComponents {
 
 /// A successfully parsed `/api/scene` payload converted into the render
 /// crate's scene description. The WASM runtime inserts it into the shared
-/// [`GameWorld`](ornis_app::GameWorld) before ECS extraction and GPU upload.
+/// [`ReplicaGameWorld`](ornis_app::ReplicaGameWorld) before ECS extraction
+/// and GPU upload. Both `version` and `sequence` stay plain `u64` on the
+/// transport; the typed [`SceneVersion`](ornis_core::SceneVersion) is only
+/// used inside the world.
 pub struct LiveScene {
     /// Authoritative server-side scene version.
     pub version: u64,
@@ -127,6 +130,7 @@ pub(crate) const FULL_CONTRACT: &str = r#"{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::units::{Clamped01, PositiveF32};
 
     #[test]
     fn parses_full_contract() {
@@ -146,11 +150,11 @@ mod tests {
                 radius,
                 segments: 32,
                 rings: 24
-            } if (radius - 1.0).abs() < f32::EPSILON
+            } if (radius.get() - 1.0).abs() < f32::EPSILON
         ));
         assert!(matches!(
             e.material,
-            MaterialDesc::Dielectric { roughness, .. } if (roughness - 0.5).abs() < f32::EPSILON
+            MaterialDesc::Dielectric { roughness, .. } if (roughness.get() - 0.5).abs() < f32::EPSILON
         ));
     }
 
@@ -201,8 +205,8 @@ mod tests {
                 coat_weight,
                 coat_roughness,
                 ..
-            } if (coat_weight - 0.8).abs() < f32::EPSILON
-                && (coat_roughness - 0.1).abs() < f32::EPSILON
+            } if (coat_weight.get() - 0.8).abs() < f32::EPSILON
+                && (coat_roughness.get() - 0.1).abs() < f32::EPSILON
         ));
         assert!(matches!(
             live.scene.entities[1].material,
@@ -212,7 +216,7 @@ mod tests {
         // single shared radius.
         let (r0, r1) = match (&live.scene.entities[0].mesh, &live.scene.entities[1].mesh) {
             (MeshDesc::Sphere { radius: r0, .. }, MeshDesc::Sphere { radius: r1, .. }) => {
-                (*r0, *r1)
+                (r0.get(), r1.get())
             }
             (a, b) => panic!("expected spheres, got {a:?} and {b:?}"),
         };
@@ -314,7 +318,7 @@ mod tests {
         assert_eq!(live.scene.entities.len(), 3);
         assert!(matches!(
             live.scene.entities[0].mesh,
-            MeshDesc::Box { size } if size == [2.0, 4.0, 6.0]
+            MeshDesc::Box { size } if size.map(PositiveF32::get) == [2.0, 4.0, 6.0]
         ));
         assert!(matches!(
             live.scene.entities[0].material,
@@ -325,7 +329,7 @@ mod tests {
         ));
         assert!(matches!(
             live.scene.entities[1].mesh,
-            MeshDesc::Plane { size } if size == [3.0, 5.0]
+            MeshDesc::Plane { size } if size.map(PositiveF32::get) == [3.0, 5.0]
         ));
         // Old payload without `emission`: defaults to off, still loads.
         assert!(matches!(
@@ -341,7 +345,7 @@ mod tests {
                 radius,
                 height,
                 radial_segments,
-            } if radius == 1.5 && height == 7.0 && radial_segments == 12
+            } if radius.get() == 1.5 && height.get() == 7.0 && radial_segments == 12
         ));
         assert!(matches!(
             live.scene.entities[2].material,
@@ -358,12 +362,12 @@ mod tests {
         // an `/api/scene` payload, and parse back: the JSON transport
         // preserves Box geometry and emission bit-exactly.
         let mesh_json = serde_json::to_string(&MeshDesc::Box {
-            size: [2.0, 4.0, 6.0],
+            size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
         })
         .expect("mesh serializes");
         let material_json = serde_json::to_string(&MaterialDesc::Dielectric {
             base_color: [0.8, 0.2, 0.2],
-            roughness: 0.4,
+            roughness: Clamped01::new(0.4),
             emission: [2.0, 1.0, 0.5],
         })
         .expect("material serializes");
@@ -378,7 +382,7 @@ mod tests {
         let live = parse_scene_json(&payload).expect("round-tripped payload must parse");
         assert!(matches!(
             live.scene.entities[0].mesh,
-            MeshDesc::Box { size } if size == [2.0, 4.0, 6.0]
+            MeshDesc::Box { size } if size.map(PositiveF32::get) == [2.0, 4.0, 6.0]
         ));
         let MaterialDesc::Dielectric { emission, .. } = &live.scene.entities[0].material else {
             panic!(
