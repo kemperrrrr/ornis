@@ -8,7 +8,9 @@ license.workspace = true
 [dependencies]
 ornis-core = { path = "../core" }
 ornis-input = { path = "../input" }
+ornis-macros = { path = "../macros" }
 glam = "0.33"
+serde = "1.0"
 
 [lints]
 workspace = true

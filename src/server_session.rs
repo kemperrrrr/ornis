@@ -71,11 +71,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
+use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
     ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, SmartStore, World,
 };
-use ornis_core::units::{Clamped01, PositiveF32};
-use ornis_gameplay::install_gameplay;
+use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
 use crate::engine_runtime::{PhysicsRuntime, install_physics};
@@ -105,6 +105,8 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
     registry.register::<MeshDesc>("Mesh");
     registry.register::<MaterialDesc>("Material");
     registry.register::<ColliderDesc>("Collider");
+    registry.register_component::<Velocity>();
+    registry.register_component::<Position>();
     registry
 });
 
@@ -1591,7 +1593,11 @@ mod tests {
                 scale: [1.0, 1.0, 1.0],
             },
             MeshDesc::Box {
-                size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
+                size: [
+                    PositiveF32::expect_valid(2.0),
+                    PositiveF32::expect_valid(4.0),
+                    PositiveF32::expect_valid(6.0),
+                ],
             },
             default_material(),
         );

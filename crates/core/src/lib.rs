@@ -65,7 +65,8 @@ pub use prefetch::prefetch_read;
 // Rayon traits without requiring the caller crate to depend on rayon directly.
 pub use rayon;
 pub use registry::{
-    ComponentMeta, ComponentName, ComponentRegistry, LaneId, RegisterComponent, RegistryError,
+    ComponentMeta, ComponentName, ComponentRegistry, FieldMeta, FieldPath, FieldPathError,
+    FieldSegment, FieldSurface, LaneId, RegisterComponent, RegistryError,
 };
 pub use schedule::{
     OrderError, Resources, Schedule, System, SystemAccess, SystemName, compute_levels,

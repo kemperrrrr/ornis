@@ -1882,6 +1882,7 @@ dependencies = [
  "ornis-core",
  "ornis-gameplay",
  "ornis-render",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1896,6 +1897,7 @@ dependencies = [
  "ornis-physics",
  "ornis-render",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1954,6 +1956,8 @@ dependencies = [
  "glam",
  "ornis-core",
  "ornis-input",
+ "ornis-macros",
+ "serde",
 ]
 
 [[package]]

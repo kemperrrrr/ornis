@@ -44,3 +44,35 @@ fn register_component_derive_uses_canonical_name() {
         1
     );
 }
+
+#[test]
+fn register_component_derive_emits_field_schema() {
+    use ornis_core::FieldMeta;
+
+    assert_eq!(
+        AutoNamed::FIELDS,
+        &[FieldMeta {
+            name: "v",
+            path: "v",
+            type_name: "u32",
+            writable: true,
+        }]
+    );
+    assert_eq!(
+        CustomNamed::FIELDS,
+        &[FieldMeta {
+            name: "hp",
+            path: "hp",
+            type_name: "u32",
+            writable: true,
+        }]
+    );
+
+    // Schema travels into the registry.
+    let mut registry = ComponentRegistry::new();
+    registry.register_component::<CustomNamed>();
+    assert_eq!(
+        registry.by_name("custom_health").unwrap().fields(),
+        CustomNamed::FIELDS
+    );
+}

@@ -22,14 +22,69 @@ use glam::Vec3;
 use ornis_core::units::MetersPerSecond;
 use ornis_core::{Engine, FixedTime, Resources, SmartStore, System, SystemAccess, Time};
 use ornis_input::{InputMap, InputState};
+use ornis_macros::RegisterComponent;
+
+/// Serializes a [`Vec3`]-backed component as its `[x, y, z]` array.
+///
+/// Manual impl (not `glam/serde`) so gameplay never toggles a workspace-wide
+/// feature: the canonical JSON form matches `glam`'s own (`[x, y, z]`).
+fn serialize_vec3<S: serde::Serializer>(v: Vec3, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeTupleStruct;
+    let mut state = serializer.serialize_tuple_struct("Vec3", 3)?;
+    state.serialize_field(&v.x)?;
+    state.serialize_field(&v.y)?;
+    state.serialize_field(&v.z)?;
+    state.end()
+}
+
+/// Reads the `[x, y, z]` canonical form back (sequence only, like `glam`).
+fn deserialize_vec3<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec3, D::Error> {
+    struct Vec3Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Vec3Visitor {
+        type Value = Vec3;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a sequence of 3 f32 values")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec3, A::Error> {
+            let x = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+            let y = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+            let z = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
+            Ok(Vec3::new(x, y, z))
+        }
+    }
+
+    deserializer.deserialize_tuple_struct("Vec3", 3, Vec3Visitor)
+}
 
 /// Marker for the locally controlled player entity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Player;
 
 /// Linear velocity in world units per second (gameplay intent, not solver state).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, RegisterComponent)]
 pub struct Velocity(pub Vec3);
+
+impl serde::Serialize for Velocity {
+    /// Canonical `[x, y, z]` m/s form (registry, scenes, editor protocol).
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_vec3(self.0, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Velocity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_vec3(deserializer).map(Velocity)
+    }
+}
 
 impl Velocity {
     /// Wraps a raw m/s vector.
@@ -60,8 +115,21 @@ impl Default for Velocity {
 /// or physics [`RigidBody`](ornis_physics_body::RigidBody) lane exists the
 /// unified runtime synchronizes it; otherwise this lane is the authoritative
 /// placement for pure gameplay entities.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, RegisterComponent)]
 pub struct Position(pub Vec3);
+
+impl serde::Serialize for Position {
+    /// Canonical `[x, y, z]` meters form (registry, scenes, editor protocol).
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_vec3(self.0, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Position {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_vec3(deserializer).map(Position)
+    }
+}
 
 impl Position {
     /// Wraps a raw world-space position (meters).

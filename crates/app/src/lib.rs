@@ -18,6 +18,7 @@ use ornis_physics::RigidBody;
 pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 
 pub mod game_world;
+pub mod sync_harness;
 
 pub use game_world::{GameWorld, ReplicaGameWorld, spawn_static_floor};
 
@@ -103,7 +104,10 @@ pub fn install_unified_runtime(engine: &mut Engine) {
 ///
 /// Fixed-rate so that catch-up frames apply the same intent once per substep,
 /// not once per variable frame.
-struct VelocityToBodySystem;
+///
+/// The typed hot path: [`sync_harness`] re-expresses this mapping
+/// declaratively for Nth engines, this system stays the optimized SI route.
+pub(crate) struct VelocityToBodySystem;
 
 impl System for VelocityToBodySystem {
     fn name(&self) -> &'static str {
@@ -151,7 +155,10 @@ impl System for VelocityToBodySystem {
 
 /// Propagates physics body positions back into gameplay [`Position`] and
 /// render [`TransformDesc`] lanes.
-struct BodyToTransformSystem;
+///
+/// The typed hot path: [`sync_harness`] re-expresses this mapping
+/// declaratively for Nth engines, this system stays the optimized SI route.
+pub(crate) struct BodyToTransformSystem;
 
 impl System for BodyToTransformSystem {
     fn name(&self) -> &'static str {

@@ -24,8 +24,8 @@ use std::sync::{
 };
 
 use crate::{
-    ComponentMeta, ComponentName, ComponentRegistry, Engine, Entity, Resources, SmartStore, System,
-    SystemAccess, Time,
+    ComponentMeta, ComponentName, ComponentRegistry, Engine, Entity, FieldPath, Resources,
+    SmartStore, System, SystemAccess, Time,
 };
 
 /// Typed mutation failure: one rejection reason per entry.
@@ -52,6 +52,25 @@ pub enum MutationError {
     /// Parsed value failed to insert (internal type mismatch).
     #[error("mutation for `{0}` failed to insert (internal type mismatch)")]
     InsertMismatch(ComponentName),
+    /// Field path addresses nothing on the component.
+    #[error("unknown field `{path}` on component `{component}`")]
+    UnknownField {
+        /// Registry name of the component.
+        component: ComponentName,
+        /// Requested path.
+        path: FieldPath,
+    },
+    /// The entity lacks the component — field access never constructs
+    /// the missing remainder (create it with [`Mutation::Set`] first).
+    #[error("entity {id}g{generation} has no `{component}` component")]
+    MissingComponent {
+        /// Registry name of the absent component.
+        component: ComponentName,
+        /// Entity id.
+        id: u32,
+        /// Entity generation.
+        generation: u32,
+    },
 }
 
 /// One world-content change, producer-neutral.
@@ -69,6 +88,19 @@ pub enum Mutation {
         /// Registry name (see [`ComponentRegistry::by_name`]).
         component: ComponentName,
         /// New component value.
+        value: serde_json::Value,
+    },
+    /// Write one field of `component` on `entity` (granular inspector
+    /// edits, sync mappings). The component must already exist — field
+    /// access never constructs it.
+    SetField {
+        /// Target entity, generation included.
+        entity: Entity,
+        /// Registry name (see [`ComponentRegistry::by_name`]).
+        component: ComponentName,
+        /// Dotted path inside the canonical JSON form (`position.x`).
+        path: FieldPath,
+        /// New field value.
         value: serde_json::Value,
     },
 }
@@ -177,6 +209,70 @@ fn apply_one(
                     errors: vec![error],
                 },
             }
+        }
+        Mutation::SetField {
+            entity,
+            component,
+            path,
+            value,
+        } => {
+            let meta = match registry.by_component(component) {
+                Some(meta) => meta,
+                None => {
+                    return AppliedMutation {
+                        index,
+                        applied: 0,
+                        errors: vec![MutationError::UnknownComponent(component.clone())],
+                    };
+                }
+            };
+            if !store.is_alive(*entity) {
+                return AppliedMutation {
+                    index,
+                    applied: 0,
+                    errors: vec![MutationError::EntityNotAlive {
+                        id: entity.id(),
+                        generation: entity.generation(),
+                    }],
+                };
+            }
+            match meta.set_field(store, *entity, path, value) {
+                Ok(written) => AppliedMutation {
+                    index,
+                    applied: usize::from(written),
+                    errors: Vec::new(),
+                },
+                Err(error) => AppliedMutation {
+                    index,
+                    applied: 0,
+                    errors: vec![field_error_to_mutation(component, path, *entity, error)],
+                },
+            }
+        }
+    }
+}
+
+/// Maps a field-surface failure onto the mutation report vocabulary.
+/// A guard skip never reaches here (`set_field` reports it as `Ok(false)`).
+fn field_error_to_mutation(
+    component: &ComponentName,
+    path: &FieldPath,
+    entity: Entity,
+    error: crate::RegistryError,
+) -> MutationError {
+    match error {
+        crate::RegistryError::UnknownField { .. } => MutationError::UnknownField {
+            component: component.clone(),
+            path: path.clone(),
+        },
+        crate::RegistryError::MissingComponent { .. }
+        | crate::RegistryError::MissingLane { .. } => MutationError::MissingComponent {
+            component: component.clone(),
+            id: entity.id(),
+            generation: entity.generation(),
+        },
+        crate::RegistryError::UnknownComponent(_) | crate::RegistryError::Json(_) => {
+            MutationError::Parse(error.to_string())
         }
     }
 }
@@ -611,5 +707,86 @@ mod tests {
         assert_eq!(report.applied(), 0);
         assert_eq!(report.error_count(), 1);
         assert_eq!(mana_of(&store, entity), Some(7));
+    }
+
+    fn set_field(entity: Entity, value: serde_json::Value) -> Mutation {
+        Mutation::SetField {
+            entity,
+            component: "mana".into(),
+            path: crate::FieldPath::from_static("mana"),
+            value,
+        }
+    }
+
+    #[test]
+    fn apply_set_field_writes_granularly() {
+        let (mut store, registry) = apply_setup();
+        let entity = store.create_entity();
+        store.insert(entity, Mana { mana: 7 });
+        let report = apply_mutations(
+            &mut store,
+            &registry,
+            &[set_field(entity, serde_json::json!(42))],
+        );
+        assert_eq!(report.applied(), 1);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(mana_of(&store, entity), Some(42));
+    }
+
+    #[test]
+    fn apply_set_field_rejects_with_typed_errors() {
+        let (mut store, registry) = apply_setup();
+        let entity = store.create_entity();
+        store.insert(entity, Mana { mana: 7 });
+        let dead = Entity::new_with_gen(999, 0);
+        let report = apply_mutations(
+            &mut store,
+            &registry,
+            &[
+                set_field(entity, serde_json::json!("lots")),
+                Mutation::SetField {
+                    entity,
+                    component: "mana".into(),
+                    path: crate::FieldPath::from_static("health"),
+                    value: serde_json::json!(1),
+                },
+                set_field(dead, serde_json::json!(1)),
+            ],
+        );
+        assert_eq!(report.applied(), 0);
+        assert_eq!(report.error_count(), 3);
+        assert!(matches!(
+            report.entries[0].errors[0],
+            MutationError::Parse(_)
+        ));
+        assert!(matches!(
+            report.entries[1].errors[0],
+            MutationError::UnknownField { .. }
+        ));
+        assert!(matches!(
+            report.entries[2].errors[0],
+            MutationError::EntityNotAlive { .. }
+        ));
+        // Nothing wrote.
+        assert_eq!(mana_of(&store, entity), Some(7));
+        // Human-readable texts still render.
+        assert!(!report.entries[1].error_messages().is_empty());
+    }
+
+    #[test]
+    fn apply_set_field_needs_existing_component() {
+        let (mut store, registry) = apply_setup();
+        let entity = store.create_entity();
+        let report = apply_mutations(
+            &mut store,
+            &registry,
+            &[set_field(entity, serde_json::json!(1))],
+        );
+        assert_eq!(report.applied(), 0);
+        assert_eq!(report.error_count(), 1);
+        assert!(matches!(
+            report.entries[0].errors[0],
+            MutationError::MissingComponent { .. }
+        ));
     }
 }
