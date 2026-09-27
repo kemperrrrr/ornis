@@ -4,6 +4,7 @@
 
 use glam::{Quat, Vec3};
 
+use super::MAX_MANIFOLD_POINTS;
 use crate::body::RigidBody;
 
 #[inline]
@@ -14,7 +15,11 @@ pub(crate) fn clamp01(v: f32) -> f32 {
 /// Reciprocal inertia axis with zero-guard: `1/i` for positive `i`, else 0.
 #[inline]
 pub fn inv_inertia_axis(i: f32) -> f32 {
-    if i > 0.0 { 1.0 / i } else { 0.0 }
+    if i > 0.0 {
+        1.0 / i
+    } else {
+        0.0
+    }
 }
 
 #[inline]
@@ -132,7 +137,11 @@ pub(crate) fn k_entry(
 /// partial pivoting. Returns None on a (near-)singular matrix.
 // Index loops are kept for matrix-math clarity (rows/cols, not elements).
 #[allow(clippy::needless_range_loop)]
-pub fn solve_small(a: &[[f32; 4]; 4], b: &[f32; 4], n: usize) -> Option<[f32; 4]> {
+pub fn solve_small(
+    a: &[[f32; MAX_MANIFOLD_POINTS]; MAX_MANIFOLD_POINTS],
+    b: &[f32; MAX_MANIFOLD_POINTS],
+    n: usize,
+) -> Option<[f32; MAX_MANIFOLD_POINTS]> {
     let mut m = *a;
     let mut x = *b;
     for col in 0..n {
@@ -176,7 +185,7 @@ pub fn solve_small(a: &[[f32; 4]; 4], b: &[f32; 4], n: usize) -> Option<[f32; 4]
             );
         }
     }
-    let mut out = [0.0f32; 4];
+    let mut out = [0.0f32; MAX_MANIFOLD_POINTS];
     for r in (0..n).rev() {
         debug_assert!(
             m[r][r].is_finite() && m[r][r].abs() > 1e-12,
@@ -320,26 +329,26 @@ pub fn solve_normal_block(
     i: usize,
     j: usize,
     n: Vec3,
-    pts: &[Vec3; 4],
-    acc: &mut [f32; 4],
-    target: &[f32; 4],
+    pts: &[Vec3; MAX_MANIFOLD_POINTS],
+    acc: &mut [f32; MAX_MANIFOLD_POINTS],
+    target: &[f32; MAX_MANIFOLD_POINTS],
     count: usize,
 ) {
     let pa = bodies[i].position;
     let pb = bodies[j].position;
-    let mut ras = [Vec3::ZERO; 4];
-    let mut rbs = [Vec3::ZERO; 4];
+    let mut ras = [Vec3::ZERO; MAX_MANIFOLD_POINTS];
+    let mut rbs = [Vec3::ZERO; MAX_MANIFOLD_POINTS];
     for k in 0..count {
         ras[k] = pts[k] - pa;
         rbs[k] = pts[k] - pb;
     }
-    let mut k_mat = [[0.0f32; 4]; 4];
+    let mut k_mat = [[0.0f32; MAX_MANIFOLD_POINTS]; MAX_MANIFOLD_POINTS];
     for k in 0..count {
         for l in 0..count {
             k_mat[k][l] = k_entry(bodies, i, j, n, ras[k], rbs[k], ras[l], rbs[l]);
         }
     }
-    let mut vn = [0.0f32; 4];
+    let mut vn = [0.0f32; MAX_MANIFOLD_POINTS];
     for k in 0..count {
         vn[k] = (point_velocity(&bodies[j], rbs[k]) - point_velocity(&bodies[i], ras[k])).dot(n);
     }
@@ -367,19 +376,19 @@ pub fn solve_normal_block(
 /// unpacked point indices (`idx[..ns]`).
 pub(crate) struct ActiveSet {
     mask: u32,
-    idx: [usize; 4],
+    idx: [usize; MAX_MANIFOLD_POINTS],
     ns: usize,
     count: usize,
 }
 
 /// Contact-point lever arms of one manifold (body-relative anchors).
 pub(crate) struct BlockGeom {
-    ras: [Vec3; 4],
-    rbs: [Vec3; 4],
+    ras: [Vec3; MAX_MANIFOLD_POINTS],
+    rbs: [Vec3; MAX_MANIFOLD_POINTS],
 }
 
 pub(crate) fn active_set_indices(mask: u32, count: usize) -> ActiveSet {
-    let mut idx = [0usize; 4];
+    let mut idx = [0usize; MAX_MANIFOLD_POINTS];
     // count is carried so helpers do not need it as a separate argument.
     let mut ns = 0;
     for k in 0..count {
@@ -402,16 +411,16 @@ pub(crate) fn active_set_indices(mask: u32, count: usize) -> ActiveSet {
 #[allow(clippy::needless_range_loop)]
 #[allow(clippy::too_many_arguments)] // mirrors the K-matrix block layout
 pub(crate) fn try_active_set(
-    k_mat: &[[f32; 4]; 4],
-    vn: &[f32; 4],
-    acc: &[f32; 4],
-    target: &[f32; 4],
+    k_mat: &[[f32; MAX_MANIFOLD_POINTS]; MAX_MANIFOLD_POINTS],
+    vn: &[f32; MAX_MANIFOLD_POINTS],
+    acc: &[f32; MAX_MANIFOLD_POINTS],
+    target: &[f32; MAX_MANIFOLD_POINTS],
     count: usize,
     set: &ActiveSet,
-) -> Option<[f32; 4]> {
+) -> Option<[f32; MAX_MANIFOLD_POINTS]> {
     let ActiveSet { idx, ns, .. } = *set;
-    let mut ks = [[0.0f32; 4]; 4];
-    let mut bs = [0.0f32; 4];
+    let mut ks = [[0.0f32; MAX_MANIFOLD_POINTS]; MAX_MANIFOLD_POINTS];
+    let mut bs = [0.0f32; MAX_MANIFOLD_POINTS];
     for a in 0..ns {
         for b in 0..ns {
             ks[a][b] = k_mat[idx[a]][idx[b]];
@@ -456,13 +465,13 @@ pub(crate) fn try_active_set(
 #[allow(clippy::needless_range_loop)]
 #[allow(clippy::too_many_arguments)] // mirrors the K-matrix block layout
 pub(crate) fn inactive_feasible(
-    k_mat: &[[f32; 4]; 4],
-    vn: &[f32; 4],
-    acc: &[f32; 4],
-    target: &[f32; 4],
+    k_mat: &[[f32; MAX_MANIFOLD_POINTS]; MAX_MANIFOLD_POINTS],
+    vn: &[f32; MAX_MANIFOLD_POINTS],
+    acc: &[f32; MAX_MANIFOLD_POINTS],
+    target: &[f32; MAX_MANIFOLD_POINTS],
     count: usize,
     set: &ActiveSet,
-    ap: &[f32; 4],
+    ap: &[f32; MAX_MANIFOLD_POINTS],
 ) -> bool {
     let ActiveSet { mask, idx, ns, .. } = *set;
     for t in 0..count {
@@ -496,9 +505,9 @@ pub(crate) fn commit_active_set(
     j: usize,
     n: Vec3,
     geom: &BlockGeom,
-    acc: &mut [f32; 4],
+    acc: &mut [f32; MAX_MANIFOLD_POINTS],
     set: &ActiveSet,
-    ap: &[f32; 4],
+    ap: &[f32; MAX_MANIFOLD_POINTS],
 ) {
     let ActiveSet {
         mask,

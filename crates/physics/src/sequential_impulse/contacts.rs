@@ -25,7 +25,7 @@ const RESTITUTION_MAX_PEN: f32 = 0.05;
 fn best_cached_point(
     cached_points: &[WarmPoint],
     cached_count: usize,
-    used: &[bool; 4],
+    used: &[bool; MAX_MANIFOLD_POINTS],
     la_k: Vec3,
     lb_k: Vec3,
     n: Vec3,
@@ -52,17 +52,17 @@ fn best_cached_point(
 /// feature stays in contact, even when the bodies move fast in world space.
 #[allow(clippy::needless_range_loop)]
 fn match_warm_points(
-    la: &[Vec3; 4],
-    lb: &[Vec3; 4],
+    la: &[Vec3; MAX_MANIFOLD_POINTS],
+    lb: &[Vec3; MAX_MANIFOLD_POINTS],
     n: Vec3,
     key: (usize, usize),
     warm_in: &WarmCache,
     count: usize,
-) -> ([f32; 4], [bool; 4]) {
-    let mut warm = [0.0f32; 4];
-    let mut matched = [false; 4];
+) -> ([f32; MAX_MANIFOLD_POINTS], [bool; MAX_MANIFOLD_POINTS]) {
+    let mut warm = [0.0f32; MAX_MANIFOLD_POINTS];
+    let mut matched = [false; MAX_MANIFOLD_POINTS];
     if let Some((cached_points, cached_count)) = warm_in.get(&key) {
-        let mut used = [false; 4];
+        let mut used = [false; MAX_MANIFOLD_POINTS];
         for k in 0..count {
             if let Some(c) = best_cached_point(cached_points, *cached_count, &used, la[k], lb[k], n)
             {
@@ -78,8 +78,12 @@ fn match_warm_points(
 /// Speculative approach-speed target per point (G6): a separated point may
 /// close its gap within this substep, but no more (Box2D speculative distance).
 #[allow(clippy::needless_range_loop)]
-fn speculative_targets(pen0: &[f32; 4], count: usize, sub_dt: f32) -> [f32; 4] {
-    let mut target = [0.0f32; 4];
+fn speculative_targets(
+    pen0: &[f32; MAX_MANIFOLD_POINTS],
+    count: usize,
+    sub_dt: f32,
+) -> [f32; MAX_MANIFOLD_POINTS] {
+    let mut target = [0.0f32; MAX_MANIFOLD_POINTS];
     for k in 0..count {
         if pen0[k] < 0.0 {
             target[k] = pen0[k] / sub_dt;
@@ -99,14 +103,14 @@ fn speculative_targets(pen0: &[f32; 4], count: usize, sub_dt: f32) -> [f32; 4] {
 fn compute_restitution_bias(
     bodies: &[RigidBody],
     m: &Manifold,
-    matched: &[bool; 4],
-    pen0: &[f32; 4],
+    matched: &[bool; MAX_MANIFOLD_POINTS],
+    pen0: &[f32; MAX_MANIFOLD_POINTS],
     n: Vec3,
     e: f32,
     gate: RestitutionGate,
     sub_dt: f32,
-) -> [f32; 4] {
-    let mut bias = [0.0f32; 4];
+) -> [f32; MAX_MANIFOLD_POINTS] {
+    let mut bias = [0.0f32; MAX_MANIFOLD_POINTS];
     if !gate.is_enabled() {
         return bias;
     }
@@ -145,9 +149,9 @@ fn apply_warm_start(
     i: usize,
     j: usize,
     n: Vec3,
-    warm: &[f32; 4],
-    target: &[f32; 4],
-) -> [f32; 4] {
+    warm: &[f32; MAX_MANIFOLD_POINTS],
+    target: &[f32; MAX_MANIFOLD_POINTS],
+) -> [f32; MAX_MANIFOLD_POINTS] {
     let mut warm_applied = *warm;
     for k in 0..m.point_count {
         if warm[k] > 0.0 {
@@ -240,9 +244,9 @@ fn prepare_manifold_state(
     let count = m.point_count;
 
     // --- Body-frame anchors first: matching and G3 both need them ---
-    let mut la = [Vec3::ZERO; 4];
-    let mut lb = [Vec3::ZERO; 4];
-    let mut pen0 = [0.0f32; 4];
+    let mut la = [Vec3::ZERO; MAX_MANIFOLD_POINTS];
+    let mut lb = [Vec3::ZERO; MAX_MANIFOLD_POINTS];
+    let mut pen0 = [0.0f32; MAX_MANIFOLD_POINTS];
     for k in 0..count {
         let p = m.points[k].world_point;
         la[k] = bodies[i].orientation.inverse() * (p - bodies[i].position);
@@ -266,17 +270,17 @@ fn prepare_manifold_state(
         j,
         count,
         acc: warm_applied,
-        acc_friction: [0.0; 4],
-        acc_friction2: [0.0; 4],
+        acc_friction: [0.0; MAX_MANIFOLD_POINTS],
+        acc_friction2: [0.0; MAX_MANIFOLD_POINTS],
         bias,
         target,
         mu,
         mu2,
         mu_roll,
         mu_spin,
-        acc_roll: [0.0; 4],
-        acc_roll2: [0.0; 4],
-        acc_spin: [0.0; 4],
+        acc_roll: [0.0; MAX_MANIFOLD_POINTS],
+        acc_roll2: [0.0; MAX_MANIFOLD_POINTS],
+        acc_spin: [0.0; MAX_MANIFOLD_POINTS],
         t1,
         t2: t1.cross(n),
         la,
@@ -371,13 +375,16 @@ impl SequentialImpulseEngine {
                 for &si in &single_si {
                     let st = &global_states[si];
                     let m = &manifolds[st.mi];
-                    let key = (m.body_a.min(m.body_b), m.body_a.max(m.body_b));
+                    let key = (
+                        m.body_a.index().min(m.body_b.index()),
+                        m.body_a.index().max(m.body_b.index()),
+                    );
                     let mut pts = [WarmPoint {
                         la: Vec3::ZERO,
                         lb: Vec3::ZERO,
                         normal: Vec3::ZERO,
                         impulse: 0.0,
-                    }; 4];
+                    }; MAX_MANIFOLD_POINTS];
                     for k in 0..st.count {
                         pts[k] = WarmPoint {
                             la: st.la[k],
@@ -716,7 +723,7 @@ impl SequentialImpulseEngine {
         // manifold — the rocking pump); single points keep the scalar
         // projected update.
         if st.count >= 2 {
-            let mut pts = [Vec3::ZERO; 4];
+            let mut pts = [Vec3::ZERO; MAX_MANIFOLD_POINTS];
             for k in 0..st.count {
                 pts[k] = m.points[k].world_point;
             }
@@ -1152,7 +1159,7 @@ fn persist_warm_cache(
             lb: Vec3::ZERO,
             normal: Vec3::ZERO,
             impulse: 0.0,
-        }; 4];
+        }; MAX_MANIFOLD_POINTS];
         for k in 0..st.count {
             pts[k] = WarmPoint {
                 la: st.la[k],

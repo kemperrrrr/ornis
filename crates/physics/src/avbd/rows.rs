@@ -981,8 +981,8 @@ impl AvbdEngine {
     /// Stamp one constraint row for a single body side.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn stamp_row(
-        lhs: &mut [[f32; 6]; 6],
-        rhs: &mut [f32; 6],
+        lhs: &mut [[f32; SPATIAL_DOF]; SPATIAL_DOF],
+        rhs: &mut [f32; SPATIAL_DOF],
         axis: Vec3,
         pen: f32,
         f: f32,
@@ -1012,8 +1012,8 @@ impl AvbdEngine {
 
     /// Stamp a pure angular row in world coordinates.
     pub(super) fn stamp_angular_row(
-        lhs: &mut [[f32; 6]; 6],
-        rhs: &mut [f32; 6],
+        lhs: &mut [[f32; SPATIAL_DOF]; SPATIAL_DOF],
+        rhs: &mut [f32; SPATIAL_DOF],
         axis: Vec3,
         pen: f32,
         force: f32,

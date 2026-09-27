@@ -60,6 +60,12 @@ use crate::trigger::{
 };
 use crate::wide::{SolverStep, build_solver_steps};
 
+/// Manifold point capacity: every per-point parallel array (`acc`,
+/// `target`, `pen0`, warm-start tables) and the `1..=N` count invariant
+/// are sized by this. Box2D-class 4-point cap: one face contact (2) plus
+/// margin for speculative/rolling rows sharing the same lanes.
+pub(crate) const MAX_MANIFOLD_POINTS: usize = 4;
+
 /// The CPU reference physics engine: sequential-impulse solver with a
 /// selectable broadphase, manifold generation, island-coherent sleeping,
 /// warm-started contacts and joints, and optional SIMD-wide / GPU contact

@@ -117,6 +117,11 @@ mod joint_tests;
 
 pub use assembly::solve_6x6;
 
+/// Spatial degrees of freedom per rigid body (3 linear + 3 angular):
+/// every 6-vector/6x6-system in the AVBD sweep (`sacc`, constraint rows,
+/// the dense LDL) is sized by this.
+pub(crate) const SPATIAL_DOF: usize = 6;
+
 use self::rows::{
     inverse_symmetric, mat3_vec, pair_allowed, quat_diff_vec, quat_integrate, shape_min_dimension,
     world_inertia,
@@ -353,7 +358,7 @@ struct AvbdJoint {
     /// SixDof one-sided limit forces, dual-owned (slots 0..3 linear X/Y/Z,
     /// 3..6 angular): warmstarted by the primal, committed by the dual —
     /// same discipline as `lim_dual`, one slot per limited axis.
-    sacc: [f32; 6],
+    sacc: [f32; SPATIAL_DOF],
     lam_l: [f32; 3],
     lam_a: [f32; 3],
     pen_l: [f32; 3],
@@ -1260,7 +1265,7 @@ impl PhysicsEngine for AvbdEngine {
                 six_lin: [AxisConfig::Free; 3],
                 six_ang: [AxisConfig::Free; 3],
                 dref: Vec3::ZERO,
-                sacc: [0.0; 6],
+                sacc: [0.0; SPATIAL_DOF],
                 lam_l: [0.0; 3],
                 lam_a: [0.0; 3],
                 pen_l: [JOINT_PENALTY_INIT; 3],
@@ -1305,7 +1310,7 @@ impl PhysicsEngine for AvbdEngine {
             six_lin: [AxisConfig::Free; 3],
             six_ang: [AxisConfig::Free; 3],
             dref: r.ref_anchor_delta,
-            sacc: [0.0; 6],
+            sacc: [0.0; SPATIAL_DOF],
             lam_l: [0.0; 3],
             lam_a: [0.0; 3],
             pen_l: [JOINT_PENALTY_INIT; 3],

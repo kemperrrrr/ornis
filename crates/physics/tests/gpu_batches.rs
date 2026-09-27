@@ -4,6 +4,8 @@
 
 use glam::Vec3;
 use ornis_macros::gpu_pipeline;
+use ornis_physics::BodyHandle;
+use ornis_physics::RestitutionGate;
 use ornis_physics::RigidBody;
 use ornis_physics::engine::{
     Manifold, ManifoldPoint, ManifoldState, PhysicsEngine, SequentialImpulseEngine,
@@ -13,7 +15,7 @@ use ornis_physics::gpu::{
     GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem, GpuBatch, GpuBodyState, GpuSequentialImpulse,
     LaneInput, WgpuAvbdSolver, avbd_diag_solve_cpu, avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu,
     avbd_row_wgsl, avbd_stage_contact_solve, avbd_stamp_row_cpu, avbd_stub_wgsl,
-    contact_solver_wgsl, pack_single_point_batches, solve_params,
+    contact_solver_wgsl, pack_single_point_batches, solve_params_bool,
 };
 use std::sync::Arc;
 
@@ -21,14 +23,14 @@ use std::sync::Arc;
 /// — the exact values the old per-iteration loop uploaded one by one.
 #[test]
 fn solve_params_mirror_old_per_iteration_values() {
-    let params = solve_params(8, true);
+    let params = solve_params_bool(8, true);
     assert_eq!(params.len(), 8);
     for (k, entry) in params.iter().enumerate() {
         assert_eq!(*entry, [k as u32, 8, 1, 0], "pass {k} params wrong");
     }
-    let params = solve_params(3, false);
+    let params = solve_params_bool(3, false);
     assert_eq!(params, vec![[0, 3, 0, 0], [1, 3, 0, 0], [2, 3, 0, 0]]);
-    assert!(solve_params(0, false).is_empty());
+    assert!(solve_params_bool(0, false).is_empty());
 }
 
 #[test]
@@ -43,8 +45,8 @@ fn gpu_pack_produces_disjoint_batches() {
     // Single-point manifold helper
     fn mk_manifold(i: usize, j: usize, n: Vec3, p: Vec3) -> Manifold {
         Manifold {
-            body_a: i,
-            body_b: j,
+            body_a: i.into(),
+            body_b: j.into(),
             normal: n,
             point_count: 1,
             points: [ManifoldPoint {
@@ -88,7 +90,7 @@ fn gpu_pack_produces_disjoint_batches() {
     let states: Vec<ManifoldState> = (0..3)
         .map(|i| {
             let m = &manifolds[i];
-            mk_state(m.body_a, m.body_b)
+            mk_state(m.body_a.index(), m.body_b.index())
         })
         .collect();
     let single_indices: Vec<usize> = (0..3).collect();
@@ -299,7 +301,7 @@ fn gpu_solver_single_contact_matches_analytic() {
 
     solver.upload_bodies(&[a.clone(), b.clone()]);
     solver.upload_batches(&[batch]);
-    solver.solve(1, 8, false);
+    solver.solve(1, 8, RestitutionGate::Suppressed);
 
     let mut out = [a, b];
     solver.download_bodies(&mut out);
@@ -368,7 +370,7 @@ fn gpu_contact_row_matches_cpu_kernels() {
     gb.count = 1;
     solver.upload_bodies(&bodies);
     solver.upload_batches(&[gb]);
-    solver.solve(1, 48, false);
+    solver.solve(1, 48, RestitutionGate::Suppressed);
     let mut gpu_bodies = bodies.clone();
     solver.download_bodies(&mut gpu_bodies);
     let mut gpu_batches = [gb];
@@ -377,8 +379,8 @@ fn gpu_contact_row_matches_cpu_kernels() {
     // CPU side: the same contact as a one-lane wide batch (the batch
     // path calls `contact_math::...::eval` per lane).
     let manifolds = [Manifold {
-        body_a: 0,
-        body_b: 1,
+        body_a: BodyHandle::from_raw(0),
+        body_b: BodyHandle::from_raw(1),
         normal: n,
         point_count: 1,
         points: [ManifoldPoint {
@@ -497,8 +499,11 @@ fn gpu_solver_tracks_cpu_engine() {
         gpu.step(1.0 / 60.0);
     }
 
-    for i in 0..4 {
-        let (bc, bg) = (cpu.get_body(i).unwrap(), gpu.get_body(i).unwrap());
+    for i in 0usize..4 {
+        let (bc, bg) = (
+            cpu.get_body(i.into()).unwrap(),
+            gpu.get_body(i.into()).unwrap(),
+        );
         assert!(
             bc.position.distance(bg.position) < 0.05,
             "body {i} position diverged: cpu {:?} vs gpu {:?}",
@@ -695,7 +700,7 @@ fn avbd_stub_cpu_fallback_advances() {
     engine.add_body(RigidBody::new_sphere(Vec3::new(0.0, 5.0, 0.0), 0.5, 1.0));
     stub.step_avbd(&mut engine, 1.0 / 60.0);
     let v = engine
-        .get_body(0)
+        .get_body(BodyHandle::from_raw(0))
         .expect("stub scene keeps its body")
         .velocity;
     assert!(v.y < 0.0, "CPU fallback must integrate gravity, got {v:?}");
@@ -738,10 +743,10 @@ fn avbd_engine_gpu_flag_defaults_off_and_falls_back() {
     }
     assert_eq!(wired.gpu_fallback_steps(), 60);
     assert_eq!(plain.gpu_fallback_steps(), 0);
-    for h in 0..2 {
+    for h in 0usize..2 {
         let (bp, bw) = (
-            plain.get_body(h).expect("plain keeps bodies"),
-            wired.get_body(h).expect("wired keeps bodies"),
+            plain.get_body(h.into()).expect("plain keeps bodies"),
+            wired.get_body(h.into()).expect("wired keeps bodies"),
         );
         assert_eq!(bp.position.to_array(), bw.position.to_array());
         assert_eq!(bp.velocity.to_array(), bw.velocity.to_array());

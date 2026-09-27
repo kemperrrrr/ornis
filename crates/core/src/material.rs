@@ -729,6 +729,13 @@ mod tests {
     }
 
     #[test]
+    fn color_rgba_sets_full_color() {
+        let mut base = BaseGroup::zeroed();
+        base.color_rgba([0.5, 0.25, 0.125, 1.0]);
+        assert_eq!(base.color, [0.5, 0.25, 0.125, 1.0]);
+    }
+
+    #[test]
     fn test_default_material_is_neutral_dielectric() {
         let mat = OpenPBRMaterial::default();
         assert_eq!(mat.base.params[0], 1.0);

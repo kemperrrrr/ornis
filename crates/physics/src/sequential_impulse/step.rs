@@ -32,8 +32,8 @@ pub(crate) struct WarmPoint {
     pub(crate) impulse: f32,
 }
 
-/// Warm-start cache: per body pair, up to 4 matched contact points.
-pub(crate) type WarmCache = FxHashMap<(usize, usize), ([WarmPoint; 4], usize)>;
+/// Warm-start cache: per body pair, up to MAX_MANIFOLD_POINTS matched contact points.
+pub(crate) type WarmCache = FxHashMap<(usize, usize), ([WarmPoint; MAX_MANIFOLD_POINTS], usize)>;
 
 /// Per-manifold solver state shared between the velocity and position stages
 /// of a substep (G6 stage split: velocities solve BEFORE positions move, so
@@ -46,23 +46,23 @@ pub struct ManifoldState {
     pub i: usize,
     /// Second body handle.
     pub j: usize,
-    /// Active point count (1..=4): indexes every parallel array below.
+    /// Active point count (1..=MAX_MANIFOLD_POINTS): indexes every parallel array below.
     /// Enforced at the single construction site; direct writes bypass the
     /// invariant (see [`ManifoldState::has_valid_count`]).
     pub count: usize,
     /// Accumulated normal impulse per point (warm start).
-    pub acc: [f32; 4],
+    pub acc: [f32; MAX_MANIFOLD_POINTS],
     /// Accumulated friction impulse per point (first tangent).
-    pub acc_friction: [f32; 4],
+    pub acc_friction: [f32; MAX_MANIFOLD_POINTS],
     /// Accumulated friction impulse per point (second tangent).
-    pub acc_friction2: [f32; 4],
+    pub acc_friction2: [f32; MAX_MANIFOLD_POINTS],
     /// Restitution bias per point.
-    pub bias: [f32; 4],
+    pub bias: [f32; MAX_MANIFOLD_POINTS],
     /// G6 speculative per-point approach-speed limit (negative of the
     /// remaining gap / sub_dt; 0 for touching points). The velocity
     /// solve drives vn to this target instead of 0, so a separated
     /// point may close its gap within the substep but never more.
-    pub target: [f32; 4],
+    pub target: [f32; MAX_MANIFOLD_POINTS],
     /// Coulomb friction coefficient.
     pub mu: f32,
     /// Transverse Coulomb coefficient (ODE `mu2` parity): cap along `t2`
@@ -77,12 +77,12 @@ pub struct ManifoldState {
     pub mu_spin: f32,
     /// Accumulated rolling impulses about `t1`/`t2` per point, capped by
     /// `mu_roll × acc[k]` (torque-cap × normal-impulse, MuJoCo units).
-    pub acc_roll: [f32; 4],
+    pub acc_roll: [f32; MAX_MANIFOLD_POINTS],
     /// Accumulated rolling impulse about `t2` per point.
-    pub acc_roll2: [f32; 4],
+    pub acc_roll2: [f32; MAX_MANIFOLD_POINTS],
     /// Accumulated torsional impulse about `n` per point, capped by
     /// `mu_spin × acc[k]`.
-    pub acc_spin: [f32; 4],
+    pub acc_spin: [f32; MAX_MANIFOLD_POINTS],
     /// Fixed tangent basis (Box2D-style): friction is solved along
     /// directions derived from the contact normal ONCE, not from the
     /// instantaneous slip velocity — velocity-aligned friction walks
@@ -92,27 +92,27 @@ pub struct ManifoldState {
     pub t2: Vec3,
     /// G3 body-frame anchors and detection-time penetration per point,
     /// so the positional pass can re-measure live separation.
-    pub la: [Vec3; 4],
+    pub la: [Vec3; MAX_MANIFOLD_POINTS],
     /// Body-B body-frame anchors per point.
-    pub lb: [Vec3; 4],
+    pub lb: [Vec3; MAX_MANIFOLD_POINTS],
     /// Detection-time penetration per point.
-    pub pen0: [f32; 4],
+    pub pen0: [f32; MAX_MANIFOLD_POINTS],
 }
 
 impl ManifoldState {
-    /// Whether `count` satisfies the 1..=4 parallel-array invariant.
+    /// Whether `count` satisfies the 1..=MAX_MANIFOLD_POINTS parallel-array invariant.
     /// The single construction site
     /// (`prepare_manifold_state`, via [`Manifold::has_valid_count`](crate::engine::Manifold::has_valid_count))
     /// admits only valid counts; every parallel array below is indexed
     /// `0..count`.
     pub fn has_valid_count(&self) -> bool {
-        (1..=4).contains(&self.count)
+        (1..=MAX_MANIFOLD_POINTS).contains(&self.count)
     }
 
     /// Live lane count, clamped to the buffer size (defensive: construction
-    /// admits only `1..=4`, so this equals `count` on valid states).
+    /// admits only `1..=MAX_MANIFOLD_POINTS`, so this equals `count` on valid states).
     pub fn live_count(&self) -> usize {
-        self.count.min(4)
+        self.count.min(MAX_MANIFOLD_POINTS)
     }
 
     /// Live normal impulses (`acc[..count]`).

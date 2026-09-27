@@ -21,10 +21,13 @@ use std::f32::consts::TAU;
 /// assembling the inertial + contact-row Hessian; the GPU rung-1 diagonal
 /// solve (behind the `gpu` feature) cross-checks against it on diagonal
 /// systems (tolerance, never bit-identical by promise).
-pub fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
-    let mut l = [[0.0f32; 6]; 6];
-    let mut d = [0.0f32; 6];
-    for i in 0..6 {
+pub fn solve_6x6(
+    lhs: [[f32; SPATIAL_DOF]; SPATIAL_DOF],
+    rhs: [f32; SPATIAL_DOF],
+) -> Option<[f32; SPATIAL_DOF]> {
+    let mut l = [[0.0f32; SPATIAL_DOF]; SPATIAL_DOF];
+    let mut d = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         for j in 0..=i {
             let mut s = lhs[i][j];
             for k in 0..j {
@@ -41,20 +44,20 @@ pub fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
             }
         }
     }
-    let mut y = [0.0f32; 6];
-    for i in 0..6 {
+    let mut y = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         let mut s = rhs[i];
         for k in 0..i {
             s -= l[i][k] * y[k];
         }
         y[i] = s;
     }
-    let mut z = [0.0f32; 6];
-    for i in 0..6 {
+    let mut z = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         z[i] = y[i] / d[i];
     }
-    let mut x = [0.0f32; 6];
-    for i in (0..6).rev() {
+    let mut x = [0.0f32; SPATIAL_DOF];
+    for i in (0..SPATIAL_DOF).rev() {
         let mut s = z[i];
         for k in (i + 1)..6 {
             s -= l[k][i] * x[k];
@@ -69,7 +72,7 @@ impl AvbdEngine {
     pub(super) fn solve_body(&mut self, h: usize) {
         let m_dt2 = 1.0 / eff_inv_mass(&self.bodies[h]) / (DT_STEP * DT_STEP);
         let iw = world_inertia(self.bodies[h].inertia, self.bodies[h].orientation);
-        let mut lhs = [[0.0f32; 6]; 6];
+        let mut lhs = [[0.0f32; SPATIAL_DOF]; SPATIAL_DOF];
         for (i, row) in lhs.iter_mut().enumerate().take(3) {
             row[i] = m_dt2;
         }
@@ -78,7 +81,7 @@ impl AvbdEngine {
                 lhs[3 + a][3 + b] = iw[a][b] / (DT_STEP * DT_STEP);
             }
         }
-        let mut rhs = [0.0f32; 6];
+        let mut rhs = [0.0f32; SPATIAL_DOF];
         let rl = m_dt2 * (self.bodies[h].position - self.inertial[h]);
         rhs[0] = rl.x;
         rhs[1] = rl.y;

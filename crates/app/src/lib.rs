@@ -217,9 +217,9 @@ pub fn apply_browser_input(world: &mut World, input: InputState) {
 mod tests {
     use super::*;
     use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-    use ornis_core::units::{Clamped01, PositiveF32};
     #[allow(unused_imports)]
     use ornis_core::Entity;
+    use ornis_core::units::{Clamped01, PositiveF32};
     use ornis_core::{Engine, World};
 
     /// Thin view over the unified [`World`]: no second `Engine` copy required.

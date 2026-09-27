@@ -1066,8 +1066,7 @@ Scene(
     #[test]
     fn try_custom_validates_triples_and_range() {
         let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let valid = MeshDesc::try_custom(positions.clone(), vec![0, 1, 2])
-            .expect("triple builds");
+        let valid = MeshDesc::try_custom(positions.clone(), vec![0, 1, 2]).expect("triple builds");
         let tris = valid.as_triangles().expect("typed view");
         assert_eq!(tris, vec![Triangle::from_raw([0, 1, 2])]);
         assert_eq!(tris[0].as_u32(), [0, 1, 2]);
@@ -1083,5 +1082,30 @@ Scene(
             .as_triangles()
             .is_none()
         );
+    }
+
+    #[test]
+    fn checked_dir_normalizes_or_rejects() {
+        assert_eq!(
+            LightDesc::checked_dir([2.0, 0.0, 0.0]),
+            Some([1.0, 0.0, 0.0])
+        );
+        assert!(LightDesc::checked_dir([0.0, 0.0, 0.0]).is_none());
+        assert!(LightDesc::checked_dir([f32::NAN, 0.0, 0.0]).is_none());
+        assert!(LightDesc::checked_dir([f32::INFINITY, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn checked_intensity_accepts_finite_non_negative() {
+        assert_eq!(LightDesc::checked_intensity(2.5), Some(2.5));
+        assert_eq!(LightDesc::checked_intensity(0.0), Some(0.0));
+        assert!(LightDesc::checked_intensity(-1.0).is_none());
+        assert!(LightDesc::checked_intensity(f32::NAN).is_none());
+        assert!(LightDesc::checked_intensity(f32::INFINITY).is_none());
+    }
+
+    #[test]
+    fn glass_ior_defaults_to_crown() {
+        assert_eq!(default_glass_ior().get(), 1.5);
     }
 }

@@ -11,10 +11,10 @@
 //! (host discovery staging rows into the device solve). Moved verbatim from
 //! `gpu.rs` (phase 3); rung 2 added in place.
 
-use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
+use ornis_macros::{gpu_pipeline, wgsl_fn, WgslStruct};
 
 use super::GpuBodyState;
-use crate::avbd::{AvbdEngine, solve_6x6};
+use crate::avbd::{solve_6x6, AvbdEngine, SPATIAL_DOF};
 use crate::body::{BodyType, RigidBody};
 use crate::engine::PhysicsEngine;
 use bytemuck::Zeroable as _;
@@ -64,16 +64,16 @@ impl GpuAvbdMass {
 /// isotropic bodies (spheres/cubes) and a documented approximation
 /// otherwise. Statics (`inv_mass <= 0`) and non-positive `dt` yield zeros.
 /// Pure (no device) so unit tests pin it without an adapter.
-pub fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> [f32; 6] {
+pub fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> [f32; SPATIAL_DOF] {
     // Non-positive or non-finite inputs assemble nothing (matches the
     // shader guards, which test the positive form and zero otherwise —
     // NaN fails both spellings and lands on zeros either way).
     if !inv_mass.is_finite() || inv_mass <= 0.0 || !dt.is_finite() || dt <= 0.0 {
-        return [0.0; 6];
+        return [0.0; SPATIAL_DOF];
     }
     let dt2 = dt * dt;
     if !dt2.is_finite() || dt2 <= 1e-12 {
-        return [0.0; 6];
+        return [0.0; SPATIAL_DOF];
     }
     let lin = 1.0 / (inv_mass * dt2);
     [
@@ -94,9 +94,12 @@ pub fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> 
 /// `Option`); on strictly positive systems it agrees with the dense AVBD
 /// LDL within float tolerance (pinned by test, never bit-identical by
 /// promise). Full 6x6 device LDL with breakdown signaling is a later rung.
-pub fn avbd_diag_solve_cpu(diag: [f32; 6], rhs: [f32; 6]) -> [f32; 6] {
-    let mut out = [0.0f32; 6];
-    for i in 0..6 {
+pub fn avbd_diag_solve_cpu(
+    diag: [f32; SPATIAL_DOF],
+    rhs: [f32; SPATIAL_DOF],
+) -> [f32; SPATIAL_DOF] {
+    let mut out = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         if diag[i] > 1e-12 {
             out[i] = rhs[i] / diag[i];
         }
@@ -176,9 +179,9 @@ impl GpuAvbdStub {
     pub fn stage_diag_solve(
         &self,
         bodies: &[RigidBody],
-        rhs: &[[f32; 6]],
+        rhs: &[[f32; SPATIAL_DOF]],
         dt: f32,
-    ) -> Option<Vec<[f32; 6]>> {
+    ) -> Option<Vec<[f32; SPATIAL_DOF]>> {
         if bodies.len() != rhs.len() {
             return None;
         }
@@ -289,7 +292,10 @@ fn avbd_stub_kernel() {
     // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
     // ONLY this function's body into `fn main`. Extracting helpers would emit
     // calls to functions that do not exist in the shader; splitting requires a
-    // macro-level helper-inclusion feature, not a local edit.
+    // macro-level helper-inclusion feature, not a local edit. Array dimensions
+    // stay integer literals for the same reason (`[T; N]` lowers literal N
+    // only — a Rust `const` has no WGSL spelling at macro time); host-side
+    // mirrors use `SPATIAL_DOF`.
     if gid.x >= avbd_count.x {
         return;
     }
@@ -402,7 +408,7 @@ pub struct GpuAvbdSystem {
 
 impl GpuAvbdSystem {
     /// Pack one staged system from its parts. Pure (no device).
-    pub fn new(mass: GpuAvbdMass, residual: [f32; 6], row: GpuAvbdRow) -> Self {
+    pub fn new(mass: GpuAvbdMass, residual: [f32; SPATIAL_DOF], row: GpuAvbdRow) -> Self {
         Self {
             mass,
             state: GpuBodyState::from_residual(residual),
@@ -430,8 +436,8 @@ fn outer3(a: [f32; 3], b: [f32; 3]) -> [[f32; 3]; 3] {
 /// tolerance (never bit-identical by promise: device contraction may differ
 /// ±1 ulp per op). Pure (no device) so unit tests pin it.
 pub fn avbd_stamp_row_cpu(
-    lhs: &mut [[f32; 6]; 6],
-    rhs: &mut [f32; 6],
+    lhs: &mut [[f32; SPATIAL_DOF]; SPATIAL_DOF],
+    rhs: &mut [f32; SPATIAL_DOF],
     axis: [f32; 3],
     pen: f32,
     force: f32,
@@ -469,10 +475,13 @@ pub fn avbd_stamp_row_cpu(
 /// `Option`, so the device kernel reports the same outcome as an `ok` flag
 /// into its `avbd_ok` buffer (`1.0` solved, `0.0` breakdown with a zeroed
 /// delta — statics and sleepers carry no correction). Pure (no device).
-pub fn avbd_ldl_6x6_cpu(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> ([f32; 6], bool) {
+pub fn avbd_ldl_6x6_cpu(
+    lhs: [[f32; SPATIAL_DOF]; SPATIAL_DOF],
+    rhs: [f32; SPATIAL_DOF],
+) -> ([f32; SPATIAL_DOF], bool) {
     match solve_6x6(lhs, rhs) {
         Some(x) => (x, true),
-        None => ([0.0; 6], false),
+        None => ([0.0; SPATIAL_DOF], false),
     }
 }
 
@@ -485,10 +494,10 @@ pub fn avbd_ldl_6x6_cpu(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> ([f32; 6], bool) {
 /// Returns `None` only on a bodies/rhs/rows length mismatch.
 pub fn avbd_stage_contact_solve(
     bodies: &[RigidBody],
-    rhs: &[[f32; 6]],
+    rhs: &[[f32; SPATIAL_DOF]],
     rows: &[GpuAvbdRow],
     dt: f32,
-) -> Option<Vec<([f32; 6], bool)>> {
+) -> Option<Vec<([f32; SPATIAL_DOF], bool)>> {
     if bodies.len() != rhs.len() || bodies.len() != rows.len() {
         return None;
     }
@@ -499,7 +508,7 @@ pub fn avbd_stage_contact_solve(
         .map(|((b, r), row)| {
             let m = GpuAvbdMass::from_body(b);
             let diag = avbd_inertial_hessian_diag(m.inv_mass, m.inertia, dt);
-            let mut lhs = [[0.0f32; 6]; 6];
+            let mut lhs = [[0.0f32; SPATIAL_DOF]; SPATIAL_DOF];
             for (i, row_lhs) in lhs.iter_mut().enumerate() {
                 row_lhs[i] = diag[i];
             }

@@ -12,6 +12,19 @@ use crate::joint::{
     AxisConfig, PrismaticLimit, PrismaticMotor, RevoluteLimit, RevoluteMotor, WheelSuspension,
 };
 
+/// Numerical zero for effective-mass guards: rows with `k`/`k_eff` below
+/// this are skipped as degenerate (infinite mass ratio, collapsed axes).
+const MIN_EFFECTIVE_MASS: f32 = 1e-9;
+
+/// Numerical zero for segment-length guards: lengths below this are treated
+/// as collapsed (no meaningful direction to constrain along).
+const MIN_SEGMENT_LENGTH: f32 = 1e-9;
+
+/// Numerical zero for accumulated-impulse and squared-length guards: values
+/// at or below this magnitude are treated as exactly zero (nothing stored,
+/// no tangent to build).
+const DEGENERATE_EPS: f32 = 1e-12;
+
 /// Twist of B relative to A about A's hinge axis (rad, wrapped to
 /// [-PI, PI]). Decomposes `qa^-1 * qb` into twist about the axis plus
 /// swing; limits, motors and their tests measure travel with this.
@@ -38,13 +51,13 @@ fn hinge_frame(orientation: Quat, axis: Vec3) -> (Vec3, Vec3, Vec3) {
 /// or a degenerate world projection instead of silently substituting a
 /// default axis. Callers skip the angular correction on `None`.
 fn try_hinge_frame(orientation: Quat, axis: Vec3) -> Option<(Vec3, Vec3, Vec3)> {
-    if !axis.is_finite() || axis.length_squared() < 1e-12 {
+    if !axis.is_finite() || axis.length_squared() < DEGENERATE_EPS {
         return None;
     }
     let unit = crate::invariants::UnitVec3::normalize_checked(orientation * axis)?;
     let wa = unit.get();
     let (t1, t2) = crate::math::tangent_basis_unit(unit);
-    if t1.length_squared() < 1e-12 || t2.length_squared() < 1e-12 {
+    if t1.length_squared() < DEGENERATE_EPS || t2.length_squared() < DEGENERATE_EPS {
         return None;
     }
     Some((wa, t1, t2))
@@ -260,7 +273,7 @@ impl SequentialImpulseEngine {
             }
             // Warm start: re-apply the accumulated generalized impulse.
             let acc = self.joints[gi].acc_gear;
-            if acc.abs() > 1e-12 {
+            if acc.abs() > DEGENERATE_EPS {
                 gear_apply_delta(&mut self.bodies, &sa, acc);
                 gear_apply_delta(&mut self.bodies, &sb, acc * ratio);
             }
@@ -273,7 +286,7 @@ impl SequentialImpulseEngine {
             };
             let c = (continuous[0] + ratio * continuous[1] - c0).clamp(-MAX_C, MAX_C);
             let k = sa.eff + ratio * ratio * sb.eff;
-            if k < 1e-9 || sub_dt <= 0.0 {
+            if k < MIN_EFFECTIVE_MASS || sub_dt <= 0.0 {
                 continue;
             }
             let dl = -((sa.rate + ratio * sb.rate) + BETA * c / sub_dt) / k;
@@ -320,7 +333,7 @@ fn joint_warm_start(
     const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
     for (k, dir) in AXES.iter().enumerate() {
         let l = joint.acc_lin[k];
-        if l.abs() > 1e-12 {
+        if l.abs() > DEGENERATE_EPS {
             apply_impulse(bodies, a, b, dir * l, ra, rb);
         }
     }
@@ -330,7 +343,7 @@ fn joint_warm_start(
         };
         for (k, t) in [t1, t2].iter().enumerate() {
             let l = joint.acc_ang[k];
-            if l.abs() > 1e-12 {
+            if l.abs() > DEGENERATE_EPS {
                 apply_angular_impulse(bodies, a, b, t * l);
             }
         }
@@ -352,7 +365,7 @@ fn joint_linear_velocity_iteration(
     const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
     for (k, dir) in AXES.iter().enumerate() {
         let k_eff = effective_mass(bodies, a, b, *dir, ra, rb);
-        if k_eff < 1e-9 {
+        if k_eff < MIN_EFFECTIVE_MASS {
             continue;
         }
         let vrel = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(*dir);
@@ -379,7 +392,7 @@ fn joint_angular_velocity_iteration(
         let (ba, bb) = (&bodies[a], &bodies[b]);
         let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *t).dot(*t)
             + mul_inv_inertia(bb.inertia, bb.orientation, *t).dot(*t);
-        if k_eff < 1e-9 {
+        if k_eff < MIN_EFFECTIVE_MASS {
             continue;
         }
         let wrel = (bb.angular_velocity - ba.angular_velocity).dot(*t);
@@ -406,7 +419,7 @@ fn joint_prismatic_linear_iteration(
     t: Vec3,
 ) {
     let k_eff = effective_mass(bodies, a, b, t, ra, rb);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let vrel = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(t);
@@ -439,7 +452,7 @@ fn joint_prismatic_drive_velocity_iteration(
     let s =
         ((bodies[b].position + rb) - (bodies[a].position + ra)).dot(wa) - joint.reference_length;
     let k_eff = effective_mass(bodies, a, b, wa, ra, rb);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let v = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(wa);
@@ -515,7 +528,7 @@ fn joint_drive_velocity_iteration(
     let (ba, bb) = (&bodies[a], &bodies[b]);
     let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, wa).dot(wa)
         + mul_inv_inertia(bb.inertia, bb.orientation, wa).dot(wa);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let w = (bb.angular_velocity - ba.angular_velocity).dot(wa);
@@ -566,7 +579,7 @@ fn joint_linear_position_step(
         return;
     }
     let k_eff = effective_mass(bodies, a, b, dir, ra, rb);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let lambda = -BETA * e / k_eff;
@@ -602,7 +615,7 @@ fn joint_angular_position_pass(
         let (ba, bb) = (&bodies[a], &bodies[b]);
         let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, t).dot(t)
             + mul_inv_inertia(bb.inertia, bb.orientation, t).dot(t);
-        if k_eff < 1e-9 {
+        if k_eff < MIN_EFFECTIVE_MASS {
             continue;
         }
         let lambda = -BETA * err / k_eff;
@@ -741,7 +754,7 @@ fn joint_angular_lock_velocity_iteration(
         let (ba, bb) = (&bodies[a], &bodies[b]);
         let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *t).dot(*t)
             + mul_inv_inertia(bb.inertia, bb.orientation, *t).dot(*t);
-        if k_eff < 1e-9 {
+        if k_eff < MIN_EFFECTIVE_MASS {
             continue;
         }
         let wrel = (bb.angular_velocity - ba.angular_velocity).dot(*t);
@@ -764,7 +777,7 @@ fn joint_angular_lock_warm_start(
 ) {
     for (k, t) in axes.iter().enumerate() {
         let l = acc.get(k).copied().unwrap_or(0.0);
-        if l.abs() > 1e-12 {
+        if l.abs() > DEGENERATE_EPS {
             apply_angular_impulse(bodies, a, b, t * l);
         }
     }
@@ -803,7 +816,7 @@ fn joint_angular_lock_position_pass(
         let (ba, bb) = (&bodies[a], &bodies[b]);
         let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *t).dot(*t)
             + mul_inv_inertia(bb.inertia, bb.orientation, *t).dot(*t);
-        if k_eff < 1e-9 {
+        if k_eff < MIN_EFFECTIVE_MASS {
             continue;
         }
         let lambda = -BETA * err / k_eff;
@@ -836,12 +849,12 @@ fn joint_distance_velocity_iteration(
 ) {
     let delta = (bodies[b].position + rb) - (bodies[a].position + ra);
     let len = delta.length();
-    if len < 1e-9 {
+    if len < MIN_SEGMENT_LENGTH {
         return;
     }
     let n = delta / len;
     let k_eff = effective_mass(bodies, a, b, n, ra, rb);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let vrel = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(n);
@@ -881,7 +894,7 @@ fn joint_wheel_spring_iteration(
     let s =
         ((bodies[b].position + rb) - (bodies[a].position + ra)).dot(wa) - joint.reference_length;
     let k_eff = effective_mass(bodies, a, b, wa, ra, rb);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let v = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(wa);
@@ -923,7 +936,7 @@ fn joint_sixdof_linear_limit_iteration(
 ) {
     const LINEAR_SLOP: f32 = 0.002;
     let k_eff = effective_mass(bodies, a, b, dir, ra, rb);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let v = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(dir);
@@ -982,7 +995,7 @@ fn joint_sixdof_angular_limit_iteration(
     let (ba, bb) = (&bodies[a], &bodies[b]);
     let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, dir).dot(dir)
         + mul_inv_inertia(bb.inertia, bb.orientation, dir).dot(dir);
-    if k_eff < 1e-9 {
+    if k_eff < MIN_EFFECTIVE_MASS {
         return;
     }
     let w = (bb.angular_velocity - ba.angular_velocity).dot(dir);
@@ -1047,7 +1060,7 @@ fn solve_new_joint_velocity(
             let rb = bodies[b].orientation * lb;
             // Warm start along the current rod axis.
             let delta = (bodies[b].position + rb) - (bodies[a].position + ra);
-            if delta.length() >= 1e-9 && joint.acc_dist.abs() > 1e-12 {
+            if delta.length() >= MIN_SEGMENT_LENGTH && joint.acc_dist.abs() > DEGENERATE_EPS {
                 let n = delta / delta.length();
                 apply_impulse(bodies, a, b, n * joint.acc_dist, ra, rb);
             }
@@ -1069,7 +1082,7 @@ fn solve_new_joint_velocity(
             joint_warm_start(bodies, joint, a, b, ra, rb, None);
             joint_angular_lock_warm_start(bodies, &joint.acc_ang, a, b, &lock);
             // Warm-start the spring along the current suspension axis.
-            if joint.acc_limit.abs() > 1e-12 {
+            if joint.acc_limit.abs() > DEGENERATE_EPS {
                 apply_impulse(bodies, a, b, ws * joint.acc_limit, ra, rb);
             }
             for _ in 0..iterations {
@@ -1197,7 +1210,7 @@ fn solve_new_joint_position(
                 let rb = bodies[b].orientation * lb;
                 let delta = (bodies[b].position + rb) - (bodies[a].position + ra);
                 let len = delta.length();
-                if len < 1e-9 {
+                if len < MIN_SEGMENT_LENGTH {
                     continue;
                 }
                 joint_linear_position_step(

@@ -13,6 +13,15 @@ use super::SequentialImpulseEngine;
 use super::math::vec3_finite;
 use super::*;
 
+/// Numerical zero for degenerate guards: denominators, lengths and polynomial
+/// coefficients at or below this magnitude are treated as exactly zero
+/// (singular solve, zero-length direction, repeated root).
+const DEGENERATE_EPS: f32 = 1e-12;
+
+/// Minimum meaningful segment length: shorter extents are treated as
+/// collapsed (no sweep direction, no bound worth keeping).
+const MIN_SEGMENT_LENGTH: f32 = 1e-9;
+
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
 /// [`SequentialImpulseEngine`] and [`crate::avbd::AvbdEngine`] both route
@@ -265,7 +274,7 @@ pub fn kinematic_cast(
     target: distance::ShapeRef<'_>,
 ) -> Option<(f32, Vec3)> {
     let len = displacement.length();
-    if len < 1e-9 {
+    if len < MIN_SEGMENT_LENGTH {
         return None;
     }
     let dir = displacement / len;
@@ -354,7 +363,7 @@ pub fn remove_angular_approach(
     let m = lever.cross(normal);
     let im = mul_inv_inertia(inertia, orientation, m);
     let denom = im.dot(m);
-    if !denom.is_finite() || denom <= 1e-12 {
+    if !denom.is_finite() || denom <= DEGENERATE_EPS {
         return omega;
     }
     let vn = omega.cross(lever).dot(normal);
@@ -394,7 +403,7 @@ pub fn ccd_impact_velocity(
     let m = lever.cross(normal);
     let im = mul_inv_inertia(inertia, orientation, m);
     let denom = inv_mass + im.dot(m);
-    if !denom.is_finite() || denom <= 1e-12 {
+    if !denom.is_finite() || denom <= DEGENERATE_EPS {
         return (velocity, omega);
     }
     let impulse = -(1.0 + e) * vn_c / denom;
@@ -477,7 +486,7 @@ fn first_angular_overlap_fraction(
     }
     let angle = (body.angular_velocity * sub_dt).length();
     let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
-    if bound < 1e-9 {
+    if bound < MIN_SEGMENT_LENGTH {
         return None;
     }
     const TOUCH: f32 = 1e-5;
@@ -552,7 +561,7 @@ pub fn find_angular_continuous_hit(
         return None;
     }
     let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
-    if bound < 1e-9 {
+    if bound < MIN_SEGMENT_LENGTH {
         return None;
     }
     let mover_layer = body.collision_layer;
@@ -629,7 +638,7 @@ fn ray_sphere_hit(
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
     let a = direction.length_squared();
-    if a <= 1e-12 {
+    if a <= DEGENERATE_EPS {
         return None;
     }
     let offset = origin - center;
@@ -668,7 +677,7 @@ fn ray_obb_slab(
     axis: Vec3,
     state: &mut RayObbState,
 ) -> bool {
-    if direction.abs() <= 1e-12 {
+    if direction.abs() <= DEGENERATE_EPS {
         return origin >= minimum && origin <= maximum;
     }
     let (entry, entry_normal, exit, exit_normal) = if direction > 0.0 {
@@ -704,7 +713,7 @@ fn ray_obb_hit(
     half_extents: Vec3,
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
-    if direction.length_squared() <= 1e-12 {
+    if direction.length_squared() <= DEGENERATE_EPS {
         return None;
     }
     let mut state = RayObbState {
@@ -772,7 +781,7 @@ fn ray_capsule_cylinder_hit(
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
     let a = direction.x * direction.x + direction.z * direction.z;
-    if a <= 1e-12 {
+    if a <= DEGENERATE_EPS {
         return None;
     }
     let half_b = origin.x * direction.x + origin.z * direction.z;
@@ -836,7 +845,7 @@ fn ray_cylinder_hit(
     let mut best: Option<(f32, Vec3)> = None;
     // Curved wall: |o.xz + t*d.xz|^2 = r^2.
     let a = direction.x * direction.x + direction.z * direction.z;
-    if a > 1e-12 {
+    if a > DEGENERATE_EPS {
         let half_b = origin.x * direction.x + origin.z * direction.z;
         let c = origin.x * origin.x + origin.z * origin.z - radius * radius;
         let disc = half_b * half_b - a * c;
@@ -857,7 +866,7 @@ fn ray_cylinder_hit(
         }
     }
     // Caps: planes y = ±half_height with a radial check.
-    if direction.y.abs() > 1e-12 {
+    if direction.y.abs() > DEGENERATE_EPS {
         for (plane_y, n) in [(half_height, Vec3::Y), (-half_height, Vec3::NEG_Y)] {
             let t = (plane_y - origin.y) / direction.y;
             if t >= 0.0 && t <= max_dist {
@@ -883,7 +892,7 @@ fn ray_cone_hit(
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
     // Surface: x^2 + z^2 = k^2 * (h - y)^2, k = r / (2h).
-    let k = if half_height > 1e-9 {
+    let k = if half_height > MIN_SEGMENT_LENGTH {
         radius / (2.0 * half_height)
     } else {
         return None;
@@ -898,7 +907,7 @@ fn ray_cone_hit(
         - k * k * (half_height - origin.y) * (half_height - origin.y);
     // Quadratic a*t^2 + 2*h*t + c = 0 (linear fallback when a ~ 0).
     let mut roots = [0.0f32; 2];
-    let n_roots = if a.abs() > 1e-12 {
+    let n_roots = if a.abs() > DEGENERATE_EPS {
         let disc = h * h - a * c;
         if disc < 0.0 {
             0
@@ -907,7 +916,7 @@ fn ray_cone_hit(
             roots = [(-h - root) / a, (-h + root) / a];
             2
         }
-    } else if h.abs() > 1e-12 {
+    } else if h.abs() > DEGENERATE_EPS {
         roots = [-c / (2.0 * h), f32::INFINITY];
         1
     } else {
@@ -926,7 +935,7 @@ fn ray_cone_hit(
         }
     }
     // Base cap disk at y = -half_height.
-    if direction.y.abs() > 1e-12 {
+    if direction.y.abs() > DEGENERATE_EPS {
         let t = (-half_height - origin.y) / direction.y;
         if t >= 0.0 && t <= max_dist {
             let px = origin.x + direction.x * t;
@@ -948,7 +957,7 @@ fn ray_hull_hit(
     hull: &crate::shape::ConvexHull,
     max_dist: f32,
 ) -> Option<(f32, Vec3)> {
-    const EPS: f32 = 1e-9;
+    const EPS: f32 = MIN_SEGMENT_LENGTH;
     let mut best: Option<(f32, Vec3)> = None;
     for f in &hull.faces {
         let (a, b, c) = (
@@ -1202,7 +1211,7 @@ fn ray_aabb_hit(
             Vec3::Z,
         ),
     ] {
-        if d.abs() <= 1e-12 {
+        if d.abs() <= DEGENERATE_EPS {
             if o < mn || o > mx {
                 return None;
             }
