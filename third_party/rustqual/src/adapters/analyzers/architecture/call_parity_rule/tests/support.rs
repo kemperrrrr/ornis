@@ -1,0 +1,394 @@
+//! Shared test helpers for the call-parity integration-style tests
+//! (Checks A/B/C/D, touchpoints, pub-fn collection).
+
+use crate::adapters::analyzers::architecture::call_parity_rule::build_handler_touchpoints;
+use crate::adapters::analyzers::architecture::call_parity_rule::check_a::check_no_delegation;
+use crate::adapters::analyzers::architecture::call_parity_rule::check_b::check_missing_adapter;
+use crate::adapters::analyzers::architecture::call_parity_rule::check_c::check_multi_touchpoint;
+use crate::adapters::analyzers::architecture::call_parity_rule::check_d::check_multiplicity_mismatch;
+use crate::adapters::analyzers::architecture::call_parity_rule::pub_fns::collect_pub_fns_by_layer;
+use crate::adapters::analyzers::architecture::call_parity_rule::touchpoints::compute_touchpoints;
+use crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::{
+    build_call_graph, canonical_name_for_pub_fn,
+};
+use crate::adapters::analyzers::architecture::compiled::CompiledCallParity;
+use crate::adapters::analyzers::architecture::layer_rule::LayerDefinitions;
+use crate::adapters::analyzers::architecture::MatchLocation;
+use crate::adapters::shared::use_tree::{gather_alias_map, AliasMap};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use std::collections::{HashMap, HashSet};
+
+/// In-memory workspace built from `(path, source)` pairs.
+pub(super) struct Workspace {
+    pub files: Vec<(String, String, syn::File)>,
+    pub aliases_per_file: HashMap<String, AliasMap>,
+}
+
+pub(super) fn parse(src: &str) -> syn::File {
+    syn::parse_str(src).expect("parse")
+}
+
+pub(super) fn globset(patterns: &[&str]) -> GlobSet {
+    let mut b = GlobSetBuilder::new();
+    for p in patterns {
+        b.add(Glob::new(p).unwrap());
+    }
+    b.build().unwrap()
+}
+
+/// Build a workspace + pre-compute alias maps per file.
+pub(super) fn build_workspace(entries: &[(&str, &str)]) -> Workspace {
+    let mut files = Vec::new();
+    let mut aliases_per_file = HashMap::new();
+    for (path, src) in entries {
+        let ast = parse(src);
+        let alias_map = gather_alias_map(&ast);
+        aliases_per_file.insert(path.to_string(), alias_map);
+        files.push((path.to_string(), src.to_string(), ast));
+    }
+    Workspace {
+        files,
+        aliases_per_file,
+    }
+}
+
+/// Borrow the parsed files as `(&path, &syn::File)` — the shape the
+/// graph + pub-fn collectors accept. Tied to `ws`'s lifetime.
+pub(super) fn borrowed_files(ws: &Workspace) -> Vec<(&str, &syn::File)> {
+    ws.files.iter().map(|(p, _, f)| (p.as_str(), f)).collect()
+}
+
+/// Three-layer test fixture: application + cli + mcp.
+/// Operation: LayerDefinitions construction.
+pub(super) fn three_layer() -> LayerDefinitions {
+    LayerDefinitions::new(
+        vec![
+            "application".to_string(),
+            "cli".to_string(),
+            "mcp".to_string(),
+        ],
+        vec![
+            ("application".to_string(), globset(&["src/application/**"])),
+            ("cli".to_string(), globset(&["src/cli/**"])),
+            ("mcp".to_string(), globset(&["src/mcp/**"])),
+        ],
+    )
+}
+
+/// `[architecture.call_parity]` configured for cli + mcp adapters,
+/// application as target, with a tunable `call_depth`. The most common
+/// shape across tests; per-file helpers customize only when they need
+/// different adapters or exclude_targets.
+/// Operation: struct literal construction.
+pub(super) fn cli_mcp_config(call_depth: usize) -> CompiledCallParity {
+    CompiledCallParity {
+        adapters: vec!["cli".to_string(), "mcp".to_string()],
+        target: "application".to_string(),
+        call_depth,
+        exclude_targets: GlobSet::empty(),
+        transparent_wrappers: HashSet::new(),
+        transparent_macros: HashSet::new(),
+        promoted_attributes: HashSet::new(),
+        single_touchpoint: crate::config::architecture::SingleTouchpointMode::default(),
+    }
+}
+
+/// Ports-style fixture: ports + application + cli + mcp.
+/// Used to exercise trait-dispatch where the trait declaration lives
+/// in `ports` and impls live in the target `application` layer —
+/// the canonical Hexagonal/Ports&Adapters shape.
+/// Operation: LayerDefinitions construction.
+pub(super) fn ports_app_cli_mcp() -> LayerDefinitions {
+    LayerDefinitions::new(
+        vec![
+            "ports".to_string(),
+            "application".to_string(),
+            "cli".to_string(),
+            "mcp".to_string(),
+        ],
+        vec![
+            ("ports".to_string(), globset(&["src/ports/**"])),
+            ("application".to_string(), globset(&["src/application/**"])),
+            ("cli".to_string(), globset(&["src/cli/**"])),
+            ("mcp".to_string(), globset(&["src/mcp/**"])),
+        ],
+    )
+}
+
+/// Four-layer test fixture: application + cli + mcp + rest.
+/// Operation: LayerDefinitions construction.
+pub(super) fn four_layer() -> LayerDefinitions {
+    LayerDefinitions::new(
+        vec![
+            "application".to_string(),
+            "cli".to_string(),
+            "mcp".to_string(),
+            "rest".to_string(),
+        ],
+        vec![
+            ("application".to_string(), globset(&["src/application/**"])),
+            ("cli".to_string(), globset(&["src/cli/**"])),
+            ("mcp".to_string(), globset(&["src/mcp/**"])),
+            ("rest".to_string(), globset(&["src/rest/**"])),
+        ],
+    )
+}
+
+/// Which call-parity check to run against the pre-built graph. A tiny
+/// enum tag keeps `run_check_a` / `run_check_b` / `run_check_c` /
+/// `run_check_d` from sharing identical body statements (DRY-004
+/// fragment-match) without the HRTB lifetime gymnastics that a
+/// `FnOnce` closure would require.
+pub(super) enum Check {
+    A,
+    B,
+    C,
+    D,
+}
+
+/// Build only the workspace call graph and return it for direct
+/// inspection (node membership, edge presence). Integration: thin
+/// wrapper over `build_call_graph` that consumes the same workspace
+/// shape as the higher-level helpers.
+pub(super) fn build_graph_only(
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cfg_test: &HashSet<String>,
+    transparent_wrappers: &HashSet<String>,
+) -> crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::CallGraph {
+    let borrowed = borrowed_files(ws);
+    let crate_root_modules =
+        crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::collect_crate_root_modules(&borrowed);
+    let workspace_module_paths =
+        crate::adapters::analyzers::architecture::call_parity_rule::local_symbols::collect_workspace_module_paths(&borrowed);
+    let workspace = crate::adapters::analyzers::architecture::call_parity_rule::local_symbols::WorkspaceLookup {
+        cfg_test_files: cfg_test,
+        crate_root_modules: &crate_root_modules,
+        workspace_module_paths: &workspace_module_paths,
+    };
+    build_call_graph(
+        &borrowed,
+        &ws.aliases_per_file,
+        layers,
+        transparent_wrappers,
+        &workspace,
+    )
+}
+
+/// Build a call graph for the common test case: the `ports_app_cli_mcp`
+/// layer layout, no cfg-test files, no transparent wrappers. Tests that
+/// need a different layout / cfg-test set / wrappers call `build_graph_only`
+/// directly.
+pub(super) fn graph_of(
+    ws: &Workspace,
+) -> crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::CallGraph {
+    build_graph_only(ws, &ports_app_cli_mcp(), &empty_cfg_test(), &HashSet::new())
+}
+
+/// Like [`graph_of`] but with the simpler `three_layer` layout.
+pub(super) fn graph_3l(
+    ws: &Workspace,
+) -> crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::CallGraph {
+    build_graph_only(ws, &three_layer(), &empty_cfg_test(), &HashSet::new())
+}
+
+/// Build the workspace's pub-fns map and call graph. Integration:
+/// shared by `run_check` and `compute_touchpoints_for`.
+fn build_pub_fns_and_graph<'ws>(
+    ws: &'ws Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    cfg_test: &HashSet<String>,
+) -> (
+    HashMap<
+        String,
+        Vec<crate::adapters::analyzers::architecture::call_parity_rule::pub_fns::PubFnInfo<'ws>>,
+    >,
+    crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::CallGraph,
+) {
+    let borrowed = borrowed_files(ws);
+    let crate_root_modules =
+        crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::collect_crate_root_modules(&borrowed);
+    let workspace_module_paths =
+        crate::adapters::analyzers::architecture::call_parity_rule::local_symbols::collect_workspace_module_paths(&borrowed);
+    let workspace = crate::adapters::analyzers::architecture::call_parity_rule::local_symbols::WorkspaceLookup {
+        cfg_test_files: cfg_test,
+        crate_root_modules: &crate_root_modules,
+        workspace_module_paths: &workspace_module_paths,
+    };
+    use crate::adapters::analyzers::architecture::call_parity_rule::pub_fns::PubFnInputs;
+    let pub_fns = collect_pub_fns_by_layer(PubFnInputs {
+        files: &borrowed,
+        aliases_per_file: &ws.aliases_per_file,
+        layers,
+        transparent_wrappers: &cp.transparent_wrappers,
+        promoted_attributes: &cp.promoted_attributes,
+        workspace: &workspace,
+    });
+    let graph = build_call_graph(
+        &borrowed,
+        &ws.aliases_per_file,
+        layers,
+        &cp.transparent_wrappers,
+        &workspace,
+    );
+    (pub_fns, graph)
+}
+
+/// Run a call-parity check end-to-end against a workspace. Integration:
+/// builds pub-fns + graph, then dispatches on `which`.
+pub(super) fn run_check(
+    which: Check,
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    cfg_test: &HashSet<String>,
+) -> Vec<MatchLocation> {
+    let (pub_fns, graph) = build_pub_fns_and_graph(ws, layers, cp, cfg_test);
+    let touchpoints = build_handler_touchpoints(&pub_fns, &graph, cp);
+    match which {
+        Check::A => check_no_delegation(&pub_fns, &touchpoints, cp),
+        Check::B => {
+            let borrowed = borrowed_files(ws);
+            let crate_root_modules =
+                crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::collect_crate_root_modules(&borrowed);
+            let workspace_module_paths =
+                crate::adapters::analyzers::architecture::call_parity_rule::local_symbols::collect_workspace_module_paths(&borrowed);
+            let workspace = crate::adapters::analyzers::architecture::call_parity_rule::local_symbols::WorkspaceLookup {
+                cfg_test_files: cfg_test,
+                crate_root_modules: &crate_root_modules,
+                workspace_module_paths: &workspace_module_paths,
+            };
+            let candidates = crate::adapters::analyzers::architecture::call_parity_rule::hint::collect_private_candidates(
+                &borrowed, &ws.aliases_per_file, layers, &cp.transparent_wrappers, &workspace,
+            );
+            let mut hits = check_missing_adapter(&pub_fns, &graph, &touchpoints, cp);
+            crate::adapters::analyzers::architecture::call_parity_rule::hint::enrich_with_hints(
+                &mut hits,
+                &graph,
+                cp,
+                &candidates,
+            );
+            hits
+        }
+        Check::C => check_multi_touchpoint(&pub_fns, &touchpoints, cp),
+        Check::D => check_multiplicity_mismatch(&pub_fns, &graph, &touchpoints, cp),
+    }
+}
+
+/// Run Check A (adapter-must-delegate). Operation: thin wrapper.
+pub(super) fn run_check_a(
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    cfg_test: &HashSet<String>,
+) -> Vec<MatchLocation> {
+    run_check(Check::A, ws, layers, cp, cfg_test)
+}
+
+/// Run Check B (target-must-be-reached). Operation: thin wrapper.
+pub(super) fn run_check_b(
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    cfg_test: &HashSet<String>,
+) -> Vec<MatchLocation> {
+    run_check(Check::B, ws, layers, cp, cfg_test)
+}
+
+/// Run Check C (single-touchpoint). Operation: thin wrapper.
+pub(super) fn run_check_c(
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    cfg_test: &HashSet<String>,
+) -> Vec<MatchLocation> {
+    run_check(Check::C, ws, layers, cp, cfg_test)
+}
+
+/// Run Check D (multiplicity-must-match). Operation: thin wrapper.
+pub(super) fn run_check_d(
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    cfg_test: &HashSet<String>,
+) -> Vec<MatchLocation> {
+    run_check(Check::D, ws, layers, cp, cfg_test)
+}
+
+/// An empty `cfg_test` HashSet — convenience for callers that don't
+/// exercise test-file filtering.
+pub(super) fn empty_cfg_test() -> HashSet<String> {
+    HashSet::new()
+}
+
+/// Does `graph` contain a forward edge `from → to`? Used by workspace-
+/// level edge-tracing assertions across the call_parity test suite.
+/// Operation: HashMap + HashSet lookup.
+pub(super) fn graph_contains_edge(
+    graph: &crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::CallGraph,
+    from: &str,
+    to: &str,
+) -> bool {
+    graph
+        .forward
+        .get(from)
+        .is_some_and(|callees| callees.contains(to))
+}
+
+/// Sorted list of callees from `from` for assertion-message context.
+/// Returns `Vec<&str>` borrowing from the graph for a stable, readable
+/// debug output. Operation: HashMap lookup + sort.
+pub(super) fn callees_of<'g>(
+    graph: &'g crate::adapters::analyzers::architecture::call_parity_rule::workspace_graph::CallGraph,
+    from: &str,
+) -> Vec<&'g str> {
+    graph
+        .forward
+        .get(from)
+        .map(|set| {
+            let mut v: Vec<&str> = set.iter().map(String::as_str).collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default()
+}
+
+/// Build pub-fns + graph and compute touchpoints for one named handler.
+/// Integration: builds the workspace graph, finds the handler by its
+/// short fn_name, then delegates to `compute_touchpoints`.
+pub(super) fn compute_touchpoints_for(
+    ws: &Workspace,
+    layers: &LayerDefinitions,
+    cp: &CompiledCallParity,
+    handler_fn_name: &str,
+    cfg_test: &HashSet<String>,
+) -> HashSet<String> {
+    let (pub_fns, graph) = build_pub_fns_and_graph(ws, layers, cp, cfg_test);
+    let matches: Vec<(&str, _)> = pub_fns
+        .iter()
+        .flat_map(|(layer, infos)| {
+            infos
+                .iter()
+                .filter(|i| i.fn_name == handler_fn_name)
+                .map(move |i| (layer.as_str(), i))
+        })
+        .collect();
+    let (origin_adapter, info) = match matches.as_slice() {
+        [] => panic!("handler `{handler_fn_name}` not found in pub_fns"),
+        [m] => *m,
+        _ => panic!(
+            "handler `{handler_fn_name}` is ambiguous in pub_fns ({} matches); pass a more specific name or extend this helper to take a layer hint",
+            matches.len()
+        ),
+    };
+    let canonical = canonical_name_for_pub_fn(info);
+    let ctx = crate::adapters::analyzers::architecture::call_parity_rule::touchpoints::TouchpointContext {
+        graph: &graph,
+        target_layer: &cp.target,
+        call_depth: cp.call_depth,
+        origin_adapter,
+        adapter_layers: &cp.adapters,
+    };
+    compute_touchpoints(&canonical, &ctx)
+}

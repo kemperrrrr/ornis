@@ -1,0 +1,150 @@
+//! Per-dim row → JSON entry conversion.
+
+use serde_json::{json, Value};
+
+use super::details::{coupling_category_detail, dry_category_detail, srp_category_detail};
+use super::rows::{
+    AiArchRow, AiComplexityRow, AiCouplingRow, AiDryRow, AiIospRow, AiSrpRow, AiTqRow,
+};
+use crate::config::Config;
+use crate::domain::findings::{ComplexityFindingKind, TqFindingKind};
+
+pub(crate) fn format_iosp_entry(r: AiIospRow) -> Value {
+    let logic_lines: Vec<String> = r
+        .finding
+        .logic_locations
+        .iter()
+        .map(|l| l.line.to_string())
+        .collect();
+    let call_lines: Vec<String> = r
+        .finding
+        .call_locations
+        .iter()
+        .map(|c| c.line.to_string())
+        .collect();
+    let detail = format!(
+        "logic + calls (logic lines {}, call lines {})",
+        logic_lines.join(","),
+        call_lines.join(","),
+    );
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        &r.function_name,
+        "violation",
+        detail,
+    )
+}
+
+pub(crate) fn format_complexity_entry(r: AiComplexityRow) -> Value {
+    let category = r.finding.kind.meta().ai_category;
+    let detail = match r.finding.kind {
+        ComplexityFindingKind::Cognitive
+        | ComplexityFindingKind::Cyclomatic
+        | ComplexityFindingKind::NestingDepth
+        | ComplexityFindingKind::FunctionLength => {
+            format!("{} (max {})", r.finding.metric_value, r.finding.threshold)
+        }
+        ComplexityFindingKind::MagicNumber
+        | ComplexityFindingKind::Unsafe
+        | ComplexityFindingKind::ErrorHandling => r.finding.common.message.clone(),
+    };
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        &r.function_name,
+        category,
+        detail,
+    )
+}
+
+pub(crate) fn format_dry_entry(r: AiDryRow) -> Value {
+    let (category, detail) = dry_category_detail(&r.finding);
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        &r.function_name,
+        category,
+        detail,
+    )
+}
+
+pub(crate) fn format_srp_entry(r: AiSrpRow, config: &Config) -> Value {
+    let (category, detail) = srp_category_detail(&r.finding, config);
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        &r.function_name,
+        category,
+        detail,
+    )
+}
+
+pub(crate) fn format_coupling_entry(r: AiCouplingRow) -> Value {
+    let (category, detail) = coupling_category_detail(&r.finding);
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        &r.function_name,
+        category,
+        detail,
+    )
+}
+
+pub(crate) fn format_tq_entry(r: AiTqRow) -> Value {
+    let category = r.finding.kind.meta().ai_category;
+    // In `detail` rather than as its own key: every entry of every dimension
+    // shares one shape here, and a key only TQ carries would drop the whole
+    // findings table into the per-entry fallback. `--format json` has the
+    // structured field.
+    let detail = match r.finding.kind {
+        TqFindingKind::Untested => format!(
+            "{} [{}]",
+            r.finding.common.message,
+            r.finding.coverage.json()
+        ),
+        _ => r.finding.common.message.clone(),
+    };
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        &r.function_name,
+        category,
+        detail,
+    )
+}
+
+pub(crate) fn format_arch_entry(r: AiArchRow) -> Value {
+    let detail = format!("{}: {}", r.finding.common.rule_id, r.finding.common.message);
+    build_value_entry(
+        &r.finding.common.file,
+        r.finding.common.line,
+        "",
+        "architecture",
+        detail,
+    )
+}
+
+/// One row of the AI envelope. `kind` is empty for everything but an orphan
+/// suppression, and it is present anyway: each file's entries are rendered as a
+/// TOON table, and a table needs one shape — `toon-encode` falls back to a
+/// per-entry list the moment two objects differ in their keys. The fallback is
+/// valid output, but a consumer reading the tabular form silently misses the
+/// rest, so the shape stays uniform even where a column has nothing to say.
+/// Operation: struct construction, no own calls.
+fn build_value_entry(
+    file: &str,
+    line: usize,
+    function_name: &str,
+    category: &str,
+    detail: String,
+) -> Value {
+    json!({
+        "file": file,
+        "category": category,
+        "kind": "",
+        "line": line,
+        "fn": function_name,
+        "detail": detail,
+    })
+}

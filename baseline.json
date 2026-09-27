@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.03762163468777968,
-  "iosp_score": 0.8990228013029316,
+  "quality_score": 0.03766555596210297,
+  "iosp_score": 0.8990556821882123,
   "violations": 310,
-  "total": 4932,
+  "total": 4933,
   "complexity_warnings": 52,
   "magic_number_warnings": 1657,
   "nesting_depth_warnings": 14,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 6,
-  "tq_untested_warnings": 131,
+  "tq_untested_warnings": 132,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 25,
   "structural_coupling_warnings": 23,
-  "total_findings": 3868,
+  "total_findings": 3869,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -1548,7 +1548,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 768
+      "line": 773
     },
     {
       "name": "EditorSession::default",

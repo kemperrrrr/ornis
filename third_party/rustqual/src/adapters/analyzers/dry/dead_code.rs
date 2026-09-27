@@ -1,0 +1,353 @@
+use std::collections::HashSet;
+
+use syn::visit::Visit;
+
+use super::allow_scope::{AllowScope, DeadCodeLevel};
+use super::inherited_allow::InheritedLevels;
+use super::{has_cfg_test, has_test_attr, qualify_name};
+use crate::adapters::shared::declared_function::DeclaredFunction;
+use crate::adapters::shared::file_visitor::FileVisitor;
+use crate::adapters::shared::item_shape::{impl_item_attrs, item_attrs, trait_item_attrs};
+use crate::adapters::shared::marked_declaration::{mark_annotated, MarkerLines};
+
+// ── DeclaredFnCollector (for dead code) ─────────────────────────
+
+/// AST visitor that collects all declared function/method names with metadata.
+pub(crate) struct DeclaredFnCollector {
+    pub(crate) file: String,
+    pub(crate) functions: Vec<DeclaredFunction>,
+    in_test: bool,
+    parent_type: Option<String>,
+    is_trait_impl: bool,
+    allow: AllowScope,
+    /// The `dead_code` level each file arrives with, from the module that
+    /// declares it — a lint level does not stop at a file boundary.
+    inherited: InheritedLevels,
+}
+
+impl DeclaredFnCollector {
+    pub(crate) fn new(inherited: InheritedLevels) -> Self {
+        Self {
+            file: String::new(),
+            functions: Vec::new(),
+            in_test: false,
+            parent_type: None,
+            is_trait_impl: false,
+            allow: AllowScope::default(),
+            inherited,
+        }
+    }
+}
+
+impl FileVisitor for DeclaredFnCollector {
+    fn reset_for_file(&mut self, file_path: &str) {
+        self.file = file_path.to_string();
+        self.in_test = false;
+        let inherited = self
+            .inherited
+            .get(file_path)
+            .copied()
+            .unwrap_or(DeadCodeLevel::Report);
+        self.allow = AllowScope::with_baseline(inherited);
+        self.parent_type = None;
+        self.is_trait_impl = false;
+    }
+}
+
+impl<'ast> Visit<'ast> for DeclaredFnCollector {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let name = node.sig.ident.to_string();
+        let line = node.sig.ident.span().start().line;
+        self.functions.push(DeclaredFunction {
+            qualified_name: qualify_name(&self.parent_type, &name),
+            is_main: name == "main",
+            is_test: self.in_test || has_test_attr(&node.attrs) || has_cfg_test(&node.attrs),
+            is_trait_impl: false,
+            dead_code_exempt: self.allow.covers(&node.attrs),
+            is_api: false,
+            is_test_helper: false,
+            name,
+            file: self.file.clone(),
+            line,
+        });
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let prev_parent = self.parent_type.take();
+        let prev_is_trait = self.is_trait_impl;
+        let prev_in_test = self.in_test;
+
+        if has_cfg_test(&node.attrs) {
+            self.in_test = true;
+        }
+
+        self.is_trait_impl = node.trait_.is_some();
+        if let syn::Type::Path(tp) = &*node.self_ty {
+            if let Some(seg) = tp.path.segments.last() {
+                self.parent_type = Some(seg.ident.to_string());
+            }
+        }
+
+        syn::visit::visit_item_impl(self, node);
+
+        self.parent_type = prev_parent;
+        self.is_trait_impl = prev_is_trait;
+        self.in_test = prev_in_test;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let name = node.sig.ident.to_string();
+        let line = node.sig.ident.span().start().line;
+        self.functions.push(DeclaredFunction {
+            qualified_name: qualify_name(&self.parent_type, &name),
+            is_main: false,
+            is_test: self.in_test || has_test_attr(&node.attrs) || has_cfg_test(&node.attrs),
+            is_trait_impl: self.is_trait_impl,
+            dead_code_exempt: self.allow.covers(&node.attrs),
+            is_api: false,
+            is_test_helper: false,
+            name,
+            file: self.file.clone(),
+            line,
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        if node.default.is_some() {
+            let name = node.sig.ident.to_string();
+            let line = node.sig.ident.span().start().line;
+            self.functions.push(DeclaredFunction {
+                qualified_name: qualify_name(&self.parent_type, &name),
+                is_main: false,
+                is_test: self.in_test,
+                is_trait_impl: true,
+                dead_code_exempt: false,
+                is_api: false,
+                is_test_helper: false,
+                name,
+                file: self.file.clone(),
+                line,
+            });
+        }
+    }
+
+    fn visit_file(&mut self, node: &'ast syn::File) {
+        self.allow.enter_file(&node.attrs);
+        syn::visit::visit_file(self, node);
+    }
+
+    /// Every item goes through here, so the two scope-forming attributes are
+    /// handled once instead of on the handful of shapes that happen to need an
+    /// override: `#[cfg(test)]` on a const or a `use` scopes exactly as it does
+    /// on a function, and a lint level set on an `impl` or a function covers
+    /// what is declared inside it.
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        let attrs = item_attrs(node);
+        let prev_in_test = self.in_test;
+        let prev_allow = self.allow.enter(attrs);
+        self.in_test = prev_in_test || has_cfg_test(attrs);
+        syn::visit::visit_item(self, node);
+        self.allow.leave(prev_allow);
+        self.in_test = prev_in_test;
+    }
+
+    /// Associated items do not pass through `visit_item`, so the same scoping
+    /// happens at their own dispatch — a `#[cfg(test)]` associated const or
+    /// type carries references just as a free one does.
+    fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+        let attrs = impl_item_attrs(node);
+        let prev_in_test = self.in_test;
+        let prev_allow = self.allow.enter(attrs);
+        self.in_test = prev_in_test || has_cfg_test(attrs);
+        syn::visit::visit_impl_item(self, node);
+        self.allow.leave(prev_allow);
+        self.in_test = prev_in_test;
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        let attrs = trait_item_attrs(node);
+        let prev_in_test = self.in_test;
+        let prev_allow = self.allow.enter(attrs);
+        self.in_test = prev_in_test || has_cfg_test(attrs);
+        syn::visit::visit_trait_item(self, node);
+        self.allow.leave(prev_allow);
+        self.in_test = prev_in_test;
+    }
+}
+
+// ── Result types ────────────────────────────────────────────────
+
+/// A warning about a potentially dead (unused) function.
+#[derive(Debug, Clone)]
+pub struct DeadCodeWarning {
+    pub function_name: String,
+    pub qualified_name: String,
+    pub file: String,
+    pub line: usize,
+    pub kind: DeadCodeKind,
+    pub suggestion: String,
+}
+
+/// Classification of dead code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeadCodeKind {
+    /// Function is never called from anywhere (production or test).
+    Uncalled,
+    /// Function is only called from `#[cfg(test)]` code, not production.
+    TestOnly,
+}
+
+// ── Detection API ───────────────────────────────────────────────
+
+/// Detect dead code across parsed files.
+/// Integration: orchestrates declaration collection, call collection, and finding.
+/// Note: the `detect_dead_code` config flag is checked by the pipeline caller.
+pub fn detect_dead_code(
+    parsed: &[(String, String, syn::File)],
+    api_lines: &std::collections::HashMap<String, std::collections::HashSet<usize>>,
+    test_helper_lines: &std::collections::HashMap<String, std::collections::HashSet<usize>>,
+    cfg_test_files: &std::collections::HashSet<String>,
+) -> Vec<DeadCodeWarning> {
+    let declared = super::collect_declared_functions(parsed);
+    let mut declared = mark_cfg_test_declarations(declared, cfg_test_files);
+    mark_api_declarations(&mut declared, api_lines);
+    mark_test_helper_declarations(&mut declared, test_helper_lines);
+    let calls = collect_all_calls(parsed, cfg_test_files);
+    // A re-export is usage for DRY-002: a re-exported function is not dead.
+    let mut prod_calls = calls.refs.production;
+    prod_calls.extend(calls.reexported);
+    let test_calls = calls.refs.tests;
+    let uncalled = find_uncalled(&declared, &prod_calls, &test_calls);
+    let test_only = find_test_only(&declared, &prod_calls, &test_calls);
+    merge_warnings(uncalled, test_only)
+}
+
+/// Mark functions that have a `// qual:api` annotation within the annotation
+/// window. The window rule is shared with DRY-006 and the stale-marker check,
+/// so the three cannot disagree about what a marker attaches to.
+/// Trivial: delegates to `mark_annotated`.
+pub(crate) fn mark_api_declarations(declared: &mut [DeclaredFunction], api_lines: &MarkerLines) {
+    mark_annotated(declared, api_lines, |d| d.is_api = true);
+}
+
+/// Mark functions that have a `// qual:test_helper` annotation within
+/// the annotation window.
+/// Trivial: delegates to `mark_annotated`.
+pub(crate) fn mark_test_helper_declarations(
+    declared: &mut [DeclaredFunction],
+    test_helper_lines: &MarkerLines,
+) {
+    mark_annotated(declared, test_helper_lines, |d| d.is_test_helper = true);
+}
+
+/// Merge warning lists into one.
+/// Trivial: concatenation.
+fn merge_warnings(
+    mut uncalled: Vec<DeadCodeWarning>,
+    test_only: Vec<DeadCodeWarning>,
+) -> Vec<DeadCodeWarning> {
+    uncalled.extend(test_only);
+    uncalled
+}
+
+pub(crate) use crate::adapters::shared::cfg_test_files::collect_cfg_test_file_paths;
+
+/// Mark declared functions from cfg-test files as test code.
+/// Trivial: iteration + field mutation.
+fn mark_cfg_test_declarations(
+    mut declared: Vec<DeclaredFunction>,
+    cfg_test_files: &HashSet<String>,
+) -> Vec<DeclaredFunction> {
+    declared.iter_mut().for_each(|d| {
+        if cfg_test_files.contains(&d.file) {
+            d.is_test = true;
+        }
+    });
+    declared
+}
+
+// Call target collection is in super::call_targets.
+pub(crate) use super::call_targets::collect_all_calls;
+
+// ── Finding logic ───────────────────────────────────────────────
+
+/// Find functions that are never called from anywhere.
+/// `// qual:test_helper` does NOT exclude here — a helper marker on a
+/// function with no callers at all is still worth flagging (the
+/// marker is likely stale). `// qual:api` does exclude because
+/// public-API functions legitimately have no in-crate callers.
+/// Operation: set logic + filtering, no own calls.
+fn find_uncalled(
+    declared: &[DeclaredFunction],
+    prod_calls: &HashSet<String>,
+    test_calls: &HashSet<String>,
+) -> Vec<DeadCodeWarning> {
+    declared
+        .iter()
+        .filter(|d| !should_exclude_uncalled(d))
+        .filter(|d| !prod_calls.contains(&d.name) && !test_calls.contains(&d.name))
+        .filter(|d| {
+            !prod_calls.contains(&d.qualified_name) && !test_calls.contains(&d.qualified_name)
+        })
+        .map(|d| DeadCodeWarning {
+            function_name: d.name.clone(),
+            qualified_name: d.qualified_name.clone(),
+            file: d.file.clone(),
+            line: d.line,
+            kind: DeadCodeKind::Uncalled,
+            suggestion: "never called; consider removing".to_string(),
+        })
+        .collect()
+}
+
+/// Find functions that are only called from test code.
+/// `// qual:test_helper` excludes here (narrow purpose of the marker).
+/// Operation: set logic + filtering, no own calls.
+fn find_test_only(
+    declared: &[DeclaredFunction],
+    prod_calls: &HashSet<String>,
+    test_calls: &HashSet<String>,
+) -> Vec<DeadCodeWarning> {
+    declared
+        .iter()
+        .filter(|d| !should_exclude_test_only(d))
+        // Must be called from tests but NOT from production
+        .filter(|d| {
+            let called_from_tests =
+                test_calls.contains(&d.name) || test_calls.contains(&d.qualified_name);
+            let called_from_prod =
+                prod_calls.contains(&d.name) || prod_calls.contains(&d.qualified_name);
+            called_from_tests && !called_from_prod
+        })
+        .map(|d| DeadCodeWarning {
+            function_name: d.name.clone(),
+            qualified_name: d.qualified_name.clone(),
+            file: d.file.clone(),
+            line: d.line,
+            kind: DeadCodeKind::TestOnly,
+            suggestion: concat!(
+                "only called from test code; move to tests/ or annotate with ",
+                "// qual:api (public API) or // qual:test_helper (test-only helper)"
+            )
+            .to_string(),
+        })
+        .collect()
+}
+
+/// Check if a declared function should be excluded from the Uncalled
+/// dead-code check. `// qual:test_helper` is NOT in this list — a
+/// helper marker on a function with no callers at all is still worth
+/// flagging so the user sees that their annotation is stale.
+/// Operation: boolean logic combining multiple exclusion criteria.
+fn should_exclude_uncalled(d: &DeclaredFunction) -> bool {
+    d.is_main || d.is_test || d.is_trait_impl || d.dead_code_exempt || d.is_api
+}
+
+/// Check if a declared function should be excluded from the TestOnly
+/// dead-code check. `// qual:test_helper` IS in this list — silencing
+/// the testonly finding is the whole point of the annotation.
+/// Operation: delegates to should_exclude_uncalled + test_helper check.
+fn should_exclude_test_only(d: &DeclaredFunction) -> bool {
+    d.is_test_helper || should_exclude_uncalled(d)
+}

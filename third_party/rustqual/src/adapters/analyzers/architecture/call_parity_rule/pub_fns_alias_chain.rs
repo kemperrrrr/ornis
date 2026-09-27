@@ -1,0 +1,207 @@
+//! Workspace-wide alias-chain pre-pass.
+//!
+//! Walks every file (including private modules) and records each
+//! `type Alias = Target;` declaration as a `(alias_canonical →
+//! target_canonical)` edge. The visibility collector chases this map
+//! after registering an alias's immediate target so chains like
+//! `pub type Public = Inner; type Inner = private::Hidden;` reach
+//! the source type even when intermediate aliases are private.
+
+use super::bindings::{canonicalise_workspace_path, CanonScope};
+use super::local_symbols::{collect_local_symbols_scoped, FileScope, LocalSymbols};
+use super::pub_fns_visibility::{canonical_for_decl, peel_to_inner_path};
+use crate::adapters::shared::cfg_test::has_cfg_test;
+use crate::adapters::shared::use_tree::{gather_alias_map_scoped, AliasMap};
+use std::collections::{HashMap, HashSet};
+
+/// Collect every type-item canonical (struct/enum/union/trait/type) in
+/// the workspace. The visibility walker uses this to distinguish a
+/// `pub use foo::Bar as Baz;` over a *type* (which exposes its impl
+/// methods to call-parity) from one over a *value* — function, const,
+/// static — which must not bleed a same-named private type's impls
+/// into the public surface. Operation.
+pub(super) fn collect_workspace_type_canonicals(
+    files: &[(&str, &syn::File)],
+    cfg_test_files: &HashSet<String>,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (path, ast) in files {
+        if cfg_test_files.contains(*path) {
+            continue;
+        }
+        walk_type_canonicals(&ast.items, path, &[], &mut out);
+    }
+    out
+}
+
+// qual:recursive
+fn walk_type_canonicals(
+    items: &[syn::Item],
+    file_path: &str,
+    mod_stack: &[String],
+    out: &mut HashSet<String>,
+) {
+    let recurse = |inner: &[syn::Item], next: &[String], out: &mut HashSet<String>| {
+        walk_type_canonicals(inner, file_path, next, out);
+    };
+    let add = |ident: &syn::Ident, out: &mut HashSet<String>| {
+        out.insert(super::pub_fns_visibility::canonical_for_decl(
+            file_path,
+            mod_stack,
+            &ident.to_string(),
+        ));
+    };
+    for item in items {
+        match item {
+            syn::Item::Struct(s) => add(&s.ident, out),
+            syn::Item::Enum(e) => add(&e.ident, out),
+            syn::Item::Union(u) => add(&u.ident, out),
+            syn::Item::Trait(t) => add(&t.ident, out),
+            syn::Item::Type(t) => add(&t.ident, out),
+            syn::Item::Mod(m) if !has_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = m.content.as_ref() {
+                    let mut next = mod_stack.to_vec();
+                    next.push(m.ident.to_string());
+                    recurse(inner, &next, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build the workspace-wide alias-chain map. Per-file delegate to the
+/// unconditional walker. Operation.
+pub(super) fn collect_alias_chain(
+    files: &[(&str, &syn::File)],
+    aliases_per_file: &HashMap<String, AliasMap>,
+    workspace: &super::local_symbols::WorkspaceLookup<'_>,
+    transparent_wrappers: &HashSet<String>,
+) -> HashMap<String, String> {
+    let mut chain = HashMap::new();
+    let empty_aliases = HashMap::new();
+    let crate_root_modules = workspace.crate_root_modules;
+    let workspace_module_paths = workspace.workspace_module_paths;
+    for (path, ast) in files {
+        if workspace.cfg_test_files.contains(*path) {
+            continue;
+        }
+        let alias_map = aliases_per_file.get(*path).unwrap_or(&empty_aliases);
+        let LocalSymbols { flat, by_name } = collect_local_symbols_scoped(ast);
+        let aliases_per_scope = gather_alias_map_scoped(ast);
+        let file_scope = FileScope {
+            path,
+            alias_map,
+            aliases_per_scope: &aliases_per_scope,
+            local_symbols: &flat,
+            local_decl_scopes: &by_name,
+            crate_root_modules,
+            workspace_module_paths: Some(workspace_module_paths),
+        };
+        walk_alias_chain(
+            &ast.items,
+            &[],
+            &file_scope,
+            transparent_wrappers,
+            &mut chain,
+        );
+    }
+    chain
+}
+
+/// Recursive walk that records every `type X = Y;` declaration —
+/// regardless of `X`'s visibility or its enclosing module's
+/// visibility — into the alias-chain map. Operation: closure-hidden
+/// descent into all `mod` blocks (cfg-test still skipped).
+// qual:recursive
+fn walk_alias_chain(
+    items: &[syn::Item],
+    mod_stack: &[String],
+    file_scope: &FileScope<'_>,
+    transparent_wrappers: &HashSet<String>,
+    chain: &mut HashMap<String, String>,
+) {
+    let recurse = |inner: &[syn::Item], next: &[String], chain: &mut HashMap<String, String>| {
+        walk_alias_chain(inner, next, file_scope, transparent_wrappers, chain);
+    };
+    for item in items {
+        match item {
+            syn::Item::Type(t) => {
+                let alias_canonical =
+                    canonical_for_decl(file_scope.path, mod_stack, &t.ident.to_string());
+                if let Some(target) = resolve_alias_target_canonical(
+                    &t.ty,
+                    file_scope,
+                    mod_stack,
+                    transparent_wrappers,
+                ) {
+                    chain.insert(alias_canonical, target);
+                }
+            }
+            syn::Item::Mod(m) if !has_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = m.content.as_ref() {
+                    let mut next = mod_stack.to_vec();
+                    next.push(m.ident.to_string());
+                    recurse(inner, &next, chain);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Peel-and-canonicalise an alias's target type, returning the
+/// resolved canonical path joined as a string. Shared by the
+/// chain-builder and the visibility walker so both agree on what
+/// `pub type Public = Box<private::Hidden>` reduces to.
+///
+/// Known limitation: generic-identity aliases such as `type Id<T> = T;`
+/// are not substituted at use sites. `pub type Public = Id<Hidden>;`
+/// records `Id` only — `Hidden` is missed by the visibility set even
+/// though receiver-type inference resolves callers to it. A correct
+/// fix would track each alias's generic parameters and substitute
+/// at use sites, distinguishing identity aliases from nominal generic
+/// types (which legitimately must NOT expose their inner). Operation.
+pub(super) fn resolve_alias_target_canonical(
+    ty: &syn::Type,
+    file_scope: &FileScope<'_>,
+    mod_stack: &[String],
+    transparent_wrappers: &HashSet<String>,
+) -> Option<String> {
+    let p = peel_to_inner_path(ty, transparent_wrappers, file_scope, mod_stack)?;
+    let segs: Vec<String> = p
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect();
+    let scope = CanonScope {
+        file: file_scope,
+        mod_stack,
+        reexports: None,
+    };
+    // Use-site gate: `type Repo = ::ext::Store;` alias targets that
+    // are extern-rooted don't expose a workspace canonical.
+    canonicalise_workspace_path(&segs, p.path.leading_colon.is_some(), &scope).map(|c| c.join("::"))
+}
+
+/// Follow an alias chain from `start` through `alias_chain` until a
+/// fixed point or cycle is reached, inserting every intermediate
+/// canonical into `out`. `seen` guards against `type A = B; type B
+/// = A;` cycles. Operation.
+pub(super) fn chase_alias_chain(
+    start: &str,
+    alias_chain: &HashMap<String, String>,
+    out: &mut HashSet<String>,
+) {
+    let mut current = start.to_string();
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(current.clone());
+    while let Some(next) = alias_chain.get(&current) {
+        if !seen.insert(next.clone()) {
+            break;
+        }
+        out.insert(next.clone());
+        current = next.clone();
+    }
+}

@@ -246,18 +246,23 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
     if !stages.enabled("rustqual") {
         return;
     }
-    if !binary_exists("rustqual") {
+    // The gate runs the vendored Ornis fork (third_party/rustqual): its
+    // config uses workspace-aware layer resolution and combinable
+    // allowed_in/forbidden_in, which upstream 1.8.2 misreads (452 false
+    // positives). Prefer a locally built fork binary, fall back to PATH.
+    let rq = rustqual_binary(stages.root);
+    if !binary_exists("rustqual") && rq == "rustqual" {
         stages.skip(
             "rustqual",
             "rustqual",
-            "rustqual not installed — structural gate skipped (cargo install rustqual --locked --version 1.8.2)",
+            "rustqual not installed — structural gate skipped (cargo build --manifest-path third_party/rustqual/Cargo.toml)",
         );
         return;
     }
     let baseline_path = stages.root.join("baseline.json");
     if !baseline_path.exists() {
         // No baseline — run plain rustqual (findings are informational until baseline is created).
-        let mut c = Command::new("rustqual");
+        let mut c = Command::new(&rq);
         c.current_dir(stages.root);
         stages.run(
             "rustqual",
@@ -281,7 +286,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
     if let Some(parent) = tmp_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let output = Command::new("rustqual")
+    let output = Command::new(&rq)
         .args(["--save-baseline", &tmp_path.to_string_lossy()])
         .current_dir(stages.root)
         .output();
@@ -1118,6 +1123,20 @@ fn binary_exists(bin: &str) -> bool {
 /// (e.g. cargo-outdated) do not understand `--version` directly.
 fn cargo_subcommand_exists(sub: &str) -> bool {
     binary_exists(&format!("cargo-{sub}"))
+}
+
+/// rustqual binary to run: the vendored Ornis fork when built
+/// (release preferred, debug accepted), otherwise whatever `rustqual`
+/// resolves to on PATH (CI puts the release fork build there).
+fn rustqual_binary(root: &std::path::Path) -> String {
+    let base = root.join("third_party/rustqual/target");
+    for profile in ["release", "debug"] {
+        let candidate = base.join(profile).join("rustqual");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "rustqual".to_string()
 }
 
 /// Records a SKIP without spawning a command (no progress output).

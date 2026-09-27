@@ -60,12 +60,20 @@ jobs:
 
       # Same toolset the single-job gate installed: no cargo-edit on
       # purpose, so `upgrade-check` keeps its SKIP-with-hint behavior.
+      # rustqual comes from the vendored Ornis fork (third_party/rustqual),
+      # not crates.io — the fork carries workspace-aware layer resolution
+      # the upstream 1.8.2 lacks.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-audit,cargo-outdated,rustqual@1.8.2
+          tool: cargo-deny,cargo-audit,cargo-outdated
 
-      - name: Verify rustqual version (pinned)
-        run: rustqual --version
+      - name: Build vendored rustqual
+        run: |
+          cargo build --release --manifest-path third_party/rustqual/Cargo.toml
+          echo "$PWD/third_party/rustqual/target/release" >> "$GITHUB_PATH"
+
+      - name: Verify rustqual version (vendored fork)
+        run: ./third_party/rustqual/target/release/rustqual --version
 
       - uses: Swatinem/rust-cache@v2
         with:

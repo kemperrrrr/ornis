@@ -1,0 +1,340 @@
+//! `ArchitectureAnalyzer` — implements the `DimensionAnalyzer` port.
+//!
+//! Runs every rule type configured under `[architecture]` against the
+//! parsed workspace and projects the rich `MatchLocation` outputs into
+//! cross-dimension `Finding`s. Symbol patterns honour their
+//! `allowed_in` / `forbidden_in` scope globs; the layer and forbidden
+//! rules are inherently workspace-wide.
+//!
+//! The adapter is state-less — one instance per run is sufficient. The
+//! compiled rule structures are rebuilt on every `analyze` call; that
+//! keeps the port contract minimal (no setup step) at the cost of
+//! re-compiling globs when the Application layer calls back multiple
+//! times, which it currently does not.
+
+use crate::adapters::analyzers::architecture::compiled::{
+    compile_architecture, CompiledArchitecture,
+};
+use crate::adapters::analyzers::architecture::forbidden_rule::{
+    check_forbidden_rules, CompiledForbiddenRule,
+};
+use crate::adapters::analyzers::architecture::layer_rule::{check_layer_rule, LayerRuleInput};
+use crate::adapters::analyzers::architecture::matcher::{
+    find_derive_matches, find_function_call_matches, find_glob_imports, find_item_kind_matches,
+    find_macro_calls, find_method_call_matches, find_path_prefix_matches,
+};
+use crate::adapters::analyzers::architecture::rendering::{
+    build_file_refs, format_match_message, match_to_finding,
+};
+use crate::adapters::analyzers::architecture::{MatchLocation, ViolationKind};
+use crate::config::architecture::SymbolPattern;
+use crate::domain::{Dimension, Finding, Severity};
+use crate::ports::{AnalysisContext, DimensionAnalyzer};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
+/// DimensionAnalyzer adapter for the Architecture dimension.
+pub struct ArchitectureAnalyzer;
+
+impl DimensionAnalyzer for ArchitectureAnalyzer {
+    fn dimension_name(&self) -> &'static str {
+        "architecture"
+    }
+
+    /// Integration: delegate per-rule-type work and collect findings.
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+        let arch = &ctx.config.architecture;
+        if !arch.enabled {
+            return Vec::new();
+        }
+        let compiled = match compile_architecture(arch) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error compiling [architecture] config: {e}");
+                return Vec::new();
+            }
+        };
+        collect_all_findings(ctx, arch, &compiled)
+    }
+}
+
+/// Gather findings from every rule type.
+/// Integration: sums per-rule-type sub-collections.
+fn collect_all_findings(
+    ctx: &AnalysisContext<'_>,
+    arch: &crate::config::ArchitectureConfig,
+    compiled: &CompiledArchitecture,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    findings.extend(collect_symbol_findings(ctx, &arch.patterns));
+    findings.extend(collect_layer_findings(ctx, compiled));
+    findings.extend(collect_forbidden_findings(ctx, &compiled.forbidden));
+    findings.extend(
+        crate::adapters::analyzers::architecture::trait_contract_rule::collect_findings(
+            ctx,
+            &compiled.trait_contracts,
+        ),
+    );
+    findings.extend(
+        crate::adapters::analyzers::architecture::call_parity_rule::collect_findings(ctx, compiled),
+    );
+    findings
+}
+
+// ── symbol patterns ────────────────────────────────────────────────────
+
+/// Run every `[[architecture.pattern]]` entry on every file.
+/// Operation: iterator-chain over patterns and files.
+fn collect_symbol_findings(ctx: &AnalysisContext<'_>, patterns: &[SymbolPattern]) -> Vec<Finding> {
+    patterns
+        .iter()
+        .flat_map(|p| collect_pattern_findings(ctx, p))
+        .collect()
+}
+
+/// Run one symbol pattern against every in-scope file.
+/// Integration: compiles scope globs, iterates files, delegates to matcher driver.
+fn collect_pattern_findings(ctx: &AnalysisContext<'_>, pattern: &SymbolPattern) -> Vec<Finding> {
+    let Some(scope) = compile_pattern_scope(pattern) else {
+        return Vec::new();
+    };
+    ctx.files
+        .iter()
+        .filter(|f| scope.accepts(&f.path))
+        .flat_map(|f| run_pattern_matchers(f, pattern))
+        .collect()
+}
+
+/// Compiled scope decision for one pattern.
+pub(super) struct PatternScope {
+    kind: ScopeKind,
+    paths: GlobSet,
+    allowed: GlobSet,
+    except: GlobSet,
+}
+
+/// Whitelist or blocklist interpretation of `paths`.
+pub(super) enum ScopeKind {
+    /// No `forbidden_in`: fires everywhere except `paths` (legacy invert).
+    AllowedIn,
+    /// `forbidden_in` (+ optional `allowed_in`/`except` exemptions).
+    ForbiddenIn,
+}
+
+impl PatternScope {
+    /// True when the pattern applies to `path` (i.e. matchers should run).
+    /// Operation: glob-lookup logic.
+    pub(super) fn accepts(&self, path: &str) -> bool {
+        if self.except.is_match(path) {
+            return false;
+        }
+        match self.kind {
+            ScopeKind::AllowedIn => !self.paths.is_match(path),
+            ScopeKind::ForbiddenIn => self.paths.is_match(path) && !self.allowed.is_match(path),
+        }
+    }
+}
+
+/// Compile a pattern's scope fields into matching globs.
+///
+/// `forbidden_in` is the primary scope; `allowed_in` and `except` are
+/// exemptions within it (Ornis fork: upstream treated any `allowed_in` +
+/// `forbidden_in` combination as uncompilable and silently skipped the
+/// whole rule — the book documents them as combinable, so the book wins).
+/// A lone `allowed_in` (no `forbidden_in`) keeps the legacy inverted
+/// meaning: fire everywhere except the listed paths.
+pub(super) fn compile_pattern_scope(pattern: &SymbolPattern) -> Option<PatternScope> {
+    let except = build_globset(&pattern.except).unwrap_or_else(GlobSet::empty);
+    // Single construction site (BP-009): arms below only compute parts.
+    let (kind, paths, allowed) = match (&pattern.allowed_in, &pattern.forbidden_in) {
+        (None, None) => return None,
+        (Some(allowed_paths), None) => {
+            let paths = build_globset(allowed_paths)?;
+            (ScopeKind::AllowedIn, paths, GlobSet::empty())
+        }
+        (_, Some(forbidden_paths)) => {
+            let paths = build_globset(forbidden_paths)?;
+            let mut allowed = GlobSet::empty();
+            if let Some(list) = &pattern.allowed_in {
+                allowed = build_globset(list)?;
+            }
+            (ScopeKind::ForbiddenIn, paths, allowed)
+        }
+    };
+    Some(PatternScope {
+        kind,
+        paths,
+        allowed,
+        except,
+    })
+}
+
+/// Build a GlobSet from string patterns; returns None if any is invalid.
+/// Operation: per-pattern add with error short-circuit.
+fn build_globset(patterns: &[String]) -> Option<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for p in patterns {
+        match Glob::new(p) {
+            Ok(g) => {
+                builder.add(g);
+            }
+            Err(e) => {
+                eprintln!("architecture: invalid glob \"{p}\": {e}");
+                return None;
+            }
+        }
+    }
+    builder.build().ok()
+}
+
+/// Run every active matcher of `pattern` on one parsed file.
+/// Integration: iterator-chain over matchers, collects findings.
+pub(super) fn run_pattern_matchers(
+    file: &crate::ports::ParsedFile,
+    pattern: &SymbolPattern,
+) -> Vec<Finding> {
+    let rule_id = format!("architecture/pattern/{}", pattern.name);
+    let mut out = Vec::new();
+
+    if let Some(prefixes) = &pattern.forbid_path_prefix {
+        let hits = find_path_prefix_matches(&file.path, &file.ast, prefixes);
+        out.extend(
+            hits.into_iter()
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    if let Some(names) = &pattern.forbid_method_call {
+        let hits = find_method_call_matches(&file.path, &file.ast, names);
+        out.extend(
+            hits.into_iter()
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    if let Some(paths) = &pattern.forbid_function_call {
+        let hits = find_function_call_matches(&file.path, &file.ast, paths);
+        out.extend(
+            hits.into_iter()
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    if let Some(names) = &pattern.forbid_macro_call {
+        let hits = find_macro_calls(&file.path, &file.ast, names);
+        out.extend(
+            hits.into_iter()
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    if matches!(pattern.forbid_glob_import, Some(true)) {
+        let hits = find_glob_imports(&file.path, &file.ast);
+        out.extend(
+            hits.into_iter()
+                .filter(|h| !pattern.allow_prelude_glob || !is_prelude_glob(h))
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    if let Some(kinds) = &pattern.forbid_item_kind {
+        let hits = find_item_kind_matches(&file.path, &file.ast, kinds);
+        out.extend(
+            hits.into_iter()
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    if let Some(names) = &pattern.forbid_derive {
+        let hits = find_derive_matches(&file.path, &file.ast, names);
+        out.extend(
+            hits.into_iter()
+                .map(|h| match_to_finding(h, &rule_id, pattern)),
+        );
+    }
+    out
+}
+
+/// True if a glob-import hit targets a `*::prelude::*` re-export (a `prelude`
+/// segment at any depth) — the idiomatic `std`/`dioxus`/`bevy` pattern exempted
+/// by `allow_prelude_glob`. The matcher reports every glob; this policy predicate
+/// decides which are forgiven. Operation: kind match + segment scan, no own calls.
+fn is_prelude_glob(hit: &MatchLocation) -> bool {
+    matches!(
+        &hit.kind,
+        ViolationKind::GlobImport { base_path }
+            if base_path.split("::").any(|seg| seg == "prelude")
+    )
+}
+
+// ── layer rule ─────────────────────────────────────────────────────────
+
+/// Run the layer rule against the whole parsed workspace.
+/// Operation: workspace projection + checker call + mapping.
+fn collect_layer_findings(
+    ctx: &AnalysisContext<'_>,
+    compiled: &CompiledArchitecture,
+) -> Vec<Finding> {
+    let refs: Vec<(String, &syn::File)> =
+        ctx.files.iter().map(|f| (f.path.clone(), &f.ast)).collect();
+    let input = LayerRuleInput {
+        layers: &compiled.layers,
+        reexport_points: &compiled.reexport_points,
+        unmatched_behavior: compiled.unmatched_behavior,
+        external_exact: &compiled.external_exact,
+        external_glob: &compiled.external_glob,
+    };
+    check_layer_rule(&refs, &input)
+        .into_iter()
+        .map(layer_hit_to_finding)
+        .collect()
+}
+
+/// Project a layer/unmatched `MatchLocation` into a Finding.
+/// Operation: rule_id selection + field copy.
+pub(super) fn layer_hit_to_finding(hit: MatchLocation) -> Finding {
+    let rule_id = match &hit.kind {
+        ViolationKind::UnmatchedLayer { .. } => "architecture/layer/unmatched",
+        _ => "architecture/layer",
+    };
+    Finding {
+        file: hit.file.clone(),
+        line: hit.line,
+        column: hit.column,
+        dimension: Dimension::Architecture,
+        rule_id: rule_id.to_string(),
+        message: format_match_message(&hit.kind, "layer import rule"),
+        severity: Severity::High,
+        ..Finding::default()
+    }
+}
+
+// ── forbidden rules ────────────────────────────────────────────────────
+
+/// Run every forbidden rule and project its hits into findings.
+/// Operation: workspace projection + checker call + mapping.
+fn collect_forbidden_findings(
+    ctx: &AnalysisContext<'_>,
+    rules: &[CompiledForbiddenRule],
+) -> Vec<Finding> {
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    check_forbidden_rules(&build_file_refs(ctx), rules)
+        .into_iter()
+        .map(forbidden_hit_to_finding)
+        .collect()
+}
+
+/// Project a forbidden-edge hit into a Finding.
+/// Operation: field copy with dimension rule_id.
+pub(super) fn forbidden_hit_to_finding(hit: MatchLocation) -> Finding {
+    let reason = if let ViolationKind::ForbiddenEdge { reason, .. } = &hit.kind {
+        reason.clone()
+    } else {
+        String::new()
+    };
+    Finding {
+        file: hit.file.clone(),
+        line: hit.line,
+        column: hit.column,
+        dimension: Dimension::Architecture,
+        rule_id: "architecture/forbidden".to_string(),
+        message: format_match_message(&hit.kind, &reason),
+        severity: Severity::High,
+        ..Finding::default()
+    }
+}

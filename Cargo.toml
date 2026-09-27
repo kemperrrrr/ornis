@@ -21,6 +21,10 @@ members = [
     "crates/gltf",
     "xtask",
 ]
+# Vendored rustqual fork: standalone crate with its own lockfile, built via
+# `cargo build --manifest-path third_party/rustqual/Cargo.toml` (never a
+# workspace member — keeps workspace gates and feature unification clean).
+exclude = ["third_party/rustqual"]
 
 [workspace.lints.clippy]
 # Baseline: all standard lints as warnings.
