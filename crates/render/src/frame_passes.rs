@@ -558,88 +558,230 @@ impl CompositeMode for CompositeForward {
     }
 }
 
-/// Distance-fog settings (opt-in scaffolding, never wired by default).
+/// Positive fog density in 1/m (strictly `> 0` and finite).
 ///
-/// `density = 0.0` (default) disables fog: [`apply_fog`] is the exact
-/// identity then, so registering [`FogPass`] with defaults leaves the
-/// frame pixel-identical. Positive densities mix toward [`color`](Self::color)
-/// with depth (see [`apply_fog`]); the GPU mix is future work.
+/// Newtype over [`PositiveF32`](ornis_core::units::PositiveF32): a disabled
+/// fog carries no density at all ([`FogState::Disabled`]), so any live
+/// density is positive by construction — no `density == 0.0` checks at use
+/// sites.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogDensity(ornis_core::units::PositiveF32);
+
+impl FogDensity {
+    /// Checked constructor: `Some` only for finite values `> 0`.
+    pub fn try_new(value: f32) -> Option<Self> {
+        ornis_core::units::PositiveF32::try_new(value).map(Self)
+    }
+
+    /// Constant-payload constructor, panicking on non-positive input.
+    /// For literals validated by inspection.
+    ///
+    /// # Panics
+    /// Panics when `value` is not finite and `> 0`.
+    pub const fn expect_valid(value: f32) -> Self {
+        match ornis_core::units::PositiveF32::try_new(value) {
+            Some(valid) => Self(valid),
+            None => panic!("FogDensity requires a finite value > 0"),
+        }
+    }
+
+    /// Raw density in 1/m.
+    pub const fn get(self) -> f32 {
+        self.0.get()
+    }
+}
+
+impl From<FogDensity> for f32 {
+    /// Raw density.
+    fn from(density: FogDensity) -> Self {
+        density.get()
+    }
+}
+
+/// Distance-fog settings for the enabled state.
+///
+/// `color` is the linear-space fog color ([`LinearRgb`](ornis_core::units::LinearRgb));
+/// `density` is the exponential falloff rate. There is no zero-density
+/// instance — disabled fog is [`FogState::Disabled`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FogSettings {
     /// Fog color mixed toward with depth.
-    pub color: [f32; 3],
-    /// Fog density; `0.0` disables (identity).
-    pub density: f32,
+    pub color: ornis_core::units::LinearRgb,
+    /// Fog density (always positive).
+    pub density: FogDensity,
+}
+
+impl FogSettings {
+    /// Builds settings from typed color + density.
+    pub const fn new(color: ornis_core::units::LinearRgb, density: FogDensity) -> Self {
+        Self { color, density }
+    }
+
+    /// Fallible raw constructor: `None` when `density` is not finite and
+    /// `> 0`.
+    pub fn try_from_raw(color: [f32; 3], density: f32) -> Option<Self> {
+        Some(Self {
+            color: ornis_core::units::LinearRgb::new(color),
+            density: FogDensity::try_new(density)?,
+        })
+    }
 }
 
 impl Default for FogSettings {
     fn default() -> Self {
         Self {
-            color: [0.5, 0.6, 0.7],
-            density: 0.0,
+            color: ornis_core::units::LinearRgb::new([0.5, 0.6, 0.7]),
+            density: FogDensity::expect_valid(0.02),
         }
     }
 }
 
-/// Pure distance-fog mix: `color + (fog.color - color) * (1 - exp(-density * depth))`.
+/// Distance-fog state: disabled (exact no-op) or enabled with settings.
 ///
-/// `density <= 0.0` (or non-finite inputs) returns `color` unchanged —
-/// the exact identity, so the disabled pass cannot drift a pixel.
-/// `depth` is view-space distance (`>= 0`).
-pub fn apply_fog(color: [f32; 3], depth: f32, fog: FogSettings) -> [f32; 3] {
-    if fog.density <= 0.0 || !fog.density.is_finite() || !depth.is_finite() {
-        return color;
+/// Replaces `density == 0.0` bool checks: the invariant lives in the type.
+/// Default is [`FogState::Disabled`], so merely registering
+/// [`FogPass::default()`] leaves the frame pixel-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum FogState {
+    /// Fog off: [`apply_fog`] is the exact identity and [`FogPass::run`]
+    /// records no commands.
+    #[default]
+    Disabled,
+    /// Fog on with the given settings.
+    Enabled(FogSettings),
+}
+
+impl FogState {
+    /// `true` for [`FogState::Disabled`].
+    pub fn is_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    /// `true` for [`FogState::Enabled`].
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled(_))
+    }
+
+    /// Settings of the enabled state, `None` when disabled.
+    pub fn settings(self) -> Option<FogSettings> {
+        match self {
+            Self::Enabled(settings) => Some(settings),
+            Self::Disabled => None,
+        }
+    }
+}
+
+impl From<FogSettings> for FogState {
+    /// Wraps enabled settings.
+    fn from(settings: FogSettings) -> Self {
+        Self::Enabled(settings)
+    }
+}
+
+/// Exponential fog factor for `depth` (view-space distance, `>= 0`) and
+/// `density`: `1 - exp(-density * depth)` in `[0, 1)`.
+///
+/// Non-finite or negative depths map to zero (no fog); the result is a
+/// [`Clamped01`](ornis_core::units::Clamped01) by construction, so the mix
+/// can never overshoot the fog color.
+pub fn fog_factor(depth: f32, density: FogDensity) -> ornis_core::units::Clamped01 {
+    if !depth.is_finite() {
+        return ornis_core::units::Clamped01::ZERO;
     }
     let depth = depth.max(0.0);
-    let factor = 1.0 - (-fog.density * depth).exp();
+    ornis_core::units::Clamped01::new(1.0 - (-density.get() * depth).exp())
+}
+
+/// Pure distance-fog mix: `color + (fog.color - color) * factor`.
+///
+/// `factor` comes from [`fog_factor`]; [`FogState::Disabled`] returns
+/// `color` unchanged — the exact identity, so the disabled pass cannot
+/// drift a pixel. `depth` is view-space distance (`>= 0`): on the GPU it is
+/// the Euclidean distance from the eye to the world position reconstructed
+/// from the g-buffer `Depth` buffer (see [`crate::shaders::fog_generated`]
+/// — hardware depth is non-linear, the `world_position` layer only stores
+/// xy, so depth-texture reconstruction is authoritative).
+pub fn apply_fog(color: [f32; 3], depth: f32, fog: FogState) -> [f32; 3] {
+    let FogState::Enabled(settings) = fog else {
+        return color;
+    };
+    let factor = fog_factor(depth, settings.density).get();
+    let fog_color = settings.color.as_array();
     [
-        color[0] + (fog.color[0] - color[0]) * factor,
-        color[1] + (fog.color[1] - color[1]) * factor,
-        color[2] + (fog.color[2] - color[2]) * factor,
+        color[0] + (fog_color[0] - color[0]) * factor,
+        color[1] + (fog_color[1] - color[1]) * factor,
+        color[2] + (fog_color[2] - color[2]) * factor,
     ]
 }
 
-/// Optional distance-fog pass over the deferred HDR layer (scaffolding).
+/// Optional distance-fog pass over the deferred HDR layer.
 ///
 /// Never registered by [`crate::frame_exec::RenderFrame3D`] — opt in by
-/// registering `FogPass` after the composite pass. With default settings
-/// [`run`](FramePass::run) records no commands (pixel-identical no-op);
-/// the non-zero-density GPU mix is future work (see [`apply_fog`] for
-/// the pinned math).
+/// registering `FogPass` with an enabled state. With
+/// [`FogState::Disabled`] (default) [`run`](FramePass::run) records no
+/// commands (pixel-identical no-op); with
+/// [`FogState::Enabled`] it runs the GPU mix from
+/// [`crate::shaders::fog_generated`] (same math as [`apply_fog`]).
 pub struct FogPass {
-    settings: FogSettings,
+    state: FogState,
 }
 
 impl FogPass {
-    /// Value constructor.
-    pub fn new(settings: FogSettings) -> Self {
-        Self { settings }
+    /// Value constructor from a [`FogState`].
+    pub fn new(state: FogState) -> Self {
+        Self { state }
     }
 
-    /// `true` when fog is disabled (`density <= 0.0`): [`run`](FramePass::run)
-    /// is a no-op and the frame is unchanged.
+    /// Value constructor from enabled [`FogSettings`].
+    pub fn with_settings(settings: FogSettings) -> Self {
+        Self::new(FogState::Enabled(settings))
+    }
+
+    /// Current fog state.
+    pub fn state(self) -> FogState {
+        self.state
+    }
+
+    /// `true` when fog is disabled: [`run`](FramePass::run) is a no-op and
+    /// the frame is unchanged.
     pub fn is_disabled(&self) -> bool {
-        self.settings.density <= 0.0
+        self.state.is_disabled()
     }
 }
 
 impl Default for FogPass {
     fn default() -> Self {
-        Self::new(FogSettings::default())
+        Self::new(FogState::Disabled)
     }
 }
 
 impl FramePass for FogPass {
-    type Reads = (Read<Hdr>,);
+    type Reads = (Read<Hdr>, Read<Depth>);
     type Writes = (Write<Target>,);
     fn name(&self) -> &'static str {
         "fog"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, _frame: &mut Frame<'_>) {
-        // Keep the declared wiring honest in debug builds even though no
-        // commands are recorded yet (scaffolding: pure math in `apply_fog`).
-        let _ = views.get::<Hdr>();
-        let _ = views.get::<Target>();
+    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+        let Some(settings) = self.state.settings() else {
+            // Disabled: keep the declared wiring honest in debug builds
+            // without recording any commands (exact no-op).
+            let _ = views.get::<Hdr>();
+            let _ = views.get::<Depth>();
+            let _ = views.get::<Target>();
+            return;
+        };
+        frame.renderer.render_fog(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            crate::renderer::FogInputs {
+                hdr: views.get::<Hdr>(),
+                depth: views.get::<Depth>(),
+                target: views.get::<Target>(),
+                color: settings.color.as_array(),
+                density: settings.density.get(),
+            },
+        );
     }
 }
 
@@ -859,39 +1001,120 @@ mod tests {
 
     #[test]
     fn fog_defaults_to_disabled_identity() {
-        // Default density is 0.0 = off.
-        assert_eq!(FogSettings::default().density, 0.0);
+        use ornis_core::units::{Clamped01, LinearRgb};
+        // Default state is Disabled (exact no-op).
+        assert!(FogState::default().is_disabled());
+        assert!(!FogState::default().is_enabled());
+        assert_eq!(FogState::default().settings(), None);
         assert!(FogPass::default().is_disabled());
         assert_eq!(FogPass::default().name(), "fog");
-        // Opt-in wiring: reads the deferred HDR layer, writes the target.
-        assert_eq!(reads_of::<FogPass>(), vec!["hdr"]);
+        // Opt-in wiring: reads the deferred HDR layer + g-buffer depth
+        // (depth is the hardware buffer, linearized on the GPU — see
+        // `fog_generated`), writes the target.
+        assert_eq!(reads_of::<FogPass>(), vec!["hdr", "depth"]);
         assert_eq!(writes_of::<FogPass>(), vec![("target", None)]);
-        // Density 0 leaves every sample unchanged: 0 differences.
-        let fog = FogSettings::default();
+        // Disabled leaves every sample unchanged: 0 differences, including
+        // degenerate depths.
         let samples = [
             ([1.0, 0.0, 0.0], 0.0),
             ([0.0, 1.0, 0.0], 1.5),
             ([0.2, 0.3, 0.9], 100.0),
             ([0.0, 0.0, 0.0], 1000.0),
+            ([0.4, 0.2, 0.1], -5.0),
+            ([0.4, 0.2, 0.1], f32::NAN),
+            ([0.4, 0.2, 0.1], f32::INFINITY),
         ];
         let mut diffs = 0usize;
         for (color, depth) in samples {
-            if apply_fog(color, depth, fog) != color {
+            if apply_fog(color, depth, FogState::Disabled) != color {
                 diffs += 1;
             }
         }
         assert_eq!(diffs, 0, "disabled fog must be pixel-identical");
+        // Density rejects non-positive input at the type level.
+        assert!(FogDensity::try_new(0.0).is_none());
+        assert!(FogDensity::try_new(-1.0).is_none());
+        assert!(FogDensity::try_new(f32::NAN).is_none());
+        assert!(FogDensity::try_new(f32::INFINITY).is_none());
+        assert_eq!(FogDensity::expect_valid(0.1).get(), 0.1);
+        assert!(FogSettings::try_from_raw([0.5, 0.6, 0.7], 0.0).is_none());
         // Enabled fog moves toward the fog color with depth, never past it.
-        let fog = FogSettings {
-            color: [0.5, 0.6, 0.7],
-            density: 0.1,
-        };
+        let fog = FogState::Enabled(
+            FogSettings::try_from_raw([0.5, 0.6, 0.7], 0.1).expect("positive density"),
+        );
         assert!(!FogPass::new(fog).is_disabled());
+        assert!(fog.is_enabled());
         let near = apply_fog([0.0, 0.0, 0.0], 0.5, fog);
         let far = apply_fog([0.0, 0.0, 0.0], 50.0, fog);
+        let fog_color = [0.5, 0.6, 0.7];
         for i in 0..3 {
             assert!(near[i] > 0.0 && near[i] < far[i], "{near:?} {far:?}");
-            assert!(far[i] < fog.color[i], "{far:?}");
+            assert!(far[i] < fog_color[i], "{far:?}");
+        }
+        // Factor stays in [0, 1): zero depth is zero fog, far depth
+        // approaches (never reaches) full fog.
+        let density = FogDensity::expect_valid(0.1);
+        assert_eq!(fog_factor(0.0, density), Clamped01::ZERO);
+        assert_eq!(fog_factor(-3.0, density), Clamped01::ZERO);
+        assert_eq!(fog_factor(f32::NAN, density), Clamped01::ZERO);
+        let far_factor = fog_factor(100.0, density).get();
+        assert!(far_factor > 0.999 && far_factor < 1.0, "{far_factor}");
+        // At depth 0 the output equals the input exactly (factor 0).
+        let settings = FogSettings::new(LinearRgb::new([0.9, 0.1, 0.1]), density);
+        assert_eq!(
+            apply_fog([0.2, 0.4, 0.6], 0.0, FogState::Enabled(settings)),
+            [0.2, 0.4, 0.6]
+        );
+    }
+
+    #[test]
+    fn fog_cpu_reference_parity() {
+        // Independent reference of the pinned formula (not via `apply_fog`):
+        // `color + (fog.color - color) * (1 - exp(-density * depth))` with
+        // negative/non-finite depths clamped to zero fog. Tolerance is tight
+        // (f32 round-trip of one exp + fused multiply-add chain).
+        const TOL: f32 = 1e-6;
+        let densities: [f32; 4] = [0.01, 0.05, 0.2, 1.0];
+        let depths: [f32; 6] = [0.0, 0.1, 0.5, 2.0, 10.0, 100.0];
+        let colors = [[0.0, 0.0, 0.0], [1.0, 0.5, 0.25], [0.2, 0.8, 0.4]];
+        let fog_color = [0.5, 0.6, 0.7];
+        for density in densities {
+            let fog = FogState::Enabled(
+                FogSettings::try_from_raw(fog_color, density).expect("positive density"),
+            );
+            for depth in depths {
+                for color in colors {
+                    let reference = {
+                        let d = depth.max(0.0);
+                        let f = 1.0 - (-density * d).exp();
+                        [
+                            color[0] + (fog_color[0] - color[0]) * f,
+                            color[1] + (fog_color[1] - color[1]) * f,
+                            color[2] + (fog_color[2] - color[2]) * f,
+                        ]
+                    };
+                    let actual = apply_fog(color, depth, fog);
+                    for i in 0..3 {
+                        assert!(
+                            (actual[i] - reference[i]).abs() <= TOL,
+                            "density={density} depth={depth} color={color:?}: {actual:?} vs {reference:?}"
+                        );
+                    }
+                    // Never overshoots: each channel stays between the
+                    // input and the fog color.
+                    for i in 0..3 {
+                        let (lo, hi) = if color[i] <= fog_color[i] {
+                            (color[i], fog_color[i])
+                        } else {
+                            (fog_color[i], color[i])
+                        };
+                        assert!(
+                            actual[i] >= lo - TOL && actual[i] <= hi + TOL,
+                            "overshoot: {actual:?} not in [{lo}, {hi}]"
+                        );
+                    }
+                }
+            }
         }
     }
 

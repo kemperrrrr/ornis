@@ -445,7 +445,7 @@ fn joint_cap_is_128() {
 #[test]
 fn classic_custom_entries_report_unskinned() {
     // The only extraction path touched by phase B: classic bind-pose soups
-    // are never pre-skinned, so the new flag reads false there.
+    // are never pre-skinned, so the new mode reads CPU with no palette.
     let mut store = SmartStore::new();
     let entity = store.create_entity();
     store.insert(
@@ -479,9 +479,14 @@ fn classic_custom_entries_report_unskinned() {
 
     let upload = extract_render_data(&store);
     assert_eq!(upload.custom_meshes.len(), 1);
-    assert!(
-        !upload.custom_meshes[0].skinned,
+    assert_eq!(
+        upload.custom_meshes[0].skinning,
+        ornis_animation::SkinningMode::Cpu,
         "classic soup path is never pre-skinned"
+    );
+    assert!(
+        upload.custom_meshes[0].joint_palette.is_none(),
+        "classic soup stages no palette"
     );
 }
 

@@ -17,6 +17,11 @@ use crate::mesh::{Mesh, Vertex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UploadError {
     /// [`ornis_mesh_editor::MeshData`] failed [`ornis_mesh_editor::MeshData::validate`].
+    ///
+    /// The index-out-of-range case surfaces here as
+    /// [`ornis_mesh_editor::MeshError::IndexOutOfBounds`] (see
+    /// [`Self::is_index_out_of_range`]); callers skip the entity, never
+    /// a stub mesh.
     #[error("invalid mesh data: {0}")]
     InvalidMesh(#[source] ornis_mesh_editor::MeshError),
     /// Inline `MeshDesc::Custom` soup has no vertices or no indices —
@@ -25,6 +30,63 @@ pub enum UploadError {
     #[error("custom mesh has no vertices or indices")]
     EmptyMesh,
 }
+
+impl UploadError {
+    /// True for the empty-soup case ([`Self::EmptyMesh`]).
+    pub const fn is_empty_soup(&self) -> bool {
+        matches!(self, Self::EmptyMesh)
+    }
+
+    /// True when an index points past the end of the positions
+    /// ([`ornis_mesh_editor::MeshError::IndexOutOfBounds`] wrapped in
+    /// [`Self::InvalidMesh`]).
+    pub const fn is_index_out_of_range(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidMesh(ornis_mesh_editor::MeshError::IndexOutOfBounds)
+        )
+    }
+}
+
+/// Deterministic identity of one inline `MeshDesc::Custom` soup.
+///
+/// Newtype over the raw `u64` digest so cache maps cannot be mixed up
+/// with unrelated hashes (entity ids, material slots). Frame-local:
+/// built with `DefaultHasher`, so equal soups hash equally inside one
+/// process run, but values are not stable across runs and must never be
+/// serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SoupHash(u64);
+
+impl SoupHash {
+    /// Raw digest value (map-key material only).
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Rebuild from a raw digest (round-trip for maps and tests).
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Outcome of one [`SoupCache`] lookup: whether the soup conversion was
+/// reused or computed fresh. The extraction copies the outcome into
+/// [`crate::extraction::ExtractionStats`] (`custom_cache_hits` /
+/// `custom_cache_misses`), so per-frame dedup stays observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadCache {
+    /// Identical soup already converted this frame — stored vertices
+    /// cloned, no normal/UV recompute.
+    Hit,
+    /// Distinct soup — converted once and stored for later hits.
+    Miss,
+}
+
+/// One converted Custom soup: GPU-ready vertices plus the triangle index
+/// list. Alias over the bare tuple so cached-conversion signatures stay
+/// readable (and under the `type_complexity` gate).
+pub type ConvertedSoup = (Vec<Vertex>, Vec<u32>);
 
 /// Convert [`ornis_mesh_editor::MeshData`] into GPU-ready vertices + indices.
 ///
@@ -124,6 +186,18 @@ pub fn custom_mesh_data(
 /// renderer then moves the arrays into buffers
 /// (`renderer::upload_custom_mesh`).
 ///
+/// Per-soup budget: time is `O(V + T)` over `V` vertices and `T`
+/// triangles (one area-weighted normal pass, one box-projection UV pass,
+/// one tangent pass — no kernel, no allocation beyond the outputs);
+/// memory is 44 bytes per output [`Vertex`] plus 4 bytes per index, with
+/// ~32 bytes per vertex of transient [`ornis_mesh_editor::MeshData`]
+/// scratch (positions + normals + uvs) freed on return. Guidance: keep
+/// single soups well under the `u32` index space (validation rejects
+/// out-of-range indices with [`UploadError::is_index_out_of_range`]),
+/// and share repeated geometry — [`SoupCache`] converts each distinct
+/// soup once per frame, so `N` identical entities pay one conversion
+/// plus `N-1` cache-hit clones.
+///
 /// # Errors
 ///
 /// Same as [`custom_mesh_data`] (empty or invalid soup).
@@ -137,10 +211,10 @@ pub fn custom_vertices(
 /// Deterministic hash of an inline `MeshDesc::Custom` soup (`positions` +
 /// `indices`; `f32` hashed by bits, so `0.0` and `-0.0` differ).
 ///
-/// Cache key for [`custom_vertices_cached`]: identical soups hash
-/// identically, so a frame with repeated geometry converts and uploads
+/// Cache key for [`custom_vertices_cached`] and [`SoupCache`]: identical
+/// soups hash identically, so a frame with repeated geometry converts
 /// each distinct soup once.
-pub fn soup_hash(positions: &[[f32; 3]], indices: &[u32]) -> u64 {
+pub fn soup_hash(positions: &[[f32; 3]], indices: &[u32]) -> SoupHash {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     positions.len().hash(&mut hasher);
     for position in positions {
@@ -150,17 +224,102 @@ pub fn soup_hash(positions: &[[f32; 3]], indices: &[u32]) -> u64 {
     }
     indices.len().hash(&mut hasher);
     indices.hash(&mut hasher);
-    hasher.finish()
+    SoupHash::from_raw(hasher.finish())
+}
+
+/// Per-frame Custom-soup conversion cache: dedups identical soups by
+/// [`SoupHash`] and counts [`UploadCache`] hits/misses for
+/// [`crate::extraction::ExtractionStats`].
+///
+/// Staging reuse: the map is reserved once per frame
+/// ([`Self::with_capacity`]) and [`Self::clear_reuse`] drops entries
+/// while keeping the allocation for the next frame, so a steady scene
+/// pays no per-frame map growth. Converted vertex/index `Vec`s stay
+/// owned by the map; lookups clone out of it (one allocation per
+/// per-entity entry at the renderer, which keeps its own per-entity
+/// GPU buffers).
+#[derive(Debug, Default)]
+pub struct SoupCache {
+    /// Converted geometry by soup identity.
+    map: HashMap<SoupHash, ConvertedSoup>,
+    /// [`UploadCache::Hit`] count this frame.
+    hits: u64,
+    /// [`UploadCache::Miss`] count this frame (distinct soups converted).
+    misses: u64,
+}
+
+impl SoupCache {
+    /// Empty cache without reservation (one-off conversions, tests).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Empty cache reserving room for `custom_entities` distinct soups —
+    /// the extraction passes its entity-lane length (capped), so a frame
+    /// with `N` distinct soups grows the map at most once.
+    pub fn with_capacity(custom_entities: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(custom_entities),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Drop all entries but keep the map allocation (and reset the
+    /// hit/miss counters) for the next frame's conversions.
+    pub fn clear_reuse(&mut self) {
+        self.map.clear();
+        self.hits = 0;
+        self.misses = 0;
+    }
+
+    /// Convert `positions`/`indices` once per distinct soup, cloning the
+    /// stored result on repeats (see [`custom_vertices_cached`]).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`custom_vertices`] (empty or invalid soup); failures are
+    /// never cached and never counted, so a retry re-attempts the
+    /// conversion.
+    pub fn get_or_convert(
+        &mut self,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<(ConvertedSoup, UploadCache), UploadError> {
+        let (converted, outcome) =
+            custom_vertices_cached_with_outcome(positions, indices, &mut self.map)?;
+        match outcome {
+            UploadCache::Hit => self.hits += 1,
+            UploadCache::Miss => self.misses += 1,
+        }
+        Ok((converted, outcome))
+    }
+
+    /// Hits this frame (see [`UploadCache::Hit`]).
+    pub const fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    /// Misses this frame — the number of distinct soups converted.
+    pub const fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    /// Distinct soups currently stored.
+    pub fn distinct_soups(&self) -> usize {
+        self.map.len()
+    }
 }
 
 /// Cached variant of [`custom_vertices`]: on a cache hit the stored
 /// conversion is cloned without recomputing normals; on a miss the soup
 /// is converted once and the result stored under [`soup_hash`].
 ///
-/// The caller owns the map (per-frame in the extraction); the cache never
-/// outlives the converted data it clones from. Hash collisions across
-/// distinct soups are not rechecked — `u64` makes them negligible, and a
-/// collision would only reuse shading for one soup, never panic.
+/// The caller owns the map (per-frame in the extraction, see
+/// [`SoupCache`]); the cache never outlives the converted data it clones
+/// from. Hash collisions across distinct soups are not rechecked —
+/// `u64` makes them negligible, and a collision would only reuse shading
+/// for one soup, never panic.
 ///
 /// # Errors
 ///
@@ -169,15 +328,30 @@ pub fn soup_hash(positions: &[[f32; 3]], indices: &[u32]) -> u64 {
 pub fn custom_vertices_cached(
     positions: &[[f32; 3]],
     indices: &[u32],
-    cache: &mut HashMap<u64, (Vec<Vertex>, Vec<u32>)>,
-) -> Result<(Vec<Vertex>, Vec<u32>), UploadError> {
+    cache: &mut HashMap<SoupHash, ConvertedSoup>,
+) -> Result<ConvertedSoup, UploadError> {
+    Ok(custom_vertices_cached_with_outcome(positions, indices, cache)?.0)
+}
+
+/// [`custom_vertices_cached`] plus the [`UploadCache`] outcome: [`Hit`](UploadCache::Hit)
+/// when the stored conversion was reused, [`Miss`](UploadCache::Miss)
+/// when the soup was converted and stored.
+///
+/// # Errors
+///
+/// Same as [`custom_vertices_cached`].
+pub fn custom_vertices_cached_with_outcome(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    cache: &mut HashMap<SoupHash, ConvertedSoup>,
+) -> Result<(ConvertedSoup, UploadCache), UploadError> {
     let key = soup_hash(positions, indices);
     if let Some((vertices, soup_indices)) = cache.get(&key) {
-        return Ok((vertices.clone(), soup_indices.clone()));
+        return Ok(((vertices.clone(), soup_indices.clone()), UploadCache::Hit));
     }
     let converted = custom_vertices(positions, indices)?;
     cache.insert(key, converted.clone());
-    Ok(converted)
+    Ok((converted, UploadCache::Miss))
 }
 
 /// Rebuild per-vertex uvs with a box projection: each vertex is mapped
@@ -401,5 +575,82 @@ mod tests {
         let bad = [[0.0, 0.0, 0.0]];
         assert!(custom_vertices_cached(&bad, &[0, 0, 7], &mut cache).is_err());
         assert_eq!(cache.len(), 2, "failures are not cached");
+    }
+
+    #[test]
+    fn soup_hash_is_a_stable_newtype_within_a_run() {
+        // Same soup → equal `SoupHash`; any position/index change flips
+        // it; the raw value round-trips through `from_raw`/`get`.
+        let quad = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ];
+        let indices = [0, 1, 2, 0, 2, 3];
+        assert_eq!(soup_hash(&quad, &indices), soup_hash(&quad, &indices));
+        let mut moved = quad;
+        moved[0][0] = 0.5;
+        assert_ne!(soup_hash(&quad, &indices), soup_hash(&moved, &indices));
+        assert_ne!(
+            soup_hash(&quad, &indices),
+            soup_hash(&quad, &[0, 1, 2, 0, 2, 1])
+        );
+        let hash = soup_hash(&quad, &indices);
+        assert_eq!(SoupHash::from_raw(hash.get()), hash);
+    }
+
+    #[test]
+    fn cache_outcome_reports_hit_then_miss_counts() {
+        // First sight of a soup is a `Miss`, the repeat is a `Hit`; the
+        // `SoupCache` mirrors the outcomes in its hit/miss counters and
+        // converts each distinct soup exactly once.
+        let quad = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ];
+        let quad_indices = [0, 1, 2, 0, 2, 3];
+        let mut cache = SoupCache::with_capacity(4);
+        let (_, first) = cache
+            .get_or_convert(&quad, &quad_indices)
+            .expect("quad valid");
+        assert_eq!(first, UploadCache::Miss);
+        let (again, second) = cache
+            .get_or_convert(&quad, &quad_indices)
+            .expect("quad cached");
+        assert_eq!(second, UploadCache::Hit);
+        assert_eq!(again.1, quad_indices);
+        let tri = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let (_, third) = cache.get_or_convert(&tri, &[0, 1, 2]).expect("tri valid");
+        assert_eq!(third, UploadCache::Miss);
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.distinct_soups(), 2, "identical soups convert once");
+        // Failures are neither cached nor counted.
+        assert!(
+            cache
+                .get_or_convert(&[[0.0, 0.0, 0.0]], &[0, 0, 7])
+                .is_err()
+        );
+        assert_eq!((cache.hits(), cache.misses()), (1, 2));
+        // `clear_reuse` drops entries but keeps the reservation working.
+        cache.clear_reuse();
+        assert_eq!(cache.distinct_soups(), 0);
+        assert_eq!((cache.hits(), cache.misses()), (0, 0));
+    }
+
+    #[test]
+    fn upload_error_cases_are_first_class() {
+        // Empty soup vs index-out-of-range classify through the
+        // predicates without matching on the wrapped `MeshError`.
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let empty = custom_vertices(&[], &[0, 1, 2]).expect_err("empty positions");
+        assert!(empty.is_empty_soup());
+        assert!(!empty.is_index_out_of_range());
+        let bad = custom_vertices(&positions, &[0, 1, 9]).expect_err("bad index");
+        assert!(bad.is_index_out_of_range());
+        assert!(!bad.is_empty_soup());
     }
 }

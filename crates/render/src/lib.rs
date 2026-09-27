@@ -35,6 +35,9 @@ pub mod renderer;
 pub mod schedule_bridge;
 /// WGSL shader assembly and Rust-side BRDF math kernels.
 pub mod shaders;
+/// Phase D GPU skinning: joint-palette layout, skinned vertex stage and
+/// palette upload bytes (CPU-skinned extraction stays the fallback).
+pub mod skinning;
 /// Typed plan systems + single declaration registry (d3).
 pub mod system;
 /// glTF texture image upload (`LoadedImage` → `wgpu` texture + sampler).
@@ -54,8 +57,11 @@ pub use flags::{
     SamplerKind, ShadowCast,
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
+pub use frame_passes::{FogDensity, FogPass, FogSettings, FogState, apply_fog, fog_factor};
 pub use mesh::{Mesh, Vertex, create_sphere};
-pub use mesh_upload::{UploadError, to_vertices, upload_mesh_data};
+pub use mesh_upload::{
+    ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,
+};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Unified explicit-ordering edge error (Phase A, audit §4.2); the same type
 /// `ornis_core` re-exports for systems.
@@ -64,10 +70,15 @@ pub use render_backend::{
     RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
 };
 pub use renderer::{
-    CameraUniform, CompositeInputs, CompositePass, ForwardPass, GBufferTextures, GbufferTargets,
-    InstanceData, LightingPass, MaterialIdx, PerObjectGpu, Renderer3D,
+    BlendMode, CameraUniform, CompositeInputs, CompositePass, FogInputs, ForwardPass,
+    GBufferTextures, GbufferTargets, InstanceData, LightingPass, MaterialIdx, PerObjectGpu,
+    Renderer3D, TransparencyError, TransparencyOptions, forward_blend_state, sort_by_depth,
 };
 pub use schedule_bridge::{ProjectionError, try_project_schedule};
+pub use skinning::{
+    GBUFFER_SKINNED_RESOURCES, JointPalette, PALETTE_BYTE_SIZE, SkinJoint, joint_palette_bytes,
+    wgsl_vertex_source_skinned,
+};
 pub use system::{
     Access, AccessSet, ClearBlack, ClearTransparent, ClearValue, ClearWhite, Frame, FramePass,
     FrameResource, Read, Resolver, ResourceKind, SystemSet, SystemViews, Write, WriteClear,

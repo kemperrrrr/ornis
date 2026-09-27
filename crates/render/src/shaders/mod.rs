@@ -7,6 +7,7 @@
 
 pub mod bloom_generated;
 pub mod composite_generated;
+pub mod fog_generated;
 pub mod gbuffer_generated;
 pub mod hdr_composite_generated;
 pub mod helpers;
@@ -509,6 +510,14 @@ pub fn composite_fragment() -> String {
 /// use only the generated version.
 pub fn bloom_fragment() -> String {
     bloom_generated::wgsl_source()
+}
+
+// ── FOG ─────────────────────────────────────────────────────────────
+/// Single source of truth — `fog_generated::wgsl_source()`
+/// (Rust → WGSL, path 2); `renderer::create_fog_pass` and this forwarder
+/// use only the generated version.
+pub fn fog_fragment() -> String {
+    fog_generated::wgsl_source()
 }
 
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────
@@ -1185,10 +1194,11 @@ mod tests {
 
     #[test]
     fn assembled_shaders_validate_with_naga() {
-        let shaders: [(&str, String); 10] = [
+        let shaders: [(&str, String); 11] = [
             ("composite_vertex", composite_vertex()),
             ("composite_fragment", composite_fragment()),
             ("bloom_fragment", bloom_fragment()),
+            ("fog_fragment", fog_fragment()),
             ("gbuffer_vertex", gbuffer_vertex()),
             ("gbuffer_fragment", gbuffer_fragment()),
             ("lighting_vertex", lighting_vertex()),

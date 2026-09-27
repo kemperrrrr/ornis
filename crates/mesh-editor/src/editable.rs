@@ -172,6 +172,146 @@ impl EditableMesh {
         self.refresh_stats();
     }
 
+    /// Apply one recorded op through the preview path, logging `(op, before)`
+    /// into `undo` first. Preview-capable ops (transform/extrude/subdivide)
+    /// and session ops (commit/cancel) run here; exact ops (boolean/bevel)
+    /// need the background worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UndoError::RequiresExactWorker`](crate::UndoError) for
+    /// boolean/bevel (state untouched, nothing logged), or the history
+    /// denial from [`UndoStack::push`](crate::UndoStack) (state untouched —
+    /// the log write happens before any mutation).
+    pub fn apply_op(
+        &mut self,
+        op: &crate::EditOp,
+        undo: &mut crate::UndoStack,
+    ) -> Result<(), crate::UndoError> {
+        match op {
+            crate::EditOp::Transform { matrix } => {
+                undo.push(op.clone(), self.view().clone())?;
+                self.apply_transform(*matrix);
+                Ok(())
+            }
+            crate::EditOp::Extrude { faces, depth } => {
+                undo.push(op.clone(), self.view().clone())?;
+                self.apply_extrude(faces, *depth);
+                Ok(())
+            }
+            crate::EditOp::Subdivide { levels } => {
+                undo.push(op.clone(), self.view().clone())?;
+                self.apply_subdivide(*levels);
+                Ok(())
+            }
+            crate::EditOp::CommitExact => {
+                undo.push(op.clone(), self.base.clone())?;
+                self.commit();
+                Ok(())
+            }
+            crate::EditOp::CancelPreview => {
+                undo.push(op.clone(), self.view().clone())?;
+                self.cancel();
+                Ok(())
+            }
+            crate::EditOp::Boolean { .. } | crate::EditOp::Bevel { .. } => {
+                Err(crate::UndoError::RequiresExactWorker)
+            }
+        }
+    }
+
+    /// Undo the last logged op: its pre-op view becomes the new preview.
+    /// The preview sequence advances, so in-flight exact results go stale
+    /// (an undo is a newer edit than any pending job).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UndoError::Empty`](crate::UndoError) when no entries are
+    /// retained (state untouched).
+    pub fn undo(&mut self, stack: &mut crate::UndoStack) -> Result<(), crate::UndoError> {
+        let restored = stack.undo(self.view())?;
+        self.preview = Some(restored);
+        self.preview_seq = self.preview_seq.saturating_add(1);
+        self.dirty.set(
+            crate::MeshDirty::VERTS
+                | crate::MeshDirty::TOPO
+                | crate::MeshDirty::NORMALS
+                | crate::MeshDirty::GPU_UPLOAD,
+            &[],
+        );
+        self.refresh_stats();
+        Ok(())
+    }
+
+    /// Redo the newest undone op, symmetric to [`undo`](Self::undo).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UndoError::RedoEmpty`](crate::UndoError) when nothing was
+    /// undone (state untouched).
+    pub fn redo(&mut self, stack: &mut crate::UndoStack) -> Result<(), crate::UndoError> {
+        let restored = stack.redo(self.view())?;
+        self.preview = Some(restored);
+        self.preview_seq = self.preview_seq.saturating_add(1);
+        self.dirty.set(
+            crate::MeshDirty::VERTS
+                | crate::MeshDirty::TOPO
+                | crate::MeshDirty::NORMALS
+                | crate::MeshDirty::GPU_UPLOAD,
+            &[],
+        );
+        self.refresh_stats();
+        Ok(())
+    }
+
+    /// Submit the current view to the background worker, tagging the job
+    /// with the current preview sequence. The returned [`Seq`](crate::Seq)
+    /// is the freshness key [`poll_exact`](Self::poll_exact) compares
+    /// against: preview edits after this call advance `preview_seq` past
+    /// it and the result lands stale (counted, never swapped).
+    pub fn submit_exact(&self, worker: &crate::ExactWorker, op: crate::ExactOp) -> crate::Seq {
+        let seq = crate::Seq::new(self.preview_seq);
+        worker.submit_seq(self.view().clone(), op, seq);
+        seq
+    }
+
+    /// Poll the worker for the newest finished result and apply the swap
+    /// criterion: fresh (`seq >= preview_seq`) plus a coherent preview
+    /// adopts the result as the new base and clears the preview; stale
+    /// keeps the preview and counts the drop. Nothing pending keeps the
+    /// preview without touching state.
+    pub fn poll_exact(&mut self, worker: &crate::ExactWorker) -> crate::SwapDecision {
+        let Some(result) = worker.try_recv() else {
+            return crate::SwapDecision::KeepPreview;
+        };
+        self.stats
+            .observe_exact_result(&result, worker.thread_count() as u32);
+        let decision = crate::decide_swap(
+            crate::Seq::new(self.preview_seq),
+            self.stats.preview_coherence(),
+            crate::Seq::new(result.seq),
+        );
+        match decision {
+            crate::SwapDecision::SwapExact(_) => {
+                self.base = result.mesh;
+                self.base_seq = result.seq;
+                self.preview = None;
+                self.dirty.set(
+                    crate::MeshDirty::VERTS
+                        | crate::MeshDirty::TOPO
+                        | crate::MeshDirty::NORMALS
+                        | crate::MeshDirty::GPU_UPLOAD,
+                    &[],
+                );
+                self.refresh_stats();
+            }
+            crate::SwapDecision::KeepPreview => {
+                self.stats.dropped_exact_seq = self.stats.dropped_exact_seq.saturating_add(1);
+            }
+        }
+        decision
+    }
+
     /// Preview working copy, cloning the base on first edit of a session.
     fn preview_or_clone(&mut self) -> &mut crate::MeshData {
         if self.preview.is_none() {
@@ -300,5 +440,93 @@ mod tests {
         }
         let out = crate::boolean(&a, &b, crate::BooleanKind::Union).expect("union works");
         assert!(out.triangle_count() > 0);
+    }
+
+    #[test]
+    fn apply_op_undo_redo_roundtrip() {
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        let mut undo = crate::UndoStack::with_default_cap(crate::UndoStrategy::Ops);
+        let original = edit.view().positions.clone();
+        let op = crate::EditOp::Transform {
+            matrix: glam::Mat4::from_translation(glam::Vec3::new(1.0, 0.0, 0.0)),
+        };
+        edit.apply_op(&op, &mut undo).expect("preview op applies");
+        assert!(
+            edit.view().positions.iter().all(|p| p[0] >= 0.5 - 1e-5),
+            "box moved +x"
+        );
+        edit.undo(&mut undo).expect("undo restores original");
+        assert_eq!(edit.view().positions, original);
+        edit.redo(&mut undo).expect("redo reapplies");
+        assert!(
+            edit.view().positions.iter().all(|p| p[0] >= 0.5 - 1e-5),
+            "box moved +x again"
+        );
+    }
+
+    #[test]
+    fn exact_op_rejected_without_state_change() {
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        let mut undo = crate::UndoStack::with_default_cap(crate::UndoStrategy::Ops);
+        let original = edit.view().positions.clone();
+        let op = crate::EditOp::Boolean {
+            kind: crate::BooleanKind::Union,
+            tool: crate::MeshData::unit_box(),
+            tool_matrix: glam::Mat4::IDENTITY,
+        };
+        assert!(matches!(
+            edit.apply_op(&op, &mut undo),
+            Err(crate::UndoError::RequiresExactWorker)
+        ));
+        assert_eq!(edit.view().positions, original);
+        assert!(undo.is_empty());
+        assert!(matches!(edit.undo(&mut undo), Err(crate::UndoError::Empty)));
+    }
+
+    #[test]
+    fn poll_exact_applies_fresh_result() {
+        use std::time::{Duration, Instant};
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        let worker = crate::ExactWorker::spawn();
+        // `BevelAll` with non-positive radius clones the snapshot: the fast
+        // worker path, no kernel timing in the assertion.
+        let submitted = edit.submit_exact(&worker, crate::ExactOp::BevelAll { radius: 0.0 });
+        assert_eq!(submitted, crate::Seq::new(edit.preview_seq));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let swapped = loop {
+            match edit.poll_exact(&worker) {
+                crate::SwapDecision::SwapExact(seq) => break seq,
+                crate::SwapDecision::KeepPreview if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                crate::SwapDecision::KeepPreview => {
+                    panic!("fresh exact result never arrived");
+                }
+            }
+        };
+        assert_eq!(swapped, submitted);
+        assert!(edit.preview.is_none());
+        assert_eq!(edit.base_seq, submitted.get());
+    }
+
+    #[test]
+    fn poll_exact_keeps_newer_preview() {
+        use std::time::{Duration, Instant};
+        let mut edit = EditableMesh::new(crate::MeshData::unit_box());
+        let worker = crate::ExactWorker::spawn();
+        edit.submit_exact(&worker, crate::ExactOp::BevelAll { radius: 0.0 });
+        // A newer preview edit supersedes the in-flight job however fast
+        // the worker clones: its seq is fixed at submit time.
+        edit.apply_transform(glam::Mat4::from_translation(glam::Vec3::X));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = edit.poll_exact(&worker);
+            if edit.stats.dropped_exact_seq == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "stale result never arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(edit.preview.is_some(), "newer preview survives");
     }
 }

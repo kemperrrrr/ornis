@@ -73,6 +73,31 @@ pub fn to_physics_arrays(mesh: &crate::MeshData) -> (Vec<glam::Vec3>, Vec<[u32; 
     (verts, tris)
 }
 
+/// Budget-gated [`to_physics_arrays`]: over-budget meshes are denied BEFORE
+/// any allocation, so a huge edit never hitches the frame building physics
+/// arrays it cannot use. The caller keeps the old collider and retries
+/// ([`RefitDecision::Defer`](crate::RefitDecision)) on a later frame or in
+/// a background pass.
+///
+/// # Errors
+///
+/// Returns [`RefitDefer`](crate::RefitDefer) when `mesh.triangle_count()`
+/// exceeds the budget. Never panics on size: the count check precedes the
+/// conversion.
+pub fn to_physics_arrays_gated(
+    mesh: &crate::MeshData,
+    budget: &crate::RefitBudget,
+) -> Result<(Vec<glam::Vec3>, Vec<[u32; 3]>), crate::RefitDefer> {
+    let tris = mesh.triangle_count();
+    if budget.decide(tris) == crate::RefitDecision::Defer {
+        return Err(crate::RefitDefer {
+            tris,
+            max_tris: budget.max_tris,
+        });
+    }
+    Ok(to_physics_arrays(mesh))
+}
+
 /// Zero all normals, accumulate over `range`, normalize everything.
 fn accumulate_all(mesh: &mut crate::MeshData, range: std::ops::Range<usize>) {
     for n in &mut mesh.normals {
@@ -145,6 +170,21 @@ mod tests {
         let faces: Vec<u32> = (0..part.triangle_count() as u32).collect();
         recompute_normals(&mut part, Some(&faces));
         assert_eq!(full.normals, part.normals);
+    }
+
+    #[test]
+    fn gated_bridge_defers_over_budget_before_allocating() {
+        let mesh = crate::MeshData::unit_box(); // 12 triangles.
+        let tight = crate::RefitBudget::new(crate::Millis::new(2), 11);
+        let denial = to_physics_arrays_gated(&mesh, &tight)
+            .expect_err("12 tris over an 11-tri budget defers");
+        assert_eq!(denial.tris, 12);
+        assert_eq!(denial.max_tris, 11);
+        assert_eq!(denial.decision(), crate::RefitDecision::Defer);
+        let roomy = crate::RefitBudget::new(crate::Millis::new(2), 12);
+        let (verts, tris) = to_physics_arrays_gated(&mesh, &roomy).expect("exact fit rebuilds");
+        assert_eq!(verts.len(), mesh.vertex_count());
+        assert_eq!(tris.len(), mesh.triangle_count());
     }
 
     #[test]

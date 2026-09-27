@@ -93,6 +93,17 @@ impl MeshData {
         self.indices.len() / 3
     }
 
+    /// Retained heap bytes of the attribute/index arrays (no header overhead).
+    ///
+    /// Powers [`UndoStrategy::Snapshots`](crate::UndoStrategy) byte
+    /// eviction: a cheap `len × width` sum, no allocation walk.
+    pub fn heap_bytes(&self) -> usize {
+        self.positions.len() * size_of::<[f32; 3]>()
+            + self.normals.len() * size_of::<[f32; 3]>()
+            + self.uvs.len() * size_of::<[f32; 2]>()
+            + self.indices.len() * size_of::<u32>()
+    }
+
     /// Axis-aligned unit box centered at the origin (12 triangles).
     ///
     /// Normals are analytic (per-face), uvs are a placeholder planar map;
@@ -311,6 +322,17 @@ mod tests {
         }
         assert_eq!(mesh.normals[2], [0.0, 1.0, 0.0]);
         assert_eq!(mesh.normals[3], [-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn heap_bytes_sums_array_widths() {
+        let mesh = MeshData::unit_box();
+        assert_eq!(
+            mesh.heap_bytes(),
+            24 * 12 + 24 * 12 + 24 * 8 + 36 * 4,
+            "24 verts (pos/normal/uv) + 36 indices"
+        );
+        assert_eq!(MeshData::default().heap_bytes(), 0);
     }
 
     #[test]

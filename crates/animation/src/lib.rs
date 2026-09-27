@@ -32,6 +32,16 @@ use ornis_gameplay::Position;
 
 use ornis_assets::scene::{MeshDesc, TransformDesc};
 
+/// Phase D GPU-skinning contract: [`SkinningMode`], [`JointCount`] /
+/// [`JointLimit`], [`SkinningResources`], [`SkinError`] and the shader-mirror
+/// reference blend.
+pub mod skinning;
+
+pub use skinning::{
+    CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
+    blend_vertex_reference,
+};
+
 /// One animation key: the channel value at `time` seconds from clip start.
 ///
 /// Keys inside a [`KeyTrack`] must be sorted by ascending `time`; the sampler
@@ -503,13 +513,14 @@ mod tests {
 // and bumps a counter — never a stub pose. Joints are never ECS entities:
 // the flat `JointPose` vector is the only pose representation.
 
-/// Maximum joints per skeleton: the uniform/storage limit of the future
-/// GPU path (design §2.1).
+/// Maximum joints per skeleton: the uniform/storage limit of the GPU path
+/// (design §2.1), spelled through [`JointLimit::GPU`] — the type is the
+/// single source of truth, this constant is its `usize` projection.
 ///
 /// Skeletons beyond the cap are rejected, never silently truncated:
 /// [`Skeleton::validate`] fails, loaders must fail, and the systems skip
 /// the entity while counting it (`skipped_bad_skin`).
-pub const MAX_JOINTS: usize = 128;
+pub const MAX_JOINTS: usize = JointLimit::GPU.get() as usize;
 
 /// Why a [`Skeleton`] is unusable (and its entities must be skipped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

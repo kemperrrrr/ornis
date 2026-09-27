@@ -21,13 +21,20 @@ pub mod exact;
 pub mod mesh_data;
 pub mod normals;
 pub mod ops;
+pub mod refit;
 pub mod stats;
+pub mod undo;
 
 pub use bridge::{BridgeError, boolean, from_manifold, to_manifold};
 pub use dirty::MeshDirty;
 pub use editable::EditableMesh;
-pub use exact::{ExactOp, ExactResult, ExactWorker};
+pub use exact::{
+    ExactOp, ExactPoolSize, ExactPriority, ExactResult, ExactWorker, PositiveUsize, Seq,
+    WorkerConfig,
+};
 pub use mesh_data::{MeshData, MeshError};
-pub use normals::{recompute_normals, to_physics_arrays};
+pub use normals::{recompute_normals, to_physics_arrays, to_physics_arrays_gated};
 pub use ops::{BooleanKind, EditOp};
-pub use stats::FrameStats;
+pub use refit::{Millis, RefitBudget, RefitDecision, RefitDefer, SwapDecision, decide_swap};
+pub use stats::{FrameStats, PreviewStats};
+pub use undo::{UndoDepth, UndoError, UndoStack, UndoStrategy};

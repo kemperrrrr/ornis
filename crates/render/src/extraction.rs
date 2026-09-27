@@ -16,15 +16,15 @@
 //! client to build its own physical GPU representation.
 
 use glam::{Mat4, Quat, Vec3};
-use ornis_animation::SkinnedMesh;
+use ornis_animation::{
+    JointPose, Skeleton, SkinnedMesh, SkinningMode, SkinningResources, skinning_matrices,
+};
 use ornis_core::{Engine, Entity, OpenPBRMaterial, SmartStore};
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
-
 use crate::camera::Frustum;
 use crate::mesh::Vertex;
-use crate::mesh_upload::custom_vertices_cached;
+use crate::mesh_upload::{SoupCache, UploadCache};
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
 use ornis_core::units::PositiveF32;
@@ -63,20 +63,33 @@ pub struct CustomMeshEntry {
     pub indices: Vec<u32>,
     /// Model/normal matrices and the index into `FrameUpload::materials`.
     pub instance: InstanceData,
-    /// Whether this entry carries pre-skinned world-space vertices (phase B,
-    /// `docs/animation-design.md` §2.3): then `vertices` are already in
-    /// world space and `instance.model_matrix` is `IDENTITY`.
+    /// How this entry is blended (phase D, `docs/animation-design.md` §2.3):
+    /// [`SkinningMode::Cpu`] on the classic soup path below (bind-pose
+    /// geometry transformed by `instance.model_matrix`, never pre-skinned)
+    /// and on the CPU pre-skin fallback; [`SkinningMode::Gpu`] exactly when
+    /// the entity carries the [`SkinnedMesh`] lane *and* its joint palette
+    /// staged (see [`CustomMeshEntry::joint_palette`]) — then `vertices`
+    /// are still the skin-system output buffers (`skinned_positions` /
+    /// `skinned_normals`, world space, `instance.model_matrix` is
+    /// `IDENTITY`) so the current draw path stays pixel-identical, while
+    /// the palette rides alongside for the skinned vertex stage.
     ///
-    /// `false` on the classic soup path below (bind-pose geometry
-    /// transformed by `instance.model_matrix`, never pre-skinned); `true`
-    /// exactly when the entity carries the [`SkinnedMesh`] lane — the
-    /// extraction reads its skin-system output buffers
-    /// (`skinned_positions`/`skinned_normals`) plus the bind `uvs`/`indices`
-    /// (see [`extract_render_data_with_stats`]). Freshness is the skin
-    /// system's contract (`skel_skin_cpu` runs PostFrame before the frame
-    /// upload); inconsistent lane arrays skip the entity with
-    /// [`ExtractionStats::skipped_bad_skin`], never a stub.
-    pub skinned: bool,
+    /// Freshness is the skin system's contract (`skel_skin_cpu` runs
+    /// PostFrame before the frame upload); inconsistent lane arrays skip
+    /// the entity with [`ExtractionStats::skipped_bad_skin`], never a stub
+    /// (see [`extract_render_data_with_stats`]).
+    pub skinning: SkinningMode,
+    /// Staged GPU joint palette (phase D): final joint matrices
+    /// (`model * inverse_bind`) as column-major arrays, one per joint —
+    /// the upload bytes behind [`crate::skinning::joint_palette_bytes`].
+    ///
+    /// `Some` exactly when [`CustomMeshEntry::skinning`] is
+    /// [`SkinningMode::Gpu`]; `None` on the classic path and on the CPU
+    /// fallback (over-limit skeleton, stale pose, out-of-range joint
+    /// indices — anything that would read out of bounds in the shader).
+    /// The CPU-skinned `vertices` above stay authoritative for the draw
+    /// until the skinned pipeline binds this palette.
+    pub joint_palette: Option<Vec<[[f32; 4]; 4]>>,
 }
 
 /// Tessellation floor when no complete renderable entity asks for more
@@ -330,6 +343,12 @@ pub struct ExtractionStats {
     /// an existing [`FrameUpload::materials`] entry instead of pushing a
     /// new one.
     pub materials_deduped: u32,
+    /// Custom-soup conversion cache hits: identical soups reused without
+    /// recomputing normals/UVs (see [`SoupCache`], [`UploadCache::Hit`]).
+    pub custom_cache_hits: u32,
+    /// Custom-soup conversion cache misses: distinct soups converted
+    /// this frame (see [`UploadCache::Miss`]).
+    pub custom_cache_misses: u32,
 }
 
 /// Extracts complete renderable entities from the ECS store.
@@ -354,8 +373,10 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 /// Entities carrying the [`SkinnedMesh`] lane never take the classic paths
 /// below: their skin-system output buffers (`skinned_positions` /
 /// `skinned_normals`, world space) plus the bind `uvs`/`indices` land in
-/// `custom_meshes` with `skinned: true` and `IDENTITY` matrices (design
-/// §2.3). Inconsistent lane arrays skip the entity with
+/// `custom_meshes` with [`SkinningMode::Gpu`] (palette staged, see
+/// [`CustomMeshEntry::joint_palette`]) or the [`SkinningMode::Cpu`]
+/// fallback, and `IDENTITY` matrices either way (design §2.3).
+/// Inconsistent lane arrays skip the entity with
 /// [`ExtractionStats::skipped_bad_skin`] — even when its classic soup
 /// would decode, a claimed skin must not silently render unskinned.
 pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, ExtractionStats) {
@@ -377,8 +398,12 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
     // distinct materials, not thousands.
     let mut seen: Vec<MaterialDesc> = Vec::new();
     // Per-frame Custom soup conversion cache: identical soups convert
-    // once (see `mesh_upload::custom_vertices_cached`).
-    let mut custom_cache: HashMap<u64, (Vec<Vertex>, Vec<u32>)> = HashMap::new();
+    // once (see `mesh_upload::SoupCache`). Staging is reserved once from
+    // the lane length (capped): the map grows at most once per frame and
+    // `custom_meshes` amortizes its pushes the same way.
+    let lane_len = transforms.entities.len();
+    let mut soup_cache = SoupCache::with_capacity(lane_len.min(4096));
+    extracted.custom_meshes.reserve(lane_len.min(256));
     for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
         let Some(mesh) = meshes.get(entity) else {
             stats.skipped_incomplete += 1;
@@ -393,6 +418,9 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
         // lane's own bind arrays are authoritative, the desc only keeps
         // the completeness triple). Lane defects skip with the skin
         // counter; the classic soup below never runs for claimed entities.
+        // Phase D: the joint palette stages alongside (GPU mode) whenever
+        // the skeleton validates — otherwise the CPU fallback (same
+        // vertices, no palette).
         if let Some(skin) = skinned.as_ref().and_then(|lane| lane.get(entity)) {
             let Some((vertices, indices)) = skinned_entry(skin) else {
                 stats.skipped_bad_skin += 1;
@@ -400,6 +428,10 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             };
             let material_index =
                 deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
+            let (skinning, joint_palette) = match gpu_joint_palette(store, skin) {
+                Some(palette) => (SkinningMode::Gpu, Some(palette)),
+                None => (SkinningMode::Cpu, None),
+            };
             extracted.custom_meshes.push(CustomMeshEntry {
                 vertices,
                 indices,
@@ -408,7 +440,8 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                     normal_matrix: Mat4::IDENTITY,
                     material_index,
                 },
-                skinned: true,
+                skinning,
+                joint_palette,
             });
             continue;
         }
@@ -424,12 +457,20 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 stats.skipped_bad_custom += 1;
                 continue;
             }
-            let Ok((vertices, soup_indices)) =
-                custom_vertices_cached(positions, indices, &mut custom_cache)
+            let Ok(((vertices, soup_indices), outcome)) =
+                soup_cache.get_or_convert(positions, indices)
             else {
                 stats.skipped_bad_custom += 1;
                 continue;
             };
+            match outcome {
+                UploadCache::Hit => {
+                    stats.custom_cache_hits = stats.custom_cache_hits.saturating_add(1);
+                }
+                UploadCache::Miss => {
+                    stats.custom_cache_misses = stats.custom_cache_misses.saturating_add(1);
+                }
+            }
             let model = Mat4::from_scale_rotation_translation(
                 Vec3::from_array(transform.scale),
                 normalized_rotation(transform.rotation),
@@ -447,7 +488,8 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 indices: soup_indices,
                 instance,
                 // Classic soup path: bind-pose geometry, never pre-skinned.
-                skinned: false,
+                skinning: SkinningMode::Cpu,
+                joint_palette: None,
             });
             continue;
         }
@@ -570,7 +612,9 @@ pub fn instance_sphere(instance: &InstanceData) -> (Vec3, f32) {
 /// Off by default — [`extract_render_data`] never calls this; the
 /// caller applies it after extraction when a frame `view_proj` (see
 /// [`crate::camera::camera_view_projection`]) is available. Degenerate
-/// planes and non-finite bounds fail open (kept, never culled).
+/// planes and non-finite bounds fail open (kept, never culled). Cost is
+/// `O(n)` sphere tests over both lanes; measure with
+/// [`cull_frame_upload_timed`] when the frame budget needs attributing.
 pub fn cull_frame_upload(upload: &mut FrameUpload, view_proj: &Mat4) -> CullStats {
     let frustum = Frustum::from_view_proj(view_proj);
     let before = upload.instances.len() + upload.custom_meshes.len();
@@ -602,6 +646,8 @@ pub fn instance_view_depth(instance: &InstanceData, view: &Mat4) -> f32 {
 /// Reorders both instance lanes by [`instance_view_depth`] descending
 /// (farthest first, stable). Order-only: blending and depth state are
 /// untouched. Non-finite depths compare equal (stable, never panics).
+/// Cost is `O(n log n)` comparisons over both lanes; measure with
+/// [`sort_by_depth_timed`] when the frame budget needs attributing.
 pub fn sort_by_depth(upload: &mut FrameUpload, view: &Mat4) {
     upload.instances.sort_by(|a, b| {
         instance_view_depth(b, view)
@@ -613,6 +659,28 @@ pub fn sort_by_depth(upload: &mut FrameUpload, view: &Mat4) {
             .partial_cmp(&instance_view_depth(&a.instance, view))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+}
+
+/// [`cull_frame_upload`] plus its wall time: the [`CullStats`] report and
+/// the time spent testing both lanes against the six frustum planes
+/// (`O(n)` sphere tests). Use the duration to attribute cull cost inside
+/// the frame budget; the culled payload is identical to the untimed call.
+pub fn cull_frame_upload_timed(
+    upload: &mut FrameUpload,
+    view_proj: &Mat4,
+) -> (CullStats, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let stats = cull_frame_upload(upload, view_proj);
+    (stats, started.elapsed())
+}
+
+/// [`sort_by_depth`] plus its wall time (`O(n log n)` comparisons).
+/// Use the duration to attribute sort cost inside the frame budget; the
+/// reordered payload is identical to the untimed call.
+pub fn sort_by_depth_timed(upload: &mut FrameUpload, view: &Mat4) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    sort_by_depth(upload, view);
+    started.elapsed()
 }
 
 fn insert_scene_entities(
@@ -778,6 +846,45 @@ fn skinned_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>)> {
         })
         .collect();
     Some((vertices, mesh.indices.to_vec()))
+}
+
+/// Stages the GPU joint palette of one [`SkinnedMesh`] entity: final joint
+/// matrices (`model * inverse_bind`) as column-major arrays.
+///
+/// [`None`] (CPU fallback — same pre-skinned vertices, no palette) when the
+/// skeleton lanes are absent, the topology is invalid, the pose is stale,
+/// or a joint index reaches past the palette (an out-of-bounds read in the
+/// shader must never stage). Callers keep the entity on the CPU path; only
+/// lane-buffer defects skip it (see [`skinned_entry`]).
+fn gpu_joint_palette(store: &SmartStore, mesh: &SkinnedMesh) -> Option<Vec<[[f32; 4]; 4]>> {
+    let skeletons = store.read_lane::<Skeleton>()?;
+    let poses = store.read_lane::<JointPose>()?;
+    let skeleton = skeletons.get(mesh.skeleton)?;
+    let count = skeleton.validate().ok()?;
+    let pose = poses.get(mesh.skeleton)?;
+    if pose.matrices.len() != count {
+        return None;
+    }
+    let staged = SkinningResources::build(
+        &skinning_matrices(&pose.matrices, &skeleton.inverse_bind),
+        SkinningMode::Gpu,
+    )
+    .ok()?;
+    if mesh
+        .joints
+        .iter()
+        .flatten()
+        .any(|index| (*index as usize) >= count)
+    {
+        return None;
+    }
+    Some(
+        staged
+            .palette_matrices()
+            .iter()
+            .map(Mat4::to_cols_array_2d)
+            .collect(),
+    )
 }
 
 /// Any unit vector orthogonal to a skinned normal (tangent fallback).
@@ -1056,9 +1163,18 @@ mod tests {
             rings: 32,
         });
         add(MeshDesc::Box {
-            size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
+            size: [
+                PositiveF32::expect_valid(2.0),
+                PositiveF32::expect_valid(4.0),
+                PositiveF32::expect_valid(6.0),
+            ],
         });
-        add(MeshDesc::Plane { size: [PositiveF32::expect_valid(3.0), PositiveF32::expect_valid(5.0)] });
+        add(MeshDesc::Plane {
+            size: [
+                PositiveF32::expect_valid(3.0),
+                PositiveF32::expect_valid(5.0),
+            ],
+        });
         add(MeshDesc::Cylinder {
             radius: PositiveF32::expect_valid(2.0),
             height: PositiveF32::expect_valid(7.0),
@@ -1214,6 +1330,8 @@ mod tests {
                 skipped_bad_skin: 0,
                 skipped_unknown_mesh: 0,
                 materials_deduped: 0,
+                custom_cache_hits: 0,
+                custom_cache_misses: 0,
             }
         );
     }
@@ -1258,9 +1376,18 @@ mod tests {
         for mesh in [
             test_sphere(),
             MeshDesc::Box {
-                size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
+                size: [
+                    PositiveF32::expect_valid(2.0),
+                    PositiveF32::expect_valid(4.0),
+                    PositiveF32::expect_valid(6.0),
+                ],
             },
-            MeshDesc::Plane { size: [PositiveF32::expect_valid(3.0), PositiveF32::expect_valid(5.0)] },
+            MeshDesc::Plane {
+                size: [
+                    PositiveF32::expect_valid(3.0),
+                    PositiveF32::expect_valid(5.0),
+                ],
+            },
             MeshDesc::Cylinder {
                 radius: PositiveF32::expect_valid(2.0),
                 height: PositiveF32::expect_valid(7.0),
@@ -1404,7 +1531,8 @@ mod tests {
                     normal_matrix: model.inverse().transpose(),
                     material_index: crate::renderer::MaterialIdx::from_raw(0),
                 },
-                skinned: false,
+                skinning: SkinningMode::Cpu,
+                joint_palette: None,
             });
         }
         let view = (
@@ -1419,6 +1547,88 @@ mod tests {
         let stats = cull_frame_upload(&mut upload, &view_proj);
         assert_eq!(stats.kept, 1, "{stats:?}");
         assert_eq!(stats.culled, 1, "{stats:?}");
+    }
+
+    #[test]
+    fn identical_soups_convert_once_and_count_hits() {
+        // Two identical quads plus one distinct triangle: the frame
+        // converts two distinct soups (2 misses), the repeated quad is a
+        // cache hit, and both quad entries carry equal geometry.
+        let mut engine = Engine::new();
+        push_test_entity(&mut engine, Some(test_quad()), Some(test_material()));
+        push_test_entity(&mut engine, Some(test_quad()), Some(test_material()));
+        push_test_entity(
+            &mut engine,
+            Some(MeshDesc::Custom {
+                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                indices: vec![0, 1, 2],
+            }),
+            Some(test_material()),
+        );
+
+        let (extracted, stats) =
+            extract_render_data_with_stats(engine.world().store().expect("store"));
+        assert_eq!(extracted.custom_meshes.len(), 3, "per-entity entries kept");
+        assert_eq!(stats.custom_cache_misses, 2, "quad + triangle converted");
+        assert_eq!(stats.custom_cache_hits, 1, "repeated quad reused");
+        let (first, second) = (&extracted.custom_meshes[0], &extracted.custom_meshes[1]);
+        assert_eq!(first.indices, second.indices);
+        assert_eq!(first.vertices.len(), second.vertices.len());
+    }
+
+    #[test]
+    fn timed_cull_and_sort_match_untimed_payloads() {
+        // The timed wrappers report the same payload as the plain calls
+        // plus a wall-time measurement for frame-budget attribution.
+        let mut engine = Engine::new();
+        for i in 0..10 {
+            let store = engine.world_mut().store_mut().expect("store");
+            let handle = store.create_entity();
+            store.insert(
+                handle,
+                TransformDesc {
+                    translation: [i as f32 * 0.05, 0.0, -(i as f32)],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: Vec3::ONE.to_array(),
+                },
+            );
+            store.insert(handle, test_sphere());
+            store.insert(handle, test_material());
+        }
+        let view = (
+            Vec3::new(0.0, 2.5, 9.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            60.0,
+            0.1,
+            100.0,
+        );
+        let (view_proj, _) = crate::camera::camera_view_projection(view, (160, 90));
+        let mut timed = extract_render_data(engine.world().store().expect("store"));
+        let mut plain = timed.clone();
+        let (stats, elapsed) = cull_frame_upload_timed(&mut timed, &view_proj);
+        let expected = cull_frame_upload(&mut plain, &view_proj);
+        assert_eq!(stats, expected);
+        assert_eq!(timed.instances.len(), plain.instances.len());
+        let _ = elapsed;
+
+        let mut timed_sort = extract_render_data(engine.world().store().expect("store"));
+        let mut plain_sort = timed_sort.clone();
+        let sort_elapsed = sort_by_depth_timed(&mut timed_sort, &Mat4::IDENTITY);
+        sort_by_depth(&mut plain_sort, &Mat4::IDENTITY);
+        assert_eq!(
+            timed_sort
+                .instances
+                .iter()
+                .map(|instance| instance.model_matrix.w_axis.z)
+                .collect::<Vec<_>>(),
+            plain_sort
+                .instances
+                .iter()
+                .map(|instance| instance.model_matrix.w_axis.z)
+                .collect::<Vec<_>>()
+        );
+        let _ = sort_elapsed;
     }
 
     #[test]
@@ -1447,5 +1657,194 @@ mod tests {
             .map(|instance| instance.model_matrix.w_axis.z)
             .collect();
         assert_eq!(zs, vec![-10.0, -5.0, -1.0], "{zs:?}");
+    }
+
+    /// Test helper: a single-joint skeleton root plus one skinned triangle
+    /// entity (identity pose → CPU vertices equal the bind positions).
+    /// Returns the mesh entity (for lane corruption) — the root is the
+    /// mesh's `skeleton` link.
+    fn push_skinned_triangle(engine: &mut Engine) -> Entity {
+        {
+            let store = engine.world_mut().store_mut().expect("store");
+            store.register::<Skeleton>();
+            store.register::<JointPose>();
+            store.register::<SkinnedMesh>();
+        }
+        let root = {
+            let store = engine.world_mut().store_mut().expect("store");
+            let root = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["root".to_string()]),
+            );
+            store.insert(root, JointPose::identity(1));
+            root
+        };
+        let positions = vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        {
+            let store = engine.world_mut().store_mut().expect("store");
+            let mesh = store.create_entity();
+            store.insert(
+                mesh,
+                TransformDesc {
+                    translation: Vec3::ZERO.to_array(),
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: Vec3::ONE.to_array(),
+                },
+            );
+            store.insert(
+                mesh,
+                MeshDesc::Custom {
+                    positions: positions.clone(),
+                    indices: vec![0, 1, 2],
+                },
+            );
+            store.insert(mesh, test_material());
+            store.insert(
+                mesh,
+                SkinnedMesh::new(
+                    root,
+                    vec![[0, 0, 0, 0]; 3],
+                    vec![[1.0, 0.0, 0.0, 0.0]; 3],
+                    positions,
+                    vec![[0.0, 0.0, 1.0]; 3],
+                    vec![[0.0, 0.0]; 3],
+                    vec![0, 1, 2],
+                ),
+            );
+            mesh
+        }
+    }
+
+    #[test]
+    fn skinned_entry_stages_gpu_palette_with_cpu_vertices() {
+        // Valid skin: GPU mode with the staged palette, while `vertices`
+        // stay the CPU-skinned buffers (identity skin → bind positions) so
+        // the current draw path is pixel-identical. The palette blend of
+        // the bind data matches the vertices within the parity допуск.
+        use ornis_animation::{CPU_GPU_TOLERANCE, blend_vertex_reference};
+        let mut engine = Engine::new();
+        push_skinned_triangle(&mut engine);
+
+        let (upload, stats) =
+            extract_render_data_with_stats(engine.world().store().expect("store"));
+        assert_eq!(upload.custom_meshes.len(), 1);
+        assert_eq!(stats.skipped_bad_skin, 0);
+        let entry = &upload.custom_meshes[0];
+        assert_eq!(entry.skinning, SkinningMode::Gpu);
+        assert_eq!(entry.instance.model_matrix, Mat4::IDENTITY);
+        let palette = entry.joint_palette.as_ref().expect("palette staged");
+        assert_eq!(palette.len(), 1);
+        assert_eq!(Mat4::from_cols_array_2d(&palette[0]), Mat4::IDENTITY);
+        assert_eq!(entry.vertices[0].position, [1.0, 0.0, 0.0]);
+        // Parity: palette-blend(bind) ≈ CPU-skinned vertices.
+        let bind = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let matrices = [Mat4::IDENTITY];
+        for (index, vertex) in entry.vertices.iter().enumerate() {
+            let (position, _) = blend_vertex_reference(
+                &matrices,
+                [0, 0, 0, 0],
+                [1.0, 0.0, 0.0, 0.0],
+                bind[index],
+                [0.0, 0.0, 1.0],
+            );
+            let drift = (Vec3::from_array(position) - Vec3::from_array(vertex.position)).length();
+            assert!(drift < CPU_GPU_TOLERANCE, "vertex {index} drifts {drift}");
+        }
+    }
+
+    #[test]
+    fn missing_skeleton_falls_back_to_cpu_without_palette() {
+        // No skeleton/pose lanes: the entity still extracts (valid CPU
+        // buffers) but in CPU mode with no palette — never a GPU claim
+        // the shader could read out of bounds with.
+        let mut engine = Engine::new();
+        push_skinned_triangle(&mut engine);
+        // Destroy every skeleton root (same honesty as `RenderWorld` scene
+        // replacement): the mesh lane outlives its skeleton.
+        let roots: Vec<Entity> = {
+            let store = engine.world().store().expect("store");
+            store
+                .read_lane::<Skeleton>()
+                .map(|lane| lane.entities.clone())
+                .unwrap_or_default()
+        };
+        for root in roots {
+            let store = engine.world_mut().store_mut().expect("store");
+            if store.is_alive(root) {
+                store.destroy_entity(root);
+            }
+        }
+
+        let (upload, stats) =
+            extract_render_data_with_stats(engine.world().store().expect("store"));
+        assert_eq!(upload.custom_meshes.len(), 1);
+        assert_eq!(stats.skipped_bad_skin, 0);
+        let entry = &upload.custom_meshes[0];
+        assert_eq!(entry.skinning, SkinningMode::Cpu);
+        assert!(entry.joint_palette.is_none());
+        assert_eq!(entry.vertices[0].position, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn over_limit_skeleton_falls_back_to_cpu_without_palette() {
+        // 129 joints: the palette cannot stage (typed overflow), so the
+        // entry extracts in CPU mode with no palette — never truncated.
+        use ornis_animation::JointLimit;
+        let over = JointLimit::GPU.index() + 1;
+        let mut engine = Engine::new();
+        {
+            let store = engine.world_mut().store_mut().expect("store");
+            store.register::<Skeleton>();
+            store.register::<JointPose>();
+            store.register::<SkinnedMesh>();
+            let root = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(
+                    vec![None; over],
+                    vec![Mat4::IDENTITY; over],
+                    vec!["joint".to_string(); over],
+                ),
+            );
+            store.insert(root, JointPose::identity(over));
+            let mesh = store.create_entity();
+            store.insert(
+                mesh,
+                TransformDesc {
+                    translation: Vec3::ZERO.to_array(),
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: Vec3::ONE.to_array(),
+                },
+            );
+            store.insert(
+                mesh,
+                MeshDesc::Custom {
+                    positions: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    indices: vec![0, 1, 2],
+                },
+            );
+            store.insert(mesh, test_material());
+            store.insert(
+                mesh,
+                SkinnedMesh::new(
+                    root,
+                    vec![[0, 0, 0, 0]; 3],
+                    vec![[1.0, 0.0, 0.0, 0.0]; 3],
+                    vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    vec![[0.0, 0.0, 1.0]; 3],
+                    vec![[0.0, 0.0]; 3],
+                    vec![0, 1, 2],
+                ),
+            );
+        }
+
+        let (upload, stats) =
+            extract_render_data_with_stats(engine.world().store().expect("store"));
+        assert_eq!(upload.custom_meshes.len(), 1);
+        assert_eq!(stats.skipped_bad_skin, 0);
+        let entry = &upload.custom_meshes[0];
+        assert_eq!(entry.skinning, SkinningMode::Cpu);
+        assert!(entry.joint_palette.is_none());
     }
 }

@@ -1,7 +1,7 @@
 //! Phase C acceptance (design `docs/animation-design.md` §4): imported
 //! skin data → [`Skeleton`] + [`SkinnedMesh`] (via the no-dependency bridge
 //! builders) → `skel_sample` + `skel_skin_cpu` → the extraction publishes
-//! one `skinned: true` entry with world-space vertices and `IDENTITY`
+//! one GPU-skinning entry with world-space vertices and `IDENTITY`
 //! matrices.
 //!
 //! The [`SkinImport`]/[`SkinnedMeshImport`] values below play the importer's
@@ -16,7 +16,7 @@ use std::f32::consts::FRAC_PI_2;
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     ClipId, JointId, JointPose, JointTrack, Key, KeyTrack, SkelClip, SkelPlayer, SkelSampleSystem,
-    SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport, skeleton_from_import,
+    SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport, SkinningMode, skeleton_from_import,
     skinned_mesh_from_import,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
@@ -162,7 +162,8 @@ fn close(actual: [f32; 3], expected: Vec3) -> bool {
 #[test]
 fn skinned_primitive_extracts_world_vertices_with_identity() {
     // End-to-end: import-shaped data → builders → sample + CPU skin →
-    // one `skinned: true` entry (world vertices, `IDENTITY` matrices).
+    // one GPU-skinning entry (world vertices, `IDENTITY` matrices, staged
+    // two-joint palette).
     let mut engine = skel_engine();
     spawn_skinned_pair(&mut engine);
 
@@ -180,7 +181,16 @@ fn skinned_primitive_extracts_world_vertices_with_identity() {
     assert_eq!(stats.skipped_incomplete, 1);
 
     let entry = &upload.custom_meshes[0];
-    assert!(entry.skinned, "skin lane claims the entry");
+    assert_eq!(
+        entry.skinning,
+        SkinningMode::Gpu,
+        "valid skin stages the palette"
+    );
+    let palette = entry
+        .joint_palette
+        .as_ref()
+        .expect("GPU entry carries the palette");
+    assert_eq!(palette.len(), 2, "two-bone skeleton stages two joints");
     assert_eq!(entry.instance.model_matrix, Mat4::IDENTITY);
     assert_eq!(entry.instance.normal_matrix, Mat4::IDENTITY);
     assert_eq!(

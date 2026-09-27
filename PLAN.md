@@ -311,9 +311,38 @@ boolean сходится фоном за N кадров, подмена по `se
    менять не пришлось (generic `set_component`). В `extract_render_data`
    Custom пока скипается — общего per-entity GPU-upload супов нет.
 4. In-crate provenance в `mesh-editor/src/lib.rs`; `///`/`//!` везде.
-Открыто: per-entity Custom в `RenderMesh` (сейчас общий `GpuMesh` —
-сфера), трединг exact (один thread vs пул), undo (опсы vs снапшоты),
-бюджет рефита коллайдера, критерий подмены exact.
+Закрыто: per-entity Custom upload perf — дедуп по `SoupHash`
+(`mesh_upload::SoupCache`, конверсия один раз на фрейм) со счётчиками
+`ExtractionStats::{custom_cache_hits, custom_cache_misses}`, staging
+reserve reuse, бюджет супа в `///` на `custom_vertices`, замеры
+`cull_frame_upload_timed`/`sort_by_depth_timed` (GPU-буферы остаются
+per-entity — см. `renderer::upload_custom_mesh`); трединг exact —
+конфигурируемый пул `ExactWorker` (`WorkerConfig`/`ExactPoolSize`,
+default 1 = прежнее поведение, parity-тест 1 vs 4 threads по
+seq-newest-wins семантике), `Seq`/`PositiveUsize`/`ExactPriority`
+newtype-типы, `FrameStats` расширен timings без ломки API
+(`exact_queue_us`, `exact_threads`, `observe_exact_result`).
+✅ Закрыто 2026-09-27 — undo / бюджет рефита / критерий подмены
+(проверено: `cargo test -p ornis-mesh-editor` 38/38,
+`clippy --all-targets -D warnings` чисто, `fmt --check` чисто):
+`undo.rs` — `UndoStrategy::{Ops, Snapshots{max_bytes}}` (дефолт Ops:
+интент-лог + пре-оп вид на запись; обоснование — топологические опсы
+неинвертируемы из интента, чистый replay без снимка состояние не
+вернёт), `UndoStack` (push/pop, cap-eviction, coalescing
+drag-Transform, redo-стек, `UndoError`), `UndoDepth` вместо bool,
+`EditableMesh::apply_op/undo/redo` без ломки `commit`/`cancel`;
+`refit.rs` — `RefitBudget{max_ms: Millis, max_tris}` (default 2мс/65536),
+`decide`/`decide_with_elapsed` → `RefitDecision::{RefitNow, Defer}`,
+`to_physics_arrays_gated` (проверка ДО аллокации, `RefitDefer`
+со счётчиками вместо паники); подмена — канонический `exact::Seq`
+(newest-wins ordering) + `PreviewStats` (инвариант ≤1мс в типе:
+приватное поле + `try_new`) + `FrameStats::preview_coherence`,
+`decide_swap` → `SwapDecision::{KeepPreview, SwapExact(Seq)}`
+(равенство seq = свежий: посчитан ровно из показываемого снимка;
+stale не затирает newer preview),
+`EditableMesh::submit_exact/poll_exact` (stale считает в
+`dropped_exact_seq`, тайминги — через `observe_exact_result`).
+Адаптеры Rapier/Jolt не делались (явно исключены).
 
 ### g. Unified Scheduler (IDEAS §28, долгосрочно)
 
