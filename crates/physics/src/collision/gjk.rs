@@ -18,6 +18,22 @@ use glam::{Quat, Vec3};
 use crate::distance::ShapeRef;
 use crate::shape::Shape;
 
+/// Numerical zero for squared-length degeneracy guards: rim radial projections, enclosing-simplex gaps and EPA seed dedupe distances at or below this carry no direction (collapsed circle, straddling simplex, repeated support) — values are f32 dust on O(1) geometry, not features.
+const DEGENERATE_EPS: f32 = 1e-12;
+/// Tighter numerical zero for near-coincident squared distances and degenerate face areas: collapsed segments, center-delta straddles and zero-area EPA faces below this are treated as exactly degenerate — one part in 1e9 of length, i.e. far inside f32 rounding on meter-scale scenes, so nothing geometric can live there.
+const DEGENERATE_LEN2: f32 = 1e-18;
+/// GJK support-progress tolerance (relative): a new Minkowski vertex must push past the current closest point by more than this fraction of its scale to count as progress — smaller advances are rim-circle zigzag, so the shapes are declared separated with the current weights instead of iterating forever.
+const GJK_PROGRESS_EPS: f32 = 1e-6;
+/// GJK zero-stall distance (m): a separated weight blend this short straddles the origin (the interior-segment trap, not a contact), so the query routes to EPA — reporting a zero-depth contact from here would disable positional correction and sink the pair.
+const GJK_STALL_DIST: f32 = 1e-6;
+/// Relative-volume tolerance for tetrahedron degeneracy: volumes below this fraction of the edge-length scale are flat (repeated or coplanar supports), so the inside test would coin-flip false enclosure for separated shapes — the reduction falls back to the best face without enclosing.
+const TET_VOLUME_EPS: f32 = 1e-9;
+/// EPA horizon strictness (m of plane distance): a face joins the visible set only past this — grazing faces stay sealed so the resealed fan keeps positive area instead of growing slivers that stall convergence.
+/// Same value as `TET_VOLUME_EPS` with a different meaning (hull visibility, not simplex flatness), hence a separate const.
+const EPA_VISIBLE_EPS: f32 = 1e-9;
+/// Degenerate-growth cap for the EPA polytope (vertices): past this the expansion is zigzagging on curved features rather than converging, so the loop reports the best face so far instead of growing unbounded.
+const EPA_MAX_VERTS: usize = 128;
+
 /// Separation/depth query result: surface distance (negative =
 /// penetration), the contact normal (first shape toward the second), and
 /// one witness point on each shape. The normal always comes from the
@@ -72,7 +88,7 @@ fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
                     -*half_height
                 });
             let radial = dir - axis * along;
-            let rim = if radial.length_squared() > 1e-12 {
+            let rim = if radial.length_squared() > DEGENERATE_EPS {
                 radial.normalize() * *radius
             } else {
                 Vec3::ZERO
@@ -88,7 +104,7 @@ fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
             let base = pos - axis * *half_height;
             let along = dir.dot(axis);
             let radial = dir - axis * along;
-            let rim = if radial.length_squared() > 1e-12 {
+            let rim = if radial.length_squared() > DEGENERATE_EPS {
                 base + radial.normalize() * *radius
             } else {
                 base
@@ -154,7 +170,7 @@ fn minkowski(a: ShapeRef, b: ShapeRef, dir: Vec3) -> SVertex {
 fn closest_segment(p: Vec3, q: Vec3) -> (Vec3, f32, f32) {
     let pq = q - p;
     let len_sq = pq.length_squared();
-    if len_sq < 1e-18 {
+    if len_sq < DEGENERATE_LEN2 {
         return (p, 1.0, 0.0);
     }
     let t = (-p.dot(pq) / len_sq).clamp(0.0, 1.0);
@@ -214,7 +230,7 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
     const MAX_ITERS: usize = 64;
     // Initial direction: center delta, exact fallback.
     let mut dir = a.pos - b.pos;
-    if dir.length_squared() < 1e-18 {
+    if dir.length_squared() < DEGENERATE_LEN2 {
         dir = Vec3::X;
     }
     let mut simplex = [minkowski(a, b, dir); 4];
@@ -223,7 +239,7 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
     // are always the weight blend of the stored preimages.
     let mut weights = [1.0f32, 0.0, 0.0, 0.0];
     let mut closest = simplex[0].v;
-    if closest.length_squared() < 1e-18 {
+    if closest.length_squared() < DEGENERATE_LEN2 {
         // Centroid difference already spans the origin: touching.
         return Some(GjkDistance {
             dist: 0.0,
@@ -236,7 +252,7 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
         dir = -closest;
         let w = minkowski(a, b, dir);
         // No progress past the current closest point: separated.
-        if w.v.dot(dir) - closest.dot(dir) <= 1e-6 * closest.length_squared().max(1.0) {
+        if w.v.dot(dir) - closest.dot(dir) <= GJK_PROGRESS_EPS * closest.length_squared().max(1.0) {
             let (mut pa, mut pb) = (Vec3::ZERO, Vec3::ZERO);
             for i in 0..count {
                 pa += simplex[i].sa * weights[i];
@@ -246,7 +262,7 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
             // Stall at ~zero distance is the same straddling-segment trap
             // as above (interior weight blend, not a contact): route to
             // EPA instead of reporting a zero-depth contact that sinks.
-            if delta.length() <= 1e-6 {
+            if delta.length() <= GJK_STALL_DIST {
                 return None;
             }
             return Some(GjkDistance {
@@ -277,7 +293,7 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
         // Both route to EPA, which resolves touching as dist ~ 0 and
         // penetration as negative. Never report dist ~ 0 from here: a
         // zero-depth contact disables positional correction and sinks.
-        if count == 0 || next.length_squared() <= 1e-12 {
+        if count == 0 || next.length_squared() <= DEGENERATE_EPS {
             return None; // Enclosed (or touching): EPA owns it.
         }
         closest = next;
@@ -330,7 +346,7 @@ fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
     let e3 = s[3].v - s[0].v;
     let vol = e1.dot(e2.cross(e3)).abs();
     let scale = e1.length() * e2.length() * e3.length();
-    if vol <= 1e-9 * scale.max(1e-18) {
+    if vol <= TET_VOLUME_EPS * scale.max(DEGENERATE_LEN2) {
         let mut best: Option<(Vec3, f32, [f32; 4])> = None;
         for (a, b, c) in [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)] {
             let (p, wa, wb, wc) = closest_triangle(s[a].v, s[b].v, s[c].v);
@@ -423,7 +439,7 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
         for (i, f) in faces.iter().enumerate() {
             let n = (verts[f[1]].v - verts[f[0]].v).cross(verts[f[2]].v - verts[f[0]].v);
             let len = n.length();
-            if len < 1e-18 {
+            if len < DEGENERATE_LEN2 {
                 continue;
             }
             let n = n / len;
@@ -453,10 +469,10 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
         for (i, f) in faces.iter().enumerate() {
             let n = (verts[f[1]].v - verts[f[0]].v).cross(verts[f[2]].v - verts[f[0]].v);
             let len = n.length();
-            if len < 1e-18 {
+            if len < DEGENERATE_LEN2 {
                 continue;
             }
-            if (n / len).dot(w.v - verts[f[0]].v) > 1e-9 {
+            if (n / len).dot(w.v - verts[f[0]].v) > EPA_VISIBLE_EPS {
                 visible[i] = true;
             }
         }
@@ -501,7 +517,7 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
             }
         }
         best = (bdist.max(0.0), bnormal, a.pos, b.pos);
-        if verts.len() > 128 {
+        if verts.len() > EPA_MAX_VERTS {
             break; // Degenerate growth guard: report the best face so far.
         }
     }
@@ -529,7 +545,7 @@ pub(crate) fn convex_distance(a: ShapeRef, b: ShapeRef) -> GjkDistance {
     for d in dirs {
         let w = minkowski(a, b, d);
         // Keep the extreme vertex per direction (dedupe by value).
-        if (0..found).all(|i| (tet[i].v - w.v).length_squared() > 1e-12) && found < 4 {
+        if (0..found).all(|i| (tet[i].v - w.v).length_squared() > DEGENERATE_EPS) && found < 4 {
             tet[found] = w;
             found += 1;
         }

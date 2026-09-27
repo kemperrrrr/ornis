@@ -12,6 +12,10 @@ use super::rows::{
 use super::*;
 use crate::engine::joints::{hinge_twist, quat_twist};
 
+/// Numerical zero for motor effective-mass guards: hinge/slide rows with `k` below this are skipped as degenerate (infinite mass ratio from static pairings or collapsed axes), so the deadbeat servo never divides by dust inertia.
+/// Repeated per motor kind (revolute/prismatic/wheel) with one shared meaning.
+const MIN_EFFECTIVE_MASS: f32 = 1e-9;
+
 impl AvbdEngine {
     /// Step-start normal violation of a point (gap + margin).
     pub(super) fn gap_c0(&self, pi: usize, qi: usize) -> f32 {
@@ -187,7 +191,7 @@ impl AvbdEngine {
                     let ia = self.ang_inv_wa(a, wa);
                     let ib = self.ang_inv_wa(b, wa);
                     let k = ia.dot(wa) + ib.dot(wa);
-                    if k < 1e-9 {
+                    if k < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let dj = ((target - w) / k).clamp(-max * DT_STEP, max * DT_STEP);
@@ -205,7 +209,7 @@ impl AvbdEngine {
                     let ka = eff_inv_mass(&self.bodies[a]);
                     let kb = eff_inv_mass(&self.bodies[b]);
                     let k = ka + kb;
-                    if k < 1e-9 {
+                    if k < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let dj = ((target - v) / k).clamp(-max * DT_STEP, max * DT_STEP);
@@ -226,7 +230,7 @@ impl AvbdEngine {
                     let ia = self.ang_inv_wa(a, wa);
                     let ib = self.ang_inv_wa(b, wa);
                     let k = ia.dot(wa) + ib.dot(wa);
-                    if k < 1e-9 {
+                    if k < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let dj = ((target - w) / k).clamp(-max * DT_STEP, max * DT_STEP);

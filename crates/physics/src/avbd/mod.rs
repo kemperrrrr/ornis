@@ -231,6 +231,14 @@ const LIM_PEN_MAX: f32 = 1e4;
 /// not the stiffness, shapes the resistance, mirroring the official
 /// impulse clamp).
 const ROLL_PEN: f32 = 100.0;
+/// Minimum meaningful TOI displacement length (m): shorter steps carry no sweep direction, and the hit-fraction divide needs a nonzero floor — the clamped length stands in for an exactly-zero displacement without changing any nonzero trajectory.
+/// The value matches [`crate::sequential_impulse`] segment floors bit-for-bit but guards a different quantity (cast displacement, not segment extent), so it keeps its own name.
+const MIN_TOI_DISP_LENGTH: f32 = 1e-9;
+/// Rest deadband for BDF1 angular-velocity recovery (quaternion-difference length): vectors below this are f32 dust on O(1) positions, so the body reports exactly zero spin instead of a dust angular velocity that would veto sleep and leak into motors.
+/// Same value as the TOI floor with a different meaning (spin dust, not sweep length), hence a separate const.
+const SPIN_REST_EPS: f32 = 1e-9;
+/// CCD restitution gate (m/s of incoming normal speed): only TOI arrivals faster than this earn the one-shot restitution bounce in the clamp — slower arrivals stick and let positional correction own the rest, mirroring the builtin bounce threshold so CCD never invents energy at rest.
+const CCD_BOUNCE_SPEED: f32 = 1.0;
 /// A single contact point: material anchors on both bodies plus the dual
 /// state. Anchors are body-local, fixed at detection (spike lesson).
 /// Penalty is per-axis (official `penalty` float3): a shared penalty lets
@@ -589,10 +597,7 @@ impl AvbdEngine {
 
     /// Local-space body read: `h` is an AVBD-table index, not a global handle.
     /// Thin reinterpretation over [`PhysicsEngine::get_body`]; same lookup.
-    pub(crate) fn get_body_local(
-        &self,
-        h: crate::body::LocalAvbdBody,
-    ) -> Option<&RigidBody> {
+    pub(crate) fn get_body_local(&self, h: crate::body::LocalAvbdBody) -> Option<&RigidBody> {
         self.bodies.get(h.index())
     }
 
@@ -814,7 +819,7 @@ impl AvbdEngine {
                 cast_shape(mover, disp, targets)
             };
             if let Some(hit) = hit {
-                let len = disp.length().max(1e-9);
+                let len = disp.length().max(MIN_TOI_DISP_LENGTH);
                 // `cast_shape` stops at first TOUCH (1 mm gap): stop AT the
                 // reported pose — never step into it (the gap is the clean
                 // touching contact the pair pass below owns) — and bound the
@@ -847,7 +852,7 @@ impl AvbdEngine {
                 b.position += disp * frac;
                 let vn = b.velocity.dot(hit.normal);
                 if vn < 0.0 {
-                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
+                    let bounce = if vn < -CCD_BOUNCE_SPEED { 1.0 + e } else { 1.0 };
                     b.velocity -= hit.normal * (bounce * vn);
                 }
                 self.wake_body(hit.handle.index());
@@ -950,7 +955,7 @@ impl AvbdEngine {
             // Official relative-rotation velocity `2*(q*q0^-1).xyz`, with a
             // rest deadband (positions are O(1) f32: sub-epsilon spin is dust).
             let spin = quat_diff_vec(b.orientation, self.rot0[h]);
-            b.angular_velocity = if spin.length() < 1e-9 {
+            b.angular_velocity = if spin.length() < SPIN_REST_EPS {
                 Vec3::ZERO
             } else {
                 spin / DT_STEP

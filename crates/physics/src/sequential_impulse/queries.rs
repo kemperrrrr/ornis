@@ -22,6 +22,11 @@ const DEGENERATE_EPS: f32 = 1e-12;
 /// collapsed (no sweep direction, no bound worth keeping).
 const MIN_SEGMENT_LENGTH: f32 = 1e-9;
 
+/// Fraction of the thinnest feature that arms CCD: linear and angular
+/// sweeps shorter than this fraction of `shape_min_dimension` cannot
+/// defeat the discrete phase, so they skip the time-of-impact walk.
+const CCD_TRAVEL_GATE_FRACTION: f32 = 0.5;
+
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
 /// [`SequentialImpulseEngine`] and [`crate::avbd::AvbdEngine`] both route
@@ -423,7 +428,7 @@ fn find_linear_continuous_hit(
     }
     let length = displacement.length();
     let min_dimension = shape_min_dimension(&body.shape);
-    if length <= 0.5 * min_dimension {
+    if length <= CCD_TRAVEL_GATE_FRACTION * min_dimension {
         return None;
     }
     let mover_layer = body.collision_layer;
@@ -557,7 +562,9 @@ pub fn find_angular_continuous_hit(
     // easily); chunky bodies only at large ones — cheaper than a flat angle
     // for cubes, stricter than one for blades.
     let angle = (body.angular_velocity * sub_dt).length();
-    if shape_max_radius(&body.shape) * angle <= 0.5 * shape_min_dimension(&body.shape) {
+    if shape_max_radius(&body.shape) * angle
+        <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&body.shape)
+    {
         return None;
     }
     let bound = displacement.length() + shape_max_radius(&body.shape) * angle;

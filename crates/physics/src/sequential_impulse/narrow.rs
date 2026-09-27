@@ -594,6 +594,11 @@ fn distance_contact(
 /// broadphase, so pairs within it are guaranteed to reach narrow phase.
 const SPEC_BASE: f32 = 0.05;
 
+/// Maximum relative linear speed (m/s) for the cached SAT/box path and the
+/// narrow-phase cache: faster pairs bypass the cache (near-zero hit rate)
+/// and run the full manifold build.
+const SAT_CACHE_MAX_REL_SPEED: f32 = 0.5;
+
 /// Shard count rule for scheduler-dispatched narrowphase: enough coarse
 /// tasks to feed every worker without starving (the spike showed 8 shards
 /// on 8 threads ~50% slower than flat rayon from imbalance, while 32
@@ -683,7 +688,7 @@ fn narrow_pair(
             // reuse the axis only, contacts rebuild from live geometry.
             let use_sat = sat_cache.is_some()
                 && cur_substep == 0
-                && rel_speed <= 0.5
+                && rel_speed <= SAT_CACHE_MAX_REL_SPEED
                 && a.angular_velocity.length_squared() <= 0.25
                 && b.angular_velocity.length_squared() <= 0.25;
             if use_sat {
@@ -948,7 +953,7 @@ pub fn detect_collisions_into(
                     // reuse the axis only, contacts rebuild from live geometry.
                     let use_sat = sat_cache.is_some()
                         && cur_substep == 0
-                        && (a.velocity - b.velocity).length() <= 0.5
+                        && (a.velocity - b.velocity).length() <= SAT_CACHE_MAX_REL_SPEED
                         && a.angular_velocity.length_squared() <= 0.25
                         && b.angular_velocity.length_squared() <= 0.25;
                     if use_sat {
@@ -1300,7 +1305,7 @@ pub(crate) fn detect_collisions_into_with_cache(
         }
         let rel_speed = (a.velocity - b.velocity).length();
         // Fast-moving pairs have near-zero cache hit rate — bypass HashMap lookup and don't cache.
-        if rel_speed > 0.5
+        if rel_speed > SAT_CACHE_MAX_REL_SPEED
             || a.angular_velocity.length_squared() > 0.25
             || b.angular_velocity.length_squared() > 0.25
         {

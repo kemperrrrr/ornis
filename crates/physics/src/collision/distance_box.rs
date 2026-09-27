@@ -5,6 +5,13 @@ use glam::{Mat3, Quat, Vec3};
 
 use super::{Distance, OBB_EDGES, ShapeRef, obb_corners, point_obb_closest, seg_seg_closest};
 
+/// Numerical zero for degeneracy guards: squared SAT cross-axis lengths, segment direction components and squared core distances at or below this magnitude are treated as exactly zero (parallel face/edge axes with no separating direction, collapsed slab crossings, touching spine cores) — values here are f32 dust on O(1) geometry, not features.
+const DEGENERATE_EPS: f32 = 1e-12;
+/// Face-axis significance for support-face collapse: local direction components above this snap the query onto the opposing face pair, while smaller components are orientation dust rather than a facing axis — without the gate a grazing normal would collapse the wrong extent and teleport the witnesses.
+const FACE_AXIS_EPS: f32 = 1e-6;
+/// Spine-to-normal alignment for capsule endpoint selection: axis projections above this commit the penetration query to the leading cap, while smaller projections read as broadside so the whole spine segment stays in play — the value matches `FACE_AXIS_EPS` bit-for-bit but guards alignment, not facing, hence a separate const.
+const SPINE_ALIGNMENT_EPS: f32 = 1e-6;
+
 fn separating_axis(a: ShapeRef, ha: Vec3, b: ShapeRef, hb: Vec3) -> (f32, Vec3) {
     let ra = Mat3::from_quat(a.rot);
     let rb = Mat3::from_quat(b.rot);
@@ -16,7 +23,7 @@ fn separating_axis(a: ShapeRef, ha: Vec3, b: ShapeRef, hb: Vec3) -> (f32, Vec3) 
     for i in 0..3 {
         for j in 0..3 {
             let cross = aa[i].cross(bb[j]);
-            if cross.length_squared() > 1e-12 {
+            if cross.length_squared() > DEGENERATE_EPS {
                 axes[6 + 3 * i + j] = cross.normalize();
             }
         }
@@ -70,7 +77,7 @@ fn support_face<'a>(body: ShapeRef<'a>, half: Vec3, direction: Vec3) -> (ShapeRe
     let mut offset = Vec3::ZERO;
     let mut extent = half;
     for i in 0..3 {
-        if local[i].abs() > 1e-6 {
+        if local[i].abs() > FACE_AXIS_EPS {
             offset[i] = local[i].signum() * half[i];
             extent[i] = 0.0;
         }
@@ -139,7 +146,7 @@ fn segment_box(start: Vec3, end: Vec3, lo: Vec3, hi: Vec3) -> (Vec3, Vec3, f32) 
     let delta = end - start;
     let mut cuts = vec![0.0f32, 1.0];
     for i in 0..3 {
-        if delta[i].abs() > 1e-12 {
+        if delta[i].abs() > DEGENERATE_EPS {
             for boundary in [lo[i], hi[i]] {
                 let t = (boundary - start[i]) / delta[i];
                 if t > 0.0 && t < 1.0 {
@@ -196,22 +203,22 @@ pub(super) fn box_capsule(
     let axis = inv * (b.rot * Vec3::Y);
     let (start, end) = (center - axis * height, center + axis * height);
     let (mut core, mut surface, squared) = segment_box(start, end, -half, half);
-    let (distance, normal) = if squared > 1e-12 {
+    let (distance, normal) = if squared > DEGENERATE_EPS {
         let length = squared.sqrt();
         (length - radius, (core - surface) / length)
     } else {
         let (depth, normal) = spine_penetration(center, axis, half, radius, height);
         let (mut lo, mut hi) = (-half, half);
         for i in 0..3 {
-            if normal[i].abs() > 1e-6 {
+            if normal[i].abs() > FACE_AXIS_EPS {
                 lo[i] = normal[i].signum() * half[i];
                 hi[i] = lo[i];
             }
         }
         let projection = axis.dot(normal);
-        let endpoints = if projection > 1e-6 {
+        let endpoints = if projection > SPINE_ALIGNMENT_EPS {
             (start, start)
-        } else if projection < -1e-6 {
+        } else if projection < -SPINE_ALIGNMENT_EPS {
             (end, end)
         } else {
             (start, end)
