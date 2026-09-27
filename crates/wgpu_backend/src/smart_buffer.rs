@@ -26,31 +26,22 @@ bitflags! {
 /// `Ok(())` means the CPU copy is current (either no download was needed
 /// or the bytes were copied); `Err` preserves `DIRTY_GPU` so the caller
 /// can retry instead of observing stale data as if it were current.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CpuSyncError {
     /// The GPU buffer was dropped and not yet recreated via
     /// [`SmartBuffer::ensure_gpu_buffer`].
+    #[error("no GPU buffer to download from")]
     NoGpuBuffer,
     /// The async map failed or its result channel was lost.
+    #[error("GPU staging-buffer map failed")]
     MapFailed,
     /// The mapped range could not be read back.
+    #[error("GPU staging-buffer readback failed")]
     ReadbackFailed,
     /// The GPU returned a different element count than the CPU copy.
+    #[error("GPU download length differs from CPU copy")]
     LengthMismatch,
 }
-
-impl std::fmt::Display for CpuSyncError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoGpuBuffer => write!(f, "no GPU buffer to download from"),
-            Self::MapFailed => write!(f, "GPU staging-buffer map failed"),
-            Self::ReadbackFailed => write!(f, "GPU staging-buffer readback failed"),
-            Self::LengthMismatch => write!(f, "GPU download length differs from CPU copy"),
-        }
-    }
-}
-
-impl std::error::Error for CpuSyncError {}
 
 /// A buffer resident on both CPU and GPU with dirty-flag synchronization.
 ///

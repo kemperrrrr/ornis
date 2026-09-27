@@ -8,24 +8,15 @@
 use manifold_rust::{manifold::Manifold, types::Error as ManifoldError};
 
 /// Kernel-side failure of a boolean operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BridgeError {
     /// Input tripped the engine-side shape check.
+    #[error("mesh data failed validation")]
     InvalidInput,
     /// Kernel reported a non-manifold result or construction failure.
+    #[error("manifold kernel reported an error")]
     KernelFailed,
 }
-
-impl std::fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidInput => write!(f, "mesh data failed validation"),
-            Self::KernelFailed => write!(f, "manifold kernel reported an error"),
-        }
-    }
-}
-
-impl std::error::Error for BridgeError {}
 
 /// Convert validated [`crate::MeshData`] into a kernel [`Manifold`].
 ///

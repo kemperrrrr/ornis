@@ -399,21 +399,11 @@ fn pipeline_config_detects_cpu() {
 
 // ===== Pack derive tests =====
 
-#[derive(Debug, Clone, PartialEq, Pack)]
+#[derive(Debug, Clone, Default, PartialEq, Pack)]
 struct Vec3 {
     x: f32,
     y: f32,
     z: f32,
-}
-
-impl Default for Vec3 {
-    fn default() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Pack)]

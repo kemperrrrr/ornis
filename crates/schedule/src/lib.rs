@@ -26,7 +26,6 @@
 //! `render` — with golden `levels` partitions including the production graph).
 
 use std::collections::HashMap;
-use std::fmt;
 use std::hash::Hash;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -109,29 +108,19 @@ pub fn bitset_level_plan<K: Copy + Eq + Hash>(
 /// frontends (previously near-verbatim duplicates: `OrderError` in core and
 /// `GraphOrderError` in render, audit §4.2). Node names are `String`:
 /// systems and passes are equivalent at this level.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OrderError {
     /// No node with this name exists (name uniqueness is the caller's responsibility).
+    #[error("no node named '{name}'")]
     UnknownNode { name: String },
     /// `after` is registered before `before`: execution order is
     /// registration order, explicit edges only split levels.
+    #[error(
+        "'{after}' is registered earlier than '{before}' — register nodes in \
+         execution order; explicit edges only split parallel levels"
+    )]
     BackwardEdge { before: String, after: String },
 }
-
-impl fmt::Display for OrderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OrderError::UnknownNode { name } => write!(f, "no node named '{name}'"),
-            OrderError::BackwardEdge { before, after } => write!(
-                f,
-                "'{after}' is registered earlier than '{before}' — register nodes in \
-                 execution order; explicit edges only split parallel levels"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for OrderError {}
 
 /// Name-based edge validation: names → registration indices via
 /// `index_of`; unknown name → [`OrderError::UnknownNode`], backward

@@ -746,6 +746,7 @@ dependencies = [
  "ornis-input",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "tiny_http",
 ]
 
@@ -1906,6 +1907,7 @@ dependencies = [
  "ron",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1919,6 +1921,7 @@ dependencies = [
  "ornis-core",
  "ornis-gameplay",
  "symphonia",
+ "thiserror 2.0.20",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -1941,6 +1944,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2001,6 +2005,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "manifold-rust",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2044,6 +2049,7 @@ dependencies = [
  "proptest",
  "ron",
  "serde",
+ "thiserror 2.0.20",
  "wgpu",
 ]
 
@@ -2053,6 +2059,7 @@ version = "0.1.0"
 dependencies = [
  "fixedbitset",
  "rayon",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2097,6 +2104,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "wgpu",
 ]
 

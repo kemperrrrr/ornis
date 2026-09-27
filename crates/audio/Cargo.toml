@@ -12,6 +12,8 @@ cpal = "0.18"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "ogg", "mp3", "flac", "pcm"] }
 crossbeam-channel = "0.5"
 glam = "0.33"
+# Typed decoder errors (`thiserror::Error` on `DecodeError`).
+thiserror = "2.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18"

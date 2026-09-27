@@ -74,6 +74,7 @@ use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutation
 use ornis_core::{
     ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, SmartStore, World,
 };
+use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_gameplay::install_gameplay;
 use ornis_physics::RigidBody;
 
@@ -1244,7 +1245,6 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
-    use ornis_core::units::{Clamped01, PositiveF32};
 
     fn world_and_events() -> (EditorSession, Sender<GameEvent>, Receiver<GameEvent>) {
         let (ev_tx, ev_rx) = unbounded();

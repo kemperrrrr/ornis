@@ -32,6 +32,11 @@ enabled = true
 
 [boilerplate]
 enabled = true
+# House policy for newtype Displays (AGENTS.md type-level design): thin
+# wrappers print through the inner value (`f.write_str(x.as_str())`) or a
+# fixed prefix (`write!(f, "lane{}", …)`). BP-002 enforces this idiom —
+# any other trivial form keeps firing.
+accepted_display_idioms = ["write_str", "write_macro"]
 
 [srp]
 enabled = true

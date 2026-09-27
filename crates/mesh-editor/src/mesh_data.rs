@@ -23,30 +23,21 @@ pub struct MeshData {
 }
 
 /// Shape violation found by [`MeshData::validate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MeshError {
     /// `indices` length is not a multiple of 3.
+    #[error("indices not a multiple of 3")]
     IndexCountNotMultipleOfThree,
     /// An index points past the end of `positions`.
+    #[error("index out of bounds")]
     IndexOutOfBounds,
     /// `normals` length differs from `positions` length.
+    #[error("normals/positions length mismatch")]
     NormalCountMismatch,
     /// `uvs` length differs from `positions` length.
+    #[error("uvs/positions length mismatch")]
     UvCountMismatch,
 }
-
-impl std::fmt::Display for MeshError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IndexCountNotMultipleOfThree => write!(f, "indices not a multiple of 3"),
-            Self::IndexOutOfBounds => write!(f, "index out of bounds"),
-            Self::NormalCountMismatch => write!(f, "normals/positions length mismatch"),
-            Self::UvCountMismatch => write!(f, "uvs/positions length mismatch"),
-        }
-    }
-}
-
-impl std::error::Error for MeshError {}
 
 impl MeshData {
     /// Build a mesh from raw parts, checking invariants.

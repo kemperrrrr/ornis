@@ -17,16 +17,12 @@ pub const PAGE_SIZE: usize = 4096;
 /// memory proportional to occupancy - used as backing storage for packed
 /// component lanes in [`SmartStore`](crate::SmartStore).
 ///
-/// `T: Clone + Default` is required: untouched slots conceptually hold
-/// `T::default()` and pages are materialized by filling with defaults.
+/// `T: Default` materializes pages by filling with defaults; `Clone`
+/// additionally snapshots pages. Untouched slots conceptually hold
+/// `T::default()`.
+#[derive(Default)]
 pub struct PageTable<T> {
     pages: Vec<Option<Box<[T; PAGE_SIZE]>>>,
-}
-
-impl<T: Clone + Default> Default for PageTable<T> {
-    fn default() -> Self {
-        Self { pages: Vec::new() }
-    }
 }
 
 impl<T: Clone + Default> Clone for PageTable<T> {

@@ -148,9 +148,10 @@ impl CpuImage {
 }
 
 /// Rejection of a [`CpuImage`] before any GPU work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TextureUploadError {
     /// Either dimension is zero — there is no honest GPU texture for it.
+    #[error("texture has empty dimensions ({width}x{height})")]
     EmptyDimensions {
         /// Offending width.
         width: u32,
@@ -158,6 +159,7 @@ pub enum TextureUploadError {
         height: u32,
     },
     /// An edge exceeds [`MAX_TEXTURE_EDGE`] (not uploadable everywhere).
+    #[error("texture too large ({width}x{height})")]
     ImageTooLarge {
         /// Offending width.
         width: u32,
@@ -165,6 +167,7 @@ pub enum TextureUploadError {
         height: u32,
     },
     /// `pixels` is not exactly `width * height * 4` bytes.
+    #[error("texture pixel length mismatch: expected {expected}, got {actual}")]
     PixelLengthMismatch {
         /// Required byte count.
         expected: u64,
@@ -172,27 +175,6 @@ pub enum TextureUploadError {
         actual: u64,
     },
 }
-
-impl std::fmt::Display for TextureUploadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyDimensions { width, height } => {
-                write!(f, "texture has empty dimensions ({width}x{height})")
-            }
-            Self::ImageTooLarge { width, height } => {
-                write!(f, "texture too large ({width}x{height})")
-            }
-            Self::PixelLengthMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "texture pixel length mismatch: expected {expected}, got {actual}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for TextureUploadError {}
 
 /// GPU format for `role`: sRGB for color roles, linear for the data role.
 ///

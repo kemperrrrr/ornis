@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 glam = "0.33"
 manifold-rust = "0.13"
+# Typed validation errors (`thiserror::Error` on `BridgeError`/`MeshError`).
+thiserror = "2.0"
 
 [lints]
 workspace = true

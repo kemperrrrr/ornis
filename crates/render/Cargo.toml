@@ -23,6 +23,8 @@ ornis-macros = { path = "../macros" }
 ornis-schedule = { path = "../schedule" }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+# Typed projection/upload errors (`thiserror::Error` derives).
+thiserror = "2.0"
 
 [dev-dependencies]
 pollster = "1.0"

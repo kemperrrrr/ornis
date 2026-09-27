@@ -19,33 +19,18 @@ use symphonia::core::meta::MetadataOptions;
 use crate::source::AudioClip;
 
 /// Failure modes of [`decode_file`] / [`decode_bytes`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     /// The file could not be opened or read.
-    Io(std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
     /// Symphonia rejected the container/metadata (e.g. not audio at all).
+    #[error("Format error: {0}")]
     Format(&'static str),
     /// No decodable track, or no Symphonia decoder registered for the codec.
+    #[error("Unsupported audio format")]
     Unsupported,
 }
-
-impl From<std::io::Error> for DecodeError {
-    fn from(e: std::io::Error) -> Self {
-        DecodeError::Io(e)
-    }
-}
-
-impl std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DecodeError::Io(e) => write!(f, "IO error: {}", e),
-            DecodeError::Format(msg) => write!(f, "Format error: {}", msg),
-            DecodeError::Unsupported => write!(f, "Unsupported audio format"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {}
 
 fn decode_inner(
     mss: MediaSourceStream,

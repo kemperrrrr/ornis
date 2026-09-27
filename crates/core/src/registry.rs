@@ -36,7 +36,6 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::fmt;
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -163,11 +162,12 @@ impl<'de> serde::Deserialize<'de> for ComponentName {
 }
 
 /// Error of a type-erased registry operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
     /// JSON does not match the component schema (`set_json`) or the
     /// component is not serializable (`get_json`; practically unreachable
     /// for ordinary structs).
+    #[error("component JSON error: {0}")]
     Json(String),
 }
 
@@ -176,16 +176,6 @@ impl RegistryError {
         Self::Json(error.to_string())
     }
 }
-
-impl fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RegistryError::Json(message) => write!(f, "component JSON error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {}
 
 /// Marker for components that have a canonical registry name.
 ///

@@ -12,6 +12,8 @@ serde_json = "1"
 crossbeam-channel = "0.5"
 glam = "0.33"
 ornis-input = { path = "../input" }
+# Typed command errors (`thiserror::Error` on `SetComponentError`).
+thiserror = "2.0"
 
 [dev-dependencies]
 

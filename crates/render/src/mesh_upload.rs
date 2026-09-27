@@ -14,32 +14,16 @@ use std::hash::{Hash, Hasher};
 use crate::mesh::{Mesh, Vertex};
 
 /// Upload of [`ornis_mesh_editor::MeshData`] failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UploadError {
     /// [`ornis_mesh_editor::MeshData`] failed [`ornis_mesh_editor::MeshData::validate`].
-    InvalidMesh(ornis_mesh_editor::MeshError),
+    #[error("invalid mesh data: {0}")]
+    InvalidMesh(#[source] ornis_mesh_editor::MeshError),
     /// Inline `MeshDesc::Custom` soup has no vertices or no indices —
     /// there is no honest GPU mesh for it (callers skip the entity,
     /// never a sphere stub).
+    #[error("custom mesh has no vertices or indices")]
     EmptyMesh,
-}
-
-impl std::fmt::Display for UploadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidMesh(inner) => write!(f, "invalid mesh data: {inner}"),
-            Self::EmptyMesh => write!(f, "custom mesh has no vertices or indices"),
-        }
-    }
-}
-
-impl std::error::Error for UploadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidMesh(inner) => Some(inner),
-            Self::EmptyMesh => None,
-        }
-    }
 }
 
 /// Convert [`ornis_mesh_editor::MeshData`] into GPU-ready vertices + indices.

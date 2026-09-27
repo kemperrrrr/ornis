@@ -17,7 +17,6 @@ use crate::system::SystemSet;
 use crate::transient_pool::{PassId, PassNode, ResourceId};
 use ornis_core::{Schedule, System, SystemAccess};
 use std::any::TypeId;
-use std::fmt;
 use std::sync::Mutex;
 
 /// Order log for projected pass systems: [`PassSystem::run`] appends its
@@ -60,11 +59,15 @@ impl System for PassSystem {
 }
 
 /// Why a pass cannot be projected into a [`PassSystem`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectionError {
     /// The pass accesses a resource declared without a typed identity
     /// (`create_resource` instead of `register_resource::<R>`); the core
     /// scheduler keys accesses by `TypeId` and has nothing to mirror.
+    #[error(
+        "pass '{pass}' accesses untyped resource {resource:?} \
+         (register it with register_resource::<R> to project)"
+    )]
     UntypedResource {
         /// Name of the offending pass.
         pass: &'static str,
@@ -72,20 +75,6 @@ pub enum ProjectionError {
         resource: ResourceId,
     },
 }
-
-impl fmt::Display for ProjectionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UntypedResource { pass, resource } => write!(
-                f,
-                "pass '{pass}' accesses untyped resource {resource:?} \
-                 (register it with register_resource::<R> to project)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ProjectionError {}
 
 /// Projects the registry's passes into a core [`Schedule`].
 ///

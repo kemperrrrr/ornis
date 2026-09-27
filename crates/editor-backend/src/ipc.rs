@@ -382,21 +382,12 @@ pub struct SetComponentPayload {
 }
 
 /// Rejection of a [`SetComponentPayload`] → [`UiCommand`] conversion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SetComponentError {
     /// The component name is empty (no registry entry can match it).
+    #[error("component name is empty")]
     EmptyComponent,
 }
-
-impl std::fmt::Display for SetComponentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SetComponentError::EmptyComponent => f.write_str("component name is empty"),
-        }
-    }
-}
-
-impl std::error::Error for SetComponentError {}
 
 /// Commands sent from UI (JS) to the game thread
 #[derive(Debug, Clone)]

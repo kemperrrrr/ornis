@@ -20,7 +20,6 @@
 //! and glTF geometry ([`AssetServer::load_gltf`], via [`crate::import`]).
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use crate::scene::{EntityDesc, Scene};
 use ornis_core::{Engine, Entity, SmartStore};
@@ -78,7 +77,8 @@ pub enum AssetEvent {
 }
 
 /// Scene `.ron` parse failure.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
 pub struct SceneLoadError {
     message: String,
 }
@@ -89,14 +89,6 @@ impl SceneLoadError {
         &self.message
     }
 }
-
-impl fmt::Display for SceneLoadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for SceneLoadError {}
 
 /// Parses a scene `.ron` asset without touching any world.
 ///
