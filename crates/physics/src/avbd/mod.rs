@@ -122,6 +122,10 @@ pub use assembly::solve_6x6;
 /// the dense LDL) is sized by this.
 pub(crate) const SPATIAL_DOF: usize = 6;
 
+/// Offset of the angular block inside 6-vectors (`sacc[3..6]`, `rhs[3..6]`,
+/// the lower-right 3x3 of constraint rows): the 3 linear DOFs come first.
+pub(crate) const ANGULAR_OFFSET: usize = 3;
+
 use self::rows::{
     inverse_symmetric, mat3_vec, pair_allowed, quat_diff_vec, quat_integrate, shape_min_dimension,
     world_inertia,

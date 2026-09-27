@@ -18,6 +18,11 @@ use crate::shape::Shape;
 mod boxes;
 pub(crate) use boxes::box_box_signed_gap;
 
+/// Numerical zero for segment-distance guards: denominators, lengths and
+/// discriminants at or below this magnitude are treated as exactly zero
+/// (degenerate segment, parallel axes, repeated root).
+const DEGENERATE_EPS: f32 = 1e-12;
+
 /// A placed shape: geometry plus world transform.
 #[derive(Clone, Copy)]
 pub struct ShapeRef<'a> {
@@ -42,7 +47,7 @@ pub(crate) struct Distance {
 fn point_segment_closest(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
     let ab = b - a;
     let len_sq = ab.length_squared();
-    if len_sq < 1e-12 {
+    if len_sq < DEGENERATE_EPS {
         return a;
     }
     let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
@@ -60,26 +65,26 @@ fn seg_seg_closest(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) -> (Vec3, Vec3) {
     let f = d2.dot(r);
 
     // Both segments degenerate to points.
-    if a < 1e-12 && e < 1e-12 {
+    if a < DEGENERATE_EPS && e < DEGENERATE_EPS {
         return (a0, b0);
     }
-    if a < 1e-12 {
+    if a < DEGENERATE_EPS {
         let t = (f / e).clamp(0.0, 1.0);
         return (a0, b0 + d2 * t);
     }
     let c = d1.dot(r);
-    if e < 1e-12 {
+    if e < DEGENERATE_EPS {
         let t = (-c / a).clamp(0.0, 1.0);
         return (a0 + d1 * t, b0);
     }
     let b = d1.dot(d2);
     let denom = a * e - b * b;
-    let mut s = if denom.abs() > 1e-12 {
+    let mut s = if denom.abs() > DEGENERATE_EPS {
         ((b * f - c * e) / denom).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let mut t = if e > 1e-12 { (b * s + f) / e } else { 0.0 };
+    let mut t = if e > DEGENERATE_EPS { (b * s + f) / e } else { 0.0 };
     if !(0.0..=1.0).contains(&t) {
         t = t.clamp(0.0, 1.0);
         s = ((b * t - c) / a).clamp(0.0, 1.0);
@@ -761,7 +766,7 @@ mod tests {
     }
 
     /// Regression for missed mutants (night gate 2026-08-24) in the
-    /// `a < 1e-12` branch of `seg_seg_closest`: segment A degenerate to a
+    /// `a < DEGENERATE_EPS` branch of `seg_seg_closest`: segment A degenerate to a
     /// point, segment B a real segment. Pins the exact clamped-`t`
     /// projection (`f / e`), catching `/`->`*`, `<`->`<=`/`==` on the
     /// guard, and the point returned for A.
@@ -779,7 +784,7 @@ mod tests {
         assert_vec3_close(pb, Vec3::new(0.0, 1.0, 0.0));
     }
 
-    /// Mirror of the above for the `e < 1e-12` branch (segment B
+    /// Mirror of the above for the `e < DEGENERATE_EPS` branch (segment B
     /// degenerate, A real) — same mutation surface, opposite operand.
     #[test]
     fn seg_seg_closest_degenerate_b_projects_onto_a() {

@@ -19,6 +19,12 @@ use crate::body::{BodyType, RigidBody};
 use crate::engine::PhysicsEngine;
 use bytemuck::Zeroable as _;
 
+/// Numerical zero for host-side guards: time steps, diagonal entries and
+/// Hessian components at or below this magnitude are treated as exactly
+/// zero (degenerate axis, unsteppable dt). Kernel bodies keep literals —
+/// the DSL lowers `[T; N]` for literal N only (see `avbd_row_kernel`).
+const DEGENERATE_EPS: f32 = 1e-12;
+
 // ---------------------------------------------------------------------------
 // AVBD inertial mass roster (rung 1 device input)
 // ---------------------------------------------------------------------------
@@ -72,7 +78,7 @@ pub fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> 
         return [0.0; SPATIAL_DOF];
     }
     let dt2 = dt * dt;
-    if !dt2.is_finite() || dt2 <= 1e-12 {
+    if !dt2.is_finite() || dt2 <= DEGENERATE_EPS {
         return [0.0; SPATIAL_DOF];
     }
     let lin = 1.0 / (inv_mass * dt2);
@@ -87,7 +93,7 @@ pub fn avbd_inertial_hessian_diag(inv_mass: f32, inertia: [f32; 3], dt: f32) -> 
 }
 
 /// Diagonal LDL solve (L = I, D = diag): `x[i] = rhs[i] / diag[i]`,
-/// degenerate axes (`<= 1e-12`) solve to `0.0` — statics and sleepers
+/// degenerate axes (`<= DEGENERATE_EPS`) solve to `0.0` — statics and sleepers
 /// (zeroed mass model) carry no correction.
 ///
 /// This mirrors the `avbd_diag_solve` shader helper exactly (WGSL has no
@@ -100,7 +106,7 @@ pub fn avbd_diag_solve_cpu(
 ) -> [f32; SPATIAL_DOF] {
     let mut out = [0.0f32; SPATIAL_DOF];
     for i in 0..SPATIAL_DOF {
-        if diag[i] > 1e-12 {
+        if diag[i] > DEGENERATE_EPS {
             out[i] = rhs[i] / diag[i];
         }
     }
@@ -216,7 +222,7 @@ fn avbd_hessian_lin(inv_mass: f32, dt: f32) -> f32 {
     let mut h = 0.0;
     if inv_mass > 0.0 {
         let dt2 = dt * dt;
-        if dt2 > 1e-12 {
+        if dt2 > DEGENERATE_EPS {
             h = 1.0 / (inv_mass * dt2);
         }
     }
@@ -233,7 +239,7 @@ fn avbd_hessian_ang(inertia: Vec3, dt: f32) -> Vec3 {
     let mut h0 = 0.0;
     let mut h1 = 0.0;
     let mut h2 = 0.0;
-    if dt2 > 1e-12 {
+    if dt2 > DEGENERATE_EPS {
         h0 = inertia[0] / dt2;
         h1 = inertia[1] / dt2;
         h2 = inertia[2] / dt2;
@@ -250,13 +256,13 @@ fn avbd_diag_solve(h: Vec3, r: Vec3) -> Vec3 {
     let mut x0 = 0.0;
     let mut x1 = 0.0;
     let mut x2 = 0.0;
-    if h[0] > 1e-12 {
+    if h[0] > DEGENERATE_EPS {
         x0 = r[0] / h[0];
     }
-    if h[1] > 1e-12 {
+    if h[1] > DEGENERATE_EPS {
         x1 = r[1] / h[1];
     }
-    if h[2] > 1e-12 {
+    if h[2] > DEGENERATE_EPS {
         x2 = r[2] / h[2];
     }
     return Vec3::new(x0, x1, x2);

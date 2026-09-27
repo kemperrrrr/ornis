@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.06301239629751498,
+  "quality_score": 0.10486777405728864,
   "iosp_score": 0.8990885416666666,
   "violations": 310,
   "total": 4937,
   "complexity_warnings": 52,
-  "magic_number_warnings": 1566,
+  "magic_number_warnings": 1402,
   "nesting_depth_warnings": 14,
   "function_length_warnings": 94,
   "unsafe_warnings": 9,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 25,
   "structural_coupling_warnings": 23,
-  "total_findings": 3770,
+  "total_findings": 3606,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -528,22 +528,22 @@
     {
       "name": "avbd_hessian_ang",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 231
+      "line": 237
     },
     {
       "name": "avbd_diag_solve",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 249
+      "line": 255
     },
     {
       "name": "avbd_stub_kernel",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 290
+      "line": 296
     },
     {
       "name": "avbd_row_kernel",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 558
+      "line": 564
     },
     {
       "name": "GpuBatch::fill_lane",
@@ -823,22 +823,22 @@
     {
       "name": "AvbdEngine::step_inner",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 726
+      "line": 730
     },
     {
       "name": "AvbdEngine::step",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1089
+      "line": 1093
     },
     {
       "name": "AvbdEngine::add_joint",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1187
+      "line": 1191
     },
     {
       "name": "AvbdEngine::shapecast",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1417
+      "line": 1421
     },
     {
       "name": "quat_integrate",
@@ -1298,27 +1298,27 @@
     {
       "name": "heightfield_convex",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 228
+      "line": 233
     },
     {
       "name": "refine_witnesses",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 327
+      "line": 332
     },
     {
       "name": "trimesh_convex",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 386
+      "line": 391
     },
     {
       "name": "shape_distance",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 489
+      "line": 494
     },
     {
       "name": "cast_shape",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 619
+      "line": 624
     },
     {
       "name": "body_max_extent",

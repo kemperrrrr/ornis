@@ -997,15 +997,15 @@ impl AvbdEngine {
         for x in 0..3 {
             for y in 0..3 {
                 lhs[x][y] += pen * o_nn[x][y];
-                lhs[3 + x][3 + y] += pen * o_tt[x][y];
-                lhs[x][3 + y] += pen * o_nt[x][y];
-                lhs[3 + x][y] += pen * o_nt[y][x];
+                lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * o_tt[x][y];
+                lhs[x][ANGULAR_OFFSET + y] += pen * o_nt[x][y];
+                lhs[ANGULAR_OFFSET + x][y] += pen * o_nt[y][x];
             }
         }
         rhs[0] += f * nn.x;
         rhs[1] += f * nn.y;
         rhs[2] += f * nn.z;
-        rhs[3] += f * t.x;
+        rhs[ANGULAR_OFFSET] += f * t.x;
         rhs[4] += f * t.y;
         rhs[5] += f * t.z;
     }
@@ -1021,10 +1021,10 @@ impl AvbdEngine {
         let h = outer(axis, axis);
         for x in 0..3 {
             for y in 0..3 {
-                lhs[3 + x][3 + y] += pen * h[x][y];
+                lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * h[x][y];
             }
         }
-        rhs[3] += force * axis.x;
+        rhs[ANGULAR_OFFSET] += force * axis.x;
         rhs[4] += force * axis.y;
         rhs[5] += force * axis.z;
     }

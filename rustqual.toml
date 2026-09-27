@@ -21,6 +21,11 @@ max_suppression_ratio = 0.10
 
 [complexity]
 enabled = true
+# Trivial literals are noise, not magic: upstream defaults cover the int
+# spellings; float spellings ("2.0", "-1.0") must be listed explicitly
+# (string match on the literal token). Deliberately NOT listed: 0.5/2.0-style
+# idiomatic factors stay visible; thresholds/dimensions become named consts.
+allowed_magic_numbers = ["0", "1", "2", "-1", "0.0", "1.0", "2.0", "-1.0"]
 max_cognitive = 20
 max_cyclomatic = 20
 max_nesting_depth = 4
