@@ -1,0 +1,48 @@
+name: Determinism Nightly
+
+# Long determinism gates (#[ignore]d in the default suite, ~95% of the
+# physics suite runtime) run here — NOT in the per-push Quality gate,
+# which would burn CI limits on every commit. README promises
+# determinism (Strong Confluence) as an engine property; this job
+# holds that promise overnight.
+#
+# Regenerate helpers (*_regenerate, also #[ignore]d) are EXCLUDED via
+# --skip: they rewrite canonical snapshots and must stay manual.
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 02:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  determinism:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Ignored determinism gates (except regenerate helpers)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p ornis-physics -- --ignored --skip regenerate 2>&1 | tee target/determinism-nightly.log
+
+      - name: Canonical snapshots untouched
+        shell: bash
+        run: |
+          git status --porcelain -- crates/physics/tests/data/ | tee target/determinism-dirty.log
+          test ! -s target/determinism-dirty.log

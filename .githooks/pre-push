@@ -1,0 +1,20 @@
+#!/bin/sh
+# Ornis pre-push gate (installed by `cargo xtask install-hooks`).
+# Fast by default: fmt + workspace-wide compile check of all targets
+# (catches E0308-class breaks in wasm/physics test targets that
+# per-crate `cargo test` never builds).
+# ORNIS_HOOK_FULL=1 adds clippy and the wasm32 target check (slow).
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+echo "pre-push: cargo fmt --all -- --check"
+cargo fmt --all -- --check
+echo "pre-push: cargo check --workspace --all-targets"
+cargo check --workspace --all-targets
+if [ "${ORNIS_HOOK_FULL:-0}" = "1" ]; then
+  echo "pre-push [full]: clippy --workspace --all-targets"
+  cargo clippy --workspace --all-targets -- -D warnings
+  echo "pre-push [full]: wasm32 target check"
+  cargo check -p ornis-wasm --target wasm32-unknown-unknown
+fi
+echo "pre-push: OK"

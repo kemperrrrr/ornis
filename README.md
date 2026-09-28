@@ -51,6 +51,7 @@ cargo xtask quality --everything  # всё сразу: --ci + --full + --bench +
 cargo xtask quality --ci --only fmt,test  # подмножество стадий для CI-шардов (идники: --list-stages)
 cargo xtask fuzz <target>     # фаззинг парсеров: scene_ron, materialx_parse (через +nightly)
 cargo xtask mutants           # мутационное тестирование ornis-core (cargo-mutants, долго)
+cargo xtask install-hooks     # pre-push hook: fmt + workspace check (ORNIS_HOOK_FULL=1: +clippy, wasm32)
 
 # обновление structural baseline (ratchet):
 rustqual --save-baseline baseline.json   # локально после осознанного роста сложности
@@ -82,6 +83,10 @@ cargo xtask quality            # регресс-гейт: падает толь�
   (`--test-threads=1`, сборка параллельная).
   xtask — единственный источник правды о составе гейта: локально
   `cargo xtask quality --ci` гоняет те же 13 стадий, что все шарды вместе.
+- **Determinism nightly** (`.github/workflows/determinism-nightly.yml`) —
+  `#[ignore]`-гейты детерминизма (`--ignored --skip regenerate`) раз в сутки
+  + вручную через `workflow_dispatch`; в per-push гейт не входит (долгие),
+  канонические снапшоты при этом обязаны оставаться нетронутыми.
 
 - **Performance benchmarks** (`.github/workflows/performance.yml`) — отдельный
   workflow для criterion-бенчмарков, не входящий в основной quality gate:

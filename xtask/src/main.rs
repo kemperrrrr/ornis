@@ -29,6 +29,7 @@ fn main() {
         "quality" => quality::quality(&args[1..]),
         "fuzz" => quality::fuzz(&args[1..]),
         "mutants" => quality::mutants(&args[1..]),
+        "install-hooks" => install_hooks(),
         "-h" | "--help" | "help" => usage(0),
         other => {
             eprintln!("xtask: unknown task '{other}'");
@@ -59,10 +60,41 @@ fn usage(code: i32) -> ! {
                    --only a,b runs a CI shard subset (see --list-stages)\n  \
          fuzz <target> [-- <args>]\n      \
          Run a cargo-fuzz target (scene_ron, materialx_parse, editor_command) via +nightly\n  \
-         mutants [-- <args>]\n      \
-         Run cargo-mutants against ornis-core"
-    );
+          mutants [-- <args>]\n      \
+          Run cargo-mutants against ornis-core\n  \
+          install-hooks\n      \
+          Install .githooks/pre-push into .git/hooks (fmt + workspace\n      \
+          check on push; ORNIS_HOOK_FULL=1 adds clippy + wasm32 check)"
+     );
     exit(code);
+}
+
+/// Copy the committed `.githooks/` scripts into `.git/hooks/` (git does
+/// not execute hooks from the worktree). Opt-in per clone; rerun after
+/// pulling hook updates.
+fn install_hooks() {
+    let root = workspace_root();
+    let src = root.join(".githooks/pre-push");
+    let dst = root.join(".git/hooks/pre-push");
+    if !src.is_file() {
+        eprintln!("xtask: .githooks/pre-push not found");
+        exit(1);
+    }
+    std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+        eprintln!("xtask: cannot install hook: {e}");
+        exit(1);
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(
+            |e| {
+                eprintln!("xtask: cannot chmod hook: {e}");
+                exit(1);
+            },
+        );
+    }
+    eprintln!("xtask: installed pre-push hook (ORNIS_HOOK_FULL=1 for clippy + wasm32)");
 }
 
 fn workspace_root() -> PathBuf {

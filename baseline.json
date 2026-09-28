@@ -1,79 +1,64 @@
 {
   "version": 2,
-  "quality_score": 0.13423268962069834,
-  "iosp_score": 0.9022440823854904,
-  "violations": 318,
-  "total": 5242,
+  "quality_score": 0.15331634509869962,
+  "iosp_score": 0.903787416004887,
+  "violations": 315,
+  "total": 5284,
   "complexity_warnings": 52,
-  "magic_number_warnings": 1406,
+  "magic_number_warnings": 1356,
   "nesting_depth_warnings": 15,
   "function_length_warnings": 100,
-  "unsafe_warnings": 9,
-  "error_handling_warnings": 173,
+  "unsafe_warnings": 8,
+  "error_handling_warnings": 172,
   "duplicate_groups": 83,
-  "dead_code_warnings": 373,
+  "dead_code_warnings": 371,
   "dead_type_warnings": 6,
-  "fragment_groups": 494,
+  "fragment_groups": 498,
   "boilerplate_warnings": 261,
   "srp_struct_warnings": 17,
-  "srp_module_warnings": 78,
+  "srp_module_warnings": 79,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 6,
-  "tq_untested_warnings": 131,
+  "tq_untested_warnings": 130,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 26,
   "structural_coupling_warnings": 24,
-  "total_findings": 3710,
+  "total_findings": 3662,
   "violation_details": [
     {
       "name": "EventLog::push",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 165
+      "line": 214
     },
     {
       "name": "EventLog::after",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 174
+      "line": 223
     },
     {
       "name": "serve",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 197
+      "line": 249
     },
     {
-      "name": "serve_websocket",
+      "name": "serve_events_stream",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 283
+      "line": 484
     },
     {
-      "name": "poll_client_frames",
+      "name": "push_pending",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 350
-    },
-    {
-      "name": "poll_one_frame",
-      "file": "crates/editor-backend/src/remote.rs",
-      "line": 366
-    },
-    {
-      "name": "ws_decode_len",
-      "file": "crates/editor-backend/src/remote.rs",
-      "line": 419
-    },
-    {
-      "name": "sha1_digest",
-      "file": "crates/editor-backend/src/remote.rs",
-      "line": 574
+      "line": 601
     },
     {
       "name": "route_request",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 763
+      "line": 1077
     },
     {
       "name": "setup",
@@ -88,7 +73,7 @@
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
-      "line": 168
+      "line": 303
     },
     {
       "name": "normalized_rotation",
@@ -613,7 +598,7 @@
     {
       "name": "GpuSequentialImpulse::solve",
       "file": "crates/physics/src/gpu/mod.rs",
-      "line": 455
+      "line": 580
     },
     {
       "name": "SoftBody::chain",
@@ -1603,22 +1588,22 @@
     {
       "name": "GameApp::showcase_engine",
       "file": "src/main.rs",
-      "line": 251
+      "line": 260
     },
     {
       "name": "GameApp::process_remote_commands",
       "file": "src/main.rs",
-      "line": 318
+      "line": 327
     },
     {
       "name": "GameApp::window_event",
       "file": "src/main.rs",
-      "line": 467
+      "line": 487
     },
     {
       "name": "GameApp::about_to_wait",
       "file": "src/main.rs",
-      "line": 595
+      "line": 615
     }
   ]
 }
