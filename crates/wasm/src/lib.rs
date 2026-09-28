@@ -21,8 +21,8 @@ use web_sys::console;
 use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_render::{
-    FrameUpload, MaterialIdx, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D,
-    Technique, install_orbit_camera, read_orbit_camera,
+    FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
+    install_orbit_camera, read_orbit_camera,
 };
 
 mod scene_api;
@@ -949,6 +949,7 @@ async fn fetch_api_text(url: &str) -> Option<String> {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use ornis_render::MaterialIdx;
 
     #[test]
     fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {
