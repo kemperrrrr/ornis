@@ -275,7 +275,7 @@ pub fn ws_events_url(page_protocol: &str, host: &str) -> String {
 /// Send-only `/api/events` socket for gameplay input snapshots.
 ///
 /// The server already forwards client WS text frames as `BrowserInput`
-/// (`poll_one_frame`); this is the browser half. When the socket is
+/// (tungstenite transport); this is the browser half. When the socket is
 /// missing or not open the poster falls back to `POST /api/input`, so
 /// older proxies keep working.
 pub struct InputSocket {

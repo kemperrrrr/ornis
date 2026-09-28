@@ -13,7 +13,7 @@
 
 use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
 
-use super::GpuBodyState;
+use super::{GpuBodyState, GpuDispatchError};
 use crate::avbd::{AvbdEngine, SPATIAL_DOF, solve_6x6};
 use crate::body::{BodyType, RigidBody};
 use crate::engine::PhysicsEngine;
@@ -939,7 +939,19 @@ impl WgpuAvbdSolver {
     /// Download the per-body deltas and breakdown flags (`1.0` solved,
     /// `0.0` breakdown). Returns `max_bodies` entries; only the first
     /// `count` dispatched ones are meaningful.
-    pub fn download(&self) -> (Vec<GpuBodyState>, Vec<f32>) {
+    ///
+    /// Fallible path: both `map_async` outcomes are awaited through a
+    /// channel (same pattern as
+    /// [`GpuSequentialImpulse::try_download_bodies`](crate::gpu::GpuSequentialImpulse::try_download_bodies))
+    /// instead of fire-and-forget closures. If the second mapping fails after the
+    /// first succeeded, the first buffer is unmapped before returning, so
+    /// the persistent readback buffers stay reusable for the next download.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuDispatchError`] when either device mapping or either
+    /// mapped-range view fails. The numeric path is unchanged on success.
+    pub fn try_download(&self) -> Result<(Vec<GpuBodyState>, Vec<f32>), GpuDispatchError> {
         let delta_size = self.max_bodies as u64 * super::GPU_BODY_STRIDE;
         let ok_size = self.max_bodies as u64 * 4;
         let mut encoder = self
@@ -956,26 +968,46 @@ impl WgpuAvbdSolver {
                 timeout: None,
             })
             .ok();
-        self.readback_delta
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        self.readback_ok
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .ok();
-        let delta_mapped = self.readback_delta.slice(..).get_mapped_range().unwrap();
-        let deltas: Vec<GpuBodyState> = bytemuck::cast_slice(&delta_mapped).to_vec();
-        drop(delta_mapped);
-        self.readback_delta.unmap();
-        let ok_mapped = self.readback_ok.slice(..).get_mapped_range().unwrap();
-        let oks: Vec<f32> = bytemuck::cast_slice(&ok_mapped).to_vec();
-        drop(ok_mapped);
-        self.readback_ok.unmap();
-        (deltas, oks)
+        let delta_slice = self.readback_delta.slice(..);
+        let ok_slice = self.readback_ok.slice(..);
+        super::await_map(&self.device, &delta_slice)?;
+        if let Err(e) = super::await_map(&self.device, &ok_slice) {
+            self.readback_delta.unmap();
+            return Err(e);
+        }
+        match (delta_slice.get_mapped_range(), ok_slice.get_mapped_range()) {
+            (Ok(delta_mapped), Ok(ok_mapped)) => {
+                let deltas: Vec<GpuBodyState> = bytemuck::cast_slice(&delta_mapped).to_vec();
+                drop(delta_mapped);
+                self.readback_delta.unmap();
+                let oks: Vec<f32> = bytemuck::cast_slice(&ok_mapped).to_vec();
+                drop(ok_mapped);
+                self.readback_ok.unmap();
+                Ok((deltas, oks))
+            }
+            (Ok(delta_mapped), Err(e)) => {
+                drop(delta_mapped);
+                self.readback_delta.unmap();
+                Err(e.into())
+            }
+            (Err(e), Ok(ok_mapped)) => {
+                drop(ok_mapped);
+                self.readback_ok.unmap();
+                Err(e.into())
+            }
+            (Err(e), Err(_)) => Err(e.into()),
+        }
+    }
+
+    /// Download the per-body deltas and breakdown flags (`1.0` solved,
+    /// `0.0` breakdown). Returns `max_bodies` entries; only the first
+    /// `count` dispatched ones are meaningful.
+    ///
+    /// Legacy wrapper over [`try_download`](Self::try_download): panics on
+    /// a device mapping failure — the same failure class the old code
+    /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
+    pub fn download(&self) -> (Vec<GpuBodyState>, Vec<f32>) {
+        self.try_download()
+            .expect("GPU AVBD download: buffer mapping failed")
     }
 }

@@ -835,18 +835,29 @@ fn solver_is_deterministic_across_runs() {
     assert_eq!(snapshot(&first), snapshot(&second));
 }
 
+/// Canonical snapshot bytes for this target arch: 120 contact steps
+/// chaotically amplify 1-ulp codegen differences (arm64 vs x86_64 FMA),
+/// so one file cannot be bit-identical everywhere. Bit-identity is only
+/// promised per machine (see the run-twice test above); each arch pins
+/// its own canonical bits. Intentional solver change → re-baseline the
+/// file for YOUR arch via `determinism_snapshot_regenerate` and expect
+/// CI (other arch) to demand its own file in the same PR.
+#[cfg(target_arch = "aarch64")]
+const CANONICAL_SNAPSHOT: &str = include_str!("data/determinism_snapshot.aarch64.hex");
+#[cfg(not(target_arch = "aarch64"))]
+const CANONICAL_SNAPSHOT: &str = include_str!("data/determinism_snapshot.x86_64.hex");
+
 #[test]
 fn determinism_snapshot_matches_canonical() {
     let mut physics = determinism_snapshot_scene();
     for _ in 0..120 {
         physics.step(1.0 / 60.0);
     }
-    let expected = include_str!("data/determinism_snapshot.hex");
     assert_eq!(
         determinism_snapshot_render(&physics),
-        expected,
+        CANONICAL_SNAPSHOT,
         "simulation bits drifted: intentional solver change? re-baseline via \
-         determinism_snapshot_regenerate, else float/codegen drift"
+         determinism_snapshot_regenerate (arch-appropriate file), else float/codegen drift"
     );
 }
 
@@ -857,10 +868,12 @@ fn determinism_snapshot_regenerate() {
     for _ in 0..120 {
         physics.step(1.0 / 60.0);
     }
-    let path = format!(
-        "{}/tests/data/determinism_snapshot.hex",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let name = if cfg!(target_arch = "aarch64") {
+        "determinism_snapshot.aarch64.hex"
+    } else {
+        "determinism_snapshot.x86_64.hex"
+    };
+    let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::write(path, determinism_snapshot_render(&physics)).unwrap();
 }
 

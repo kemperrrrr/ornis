@@ -11,11 +11,12 @@ use ornis_physics::engine::{
     Manifold, ManifoldPoint, ManifoldState, PhysicsEngine, SequentialImpulseEngine,
 };
 use ornis_physics::gpu::{
-    GPU_AVBD_SYSTEM_STRIDE, GPU_BATCH_STRIDE, GPU_BODY_STRIDE, GpuAvbdDispatch, GpuAvbdMass,
-    GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem, GpuBatch, GpuBodyState, GpuSequentialImpulse,
-    LaneInput, WgpuAvbdSolver, avbd_diag_solve_cpu, avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu,
-    avbd_row_wgsl, avbd_stage_contact_solve, avbd_stamp_row_cpu, avbd_stub_wgsl,
-    contact_solver_wgsl, pack_single_point_batches, solve_params_bool,
+    DispatchReport, GPU_AVBD_SYSTEM_STRIDE, GPU_BATCH_STRIDE, GPU_BODY_STRIDE, GpuAvbdDispatch,
+    GpuAvbdMass, GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem, GpuBatch, GpuBodyState,
+    GpuSequentialImpulse, LaneInput, WgpuAvbdSolver, avbd_diag_solve_cpu,
+    avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu, avbd_row_wgsl, avbd_stage_contact_solve,
+    avbd_stamp_row_cpu, avbd_stub_wgsl, contact_solver_wgsl, pack_single_point_batches,
+    solve_params_bool,
 };
 use std::sync::Arc;
 
@@ -299,14 +300,44 @@ fn gpu_solver_single_contact_matches_analytic() {
     });
     batch.count = 1;
 
-    solver.upload_bodies(&[a.clone(), b.clone()]);
-    solver.upload_batches(&[batch]);
+    assert_eq!(
+        solver.upload_bodies(&[a.clone(), b.clone()]),
+        DispatchReport {
+            staged: 2,
+            dropped: 0
+        }
+    );
+    assert_eq!(
+        solver.upload_batches(&[batch]),
+        DispatchReport {
+            staged: 1,
+            dropped: 0
+        }
+    );
     solver.solve(1, 8, RestitutionGate::Suppressed);
 
     let mut out = [a, b];
-    solver.download_bodies(&mut out);
+    let body_report = solver
+        .try_download_bodies(&mut out)
+        .expect("body download must map");
+    assert_eq!(
+        body_report,
+        DispatchReport {
+            staged: 2,
+            dropped: 0
+        }
+    );
     let mut acc_batches = [batch];
-    solver.download_acc(&mut acc_batches);
+    let acc_report = solver
+        .try_download_acc(&mut acc_batches)
+        .expect("acc download must map");
+    assert_eq!(
+        acc_report,
+        DispatchReport {
+            staged: 1,
+            dropped: 0
+        }
+    );
 
     assert!(
         out[1].velocity.length() < 1e-3,
@@ -323,6 +354,49 @@ fn gpu_solver_single_contact_matches_analytic() {
     assert!(
         out[1].angular_velocity.length() < 1e-3,
         "no torque expected"
+    );
+}
+
+/// Staging hygiene: uploads past the capacity bound stage the prefix and
+/// report the dropped tail instead of dropping silently. The fallible
+/// download observes the same bound symmetrically.
+#[test]
+fn gpu_upload_reports_staged_and_dropped() {
+    let Some((device, queue)) = create_test_device() else {
+        eprintln!("gpu_upload_reports_staged_and_dropped: no wgpu adapter — skipped");
+        return;
+    };
+    let solver = GpuSequentialImpulse::new(device, queue, 2, 1);
+    let bodies = vec![
+        RigidBody::new_sphere(Vec3::new(0.0, 0.0, 0.0), 0.5, 1.0),
+        RigidBody::new_sphere(Vec3::new(1.0, 0.0, 0.0), 0.5, 1.0),
+        RigidBody::new_sphere(Vec3::new(2.0, 0.0, 0.0), 0.5, 1.0),
+        RigidBody::new_sphere(Vec3::new(3.0, 0.0, 0.0), 0.5, 1.0),
+        RigidBody::new_sphere(Vec3::new(4.0, 0.0, 0.0), 0.5, 1.0),
+    ];
+    assert_eq!(
+        solver.upload_bodies(&bodies),
+        DispatchReport {
+            staged: 2,
+            dropped: 3
+        }
+    );
+    assert_eq!(
+        solver.upload_batches(&[GpuBatch::zero(); 4]),
+        DispatchReport {
+            staged: 1,
+            dropped: 3
+        }
+    );
+    let mut out = bodies.clone();
+    assert_eq!(
+        solver
+            .try_download_bodies(&mut out)
+            .expect("body download must map"),
+        DispatchReport {
+            staged: 2,
+            dropped: 3
+        }
     );
 }
 
@@ -1002,7 +1076,7 @@ fn avbd_row_solve_device_round_trip() {
         .collect();
     solver.upload(&systems);
     solver.solve(2, dt);
-    let (deltas, oks) = solver.download();
+    let (deltas, oks) = solver.try_download().expect("avbd download must map");
 
     assert!(oks[0] > 0.5, "dynamic system must solve on device");
     assert!(oks[1] < 0.5, "static system must break down on device");
