@@ -1,8 +1,16 @@
 //! Remote editor transport: HTTP server and asset sync for live editing.
+//!
+//! Mutating endpoints (`POST /api/*`) are loopback-only hardening targets:
+//! every POST re-checks the `Host` header (DNS-rebinding), the `Origin`
+//! header (CSRF), and the `Content-Type` (JSON only), and bodies are read
+//! bounded ([`MAX_COMMAND_BYTES`]). Scene-file commands additionally resolve
+//! their `path` into a [`ScenePath`] sandboxed to `<workspace>/assets` or
+//! `<workspace>/editor`.
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, Cursor, Write};
+use std::io::{Cursor, Read};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,7 +18,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use tiny_http::{Header, ReadWrite, Request, Response, Server};
+use tiny_http::{Header, Request, Response, Server};
+use tungstenite::handshake::server::{ErrorResponse, Request as WsRequest, Response as WsResponse};
+use tungstenite::http::StatusCode;
+use tungstenite::protocol::frame::CloseFrame;
+use tungstenite::protocol::frame::coding::CloseCode;
+use tungstenite::{Bytes, Message, Utf8Bytes, WebSocket, accept_hdr_with_config};
 
 use crate::ipc::{EditorCommand, EventSeq, GameEvent, RequestId, SetComponentPayload, UiCommand};
 
@@ -36,9 +49,16 @@ fn assets_root() -> PathBuf {
 
 /// The HTTP remote editor server: serves the static editor assets and the
 /// `/api/*` endpoints from background threads; `stop` shuts them down and joins.
+///
+/// Transport layout: the public port is owned by a plain `TcpListener` that
+/// peek-dispatches each connection — `/api/events` WebSocket upgrades are
+/// framed by tungstenite right here (over our own `TcpStream`, so read
+/// timeouts are legitimate socket options), everything else is byte-proxied
+/// to an internal tiny_http server on an ephemeral port.
 pub struct RemoteEditor {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    accept_handle: Option<JoinHandle<()>>,
     websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -46,50 +66,79 @@ impl RemoteEditor {
     /// Bind `127.0.0.1:{port}` and start serving. On bind failure prints an
     /// error and returns an inert handle instead of panicking.
     pub fn start(port: u16, game_tx: Sender<UiCommand>, game_rx: Receiver<GameEvent>) -> Self {
+        let inert = || Self {
+            stop: Arc::new(AtomicBool::new(true)),
+            handle: None,
+            accept_handle: None,
+            websocket_handles: Arc::new(Mutex::new(Vec::new())),
+        };
         let addr = format!("127.0.0.1:{port}");
-        let server = match Server::http(&addr) {
-            Ok(s) => s,
+        let listener = match TcpListener::bind(&addr) {
+            Ok(listener) => listener,
             Err(e) => {
                 eprintln!("ornis: remote editor failed to bind {addr}: {e}");
-                return Self {
-                    stop: Arc::new(AtomicBool::new(true)),
-                    handle: None,
-                    websocket_handles: Arc::new(Mutex::new(Vec::new())),
-                };
+                return inert();
             }
         };
+        let internal = match Server::http("127.0.0.1:0") {
+            Ok(server) => server,
+            Err(e) => {
+                eprintln!("ornis: remote editor failed to bind internal HTTP server: {e}");
+                return inert();
+            }
+        };
+        let Some(internal_addr) = internal.server_addr().to_ip() else {
+            eprintln!("ornis: remote editor internal HTTP server has no IP address");
+            return inert();
+        };
+        let internal_port = internal_addr.port();
 
         let stop = Arc::new(AtomicBool::new(false));
+        // Replay log shared between the internal HTTP server thread (which
+        // drains `game_rx` into it) and the `/api/events` socket handlers.
+        let event_log = Arc::new(Mutex::new(EventLog::default()));
         let stop_clone = stop.clone();
         let websocket_handles = Arc::new(Mutex::new(Vec::new()));
-        let ws_port = port;
-        let websocket_handles_for_server = Arc::clone(&websocket_handles);
-        let handle = thread::Builder::new()
-            .name("remote-editor".into())
+        let websocket_handles_for_accept = Arc::clone(&websocket_handles);
+        let game_tx_for_accept = game_tx.clone();
+        let event_log_for_accept = Arc::clone(&event_log);
+        let accept_handle = thread::Builder::new()
+            .name("remote-editor-accept".into())
             .spawn(move || {
-                serve(
-                    server,
+                accept_loop(
+                    listener,
                     stop_clone,
-                    game_tx,
-                    game_rx,
-                    websocket_handles_for_server,
-                    ws_port,
+                    game_tx_for_accept,
+                    event_log_for_accept,
+                    websocket_handles_for_accept,
+                    internal_port,
+                    port,
                 )
             })
+            .expect("spawn remote-editor-accept thread");
+        let stop_clone = stop.clone();
+
+        let handle = thread::Builder::new()
+            .name("remote-editor".into())
+            .spawn(move || serve(internal, stop_clone, game_tx, game_rx, event_log, port))
             .expect("spawn remote-editor thread");
 
         eprintln!("ornis: remote editor at http://{addr}");
         Self {
             stop,
             handle: Some(handle),
+            accept_handle: Some(accept_handle),
             websocket_handles,
         }
     }
 
-    /// Signal shutdown and join the server thread.
+    /// Signal shutdown and join the server threads.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.accept_handle.take() {
             let _ = handle.join();
         }
         let handles = std::mem::take(
@@ -194,15 +243,17 @@ impl EventLog {
     }
 }
 
+/// Internal HTTP loop: drains `game_rx` into the shared replay log and
+/// answers proxied plain-HTTP requests. WebSocket upgrades never reach this
+/// loop — the public accept loop dispatches them to tungstenite beforehand.
 fn serve(
     server: Server,
     stop: Arc<AtomicBool>,
     game_tx: Sender<UiCommand>,
     game_rx: Receiver<GameEvent>,
-    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    event_log: Arc<Mutex<EventLog>>,
     server_port: u16,
 ) {
-    let event_log = Arc::new(Mutex::new(EventLog::default()));
     let mut snapshots = Snapshots::default();
     let mut next_request_id = RequestId::new(1);
     let root = assets_root();
@@ -225,26 +276,6 @@ fn serve(
             Err(_) => break,
         };
 
-        if is_websocket_request(&request) && request.url().split('?').next() == Some("/api/events")
-        {
-            let cursor = event_cursor(request.url());
-            let event_log = Arc::clone(&event_log);
-            let stop = Arc::clone(&stop);
-            let game_tx_ws = game_tx.clone();
-            if let Ok(handle) = thread::Builder::new()
-                .name("remote-editor-websocket".into())
-                .spawn(move || {
-                    serve_websocket(request, event_log, stop, cursor, server_port, game_tx_ws)
-                })
-            {
-                websocket_handles
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(handle);
-            }
-            continue;
-        }
-
         let response = route_request(
             &root,
             &mut request,
@@ -252,6 +283,7 @@ fn serve(
             &snapshots,
             &game_tx,
             &mut next_request_id,
+            server_port,
         );
         let _ = request.respond(response);
     }
@@ -265,81 +297,357 @@ fn header_value(request: &Request, name: &'static str) -> Option<String> {
         .map(|header| header.value.to_string())
 }
 
-fn is_websocket_request(request: &Request) -> bool {
-    header_value(request, "Upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+// ── `/api/events` transport ─────────────────────────────────────────────
+// The public port is a plain `TcpListener` (see `accept_loop`): each
+// connection is peek-dispatched by `classify_connection`. WebSocket upgrades
+// for `/api/events` are framed by tungstenite over our own `TcpStream`, so
+// read timeouts are legitimate socket options — this replaces the
+// hand-rolled handshake/SHA-1/base64/framing and the raw-fd timeout hack.
+// Everything else is byte-proxied to the internal tiny_http server.
+//
+// Wire protocol (unchanged, byte-compatible): the server sends unmasked
+// text frames carrying JSON event batches, empty pings every
+// `WS_HEARTBEAT_INTERVAL`, and close code 1001 (`Away`) on shutdown; the
+// client sends masked text/binary frames carrying `BrowserInput` snapshots.
+
+/// Read timeout for `/api/events` sockets: bounds one poll iteration so the
+/// push loop stays responsive. Set via the public `TcpStream` API.
+const WS_READ_TIMEOUT: Duration = Duration::from_millis(10);
+/// Idle interval between heartbeat pings.
+const WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// Push-loop cadence for newly appended replay records.
+const WS_PUSH_INTERVAL: Duration = Duration::from_millis(100);
+/// Max HTTP head bytes peeked for routing; larger heads fall through to
+/// plain HTTP (the client then uses the polling fallback).
+const SNIFF_HEAD_LIMIT: usize = 8192;
+/// Total budget for completing the routing peek of one connection.
+const SNIFF_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Server side of one `/api/events` stream: tungstenite over our own socket.
+type EventsSocket = WebSocket<TcpStream>;
+
+/// Routing outcome for one accepted TCP connection. Carries the replay
+/// cursor for event streams so the handshake path never re-parses the URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionRoute {
+    /// RFC 6455 upgrade for exactly `/api/events`, with the `?after=` cursor.
+    EventsStream { cursor: EventSeq },
+    /// Anything else: byte-proxy to the internal HTTP server.
+    Http,
 }
 
-fn websocket_bad_request(request: Request) {
-    let _ =
-        request.respond(Response::from_string("WebSocket upgrade required").with_status_code(400));
+/// What the connection handler should do after one inbound poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeAction {
+    /// Keep serving: a frame was handled or none was available.
+    KeepServing,
+    /// Terminate: the peer closed or the transport died.
+    StopServing,
 }
 
-/// Serve a WebSocket `/api/events` connection. The endpoint is bidirectional:
-/// server pushes replay records after the initial cursor and then newly
-/// appended records; the browser may also push `InputState` snapshots as text
-/// frames that are forwarded to the game thread via `game_tx`. Idle
-/// connections receive periodic ping frames, and server shutdown sends a
-/// normal close frame.
-fn serve_websocket(
-    request: Request,
+/// Accept loop for the public port: peek-dispatch each connection to the
+/// tungstenite event stream or the internal HTTP proxy. Runs until `stop`.
+/// `server_port` is the public port: it feeds the WebSocket `Origin` gate
+/// (proxied HTTP keeps its bytes, so the internal server checks the same
+/// port independently — see [`check_post_guards`]).
+fn accept_loop(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    game_tx: Sender<UiCommand>,
+    event_log: Arc<Mutex<EventLog>>,
+    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    internal_port: u16,
+    server_port: u16,
+) {
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                dispatch_connection(
+                    stream,
+                    &stop,
+                    &game_tx,
+                    &event_log,
+                    &websocket_handles,
+                    internal_port,
+                    server_port,
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+/// Sniff one connection (inline) and either spawn a joined event-stream
+/// handler or proxy it to the internal HTTP server.
+fn dispatch_connection(
+    stream: TcpStream,
+    stop: &Arc<AtomicBool>,
+    game_tx: &Sender<UiCommand>,
+    event_log: &Arc<Mutex<EventLog>>,
+    websocket_handles: &Arc<Mutex<Vec<JoinHandle<()>>>>,
+    internal_port: u16,
+    server_port: u16,
+) {
+    if stream.set_read_timeout(Some(SNIFF_TIMEOUT)).is_err() {
+        return;
+    }
+    match classify_connection(&stream) {
+        ConnectionRoute::EventsStream { cursor } => {
+            let event_log = Arc::clone(event_log);
+            let stop = Arc::clone(stop);
+            let game_tx = game_tx.clone();
+            if let Ok(handle) = thread::Builder::new()
+                .name("remote-editor-websocket".into())
+                .spawn(move || {
+                    serve_events_stream(stream, event_log, stop, cursor, game_tx, server_port)
+                })
+            {
+                websocket_handles
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(handle);
+            }
+        }
+        ConnectionRoute::Http => proxy_http(stream, internal_port),
+    }
+}
+
+/// Peek at the pending HTTP head without consuming it and decide where the
+/// connection goes. Anything that is not a complete, well-formed
+/// `/api/events` WebSocket upgrade — including timeouts, oversize heads and
+/// undecodable bytes — routes to plain HTTP, where tiny_http answers (and
+/// the editor falls back to cursor polling).
+fn classify_connection(stream: &TcpStream) -> ConnectionRoute {
+    let mut buf = vec![0_u8; SNIFF_HEAD_LIMIT];
+    let deadline = Instant::now() + SNIFF_TIMEOUT;
+    loop {
+        match stream.peek(&mut buf) {
+            Ok(0) => return ConnectionRoute::Http,
+            Ok(n) => match sniff_route(&buf[..n]) {
+                Some(route) => return route,
+                None if n >= SNIFF_HEAD_LIMIT => return ConnectionRoute::Http,
+                None => {
+                    if Instant::now() >= deadline {
+                        return ConnectionRoute::Http;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+            },
+            Err(_) => return ConnectionRoute::Http,
+        }
+    }
+}
+
+/// Route one peeked head: `Some` when the head is complete, `None` when more
+/// bytes are needed. Mirrors the old upgrade gate exactly — path
+/// `/api/events` plus `Upgrade: websocket` (case-insensitive) — without
+/// tightening it: tungstenite itself enforces the remaining RFC 6455
+/// requirements (method, version, key) during the handshake.
+fn sniff_route(head: &[u8]) -> Option<ConnectionRoute> {
+    let text = std::str::from_utf8(head).ok()?;
+    let end = text.find("\r\n\r\n")?;
+    let mut lines = text[..end].split("\r\n");
+    let target = lines.next()?.split_whitespace().nth(1)?;
+    if target.split('?').next() != Some("/api/events") {
+        return Some(ConnectionRoute::Http);
+    }
+    let upgrade = lines
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("upgrade")
+                && value.trim().eq_ignore_ascii_case("websocket")
+        });
+    if !upgrade {
+        return Some(ConnectionRoute::Http);
+    }
+    Some(ConnectionRoute::EventsStream {
+        cursor: event_cursor(target),
+    })
+}
+
+/// Serve one WebSocket `/api/events` connection over our own `TcpStream`.
+/// Bidirectional: the server pushes replay records past the initial cursor
+/// and newly appended ones; client text/binary frames carry `BrowserInput`
+/// snapshots forwarded to the game thread. Idle connections get periodic
+/// pings; server shutdown sends close code 1001 (`Away`).
+///
+/// `#[allow]` below: tungstenite's `Callback` fixes the handshake error
+/// type to `ErrorResponse` (a full HTTP response, inherently large), so no
+/// smaller `Err` spelling exists for the Origin gate.
+#[allow(clippy::result_large_err)]
+fn serve_events_stream(
+    stream: TcpStream,
     event_log: Arc<Mutex<EventLog>>,
     stop: Arc<AtomicBool>,
     mut cursor: EventSeq,
-    server_port: u16,
     game_tx: Sender<UiCommand>,
+    server_port: u16,
 ) {
-    let Some(key) = header_value(&request, "Sec-WebSocket-Key") else {
-        websocket_bad_request(request);
-        return;
-    };
-    if header_value(&request, "Sec-WebSocket-Version").as_deref() != Some("13") {
-        websocket_bad_request(request);
+    if stream.set_read_timeout(Some(WS_READ_TIMEOUT)).is_err() {
         return;
     }
-    let accept = websocket_accept(&key);
-    let response = Response::new_empty(tiny_http::StatusCode(101))
-        .with_header(Header::from_bytes("Upgrade", "websocket").unwrap())
-        .with_header(Header::from_bytes("Connection", "Upgrade").unwrap())
-        .with_header(Header::from_bytes("Sec-WebSocket-Accept", accept).unwrap());
-    let mut stream = request.upgrade("websocket", response);
-    #[cfg(unix)]
-    ws_set_read_timeout(&mut *stream, Duration::from_millis(10), server_port);
+    // `accept_unmasked_frames` preserves the previous transport's tolerance:
+    // it unmasked when present and accepted frames without a mask instead of
+    // failing the connection (browsers always mask; the old code tolerated).
+    let config = tungstenite::protocol::WebSocketConfig::default().accept_unmasked_frames(true);
+    // Same trust roots as `POST /api/*` (see [`decide_origin`]): a foreign
+    // page must not read the event stream or inject input frames through a
+    // socket — browsers always send `Origin` on WebSocket handshakes, so a
+    // present-but-foreign value is denied while absent stays allowed for
+    // non-browser clients.
+    let mut ws = match accept_hdr_with_config(
+        stream,
+        |request: &WsRequest, response: WsResponse| {
+            let origin = request
+                .headers()
+                .get("origin")
+                .and_then(|value| value.to_str().ok());
+            match decide_origin(origin, server_port) {
+                OriginDecision::Allow => Ok(response),
+                OriginDecision::Deny => {
+                    let mut denied: ErrorResponse = response.map(|_| None);
+                    *denied.status_mut() = StatusCode::FORBIDDEN;
+                    Err(denied)
+                }
+            }
+        },
+        Some(config),
+    ) {
+        Ok(ws) => ws,
+        // Tungstenite already wrote the rejection response.
+        Err(_) => return,
+    };
     let mut last_heartbeat = Instant::now();
 
-    while !stop.load(Ordering::Relaxed) {
-        // Poll for client frames without blocking the push loop. Data frames
-        // (opcode 0x1/0x2) carry browser `InputState` snapshots that are
-        // forwarded to the game thread.
-        match poll_client_frames(&mut *stream, &game_tx) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                // No frame available — continue to push.
-            }
-            Err(_) => return,
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
         }
-        let records = event_log
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .after(cursor);
-        if let Some(last) = records.last() {
-            cursor = last.sequence;
-            let payload = format_event_records(&records);
-            if write_websocket_text(&mut stream, &payload).is_err() {
-                return;
-            }
+        match poll_inbound(&mut ws, &game_tx) {
+            ServeAction::KeepServing => {}
+            ServeAction::StopServing => return,
         }
-        if last_heartbeat.elapsed() >= Duration::from_secs(15) {
-            if write_websocket_ping(&mut stream).is_err() {
+        if push_pending(&mut ws, &event_log, &mut cursor).is_err() {
+            return;
+        }
+        if last_heartbeat.elapsed() >= WS_HEARTBEAT_INTERVAL {
+            if ws.send(Message::Ping(Bytes::new())).is_err() {
                 return;
             }
             last_heartbeat = Instant::now();
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(WS_PUSH_INTERVAL);
     }
-    let _ = write_websocket_close(&mut stream, 1001);
+    let _ = ws.close(Some(CloseFrame {
+        code: CloseCode::Away,
+        reason: Utf8Bytes::from_static(""),
+    }));
+}
+
+/// Read one inbound message without blocking the push loop (the socket has
+/// `WS_READ_TIMEOUT`): forward data frames as `BrowserInput`, drive
+/// tungstenite's automatic pong/close replies, and report whether serving
+/// should continue.
+fn poll_inbound(ws: &mut EventsSocket, game_tx: &Sender<UiCommand>) -> ServeAction {
+    match ws.read() {
+        Ok(Message::Text(payload)) => {
+            forward_browser_input(payload.as_bytes(), game_tx);
+            ServeAction::KeepServing
+        }
+        Ok(Message::Binary(payload)) => {
+            forward_browser_input(&payload, game_tx);
+            ServeAction::KeepServing
+        }
+        // Pings are answered with a queued pong by tungstenite itself; the
+        // reply flushes on the next read/write. Pongs need no handling.
+        // `Frame` never surfaces from `read`.
+        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {
+            ServeAction::KeepServing
+        }
+        Ok(Message::Close(_)) => {
+            // Flush the queued close echo before dropping the socket.
+            let _ = ws.flush();
+            ServeAction::StopServing
+        }
+        Err(tungstenite::Error::Io(err))
+            if err.kind() == std::io::ErrorKind::WouldBlock
+                || err.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            // No frame available — the push loop continues. Partial frames
+            // stay buffered inside tungstenite and resume on the next read.
+            ServeAction::KeepServing
+        }
+        Err(_) => ServeAction::StopServing,
+    }
+}
+
+/// Forward one client data frame as a `BrowserInput` snapshot. Garbage
+/// payloads are dropped like on the `POST /api/input` endpoint.
+fn forward_browser_input(payload: &[u8], game_tx: &Sender<UiCommand>) {
+    if let Some(input) = parse_browser_input(payload) {
+        let _ = game_tx.send(UiCommand::Input { input });
+    }
+}
+
+/// Push replay records past `cursor` as one text frame. `Err` means the
+/// connection died; the caller terminates the handler (the client is
+/// expected to reconnect with its last cursor).
+fn push_pending(
+    ws: &mut EventsSocket,
+    event_log: &Arc<Mutex<EventLog>>,
+    cursor: &mut EventSeq,
+) -> Result<(), tungstenite::Error> {
+    let records = event_log
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .after(*cursor);
+    if let Some(last) = records.last() {
+        *cursor = last.sequence;
+        ws.send(Message::text(format_event_records(&records)))?;
+    }
+    Ok(())
+}
+
+/// Proxy one plain-HTTP connection to the internal tiny_http server.
+/// Byte-transparent in both directions, so HTTP semantics (keep-alive,
+/// framing, guards) stay exactly tiny_http's. Pump threads are transient:
+/// each exits on EOF or error, and a read-idle inherited from the sniff
+/// timeout reaps lingering keep-alive connections.
+fn proxy_http(client: TcpStream, internal_port: u16) {
+    let upstream = match TcpStream::connect(("127.0.0.1", internal_port)) {
+        Ok(upstream) => upstream,
+        Err(_) => return,
+    };
+    let (client_reader, client_writer) = match (client.try_clone(), client.try_clone()) {
+        (Ok(reader), Ok(writer)) => (reader, writer),
+        _ => return,
+    };
+    let (upstream_reader, upstream_writer) = match (upstream.try_clone(), upstream.try_clone()) {
+        (Ok(reader), Ok(writer)) => (reader, writer),
+        _ => return,
+    };
+    drop(client);
+    drop(upstream);
+    for (name, from, to) in [
+        ("remote-editor-proxy-up", client_reader, upstream_writer),
+        ("remote-editor-proxy-down", upstream_reader, client_writer),
+    ] {
+        let _ = thread::Builder::new()
+            .name(name.into())
+            .spawn(move || pump_one(from, to));
+    }
+}
+
+/// Copy bytes one direction until EOF or error. The sibling pump notices the
+/// closed socket and exits as well, so no joining is needed.
+fn pump_one(mut from: TcpStream, mut to: TcpStream) {
+    let _ = std::io::copy(&mut from, &mut to);
 }
 
 /// Poll the upgraded stream for any available client frames. Returns
@@ -347,322 +655,6 @@ fn serve_websocket(
 /// EOF), `Ok(false)` if no close was seen, or `Err` on I/O error.
 /// Handles control frames and forwards text/binary data frames as
 /// `BrowserInput` snapshots to `game_tx` (WS input channel, no polling).
-fn poll_client_frames(stream: &mut dyn ReadWrite, game_tx: &Sender<UiCommand>) -> io::Result<bool> {
-    loop {
-        match poll_one_frame(stream, game_tx) {
-            Ok(Some(true)) => return Ok(true),
-            Ok(Some(false)) => continue,
-            Ok(None) => return Ok(false),
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                return Ok(false);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-fn poll_one_frame(
-    stream: &mut dyn ReadWrite,
-    game_tx: &Sender<UiCommand>,
-) -> io::Result<Option<bool>> {
-    let Some((opcode, masked, len_byte)) = ws_read_header(stream)? else {
-        return Ok(None);
-    };
-    // ponytail: helper returns Err(WouldBlock) on timeout during ext reads — bubbled as Ok(false) above
-    let payload_len = ws_decode_len(stream, len_byte)?;
-    if payload_len == usize::MAX {
-        return Ok(Some(true));
-    }
-    let mask = ws_read_mask(stream, masked)?;
-    let payload = ws_read_payload(stream, payload_len, mask)?;
-    // Browser input channel: text/binary frames carry BrowserInput JSON.
-    if matches!(opcode, 0x1 | 0x2) {
-        if let Some(input) = parse_browser_input(&payload) {
-            let _ = game_tx.send(UiCommand::Input { input });
-        }
-        return Ok(Some(false));
-    }
-    Ok(Some(ws_dispatch_frame(stream, opcode, &payload)?))
-}
-
-fn ws_read_header(stream: &mut dyn ReadWrite) -> io::Result<Option<(u8, bool, u8)>> {
-    let mut hdr = [0u8; 2];
-    match stream.read(&mut hdr) {
-        Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
-        Ok(1) => {
-            let mut second = [0u8; 1];
-            match stream.read(&mut second) {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
-                Ok(1) => hdr[1] = second[0],
-                Ok(_) => unreachable!(),
-                Err(e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::TimedOut =>
-                {
-                    return Ok(None);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(2) => {}
-        Ok(_) => unreachable!(),
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
-            return Ok(None);
-        }
-        Err(e) => return Err(e),
-    }
-    Ok(Some((hdr[0] & 0x0F, hdr[1] & 0x80 != 0, hdr[1] & 0x7F)))
-}
-
-fn ws_decode_len(stream: &mut dyn ReadWrite, len_byte: u8) -> io::Result<usize> {
-    match len_byte {
-        126 => {
-            let mut ext = [0u8; 2];
-            read_exact_with_timeout(stream, &mut ext)?;
-            Ok(u16::from_be_bytes(ext) as usize)
-        }
-        127 => {
-            let mut ext = [0u8; 8];
-            read_exact_with_timeout(stream, &mut ext)?;
-            let len = u64::from_be_bytes(ext) as usize;
-            if len > 1_048_576 {
-                Ok(usize::MAX)
-            } else {
-                Ok(len)
-            }
-        }
-        n => Ok(n as usize),
-    }
-}
-
-fn ws_read_mask(stream: &mut dyn ReadWrite, masked: bool) -> io::Result<Option<[u8; 4]>> {
-    if !masked {
-        return Ok(None);
-    }
-    let mut key = [0u8; 4];
-    read_exact_with_timeout(stream, &mut key)?;
-    Ok(Some(key))
-}
-
-fn ws_read_payload(
-    stream: &mut dyn ReadWrite,
-    len: usize,
-    mask: Option<[u8; 4]>,
-) -> io::Result<Vec<u8>> {
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    let mut buf = vec![0u8; len];
-    read_exact_with_timeout(stream, &mut buf)?;
-    if let Some(key) = mask {
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b ^= key[i % 4];
-        }
-    }
-    Ok(buf)
-}
-
-fn ws_dispatch_frame(stream: &mut dyn ReadWrite, opcode: u8, payload: &[u8]) -> io::Result<bool> {
-    match opcode {
-        0x8 => {
-            let code = if payload.len() >= 2 {
-                u16::from_be_bytes([payload[0], payload[1]])
-            } else {
-                1000
-            };
-            if payload.len() >= 2 {
-                let _ = write_websocket_frame(stream, 0x88, payload);
-            } else {
-                let _ = write_websocket_close(stream, code);
-            }
-            Ok(true)
-        }
-        0x9 => {
-            let _ = write_websocket_frame(stream, 0x8A, payload);
-            Ok(false)
-        }
-        0xA => Ok(false),
-        // 0x1/0x2 handled in poll_one_frame as BrowserInput
-        _ => Ok(false),
-    }
-}
-
-#[cfg(unix)]
-fn ws_set_read_timeout(stream: &mut dyn ReadWrite, timeout: Duration, server_port: u16) {
-    // ponytail: only touch fds whose local port == server port — avoids poisoning client socket in tests
-    unsafe {
-        use std::os::unix::io::FromRawFd;
-        let ptr = &mut *stream as *mut dyn ReadWrite as *mut *mut u8;
-        let data = *ptr;
-        let mut seen = std::collections::HashSet::new();
-        for offset in (0..256).step_by(4) {
-            let fd = *(data.add(offset) as *const i32);
-            if !(3..512).contains(&fd) || !seen.insert(fd) {
-                continue;
-            }
-            let tcp = std::net::TcpStream::from_raw_fd(fd);
-            let ok = tcp
-                .local_addr()
-                .map(|a| a.port() == server_port)
-                .unwrap_or(false)
-                && tcp.peer_addr().is_ok();
-            if ok {
-                let _ = tcp.set_read_timeout(Some(timeout));
-            }
-            std::mem::forget(tcp);
-        }
-    }
-}
-#[cfg(not(unix))]
-fn ws_set_read_timeout(_stream: &mut dyn ReadWrite, _timeout: Duration, _server_port: u16) {}
-
-fn read_exact_with_timeout(stream: &mut dyn ReadWrite, buf: &mut [u8]) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < buf.len() {
-        match stream.read(&mut buf[offset..]) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
-            Ok(n) => offset += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-fn write_websocket_text<W: Write + ?Sized>(stream: &mut W, payload: &str) -> io::Result<()> {
-    write_websocket_frame(stream, 0x81, payload.as_bytes())
-}
-
-fn write_websocket_ping<W: Write + ?Sized>(stream: &mut W) -> io::Result<()> {
-    write_websocket_frame(stream, 0x89, &[])
-}
-
-fn write_websocket_close<W: Write + ?Sized>(stream: &mut W, code: u16) -> io::Result<()> {
-    write_websocket_frame(stream, 0x88, &code.to_be_bytes())
-}
-
-fn write_websocket_frame<W: Write + ?Sized>(
-    stream: &mut W,
-    first_byte: u8,
-    payload: &[u8],
-) -> io::Result<()> {
-    let length = payload.len();
-    let mut frame = Vec::with_capacity(length + 10);
-    frame.push(first_byte);
-    if length <= 125 {
-        frame.push(length as u8);
-    } else if length <= u16::MAX as usize {
-        frame.push(126);
-        frame.extend_from_slice(&(length as u16).to_be_bytes());
-    } else {
-        frame.push(127);
-        frame.extend_from_slice(&(length as u64).to_be_bytes());
-    }
-    frame.extend_from_slice(payload);
-    stream.write_all(&frame)?;
-    stream.flush()
-}
-
-fn websocket_accept(key: &str) -> String {
-    let mut input = key.as_bytes().to_vec();
-    input.extend_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    base64_encode(&sha1_digest(&input))
-}
-
-fn sha1_digest(input: &[u8]) -> [u8; 20] {
-    let mut message = input.to_vec();
-    let bit_length = (message.len() as u64).saturating_mul(8);
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_length.to_be_bytes());
-
-    let mut state = [
-        0x67452301_u32,
-        0xefcdab89,
-        0x98badcfe,
-        0x10325476,
-        0xc3d2e1f0,
-    ];
-    for chunk in message.chunks_exact(64) {
-        let mut words = [0_u32; 80];
-        for (index, word) in words[..16].iter_mut().enumerate() {
-            let offset = index * 4;
-            *word = u32::from_be_bytes([
-                chunk[offset],
-                chunk[offset + 1],
-                chunk[offset + 2],
-                chunk[offset + 3],
-            ]);
-        }
-        for index in 16..80 {
-            words[index] =
-                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
-                    .rotate_left(1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e] = state;
-        for (index, &word) in words.iter().enumerate() {
-            let (function, constant) = match index {
-                0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
-                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                _ => (b ^ c ^ d, 0xca62c1d6),
-            };
-            let temporary = a
-                .rotate_left(5)
-                .wrapping_add(function)
-                .wrapping_add(e)
-                .wrapping_add(constant)
-                .wrapping_add(word);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temporary;
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-    }
-
-    let mut digest = [0_u8; 20];
-    for (index, word) in state.into_iter().enumerate() {
-        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    digest
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut index = 0;
-    while index < bytes.len() {
-        let first = bytes[index];
-        let second = bytes.get(index + 1).copied();
-        let third = bytes.get(index + 2).copied();
-        output.push(TABLE[(first >> 2) as usize] as char);
-        output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
-        output.push(match second {
-            Some(second) => {
-                TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char
-            }
-            None => '=',
-        });
-        output.push(match third {
-            Some(third) => TABLE[(third & 0x3f) as usize] as char,
-            None => '=',
-        });
-        index += 3;
-    }
-    output
-}
-
 /// Drain incoming game events into `buffer`. "status"/"scene" snapshots only
 /// refresh the endpoint caches — they are not user-facing events, so they
 /// skip the buffer.
@@ -756,10 +748,332 @@ fn command_request_id(body: &str, next_request_id: &mut RequestId) -> RequestId 
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /api/* request guards: CSRF + DNS-rebinding + payload limits.
+// ═══════════════════════════════════════════════════════════════════════════
+// The editor server binds `127.0.0.1` without authentication, so any page
+// open in the browser could otherwise POST to it. Every mutating endpoint
+// re-checks three trust roots before touching the body: the `Host` header
+// (DNS-rebinding — the socket must be addressed as this loopback server,
+// not as `evil.com` resolving to 127.0.0.1), the `Origin` header (CSRF —
+// only the served editor page may drive the API from a browser;
+// non-browser clients send no `Origin` and stay allowed), and the
+// `Content-Type` (JSON only — blocks `text/plain` simple-request CSRF).
+// Bodies are read bounded ([`MAX_COMMAND_BYTES`]). GET endpoints are
+// read-only and intentionally unguarded.
+
+/// Maximum accepted body size for `POST /api/*` (1 MiB): command and input
+/// payloads are small JSON snapshots, so anything larger is rejected with
+/// 413 before parsing.
+pub const MAX_COMMAND_BYTES: usize = 1 << 20;
+
+/// Verdict of a loopback header check — an enum, never a bare `bool`, so
+/// call sites read as `decide_host(..) == OriginDecision::Deny`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginDecision {
+    /// The header is absent (non-browser client) or names this server.
+    Allow,
+    /// The header names a foreign origin/host: reject with 403.
+    Deny,
+}
+
+/// CSRF gate for `POST /api/*`: an absent `Origin` (curl, raw-socket
+/// clients) is allowed; a present one must exactly match the served editor
+/// page (`http://127.0.0.1:{port}` or `http://localhost:{port}`).
+#[must_use]
+pub fn decide_origin(origin: Option<&str>, server_port: u16) -> OriginDecision {
+    let Some(origin) = origin else {
+        return OriginDecision::Allow;
+    };
+    let origin = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+    if origin == format!("http://127.0.0.1:{server_port}")
+        || origin == format!("http://localhost:{server_port}")
+    {
+        OriginDecision::Allow
+    } else {
+        OriginDecision::Deny
+    }
+}
+
+/// DNS-rebinding gate for `POST /api/*`: an absent `Host` is allowed
+/// (plain HTTP/1.0 clients); a present one must be this loopback server
+/// (`127.0.0.1:{port}` or `localhost:{port}`).
+#[must_use]
+pub fn decide_host(host: Option<&str>, server_port: u16) -> OriginDecision {
+    let Some(host) = host else {
+        return OriginDecision::Allow;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host == format!("127.0.0.1:{server_port}") || host == format!("localhost:{server_port}") {
+        OriginDecision::Allow
+    } else {
+        OriginDecision::Deny
+    }
+}
+
+/// Why a `POST /api/*` request was rejected before reaching the engine:
+/// typed HTTP-guard failures with fixed status codes (never strings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ApiGuardError {
+    /// `Origin` names a foreign page (CSRF).
+    #[error("forbidden origin")]
+    ForbiddenOrigin,
+    /// `Host` is not this loopback server (DNS-rebinding).
+    #[error("forbidden host")]
+    ForbiddenHost,
+    /// `Content-Type` is not `application/json`.
+    #[error("unsupported media type: expected application/json")]
+    UnsupportedMediaType,
+    /// The body exceeds [`MAX_COMMAND_BYTES`].
+    #[error("request body exceeds 1048576 bytes")]
+    PayloadTooLarge,
+}
+
+impl ApiGuardError {
+    /// HTTP status code for the rejection: 403 for trust roots, 415 for a
+    /// wrong media type, 413 for an over-limit body.
+    #[must_use]
+    pub fn status_code(self) -> u16 {
+        match self {
+            Self::ForbiddenOrigin | Self::ForbiddenHost => 403,
+            Self::UnsupportedMediaType => 415,
+            Self::PayloadTooLarge => 413,
+        }
+    }
+}
+
+/// `Content-Type` gate for `POST /api/*`: requires `application/json`,
+/// tolerating parameters (`application/json; charset=utf-8`) and case
+/// differences. Absent or foreign types are rejected (415).
+pub fn check_content_type(value: Option<&str>) -> Result<(), ApiGuardError> {
+    let Some(value) = value else {
+        return Err(ApiGuardError::UnsupportedMediaType);
+    };
+    let mime = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if mime == "application/json" {
+        Ok(())
+    } else {
+        Err(ApiGuardError::UnsupportedMediaType)
+    }
+}
+
+/// Read a request body bounded by `limit` bytes: longer bodies are rejected
+/// with [`ApiGuardError::PayloadTooLarge`] without buffering the excess.
+/// Best-effort like the previous unbounded read — a torn stream yields
+/// whatever arrived (later rejected as invalid JSON), and non-UTF-8 bytes
+/// surface the same way.
+pub fn read_limited_body(reader: &mut dyn Read, limit: usize) -> Result<String, ApiGuardError> {
+    let mut body = String::new();
+    let _ = reader.take(limit as u64 + 1).read_to_string(&mut body);
+    if body.len() > limit {
+        Err(ApiGuardError::PayloadTooLarge)
+    } else {
+        Ok(body)
+    }
+}
+
+/// The three header/body gates for `POST /api/*`, in rejection order:
+/// `Host` (403), `Origin` (403), `Content-Type` (415). The body limit (413)
+/// applies when the body is actually read.
+fn check_post_guards(request: &Request, server_port: u16) -> Result<(), ApiGuardError> {
+    if decide_host(header_value(request, "Host").as_deref(), server_port) == OriginDecision::Deny {
+        return Err(ApiGuardError::ForbiddenHost);
+    }
+    if decide_origin(header_value(request, "Origin").as_deref(), server_port)
+        == OriginDecision::Deny
+    {
+        return Err(ApiGuardError::ForbiddenOrigin);
+    }
+    check_content_type(header_value(request, "Content-Type").as_deref())
+}
+
+/// JSON rejection body for a guard failure, carrying its status code.
+fn guard_response(error: ApiGuardError) -> Response<Cursor<Vec<u8>>> {
+    let body = serde_json::json!({"accepted": false, "error": error.to_string()}).to_string();
+    Response::from_string(body)
+        .with_status_code(error.status_code())
+        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scene-path sandbox: `save_scene`/`load_scene` stay in assets/ or editor/.
+// ═══════════════════════════════════════════════════════════════════════════
+// Validation lives in two places, deliberately: the HTTP backend drops
+// escaping paths fail-fast in [`build_command`] (never queued), and the
+// session re-resolves every path on execution (defense in depth — direct
+// `UiCommand` senders bypass the HTTP edge). Both sides share [`ScenePath`].
+
+/// Validated scene-file roots: `<workspace>/assets` plus
+/// `<workspace>/editor`. The only directories `save_scene`/`load_scene`
+/// may read or write.
+#[derive(Debug, Clone)]
+pub struct SceneRoots {
+    root: PathBuf,
+    assets: PathBuf,
+    editor: PathBuf,
+}
+
+impl SceneRoots {
+    /// Roots anchored at `workspace_root`.
+    #[must_use]
+    pub fn new(workspace_root: &Path) -> Self {
+        Self {
+            root: workspace_root.to_path_buf(),
+            assets: workspace_root.join("assets"),
+            editor: workspace_root.join("editor"),
+        }
+    }
+
+    /// Production roots: the workspace this crate was compiled in (the same
+    /// `../../` convention as [`assets_root`]).
+    #[must_use]
+    pub fn workspace_defaults() -> Self {
+        Self::new(&workspace_root())
+    }
+}
+
+/// Workspace root anchor: this crate lives at `crates/editor-backend`, so
+/// its manifest dir is two levels below the root.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Why a scene `path` was rejected: typed, never a plain string or panic.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScenePathError {
+    /// The `path` field was empty.
+    #[error("scene path is empty")]
+    Empty,
+    /// The resolved path leaves `<workspace>/assets` and `<workspace>/editor`.
+    #[error("scene path escapes the sandbox (<workspace>/assets, <workspace>/editor): {path}")]
+    OutsideSandbox {
+        /// The raw user-supplied path (for diagnostics, never joined blindly).
+        path: String,
+    },
+}
+
+/// A scene-file path validated to stay inside [`SceneRoots`].
+///
+/// Construction is the check: [`ScenePath::resolve`] joins a user-supplied
+/// `save_scene`/`load_scene` `path` onto the workspace root (absolute inputs
+/// are kept as-is), normalizes `.`/`..` lexically, and requires the result
+/// to sit under `<workspace>/assets` or `<workspace>/editor` — a
+/// component-wise prefix comparison, so `editor-evil/` never matches
+/// `editor/`. Existing path prefixes are additionally canonicalized
+/// (symlink hardening); not-yet-existing files keep the lexical verdict so
+/// `save_scene` can create them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenePath(PathBuf);
+
+impl ScenePath {
+    /// Validate `raw` against `roots`. See the type docs for the checks.
+    ///
+    /// # Errors
+    ///
+    /// [`ScenePathError::Empty`] for an empty input, [`ScenePathError::OutsideSandbox`]
+    /// when the resolved path is not under either sandbox root.
+    pub fn resolve(roots: &SceneRoots, raw: &str) -> Result<Self, ScenePathError> {
+        if raw.is_empty() {
+            return Err(ScenePathError::Empty);
+        }
+        let candidate = if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            roots.root.join(raw)
+        };
+        let normalized = lexical_normalize(&candidate);
+        let assets = lexical_normalize(&roots.assets);
+        let editor = lexical_normalize(&roots.editor);
+        if !normalized.starts_with(&assets) && !normalized.starts_with(&editor) {
+            return Err(ScenePathError::OutsideSandbox {
+                path: raw.to_owned(),
+            });
+        }
+        if canonical_escapes(&assets, &editor, &normalized) {
+            return Err(ScenePathError::OutsideSandbox {
+                path: raw.to_owned(),
+            });
+        }
+        Ok(Self(normalized))
+    }
+
+    /// The validated absolute path, for filesystem use.
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Collapse `.`/`..`/duplicate separators without touching the filesystem
+/// (the target may not exist yet for `save_scene`). A `..` that would climb
+/// past the filesystem root is preserved, so the sandbox prefix check
+/// below rejects it.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Symlink hardening for a lexically approved candidate: canonicalize the
+/// nearest existing ancestor and require it under a canonical root.
+/// Layouts that cannot be verified (missing roots or ancestors) keep the
+/// lexical verdict instead of failing closed on ordinary new files.
+fn canonical_escapes(assets: &Path, editor: &Path, candidate: &Path) -> bool {
+    let canonical_roots: Vec<PathBuf> = [assets, editor]
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .collect();
+    if canonical_roots.is_empty() {
+        return false;
+    }
+    let mut current = candidate.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if current.exists() {
+            let Ok(canonical) = fs::canonicalize(&current) else {
+                return false;
+            };
+            let mut full = canonical;
+            for component in tail.iter().rev() {
+                full.push(component);
+            }
+            return !canonical_roots.iter().any(|root| full.starts_with(root));
+        }
+        let Some(name) = current.file_name() else {
+            return false;
+        };
+        tail.push(name.to_os_string());
+        current.pop();
+    }
+}
+
 /// Serve one HTTP request. `/api/command` posts are validated, forwarded to
 /// the game thread and acknowledged synchronously; snapshot responses carry
 /// transport sequence metadata; everything else is answered from current
 /// server state.
+///
+/// `server_port` is the bound loopback port: `POST /api/*` requests are
+/// gated on it (see [`decide_host`]/[`decide_origin`]).
 fn route_request(
     root: &Path,
     request: &mut Request,
@@ -767,6 +1081,7 @@ fn route_request(
     snapshots: &Snapshots,
     game_tx: &Sender<UiCommand>,
     next_request_id: &mut RequestId,
+    server_port: u16,
 ) -> Response<Cursor<Vec<u8>>> {
     let url = request.url().to_string();
     let method = request.method().as_str().to_string();
@@ -786,16 +1101,26 @@ fn route_request(
             json_response(&body)
         }
         ("POST", "/api/command") => {
-            let mut body = String::new();
-            let _ = request.as_reader().read_to_string(&mut body);
+            if let Err(guard) = check_post_guards(request, server_port) {
+                return guard_response(guard);
+            }
+            let body = match read_limited_body(request.as_reader(), MAX_COMMAND_BYTES) {
+                Ok(body) => body,
+                Err(guard) => return guard_response(guard),
+            };
             let request_id = command_request_id(&body, next_request_id);
             let ack = post_command(&body, game_tx, request_id);
             let ack_body = command_ack_json(&ack);
             json_response(&ack_body)
         }
         ("POST", "/api/input") => {
-            let mut body = String::new();
-            let _ = request.as_reader().read_to_string(&mut body);
+            if let Err(guard) = check_post_guards(request, server_port) {
+                return guard_response(guard);
+            }
+            let body = match read_limited_body(request.as_reader(), MAX_COMMAND_BYTES) {
+                Ok(body) => body,
+                Err(guard) => return guard_response(guard),
+            };
             if let Some(input) = parse_browser_input(body.as_bytes()) {
                 let _ = game_tx.send(UiCommand::Input { input });
                 json_response(r#"{"accepted":true}"#)
@@ -910,9 +1235,25 @@ pub fn parse_command_payload(body: &str) -> Option<UiCommand> {
 /// Custom pass-through keyed by the typed [`EditorCommand`] tag.
 /// Malformed `set_component` shapes are dropped (`None`) like any garbage
 /// on this endpoint.
+///
+/// `save_scene`/`load_scene` additionally fail fast on sandbox violations:
+/// a `path` escaping `<workspace>/assets` or `<workspace>/editor` is
+/// dropped here and never queued; the session re-validates on execution
+/// (defense in depth). An absent or non-string `path` falls through to the
+/// session default.
 fn build_command(cmd_type: &str, data: Option<&serde_json::Value>) -> Option<UiCommand> {
     if cmd_type == EditorCommand::SetComponent.as_str() {
         return parse_set_component(data);
+    }
+    if cmd_type == "save_scene" || cmd_type == "load_scene" {
+        let raw = data
+            .and_then(|value| value.get("path"))
+            .and_then(|path| path.as_str());
+        if let Some(raw) = raw
+            && ScenePath::resolve(&SceneRoots::workspace_defaults(), raw).is_err()
+        {
+            return None;
+        }
     }
     let json_data = data.map(|v| v.to_string()).unwrap_or_default();
     Some(UiCommand::Custom {
@@ -1584,35 +1925,110 @@ mod tests {
         assert_eq!(value[0]["EntityCreated"]["entity_id"], 4);
     }
 
+    // ── sniff_route ────────────────────────────────────────────────────────
+
     #[test]
-    fn websocket_accept_matches_rfc6455_example() {
+    fn sniff_route_splits_events_stream_from_plain_http() {
+        let stream = b"GET /api/events?after=41 HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
         assert_eq!(
-            websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
-            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+            sniff_route(stream),
+            Some(ConnectionRoute::EventsStream {
+                cursor: EventSeq::new(41)
+            })
         );
+        // Same path without the upgrade header → plain HTTP (the polling
+        // fallback serves it).
+        let http =
+            b"GET /api/events?after=41 HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+        assert_eq!(sniff_route(http), Some(ConnectionRoute::Http));
+        // Other paths never upgrade, even with the header present.
+        let other = b"GET /api/scene HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n\r\n";
+        assert_eq!(sniff_route(other), Some(ConnectionRoute::Http));
+        // A lookalike path prefix must not upgrade either.
+        let prefix = b"GET /api/events2 HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n\r\n";
+        assert_eq!(sniff_route(prefix), Some(ConnectionRoute::Http));
+        // Header names and values are case-insensitive; no cursor → zero.
+        let mixed = b"GET /api/events HTTP/1.1\r\nHost: x\r\nuPgRaDe: WeBsOcKeT\r\n\r\n";
+        assert_eq!(
+            sniff_route(mixed),
+            Some(ConnectionRoute::EventsStream {
+                cursor: EventSeq::new(0)
+            })
+        );
+        // Incomplete head → None (the caller peeks for more bytes).
+        assert_eq!(
+            sniff_route(b"GET /api/events?after=1 HTTP/1.1\r\nHost: x\r\n"),
+            None
+        );
+        // Complete garbage → None as well (bounded by the caller's timeout).
+        assert_eq!(sniff_route(b"\r\n\r\n"), None);
+    }
+
+    // ── tungstenite wire bytes ───────────────────────────────────────────
+    // The transport changed, the wire format must not: assert tungstenite
+    // emits byte-identical frames for the text/ping/close messages the
+    // server sends.
+
+    /// Write-only byte sink: tungstenite's `send` path never reads, so
+    /// `Read` always reports no data.
+    struct VecSink(Vec<u8>);
+
+    impl std::io::Read for VecSink {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "write-only sink",
+            ))
+        }
+    }
+
+    impl std::io::Write for VecSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn tungstenite_bytes(message: Message) -> Vec<u8> {
+        let mut ws = WebSocket::from_raw_socket(
+            VecSink(Vec::new()),
+            tungstenite::protocol::Role::Server,
+            None,
+        );
+        ws.send(message).expect("send into sink");
+        ws.into_inner().0
     }
 
     #[test]
-    fn websocket_text_frame_encodes_short_and_extended_lengths() {
-        let mut short = Vec::new();
-        write_websocket_text(&mut short, "hello").expect("short frame");
-        assert_eq!(short, vec![0x81, 5, b'h', b'e', b'l', b'l', b'o']);
+    fn tungstenite_text_frame_encodes_short_and_extended_lengths() {
+        assert_eq!(
+            tungstenite_bytes(Message::text("hello")),
+            vec![0x81, 5, b'h', b'e', b'l', b'l', b'o']
+        );
 
-        let mut medium = Vec::new();
-        write_websocket_text(&mut medium, &"x".repeat(126)).expect("medium frame");
+        let medium = tungstenite_bytes(Message::text("x".repeat(126)));
         assert_eq!(&medium[..4], &[0x81, 126, 0, 126]);
         assert_eq!(medium.len(), 4 + 126);
     }
 
     #[test]
-    fn websocket_control_frames_encode_ping_and_normal_close() {
-        let mut ping = Vec::new();
-        write_websocket_ping(&mut ping).expect("ping frame");
-        assert_eq!(ping, vec![0x89, 0]);
+    fn tungstenite_control_frames_encode_ping_and_away_close() {
+        assert_eq!(
+            tungstenite_bytes(Message::Ping(Bytes::new())),
+            vec![0x89, 0]
+        );
 
-        let mut close = Vec::new();
-        write_websocket_close(&mut close, 1001).expect("close frame");
-        assert_eq!(close, vec![0x88, 2, 0x03, 0xe9]);
+        assert_eq!(
+            tungstenite_bytes(Message::Close(Some(CloseFrame {
+                code: CloseCode::Away,
+                reason: Utf8Bytes::from_static(""),
+            }))),
+            vec![0x88, 2, 0x03, 0xe9]
+        );
     }
 
     // ── drain_game_events ──────────────────────────────────────────────────
@@ -1661,6 +2077,174 @@ mod tests {
         // cannot easily inject args without affecting the real process; we
         // at least verify the env + default path resolve without panicking.
         let _ = assets_root();
+    }
+
+    // ── POST guards: Origin / Host / Content-Type / body limit ────────────
+
+    #[test]
+    fn origin_decision_allows_editor_and_non_browser_clients() {
+        assert_eq!(decide_origin(None, 3420), OriginDecision::Allow);
+        assert_eq!(
+            decide_origin(Some("http://127.0.0.1:3420"), 3420),
+            OriginDecision::Allow
+        );
+        assert_eq!(
+            decide_origin(Some("http://localhost:3420"), 3420),
+            OriginDecision::Allow
+        );
+    }
+
+    #[test]
+    fn origin_decision_denies_foreign_pages() {
+        assert_eq!(
+            decide_origin(Some("http://evil.com"), 3420),
+            OriginDecision::Deny
+        );
+        assert_eq!(
+            decide_origin(Some("http://127.0.0.1:9999"), 3420),
+            OriginDecision::Deny
+        );
+        assert_eq!(
+            decide_origin(Some("https://localhost:3420"), 3420),
+            OriginDecision::Deny
+        );
+        assert_eq!(decide_origin(Some("null"), 3420), OriginDecision::Deny);
+    }
+
+    #[test]
+    fn host_decision_denies_rebinding() {
+        assert_eq!(decide_host(None, 3420), OriginDecision::Allow);
+        assert_eq!(
+            decide_host(Some("127.0.0.1:3420"), 3420),
+            OriginDecision::Allow
+        );
+        assert_eq!(
+            decide_host(Some("localhost:3420"), 3420),
+            OriginDecision::Allow
+        );
+        assert_eq!(decide_host(Some("evil.com"), 3420), OriginDecision::Deny);
+        assert_eq!(
+            decide_host(Some("127.0.0.1:9999"), 3420),
+            OriginDecision::Deny
+        );
+    }
+
+    #[test]
+    fn content_type_requires_json() {
+        assert!(check_content_type(Some("application/json")).is_ok());
+        assert!(check_content_type(Some("application/json; charset=utf-8")).is_ok());
+        assert!(check_content_type(Some("Application/JSON")).is_ok());
+        assert_eq!(
+            check_content_type(Some("text/plain")),
+            Err(ApiGuardError::UnsupportedMediaType)
+        );
+        assert_eq!(
+            check_content_type(Some("application/x-www-form-urlencoded")),
+            Err(ApiGuardError::UnsupportedMediaType)
+        );
+        assert_eq!(
+            check_content_type(None),
+            Err(ApiGuardError::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn guard_errors_map_to_fixed_status_codes() {
+        assert_eq!(ApiGuardError::ForbiddenOrigin.status_code(), 403);
+        assert_eq!(ApiGuardError::ForbiddenHost.status_code(), 403);
+        assert_eq!(ApiGuardError::UnsupportedMediaType.status_code(), 415);
+        assert_eq!(ApiGuardError::PayloadTooLarge.status_code(), 413);
+    }
+
+    #[test]
+    fn limited_body_read_accepts_small_and_rejects_oversized() {
+        let mut small = std::io::Cursor::new(b"{}".to_vec());
+        assert_eq!(
+            read_limited_body(&mut small, MAX_COMMAND_BYTES).expect("small body"),
+            "{}"
+        );
+        let big = vec![b'a'; MAX_COMMAND_BYTES + 1];
+        let mut cursor = std::io::Cursor::new(big);
+        assert_eq!(
+            read_limited_body(&mut cursor, MAX_COMMAND_BYTES),
+            Err(ApiGuardError::PayloadTooLarge)
+        );
+    }
+
+    // ── ScenePath sandbox ────────────────────────────────────────────────
+
+    fn sandbox_roots(tag: &str) -> (SceneRoots, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ornis-sandbox-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("assets")).expect("sandbox assets");
+        fs::create_dir_all(dir.join("editor")).expect("sandbox editor");
+        (SceneRoots::new(&dir), dir)
+    }
+
+    #[test]
+    fn scene_path_accepts_assets_and_editor_paths() {
+        let (roots, dir) = sandbox_roots("accept");
+        for raw in [
+            "editor/scene.ron",
+            "assets/scene.ron",
+            "assets/sub/nested.ron",
+        ] {
+            let resolved = ScenePath::resolve(&roots, raw).expect("legit path resolves");
+            assert!(resolved.as_path().is_absolute(), "{raw}");
+        }
+        let absolute = dir.join("editor").join("scene.ron");
+        let resolved =
+            ScenePath::resolve(&roots, &absolute.to_string_lossy()).expect("absolute inside");
+        assert_eq!(resolved.as_path(), absolute);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scene_path_rejects_traversal_and_outside_absolute_paths() {
+        let (roots, dir) = sandbox_roots("reject");
+        for raw in [
+            "../secret.ron",
+            "../../etc/passwd",
+            "editor/../../secret.ron",
+            "assets/../editor/../../secret.ron",
+            "/etc/passwd",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    ScenePath::resolve(&roots, raw),
+                    Err(ScenePathError::OutsideSandbox { .. } | ScenePathError::Empty)
+                ),
+                "{raw} must be rejected"
+            );
+        }
+        let outside = std::env::temp_dir().join("ornis-sandbox-outside.ron");
+        assert!(matches!(
+            ScenePath::resolve(&roots, &outside.to_string_lossy()),
+            Err(ScenePathError::OutsideSandbox { .. })
+        ));
+        // A sibling that merely shares a name prefix is not inside.
+        let evil = format!("{}-evil/x.ron", dir.join("editor").display());
+        assert!(matches!(
+            ScenePath::resolve(&roots, &evil),
+            Err(ScenePathError::OutsideSandbox { .. })
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_command_drops_escaping_scene_paths_fail_fast() {
+        let traversal = serde_json::json!({"path": "../../secret.ron"});
+        assert!(build_command("save_scene", Some(&traversal)).is_none());
+        let absolute = serde_json::json!({"path": "/etc/passwd"});
+        assert!(build_command("load_scene", Some(&absolute)).is_none());
+        // Legit and default paths still pass through to the session check.
+        let legit = serde_json::json!({"path": "editor/scene.ron"});
+        assert!(build_command("save_scene", Some(&legit)).is_some());
+        assert!(build_command("load_scene", None).is_some());
+        // Unrelated commands are untouched by the sandbox.
+        let other = serde_json::json!({"path": "../../secret.ron"});
+        assert!(build_command("ping", Some(&other)).is_some());
     }
 
     // ── helpers ────────────────────────────────────────────────────────────

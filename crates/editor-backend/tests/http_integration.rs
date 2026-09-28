@@ -52,13 +52,39 @@ fn http_get(port: u16, path: &str) -> (u16, String) {
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> (u16, String) {
+    http_post_with_headers(
+        port,
+        path,
+        &[
+            ("Host", &format!("127.0.0.1:{port}")),
+            ("Content-Type", "application/json"),
+        ],
+        body.as_bytes(),
+    )
+}
+
+/// Raw POST with explicit headers (no defaults): the loopback server
+/// derives its `Host` expectation from the bound port, so callers pass it
+/// explicitly (`Host: 127.0.0.1:{port}` for legit clients, anything else to
+/// probe the DNS-rebinding gate). Absent `Origin` models non-browser
+/// clients (curl, raw sockets).
+fn http_post_with_headers(
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(req.as_bytes()).expect("write");
+    let mut req = format!("POST {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        req.push_str(&format!("{name}: {value}\r\n"));
+    }
+    req.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ));
+    stream.write_all(req.as_bytes()).expect("write headers");
+    stream.write_all(body).expect("write body");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("timeout");
@@ -126,6 +152,81 @@ fn remote_editor_http_endpoints() {
     // Unknown path → 404.
     let (status, _) = http_get(port, "/no-such-thing");
     assert_eq!(status, 404);
+
+    editor.stop();
+}
+
+#[test]
+fn remote_editor_post_guards_reject_untrusted_requests() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (_ev_tx, ev_rx) = unbounded::<GameEvent>();
+
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let host = format!("127.0.0.1:{port}");
+    let origin = format!("http://127.0.0.1:{port}");
+    let body = br#"{"type":"ping"}"#;
+
+    // Legit editor-page request (served origin) passes.
+    let (code, _) = http_post_with_headers(
+        port,
+        "/api/command",
+        &[
+            ("Host", host.as_str()),
+            ("Content-Type", "application/json"),
+            ("Origin", origin.as_str()),
+        ],
+        body,
+    );
+    assert_eq!(code, 200);
+
+    // Foreign Origin (CSRF from another page) → 403.
+    let (code, _) = http_post_with_headers(
+        port,
+        "/api/command",
+        &[
+            ("Host", host.as_str()),
+            ("Content-Type", "application/json"),
+            ("Origin", "http://evil.com"),
+        ],
+        body,
+    );
+    assert_eq!(code, 403);
+
+    // Foreign Host (DNS-rebinding) → 403.
+    let (code, _) = http_post_with_headers(
+        port,
+        "/api/command",
+        &[("Host", "evil.com"), ("Content-Type", "application/json")],
+        body,
+    );
+    assert_eq!(code, 403);
+
+    // Wrong or missing media type → 415.
+    let (code, _) = http_post_with_headers(
+        port,
+        "/api/command",
+        &[("Host", host.as_str()), ("Content-Type", "text/plain")],
+        body,
+    );
+    assert_eq!(code, 415);
+    let (code, _) = http_post_with_headers(port, "/api/command", &[("Host", host.as_str())], body);
+    assert_eq!(code, 415);
+
+    // Oversized body → 413 (the same guards cover /api/input).
+    let big = vec![b'a'; (1 << 20) + 1];
+    let (code, _) = http_post_with_headers(
+        port,
+        "/api/input",
+        &[
+            ("Host", host.as_str()),
+            ("Content-Type", "application/json"),
+        ],
+        &big,
+    );
+    assert_eq!(code, 413);
 
     editor.stop();
 }
@@ -221,7 +322,19 @@ fn remote_editor_websocket_stream_replays_events() {
         handshake.starts_with("HTTP/1.1 101"),
         "handshake: {handshake}"
     );
-    assert!(handshake.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+    // Header names are case-insensitive (RFC 9110 §5.1); tungstenite
+    // serializes them lowercase while the accept *value* (base64,
+    // case-sensitive) must match the RFC 6455 test vector exactly.
+    assert!(
+        handshake
+            .to_ascii_lowercase()
+            .contains("sec-websocket-accept:"),
+        "handshake: {handshake}"
+    );
+    assert!(
+        handshake.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+        "handshake: {handshake}"
+    );
 
     ev_tx
         .send(GameEvent::CommandCompleted {
@@ -465,13 +578,93 @@ fn remote_editor_websocket_client_close_is_echoed_and_closes() {
         "connection must close after the close handshake"
     );
 
-    // Empty client close (no status code): the server synthesizes
-    // code 1000 instead of panicking or hanging.
+    // Empty client close (no status code): tungstenite echoes the empty
+    // close back instead of synthesizing a code (RFC 6455 permits omitting
+    // the status code; the old hand-rolled transport sent 1000 here).
     let mut stream = websocket_connect(port, "/api/events?after=0");
     send_masked_client_frame(&mut stream, 0x8, &[]);
-    let (code, reason) = read_server_close(&mut stream);
-    assert_eq!(code, 1000);
-    assert!(reason.is_empty());
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).expect("read close echo");
+    assert_eq!(header, [0x88, 0], "empty close is echoed empty");
+
+    editor.stop();
+}
+
+#[test]
+fn remote_editor_websocket_forwards_input_frames_to_game() {
+    let port = free_port();
+    let (cmd_tx, cmd_rx) = unbounded::<UiCommand>();
+    let (_ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    // A masked text frame carrying a `BrowserInput` snapshot (the wasm
+    // viewport's live input lane) must reach the game thread as `Input`.
+    let mut stream = websocket_connect(port, "/api/events?after=0");
+    send_masked_client_frame(&mut stream, 0x1, br#"{"pressed_keys":[87]}"#);
+    match cmd_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("input forwarded to game")
+    {
+        UiCommand::Input { input } => assert_eq!(input.pressed_keys, vec![87]),
+        _ => panic!("expected Input command"),
+    }
+
+    editor.stop();
+}
+
+/// Read one HTTP response head (up to the blank line) from `stream`.
+fn read_response_head(stream: &mut TcpStream) -> String {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("read response head");
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).expect("response headers")
+}
+
+/// A foreign `Origin` on the WebSocket handshake must be rejected (403):
+/// otherwise any open page could read the event stream and inject input
+/// frames past the `POST /api/*` guards. Absent `Origin` (non-browser
+/// clients) and the editor origin stay accepted — see `websocket_connect`.
+#[test]
+fn remote_editor_websocket_rejects_foreign_origin() {
+    let port = free_port();
+    let (cmd_tx, _cmd_rx) = unbounded::<UiCommand>();
+    let (_ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect WebSocket");
+    stream
+        .write_all(
+            b"GET /api/events?after=0 HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://evil.example\r\n\r\n",
+        )
+        .expect("write WebSocket handshake");
+    let head = read_response_head(&mut stream);
+    assert!(
+        head.starts_with("HTTP/1.1 403"),
+        "foreign origin must be rejected: {head}"
+    );
+
+    // The editor's own origin on the same server stays accepted.
+    let mut good = TcpStream::connect(("127.0.0.1", port)).expect("connect WebSocket");
+    good.write_all(
+        format!(
+            "GET /api/events?after=0 HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: http://127.0.0.1:{port}\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .expect("write WebSocket handshake");
+    let head = read_response_head(&mut good);
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "editor origin must be accepted: {head}"
+    );
 
     editor.stop();
 }
