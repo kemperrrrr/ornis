@@ -75,14 +75,28 @@ fn probe_browser() -> Option<String> {
 
 /// `true` when a playwright browser cache already exists for this user.
 fn playwright_cached() -> bool {
-    let mut dirs = vec![dirs_home().join(".cache/ms-playwright")];
-    #[cfg(target_os = "macos")]
-    dirs.push(dirs_home().join("Library/Caches/ms-playwright"));
-    #[cfg(windows)]
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(local).join("ms-playwright"));
-    }
+    let home = dirs_home();
+    // `extend` (not conditional `push`) keeps the `mut` live on every
+    // platform: Linux probes exactly one root, macOS/Windows add theirs.
+    let mut dirs = vec![home.join(".cache/ms-playwright")];
+    dirs.extend(platform_cache_extra(&home));
     dirs.iter().any(|d| d.is_dir())
+}
+
+/// At most one extra playwright root beyond the common Unix cache dir:
+/// macOS system cache, or Windows `%LOCALAPPDATA%` (missing var → none).
+fn platform_cache_extra(home: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return Some(home.join("Library/Caches/ms-playwright"));
+    #[cfg(windows)]
+    return std::env::var("LOCALAPPDATA")
+        .map(|local| PathBuf::from(local).join("ms-playwright"))
+        .ok();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = home;
+        None
+    }
 }
 
 fn dirs_home() -> PathBuf {
