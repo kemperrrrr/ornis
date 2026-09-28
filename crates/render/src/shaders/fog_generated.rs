@@ -13,6 +13,10 @@
 //! math as [`crate::frame_passes::apply_fog`]. The `world_position` layer
 //! is NOT the source: it only stores xy (`Rg16Float`, z comes from depth
 //! anyway), so sampling depth directly is authoritative.
+//!
+//! Placement: this stage always reads `hdr` and writes `target` (see
+//! [`crate::frame_passes::FogPlacement`] — after `composite` is
+//! recommended; the composite clear discards a before-`composite` write).
 
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;

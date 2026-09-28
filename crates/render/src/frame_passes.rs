@@ -714,14 +714,68 @@ pub fn apply_fog(color: [f32; 3], depth: f32, fog: FogState) -> [f32; 3] {
     ]
 }
 
+/// Where an opt-in [`FogPass`] node sits relative to the `composite`
+/// pass: the owner's wiring decision as a type, not a bool flag.
+///
+/// The composite pass clears `target` and draws one fullscreen mix over
+/// it, while an enabled [`FogPass`] loads `target` and draws fogged `hdr`
+/// over that — so placement decides whose output is presented:
+/// [`FogPlacement::AfterComposite`] (recommended) presents fogged `hdr`;
+/// [`FogPlacement::BeforeComposite`] has its `target` write discarded by
+/// the composite clear (node present in the plan, no visible effect).
+/// Either way fog needs the deferred HDR layer: on
+/// [`Technique::Forward`](crate::frame_exec::Technique::Forward) plans
+/// `hdr` is never written and compiling the layout fails
+/// (read-before-write). Default plans register no fog at all — see
+/// [`FogWiring`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FogPlacement {
+    /// Fog node before `composite`: its `target` write is discarded by
+    /// the composite clear. Only plan shape changes (pass order); the
+    /// presented frame is identical to no fog.
+    BeforeComposite,
+    /// Fog node after `composite` (recommended): the fogged-`hdr` draw
+    /// is the presented frame. Forward-layer and bloom contributions
+    /// already mixed into `target` are replaced by fogged `hdr` — the
+    /// owner's call on hybrid/bloomed plans.
+    AfterComposite,
+}
+
+/// Opt-in fog wiring for [`RenderFrame3D`](crate::frame_exec::RenderFrame3D):
+/// placement plus state in one value. Dropping it registers nothing —
+/// default plans stay fog-free — so the constructor is `#[must_use]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogWiring {
+    /// Where the fog node sits relative to `composite`.
+    pub placement: FogPlacement,
+    /// Fog state carried by the node (`Disabled` records no commands:
+    /// pixel-identical to no fog).
+    pub state: FogState,
+}
+
+impl FogWiring {
+    /// Wiring value from placement plus state.
+    #[must_use]
+    pub fn new(placement: FogPlacement, state: FogState) -> Self {
+        Self { placement, state }
+    }
+}
+
 /// Optional distance-fog pass over the deferred HDR layer.
 ///
-/// Never registered by [`crate::frame_exec::RenderFrame3D`] — opt in by
-/// registering `FogPass` with an enabled state. With
-/// [`FogState::Disabled`] (default) [`run`](FramePass::run) records no
-/// commands (pixel-identical no-op); with
+/// Never registered by [`crate::frame_exec::RenderFrame3D`] by default —
+/// opt in with [`FogWiring`] (placement + state as one typed decision;
+/// see [`RenderFrame3D::new_with_fog`](crate::frame_exec::RenderFrame3D::new_with_fog)).
+/// With [`FogState::Disabled`] (default) [`run`](FramePass::run) records
+/// no commands (pixel-identical no-op, same as not registered); with
 /// [`FogState::Enabled`] it runs the GPU mix from
 /// [`crate::shaders::fog_generated`] (same math as [`apply_fog`]).
+///
+/// Depth source: the g-buffer `Depth` buffer (hardware `Depth32Float`,
+/// linearized on the GPU — see [`crate::shaders::fog_generated`]).
+/// Placement recommendation: [`FogPlacement::AfterComposite`] on deferred
+/// plans without bloom (the composite output there derives solely from
+/// `hdr`, so fog sees the same layer it mixes).
 pub struct FogPass {
     state: FogState,
 }

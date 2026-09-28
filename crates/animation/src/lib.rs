@@ -39,7 +39,7 @@ pub mod skinning;
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
-    blend_vertex_reference,
+    blend_vertex_reference, canonical_staged_weights,
 };
 
 /// One animation key: the channel value at `time` seconds from clip start.

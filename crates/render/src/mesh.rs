@@ -61,6 +61,77 @@ impl Vertex {
     }
 }
 
+/// GPU skinned-vertex layout: bind-pose [`Vertex`] attributes (locations
+/// 0–3, same offsets) plus joint influences — joints as `vec4<u32>` at
+/// location 4, canonicalized weights as `vec4<f32>` at location 5.
+///
+/// Matches the skinned vertex stage input (`SkinnedVertexInput` in
+/// [`crate::skinning`]: locations 0–3 mirror the classic attributes, 4–5
+/// carry the influences): one interleaved buffer, so a skinned [`Mesh`]
+/// reuses the same upload/draw shape as a classic one (only the pipeline,
+/// bind group and buffer contents differ).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkinnedVertex {
+    /// Bind-pose position.
+    pub position: [f32; 3],
+    /// Bind-pose shading normal.
+    pub normal: [f32; 3],
+    /// Texture coordinates in [0, 1] (passthrough).
+    pub uv: [f32; 2],
+    /// Bind-pose surface tangent.
+    pub tangent: [f32; 3],
+    /// Influencing joints (top-4, `< joint count` — validated at staging).
+    pub joints: [u32; 4],
+    /// Influence weights (canonicalized at staging, see
+    /// [`ornis_animation::canonical_staged_weights`]).
+    pub weights: [f32; 4],
+}
+
+impl SkinnedVertex {
+    /// wgpu vertex buffer layout matching this struct's memory layout.
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Uint32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<Vertex>() + std::mem::size_of::<[u32; 4]>())
+                        as wgpu::BufferAddress,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
 /// Generate a UV sphere with positions, normals, UVs and tangents, uploading
 /// it to `device`. `sectors`/`stacks` are clamped to at least 3/2 so degenerate
 /// arguments still produce valid geometry.
@@ -501,6 +572,38 @@ mod tests {
             );
             let stored = glam::Vec3::from_array(vertices[tri[0] as usize].normal);
             assert!(n.dot(stored) > 0.0, "cylinder winding: {tri:?}");
+        }
+    }
+
+    #[test]
+    fn skinned_vertex_shares_the_classic_prefix() {
+        // 44-byte classic prefix + 16-byte joints + 16-byte weights, no
+        // padding: the skinned stage reads locations 0–3 exactly like the
+        // classic input, then the influences at 4–5.
+        assert_eq!(std::mem::size_of::<Vertex>(), 44);
+        assert_eq!(std::mem::size_of::<SkinnedVertex>(), 76);
+        assert_eq!(std::mem::offset_of!(SkinnedVertex, position), 0);
+        assert_eq!(std::mem::offset_of!(SkinnedVertex, normal), 12);
+        assert_eq!(std::mem::offset_of!(SkinnedVertex, uv), 24);
+        assert_eq!(std::mem::offset_of!(SkinnedVertex, tangent), 32);
+        assert_eq!(std::mem::offset_of!(SkinnedVertex, joints), 44);
+        assert_eq!(std::mem::offset_of!(SkinnedVertex, weights), 60);
+        let desc = SkinnedVertex::desc();
+        assert_eq!(desc.array_stride, 76);
+        let attrs = desc.attributes;
+        assert_eq!(attrs.len(), 6);
+        let expected = [
+            (0u64, 0u32, wgpu::VertexFormat::Float32x3),
+            (12, 1, wgpu::VertexFormat::Float32x3),
+            (24, 2, wgpu::VertexFormat::Float32x2),
+            (32, 3, wgpu::VertexFormat::Float32x3),
+            (44, 4, wgpu::VertexFormat::Uint32x4),
+            (60, 5, wgpu::VertexFormat::Float32x4),
+        ];
+        for (attr, (offset, location, format)) in attrs.iter().zip(expected) {
+            assert_eq!(attr.offset, offset, "location {location} offset");
+            assert_eq!(attr.shader_location, location);
+            assert_eq!(attr.format, format);
         }
     }
 }

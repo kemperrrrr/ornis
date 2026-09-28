@@ -14,13 +14,19 @@
 //! the joint linear part for normals while the CPU path uses the
 //! inverse-transpose 3x3 (see
 //! [`blend_vertex_reference`](ornis_animation::blend_vertex_reference)),
-//! exact for rigid/uniform-scale joints only. Callers assert
+//! exact for rigid/uniform-scale joints only, and driver FMA fusion may
+//! move the last ulp on either side. Callers assert
 //! [`ornis_animation::CPU_GPU_TOLERANCE`], not equality.
 //!
-//! Slice note: extraction stages the palette bytes alongside the
-//! CPU-skinned vertices (renderer-compatible); the draw path binds the
-//! palette and switches to [`wgsl_vertex_source_skinned`] in a follow-up —
-//! the shader here already validates with naga and pins its shape.
+//! Draw-path contract: the renderer owns one skinned g-buffer pipeline
+//! (vertex [`wgsl_vertex_source_skinned`], classic fragment) plus
+//! depth-only skinned shadow pipelines, and a palette storage buffer of
+//! [`PALETTE_BYTE_SIZE`] slots. One entry draws through [`SkinnedDraw`]:
+//! [`SkinnedDraw::Cpu`] reuses the classic path (pre-skinned vertices,
+//! unchanged), [`SkinnedDraw::Gpu`] binds the palette slot
+//! ([`PaletteHandle`]) at binding 3 with interleaved
+//! [`SkinnedVertex`](crate::mesh::SkinnedVertex) buffers. Resolution is
+//! fallible ([`SkinBindError`]) — callers fall back to CPU, never panic.
 
 use glam::Mat4;
 use ornis_animation::{JointLimit, SkinError};
@@ -248,6 +254,176 @@ pub fn joint_palette_bytes(palette: &[Mat4]) -> Result<Vec<u8>, SkinError> {
     Ok(bytemuck::cast_slice(&joints).to_vec())
 }
 
+/// GPU slot of one staged [`PALETTE_BYTE_SIZE`] palette in the renderer's
+/// palette storage buffer.
+///
+/// Index newtype (like [`MaterialIdx`](crate::renderer::MaterialIdx)): slot
+/// `i` spans bytes `i * PALETTE_BYTE_SIZE..(i + 1) * PALETTE_BYTE_SIZE`.
+/// Handles come from the palette upload; [`Self::bound`] re-checks one
+/// against a staged count.
+#[repr(transparent)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod,
+    bytemuck::Zeroable,
+)]
+pub struct PaletteHandle(u32);
+
+impl PaletteHandle {
+    /// Wraps a raw palette slot index.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw palette slot index.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Palette slot index as `usize` for byte-offset math.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Byte offset of this slot in a packed palette buffer.
+    pub const fn byte_offset(self) -> u64 {
+        self.0 as u64 * PALETTE_BYTE_SIZE as u64
+    }
+
+    /// Bounds-checks this handle against `staged` uploaded slots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkinBindError::PaletteOverflow`] when the slot reaches
+    /// past the staged range — the caller falls back to the CPU path,
+    /// never an out-of-bounds bind.
+    pub const fn bound(self, staged: u32) -> Result<Self, SkinBindError> {
+        if self.0 < staged {
+            Ok(self)
+        } else {
+            Err(SkinBindError::PaletteOverflow {
+                count: self.0,
+                limit: staged,
+            })
+        }
+    }
+}
+
+impl From<u32> for PaletteHandle {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<PaletteHandle> for u32 {
+    fn from(h: PaletteHandle) -> Self {
+        h.0
+    }
+}
+
+impl From<PaletteHandle> for usize {
+    fn from(h: PaletteHandle) -> Self {
+        h.0 as usize
+    }
+}
+
+/// Draw-path decision for one skinned entry: blend on the host or in the
+/// vertex shader.
+///
+/// Typed replacement for `Option<bool>` plumbing: `Cpu` is the classic
+/// path (pre-skinned vertices through the classic pipeline, unchanged),
+/// `Gpu` carries the palette slot the skinned pipeline binds at binding 3.
+/// Resolved per entry via
+/// [`CustomMeshEntry::draw`](crate::extraction::CustomMeshEntry::draw)
+/// (color) and
+/// [`CustomMeshEntry::shadow_draw`](crate::extraction::CustomMeshEntry::shadow_draw)
+/// (depth pre-pass) — resolution failures fall back to `Cpu`, never panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkinnedDraw {
+    /// Host-side blend: classic pipeline, pre-skinned vertices.
+    Cpu,
+    /// Vertex-shader blend: skinned pipeline, palette slot bound.
+    Gpu(PaletteHandle),
+}
+
+impl SkinnedDraw {
+    /// Whether this decision blends in the vertex shader.
+    pub const fn is_gpu(self) -> bool {
+        matches!(self, Self::Gpu(_))
+    }
+
+    /// The palette slot for [`SkinnedDraw::Gpu`], `None` for
+    /// [`SkinnedDraw::Cpu`].
+    pub const fn handle(self) -> Option<PaletteHandle> {
+        match self {
+            Self::Gpu(handle) => Some(handle),
+            Self::Cpu => None,
+        }
+    }
+}
+
+/// Why a GPU skin draw cannot bind its palette.
+///
+/// Every variant resolves to the CPU fallback at the call site (same
+/// pre-skinned vertices, classic pipeline) — a bind failure is never a
+/// panic and never a stub draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SkinBindError {
+    /// The entry claims the GPU path but stages no palette (or no slot
+    /// was uploaded for it): the color draw cannot bind.
+    #[error("gpu skin draw without a staged palette")]
+    MissingPalette,
+    /// The staged data overflows its bound: either more joints than
+    /// [`JointLimit::GPU`] at upload staging, or a palette slot past the
+    /// uploaded range at bind time (`count` is the offender, `limit` the
+    /// bound).
+    #[error("palette overflow: {count} exceeds the limit of {limit}")]
+    PaletteOverflow {
+        /// Offending joint count or palette slot.
+        count: u32,
+        /// Joint capacity or staged slot count.
+        limit: u32,
+    },
+    /// The entry claims the GPU path but the shadow depth pre-pass has no
+    /// palette for it: skinned depth needs the palette, otherwise the
+    /// shadow would fall back to bind-pose geometry.
+    #[error("shadow depth pass without a staged palette")]
+    ShadowWithoutPalette,
+}
+
+/// Stages one entry's joint matrices as [`PALETTE_BYTE_SIZE`] upload bytes:
+/// `joints` (column-major) followed by zero padding to the full slot.
+///
+/// Same layout as [`joint_palette_bytes`] for entries that already staged
+/// matrices (see
+/// [`CustomMeshEntry::joint_palette`](crate::extraction::CustomMeshEntry::joint_palette)):
+/// the upload path packs one slot per entry, so every handle spans full
+/// slots.
+///
+/// # Errors
+///
+/// Returns [`SkinBindError::PaletteOverflow`] past [`JointLimit::GPU`] —
+/// the caller falls back to the CPU path, never a truncated palette.
+pub fn palette_upload_bytes(joints: &[[[f32; 4]; 4]]) -> Result<Vec<u8>, SkinBindError> {
+    let limit = JointLimit::GPU;
+    if joints.len() > limit.index() {
+        return Err(SkinBindError::PaletteOverflow {
+            count: joints.len().min(u32::MAX as usize) as u32,
+            limit: limit.get(),
+        });
+    }
+    let mut bytes = vec![0u8; PALETTE_BYTE_SIZE];
+    let staged: &[u8] = bytemuck::cast_slice(joints);
+    bytes[..staged.len()].copy_from_slice(staged);
+    Ok(bytes)
+}
+
+/// Entry-point name of the skinned vertex stage: the renderer's skinned
+/// pipelines (color + depth pre-pass) target this, sharing the classic
+/// fragment stage.
+pub fn skinned_entry_point() -> &'static str {
+    vs_main_skinned::entry_point()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +540,80 @@ mod tests {
             joint_palette_bytes(&[Mat4::IDENTITY; 129]),
             Err(SkinError::PaletteOverflow { .. })
         ));
+    }
+
+    #[test]
+    fn palette_handle_indexes_full_slots() {
+        // Slot math is the bind contract: slot `i` spans full 8 KiB
+        // slots, and `bound` gates handles against the staged count.
+        let handle = PaletteHandle::from_raw(3);
+        assert_eq!(handle.get(), 3);
+        assert_eq!(handle.index(), 3);
+        assert_eq!(u32::from(handle), 3);
+        assert_eq!(usize::from(handle), 3);
+        assert_eq!(PaletteHandle::from(2u32).get(), 2);
+        assert_eq!(handle.byte_offset(), 3 * PALETTE_BYTE_SIZE as u64);
+        assert_eq!(PaletteHandle::default(), PaletteHandle::from_raw(0));
+        assert_eq!(handle.bound(4), Ok(handle));
+        assert_eq!(
+            handle.bound(3),
+            Err(SkinBindError::PaletteOverflow {
+                count: 3,
+                limit: 3,
+            })
+        );
+        // thiserror Display names the offender and the bound.
+        assert!(
+            SkinBindError::PaletteOverflow { count: 5, limit: 2 }
+                .to_string()
+                .contains('5')
+        );
+        assert!(!SkinBindError::MissingPalette.to_string().is_empty());
+        assert!(!SkinBindError::ShadowWithoutPalette.to_string().is_empty());
+    }
+
+    #[test]
+    fn skinned_draw_carries_the_palette_slot() {
+        let handle = PaletteHandle::from_raw(1);
+        assert!(!SkinnedDraw::Cpu.is_gpu());
+        assert_eq!(SkinnedDraw::Cpu.handle(), None);
+        assert!(SkinnedDraw::Gpu(handle).is_gpu());
+        assert_eq!(SkinnedDraw::Gpu(handle).handle(), Some(handle));
+    }
+
+    #[test]
+    fn entry_upload_bytes_pad_to_full_slots() {
+        // One identity joint stages into a full 8 KiB slot: staged bytes
+        // first, zeros after — the same layout `joint_palette_bytes`
+        // produces for the same matrix.
+        let joints = [Mat4::IDENTITY.to_cols_array_2d()];
+        let bytes = palette_upload_bytes(&joints).expect("fits");
+        assert_eq!(bytes.len(), PALETTE_BYTE_SIZE);
+        assert_eq!(
+            bytes[..64],
+            joint_palette_bytes(&[Mat4::IDENTITY]).expect("fits")[..64]
+        );
+        assert!(bytes[64..].iter().all(|byte| *byte == 0));
+        // Over-limit staging fails typed, never truncated.
+        let over = vec![Mat4::IDENTITY.to_cols_array_2d(); 129];
+        assert_eq!(
+            palette_upload_bytes(&over),
+            Err(SkinBindError::PaletteOverflow {
+                count: 129,
+                limit: 128,
+            })
+        );
+    }
+
+    #[test]
+    fn skinned_entry_point_names_the_skinned_stage() {
+        // The renderer builds its skinned pipelines on this name: it must
+        // be the skinned entry, not the classic one.
+        assert_eq!(skinned_entry_point(), "vs_main_skinned");
+        assert_ne!(
+            skinned_entry_point(),
+            crate::shaders::gbuffer_generated::vs_main::entry_point()
+        );
     }
 
     #[test]

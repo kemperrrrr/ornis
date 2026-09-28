@@ -14,9 +14,9 @@ use crate::flags::Bloom;
 use crate::frame_passes::{
     Albedo, Bloom0, Bloom1, Bloom2, BloomBright, BloomDown1Pass, BloomDown2Pass, BloomUp0Pass,
     BloomUp1Pass, Composite, CompositeDeferred, CompositeDeferredBloom, CompositeForward,
-    CompositeForwardBloom, CompositeHybrid, CompositeHybridBloom, Depth, Forward, FromDeferred,
-    FromForward, GbufferPass, Hdr, HdrFwd, LightingPass, MaterialId, MaterialParams, Normal,
-    OwnsDepth, SharedDepth, Target, WorldPosition,
+    CompositeForwardBloom, CompositeHybrid, CompositeHybridBloom, Depth, FogPass, FogPlacement,
+    FogWiring, Forward, FromDeferred, FromForward, GbufferPass, Hdr, HdrFwd, LightingPass,
+    MaterialId, MaterialParams, Normal, OwnsDepth, SharedDepth, Target, WorldPosition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
@@ -550,11 +550,43 @@ impl RenderFrame3D {
     /// (`gbuffer`, `lighting`) exist only when [`Technique::has_deferred`],
     /// the `forward` node only when [`Technique::has_forward`], and the
     /// bloom chain reads whichever HDR layer the technique produces.
+    ///
+    /// No fog node is registered (default): opt in with
+    /// [`new_with_fog`](Self::new_with_fog).
     pub fn new_with(
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
         technique: Technique,
         bloom: crate::flags::Bloom,
+    ) -> Self {
+        Self::build(surface_format, surface_size, technique, bloom, None)
+    }
+
+    /// Like [`new_with`](Self::new_with), plus an opt-in [`FogPass`] node
+    /// from `fog` ([`FogWiring`]: placement relative to `composite` plus
+    /// fog state). A [`FogState::Disabled`](crate::frame_passes::FogState::Disabled)
+    /// node records no commands, so the frame stays pixel-identical to
+    /// [`new_with`](Self::new_with); fog needs the deferred HDR layer
+    /// (see [`FogPlacement`]).
+    pub fn new_with_fog(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        fog: FogWiring,
+    ) -> Self {
+        Self::build(surface_format, surface_size, technique, bloom, Some(fog))
+    }
+
+    /// Shared plan builder: registers resources, technique nodes, the
+    /// optional bloom chain, the optional fog node (at `fog` placement),
+    /// then the composite pass.
+    fn build(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        fog: Option<FogWiring>,
     ) -> Self {
         // S2: resources are registered by type; specs/names (and the
         // ResourceId order) mirror the imperative wiring exactly.
@@ -600,6 +632,15 @@ impl RenderFrame3D {
             systems.add_system(BloomUp1Pass);
             systems.add_system(BloomUp0Pass);
         }
+        // Opt-in fog before composite: the composite clear discards its
+        // `target` write (plan shape only, no visible effect).
+        if let Some(FogWiring {
+            placement: FogPlacement::BeforeComposite,
+            state,
+        }) = fog
+        {
+            systems.add_system(FogPass::new(state));
+        }
         // The composite mode is a pure function of (technique, bloom):
         // which HDR layers exist and whether the bloom chain feeds the mix.
         match (technique, bloom) {
@@ -621,6 +662,15 @@ impl RenderFrame3D {
             (Technique::Hybrid, Bloom::Off) => {
                 systems.add_system(Composite::<CompositeHybrid>::new());
             }
+        }
+        // Opt-in fog after composite (recommended): its `target` write is
+        // the presented frame.
+        if let Some(FogWiring {
+            placement: FogPlacement::AfterComposite,
+            state,
+        }) = fog
+        {
+            systems.add_system(FogPass::new(state));
         }
         Self {
             executor: FrameExecutor::new(),
@@ -1038,6 +1088,121 @@ mod tests {
                 "composite"
             ]
         );
+    }
+
+    #[test]
+    fn default_plans_register_no_fog() {
+        // Golden guard: fog is opt-in — no default plan wires a "fog"
+        // node, so the default frame stays pixel-identical (see
+        // `FogWiring`).
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            for bloom in [Bloom::Off, Bloom::On] {
+                let mut plan = RenderFrame3D::new_with(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    (32, 32),
+                    technique,
+                    bloom,
+                );
+                let names = plan
+                    .systems
+                    .build()
+                    .passes
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>();
+                assert!(
+                    !names.iter().any(|name| name == "fog"),
+                    "{technique:?}/{bloom:?} registers no fog: {names:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fog_wiring_places_node_per_placement() {
+        use crate::frame_passes::{FogSettings, FogState};
+        // Enabled fog on a deferred plan compiles; placement decides the
+        // node position relative to `composite`.
+        let names_with = |placement: FogPlacement| {
+            let mut plan = RenderFrame3D::new_with_fog(
+                wgpu::TextureFormat::Rgba8Unorm,
+                (32, 32),
+                Technique::Hybrid,
+                Bloom::Off,
+                FogWiring::new(placement, FogState::Enabled(FogSettings::default())),
+            );
+            plan.systems
+                .build()
+                .passes
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names_with(FogPlacement::BeforeComposite),
+            vec!["gbuffer", "lighting", "forward", "fog", "composite"]
+        );
+        assert_eq!(
+            names_with(FogPlacement::AfterComposite),
+            vec!["gbuffer", "lighting", "forward", "composite", "fog"]
+        );
+    }
+
+    #[test]
+    fn fog_disabled_wiring_matches_no_fog_frame() {
+        use crate::frame_passes::FogState;
+        // Placement parity: a Disabled node records no commands
+        // ([`FogPass`](crate::frame_passes::FogPass) no-ops), so both
+        // placements present the same frame as no fog — pin the node
+        // shape plus the identity math.
+        for placement in [FogPlacement::BeforeComposite, FogPlacement::AfterComposite] {
+            let wiring = FogWiring::new(placement, FogState::Disabled);
+            assert!(wiring.state.is_disabled());
+            let mut plan = RenderFrame3D::new_with_fog(
+                wgpu::TextureFormat::Rgba8Unorm,
+                (32, 32),
+                Technique::Deferred,
+                Bloom::Off,
+                wiring,
+            );
+            let names = plan
+                .systems
+                .build()
+                .passes
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(names.iter().filter(|name| *name == "fog").count(), 1);
+            let last = match placement {
+                FogPlacement::BeforeComposite => "composite",
+                FogPlacement::AfterComposite => "fog",
+            };
+            assert_eq!(names.last().map(String::as_str), Some(last));
+        }
+        let color = [0.2, 0.4, 0.6];
+        assert_eq!(
+            crate::frame_passes::apply_fog(color, 42.0, FogState::Disabled),
+            color
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "before any write")]
+    fn fog_on_forward_plan_fails_without_hdr() {
+        use crate::frame_passes::{FogSettings, FogState};
+        // Fog reads the deferred `hdr` layer, which forward-only plans
+        // never write: compiling the layout fails (read-before-write).
+        let mut plan = RenderFrame3D::new_with_fog(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Forward,
+            Bloom::Off,
+            FogWiring::new(
+                FogPlacement::AfterComposite,
+                FogState::Enabled(FogSettings::default()),
+            ),
+        );
+        let _ = plan.systems.build();
     }
 
     #[test]

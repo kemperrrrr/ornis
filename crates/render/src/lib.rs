@@ -49,16 +49,16 @@ pub mod transient_pool;
 pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{
-    ExtractionStats, FrameUpload, RenderLights, RenderWorld, extract_render_data,
-    extract_render_data_with_stats, max_mesh_params,
+    ExtractionStats, FrameUpload, MeshPose, RenderLights, RenderWorld, SkinInfluences,
+    extract_render_data, extract_render_data_with_stats, max_mesh_params,
 };
 pub use flags::{
     Access as AccessKind, Bloom, CompositeTechnique, DepthOwnership, PassState, ResourceBacking,
     SamplerKind, ShadowCast,
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
-pub use frame_passes::{FogDensity, FogPass, FogSettings, FogState, apply_fog, fog_factor};
-pub use mesh::{Mesh, Vertex, create_sphere};
+pub use frame_passes::{FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor};
+pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};
 pub use mesh_upload::{
     ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,
 };
@@ -76,7 +76,8 @@ pub use renderer::{
 };
 pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use skinning::{
-    GBUFFER_SKINNED_RESOURCES, JointPalette, PALETTE_BYTE_SIZE, SkinJoint, joint_palette_bytes,
+    GBUFFER_SKINNED_RESOURCES, JointPalette, PALETTE_BYTE_SIZE, PaletteHandle, SkinBindError,
+    SkinJoint, SkinnedDraw, joint_palette_bytes, palette_upload_bytes, skinned_entry_point,
     wgsl_vertex_source_skinned,
 };
 pub use system::{

@@ -235,7 +235,7 @@ pub fn blend_vertex_reference(
     position: [f32; 3],
     normal: [f32; 3],
 ) -> ([f32; 3], [f32; 3]) {
-    let weights = canonical_reference_weights(weights);
+    let weights = canonical_staged_weights(weights);
     let vertex = Vec3::from_array(position);
     let direction = Vec3::from_array(normal);
     let mut blended_position = Vec3::ZERO;
@@ -257,9 +257,14 @@ pub fn blend_vertex_reference(
     (position, normal)
 }
 
-/// Canonical per-vertex weights for the reference blend (same rule as the
-/// CPU path: finite positive sums normalize, otherwise `(1,0,0,0)`).
-fn canonical_reference_weights(weights: [f32; 4]) -> [f32; 4] {
+/// Canonical per-vertex weights for GPU staging: normalize a finite
+/// positive sum, otherwise fall back to full weight on joint 0.
+///
+/// Same rule as the CPU path (design §2.1): the vertex stage multiplies
+/// raw weights without canonicalizing, so extraction stages these — not
+/// the lane values — for the palette blend. [`blend_vertex_reference`]
+/// applies the same rule, which is why the two agree.
+pub fn canonical_staged_weights(weights: [f32; 4]) -> [f32; 4] {
     let finite = weights.iter().all(|slot| slot.is_finite());
     let sum: f32 = weights.iter().sum();
     if finite && sum > 1e-6 {
@@ -351,6 +356,26 @@ mod tests {
         );
         assert_eq!(position, [1.0, 2.0, 3.0]);
         assert_eq!(normal, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn staged_weights_normalize_or_fall_back() {
+        // Finite positive sums normalize (the GPU blend multiplies raw
+        // weights, so staging canonicalizes up front).
+        assert_eq!(
+            canonical_staged_weights([2.0, 2.0, 0.0, 0.0]),
+            [0.5, 0.5, 0.0, 0.0]
+        );
+        // Zero sums, non-finite lanes and negative sums fall back to
+        // joint 0 — the same rule the CPU path applies.
+        assert_eq!(
+            canonical_staged_weights([0.0, 0.0, 0.0, 0.0]),
+            [1.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            canonical_staged_weights([f32::NAN, 1.0, 0.0, 0.0]),
+            [1.0, 0.0, 0.0, 0.0]
+        );
     }
 
     #[test]

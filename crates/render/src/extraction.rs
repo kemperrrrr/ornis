@@ -17,15 +17,17 @@
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    JointPose, Skeleton, SkinnedMesh, SkinningMode, SkinningResources, skinning_matrices,
+    JointPose, Skeleton, SkinnedMesh, SkinningMode, SkinningResources, canonical_staged_weights,
+    skinning_matrices,
 };
 use ornis_core::{Engine, Entity, OpenPBRMaterial, SmartStore};
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Frustum;
-use crate::mesh::Vertex;
+use crate::mesh::{SkinnedVertex, Vertex};
 use crate::mesh_upload::{SoupCache, UploadCache};
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
+use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
 use ornis_core::units::PositiveF32;
 
@@ -57,7 +59,11 @@ pub struct FrameUpload {
 /// (`renderer::upload_custom_mesh`) and draws the entry with `instance`.
 #[derive(Clone, Debug)]
 pub struct CustomMeshEntry {
-    /// GPU-ready vertices (`mesh_upload::custom_vertices_cached` output).
+    /// GPU-ready vertices: pre-skinned world-space rows for
+    /// [`MeshPose::Skinned`] entries (classic soup path and CPU fallback),
+    /// bind-pose rows for [`MeshPose::Bind`] entries (GPU blend — the
+    /// skinned vertex stage reads these plus the influences in
+    /// [`CustomMeshEntry::pose`]).
     pub vertices: Vec<Vertex>,
     /// Triangle index list (`u32`, triples, CCW from outside).
     pub indices: Vec<u32>,
@@ -68,11 +74,7 @@ pub struct CustomMeshEntry {
     /// geometry transformed by `instance.model_matrix`, never pre-skinned)
     /// and on the CPU pre-skin fallback; [`SkinningMode::Gpu`] exactly when
     /// the entity carries the [`SkinnedMesh`] lane *and* its joint palette
-    /// staged (see [`CustomMeshEntry::joint_palette`]) — then `vertices`
-    /// are still the skin-system output buffers (`skinned_positions` /
-    /// `skinned_normals`, world space, `instance.model_matrix` is
-    /// `IDENTITY`) so the current draw path stays pixel-identical, while
-    /// the palette rides alongside for the skinned vertex stage.
+    /// staged (see [`CustomMeshEntry::joint_palette`]).
     ///
     /// Freshness is the skin system's contract (`skel_skin_cpu` runs
     /// PostFrame before the frame upload); inconsistent lane arrays skip
@@ -87,9 +89,127 @@ pub struct CustomMeshEntry {
     /// [`SkinningMode::Gpu`]; `None` on the classic path and on the CPU
     /// fallback (over-limit skeleton, stale pose, out-of-range joint
     /// indices — anything that would read out of bounds in the shader).
-    /// The CPU-skinned `vertices` above stay authoritative for the draw
-    /// until the skinned pipeline binds this palette.
     pub joint_palette: Option<Vec<[[f32; 4]; 4]>>,
+    /// Which buffer [`CustomMeshEntry::vertices`] holds: bind-pose rows
+    /// (GPU blend) or pre-skinned world-space rows (CPU blend). Always in
+    /// lockstep with [`CustomMeshEntry::skinning`] (`Gpu` ⟺ `Bind`,
+    /// `Cpu` ⟺ `Skinned`); the draw decision reads both through
+    /// [`CustomMeshEntry::draw`].
+    pub pose: MeshPose,
+}
+
+impl CustomMeshEntry {
+    /// Color-draw decision for this entry: [`SkinnedDraw::Gpu`] exactly
+    /// when the entry blends on the GPU *and* a palette slot was uploaded
+    /// for it, [`SkinnedDraw::Cpu`] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkinBindError::MissingPalette`] when the entry claims the
+    /// GPU path but `handle` is `None` (or no palette staged) — the caller
+    /// falls back to [`SkinnedDraw::Cpu`], never a panic.
+    pub fn draw(&self, handle: Option<PaletteHandle>) -> Result<SkinnedDraw, SkinBindError> {
+        match self.skinning {
+            SkinningMode::Cpu => Ok(SkinnedDraw::Cpu),
+            SkinningMode::Gpu => match (self.joint_palette.is_some(), handle) {
+                (true, Some(handle)) => Ok(SkinnedDraw::Gpu(handle)),
+                _ => Err(SkinBindError::MissingPalette),
+            },
+        }
+    }
+
+    /// Depth-pre-pass decision for this entry: same rule as
+    /// [`CustomMeshEntry::draw`], but the failure carries
+    /// [`SkinBindError::ShadowWithoutPalette`] — skinned depth needs the
+    /// palette, otherwise the shadow would come from bind-pose geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkinBindError::ShadowWithoutPalette`] when the entry
+    /// claims the GPU path but `handle` is `None` (or no palette staged) —
+    /// the caller falls back to [`SkinnedDraw::Cpu`], never a panic.
+    pub fn shadow_draw(&self, handle: Option<PaletteHandle>) -> Result<SkinnedDraw, SkinBindError> {
+        match self.skinning {
+            SkinningMode::Cpu => Ok(SkinnedDraw::Cpu),
+            SkinningMode::Gpu => match (self.joint_palette.is_some(), handle) {
+                (true, Some(handle)) => Ok(SkinnedDraw::Gpu(handle)),
+                _ => Err(SkinBindError::ShadowWithoutPalette),
+            },
+        }
+    }
+
+    /// Interleaved GPU rows for the skinned vertex stage: bind-pose
+    /// vertices plus joint influences.
+    ///
+    /// `Some` exactly for [`MeshPose::Bind`] entries with agreeing lane
+    /// lengths; `None` for CPU-blended entries (draw those with the
+    /// classic upload) and for length defects (the caller keeps the entry
+    /// on the CPU path, never a partial buffer).
+    pub fn skinned_gpu_vertices(&self) -> Option<Vec<SkinnedVertex>> {
+        let MeshPose::Bind(influences) = &self.pose else {
+            return None;
+        };
+        if influences.joints.len() != self.vertices.len()
+            || influences.weights.len() != self.vertices.len()
+        {
+            return None;
+        }
+        Some(
+            self.vertices
+                .iter()
+                .zip(influences.joints.iter())
+                .zip(influences.weights.iter())
+                .map(|((vertex, &joints), &weights)| SkinnedVertex {
+                    position: vertex.position,
+                    normal: vertex.normal,
+                    uv: vertex.uv,
+                    tangent: vertex.tangent,
+                    joints,
+                    weights,
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Which buffer a [`CustomMeshEntry`] holds: bind-pose rows for the vertex
+/// stage to blend, or pre-skinned world-space rows for the classic draw.
+///
+/// `enum`, never `bool`: the GPU variant carries the per-vertex influences
+/// the stage blends with, so a bind-pose buffer without influences is
+/// unrepresentable.
+#[derive(Clone, Debug)]
+pub enum MeshPose {
+    /// Bind-pose vertices: the skinned pipeline blends these with
+    /// `influences` over the bound palette. Only for
+    /// [`SkinningMode::Gpu`] entries.
+    Bind(SkinInfluences),
+    /// Pre-skinned world-space vertices: the classic pipeline draws these
+    /// as-is. Classic soup path and CPU fallback.
+    Skinned,
+}
+
+impl MeshPose {
+    /// Whether this pose carries bind-pose rows for the GPU blend.
+    pub const fn is_bind(&self) -> bool {
+        matches!(self, Self::Bind(_))
+    }
+}
+
+/// Per-vertex joint influences for the GPU blend of one
+/// [`MeshPose::Bind`] entry.
+///
+/// Joints are widened `u32` lanes (`SkinnedMesh` stores `u16` — exact);
+/// weights are canonicalized at staging (see
+/// [`canonical_staged_weights`]) because the vertex stage multiplies raw
+/// weights without normalizing. Lengths always agree with the entry's
+/// vertex count.
+#[derive(Clone, Debug)]
+pub struct SkinInfluences {
+    /// Influencing joints per vertex (top-4, `< joint count`).
+    pub joints: Vec<[u32; 4]>,
+    /// Canonicalized influence weights per vertex.
+    pub weights: Vec<[f32; 4]>,
 }
 
 /// Tessellation floor when no complete renderable entity asks for more
@@ -371,11 +491,13 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 /// *distinct* materials, not entities.
 ///
 /// Entities carrying the [`SkinnedMesh`] lane never take the classic paths
-/// below: their skin-system output buffers (`skinned_positions` /
-/// `skinned_normals`, world space) plus the bind `uvs`/`indices` land in
-/// `custom_meshes` with [`SkinningMode::Gpu`] (palette staged, see
-/// [`CustomMeshEntry::joint_palette`]) or the [`SkinningMode::Cpu`]
-/// fallback, and `IDENTITY` matrices either way (design §2.3).
+/// below: GPU-staged skins land in `custom_meshes` with
+/// [`SkinningMode::Gpu`], bind-pose `vertices` plus staged influences
+/// ([`MeshPose::Bind`]) and the joint palette (see
+/// [`CustomMeshEntry::joint_palette`]); the [`SkinningMode::Cpu`]
+/// fallback keeps the skin-system output buffers (`skinned_positions` /
+/// `skinned_normals`, world space, [`MeshPose::Skinned`]) on the classic
+/// path, and `IDENTITY` matrices either way (design §2.3).
 /// Inconsistent lane arrays skip the entity with
 /// [`ExtractionStats::skipped_bad_skin`] — even when its classic soup
 /// would decode, a claimed skin must not silently render unskinned.
@@ -422,15 +544,31 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
         // the skeleton validates — otherwise the CPU fallback (same
         // vertices, no palette).
         if let Some(skin) = skinned.as_ref().and_then(|lane| lane.get(entity)) {
-            let Some((vertices, indices)) = skinned_entry(skin) else {
-                stats.skipped_bad_skin += 1;
-                continue;
-            };
             let material_index =
                 deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
             let (skinning, joint_palette) = match gpu_joint_palette(store, skin) {
                 Some(palette) => (SkinningMode::Gpu, Some(palette)),
                 None => (SkinningMode::Cpu, None),
+            };
+            // GPU entries carry bind-pose rows for the skinned vertex
+            // stage (one-line switch now that the draw path binds the
+            // palette); CPU entries and every fallback keep the
+            // pre-skinned rows on the classic path, pixel-identical.
+            let (vertices, indices, pose) = match skinning {
+                SkinningMode::Gpu => {
+                    let Some((vertices, indices, influences)) = bind_pose_entry(skin) else {
+                        stats.skipped_bad_skin += 1;
+                        continue;
+                    };
+                    (vertices, indices, MeshPose::Bind(influences))
+                }
+                SkinningMode::Cpu => {
+                    let Some((vertices, indices)) = skinned_entry(skin) else {
+                        stats.skipped_bad_skin += 1;
+                        continue;
+                    };
+                    (vertices, indices, MeshPose::Skinned)
+                }
             };
             extracted.custom_meshes.push(CustomMeshEntry {
                 vertices,
@@ -442,6 +580,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 },
                 skinning,
                 joint_palette,
+                pose,
             });
             continue;
         }
@@ -490,6 +629,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 // Classic soup path: bind-pose geometry, never pre-skinned.
                 skinning: SkinningMode::Cpu,
                 joint_palette: None,
+                pose: MeshPose::Skinned,
             });
             continue;
         }
@@ -648,6 +788,11 @@ pub fn instance_view_depth(instance: &InstanceData, view: &Mat4) -> f32 {
 /// untouched. Non-finite depths compare equal (stable, never panics).
 /// Cost is `O(n log n)` comparisons over both lanes; measure with
 /// [`sort_by_depth_timed`] when the frame budget needs attributing.
+///
+/// Order contract: the current forward submit is a single instanced draw
+/// ([`Renderer3D::render_forward`](crate::renderer::Renderer3D::render_forward))
+/// and ignores instance order — this sort is a no-op today, kept for
+/// future multi-draw submits where back-to-front order is honored.
 pub fn sort_by_depth(upload: &mut FrameUpload, view: &Mat4) {
     upload.instances.sort_by(|a, b| {
         instance_view_depth(b, view)
@@ -807,15 +952,15 @@ fn normalized_rotation(rotation: [f32; 4]) -> Quat {
     }
 }
 
-/// Builds the pre-skinned payload of one [`SkinnedMesh`] entity: world-space
-/// output buffers as [`Vertex`] rows plus the passthrough bind indices.
+/// Validated vertex count of one [`SkinnedMesh`] lane set: every bind and
+/// output array agrees on the length, and every index lands inside it.
 ///
 /// [`None`] (bad skin) on empty binds, array length defects, or an empty /
 /// malformed index list — the caller counts
 /// [`ExtractionStats::skipped_bad_skin`]. Joint-index range against the
 /// skeleton is the skin system's verdict (it owns that counter); the lane
 /// buffers validated here are that system's output contract.
-fn skinned_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>)> {
+fn skin_vertex_count(mesh: &SkinnedMesh) -> Option<usize> {
     let count = mesh.joints.len();
     if count == 0
         || mesh.weights.len() != count
@@ -833,6 +978,16 @@ fn skinned_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>)> {
     {
         return None;
     }
+    Some(count)
+}
+
+/// Builds the pre-skinned payload of one [`SkinnedMesh`] entity: world-space
+/// output buffers as [`Vertex`] rows plus the passthrough bind indices.
+///
+/// [`None`] (bad skin) when [`skin_vertex_count`] rejects the lanes — the
+/// caller counts [`ExtractionStats::skipped_bad_skin`].
+fn skinned_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>)> {
+    skin_vertex_count(mesh)?;
     let vertices = mesh
         .skinned_positions
         .iter()
@@ -846,6 +1001,53 @@ fn skinned_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>)> {
         })
         .collect();
     Some((vertices, mesh.indices.to_vec()))
+}
+
+/// Builds the bind-pose payload of one [`SkinnedMesh`] entity for the GPU
+/// blend: bind-pose [`Vertex`] rows, the passthrough bind indices, and the
+/// staged influences (widened joints, canonicalized weights).
+///
+/// [`None`] (bad skin) when [`skin_vertex_count`] rejects the lanes — the
+/// caller counts [`ExtractionStats::skipped_bad_skin`]. Joint-index range
+/// against the skeleton is gated upstream by [`gpu_joint_palette`] (only
+/// staged palettes reach the GPU path); the widened lanes here carry the
+/// values verbatim.
+fn bind_pose_entry(mesh: &SkinnedMesh) -> Option<(Vec<Vertex>, Vec<u32>, SkinInfluences)> {
+    skin_vertex_count(mesh)?;
+    let vertices = mesh
+        .positions
+        .iter()
+        .zip(mesh.normals.iter())
+        .zip(mesh.uvs.iter())
+        .map(|((&position, &normal), &uv)| Vertex {
+            position,
+            normal,
+            uv,
+            tangent: skinned_tangent(normal),
+        })
+        .collect();
+    let joints = mesh
+        .joints
+        .iter()
+        .map(|lane| {
+            [
+                lane[0] as u32,
+                lane[1] as u32,
+                lane[2] as u32,
+                lane[3] as u32,
+            ]
+        })
+        .collect();
+    let weights = mesh
+        .weights
+        .iter()
+        .map(|&lane| canonical_staged_weights(lane))
+        .collect();
+    Some((
+        vertices,
+        mesh.indices.to_vec(),
+        SkinInfluences { joints, weights },
+    ))
 }
 
 /// Stages the GPU joint palette of one [`SkinnedMesh`] entity: final joint
@@ -1533,6 +1735,7 @@ mod tests {
                 },
                 skinning: SkinningMode::Cpu,
                 joint_palette: None,
+                pose: MeshPose::Skinned,
             });
         }
         let view = (
@@ -1717,11 +1920,12 @@ mod tests {
     }
 
     #[test]
-    fn skinned_entry_stages_gpu_palette_with_cpu_vertices() {
+    fn skinned_entry_stages_gpu_palette_with_bind_pose_vertices() {
         // Valid skin: GPU mode with the staged palette, while `vertices`
-        // stay the CPU-skinned buffers (identity skin → bind positions) so
-        // the current draw path is pixel-identical. The palette blend of
-        // the bind data matches the vertices within the parity допуск.
+        // carry the bind pose (identity skin → bind positions) for the
+        // skinned vertex stage; the influences ride `pose`. Parity: the
+        // palette-blend of the bind data matches the CPU skin output
+        // within the допуск.
         use ornis_animation::{CPU_GPU_TOLERANCE, blend_vertex_reference};
         let mut engine = Engine::new();
         push_skinned_triangle(&mut engine);
@@ -1732,12 +1936,20 @@ mod tests {
         assert_eq!(stats.skipped_bad_skin, 0);
         let entry = &upload.custom_meshes[0];
         assert_eq!(entry.skinning, SkinningMode::Gpu);
+        assert!(entry.pose.is_bind());
         assert_eq!(entry.instance.model_matrix, Mat4::IDENTITY);
         let palette = entry.joint_palette.as_ref().expect("palette staged");
         assert_eq!(palette.len(), 1);
         assert_eq!(Mat4::from_cols_array_2d(&palette[0]), Mat4::IDENTITY);
         assert_eq!(entry.vertices[0].position, [1.0, 0.0, 0.0]);
-        // Parity: palette-blend(bind) ≈ CPU-skinned vertices.
+        // Bind pose rides the entry: joints widened, weights canonical.
+        let MeshPose::Bind(influences) = &entry.pose else {
+            panic!("gpu entry must carry bind influences");
+        };
+        assert_eq!(influences.joints.len(), 3);
+        assert_eq!(influences.joints[0], [0, 0, 0, 0]);
+        assert_eq!(influences.weights[0], [1.0, 0.0, 0.0, 0.0]);
+        // Parity: palette-blend(bind) ≈ CPU-skinned positions.
         let bind = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let matrices = [Mat4::IDENTITY];
         for (index, vertex) in entry.vertices.iter().enumerate() {
@@ -1751,6 +1963,12 @@ mod tests {
             let drift = (Vec3::from_array(position) - Vec3::from_array(vertex.position)).length();
             assert!(drift < CPU_GPU_TOLERANCE, "vertex {index} drifts {drift}");
         }
+        // The interleaved GPU rows zip bind vertices with influences.
+        let gpu_rows = entry.skinned_gpu_vertices().expect("bind rows");
+        assert_eq!(gpu_rows.len(), 3);
+        assert_eq!(gpu_rows[0].position, [1.0, 0.0, 0.0]);
+        assert_eq!(gpu_rows[0].joints, [0, 0, 0, 0]);
+        assert_eq!(gpu_rows[0].weights, [1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -1783,6 +2001,8 @@ mod tests {
         let entry = &upload.custom_meshes[0];
         assert_eq!(entry.skinning, SkinningMode::Cpu);
         assert!(entry.joint_palette.is_none());
+        assert!(matches!(entry.pose, MeshPose::Skinned));
+        assert!(entry.skinned_gpu_vertices().is_none());
         assert_eq!(entry.vertices[0].position, [1.0, 0.0, 0.0]);
     }
 
@@ -1846,5 +2066,211 @@ mod tests {
         let entry = &upload.custom_meshes[0];
         assert_eq!(entry.skinning, SkinningMode::Cpu);
         assert!(entry.joint_palette.is_none());
+        assert!(matches!(entry.pose, MeshPose::Skinned));
+        assert!(entry.skinned_gpu_vertices().is_none());
+    }
+
+    /// Test helper: a two-joint skeleton root with a rigid rotated pose
+    /// plus one skinned triangle entity. The palette is a 90° Z-rotation
+    /// with a translation on joint 1, so the GPU blend and the CPU skin
+    /// must agree within the parity допуск (rigid joints are exact up to
+    /// FMA ordering).
+    fn push_rotated_two_joint_triangle(engine: &mut Engine) {
+        {
+            let store = engine.world_mut().store_mut().expect("store");
+            store.register::<Skeleton>();
+            store.register::<JointPose>();
+            store.register::<SkinnedMesh>();
+        }
+        let root = {
+            let store = engine.world_mut().store_mut().expect("store");
+            let root = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(
+                    vec![None, Some(ornis_animation::JointId::from_raw(0))],
+                    vec![Mat4::IDENTITY; 2],
+                    vec!["root".to_string(), "child".to_string()],
+                ),
+            );
+            let rotated = Mat4::from_rotation_translation(
+                glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                Vec3::X,
+            );
+            store.insert(
+                root,
+                JointPose {
+                    matrices: vec![Mat4::IDENTITY, rotated],
+                },
+            );
+            root
+        };
+        {
+            let store = engine.world_mut().store_mut().expect("store");
+            let mesh = store.create_entity();
+            store.insert(
+                mesh,
+                TransformDesc {
+                    translation: Vec3::ZERO.to_array(),
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: Vec3::ONE.to_array(),
+                },
+            );
+            store.insert(
+                mesh,
+                MeshDesc::Custom {
+                    positions: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    indices: vec![0, 1, 2],
+                },
+            );
+            store.insert(mesh, test_material());
+            store.insert(
+                mesh,
+                SkinnedMesh::new(
+                    root,
+                    vec![[1, 0, 0, 0], [0, 0, 0, 0], [0, 1, 0, 0]],
+                    vec![
+                        [1.0, 0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.5, 0.5, 0.0, 0.0],
+                    ],
+                    vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    vec![[0.0, 0.0, 1.0]; 3],
+                    vec![[0.0, 0.0]; 3],
+                    vec![0, 1, 2],
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_bind_blend_matches_cpu_skin_within_tolerance() {
+        // Cpu-draw vs Gpu-draw parity at the entry level: the staged bind
+        // data blended through the GPU reference formula lands within
+        // `CPU_GPU_TOLERANCE` of the CPU skin output for a rigid palette
+        // (normals: linear part vs inverse-transpose coincide on rigid
+        // joints; positions differ only by FMA ordering).
+        use ornis_animation::{CPU_GPU_TOLERANCE, blend_vertex_reference, skin_vertices};
+        let mut engine = Engine::new();
+        push_rotated_two_joint_triangle(&mut engine);
+
+        let (upload, stats) =
+            extract_render_data_with_stats(engine.world().store().expect("store"));
+        assert_eq!(upload.custom_meshes.len(), 1);
+        assert_eq!(stats.skipped_bad_skin, 0);
+        let entry = &upload.custom_meshes[0];
+        assert_eq!(entry.skinning, SkinningMode::Gpu);
+        let palette = entry
+            .joint_palette
+            .as_ref()
+            .expect("palette staged")
+            .iter()
+            .map(Mat4::from_cols_array_2d)
+            .collect::<Vec<_>>();
+        assert_eq!(palette.len(), 2);
+        let MeshPose::Bind(influences) = &entry.pose else {
+            panic!("gpu entry must carry bind influences");
+        };
+        // CPU draw: the skin system's own blend over the same palette.
+        let joints_u16 = [[1, 0, 0, 0], [0, 0, 0, 0], [0, 1, 0, 0]];
+        let weights = [
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+        ];
+        let bind_positions = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let bind_normals = [[0.0, 0.0, 1.0]; 3];
+        let (cpu_positions, cpu_normals) = skin_vertices(
+            &palette,
+            &joints_u16,
+            &weights,
+            &bind_positions,
+            &bind_normals,
+        );
+        // GPU draw: the reference blend over the staged entry data.
+        for index in 0..3 {
+            let (gpu_position, gpu_normal) = blend_vertex_reference(
+                &palette,
+                influences.joints[index].map(|joint| joint as u16),
+                influences.weights[index],
+                entry.vertices[index].position,
+                entry.vertices[index].normal,
+            );
+            let position_drift = (Vec3::from_array(gpu_position)
+                - Vec3::from_array(cpu_positions[index]))
+            .length();
+            let normal_drift = (Vec3::from_array(gpu_normal)
+                - Vec3::from_array(cpu_normals[index]))
+            .length();
+            assert!(
+                position_drift < CPU_GPU_TOLERANCE,
+                "vertex {index} position drifts {position_drift}"
+            );
+            assert!(
+                normal_drift < CPU_GPU_TOLERANCE,
+                "vertex {index} normal drifts {normal_drift}"
+            );
+        }
+        // Spot check: joint-1-only vertex rides the rotation+translation.
+        assert!(
+            (Vec3::from_array(cpu_positions[0]) - Vec3::new(1.0, 1.0, 0.0)).length()
+                < CPU_GPU_TOLERANCE
+        );
+    }
+
+    #[test]
+    fn draw_resolves_gpu_with_handle_and_falls_back_without_palette() {
+        // Gpu entries resolve through the uploaded handle; a missing
+        // palette (or slot) falls back to Cpu without panicking — the
+        // color path reports `MissingPalette`, the shadow path
+        // `ShadowWithoutPalette` (bind-pose shadows are never drawn).
+        let mut engine = Engine::new();
+        push_skinned_triangle(&mut engine);
+        let upload = extract_render_data(engine.world().store().expect("store"));
+        let entry = &upload.custom_meshes[0];
+        assert_eq!(entry.skinning, SkinningMode::Gpu);
+        let handle = PaletteHandle::from_raw(0);
+        assert_eq!(entry.draw(Some(handle)), Ok(SkinnedDraw::Gpu(handle)));
+        assert_eq!(entry.shadow_draw(Some(handle)), Ok(SkinnedDraw::Gpu(handle)));
+        assert_eq!(entry.draw(None), Err(SkinBindError::MissingPalette));
+        assert_eq!(
+            entry.shadow_draw(None),
+            Err(SkinBindError::ShadowWithoutPalette)
+        );
+        // Both failures degrade to the CPU draw, never a panic.
+        assert_eq!(
+            entry.draw(None).unwrap_or(SkinnedDraw::Cpu),
+            SkinnedDraw::Cpu
+        );
+        assert_eq!(
+            entry.shadow_draw(None).unwrap_or(SkinnedDraw::Cpu),
+            SkinnedDraw::Cpu
+        );
+        // Cpu entries ignore handles entirely.
+        let mut cpu_entry = entry.clone();
+        cpu_entry.skinning = SkinningMode::Cpu;
+        cpu_entry.joint_palette = None;
+        cpu_entry.pose = MeshPose::Skinned;
+        assert_eq!(cpu_entry.draw(Some(handle)), Ok(SkinnedDraw::Cpu));
+        assert_eq!(cpu_entry.shadow_draw(Some(handle)), Ok(SkinnedDraw::Cpu));
+        assert_eq!(cpu_entry.draw(None), Ok(SkinnedDraw::Cpu));
+    }
+
+    #[test]
+    fn skinned_gpu_vertices_reject_cpu_pose_and_length_defects() {
+        // Cpu entries have no GPU rows; a Bind pose whose lanes disagree
+        // with the vertex count yields None instead of a partial buffer.
+        let mut engine = Engine::new();
+        push_skinned_triangle(&mut engine);
+        let upload = extract_render_data(engine.world().store().expect("store"));
+        let mut entry = upload.custom_meshes[0].clone();
+        entry.pose = MeshPose::Skinned;
+        assert!(entry.skinned_gpu_vertices().is_none());
+        let mut broken = upload.custom_meshes[0].clone();
+        let MeshPose::Bind(influences) = &mut broken.pose else {
+            panic!("gpu entry must carry bind influences");
+        };
+        influences.joints.pop();
+        assert!(broken.skinned_gpu_vertices().is_none());
     }
 }

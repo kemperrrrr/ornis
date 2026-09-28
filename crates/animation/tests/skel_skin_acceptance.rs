@@ -1,8 +1,9 @@
 //! Phase C acceptance (design `docs/animation-design.md` §4): imported
 //! skin data → [`Skeleton`] + [`SkinnedMesh`] (via the no-dependency bridge
 //! builders) → `skel_sample` + `skel_skin_cpu` → the extraction publishes
-//! one GPU-skinning entry with world-space vertices and `IDENTITY`
-//! matrices.
+//! one GPU-skinning entry with bind-pose vertices, staged influences and
+//! `IDENTITY` matrices (the draw path binds the palette and blends in the
+//! vertex stage).
 //!
 //! The [`SkinImport`]/[`SkinnedMeshImport`] values below play the importer's
 //! role: hand-filled in the multi-format contract shape (today's producer
@@ -15,9 +16,9 @@ use std::f32::consts::FRAC_PI_2;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    ClipId, JointId, JointPose, JointTrack, Key, KeyTrack, SkelClip, SkelPlayer, SkelSampleSystem,
-    SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport, SkinningMode, skeleton_from_import,
-    skinned_mesh_from_import,
+    CPU_GPU_TOLERANCE, ClipId, JointId, JointPose, JointTrack, Key, KeyTrack, SkelClip, SkelPlayer,
+    SkelSampleSystem, SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport, SkinningMode,
+    blend_vertex_reference, skeleton_from_import, skinned_mesh_from_import,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::units::Clamped01;
@@ -198,23 +199,57 @@ fn skinned_primitive_extracts_world_vertices_with_identity() {
         ornis_render::MaterialIdx::from_raw(0)
     );
     assert_eq!(upload.materials.len(), 1);
-    // Hand-computed skinning (`M1 = T(1,0,0)·Rz(90°)`, identity binds):
-    // v0 rides joint 1 fully, v1 stays on the root, v2 blends half.
+    // GPU entries carry bind-pose rows for the skinned stage (the draw
+    // path binds the palette and blends there); the influences ride the
+    // pose. Hand-computed skinning (`M1 = T(1,0,0)·Rz(90°)`, identity
+    // binds): v0 rides joint 1 fully, v1 stays on the root, v2 blends
+    // half — the palette blend of the staged bind data lands on those
+    // spots within the parity допуск.
     let vertices = &entry.vertices;
     assert_eq!(vertices.len(), 3);
-    assert!(
-        close(vertices[0].position, Vec3::new(1.0, 1.0, 0.0)),
-        "v0 skinned to {:?}",
-        vertices[0].position
+    assert_eq!(vertices[0].position, [1.0, 0.0, 0.0]);
+    assert_eq!(vertices[1].position, [0.0, 0.0, 0.0]);
+    assert_eq!(vertices[2].position, [1.0, 0.0, 0.0]);
+    let ornis_render::MeshPose::Bind(influences) = &entry.pose else {
+        panic!("gpu entry must carry bind influences");
+    };
+    assert_eq!(
+        influences.joints,
+        vec![[1, 0, 0, 0], [0, 0, 0, 0], [0, 1, 0, 0]]
     );
-    assert!(
-        close(vertices[1].position, Vec3::ZERO),
-        "v1 stays on the root"
+    assert_eq!(
+        influences.weights,
+        vec![
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0]
+        ]
     );
-    assert!(
-        close(vertices[2].position, Vec3::new(1.0, 0.5, 0.0)),
-        "v2 blends half"
-    );
+    let matrices = palette
+        .iter()
+        .map(Mat4::from_cols_array_2d)
+        .collect::<Vec<_>>();
+    let joints_u16 = [[1, 0, 0, 0], [0, 0, 0, 0], [0, 1, 0, 0]];
+    let expected = [
+        Vec3::new(1.0, 1.0, 0.0),
+        Vec3::ZERO,
+        Vec3::new(1.0, 0.5, 0.0),
+    ];
+    for (index, vertex) in vertices.iter().enumerate() {
+        let (position, _) = blend_vertex_reference(
+            &matrices,
+            joints_u16[index],
+            influences.weights[index],
+            vertex.position,
+            vertex.normal,
+        );
+        let drift = (Vec3::from_array(position) - expected[index]).length();
+        assert!(
+            drift < CPU_GPU_TOLERANCE,
+            "vertex {index} drifts {drift} from {:?}",
+            expected[index]
+        );
+    }
     // Normals survive the Z spin; uvs/indices pass through untouched.
     for vertex in vertices {
         assert!(close(vertex.normal, Vec3::Z));
