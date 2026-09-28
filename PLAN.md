@@ -908,6 +908,96 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   parallel-transport фреймами + `RopeMesh`-компонент и ветка в
   `sync_soft_out`; рендер-крейт не тронут). Lib-сьют 159, bin
   engine_runtime 11/11, clippy/fmt чисто.
+- **D1-остатки — hardening XPBD/soft (зафиксировано 2026-09-27, не начато):**
+  soft-контакты discrete only (без CCD), одно witness-сопряжение на пару
+  (без multi-point манифолдов), inelastic+frictionless (velocity-пассы про
+  soft-ряды не знают), без `layer/mask` на soft-стороне
+  (`xpbd.rs:421-424` — цепляется ко всему), без сна/островов/событий,
+  однопоточно. Джойнты XPBD — только структура
+  (Ball/Distance/Fixed/Revolute/Prismatic), limits/motors/springs не
+  ведутся, Wheel/Gear/SixDof → `None`. Разрывы — holes-not-splits без
+  дупликации частиц (`soft.rs:718-731`: рвутся только Structural,
+  shear/bend нет, volume-поверхность цела, пины не снимаются).
+  Self-collision базовый (`soft_self.rs`: uniform-grid hash `cell=2r`,
+  скип связанных рядов и pin-pin, неравенства без lambda). Архитектура:
+  soft живёт во втором отдельном `XpbdEngine` в `PhysicsRuntime`
+  (`src/engine_runtime.rs`), не в `Engine`/`SolverKind`-роутинге
+  (sequential_impulse/avbd частиц не знают). Доки отстают от кода (по
+  `AGENTS.md` верить коду): шапки `xpbd.rs:39-44` и `soft.rs:12-15` до
+  сих пор пишут «No self-collision / no render upload yet», хотя хуки
+  `solve_self_collision`, `surface`/`tube_*`, `sync_soft_out` →
+  `MeshDesc::Custom` уже в коде — починить доки.
+- **D2 — Жидкости: Position Based Fluids (план, IDEAS §29):** тот же
+  XPBD-ядро `Δλ = (−C − α̃λ)/(w + α̃)` из `crates/physics/src/xpbd.rs`,
+  но констрейнт плотности `C = ρ/ρ₀ − 1` с Poly6/Spiky-ядрами +
+  XSPH-вязкость/завихренность (Macklin–Müller 2013; §29 предписывает
+  «для частиц брать XPBD Мюллера, не AVBD»). Шаги: (1) `fluid.rs` +
+  `FluidBody { particles, rest_density, smoothing_radius }`; (2) соседский
+  поиск расширением `soft_self.rs`-грида (сейчас `cell=2r` под
+  self-collision — вернуть пары для SPH-сумм); (3) density-пасс в том же
+  сабстеп-цикле + двусторонний coupling с rigid (сейчас
+  `discover_soft_contacts` — только частицы-как-сферы, давление в обе
+  стороны — следующий шаг); (4) рендер через существующий soup-путь
+  `sync_soft_out → MeshDesc::Custom` (сначала screen-space/metaballs,
+  marching cubes позже). Бюджет: 1–5k частиц на CPU, дальше — `gpu/` +
+  compute-DSL. Гейт каждого шага: юнит-тесты + отсутствие регресса
+  physics-сьюта.
+- **D3 — Газы/дым (план, отдельно от XPBD):** SPH-газом не надо —
+  расточительно. Либо эйлеров semi-Lagrangian грид (Stam) для дыма, либо
+  читерный curl-noise + спрайты. Это отдельный грид-модуль + рендер
+  прозрачности, которого в `crates/render` пока нет. `Schrödinger's
+  Smoke` (Chern et al. 2016, эйлеров, `v = ∇arg ψ`) и Clebsch/impulse-родия —
+  экзотика (требуют MAC-сетку + комплексный солвер + рендер объёма, дают
+  в основном красивый дым). Адаптивная сетка — Losasso et al. 2004
+  (октодерево, мелко у поверхности/вихрей), `OpenVDB` (Museth 2013,
+  продакшн-стандарт), `SPGrid`/Taichi sparse под гибриды; цена —
+  T-junction ghost-значения, ребалансировка каждый кадр, сложный
+  multigrid-прекондиционер (поэтому в real-time чаще uniform-грид +
+  частицы, не полный AMR).
+- **D4 — Гибриды (план, после D2):** `FLIP` (Zhu–Bridson: P2G → давление
+  на временной сетке → G2P с `v += Δv_grid`), `APIC` (Jiang: аффинный
+  дескриптор `C` вместо скорости), `MPM` (MLS-MPM, Hu: частицы несут
+  деформацию `F`, сетка решает импульс с конститутивной моделью — один
+  солвер на песок/снег/плавление/разрушение сменой модели). Для Ornis:
+  частицы остаются, добавляется фоновая MAC-сетка только как scratch на
+  шаг + P2G/G2P; фазовые переходы — сменой жёсткости/модели. Чистый Эйлер
+  отдельно имеет смысл только под дым/газы (D3).
+- **D5 — IPC-семейство с гарантиями (план, после D2):** классический IPC
+  (Li et al. 2020: барьерный контакт + точный CCD + Ньютон с line search)
+  — не realtime (минуты на кадр), в лоб не берём: конфликтует с нынешним
+  discrete-подходом (speculative margin + TOI-clamp), требует Hessian
+  assembly + CCD внутри каждой итерации. Кандидаты по нарастанию цены:
+  (1) **ABD — Affine Body Dynamics** (Lan, Kaufman et al. 2022: тела как
+  аффинные 12-DOF, барьер IPC сохранён, шаг realtime) — ложится четвёртым
+  `SolverKind` рядом с SI/AVBD/XPBD, первый шаг трека; (2) **Rigid-IPC**
+  (Ferguson et al.) — дешевле полного deformable, но не 60 FPS;
+  (3) **GPU-варианты** (GIPC и наследники: полный IPC до интерактивных
+  rates) — требуют GPU-инфраструктуры шире нынешней `gpu/` + точного CCD
+  в цикле. Полный deformable-IPC — только офлайн/GPU-перспектива.
+  Гейт (1): стек-боксы и hinge-пины без единого пересечения на
+  CCD-стресс сценах + отсутствие регресса physics-сьюта.
+- **D6 — Physics-guided cloth LOD + мешлеты (план, Zhang et al.,
+  SIGGRAPH '25):** разрешение ткани заранее из физики, а не из пресима
+  или динамического ремешинга (ремешинг последователен, не GPU-friendly,
+  даёт осцилляции — замер §5.3.2 статьи): `λ ∼ (B/K)^{1/4}`
+  (Cerda–Mahadevan) + дистанция перехода `Lw` (Vandeparre/wrinklons) →
+  sizing map → Poisson + Delaunay. Продолжение в духе Nanite: sizing map
+  как physics-driven LOD-селектор мешлетов вместо screen-space метрики —
+  sim-сетка грубая и равномерная (дешёвый XPBD-шаг), render-сетка из
+  мешлетов (~64–128 tris) с предпросчитанной иерархией, `Lw`-переход шьёт
+  границы заранее. Оговорки: кластеризация фиксирована в UV-пространстве
+  ткани (иерархия под деформацией каждый кадр не перестраивается);
+  render-LOD не лечит locking грубой sim-сетки — нужна двухуровневость
+  (Müller–Chentanez «Wrinkle Meshes» 2010: coarse-sim + constrained
+  fine-patch; зародыш уже есть — `surface` отделена от constraint-топологии
+  в `soft.rs`); анизотропия (§4.1.2: уток мелко, основа крупно) —
+  прямоугольными кластерами вдоль нитей. Шаги: (1) `r_opt` из уже лежащих
+  compliance (`Structural`/`Shear`/`Bend` у `DeformConstraint` — те же
+  `B`/`E`, переписать в физические единицы); (2) sizing map как поле на
+  ткани + нерегулярный `cloth_grid`-билдeр; (3) партиция `surface` на
+  мешлеты + LOD-ступени; (4) селектор уровня по sizing map в
+  `sync_soft_out`. Гейт: cantilever/stretch-тесты статьи (рис. 16/18 —
+  6 складок против 7 у fine, а не 4 у coarse).
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
