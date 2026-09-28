@@ -432,9 +432,7 @@ impl SplitState {
         for b in &mut self.bodies {
             let src = match b.owner {
                 SplitOwner::Avbd => b.local_avbd.and_then(|h| self.avbd.get_body_local(h)),
-                SplitOwner::SequentialImpulse => {
-                    b.local_si.and_then(|h| self.si.get_body_local(h))
-                }
+                SplitOwner::SequentialImpulse => b.local_si.and_then(|h| self.si.get_body_local(h)),
                 SplitOwner::Static => None, // host owns non-dynamic poses/properties
             };
             if let Some(live) = src {

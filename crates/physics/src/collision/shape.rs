@@ -1277,10 +1277,7 @@ impl TriMesh {
             // Vertices are validated finite above, so this cannot fail.
             let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
                 .expect("validated finite triangle vertices");
-            hull.faces = vec![
-                Triangle::from_raw([0, 1, 2]),
-                Triangle::from_raw([0, 2, 1]),
-            ];
+            hull.faces = vec![Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 2, 1])];
             tris.push(Shape::ConvexHull(hull));
         }
         if tris.is_empty() {
@@ -1357,9 +1354,10 @@ impl TriMesh {
     /// out of range. Centralizes the `order[o] as usize` walk so narrow
     /// phase never indexes blindly.
     pub(crate) fn ordered_triangle(&self, pos: usize) -> Option<usize> {
-        self.order.get(pos).map(|id| *id as usize).filter(|t| {
-            *t < self.tris.len() && *t < self.centroids.len()
-        })
+        self.order
+            .get(pos)
+            .map(|id| *id as usize)
+            .filter(|t| *t < self.tris.len() && *t < self.centroids.len())
     }
 
     /// Median-split AABB BVH over the triangle bounds (mesh-local space).
@@ -1624,8 +1622,7 @@ mod tests {
             [2, 7, 3],
             [2, 6, 7],
         ];
-        let triangles: Vec<Triangle> =
-            raw.iter().map(|t| Triangle::from_raw(*t)).collect();
+        let triangles: Vec<Triangle> = raw.iter().map(|t| Triangle::from_raw(*t)).collect();
         TriMesh::from_triangles(&v, &triangles).expect("valid cube mesh")
     }
 
@@ -1676,12 +1673,8 @@ mod tests {
             Vec3::new(2.0, 0.0, 0.0), // Collinear with the first two.
             Vec3::Y,
         ];
-        let triangles = [
-            Triangle::from_raw([0, 1, 2]),
-            Triangle::from_raw([0, 1, 3]),
-        ];
-        let mesh =
-            TriMesh::from_triangles(&v, &triangles).expect("degenerate drops, not errors");
+        let triangles = [Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 1, 3])];
+        let mesh = TriMesh::from_triangles(&v, &triangles).expect("degenerate drops, not errors");
         assert_eq!(mesh.tris.len(), 1);
     }
 

@@ -135,7 +135,11 @@ mod tests {
         let body = body_for(
             &transform,
             &MeshDesc::Box {
-                size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
+                size: [
+                    PositiveF32::expect_valid(2.0),
+                    PositiveF32::expect_valid(4.0),
+                    PositiveF32::expect_valid(6.0),
+                ],
             },
             None,
             0.0,
@@ -145,9 +149,19 @@ mod tests {
         assert_eq!(body.position, Vec3::new(1.0, 2.0, 3.0));
 
         assert!(
-            body_for(&transform, &MeshDesc::Plane { size: [PositiveF32::expect_valid(3.0), PositiveF32::expect_valid(5.0)] }, None, 0.0)
-                .expect("plane infallible")
-                .is_none()
+            body_for(
+                &transform,
+                &MeshDesc::Plane {
+                    size: [
+                        PositiveF32::expect_valid(3.0),
+                        PositiveF32::expect_valid(5.0)
+                    ]
+                },
+                None,
+                0.0
+            )
+            .expect("plane infallible")
+            .is_none()
         );
     }
 

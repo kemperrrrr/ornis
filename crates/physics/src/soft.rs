@@ -393,8 +393,7 @@ impl SoftBody {
         for r in 0..rows {
             for c in 0..cols {
                 let pos = origin + Vec3::new(c as f32 * spacing, -(r as f32) * spacing, 0.0);
-                let mut p =
-                    Particle::try_new(pos, mass).unwrap_or_else(|| Particle::pinned(pos));
+                let mut p = Particle::try_new(pos, mass).unwrap_or_else(|| Particle::pinned(pos));
                 if pinned(c, r) {
                     p.pin();
                 }

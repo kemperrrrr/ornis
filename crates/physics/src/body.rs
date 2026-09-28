@@ -623,8 +623,8 @@ impl RigidBody {
         cell: f32,
         mass: f32,
     ) -> Self {
-        Self::try_new_heightfield(position, heights.clone(), rows, cols, cell, mass)
-            .unwrap_or_else(|_| {
+        Self::try_new_heightfield(position, heights.clone(), rows, cols, cell, mass).unwrap_or_else(
+            |_| {
                 Self::build(
                     position,
                     mass,
@@ -637,7 +637,8 @@ impl RigidBody {
                         cell,
                     }),
                 )
-            })
+            },
+        )
     }
 
     /// Checked heightfield body: validates `len == rows * cols`, grid
@@ -684,8 +685,7 @@ impl RigidBody {
         mass: f32,
     ) -> Self {
         Self::try_new_trimesh(position, vertices, triangles, mass).unwrap_or_else(|_| {
-            let empty =
-                crate::shape::TriMesh::from_triangles(&[], &[]).expect("empty soup builds");
+            let empty = crate::shape::TriMesh::from_triangles(&[], &[]).expect("empty soup builds");
             let mut body = Self::build(position, mass, 0.3, 0.5, Shape::TriMesh(empty));
             body.rolling_friction = 0.2;
             body.torsion_friction = 0.05;

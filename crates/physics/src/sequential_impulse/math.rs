@@ -15,11 +15,7 @@ pub(crate) fn clamp01(v: f32) -> f32 {
 /// Reciprocal inertia axis with zero-guard: `1/i` for positive `i`, else 0.
 #[inline]
 pub fn inv_inertia_axis(i: f32) -> f32 {
-    if i > 0.0 {
-        1.0 / i
-    } else {
-        0.0
-    }
+    if i > 0.0 { 1.0 / i } else { 0.0 }
 }
 
 #[inline]

@@ -572,7 +572,8 @@ impl AvbdEngine {
                                 let o = outer(g, g);
                                 for x in 0..3 {
                                     for y in 0..3 {
-                                        lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen_c * o[x][y];
+                                        lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
+                                            pen_c * o[x][y];
                                     }
                                 }
                                 rhs[ANGULAR_OFFSET] += f_c * g.x;
@@ -604,7 +605,8 @@ impl AvbdEngine {
                                 let o = outer(g, g);
                                 for x in 0..3 {
                                     for y in 0..3 {
-                                        lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += j.pen_a[i] * o[x][y];
+                                        lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
+                                            j.pen_a[i] * o[x][y];
                                     }
                                 }
                                 rhs[ANGULAR_OFFSET] += f * g.x;
@@ -642,7 +644,8 @@ impl AvbdEngine {
                                     let o = outer(g, g);
                                     for x in 0..3 {
                                         for y in 0..3 {
-                                            lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += j.pen_a[i] * o[x][y];
+                                            lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
+                                                j.pen_a[i] * o[x][y];
                                         }
                                     }
                                     rhs[ANGULAR_OFFSET] += f * g.x;
@@ -734,7 +737,8 @@ impl AvbdEngine {
                                 let o = outer(g, g);
                                 for x in 0..3 {
                                     for y in 0..3 {
-                                        lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += j.pen_a[2] * o[x][y];
+                                        lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
+                                            j.pen_a[2] * o[x][y];
                                     }
                                 }
                                 rhs[ANGULAR_OFFSET] += f * g.x;
@@ -779,7 +783,14 @@ impl AvbdEngine {
             // servo is bang-bang at single-step dt without substeps.
         }
 
-        let neg = [-rhs[0], -rhs[1], -rhs[2], -rhs[ANGULAR_OFFSET], -rhs[4], -rhs[5]];
+        let neg = [
+            -rhs[0],
+            -rhs[1],
+            -rhs[2],
+            -rhs[ANGULAR_OFFSET],
+            -rhs[4],
+            -rhs[5],
+        ];
         if let Some(dx) = solve_6x6(lhs, neg) {
             let body = &mut self.bodies[h];
             body.position += Vec3::new(dx[0], dx[1], dx[2]);

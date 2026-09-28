@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.13582455666470916,
+  "quality_score": 0.13462226658837362,
   "iosp_score": 0.9021538461538462,
   "violations": 318,
   "total": 5240,
   "complexity_warnings": 52,
-  "magic_number_warnings": 1401,
+  "magic_number_warnings": 1406,
   "nesting_depth_warnings": 15,
   "function_length_warnings": 100,
   "unsafe_warnings": 9,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 26,
   "structural_coupling_warnings": 24,
-  "total_findings": 3700,
+  "total_findings": 3705,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -143,7 +143,7 @@
     {
       "name": "run",
       "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 468
+      "line": 477
     },
     {
       "name": "build_scene_data",
@@ -158,47 +158,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1113
+      "line": 1116
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3016
+      "line": 3021
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3219
+      "line": 3224
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3423
+      "line": 3428
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3594
+      "line": 3599
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3620
+      "line": 3625
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3702
+      "line": 3707
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3735
+      "line": 3734
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4182
+      "line": 4183
     },
     {
       "name": "RenderFrame3D::build",
@@ -568,22 +568,22 @@
     {
       "name": "avbd_hessian_ang",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 237
+      "line": 242
     },
     {
       "name": "avbd_diag_solve",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 255
+      "line": 261
     },
     {
       "name": "avbd_stub_kernel",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 296
+      "line": 303
     },
     {
       "name": "avbd_row_kernel",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 564
+      "line": 571
     },
     {
       "name": "GpuBatch::fill_lane",
@@ -623,17 +623,17 @@
     {
       "name": "SoftBody::try_cloth_grid_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 476
+      "line": 475
     },
     {
       "name": "SoftBody::soft_cube",
       "file": "crates/physics/src/soft.rs",
-      "line": 507
+      "line": 506
     },
     {
       "name": "SoftBody::try_soft_cube_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 612
+      "line": 611
     },
     {
       "name": "RigidBody::try_sphere_units",
@@ -1033,47 +1033,47 @@
     {
       "name": "mul_inv_inertia",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 54
+      "line": 50
     },
     {
       "name": "effective_mass",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 75
+      "line": 71
     },
     {
       "name": "k_entry",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 119
+      "line": 115
     },
     {
       "name": "apply_impulse",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 207
+      "line": 203
     },
     {
       "name": "apply_angular_impulse",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 255
+      "line": 251
     },
     {
       "name": "apply_positional_rotation",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 271
+      "line": 267
     },
     {
       "name": "apply_positional_impulse",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 293
+      "line": 289
     },
     {
       "name": "solve_normal_block",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 327
+      "line": 323
     },
     {
       "name": "commit_active_set",
       "file": "crates/physics/src/sequential_impulse/math.rs",
-      "line": 502
+      "line": 498
     },
     {
       "name": "shape_min_dimension",
@@ -1333,32 +1333,32 @@
     {
       "name": "SplitState::shapecast",
       "file": "crates/physics/src/split.rs",
-      "line": 744
+      "line": 742
     },
     {
       "name": "heightfield_convex",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 233
+      "line": 237
     },
     {
       "name": "refine_witnesses",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 332
+      "line": 336
     },
     {
       "name": "trimesh_convex",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 391
+      "line": 395
     },
     {
       "name": "shape_distance",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 494
+      "line": 498
     },
     {
       "name": "cast_shape",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 624
+      "line": 628
     },
     {
       "name": "body_max_extent",
@@ -1498,27 +1498,27 @@
     {
       "name": "TriMesh::from_indexed",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1315
+      "line": 1312
     },
     {
       "name": "TriMesh::build_bvh",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1368
+      "line": 1366
     },
     {
       "name": "TriMesh::split",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1405
+      "line": 1403
     },
     {
       "name": "TriMesh::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1466
+      "line": 1464
     },
     {
       "name": "TriMesh::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1516
+      "line": 1514
     },
     {
       "name": "Tree::insert_leaf",

@@ -11,8 +11,8 @@
 //! checked constructors instead of silent defaults.
 
 use glam::{Quat, Vec3};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Duration in seconds at the frame boundary (canonical definition).
 ///
@@ -406,7 +406,9 @@ impl<'de> Deserialize<'de> for PositiveF32 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = f32::deserialize(deserializer)?;
         Self::try_new(value).ok_or_else(|| {
-            D::Error::custom(format!("PositiveF32 requires a finite value > 0, got {value}"))
+            D::Error::custom(format!(
+                "PositiveF32 requires a finite value > 0, got {value}"
+            ))
         })
     }
 }

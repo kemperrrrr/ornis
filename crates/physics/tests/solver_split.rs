@@ -210,7 +210,9 @@ fn global_handles_survive_islands_rebuilds() {
         engine.step(DT);
     }
     for h in [f, a, b, c] {
-        let body = engine.get_body(h).unwrap_or_else(|| panic!("global {h:?} lost"));
+        let body = engine
+            .get_body(h)
+            .unwrap_or_else(|| panic!("global {h:?} lost"));
         assert!(body.position.is_finite(), "global {h:?} went non-finite");
     }
     let floor = engine.get_body(f).unwrap();

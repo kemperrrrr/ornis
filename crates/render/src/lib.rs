@@ -57,7 +57,9 @@ pub use flags::{
     SamplerKind, ShadowCast,
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
-pub use frame_passes::{FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor};
+pub use frame_passes::{
+    FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor,
+};
 pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};
 pub use mesh_upload::{
     ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,

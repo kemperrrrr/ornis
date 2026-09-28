@@ -9,8 +9,8 @@
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
-use ornis_core::units::PositiveF32;
 use ornis_core::OpenPBRMaterial;
+use ornis_core::units::PositiveF32;
 use ornis_render::{
     InstanceData, MaterialIdx, RenderBackend, RenderBackendConfig, RenderContext,
     create_render_backend,
@@ -176,13 +176,22 @@ fn build_scene_data(
             segments,
             rings,
         } => ornis_render::create_sphere(device, radius.get(), *segments, *rings),
-        MeshDesc::Box { size } => ornis_render::mesh::create_box(device, size.map(PositiveF32::get)),
-        MeshDesc::Plane { size } => ornis_render::mesh::create_plane(device, size.map(PositiveF32::get)),
+        MeshDesc::Box { size } => {
+            ornis_render::mesh::create_box(device, size.map(PositiveF32::get))
+        }
+        MeshDesc::Plane { size } => {
+            ornis_render::mesh::create_plane(device, size.map(PositiveF32::get))
+        }
         MeshDesc::Cylinder {
             radius,
             height,
             radial_segments,
-        } => ornis_render::mesh::create_cylinder(device, radius.get(), height.get(), *radial_segments),
+        } => ornis_render::mesh::create_cylinder(
+            device,
+            radius.get(),
+            height.get(),
+            *radial_segments,
+        ),
         // This probe renders procedural scenes; Custom soups have no
         // upload path here yet.
         MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),

@@ -362,7 +362,11 @@ mod tests {
         // an `/api/scene` payload, and parse back: the JSON transport
         // preserves Box geometry and emission bit-exactly.
         let mesh_json = serde_json::to_string(&MeshDesc::Box {
-            size: [PositiveF32::expect_valid(2.0), PositiveF32::expect_valid(4.0), PositiveF32::expect_valid(6.0)],
+            size: [
+                PositiveF32::expect_valid(2.0),
+                PositiveF32::expect_valid(4.0),
+                PositiveF32::expect_valid(6.0),
+            ],
         })
         .expect("mesh serializes");
         let material_json = serde_json::to_string(&MaterialDesc::Dielectric {

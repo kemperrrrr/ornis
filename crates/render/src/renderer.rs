@@ -1050,7 +1050,10 @@ pub fn upload_skinned_mesh(
             MeshError::IndexCountNotMultipleOfThree,
         ));
     }
-    if indices.iter().any(|index| (*index as usize) >= vertices.len()) {
+    if indices
+        .iter()
+        .any(|index| (*index as usize) >= vertices.len())
+    {
         return Err(UploadError::InvalidMesh(MeshError::IndexOutOfBounds));
     }
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2484,7 +2487,9 @@ impl Renderer3D {
         handle: PaletteHandle,
     ) {
         if handle.index()
-            >= self.palette_count.load(std::sync::atomic::Ordering::Relaxed) as usize
+            >= self
+                .palette_count
+                .load(std::sync::atomic::Ordering::Relaxed) as usize
         {
             return;
         }
@@ -3701,10 +3706,7 @@ impl Renderer3D {
     /// no pass needs rebinding here) when it does not.
     fn ensure_palette_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self
-                .palette_buffer
-                .read()
-                .expect("palette buffer lock");
+            let old = self.palette_buffer.read().expect("palette buffer lock");
             Self::grown_storage_buffer(
                 device,
                 "skin palette buffer (grown)",
@@ -3715,10 +3717,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self
-                .palette_buffer
-                .write()
-                .expect("palette buffer lock") = buffer;
+            *self.palette_buffer.write().expect("palette buffer lock") = buffer;
         }
     }
 
@@ -3808,7 +3807,9 @@ impl Renderer3D {
         handle: PaletteHandle,
     ) {
         if handle.index()
-            >= self.palette_count.load(std::sync::atomic::Ordering::Relaxed) as usize
+            >= self
+                .palette_count
+                .load(std::sync::atomic::Ordering::Relaxed) as usize
         {
             return;
         }
@@ -4614,10 +4615,7 @@ mod tests {
             &crate::skinning::wgsl_vertex_source_skinned(),
         );
         assert_valid_wgsl("skinned_fragment", &crate::shaders::gbuffer_fragment());
-        assert_eq!(
-            crate::skinning::skinned_entry_point(),
-            "vs_main_skinned"
-        );
+        assert_eq!(crate::skinning::skinned_entry_point(), "vs_main_skinned");
     }
 
     #[test]
@@ -4700,10 +4698,7 @@ mod tests {
                 .material_buffer
                 .read()
                 .expect("material buffer lock");
-            let palette = renderer
-                .palette_buffer
-                .read()
-                .expect("palette buffer lock");
+            let palette = renderer.palette_buffer.read().expect("palette buffer lock");
             let entries =
                 crate::shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
                     "camera" => renderer.camera_buffer.as_entire_binding(),
@@ -4811,7 +4806,9 @@ mod tests {
         );
         renderer.render_skinned_shadows(&device, &mut encoder, &mesh, PaletteHandle::from_raw(99));
         queue.submit(std::iter::once(encoder.finish()));
-        device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
     }
 
     #[test]

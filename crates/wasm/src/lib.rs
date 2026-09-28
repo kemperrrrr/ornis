@@ -21,8 +21,8 @@ use web_sys::console;
 use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_render::{
-    FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
-    install_orbit_camera, read_orbit_camera,
+    FrameUpload, MaterialIdx, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D,
+    Technique, install_orbit_camera, read_orbit_camera,
 };
 
 mod scene_api;
@@ -966,7 +966,10 @@ mod integration_tests {
         assert_eq!(extracted.mesh_params, (32, 24));
         assert_eq!(extracted.materials.len(), live.scene.entities.len());
         assert_eq!(extracted.instances.len(), live.scene.entities.len());
-        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(
+            extracted.instances[0].material_index,
+            MaterialIdx::from_raw(0)
+        );
         assert_eq!(
             extracted.instances[0].model_matrix.w_axis.truncate(),
             glam::Vec3::new(-5.6, 0.0, 0.0)
@@ -1102,7 +1105,10 @@ mod integration_tests {
         assert_eq!(extracted.mesh_params, (32, 24));
         assert_eq!(extracted.instances.len(), 1);
         assert_eq!(extracted.materials.len(), 1);
-        assert_eq!(extracted.instances[0].material_index, 0);
+        assert_eq!(
+            extracted.instances[0].material_index,
+            MaterialIdx::from_raw(0)
+        );
 
         // Model-matrix golden bits: identity rotation, unit scale folded
         // with radius 1.0, translation (-5.6, 0, 0).

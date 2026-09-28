@@ -2196,12 +2196,10 @@ mod tests {
                 entry.vertices[index].position,
                 entry.vertices[index].normal,
             );
-            let position_drift = (Vec3::from_array(gpu_position)
-                - Vec3::from_array(cpu_positions[index]))
-            .length();
-            let normal_drift = (Vec3::from_array(gpu_normal)
-                - Vec3::from_array(cpu_normals[index]))
-            .length();
+            let position_drift =
+                (Vec3::from_array(gpu_position) - Vec3::from_array(cpu_positions[index])).length();
+            let normal_drift =
+                (Vec3::from_array(gpu_normal) - Vec3::from_array(cpu_normals[index])).length();
             assert!(
                 position_drift < CPU_GPU_TOLERANCE,
                 "vertex {index} position drifts {position_drift}"
@@ -2231,7 +2229,10 @@ mod tests {
         assert_eq!(entry.skinning, SkinningMode::Gpu);
         let handle = PaletteHandle::from_raw(0);
         assert_eq!(entry.draw(Some(handle)), Ok(SkinnedDraw::Gpu(handle)));
-        assert_eq!(entry.shadow_draw(Some(handle)), Ok(SkinnedDraw::Gpu(handle)));
+        assert_eq!(
+            entry.shadow_draw(Some(handle)),
+            Ok(SkinnedDraw::Gpu(handle))
+        );
         assert_eq!(entry.draw(None), Err(SkinBindError::MissingPalette));
         assert_eq!(
             entry.shadow_draw(None),

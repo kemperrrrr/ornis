@@ -11,18 +11,22 @@
 //! (host discovery staging rows into the device solve). Moved verbatim from
 //! `gpu.rs` (phase 3); rung 2 added in place.
 
-use ornis_macros::{gpu_pipeline, wgsl_fn, WgslStruct};
+use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
 
 use super::GpuBodyState;
-use crate::avbd::{solve_6x6, AvbdEngine, SPATIAL_DOF};
+use crate::avbd::{AvbdEngine, SPATIAL_DOF, solve_6x6};
 use crate::body::{BodyType, RigidBody};
 use crate::engine::PhysicsEngine;
 use bytemuck::Zeroable as _;
 
 /// Numerical zero for host-side guards: time steps, diagonal entries and
 /// Hessian components at or below this magnitude are treated as exactly
-/// zero (degenerate axis, unsteppable dt). Kernel bodies keep literals —
-/// the DSL lowers `[T; N]` for literal N only (see `avbd_row_kernel`).
+/// zero (degenerate axis, unsteppable dt). Shader bodies keep literals —
+/// the DSL embeds `#[wgsl_fn]`/`#[gpu_pipeline]` bodies verbatim and has
+/// no spelling for a Rust `const` (likewise `[T; N]` lowers literal N
+/// only, see `avbd_row_kernel`): a named const inside a shader body
+/// emits an unknown WGSL identifier (regression: `DEGENERATE_EPS`
+/// broke the rung-1/rung-2 naga gates, fixed by restoring literals).
 const DEGENERATE_EPS: f32 = 1e-12;
 
 // ---------------------------------------------------------------------------
@@ -222,7 +226,8 @@ fn avbd_hessian_lin(inv_mass: f32, dt: f32) -> f32 {
     let mut h = 0.0;
     if inv_mass > 0.0 {
         let dt2 = dt * dt;
-        if dt2 > DEGENERATE_EPS {
+        // Literal: shader bodies cannot name `DEGENERATE_EPS` (see above).
+        if dt2 > 1e-12 {
             h = 1.0 / (inv_mass * dt2);
         }
     }
@@ -239,7 +244,8 @@ fn avbd_hessian_ang(inertia: Vec3, dt: f32) -> Vec3 {
     let mut h0 = 0.0;
     let mut h1 = 0.0;
     let mut h2 = 0.0;
-    if dt2 > DEGENERATE_EPS {
+    // Literal: shader bodies cannot name `DEGENERATE_EPS` (see above).
+    if dt2 > 1e-12 {
         h0 = inertia[0] / dt2;
         h1 = inertia[1] / dt2;
         h2 = inertia[2] / dt2;
@@ -256,13 +262,14 @@ fn avbd_diag_solve(h: Vec3, r: Vec3) -> Vec3 {
     let mut x0 = 0.0;
     let mut x1 = 0.0;
     let mut x2 = 0.0;
-    if h[0] > DEGENERATE_EPS {
+    // Literals: shader bodies cannot name `DEGENERATE_EPS` (see above).
+    if h[0] > 1e-12 {
         x0 = r[0] / h[0];
     }
-    if h[1] > DEGENERATE_EPS {
+    if h[1] > 1e-12 {
         x1 = r[1] / h[1];
     }
-    if h[2] > DEGENERATE_EPS {
+    if h[2] > 1e-12 {
         x2 = r[2] / h[2];
     }
     return Vec3::new(x0, x1, x2);

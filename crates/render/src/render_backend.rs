@@ -623,10 +623,9 @@ mod tests {
                 segments,
                 rings,
             } => crate::mesh::create_sphere(&device, radius.get(), *segments, *rings),
-            ornis_assets::scene::MeshDesc::Box { size } => crate::mesh::create_box(
-                &device,
-                size.map(ornis_core::units::PositiveF32::get),
-            ),
+            ornis_assets::scene::MeshDesc::Box { size } => {
+                crate::mesh::create_box(&device, size.map(ornis_core::units::PositiveF32::get))
+            }
             ornis_assets::scene::MeshDesc::Plane { size } => {
                 crate::mesh::create_plane(&device, size.map(ornis_core::units::PositiveF32::get))
             }
@@ -634,7 +633,9 @@ mod tests {
                 radius,
                 height,
                 radial_segments,
-            } => crate::mesh::create_cylinder(&device, radius.get(), height.get(), *radial_segments),
+            } => {
+                crate::mesh::create_cylinder(&device, radius.get(), height.get(), *radial_segments)
+            }
             // The golden probe renders procedural scenes; Custom soups
             // have no upload path here yet.
             ornis_assets::scene::MeshDesc::Custom { .. } => {

@@ -84,7 +84,11 @@ fn seg_seg_closest(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) -> (Vec3, Vec3) {
     } else {
         0.0
     };
-    let mut t = if e > DEGENERATE_EPS { (b * s + f) / e } else { 0.0 };
+    let mut t = if e > DEGENERATE_EPS {
+        (b * s + f) / e
+    } else {
+        0.0
+    };
     if !(0.0..=1.0).contains(&t) {
         t = t.clamp(0.0, 1.0);
         s = ((b * t - c) / a).clamp(0.0, 1.0);

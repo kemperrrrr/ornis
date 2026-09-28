@@ -263,7 +263,16 @@ pub fn joint_palette_bytes(palette: &[Mat4]) -> Result<Vec<u8>, SkinError> {
 /// against a staged count.
 #[repr(transparent)]
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    bytemuck::Pod,
     bytemuck::Zeroable,
 )]
 pub struct PaletteHandle(u32);
@@ -557,10 +566,7 @@ mod tests {
         assert_eq!(handle.bound(4), Ok(handle));
         assert_eq!(
             handle.bound(3),
-            Err(SkinBindError::PaletteOverflow {
-                count: 3,
-                limit: 3,
-            })
+            Err(SkinBindError::PaletteOverflow { count: 3, limit: 3 })
         );
         // thiserror Display names the offender and the bound.
         assert!(
