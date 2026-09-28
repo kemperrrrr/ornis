@@ -95,6 +95,11 @@ mod native {
 use native::*;
 
 #[cfg(not(feature = "editor-only"))]
+use ornis_app::session::clamp_frame_dt;
+#[cfg(not(feature = "editor-only"))]
+use std::time::Instant;
+
+#[cfg(not(feature = "editor-only"))]
 struct GameApp {
     context: Option<GameContext>,
     remote_editor: Option<RemoteEditor>,
@@ -107,6 +112,9 @@ struct GameContext {
     remote_cmd_rx: Receiver<UiCommand>,
     remote_ev_tx: Sender<GameEvent>,
     entity_count: u32,
+    /// Wall clock of the last presented frame: `render_frame` measures the
+    /// real delta against it (clamped, see [`clamp_frame_dt`]).
+    last_frame: Instant,
 }
 
 #[cfg(not(feature = "editor-only"))]
@@ -245,6 +253,7 @@ impl GameApp {
             remote_cmd_rx,
             remote_ev_tx,
             entity_count,
+            last_frame: Instant::now(),
         })
     }
 
@@ -427,7 +436,18 @@ impl GameApp {
         // runs in Engine::schedule as RenderSubmit/RenderPresent. Only the
         // frame stays here (fixed + variable schedules + CPU extraction); the Present
         // system acquires via surface.get_current_texture and renders via frame3d itself.
-        ctx.runtime.frame(1.0 / 60.0);
+        //
+        // Vsync is OFF: the surface is configured with
+        // `wgpu::PresentMode::AutoNoVsync` (see `initialize` and the
+        // `Resized` handler), so frames are unthrottled and the wall-clock
+        // interval varies with load. The simulation therefore measures the
+        // real delta since the last frame (clamped against hitches by
+        // `clamp_frame_dt`, at most ~6 fixed steps) instead of assuming
+        // 1/60 s — sim speed is independent of FPS; the engine's bounded
+        // fixed accumulator absorbs the residual jitter.
+        let elapsed = ctx.last_frame.elapsed();
+        ctx.last_frame = Instant::now();
+        ctx.runtime.frame_secs(clamp_frame_dt(elapsed));
     }
 }
 

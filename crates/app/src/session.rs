@@ -49,11 +49,20 @@
 //! * `save_scene` — `{"path"?: string}`; serializes the world to RON and
 //!   writes it **atomically** (sibling `*.tmp` file + rename) to `path`
 //!   (default `editor/scene.ron`, the file the WASM viewport renders),
-//!   emitting `scene_saved {path, version}`. The world is not mutated;
+//!   emitting `scene_saved {path, version}`. The `path` is sandboxed to
+//!   `<workspace>/assets` or `<workspace>/editor` (see [`ScenePath`]);
+//!   the world is not mutated;
 //! * `load_scene` — `{"path"?: string}`; replaces the world with the scene
-//!   read back from `path`, emitting `scene_loaded {path, version,
-//!   entity_count}` plus fresh `status`/`scene` snapshots. A missing or
-//!   malformed file emits `error` and leaves the world untouched.
+//!   read back from `path` (same sandbox), emitting `scene_loaded {path,
+//!   version, entity_count}` plus fresh `status`/`scene` snapshots. A
+//!   missing or malformed file emits `error` and leaves the world untouched.
+//!
+//! Path validation lives in two places, deliberately: the HTTP backend drops
+//! escaping paths fail-fast in `build_command` (never queued), and this
+//! session re-resolves every path on execution (defense in depth — direct
+//! `UiCommand` senders bypass the HTTP edge). Both sides share the
+//! validated [`ScenePath`] newtype, so a raw filesystem path can never
+//! reach [`EditorSession::save_scene_file`]/[`load_scene_file`].
 //!
 //! `version` is incremented on every mutation so clients can cheaply detect
 //! changes. Invalid commands never panic: they produce an `error` event and
@@ -63,9 +72,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,7 +82,7 @@ use serde_json::Value;
 use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
-    ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, SmartStore, World,
+    ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, Seconds, SmartStore, World,
 };
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
@@ -88,6 +97,7 @@ use ornis_assets::server::AssetServer;
 use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 
 use editor_backend::ipc::{EditorCommand, GameEvent, RequestId, UiCommand};
+use editor_backend::remote::{ScenePath, ScenePathError, SceneRoots};
 
 /// Editor-side name component attached to every spawned entity.
 /// Newtype over `String`: its serde-canonical JSON is a plain string.
@@ -109,6 +119,123 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
     registry.register_component::<Position>();
     registry
 });
+
+/// Idle cadence of the editor-world loop: when no command arrives within
+/// this window the loop wakes anyway so the simulation and the scene-file
+/// watcher advance at ~60 Hz even with no traffic.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Upper bound for a measured wall-clock frame delta fed to the simulation.
+///
+/// Both host loops (native `render_frame`, editor-world [`run`]) measure the
+/// real time between frames and clamp it here: a hitch (debugger stop,
+/// backgrounded window) must cost at most ~6 fixed steps, never a
+/// catch-up spiral. The bound sits inside the engine's own hitch budget
+/// (`FixedTime` drops anything past 8 steps of 1/60 s), so the clamp only
+/// trims what the accumulator would discard anyway.
+pub const MAX_FRAME_DT: Seconds = Seconds(0.1);
+
+/// Clamps a measured wall-clock delta into a simulation step.
+///
+/// Non-negative by construction (`Duration`), finite, at most
+/// [`MAX_FRAME_DT`]. Shared by the native frame and the editor-world loop
+/// so both hosts apply the same anti-spiral policy.
+pub fn clamp_frame_dt(elapsed: Duration) -> Seconds {
+    Seconds(elapsed.as_secs_f32().clamp(0.0, MAX_FRAME_DT.get()))
+}
+
+/// Outcome of one editor frame: whether observers should publish fresh
+/// snapshots. Replaces the legacy `bool` on the typed [`Seconds`] path;
+/// [`EditorSession::tick`] keeps returning `bool` for the deterministic
+/// test pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// Physics, queued mutations or asset reloads changed the world (or a
+    /// scene replacement did): the caller should publish `status`/`scene`.
+    Changed,
+    /// The frame advanced the clock only; cached snapshots stay valid.
+    Unchanged,
+}
+
+impl TickOutcome {
+    /// Legacy `bool` view (`true` = changed).
+    pub fn changed(self) -> bool {
+        matches!(self, Self::Changed)
+    }
+}
+
+/// Outcome of one watched-scene reload check: whether the live world was
+/// replaced. A host save that the [`FileWatch`] poll observes reports
+/// [`ReloadDecision::SkippedSelfSave`] instead of rebuilding the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadDecision {
+    /// The file differed from the live world and replaced it (fresh
+    /// snapshots were published).
+    Reloaded,
+    /// The observed change is the session's own save (see
+    /// [`EditorSession::save_scene_file`]): the world is untouched.
+    SkippedSelfSave,
+    /// The file could not replace the world (missing or malformed): the
+    /// live world is untouched, the cause went to stderr.
+    Failed,
+}
+
+/// Scene-file I/O failure: reading, writing or (de)serializing the RON
+/// scene behind `save_scene`/`load_scene` and the hot-reload watcher.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SceneFileError {
+    /// The world did not serialize to RON.
+    #[error("scene RON serialization: {0}")]
+    Serialize(String),
+    /// The sibling `*.tmp` file could not be written.
+    #[error("write {path}: {reason}")]
+    Write {
+        /// Target scene path (not the `*.tmp` sibling).
+        path: String,
+        /// Underlying I/O cause.
+        reason: String,
+    },
+    /// The atomic rename over the target failed.
+    #[error("rename to {path}: {reason}")]
+    Rename {
+        /// Target scene path.
+        path: String,
+        /// Underlying I/O cause.
+        reason: String,
+    },
+    /// The scene file could not be read back.
+    #[error("read {path}: {reason}")]
+    Read {
+        /// Scene path that failed to read.
+        path: String,
+        /// Underlying I/O cause.
+        reason: String,
+    },
+    /// The file content is not a valid scene; the world is untouched.
+    #[error("{0}")]
+    Parse(String),
+}
+
+/// Fingerprint of a scene file at one instant: the `(path, mtime/size)`
+/// the watcher compares to tell the session's own save apart from an
+/// external edit. `None` metadata means the file was missing when sampled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SavedFingerprint {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    size: Option<u64>,
+}
+
+impl SavedFingerprint {
+    fn capture(path: &Path) -> Self {
+        let meta = fs::metadata(path).ok();
+        Self {
+            path: path.into(),
+            mtime: meta.as_ref().and_then(|m| m.modified().ok()),
+            size: meta.map(|m| m.len()),
+        }
+    }
+}
 
 /// World resource: lighting, camera and ambient light of the scene.
 #[derive(Debug, Clone)]
@@ -162,6 +289,14 @@ pub struct EditorSession {
     /// reload dirty-set. Survives world replacement (see
     /// [`EditorSession::load_scene`]).
     assets: AssetServer,
+    /// Fingerprint of the last host-initiated [`EditorSession::save_scene_file`]
+    /// write, sample by sample. The hot-reload gate compares the watched file
+    /// against it and swallows exactly the save's own mtime bump instead of
+    /// rebuilding the world (fresh physics/audio) from the bytes just written.
+    last_saved: Option<SavedFingerprint>,
+    /// Scene-file sandbox roots for `save_scene`/`load_scene`: production
+    /// code uses the workspace defaults, tests inject a temp dir.
+    scene_roots: SceneRoots,
 }
 
 impl Default for EditorSession {
@@ -193,6 +328,8 @@ impl Default for EditorSession {
             scene_name: "scene".into(),
             version: SceneVersion::ZERO,
             assets: AssetServer::new(),
+            last_saved: None,
+            scene_roots: SceneRoots::workspace_defaults(),
         }
     }
 }
@@ -202,6 +339,17 @@ impl EditorSession {
     /// no lights).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test seam: a session resolving scene paths against `roots` instead
+    /// of the workspace defaults, so tests never touch the real
+    /// `<workspace>/editor` or `<workspace>/assets` trees.
+    #[cfg(test)]
+    fn with_roots(roots: SceneRoots) -> Self {
+        Self {
+            scene_roots: roots,
+            ..Self::new()
+        }
     }
 
     /// Returns the shared logical world backing the editor facade.
@@ -226,17 +374,32 @@ impl EditorSession {
         self.version
     }
 
+    /// Advances the editor's domain schedule by one deterministic step.
+    ///
+    /// Legacy `f32` pin for tests: delegates to [`EditorSession::tick_secs`].
+    /// Test call sites keep passing the constant `1.0 / 60.0` step so frame
+    /// counts stay reproducible; production loops pass a measured
+    /// [`clamp_frame_dt`] delta through `tick_secs` instead.
+    pub fn tick(&mut self, delta_seconds: f32) -> bool {
+        self.tick_secs(Seconds::new(delta_seconds)).changed()
+    }
+
     /// Advances the editor's domain schedule by one frame.
     ///
     /// Asset reloads queued via `request_reload` replace the world first;
     /// physics is intentionally opt-in per component: only entities with a
-    /// `RigidBody` lane entry participate. Returns `true` when anything
-    /// changed and the caller should publish a fresh scene snapshot.
-    pub fn tick(&mut self, delta_seconds: f32) -> bool {
+    /// `RigidBody` lane entry participate. The delta is forwarded as-is to
+    /// `GameWorld::frame_secs`, whose engine runs a bounded fixed
+    /// accumulator (1/60 s steps, at most 8 per frame, excess hitch time
+    /// dropped) followed by the once-per-frame schedule — so a measured
+    /// wall-clock delta stays stable and a constant test delta stays
+    /// deterministic. Returns [`TickOutcome::Changed`] when anything changed
+    /// and the caller should publish a fresh scene snapshot.
+    pub fn tick_secs(&mut self, delta: Seconds) -> TickOutcome {
         // Asset reloads replace the whole world (fresh engine included),
         // so they run before the frame — never on a discarded world.
         let assets_changed = self.drain_assets();
-        let _ = self.world.frame(delta_seconds);
+        let _ = self.world.frame_secs(delta);
         let changed = self
             .world
             .engine_mut()
@@ -254,7 +417,11 @@ impl EditorSession {
         if changed || applied > 0 {
             self.version.bump();
         }
-        changed || applied > 0 || assets_changed
+        if changed || applied > 0 || assets_changed {
+            TickOutcome::Changed
+        } else {
+            TickOutcome::Unchanged
+        }
     }
 
     /// Applies asset-server reloads queued via `request_reload`, in id
@@ -423,8 +590,14 @@ impl EditorSession {
         fresh.scene_name = scene.name;
         fresh.version = fresh.version.max(self.version.bumped());
         // The asset registry (load history, retained sources) survives the
-        // replacement — it describes files, not the live world.
+        // replacement — it describes files, not the live world. The pending
+        // self-save fingerprint survives with it: the file on disk is still
+        // the bytes the session wrote, so the next watcher poll must keep
+        // swallowing the save's own mtime bump instead of reloading over
+        // the freshly loaded world.
         fresh.assets = std::mem::take(&mut self.assets);
+        fresh.last_saved = self.last_saved.take();
+        fresh.scene_roots = self.scene_roots.clone();
         *self = fresh;
         count
     }
@@ -451,28 +624,58 @@ impl EditorSession {
     /// Serialize the world to RON and write it to `path` **atomically**
     /// (sibling `*.tmp` file + rename): a crash or I/O error mid-write can
     /// never leave a truncated scene file behind. The world is not mutated.
-    pub fn save_scene_file(&self, path: &Path) -> Result<(), String> {
+    ///
+    /// On success the file's `(mtime, size)` fingerprint is remembered in
+    /// `last_saved`: the next hot-reload poll compares the watched file
+    /// against it and swallows the save's own mtime bump instead of
+    /// rebuilding the world from the bytes just written. Invariant: only an
+    /// actually different file (external edit) may trigger a reload — a
+    /// matching fingerprint is consumed one-shot by the reload gate (see
+    /// `reload_watched_scene`), so a later external edit still reloads.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneFileError`] when the world does not serialize or the atomic
+    /// write fails; the previous scene file (if any) stays intact.
+    ///
+    /// The `path` is a validated [`ScenePath`]: only files inside
+    /// `<workspace>/assets` or `<workspace>/editor` can be named — the type,
+    /// not a runtime check at the call site, enforces the sandbox (the HTTP
+    /// backend and [`EditorSession::scene_path`] resolve user input into it).
+    pub fn save_scene_file(&mut self, path: &ScenePath) -> Result<(), SceneFileError> {
+        let resolved = path.as_path();
         let ron = self
             .to_scene()
             .to_ron()
-            .map_err(|e| format!("scene RON serialization: {e}"))?;
-        atomic_write(path, &ron)
+            .map_err(|e| SceneFileError::Serialize(e.to_string()))?;
+        atomic_write(resolved, &ron)?;
+        self.last_saved = Some(SavedFingerprint::capture(resolved));
+        Ok(())
     }
 
     /// Read `path` and replace the world with its scene. `.ron` files go
     /// through the asset server (retained as sources); `.glb`/`.gltf`
     /// files load geometry + scalar materials the same replace path.
     /// Any error (missing file, invalid content) leaves the world untouched.
-    pub fn load_scene_file(&mut self, path: &Path) -> Result<usize, String> {
-        let is_gltf = path
+    ///
+    /// # Errors
+    ///
+    /// [`SceneFileError`] when the file cannot be read or parsed; the
+    /// world is untouched.
+    ///
+    /// Like [`EditorSession::save_scene_file`], the `path` is a validated
+    /// [`ScenePath`] confined to `<workspace>/assets` or `<workspace>/editor`.
+    pub fn load_scene_file(&mut self, path: &ScenePath) -> Result<usize, SceneFileError> {
+        let resolved = path.as_path();
+        let is_gltf = resolved
             .extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("glb") || ext.eq_ignore_ascii_case("gltf"));
         if is_gltf {
             let id = self
                 .assets
-                .load_gltf_file(path)
-                .map_err(|e| e.to_string())?;
+                .load_gltf_file(resolved)
+                .map_err(|e| SceneFileError::Parse(e.to_string()))?;
             let scene = self
                 .assets
                 .get_scene(id)
@@ -480,8 +683,25 @@ impl EditorSession {
                 .clone();
             return Ok(self.load_scene(scene));
         }
-        let ron = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        self.load_scene_ron(&ron).map_err(|e| e.to_string())
+        let ron = fs::read_to_string(resolved).map_err(|e| SceneFileError::Read {
+            path: resolved.display().to_string(),
+            reason: e.to_string(),
+        })?;
+        self.load_scene_ron(&ron)
+            .map_err(|e| SceneFileError::Parse(e.to_string()))
+    }
+
+    /// Resolve a user-supplied scene `path` against this session's sandbox
+    /// roots: the defense-in-depth check behind `save_scene`/`load_scene`
+    /// (the HTTP backend already drops escaping paths fail-fast in
+    /// `build_command`). `..` and absolute paths escaping
+    /// `<workspace>/assets` or `<workspace>/editor` are a typed
+    /// [`ScenePathError`], never a panic.
+    ///
+    /// Test-only shorthand: production paths flow through [`command_path`].
+    #[cfg(test)]
+    fn scene_path(&self, raw: &str) -> Result<ScenePath, ScenePathError> {
+        ScenePath::resolve(&self.scene_roots, raw)
     }
 
     /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
@@ -844,14 +1064,21 @@ fn handle_custom(
             CommandOutcome::success()
         }
         "save_scene" => {
-            let path = command_path(&data);
+            let path = match command_path(&world.scene_roots, &data) {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = e.to_string();
+                    emit_error(ev_tx, cmd_type.as_str(), &message);
+                    return CommandOutcome::failure(message);
+                }
+            };
             match world.save_scene_file(&path) {
                 Ok(()) => {
                     emit(
                         ev_tx,
                         "scene_saved",
                         serde_json::json!({
-                            "path": path.display().to_string(),
+                            "path": path.as_path().display().to_string(),
                             "version": world.version,
                         })
                         .to_string(),
@@ -859,20 +1086,27 @@ fn handle_custom(
                     CommandOutcome::success()
                 }
                 Err(e) => {
-                    emit_error(ev_tx, cmd_type.as_str(), &e);
-                    CommandOutcome::failure(e)
+                    emit_error(ev_tx, cmd_type.as_str(), &e.to_string());
+                    CommandOutcome::failure(e.to_string())
                 }
             }
         }
         "load_scene" => {
-            let path = command_path(&data);
+            let path = match command_path(&world.scene_roots, &data) {
+                Ok(path) => path,
+                Err(e) => {
+                    let message = e.to_string();
+                    emit_error(ev_tx, cmd_type.as_str(), &message);
+                    return CommandOutcome::failure(message);
+                }
+            };
             match world.load_scene_file(&path) {
                 Ok(count) => {
                     emit(
                         ev_tx,
                         "scene_loaded",
                         serde_json::json!({
-                            "path": path.display().to_string(),
+                            "path": path.as_path().display().to_string(),
                             "version": world.version,
                             "entity_count": count,
                         })
@@ -882,8 +1116,8 @@ fn handle_custom(
                     CommandOutcome::success()
                 }
                 Err(e) => {
-                    emit_error(ev_tx, cmd_type.as_str(), &e);
-                    CommandOutcome::failure(e)
+                    emit_error(ev_tx, cmd_type.as_str(), &e.to_string());
+                    CommandOutcome::failure(e.to_string())
                 }
             }
         }
@@ -1065,13 +1299,21 @@ fn default_material() -> MaterialDesc {
 }
 
 /// Scene path override from a `save_scene`/`load_scene` payload
-/// (`{"path": "…"}`); defaults to [`scene_file_path`]. A non-string `path`
-/// is ignored (falls back to the default) like any other soft payload flaw.
-fn command_path(data: &Value) -> PathBuf {
-    data.get("path")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(scene_file_path)
+/// (`{"path": "…"}`); defaults to `editor/scene.ron` — the file the WASM
+/// viewport renders. A non-string `path` is ignored (falls back to the
+/// default) like any other soft payload flaw.
+///
+/// Resolution is the session-side (defense-in-depth) sandbox check: `..`
+/// and absolute paths escaping `<workspace>/assets` or
+/// `<workspace>/editor` are a typed [`ScenePathError`], never a panic.
+/// The HTTP backend already drops escaping paths fail-fast in
+/// `build_command`, so a rejection here only triggers for direct
+/// `UiCommand` senders.
+fn command_path(roots: &SceneRoots, data: &Value) -> Result<ScenePath, ScenePathError> {
+    match data.get("path").and_then(Value::as_str) {
+        Some(raw) => ScenePath::resolve(roots, raw),
+        None => ScenePath::resolve(roots, "editor/scene.ron"),
+    }
 }
 
 /// Parse the command payload; an empty body means `{}`.
@@ -1133,6 +1375,9 @@ fn workspace_root() -> PathBuf {
 
 /// Default scene file for the `save_scene`/`load_scene` commands:
 /// `editor/scene.ron` — the scene the WASM viewport renders at startup.
+/// Test-only: production resolution goes through the sandboxed
+/// [`ScenePath`](editor_backend::remote::ScenePath).
+#[cfg(test)]
 fn scene_file_path() -> PathBuf {
     workspace_root().join("editor/scene.ron")
 }
@@ -1140,12 +1385,18 @@ fn scene_file_path() -> PathBuf {
 /// Write `contents` to `path` atomically: a sibling `<name>.tmp` file is
 /// written first and renamed over the target, so a failed write leaves the
 /// previous scene file intact (or no file at all).
-fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+fn atomic_write(path: &Path, contents: &str) -> Result<(), SceneFileError> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
+    fs::write(&tmp, contents).map_err(|e| SceneFileError::Write {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    fs::rename(&tmp, path).map_err(|e| SceneFileError::Rename {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })
 }
 
 /// Startup scene RON: `editor/scene.ron` (the initial scene for the live
@@ -1201,23 +1452,56 @@ fn watched_scene_path() -> Option<PathBuf> {
 
 /// Reloads the watched file into the world and publishes fresh snapshots.
 /// A missing or malformed file keeps the live world untouched.
-fn reload_watched_scene(world: &mut EditorSession, path: &Path, ev_tx: &Sender<GameEvent>) {
+///
+/// Self-save suppression: when the file's current `(mtime, size)` matches
+/// the fingerprint [`EditorSession::save_scene_file`] remembered, the
+/// observed change is the session's own save — the fingerprint is consumed
+/// one-shot and the world (version, entity handles, physics/audio state)
+/// is left untouched. Any actually different file reloads as before.
+fn reload_watched_scene(
+    world: &mut EditorSession,
+    path: &ScenePath,
+    ev_tx: &Sender<GameEvent>,
+) -> ReloadDecision {
+    let resolved = path.as_path();
+    let current = SavedFingerprint::capture(resolved);
+    if world.last_saved.as_ref() == Some(&current) {
+        world.last_saved = None;
+        return ReloadDecision::SkippedSelfSave;
+    }
     match world.load_scene_file(path) {
         Ok(count) => {
             publish_state(world, ev_tx);
             eprintln!(
                 "ornis: hot-reloaded {} ({} entities)",
-                path.display(),
+                resolved.display(),
                 count
             );
+            ReloadDecision::Reloaded
         }
-        Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
+        Err(e) => {
+            eprintln!("ornis: scene hot-reload skipped: {e}");
+            ReloadDecision::Failed
+        }
     }
 }
 
 /// Spawn the `editor-world` thread: owns the world, loads the startup scene,
 /// executes commands from `cmd_rx`, and advances the fixed-rate domain frame
 /// host between commands until the HTTP server side drops its sender.
+///
+/// Loop shape (one iteration):
+///
+/// ```text
+/// recv first command (up to ~16 ms idle wait) -> drain ready burst ->
+/// poll scene watcher -> tick with measured dt -> publish when changed
+/// ```
+///
+/// Every wake — command or idle timeout — falls through to the watcher poll
+/// and the tick, so a dense command burst can delay but never starve the
+/// simulation or the file watcher. The tick delta is the real wall-clock
+/// time since the previous tick clamped by [`clamp_frame_dt`]; an idle loop
+/// keeps its historical ~16 ms cadence.
 pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("editor-world".into())
@@ -1235,20 +1519,49 @@ pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<
             // before the first command arrives.
             publish_state(&world, &ev_tx);
             let mut scene_watch = watched_scene_path().map(FileWatch::new);
+            // Wall clock for the measured tick delta (see [`clamp_frame_dt`]).
+            let mut last_tick = Instant::now();
             loop {
-                match cmd_rx.recv_timeout(Duration::from_millis(16)) {
-                    Ok(cmd) => world.handle_command(&cmd, &ev_tx),
-                    Err(RecvTimeoutError::Timeout) => {
-                        if let Some(watch) = scene_watch.as_mut()
-                            && watch.poll()
-                        {
-                            reload_watched_scene(&mut world, &watch.path.clone(), &ev_tx);
-                        }
-                        if world.tick(1.0 / 60.0) {
-                            publish_state(&world, &ev_tx);
+                match cmd_rx.recv_timeout(IDLE_POLL_INTERVAL) {
+                    Ok(first) => world.handle_command(&first, &ev_tx),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                // Drain the burst that queued while handling, without
+                // blocking: the tick below still runs this iteration.
+                let mut disconnected = false;
+                loop {
+                    match cmd_rx.try_recv() {
+                        Ok(cmd) => world.handle_command(&cmd, &ev_tx),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
                         }
                     }
-                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                if let Some(watch) = scene_watch.as_mut()
+                    && watch.poll()
+                {
+                    // The watcher only observes workspace scene files, so this
+                    // resolve is a fail-closed formality (defense in depth).
+                    let watched = watch.path.clone();
+                    match ScenePath::resolve(&world.scene_roots, &watched.to_string_lossy()) {
+                        Ok(path) => {
+                            reload_watched_scene(&mut world, &path, &ev_tx);
+                        }
+                        Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
+                    }
+                }
+                if world
+                    .tick_secs(clamp_frame_dt(last_tick.elapsed()))
+                    .changed()
+                {
+                    publish_state(&world, &ev_tx);
+                }
+                last_tick = Instant::now();
+                if disconnected {
+                    break;
                 }
             }
         })
@@ -1443,6 +1756,18 @@ mod tests {
         dir.join("scene.ron")
     }
 
+    /// Temp sandbox workspace (`<dir>/editor`, `<dir>/assets`) plus a
+    /// session rooted at it: scene I/O tests never touch the real
+    /// workspace trees. Returns the session and the dir (for cleanup).
+    fn sandboxed_session(tag: &str) -> (EditorSession, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ornis-sandbox-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("editor")).expect("sandbox editor");
+        fs::create_dir_all(dir.join("assets")).expect("sandbox assets");
+        let world = EditorSession::with_roots(SceneRoots::new(&dir));
+        (world, dir)
+    }
+
     #[test]
     fn scene_watch_fires_once_on_external_change() {
         let path = temp_scene_path("once");
@@ -1496,36 +1821,116 @@ mod tests {
     }
 
     #[test]
+    fn clamp_frame_dt_bounds_hitches_but_keeps_idle_steps() {
+        let idle = clamp_frame_dt(Duration::from_millis(16)).get();
+        assert!(
+            (idle - 0.016).abs() < 1e-6,
+            "idle step passes through: {idle}"
+        );
+        assert_eq!(clamp_frame_dt(Duration::from_secs(10)), MAX_FRAME_DT);
+        assert_eq!(clamp_frame_dt(Duration::ZERO), Seconds::ZERO);
+    }
+
+    #[test]
+    fn tick_secs_reports_typed_outcome() {
+        let mut world = EditorSession::new();
+        assert_eq!(
+            world.tick_secs(Seconds::new(1.0 / 60.0)),
+            TickOutcome::Unchanged
+        );
+        let entity = world.spawn(None);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("world store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        assert_eq!(
+            world.tick_secs(Seconds::new(1.0 / 60.0)),
+            TickOutcome::Changed
+        );
+    }
+
+    /// The session's own save must not hot-reload the world back onto
+    /// itself (that path rebuilds physics/audio from scratch), while a
+    /// genuine external edit still replaces it. Mirrors the production
+    /// order in [`run`]: save -> tick -> watcher poll -> reload gate.
+    #[test]
+    fn save_suppresses_self_reload_but_external_edit_reloads() {
+        let (ev_tx, _ev_rx) = unbounded();
+        let (mut world, dir) = sandboxed_session("self-save");
+        world.spawn(Some("Hero".into()));
+        let version = world.version;
+        // The watcher is born before the save, like the loop's startup watch.
+        let path = world.scene_path("editor/self-save.ron").expect("sandboxed");
+        let _ = fs::remove_file(path.as_path());
+        let mut watch = FileWatch::new(path.as_path().to_path_buf());
+
+        world.save_scene_file(&path).expect("save");
+        world.tick(1.0 / 60.0);
+        assert!(watch.poll(), "the save bumps mtime, the poll observes it");
+        assert_eq!(
+            reload_watched_scene(&mut world, &path, &ev_tx),
+            ReloadDecision::SkippedSelfSave
+        );
+        assert_eq!(world.version, version, "skipped reload bumps nothing");
+        assert_eq!(world.entity_count(), 1);
+        assert_eq!(
+            world.name_of(world.alive[0]).as_deref(),
+            Some("Hero"),
+            "handles stay stable"
+        );
+
+        // External edit (removal first, so even coarse-mtime filesystems
+        // observe a change): the gate must reload now.
+        let edited = fs::read_to_string(path.as_path())
+            .expect("saved ron")
+            .replacen("Hero", "Outsider", 1);
+        let _ = fs::remove_file(path.as_path());
+        assert!(!watch.poll(), "disappearance alone never reloads");
+        fs::write(path.as_path(), edited).expect("external edit");
+        assert!(watch.poll(), "external edit fires the watcher");
+        assert_eq!(
+            reload_watched_scene(&mut world, &path, &ev_tx),
+            ReloadDecision::Reloaded
+        );
+        assert!(world.version > version, "reload bumps the version");
+        assert_eq!(
+            world.name_of(world.alive[0]).as_deref(),
+            Some("Outsider"),
+            "external content replaced the world"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn hot_reload_replaces_world_and_survives_garbage() {
         let (ev_tx, _ev_rx) = unbounded();
-        let mut world = EditorSession::new();
+        let (mut world, dir) = sandboxed_session("reload");
         let ron = fs::read_to_string(scene_file_path()).expect("editor/scene.ron readable");
-        let path = temp_scene_path("reload");
-        fs::write(&path, &ron).expect("write temp scene");
+        let path = world.scene_path("editor/scene.ron").expect("sandboxed");
+        fs::write(path.as_path(), &ron).expect("write temp scene");
 
         reload_watched_scene(&mut world, &path, &ev_tx);
         assert_eq!(world.entity_count(), 5);
 
-        fs::write(&path, "not ron {{{").expect("write garbage");
+        fs::write(path.as_path(), "not ron {{{").expect("write garbage");
         reload_watched_scene(&mut world, &path, &ev_tx);
         assert_eq!(world.entity_count(), 5);
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `.glb` dispatch rejects garbage without touching the world; the
     /// positive bytes→`Scene` path is pinned in `ornis-assets`.
     #[test]
     fn load_scene_file_rejects_gltf_garbage() {
-        let mut world = EditorSession::new();
+        let (mut world, dir) = sandboxed_session("garbage");
         let version = world.version;
-        let path = temp_scene_path("garbage");
-        let glb = path.with_extension("glb");
-        fs::write(&glb, "not a glb at all").expect("write garbage");
-        assert!(world.load_scene_file(&glb).is_err());
+        let path = world.scene_path("editor/garbage.glb").expect("sandboxed");
+        fs::write(path.as_path(), "not a glb at all").expect("write garbage");
+        assert!(world.load_scene_file(&path).is_err());
         assert_eq!(world.version, version);
         assert_eq!(world.entity_count(), 0);
-        let _ = fs::remove_file(&glb);
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Queued asset reloads replace the world on the next tick, in id
@@ -2113,14 +2518,6 @@ mod tests {
         v
     }
 
-    /// Fresh temp dir per test (removed first, so no stale state).
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     #[test]
     fn to_scene_round_trip_through_ron_preserves_world() {
         let ron = fs::read_to_string(scene_file_path()).expect("editor/scene.ron readable");
@@ -2160,56 +2557,67 @@ mod tests {
 
     #[test]
     fn save_and_load_file_round_trip() {
-        let dir = temp_dir("ornis_editor_world_save_load");
-        let path = dir.join("scene.ron");
+        let (mut world, dir) = sandboxed_session("save-load");
+        let path = world.scene_path("editor/scene.ron").expect("sandboxed");
 
-        let mut world = EditorSession::new();
         world.spawn(Some("Hero".into()));
         world.save_scene_file(&path).expect("save");
 
         // The file on disk is a valid scene with the world's content.
-        let on_disk = Scene::from_ron(&fs::read_to_string(&path).unwrap()).expect("valid RON");
+        let on_disk =
+            Scene::from_ron(&fs::read_to_string(path.as_path()).unwrap()).expect("valid RON");
         assert_eq!(on_disk.entities.len(), 1);
         assert_eq!(on_disk.entities[0].name, "Hero");
 
-        let mut restored = EditorSession::new();
+        let mut restored = EditorSession::with_roots(SceneRoots::new(&dir));
         let loaded = restored.load_scene_file(&path).expect("load");
         assert_eq!(loaded, 1);
         assert_eq!(scene_value(&restored), scene_value(&world));
         // The temp file was renamed away — no litter.
-        assert!(!dir.join("scene.ron.tmp").exists());
+        assert!(
+            !dir.join("editor/scene.ron.tmp").exists(),
+            "no temp file left"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn save_failure_never_leaves_partial_files() {
-        // The target directory does not exist: the write must fail cleanly.
-        let dir = std::env::temp_dir().join("ornis_editor_world_save_fail");
+        // The sandboxed target directory does not exist: the lexical resolve
+        // still passes (nothing to canonicalize), but the write fails cleanly.
+        let dir = std::env::temp_dir().join(format!("ornis-save-fail-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let path = dir.join("scene.ron");
+        let mut world = EditorSession::with_roots(SceneRoots::new(&dir));
+        let path = world.scene_path("editor/scene.ron").expect("sandboxed");
 
-        let world = EditorSession::new();
         assert!(world.save_scene_file(&path).is_err());
-        assert!(!path.exists(), "no partial scene file");
-        assert!(!dir.join("scene.ron.tmp").exists(), "no temp file left");
+        assert!(!path.as_path().exists(), "no partial scene file");
+        assert!(
+            !dir.join("editor/scene.ron.tmp").exists(),
+            "no temp file left"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_broken_or_missing_file_keeps_world() {
-        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let (ev_tx, ev_rx) = unbounded();
+        let (mut world, dir) = sandboxed_session("load-broken");
         world.handle_command(&custom("create_entity", r#"{"name":"Keep"}"#), &ev_tx);
         while ev_rx.try_recv().is_ok() {}
         let before = scene_value(&world);
         let version = world.version;
 
-        let dir = temp_dir("ornis_editor_world_load_broken");
-        let broken = dir.join("broken.ron");
-        fs::write(&broken, "Scene(name: 42)").unwrap();
+        fs::write(dir.join("editor/broken.ron"), "Scene(name: 42)").unwrap();
 
-        let load =
-            |path: &Path| custom("load_scene", &format!(r#"{{"path":"{}"}}"#, path.display()));
-        world.handle_command(&load(&broken), &ev_tx);
-        world.handle_command(&load(&dir.join("nope.ron")), &ev_tx);
+        world.handle_command(
+            &custom("load_scene", r#"{"path":"editor/broken.ron"}"#),
+            &ev_tx,
+        );
+        world.handle_command(
+            &custom("load_scene", r#"{"path":"editor/nope.ron"}"#),
+            &ev_tx,
+        );
 
         let events = drain_all(&ev_rx);
         assert_eq!(custom_events(&events, "error").len(), 2);
@@ -2219,15 +2627,65 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Escaping `save_scene`/`load_scene` paths are rejected with `error`
+    /// events: `..` traversal, absolute paths outside the sandbox, and the
+    /// sibling-prefix trap (`editor-evil/`). The world and the version stay
+    /// untouched, and no file is created outside the sandbox.
+    #[test]
+    fn scene_commands_reject_paths_outside_sandbox() {
+        let (ev_tx, ev_rx) = unbounded();
+        let (mut world, dir) = sandboxed_session("sandbox-cmds");
+        world.handle_command(&custom("create_entity", r#"{"name":"Keep"}"#), &ev_tx);
+        while ev_rx.try_recv().is_ok() {}
+        let before = scene_value(&world);
+        let version = world.version;
+
+        // Legit sandboxed paths resolve: default, `editor/`, `assets/`.
+        let defaults =
+            command_path(&world.scene_roots, &serde_json::json!({})).expect("default resolves");
+        assert!(defaults.as_path().ends_with("editor/scene.ron"));
+        for raw in ["editor/scene.ron", "assets/custom.ron"] {
+            let resolved = world.scene_path(raw).expect("legit path resolves");
+            assert!(resolved.as_path().starts_with(&dir), "{raw}");
+        }
+
+        let evil = dir.join("editor-evil/x.ron").to_string_lossy().into_owned();
+        for raw in [
+            "../../evil.ron",
+            "editor/../../evil.ron",
+            "/etc/passwd",
+            evil.as_str(),
+        ] {
+            assert!(world.scene_path(raw).is_err(), "{raw} must not resolve");
+            world.handle_command(
+                &custom("save_scene", &format!(r#"{{"path":"{raw}"}}"#)),
+                &ev_tx,
+            );
+            world.handle_command(
+                &custom("load_scene", &format!(r#"{{"path":"{raw}"}}"#)),
+                &ev_tx,
+            );
+        }
+
+        let events = drain_all(&ev_rx);
+        assert_eq!(custom_events(&events, "error").len(), 8);
+        assert_eq!(custom_events(&events, "scene_saved").len(), 0);
+        assert_eq!(custom_events(&events, "scene_loaded").len(), 0);
+        assert_eq!(scene_value(&world), before, "world untouched");
+        assert_eq!(world.version, version, "version untouched");
+        assert!(!dir.join("evil.ron").exists(), "no escape write");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn save_load_commands_emit_events_and_restore_state() {
-        let (mut world, ev_tx, ev_rx) = world_and_events();
-        let dir = temp_dir("ornis_editor_world_cmds");
-        let path = dir.join("scene.ron");
-        let arg = format!(r#"{{"path":"{}"}}"#, path.display());
+        let (ev_tx, ev_rx) = unbounded();
+        let (mut world, dir) = sandboxed_session("cmds");
+        let arg = r#"{"path":"editor/scene.ron"}"#;
+        let path = dir.join("editor/scene.ron");
 
         world.handle_command(&custom("create_entity", r#"{"name":"Hero"}"#), &ev_tx);
-        world.handle_command(&custom("save_scene", &arg), &ev_tx);
+        world.handle_command(&custom("save_scene", arg), &ev_tx);
 
         let events = drain_all(&ev_rx);
         let saved = custom_events(&events, "scene_saved");
@@ -2255,7 +2713,7 @@ mod tests {
         assert_eq!(world.name_of(world.alive[0]).as_deref(), Some("Temp"));
         while ev_rx.try_recv().is_ok() {}
 
-        world.handle_command(&custom("load_scene", &arg), &ev_tx);
+        world.handle_command(&custom("load_scene", arg), &ev_tx);
         assert_eq!(world.entity_count(), 1);
 
         let events = drain_all(&ev_rx);
