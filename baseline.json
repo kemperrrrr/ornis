@@ -1,34 +1,34 @@
 {
   "version": 2,
-  "quality_score": 0.11303467703480508,
-  "iosp_score": 0.8990885416666666,
-  "violations": 310,
-  "total": 4937,
+  "quality_score": 0.13582455666470916,
+  "iosp_score": 0.9021538461538462,
+  "violations": 318,
+  "total": 5240,
   "complexity_warnings": 52,
-  "magic_number_warnings": 1370,
-  "nesting_depth_warnings": 14,
-  "function_length_warnings": 94,
+  "magic_number_warnings": 1401,
+  "nesting_depth_warnings": 15,
+  "function_length_warnings": 100,
   "unsafe_warnings": 9,
-  "error_handling_warnings": 161,
-  "duplicate_groups": 82,
-  "dead_code_warnings": 351,
-  "dead_type_warnings": 7,
-  "fragment_groups": 478,
-  "boilerplate_warnings": 242,
-  "srp_struct_warnings": 16,
-  "srp_module_warnings": 75,
+  "error_handling_warnings": 173,
+  "duplicate_groups": 83,
+  "dead_code_warnings": 373,
+  "dead_type_warnings": 6,
+  "fragment_groups": 494,
+  "boilerplate_warnings": 261,
+  "srp_struct_warnings": 17,
+  "srp_module_warnings": 78,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 6,
-  "tq_untested_warnings": 128,
+  "tq_untested_warnings": 130,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
-  "structural_srp_warnings": 25,
-  "structural_coupling_warnings": 23,
-  "total_findings": 3574,
+  "structural_srp_warnings": 26,
+  "structural_coupling_warnings": 24,
+  "total_findings": 3700,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -88,27 +88,47 @@
     {
       "name": "install_object_animation",
       "file": "crates/app/src/lib.rs",
-      "line": 76
+      "line": 77
+    },
+    {
+      "name": "set_rigid_field",
+      "file": "crates/app/src/sync_harness.rs",
+      "line": 149
+    },
+    {
+      "name": "EditableMesh::poll_exact",
+      "file": "crates/mesh-editor/src/editable.rs",
+      "line": 283
+    },
+    {
+      "name": "RefitBudget::decide",
+      "file": "crates/mesh-editor/src/refit.rs",
+      "line": 82
+    },
+    {
+      "name": "PositiveUsize::expect_valid",
+      "file": "crates/mesh-editor/src/exact.rs",
+      "line": 109
     },
     {
       "name": "ExactWorker::try_recv",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 82
+      "line": 332
     },
     {
-      "name": "worker_loop",
+      "name": "pool_loop",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 95
+      "line": 357
     },
     {
       "name": "run_job",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 116
+      "line": 398
     },
     {
       "name": "bevel_all",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 143
+      "line": 425
     },
     {
       "name": "run",
@@ -138,42 +158,52 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 841
+      "line": 1113
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 2396
+      "line": 3016
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 2512
+      "line": 3219
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 2716
+      "line": 3423
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 2887
+      "line": 3594
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 2913
+      "line": 3620
+    },
+    {
+      "name": "Renderer3D::ensure_palette_capacity",
+      "file": "crates/render/src/renderer.rs",
+      "line": 3702
+    },
+    {
+      "name": "Renderer3D::upload_skin_palettes",
+      "file": "crates/render/src/renderer.rs",
+      "line": 3735
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 3268
+      "line": 4182
     },
     {
-      "name": "RenderFrame3D::new_with",
+      "name": "RenderFrame3D::build",
       "file": "crates/render/src/frame_exec.rs",
-      "line": 553
+      "line": 584
     },
     {
       "name": "fs_main",
@@ -236,6 +266,11 @@
       "line": 309
     },
     {
+      "name": "fs_main",
+      "file": "crates/render/src/shaders/fog_generated.rs",
+      "line": 69
+    },
+    {
       "name": "fs_main_textured",
       "file": "crates/render/src/shaders/material_textures.rs",
       "line": 239
@@ -243,17 +278,17 @@
     {
       "name": "extract_render_data_with_stats",
       "file": "crates/render/src/extraction.rs",
-      "line": 361
+      "line": 504
     },
     {
       "name": "normalized_rotation",
       "file": "crates/render/src/extraction.rs",
-      "line": 732
+      "line": 945
     },
     {
       "name": "skinned_tangent",
       "file": "crates/render/src/extraction.rs",
-      "line": 789
+      "line": 1098
     },
     {
       "name": "OrbitCamera::from_desc",
@@ -266,24 +301,29 @@
       "line": 58
     },
     {
+      "name": "blend_vertex_reference",
+      "file": "crates/animation/src/skinning.rs",
+      "line": 231
+    },
+    {
       "name": "blend_position",
       "file": "crates/animation/src/lib.rs",
-      "line": 1017
+      "line": 1028
     },
     {
       "name": "blend_normal",
       "file": "crates/animation/src/lib.rs",
-      "line": 1037
+      "line": 1048
     },
     {
       "name": "normalized_skel_quat",
       "file": "crates/animation/src/lib.rs",
-      "line": 1269
+      "line": 1280
     },
     {
       "name": "bake_bind_transform",
       "file": "crates/animation/src/lib.rs",
-      "line": 1665
+      "line": 1676
     },
     {
       "name": "import_gltf",
@@ -393,7 +433,7 @@
     {
       "name": "player_input",
       "file": "crates/gameplay/src/lib.rs",
-      "line": 193
+      "line": 261
     },
     {
       "name": "check_builtin_arity",
@@ -1553,7 +1593,7 @@
     {
       "name": "EditorSession::default",
       "file": "src/server_session.rs",
-      "line": 166
+      "line": 168
     },
     {
       "name": "GameApp::showcase_engine",
