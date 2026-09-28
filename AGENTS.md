@@ -15,6 +15,18 @@
 - Единая точка входа — `cargo xtask quality` (локально и в CI одно и то же).
 - Перед коммитом минимум: `cargo test --workspace` и
   `cargo clippy --all-targets -- -D warnings`.
+- Перед пушем — предпролёт по осям CI (иначе «локально зелёное, в CI
+  красное»): точечные проверки крейта НЕ эквивалентны гейту, гейт шире
+  сразу по трём осям — стадии × фичи × платформа. Обязательно:
+  `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, тесты тронутых крейтов с теми же фичами, что
+  CI-шарды (`--features gpu` для физики — шейдерные гейты живут только
+  там), `rustqual --compare baseline.json --fail-on-regression --no-fail`
+  и `cargo outdated --workspace --exit-code 1` (hard gate: зависимости
+  обязаны быть latest — иначе `cargo update`). Цена ~5–15 минут против
+  нескольких итераций «пуш → красный → чини». Тяжёлые крейты
+  (wasm/physics) проверять через CI, но компилируемость их таргетов
+  (`--all-targets`, wasm32) обязательна до пуша.
 - Complexity-гейт: `rustqual` против `baseline.json` (ratchet: `rustqual --compare baseline.json --fail-on-regression --no-fail`). Рост сложности — осознанно: обновить baseline точечно (`rustqual --save-baseline baseline.json`), с проверкой `rustqual` Score не регрессирует.
 
 ## Границы изменений
