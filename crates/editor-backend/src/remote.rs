@@ -10,19 +10,32 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{Cursor, Read};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use tiny_http::{Header, Request, Response, Server};
+/// Native-only transport: the loopback WebSocket/TCP server cannot run in
+/// the browser, so everything below up to the HTTP section is compiled out
+/// on wasm32 (the protocol types, guards and `ScenePath` above stay — the
+/// browser crate links those, never the socket code).
+#[cfg(not(target_arch = "wasm32"))]
 use tungstenite::handshake::server::{ErrorResponse, Request as WsRequest, Response as WsResponse};
+#[cfg(not(target_arch = "wasm32"))]
 use tungstenite::http::StatusCode;
+#[cfg(not(target_arch = "wasm32"))]
 use tungstenite::protocol::frame::CloseFrame;
+#[cfg(not(target_arch = "wasm32"))]
 use tungstenite::protocol::frame::coding::CloseCode;
+#[cfg(not(target_arch = "wasm32"))]
 use tungstenite::{Bytes, Message, Utf8Bytes, WebSocket, accept_hdr_with_config};
 
 use crate::ipc::{EditorCommand, EventSeq, GameEvent, RequestId, SetComponentPayload, UiCommand};
@@ -102,20 +115,15 @@ impl RemoteEditor {
         let websocket_handles_for_accept = Arc::clone(&websocket_handles);
         let game_tx_for_accept = game_tx.clone();
         let event_log_for_accept = Arc::clone(&event_log);
-        let accept_handle = thread::Builder::new()
-            .name("remote-editor-accept".into())
-            .spawn(move || {
-                accept_loop(
-                    listener,
-                    stop_clone,
-                    game_tx_for_accept,
-                    event_log_for_accept,
-                    websocket_handles_for_accept,
-                    internal_port,
-                    port,
-                )
-            })
-            .expect("spawn remote-editor-accept thread");
+        let accept_handle = spawn_accept_loop(
+            listener,
+            stop_clone,
+            game_tx_for_accept,
+            event_log_for_accept,
+            websocket_handles_for_accept,
+            internal_port,
+            port,
+        );
         let stop_clone = stop.clone();
 
         let handle = thread::Builder::new()
@@ -127,7 +135,7 @@ impl RemoteEditor {
         Self {
             stop,
             handle: Some(handle),
-            accept_handle: Some(accept_handle),
+            accept_handle,
             websocket_handles,
         }
     }
@@ -312,22 +320,29 @@ fn header_value(request: &Request, name: &'static str) -> Option<String> {
 
 /// Read timeout for `/api/events` sockets: bounds one poll iteration so the
 /// push loop stays responsive. Set via the public `TcpStream` API.
+#[cfg(not(target_arch = "wasm32"))]
 const WS_READ_TIMEOUT: Duration = Duration::from_millis(10);
 /// Idle interval between heartbeat pings.
+#[cfg(not(target_arch = "wasm32"))]
 const WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Push-loop cadence for newly appended replay records.
+#[cfg(not(target_arch = "wasm32"))]
 const WS_PUSH_INTERVAL: Duration = Duration::from_millis(100);
 /// Max HTTP head bytes peeked for routing; larger heads fall through to
 /// plain HTTP (the client then uses the polling fallback).
+#[cfg(not(target_arch = "wasm32"))]
 const SNIFF_HEAD_LIMIT: usize = 8192;
 /// Total budget for completing the routing peek of one connection.
+#[cfg(not(target_arch = "wasm32"))]
 const SNIFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Server side of one `/api/events` stream: tungstenite over our own socket.
+#[cfg(not(target_arch = "wasm32"))]
 type EventsSocket = WebSocket<TcpStream>;
 
 /// Routing outcome for one accepted TCP connection. Carries the replay
 /// cursor for event streams so the handshake path never re-parses the URL.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionRoute {
     /// RFC 6455 upgrade for exactly `/api/events`, with the `?after=` cursor.
@@ -337,6 +352,7 @@ enum ConnectionRoute {
 }
 
 /// What the connection handler should do after one inbound poll.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServeAction {
     /// Keep serving: a frame was handled or none was available.
@@ -345,11 +361,59 @@ enum ServeAction {
     StopServing,
 }
 
+/// Spawn the public-port accept loop. Native only: browsers have no
+/// loopback listener, so the wasm32 twin below drops the bound socket and
+/// yields no thread (the internal tiny_http server is likewise never
+/// driven — `RemoteEditor::start` is not called from wasm targets).
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_accept_loop(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    game_tx: Sender<UiCommand>,
+    event_log: Arc<Mutex<EventLog>>,
+    websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    internal_port: u16,
+    server_port: u16,
+) -> Option<JoinHandle<()>> {
+    Some(
+        thread::Builder::new()
+            .name("remote-editor-accept".into())
+            .spawn(move || {
+                accept_loop(
+                    listener,
+                    stop,
+                    game_tx,
+                    event_log,
+                    websocket_handles,
+                    internal_port,
+                    server_port,
+                )
+            })
+            .expect("spawn remote-editor-accept thread"),
+    )
+}
+
+/// wasm32 twin of [`spawn_accept_loop`]: no accept loop in the browser.
+#[cfg(target_arch = "wasm32")]
+fn spawn_accept_loop(
+    _listener: TcpListener,
+    _stop: Arc<AtomicBool>,
+    _game_tx: Sender<UiCommand>,
+    _event_log: Arc<Mutex<EventLog>>,
+    _websocket_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    _internal_port: u16,
+    _server_port: u16,
+) -> Option<JoinHandle<()>> {
+    None
+}
+
 /// Accept loop for the public port: peek-dispatch each connection to the
 /// tungstenite event stream or the internal HTTP proxy. Runs until `stop`.
 /// `server_port` is the public port: it feeds the WebSocket `Origin` gate
 /// (proxied HTTP keeps its bytes, so the internal server checks the same
-/// port independently — see [`check_post_guards`]).
+/// port independently — see [`check_post_guards`]). Native only (see the
+/// transport note at the tungstenite imports).
+#[cfg(not(target_arch = "wasm32"))]
 fn accept_loop(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
@@ -385,6 +449,7 @@ fn accept_loop(
 
 /// Sniff one connection (inline) and either spawn a joined event-stream
 /// handler or proxy it to the internal HTTP server.
+#[cfg(not(target_arch = "wasm32"))]
 fn dispatch_connection(
     stream: TcpStream,
     stop: &Arc<AtomicBool>,
@@ -423,6 +488,7 @@ fn dispatch_connection(
 /// `/api/events` WebSocket upgrade — including timeouts, oversize heads and
 /// undecodable bytes — routes to plain HTTP, where tiny_http answers (and
 /// the editor falls back to cursor polling).
+#[cfg(not(target_arch = "wasm32"))]
 fn classify_connection(stream: &TcpStream) -> ConnectionRoute {
     let mut buf = vec![0_u8; SNIFF_HEAD_LIMIT];
     let deadline = Instant::now() + SNIFF_TIMEOUT;
@@ -449,6 +515,7 @@ fn classify_connection(stream: &TcpStream) -> ConnectionRoute {
 /// `/api/events` plus `Upgrade: websocket` (case-insensitive) — without
 /// tightening it: tungstenite itself enforces the remaining RFC 6455
 /// requirements (method, version, key) during the handshake.
+#[cfg(not(target_arch = "wasm32"))]
 fn sniff_route(head: &[u8]) -> Option<ConnectionRoute> {
     let text = std::str::from_utf8(head).ok()?;
     let end = text.find("\r\n\r\n")?;
@@ -481,6 +548,7 @@ fn sniff_route(head: &[u8]) -> Option<ConnectionRoute> {
 /// type to `ErrorResponse` (a full HTTP response, inherently large), so no
 /// smaller `Err` spelling exists for the Origin gate.
 #[allow(clippy::result_large_err)]
+#[cfg(not(target_arch = "wasm32"))]
 fn serve_events_stream(
     stream: TcpStream,
     event_log: Arc<Mutex<EventLog>>,
@@ -554,6 +622,7 @@ fn serve_events_stream(
 /// `WS_READ_TIMEOUT`): forward data frames as `BrowserInput`, drive
 /// tungstenite's automatic pong/close replies, and report whether serving
 /// should continue.
+#[cfg(not(target_arch = "wasm32"))]
 fn poll_inbound(ws: &mut EventsSocket, game_tx: &Sender<UiCommand>) -> ServeAction {
     match ws.read() {
         Ok(Message::Text(payload)) => {
@@ -589,6 +658,7 @@ fn poll_inbound(ws: &mut EventsSocket, game_tx: &Sender<UiCommand>) -> ServeActi
 
 /// Forward one client data frame as a `BrowserInput` snapshot. Garbage
 /// payloads are dropped like on the `POST /api/input` endpoint.
+#[cfg(not(target_arch = "wasm32"))]
 fn forward_browser_input(payload: &[u8], game_tx: &Sender<UiCommand>) {
     if let Some(input) = parse_browser_input(payload) {
         let _ = game_tx.send(UiCommand::Input { input });
@@ -598,6 +668,7 @@ fn forward_browser_input(payload: &[u8], game_tx: &Sender<UiCommand>) {
 /// Push replay records past `cursor` as one text frame. `Err` means the
 /// connection died; the caller terminates the handler (the client is
 /// expected to reconnect with its last cursor).
+#[cfg(not(target_arch = "wasm32"))]
 fn push_pending(
     ws: &mut EventsSocket,
     event_log: &Arc<Mutex<EventLog>>,
@@ -619,6 +690,7 @@ fn push_pending(
 /// framing, guards) stay exactly tiny_http's. Pump threads are transient:
 /// each exits on EOF or error, and a read-idle inherited from the sniff
 /// timeout reaps lingering keep-alive connections.
+#[cfg(not(target_arch = "wasm32"))]
 fn proxy_http(client: TcpStream, internal_port: u16) {
     let upstream = match TcpStream::connect(("127.0.0.1", internal_port)) {
         Ok(upstream) => upstream,
@@ -646,6 +718,7 @@ fn proxy_http(client: TcpStream, internal_port: u16) {
 
 /// Copy bytes one direction until EOF or error. The sibling pump notices the
 /// closed socket and exits as well, so no joining is needed.
+#[cfg(not(target_arch = "wasm32"))]
 fn pump_one(mut from: TcpStream, mut to: TcpStream) {
     let _ = std::io::copy(&mut from, &mut to);
 }

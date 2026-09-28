@@ -7,8 +7,6 @@ license.workspace = true
 
 [dependencies]
 tiny_http = "0.12"
-# WebSocket framing for `/api/events` (server role, handshake only, no TLS).
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"
@@ -16,6 +14,13 @@ glam = "0.33"
 ornis-input = { path = "../input" }
 # Typed command errors (`thiserror::Error` on `SetComponentError`).
 thiserror = "2.0"
+
+# WebSocket framing for `/api/events` (server role, handshake only, no
+# TLS). Native-only: the loopback socket server cannot run in the browser,
+# so wasm32 targets skip the whole transport (protocol types, guards and
+# `ScenePath` stay available — only the socket code is gated out).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
 
