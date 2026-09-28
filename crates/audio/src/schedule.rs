@@ -124,15 +124,27 @@ impl AudioPlugin {
         }
     }
 
-    /// Build around the platform's real audio output (native only).
+    /// Build around the platform's real audio output.
     ///
-    /// Returns `None` when the mixer thread cannot spawn; the caller then
-    /// runs silently without audio.
+    /// Native: the cpal device; returns `None` when the mixer thread
+    /// cannot spawn, and the caller then runs silently without audio.
+    /// wasm32: always `None` — the Web Audio backend is single-threaded
+    /// (`Rc<RefCell>`, see the module docs) and cannot serve the
+    /// `Send + Sync` host; the browser drives the engine directly from
+    /// its render loop. One spelling for all targets so shared crates
+    /// (`ornis-app::session`, the native showcase) compile everywhere.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn try_default() -> Option<Self> {
         crate::backend::AudioBackend::new()
             .ok()
             .map(|backend| Self::with_backend(Box::new(backend)))
+    }
+
+    /// wasm32 half of [`AudioPlugin::try_default`]: no host-compatible
+    /// backend exists (see above), so this is `None` by construction.
+    #[cfg(target_arch = "wasm32")]
+    pub fn try_default() -> Option<Self> {
+        None
     }
 
     /// Register the [`AudioSource`] lane, insert the host, and add `audio_step`.
