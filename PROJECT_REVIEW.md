@@ -1563,7 +1563,7 @@ ECS RigidBody + TransformDesc
 → ECS RigidBody + TransformDesc
 ```
 
-Синхронизация и системы находятся в `src/engine_runtime.rs`. `RigidBody`
+Синхронизация и системы находятся в `crates/app/src/physics_runtime.rs`. `RigidBody`
 остаётся внутренним physics-компонентом runtime facade и не входит в текущий
 serde scene snapshot. Native showcase подключает скрытый static floor и один
 dynamic body, а WASM physics не запускает: браузер остаётся snapshot client.

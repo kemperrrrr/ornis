@@ -85,7 +85,7 @@
   `sequence`; `/api/events?after=<sequence>` даёт bounded replay и `EventGap`.
   WebSocket upgrade на `/api/events` реализован для server-push; editor UI
   предпочитает его и сохраняет cursor polling как fallback.
-  Editor-only `EditorSession` (`src/server_session.rs`, на `GameWorld`;
+  Editor-only `EditorSession` (`crates/app/src/session.rs`, на `GameWorld`;
   до 2026-09-19 — `EditorWorld`) использует `ornis_core::World`,
   а браузер восстанавливает snapshot в browser-инстансе того же `GameWorld` после
   serialization boundary — общей памяти между ними нет.
@@ -193,7 +193,7 @@ browser/gameplay consumers и полный cross-domain runtime; серверн�
    в git-истории). Причина: ноль prod-потребителей, а единственный
    рантайм с движком был сам editor-server — скриптинг де-факто жил
    внутри редактирования мира, что унификация и оформила.
-4. **Editor-интеграция** ✅ (`src/server_session.rs`): `EditorSession`
+4. **Editor-интеграция** ✅ (`crates/app/src/session.rs`): `EditorSession`
    ставит `MutationPlugin` (пустая шина — счётчик + пустой цикл);
    контент-команды транслируются в `Mutation` и идут через общий
    `apply_mutations` с бампом версии и теми же сообщениями ошибок;
@@ -886,7 +886,7 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   ✅ **Шаг 5 DONE 2026-09-22** (рендер-сетка: `SoftBody.surface` —
   рендерная топология (у ткани 2 CCW-тройки на ячейку, у куба зеркало
   volume-поверхности, у цепей пусто) + `positions_snapshot`; мост
-  `SoftSyncIn/SoftSyncOut` в `src/engine_runtime.rs` — отдельный
+  `SoftSyncIn/SoftSyncOut` в `crates/app/src/physics_runtime.rs` — отдельный
   `XpbdEngine` в `PhysicsRuntime` (оркестратор частиц не знает),
   sync-in/out по образцу rigid-пути, soup пишется в `MeshDesc::Custom`,
   трансформ пинится в identity (частицы уже мировые — существующий
@@ -921,7 +921,7 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   Self-collision базовый (`soft_self.rs`: uniform-grid hash `cell=2r`,
   скип связанных рядов и pin-pin, неравенства без lambda). Архитектура:
   soft живёт во втором отдельном `XpbdEngine` в `PhysicsRuntime`
-  (`src/engine_runtime.rs`), не в `Engine`/`SolverKind`-роутинге
+  (`crates/app/src/physics_runtime.rs`), не в `Engine`/`SolverKind`-роутинге
   (sequential_impulse/avbd частиц не знают). Доки отстают от кода (по
   `AGENTS.md` верить коду): шапки `xpbd.rs:39-44` и `soft.rs:12-15` до
   сих пор пишут «No self-collision / no render upload yet», хотя хуки

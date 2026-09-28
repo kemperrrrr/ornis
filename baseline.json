@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.13462226658837362,
-  "iosp_score": 0.9021538461538462,
+  "quality_score": 0.13423268962069834,
+  "iosp_score": 0.9022440823854904,
   "violations": 318,
-  "total": 5240,
+  "total": 5242,
   "complexity_warnings": 52,
   "magic_number_warnings": 1406,
   "nesting_depth_warnings": 15,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 6,
-  "tq_untested_warnings": 130,
+  "tq_untested_warnings": 131,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 26,
   "structural_coupling_warnings": 24,
-  "total_findings": 3705,
+  "total_findings": 3710,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -86,9 +86,19 @@
       "line": 383
     },
     {
+      "name": "EditorSession::default",
+      "file": "crates/app/src/session.rs",
+      "line": 168
+    },
+    {
+      "name": "normalized_rotation",
+      "file": "crates/app/src/physics_runtime.rs",
+      "line": 533
+    },
+    {
       "name": "install_object_animation",
       "file": "crates/app/src/lib.rs",
-      "line": 77
+      "line": 81
     },
     {
       "name": "set_rigid_field",
@@ -1591,34 +1601,24 @@
       "line": 773
     },
     {
-      "name": "EditorSession::default",
-      "file": "src/server_session.rs",
-      "line": 168
-    },
-    {
       "name": "GameApp::showcase_engine",
       "file": "src/main.rs",
-      "line": 257
+      "line": 251
     },
     {
       "name": "GameApp::process_remote_commands",
       "file": "src/main.rs",
-      "line": 324
+      "line": 318
     },
     {
       "name": "GameApp::window_event",
       "file": "src/main.rs",
-      "line": 473
+      "line": 467
     },
     {
       "name": "GameApp::about_to_wait",
       "file": "src/main.rs",
-      "line": 601
-    },
-    {
-      "name": "normalized_rotation",
-      "file": "src/engine_runtime.rs",
-      "line": 533
+      "line": 595
     }
   ]
 }

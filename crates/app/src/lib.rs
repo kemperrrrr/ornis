@@ -18,6 +18,10 @@ use ornis_physics::RigidBody;
 pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 
 pub mod game_world;
+/// Sequential-impulse/XPBD physics runtime over the unified world.
+pub mod physics_runtime;
+/// Headless editor session: commands in, snapshots/events out.
+pub mod session;
 pub mod sync_harness;
 
 pub use game_world::{GameWorld, ReplicaGameWorld, spawn_static_floor};

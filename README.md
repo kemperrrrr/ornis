@@ -235,7 +235,7 @@ browser `WASD`/`InputState` (WS `POST /api/input` → `apply_browser_input`)
 ### Ближайшее: оживить браузерный редактор
 
 1. ~~**Обработчик команд engine ↔ editor**~~ — ✅ сделано: в режиме
-   `editor-only` поток `editor-world` (`src/server_session.rs`, `EditorSession` на `GameWorld`) читает `cmd_rx`
+   `editor-only` поток `editor-world` (`crates/app/src/session.rs`, `EditorSession` на `GameWorld`) читает `cmd_rx`
    и исполняет команды из `POST /api/command` на живом editor-only ECS-мире.
 2. ~~**`GET /api/scene`**~~ — ✅ сделано: сцена сериализуется в JSON
    (version/сущности с transform/mesh/material/lights/camera/ambient),

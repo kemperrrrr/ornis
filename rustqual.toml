@@ -99,8 +99,6 @@ paths = [
     "crates/editor-backend/**",
     "crates/wasm/**",
     "src/main.rs",
-    "src/engine_runtime.rs",
-    "src/server_session.rs",
     "xtask/**",
     "fuzz/fuzz_targets/**",
 ]

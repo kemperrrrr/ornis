@@ -1878,9 +1878,12 @@ dependencies = [
 name = "ornis-app"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
+ "editor-backend",
  "glam",
  "ornis-animation",
  "ornis-assets",
+ "ornis-audio",
  "ornis-core",
  "ornis-gameplay",
  "ornis-physics",

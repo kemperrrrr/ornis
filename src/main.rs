@@ -9,7 +9,7 @@ use editor_backend::RemoteEditor;
 #[cfg(not(feature = "editor-only"))]
 use editor_backend::{GameEvent, UiCommand};
 #[cfg(not(feature = "editor-only"))]
-use engine_runtime::install_physics;
+use ornis_app::physics_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::{
     GameWorld, install_gameplay_physics_bridge, install_object_animation, spawn_static_floor,
@@ -20,12 +20,6 @@ use ornis_audio::AudioPlugin;
 use ornis_audio::bridge::install_gameplay_audio_bridge;
 #[cfg(not(feature = "editor-only"))]
 use ornis_gameplay::install_gameplay;
-
-// Compiled in both modes so its unit tests run under a plain `cargo test`;
-// native mode also installs the physics systems into the showcase Engine.
-mod engine_runtime;
-#[cfg_attr(not(feature = "editor-only"), allow(dead_code))]
-mod server_session;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // "BROWSER-ONLY EDITOR" MODE (editor-only)
@@ -46,7 +40,7 @@ fn main() {
 
     // Live ECS world on a dedicated thread: executes commands from
     // POST /api/command and publishes status/scene snapshots + events.
-    server_session::run(cmd_rx, ev_tx);
+    ornis_app::session::run(cmd_rx, ev_tx);
 
     // The binding keeps RemoteEditor alive until main ends (Drop stops the server).
     let _editor = RemoteEditor::start(3420, cmd_tx, ev_rx);

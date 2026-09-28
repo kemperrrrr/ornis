@@ -78,8 +78,8 @@ use ornis_core::{
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
-use crate::engine_runtime::{PhysicsRuntime, install_physics};
-use ornis_app::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
+use crate::physics_runtime::{PhysicsRuntime, install_physics};
+use crate::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
 use ornis_assets::collider::ColliderDesc;
 use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
@@ -1118,11 +1118,23 @@ fn parse_overrides(map: &serde_json::Map<String, Value>) -> Result<ParsedOverrid
 // Startup
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Workspace root anchor for scene files: this crate lives at
+/// `crates/app`, so its manifest dir is two levels below the root (the
+/// same `../../` convention as `editor-backend`'s asset root). Ancestor
+/// indexing keeps the path free of `..` segments, so default
+/// `scene_saved`/`scene_loaded` payloads report clean paths.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 /// Default scene file for the `save_scene`/`load_scene` commands:
-/// `editor/scene.ron` — the scene the WASM viewport renders at startup
-/// (CARGO_MANIFEST_DIR for the `ornis` binary points at the workspace root).
+/// `editor/scene.ron` — the scene the WASM viewport renders at startup.
 fn scene_file_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron")
+    workspace_root().join("editor/scene.ron")
 }
 
 /// Write `contents` to `path` atomically: a sibling `<name>.tmp` file is
@@ -1139,10 +1151,10 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
 /// Startup scene RON: `editor/scene.ron` (the initial scene for the live
 /// editor/WASM snapshot), falling back to `assets/scene.ron`.
 fn startup_scene_ron() -> Option<String> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = workspace_root();
     ["editor/scene.ron", "assets/scene.ron"]
         .iter()
-        .find_map(|rel| fs::read_to_string(manifest.join(rel)).ok())
+        .find_map(|rel| fs::read_to_string(root.join(rel)).ok())
 }
 
 /// Watches one file for external edits (phase 7, minimal): the
@@ -1180,10 +1192,10 @@ impl FileWatch {
 /// Resolves the scene file the world loads from: `editor/scene.ron`
 /// preferred, `assets/scene.ron` fallback — mirrors `startup_scene_ron`.
 fn watched_scene_path() -> Option<PathBuf> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = workspace_root();
     ["editor/scene.ron", "assets/scene.ron"]
         .iter()
-        .map(|rel| manifest.join(rel))
+        .map(|rel| root.join(rel))
         .find(|path| path.is_file())
 }
 
@@ -1487,9 +1499,7 @@ mod tests {
     fn hot_reload_replaces_world_and_survives_garbage() {
         let (ev_tx, _ev_rx) = unbounded();
         let mut world = EditorSession::new();
-        let ron =
-            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
-                .expect("editor/scene.ron readable");
+        let ron = fs::read_to_string(scene_file_path()).expect("editor/scene.ron readable");
         let path = temp_scene_path("reload");
         fs::write(&path, &ron).expect("write temp scene");
 
@@ -1631,9 +1641,7 @@ mod tests {
 
     #[test]
     fn scene_ron_round_trip() {
-        let ron =
-            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
-                .expect("editor/scene.ron readable");
+        let ron = fs::read_to_string(scene_file_path()).expect("editor/scene.ron readable");
         let mut world = EditorSession::new();
         let loaded = world.load_scene_ron(&ron).expect("scene loads");
         assert_eq!(loaded, 5);
@@ -2115,9 +2123,7 @@ mod tests {
 
     #[test]
     fn to_scene_round_trip_through_ron_preserves_world() {
-        let ron =
-            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editor/scene.ron"))
-                .expect("editor/scene.ron readable");
+        let ron = fs::read_to_string(scene_file_path()).expect("editor/scene.ron readable");
         let mut world = EditorSession::new();
         world.load_scene_ron(&ron).expect("scene loads");
         // A runtime-created entity must round-trip too.
