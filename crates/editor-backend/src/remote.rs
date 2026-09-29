@@ -17,9 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use tiny_http::{Header, Request, Response, Server};
@@ -149,13 +148,27 @@ impl RemoteEditor {
         if let Some(handle) = self.accept_handle.take() {
             let _ = handle.join();
         }
-        let handles = std::mem::take(
-            &mut *self
-                .websocket_handles
+        join_background_threads(&self.websocket_handles);
+    }
+}
+
+/// Join connection threads, then any handler they pushed before exiting.
+///
+/// A dispatch thread records its WebSocket handler in the same list and
+/// returns, so a single drain would leave that handler unjoined. Finished
+/// handles may already have been dropped when a later connection was
+/// queued; anything still here is joined, including that handler.
+fn join_background_threads(handles: &Mutex<Vec<JoinHandle<()>>>) {
+    loop {
+        let pending = std::mem::take(
+            &mut *handles
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
-        for handle in handles {
+        if pending.is_empty() {
+            break;
+        }
+        for handle in pending {
             let _ = handle.join();
         }
     }
@@ -407,12 +420,15 @@ fn spawn_accept_loop(
     None
 }
 
-/// Accept loop for the public port: peek-dispatch each connection to the
-/// tungstenite event stream or the internal HTTP proxy. Runs until `stop`.
-/// `server_port` is the public port: it feeds the WebSocket `Origin` gate
-/// (proxied HTTP keeps its bytes, so the internal server checks the same
-/// port independently — see [`check_post_guards`]). Native only (see the
-/// transport note at the tungstenite imports).
+/// Accept loop for the public port. Each accepted socket is forced into
+/// blocking mode and sniffed on its own thread — a silent peer can sit in
+/// [`classify_connection`] for up to [`SNIFF_TIMEOUT`], and doing that on
+/// the accept thread would stall every other client. The sniff then starts
+/// the tungstenite event stream or the internal HTTP proxy. Runs until
+/// `stop`. `server_port` is the public port: it feeds the WebSocket
+/// `Origin` gate (proxied HTTP keeps its bytes, so the internal server
+/// checks the same port independently — see [`check_post_guards`]). Native
+/// only (see the transport note at the tungstenite imports).
 #[cfg(not(target_arch = "wasm32"))]
 fn accept_loop(
     listener: TcpListener,
@@ -429,7 +445,7 @@ fn accept_loop(
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
-                dispatch_connection(
+                enqueue_connection(
                     stream,
                     &stop,
                     &game_tx,
@@ -447,8 +463,65 @@ fn accept_loop(
     }
 }
 
-/// Sniff one connection (inline) and either spawn a joined event-stream
-/// handler or proxy it to the internal HTTP server.
+/// Put an accepted socket onto its own thread and remember the handle so
+/// [`join_background_threads`] can wait for it (and for a WebSocket handler
+/// it may spawn) on shutdown.
+///
+/// macOS and Windows copy the listener's non-blocking flag onto accepted
+/// sockets. `peek`, tungstenite and the proxy copy all assume a blocking
+/// stream; `WouldBlock` from a non-blocking accept breaks every one of them.
+#[cfg(not(target_arch = "wasm32"))]
+fn enqueue_connection(
+    stream: TcpStream,
+    stop: &Arc<AtomicBool>,
+    game_tx: &Sender<UiCommand>,
+    event_log: &Arc<Mutex<EventLog>>,
+    websocket_handles: &Arc<Mutex<Vec<JoinHandle<()>>>>,
+    internal_port: u16,
+    server_port: u16,
+) {
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
+    let stop = Arc::clone(stop);
+    let game_tx = game_tx.clone();
+    let event_log = Arc::clone(event_log);
+    let handles_for_thread = Arc::clone(websocket_handles);
+    let spawned = thread::Builder::new()
+        .name("remote-editor-dispatch".into())
+        .spawn(move || {
+            dispatch_connection(
+                stream,
+                &stop,
+                &game_tx,
+                &event_log,
+                &handles_for_thread,
+                internal_port,
+                server_port,
+            );
+        });
+    if let Ok(handle) = spawned {
+        push_connection_handle(websocket_handles, handle);
+    }
+}
+
+/// Remember `handle` after dropping threads that have already exited.
+///
+/// One dispatch thread is queued per accepted connection and exits as soon
+/// as the WebSocket handler or the HTTP proxy is running, so the list would
+/// otherwise grow without bound until [`RemoteEditor::stop`]. Dropping a
+/// finished [`JoinHandle`] does not detach a live thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn push_connection_handle(handles: &Mutex<Vec<JoinHandle<()>>>, handle: JoinHandle<()>) {
+    let mut pending = handles
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending.retain(|existing| !existing.is_finished());
+    pending.push(handle);
+}
+
+/// Sniff one connection and either spawn a joined event-stream handler or
+/// proxy it to the internal HTTP server. Runs off the accept thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn dispatch_connection(
     stream: TcpStream,
@@ -473,10 +546,7 @@ fn dispatch_connection(
                     serve_events_stream(stream, event_log, stop, cursor, game_tx, server_port)
                 })
             {
-                websocket_handles
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(handle);
+                push_connection_handle(websocket_handles, handle);
             }
         }
         ConnectionRoute::Http => proxy_http(stream, internal_port),
@@ -687,11 +757,22 @@ fn push_pending(
 
 /// Proxy one plain-HTTP connection to the internal tiny_http server.
 /// Byte-transparent in both directions, so HTTP semantics (keep-alive,
-/// framing, guards) stay exactly tiny_http's. Pump threads are transient:
-/// each exits on EOF or error, and a read-idle inherited from the sniff
-/// timeout reaps lingering keep-alive connections.
+/// framing, guards) stay exactly tiny_http's.
+///
+/// The sniff read timeout is cleared first. It is only a routing budget;
+/// left in place, `io::copy` treats keep-alive idle as an error and the
+/// sibling pump stays blocked on a cloned socket. With the timeout gone,
+/// idle keep-alive never ends either copy: both threads stay blocked in
+/// `read`, and the next request still flows. tiny_http does not close an
+/// idle HTTP/1.1 connection on its own — it waits for another request,
+/// `Connection: close`, or EOF. A peer that vanishes with neither FIN nor
+/// RST therefore leaves both pumps blocked; that is an idle socket, not
+/// the old hang, and it is the same wait tiny_http is already in.
 #[cfg(not(target_arch = "wasm32"))]
 fn proxy_http(client: TcpStream, internal_port: u16) {
+    if client.set_read_timeout(None).is_err() {
+        return;
+    }
     let upstream = match TcpStream::connect(("127.0.0.1", internal_port)) {
         Ok(upstream) => upstream,
         Err(_) => return,
@@ -716,18 +797,28 @@ fn proxy_http(client: TcpStream, internal_port: u16) {
     }
 }
 
-/// Copy bytes one direction until EOF or error. The sibling pump notices the
-/// closed socket and exits as well, so no joining is needed.
+/// Copy bytes one direction until EOF or error.
+///
+/// A clean EOF is a half-close: only the destination's write side is shut
+/// down, so the FIN reaches the peer and the reverse direction can still
+/// deliver a response (a client that `shutdown(Write)`s after its request
+/// must be able to read that response). An I/O error shuts both sockets
+/// down instead — a cloned fd would otherwise leave the sibling blocked
+/// even though this direction is already dead. Idle keep-alive hits
+/// neither path; the sniff timeout was cleared, so `io::copy` waits.
 #[cfg(not(target_arch = "wasm32"))]
 fn pump_one(mut from: TcpStream, mut to: TcpStream) {
-    let _ = std::io::copy(&mut from, &mut to);
+    match std::io::copy(&mut from, &mut to) {
+        Ok(_) => {
+            let _ = to.shutdown(std::net::Shutdown::Write);
+        }
+        Err(_) => {
+            let _ = from.shutdown(std::net::Shutdown::Both);
+            let _ = to.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
-/// Poll the upgraded stream for any available client frames. Returns
-/// `Ok(true)` if the connection should be closed (client sent close or
-/// EOF), `Ok(false)` if no close was seen, or `Err` on I/O error.
-/// Handles control frames and forwards text/binary data frames as
-/// `BrowserInput` snapshots to `game_tx` (WS input channel, no polling).
 /// Drain incoming game events into `buffer`. "status"/"scene" snapshots only
 /// refresh the endpoint caches — they are not user-facing events, so they
 /// skip the buffer.
@@ -1516,7 +1607,7 @@ fn format_event_records(records: &[EventRecord]) -> String {
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     // ── format_events ──────────────────────────────────────────────────────
 
@@ -2035,6 +2126,253 @@ mod tests {
         );
         // Complete garbage → None as well (bounded by the caller's timeout).
         assert_eq!(sniff_route(b"\r\n\r\n"), None);
+    }
+
+    /// Public accept loop plus the internal HTTP server, on an ephemeral port.
+    struct RunningEditor {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+        http: Option<JoinHandle<()>>,
+        accept: Option<JoinHandle<()>>,
+        _ui_rx: Receiver<UiCommand>,
+        _event_tx: Sender<GameEvent>,
+    }
+
+    impl RunningEditor {
+        fn spawn() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind public listener");
+            let port = listener.local_addr().expect("public addr").port();
+            let internal = Server::http("127.0.0.1:0").expect("bind internal http");
+            let internal_port = internal.server_addr().to_ip().expect("internal ip").port();
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let (game_tx, ui_rx) = unbounded::<UiCommand>();
+            let (event_tx, game_rx) = unbounded::<GameEvent>();
+            let event_log = Arc::new(Mutex::new(EventLog::default()));
+            let handles = Arc::new(Mutex::new(Vec::new()));
+
+            let http_stop = Arc::clone(&stop);
+            let http_tx = game_tx.clone();
+            let http_log = Arc::clone(&event_log);
+            let http = thread::Builder::new()
+                .name("test-remote-editor".into())
+                .spawn(move || serve(internal, http_stop, http_tx, game_rx, http_log, port))
+                .expect("spawn http");
+
+            let accept_stop = Arc::clone(&stop);
+            let accept_log = Arc::clone(&event_log);
+            let accept_handles = Arc::clone(&handles);
+            let accept = thread::Builder::new()
+                .name("test-remote-editor-accept".into())
+                .spawn(move || {
+                    accept_loop(
+                        listener,
+                        accept_stop,
+                        game_tx,
+                        accept_log,
+                        accept_handles,
+                        internal_port,
+                        port,
+                    )
+                })
+                .expect("spawn accept");
+
+            Self {
+                port,
+                stop,
+                handles,
+                http: Some(http),
+                accept: Some(accept),
+                _ui_rx: ui_rx,
+                _event_tx: event_tx,
+            }
+        }
+
+        fn stop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.accept.take() {
+                let _ = handle.join();
+            }
+            if let Some(handle) = self.http.take() {
+                let _ = handle.join();
+            }
+            join_background_threads(&self.handles);
+        }
+    }
+
+    impl Drop for RunningEditor {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// A peer that never sends bytes must not stall the accept loop. The
+    /// sniff budget is several seconds; a later client has to be answered
+    /// well inside that window.
+    #[test]
+    fn silent_connection_does_not_block_accept() {
+        let editor = RunningEditor::spawn();
+        let silent = TcpStream::connect(("127.0.0.1", editor.port)).expect("silent connect");
+        // The accept loop polls every 50ms. Wait until that silent socket is
+        // the one being sniffed before opening the client that must not wait.
+        thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        let mut client = TcpStream::connect(("127.0.0.1", editor.port)).expect("http connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout");
+        client
+            .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .expect("write status request");
+        let response = read_http_message(&mut client);
+        let elapsed = started.elapsed();
+
+        assert!(
+            response.contains("200") && response.contains("entity_count"),
+            "silent peer blocked or broke the status request after {elapsed:?}: {response}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "silent peer blocked accept for {elapsed:?}"
+        );
+
+        drop(silent);
+        drop(client);
+    }
+
+    /// `shutdown(Write)` after a full request is a half-close: the response
+    /// must still arrive, complete, and end with EOF.
+    #[test]
+    fn half_close_still_delivers_the_response() {
+        let editor = RunningEditor::spawn();
+        let mut client = TcpStream::connect(("127.0.0.1", editor.port)).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout");
+        client
+            .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .expect("write status request");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-close client write");
+
+        let (body, saw_eof) = read_until_eof(&mut client);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            saw_eof,
+            "expected the response to end with EOF, got: {text}"
+        );
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "missing status line: {text}"
+        );
+        assert!(
+            http_message_complete(&body) && text.contains("entity_count"),
+            "truncated status body: {text}"
+        );
+    }
+
+    /// Dispatch handles are pruned when the next connection is queued, so a
+    /// burst of short requests must not leave one handle per connection.
+    #[test]
+    fn connection_handles_stay_bounded() {
+        let editor = RunningEditor::spawn();
+        const CONNECTIONS: usize = 32;
+        for _ in 0..CONNECTIONS {
+            let mut client = TcpStream::connect(("127.0.0.1", editor.port)).expect("connect");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("client read timeout");
+            client
+                .write_all(
+                    b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write status request");
+            let response = read_http_message(&mut client);
+            assert!(
+                response.contains("entity_count"),
+                "short connection failed: {response}"
+            );
+        }
+        let queued = editor
+            .handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        assert!(
+            queued <= 8,
+            "handle list grew with connections: {queued} after {CONNECTIONS}"
+        );
+    }
+
+    /// Read one HTTP/1.1 response, stopping at `Content-Length`, EOF, or the
+    /// stream's read timeout.
+    fn read_http_message(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 1024];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if http_message_complete(&buf) {
+                        break;
+                    }
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => panic!("read response: {e}"),
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// Read until clean EOF. `false` means the read timed out or failed
+    /// before the peer closed, which a half-close must not do.
+    fn read_until_eof(stream: &mut TcpStream) -> (Vec<u8>, bool) {
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 1024];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) => return (buf, true),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return (buf, false);
+                }
+                Err(e) => panic!(
+                    "read response: {e}; so far {}",
+                    String::from_utf8_lossy(&buf)
+                ),
+            }
+        }
+    }
+
+    fn http_message_complete(buf: &[u8]) -> bool {
+        let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let body_len = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        match body_len {
+            Some(len) => buf.len() >= header_end + 4 + len,
+            None => false,
+        }
     }
 
     // ── tungstenite wire bytes ───────────────────────────────────────────

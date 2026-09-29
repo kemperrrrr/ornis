@@ -307,21 +307,69 @@ impl InputSocket {
     }
 }
 
-/// Fire-and-forget POST of one input snapshot; failures (server down,
-/// static file open) are ignored — the next dirty frame retries.
+/// Fire-and-forget `POST /api/input` of one snapshot.
+///
+/// The body is JSON and the header is `Content-Type: application/json`,
+/// matching `editor/editor.js`. Without that header the browser sends
+/// `text/plain` and the server answers 415. Network errors and non-success
+/// statuses are logged; the next dirty frame retries.
 fn post_input_snapshot(body: String) {
     let Some(window) = web_sys::window() else {
         return;
     };
+    let headers = match web_sys::Headers::new() {
+        Ok(headers) => headers,
+        Err(e) => {
+            console::warn_1(
+                &format!("[ornis-wasm] POST /api/input failed to build headers: {e:?}").into(),
+            );
+            return;
+        }
+    };
+    if let Err(e) = headers.set("Content-Type", "application/json") {
+        console::warn_1(
+            &format!("[ornis-wasm] POST /api/input failed to set Content-Type: {e:?}").into(),
+        );
+        return;
+    }
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
+    init.set_headers(&headers);
     init.set_body(&JsValue::from_str(&body));
-    let Ok(request) = web_sys::Request::new_with_str_and_init("/api/input", &init) else {
-        return;
+    let request = match web_sys::Request::new_with_str_and_init("/api/input", &init) {
+        Ok(request) => request,
+        Err(e) => {
+            console::warn_1(
+                &format!("[ornis-wasm] POST /api/input failed to build request: {e:?}").into(),
+            );
+            return;
+        }
     };
     let promise = window.fetch_with_request(&request);
     wasm_bindgen_futures::spawn_local(async move {
-        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        match wasm_bindgen_futures::JsFuture::from(promise).await {
+            Ok(value) => match value.dyn_into::<web_sys::Response>() {
+                Ok(resp) if !resp.ok() => {
+                    console::warn_1(
+                        &format!(
+                            "[ornis-wasm] POST /api/input failed: HTTP {}",
+                            resp.status()
+                        )
+                        .into(),
+                    );
+                }
+                Ok(_) => {}
+                Err(value) => {
+                    console::warn_1(
+                        &format!("[ornis-wasm] POST /api/input returned a non-response: {value:?}")
+                            .into(),
+                    );
+                }
+            },
+            Err(e) => {
+                console::warn_1(&format!("[ornis-wasm] POST /api/input failed: {e:?}").into());
+            }
+        }
     });
 }
 

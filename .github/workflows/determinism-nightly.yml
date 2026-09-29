@@ -39,10 +39,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          mkdir -p target
           cargo test -p ornis-physics -- --ignored --skip regenerate 2>&1 | tee target/determinism-nightly.log
 
       - name: Canonical snapshots untouched
         shell: bash
         run: |
+          mkdir -p target
           git status --porcelain -- crates/physics/tests/data/ | tee target/determinism-dirty.log
           test ! -s target/determinism-dirty.log
