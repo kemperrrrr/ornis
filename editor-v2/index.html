@@ -14,6 +14,11 @@
 <main class="layout">
   <!-- LEFT: full-height hierarchy -->
   <aside class="panel left">
+    <div class="panel-bar">
+      <button class="ghost" id="toggle-left" title="Collapse panel">
+        <svg viewBox="0 0 24 24"><use href="../editor/icons/dock-left.svg#icon" /></svg>
+      </button>
+    </div>
     <div class="tree-tools">
       <label class="search">
         <svg viewBox="0 0 24 24"><use href="../editor/icons/search.svg#icon" /></svg>
@@ -22,21 +27,31 @@
       <button class="ghost" id="add-entity" title="Add entity">
         <svg viewBox="0 0 24 24"><use href="../editor/icons/plus.svg#icon" /></svg>
       </button>
-      <button class="ghost" id="toggle-left" title="Collapse panel">
-        <svg viewBox="0 0 24 24"><use href="../editor/icons/dock-left.svg#icon" /></svg>
-      </button>
     </div>
     <div class="tree" id="tree" tabindex="0" aria-label="Scene hierarchy"></div>
   </aside>
 
   <div class="center-top">
+    <div class="top-row">
     <div class="project"><strong>demo</strong></div>
-    <div class="transport" role="toolbar" aria-label="Play controls">
-      <button id="btn-play" title="Play / Stop">
-        <svg viewBox="0 0 24 24"><use id="play-icon" href="../editor/icons/play.svg#icon" /></svg>
-      </button>
+    <div class="palette-wrap">
+      <div class="transport" role="toolbar" aria-label="Play controls">
+        <button id="btn-play" title="Play">
+          <svg viewBox="0 0 24 24"><use id="play-icon" href="../editor/icons/play.svg#icon" /></svg>
+        </button>
+        <button id="btn-pause" title="Pause" disabled>
+          <svg viewBox="0 0 24 24"><use href="../editor/icons/pause.svg#icon" /></svg>
+        </button>
+      </div>
+      <label class="search palette" title="Command Palette (Ctrl/⌘+K)">
+        <svg viewBox="0 0 24 24"><use href="../editor/icons/search.svg#icon" /></svg>
+        <input id="command-palette" type="text" placeholder="Command Palette" aria-label="Command Palette" />
+        <kbd>⌘K</kbd>
+      </label>
     </div>
-    <div class="status" id="status-pill" title="Editor status">Ready</div>
+    </div>
+    <!-- Second row: open scene/entity tabs (Godot-style); filled by app.js -->
+    <div class="scene-tabs" id="scene-tabs" role="tablist" aria-label="Open scenes"></div>
   </div>
 
   <div class="panel viewport-panel">
@@ -44,9 +59,12 @@
         <div class="grid-bg"></div>
         <div class="shapes" id="shapes"></div>
         <div class="viewport-hint">Static mockup — live WASM canvas plugs in here later</div>
+        <button class="viewport-settings" id="btn-settings" title="Settings">
+          <svg viewBox="0 0 24 24"><use href="../editor/icons/settings.svg#icon" /></svg>
+        </button>
         <div class="viewport-gizmos" role="toolbar" aria-label="Transform tools">
           <button class="gizmo active" data-tool="select" title="Select">
-            <svg viewBox="0 0 24 24"><use href="../editor/icons/cursor-default.svg#icon" /></svg>
+            <svg viewBox="0 0 24 24"><use href="icons/hand-pointer.svg#icon" /></svg>
           </button>
           <button class="gizmo" data-tool="move" title="Move">
             <svg viewBox="0 0 24 24"><use href="../editor/icons/transform-gizmo.svg#icon" /></svg>
@@ -71,19 +89,8 @@
         </button>
       </div>
       <div class="tab-page" id="tab-assets">
-        <div class="browser-split">
-          <div class="tree folder-tree" id="folder-tree" tabindex="0" aria-label="Folders"></div>
-          <div class="folder-contents">
-            <div class="content-bar">
-              <span class="crumb" id="crumb"></span>
-              <label class="search inline">
-                <svg viewBox="0 0 24 24"><use href="../editor/icons/search.svg#icon" /></svg>
-                <input id="asset-filter" type="text" placeholder="Filter" />
-              </label>
-            </div>
-            <div class="content-list" id="content-list"></div>
-          </div>
-        </div>
+        <nav class="crumb" id="crumb" aria-label="Folder path"></nav>
+        <div class="folder-grid" id="folder-grid"></div>
       </div>
       <div class="tab-page hidden" id="tab-console">
         <div class="console" id="console-log">
@@ -95,11 +102,13 @@
 
   <!-- RIGHT: full-height inspector -->
   <aside class="panel right">
-    <div class="entity-head">
+    <div class="panel-bar">
       <button class="ghost" id="toggle-right" title="Collapse panel">
         <svg viewBox="0 0 24 24"><use href="../editor/icons/dock-right.svg#icon" /></svg>
       </button>
-      <svg viewBox="0 0 24 24" class="entity-icon"><use id="inspector-icon" href="../editor/icons/cube.svg#icon" /></svg>
+    </div>
+    <div class="entity-head">
+      <svg viewBox="0 0 24 24" class="entity-icon"><use id="inspector-icon" href="../editor/icons/cube-outline.svg#icon" /></svg>
       <input id="inspector-name" type="text" value="" aria-label="Entity name" />
     </div>
     <div id="inspector"></div>
@@ -107,6 +116,14 @@
       <svg viewBox="0 0 24 24"><use href="../editor/icons/plus.svg#icon" /></svg>
       Add Component
     </button>
+    <div class="preview-panel">
+      <div class="preview-box" id="preview-box">
+        <button class="viewport-settings" id="btn-preview-settings" title="Preview settings">
+          <svg viewBox="0 0 24 24"><use href="../editor/icons/settings.svg#icon" /></svg>
+        </button>
+        <svg viewBox="0 0 24 24" class="preview-icon"><use id="preview-icon" href="../editor/icons/cube-outline.svg#icon" /></svg>
+      </div>
+    </div>
   </aside>
 </main>
 

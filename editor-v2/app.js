@@ -4,22 +4,24 @@
   "use strict";
 
   var ICONS = "../editor/icons/";
-  function icon(name) { return ICONS + name + ".svg#icon"; }
+  // editor-v2's own icons live in ./icons and take precedence over the shared set.
+  var LOCAL_ICONS = { "material-toon": true, "camera-wide": true };
+  function icon(name) { return (LOCAL_ICONS[name] ? "icons/" : ICONS) + name + ".svg#icon"; }
 
   var entities = [
-    { id: "red", name: "Red Sphere", kind: "mesh", icon: "cube",
+    { id: "red", name: "Red Sphere", kind: "mesh", icon: "cube-outline",
       comps: ["transform", "material", "physics"],
       pos: [-5.6, 0, 0], color: "#cc3333", rough: 0.5, metal: false, mass: 12, body: "Dynamic", enabled: true },
-    { id: "green", name: "Green Rough Sphere", kind: "mesh", icon: "cube",
+    { id: "green", name: "Green Rough Sphere", kind: "mesh", icon: "cube-outline",
       comps: ["transform", "material", "physics"],
       pos: [-2.8, 0, 0], color: "#33aa33", rough: 0.7, metal: false, mass: 9, body: "Dynamic", enabled: true },
-    { id: "blue", name: "Blue Smooth Sphere", kind: "mesh", icon: "cube",
+    { id: "blue", name: "Blue Smooth Sphere", kind: "mesh", icon: "cube-outline",
       comps: ["transform", "material", "physics"],
       pos: [0, 0, 0], color: "#3355cc", rough: 0.1, metal: false, mass: 9, body: "Static", enabled: true },
-    { id: "gold", name: "Gold Sphere", kind: "mesh", icon: "cube",
+    { id: "gold", name: "Gold Sphere", kind: "mesh", icon: "cube-outline",
       comps: ["transform", "material", "physics"],
       pos: [2.8, 0, 0], color: "#e6b800", rough: 0.2, metal: true, mass: 20, body: "Dynamic", enabled: false },
-    { id: "ceramic", name: "Ceramic Sphere", kind: "mesh", icon: "cube",
+    { id: "ceramic", name: "Ceramic Sphere", kind: "mesh", icon: "cube-outline",
       comps: ["transform", "material", "physics"],
       pos: [5.6, 0, 0], color: "#e8e8e8", rough: 0.35, metal: false, mass: 7, body: "Kinematic", enabled: true },
     { id: "key", name: "Key Light", kind: "light", icon: "lightbulb",
@@ -28,39 +30,43 @@
     { id: "fill", name: "Fill Light", kind: "light", icon: "lightbulb",
       comps: ["transform", "light"],
       pos: [-4, 3, -2], color: "#ccd6ff", intensity: 0.3, enabled: true },
-    { id: "cam", name: "Orbit Camera", kind: "camera", icon: "camera",
+    { id: "cam", name: "Orbit Camera", kind: "camera", icon: "camera-wide",
       comps: ["transform", "camera"],
       pos: [0, 2.5, 9], fov: 60, enabled: true },
   ];
   var COMP_DEFS = {
     transform: { label: "Transform", icon: "transform-gizmo" },
-    material: { label: "Material", icon: "select-color" },
+    material: { label: "Material", icon: "material-toon" },
     physics: { label: "Physics Body", icon: "weight" },
     light: { label: "Light", icon: "lightbulb" },
-    camera: { label: "Camera", icon: "camera" },
+    camera: { label: "Camera", icon: "camera-wide" },
   };
   var sceneTree = [
-    { label: "demo", icon: "cube",
+    { label: "demo", icon: "cube-outline",
       children: ["red", "green", "blue", "gold", "ceramic", "key", "fill", "cam"] },
   ];
-  var FS = { name: "Project", children: [
-    { name: "Scenes", children: [
-      { name: "demo.ron", file: { icon: "file" } },
-      { name: "Village", children: [
-        { name: "exterior.ron", file: { icon: "file" } },
-        { name: "interior.ron", file: { icon: "file" } },
+  var FS = { name: "demo", children: [
+    { name: "assets", children: [
+      { name: "Scenes", children: [
+        { name: "demo.ron", file: { icon: "file" } },
+        { name: "Village", children: [
+          { name: "exterior.ron", file: { icon: "file" } },
+          { name: "interior.ron", file: { icon: "file" } },
+        ]},
       ]},
-    ]},
-    { name: "Materials", children: [
-      { name: "Metals", children: [
-        { name: "Gold material", file: { icon: "select-color" } },
+      { name: "Materials", children: [
+        { name: "Metals", children: [
+          { name: "Gold material", file: { icon: "material-toon" } },
+        ]},
+        { name: "Ceramics", children: [
+          { name: "Ceramic material", file: { icon: "material-toon" } },
+        ]},
       ]},
-      { name: "Ceramics", children: [
-        { name: "Ceramic material", file: { icon: "select-color" } },
+      { name: "Prefabs", children: [
+        { name: "Player spawn", file: { icon: "cube-outline" } },
       ]},
-    ]},
-    { name: "Prefabs", children: [
-      { name: "Player spawn", file: { icon: "cube" } },
+      { name: "Textures", children: [] },
+      { name: "Sounds", children: [] },
     ]},
   ]};
   var selectedId = "blue";
@@ -76,8 +82,7 @@
     var b = document.createElement("button");
     b.className = "tree-row" + (opts.selected ? " selected" : "");
     var caret = document.createElement("span");
-    caret.className = "caret" + (opts.collapsible ? " clickable" : "");
-    caret.textContent = opts.collapsible ? (opts.collapsed ? "▸" : "▾") : "";
+    caret.className = "caret" + (opts.collapsible ? " clickable" + (opts.collapsed ? "" : " open") : "");
     if (opts.collapsible && opts.onToggle) {
       caret.addEventListener("click", function (ev) { ev.stopPropagation(); opts.onToggle(); });
     }
@@ -117,7 +122,14 @@
           var r = row(label, id ? byId(id).icon : child.icon,
             { selected: id === selectedId, collapsible: !!id, collapsed: !!collapsed[ekey],
               onToggle: function () { collapsed[ekey] = !collapsed[ekey]; renderTree(); } });
-          if (id) r.addEventListener("click", function () { select(id); });
+          if (id) {
+            r.dataset.id = id;
+            r.title = "Double-click to open in a tab";
+            r.addEventListener("click", function (ev) {
+              select(id);
+              if (ev.detail === 2) openEntityTab(id); // tree re-renders on click, so detect dblclick here too
+            });
+          }
           kids.appendChild(r);
           if (id && !collapsed[ekey]) {
             var sub = document.createElement("div");
@@ -156,6 +168,7 @@
   var inspector = document.getElementById("inspector");
   var nameInput = document.getElementById("inspector-name");
   var inspectorIcon = document.getElementById("inspector-icon");
+  var previewIcon = document.getElementById("preview-icon");
 
   function numVec(values, onChange) {
     var wrap = document.createElement("div");
@@ -192,7 +205,7 @@
     svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("class", "section-icon");
     var use = document.createElementNS(svgNS, "use");
-    use.setAttribute("href", icon(iconName || "cube"));
+    use.setAttribute("href", icon(iconName || "cube-outline"));
     svg.appendChild(use);
     s.appendChild(svg);
     s.appendChild(document.createTextNode(title));
@@ -209,6 +222,7 @@
     if (!e) { inspector.innerHTML = '<p class="muted">Select an entity.</p>'; return; }
     nameInput.value = e.name;
     inspectorIcon.setAttribute("href", icon(e.icon));
+    previewIcon.setAttribute("href", icon(e.icon));
 
     var t = section("Transform", true, "transform-gizmo");
     var f = document.createElement("div"); f.className = "field";
@@ -219,7 +233,7 @@
     inspector.appendChild(t.root);
 
     if (e.kind === "mesh") {
-    var m = section("Material", true, "select-color");
+    var m = section("Material", true, "material-toon");
     var cf = document.createElement("div"); cf.className = "field";
     var cl = document.createElement("span"); cl.textContent = "Base color";
     var ci = document.createElement("input");
@@ -289,7 +303,7 @@
     }
 
     if (e.kind === "camera") {
-      var cm = section("Camera", true, "camera");
+      var cm = section("Camera", true, "camera-wide");
       cm.body.appendChild(sliderRow("Fov", e.fov, 20, 120, 1,
         function (v) { return v.toFixed(0) + "°"; }, function (v) { e.fov = v; }));
       inspector.appendChild(cm.root);
@@ -303,15 +317,13 @@
 
   nameInput.addEventListener("change", function () {
     var e = byId(selectedId);
-    if (e && nameInput.value.trim()) { e.name = nameInput.value.trim(); renderTree(); renderShapes(); }
+    if (e && nameInput.value.trim()) { e.name = nameInput.value.trim(); renderTree(); renderShapes(); renderTabLabels(); }
   });
 
-  // ---- project browser: folder tree (left) + contents (right) ----
-  var folderTree = document.getElementById("folder-tree");
-  var contentList = document.getElementById("content-list");
-  var assetFilter = document.getElementById("asset-filter");
+  // ---- project browser: breadcrumb path + folder grid (folders only for now) ----
+  var folderGrid = document.getElementById("folder-grid");
   var crumb = document.getElementById("crumb");
-  var selectedFolder = []; // path of folder names from project root
+  var selectedFolder = ["assets"]; // path of folder names below the project root
 
   function fsNodeAt(path) {
     var node = FS;
@@ -323,66 +335,62 @@
     return node;
   }
 
-  function appendFolderNode(node, parent, path) {
-    var key = "fp:" + path.join("/");
-    var isCollapsed = !!collapsed[key];
-    var isSel = path.length === selectedFolder.length &&
-      path.every(function (v, i) { return v === selectedFolder[i]; });
-    var r = row(node.name, isCollapsed ? "folder" : "folder-open",
-      { selected: isSel, collapsible: true, collapsed: isCollapsed,
-        onToggle: function () { collapsed[key] = !collapsed[key]; renderBrowser(); } });
-    r.addEventListener("click", function () { selectedFolder = path; renderBrowser(); });
-    parent.appendChild(r);
-    if (!isCollapsed) {
-      var sub = document.createElement("div");
-      sub.className = "tree-children";
-      (node.children || []).forEach(function (c) {
-        if (!c.file) appendFolderNode(c, sub, path.concat([c.name]));
+  function crumbItem(name, path) {
+    var b = document.createElement("button");
+    b.className = "crumb-item";
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    var use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", icon("folder"));
+    svg.appendChild(use);
+    b.appendChild(svg);
+    b.appendChild(document.createTextNode(name));
+    b.addEventListener("click", function () { selectedFolder = path; renderBrowser(); });
+    return b;
+  }
+
+  function renderCrumb() {
+    crumb.innerHTML = "";
+    crumb.appendChild(crumbItem(FS.name, []));
+    selectedFolder.forEach(function (seg, i) {
+      var sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      crumb.appendChild(sep);
+      crumb.appendChild(crumbItem(seg, selectedFolder.slice(0, i + 1)));
+    });
+  }
+
+  function renderGrid() {
+    folderGrid.innerHTML = "";
+    var node = fsNodeAt(selectedFolder);
+    (node.children || []).forEach(function (child) {
+      if (child.file) return; // files come in a later iteration
+      var tile = document.createElement("button");
+      tile.className = "folder-tile";
+      tile.title = child.name;
+      tile.innerHTML = '<svg viewBox="0 0 24 24"><use href="' + icon("folder") + '" /></svg>';
+      var label = document.createElement("span");
+      label.textContent = child.name;
+      tile.appendChild(label);
+      tile.addEventListener("dblclick", function () {
+        selectedFolder = selectedFolder.concat([child.name]);
+        renderBrowser();
       });
-      if (sub.children.length) parent.appendChild(sub);
+      tile.addEventListener("click", function () {
+        folderGrid.querySelectorAll(".folder-tile.selected").forEach(function (t) { t.classList.remove("selected"); });
+        tile.classList.add("selected");
+      });
+      folderGrid.appendChild(tile);
+    });
+    if (!folderGrid.children.length) {
+      var empty = document.createElement("div");
+      empty.className = "muted folder-empty";
+      empty.textContent = "No folders here";
+      folderGrid.appendChild(empty);
     }
   }
 
-  function renderFolderTree() {
-    folderTree.innerHTML = "";
-    (FS.children || []).forEach(function (node) {
-      if (!node.file) appendFolderNode(node, folderTree, [node.name]);
-    });
-  }
-
-  function renderContents() {
-    crumb.innerHTML = "";
-    var root = document.createElement("button");
-    root.textContent = "Project";
-    root.addEventListener("click", function () { selectedFolder = []; renderBrowser(); });
-    crumb.appendChild(root);
-    selectedFolder.forEach(function (seg, i) {
-      crumb.appendChild(document.createTextNode(" › "));
-      var b = document.createElement("button");
-      b.textContent = seg;
-      b.addEventListener("click", function () {
-        selectedFolder = selectedFolder.slice(0, i + 1);
-        renderBrowser();
-      });
-      crumb.appendChild(b);
-    });
-    contentList.innerHTML = "";
-    var q = assetFilter.value.trim().toLowerCase();
-    var node = fsNodeAt(selectedFolder);
-    (node.children || []).forEach(function (child) {
-      if (q && child.name.toLowerCase().indexOf(q) < 0) return;
-      var r = row(child.name, child.file ? child.file.icon : "folder", {});
-      if (!child.file) {
-        r.addEventListener("click", function () {
-          selectedFolder = selectedFolder.concat([child.name]);
-          renderBrowser();
-        });
-      }
-      contentList.appendChild(r);
-    });
-  }
-
-  function renderBrowser() { renderFolderTree(); renderContents(); }
+  function renderBrowser() { renderCrumb(); renderGrid(); }
   document.querySelectorAll(".tab").forEach(function (tab) {
     tab.addEventListener("click", function () {
       document.querySelectorAll(".tab").forEach(function (x) { x.classList.remove("active"); });
@@ -402,19 +410,205 @@
     consoleLog.appendChild(div);
   }
 
-  // ---- toolbar wiring (fake): single play/stop toggle ----
-  var pill = document.getElementById("status-pill");
+  // ---- scene / entity tabs (second row of the top bar, Godot-style) ----
+  var tabStrip = document.getElementById("scene-tabs");
+  var TAB_ANIM_MS = 320; // keep in sync with --tab-anim in styles.css
+  var openTabs = [{ id: "demo", root: true }]; // "demo" = root scene, always open
+  var activeTab = "demo";
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function svgIcon(name) {
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    var use = document.createElementNS(SVG_NS, "use");
+    use.setAttribute("href", icon(name));
+    svg.appendChild(use);
+    return svg;
+  }
+  function tabEl(id) { return tabStrip.querySelector('.scene-tab[data-id="' + id + '"]:not(.leaving)'); }
+  function tabLabel(t) { return t.root ? "demo" : (byId(t.id) || { name: t.id }).name; }
+  function tabIcon(t) { return t.root ? sceneTree[0].icon : (byId(t.id) || { icon: "cube-outline" }).icon; }
+
+  function buildTab(t) {
+    var el = document.createElement("div");
+    el.className = "scene-tab" + (t.root ? " root" : "");
+    el.dataset.id = t.id;
+    el.setAttribute("role", "tab");
+    el.tabIndex = 0;
+    el.title = tabLabel(t);
+    el.appendChild(svgIcon(tabIcon(t)));
+    var lab = document.createElement("span");
+    lab.className = "label";
+    lab.textContent = tabLabel(t);
+    el.appendChild(lab);
+    if (!t.root) {
+      var x = document.createElement("button");
+      x.className = "close";
+      x.title = "Close tab";
+      x.tabIndex = -1;
+      x.appendChild(svgIcon("close"));
+      x.addEventListener("click", function (ev) { ev.stopPropagation(); closeTab(t.id); });
+      el.appendChild(x);
+      el.addEventListener("auxclick", function (ev) { if (ev.button === 1) { ev.preventDefault(); closeTab(t.id); } });
+    }
+    el.addEventListener("click", function () { activateTab(t.id); });
+    el.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activateTab(t.id); }
+    });
+    return el;
+  }
+
+  function syncActive() {
+    tabStrip.querySelectorAll(".scene-tab").forEach(function (el) {
+      var on = el.dataset.id === activeTab && !el.classList.contains("leaving");
+      el.classList.toggle("active", on);
+      el.setAttribute("aria-selected", on ? "true" : "false");
+    });
+  }
+
+  function scrollTabIntoView(el) {
+    var left = el.offsetLeft, right = left + el.offsetWidth;
+    var view = tabStrip.scrollLeft, w = tabStrip.clientWidth, pad = 8;
+    if (left - pad < view) tabStrip.scrollTo({ left: left - pad, behavior: "smooth" });
+    else if (right + pad > view + w) tabStrip.scrollTo({ left: right + pad - w, behavior: "smooth" });
+  }
+
+  function activateTab(id) {
+    if (!openTabs.some(function (t) { return t.id === id; })) return;
+    var changed = activeTab !== id;
+    activeTab = id;
+    syncActive();
+    var t = openTabs.find(function (t) { return t.id === id; });
+    if (!t.root && byId(id)) select(id);
+    var el = tabEl(id);
+    if (el) scrollTabIntoView(el);
+    if (changed) log("tab: switched to " + tabLabel(t) + " (mock)");
+  }
+
+  function openEntityTab(id) {
+    if (!byId(id)) return;
+    if (openTabs.some(function (t) { return t.id === id; })) { activateTab(id); return; }
+    var t = { id: id };
+    openTabs.push(t);
+    var el = buildTab(t);
+    tabStrip.appendChild(el);
+    // Expand from 0 to the tab's natural width (measured first so the easing isn't cut short).
+    var w = el.offsetWidth;
+    freezeLabel(el);
+    el.style.transition = "none";
+    el.classList.add("entering");
+    void el.offsetWidth; // commit the collapsed state
+    el.style.transition = "";
+    requestAnimationFrame(function () {
+      el.style.maxWidth = w + "px";
+      el.classList.remove("entering");
+      setTimeout(function () { el.style.maxWidth = ""; unfreezeLabel(el); }, TAB_ANIM_MS + 40);
+    });
+    log("tab: opened " + tabLabel(t) + " (mock)");
+    activeTab = id;
+    syncActive();
+    select(id);
+    setTimeout(function () { if (activeTab === id) scrollTabIntoView(el); }, TAB_ANIM_MS); // after it has expanded
+  }
+
+  // Keep the label at its full width while the tab folds/unfolds, so the text
+  // is clipped by the tab edge instead of re-ellipsizing every frame.
+  function freezeLabel(el) {
+    var lab = el.querySelector(".label");
+    if (lab) lab.style.width = lab.offsetWidth + "px";
+    el.classList.add("anim");
+  }
+  function unfreezeLabel(el) {
+    var lab = el.querySelector(".label");
+    if (lab) lab.style.width = "";
+    el.classList.remove("anim");
+  }
+
+  function closeTab(id) {
+    var i = openTabs.findIndex(function (t) { return t.id === id; });
+    if (i < 0 || openTabs[i].root) return;
+    var t = openTabs[i];
+    openTabs.splice(i, 1);
+    var el = tabEl(id);
+    log("tab: closed " + tabLabel(t) + " (mock)");
+    if (activeTab === id) {
+      var next = openTabs[Math.min(i, openTabs.length - 1)];
+      activeTab = null;
+      activateTab(next.id);
+    }
+    if (el) {
+      // Collapse from the real width (pin it without a transition first).
+      var bg = getComputedStyle(el).backgroundColor;
+      freezeLabel(el);
+      el.style.transition = "none";
+      el.style.maxWidth = el.offsetWidth + "px";
+      void el.offsetWidth;
+      el.style.transition = "";
+      el.style.backgroundColor = bg; // keep its colour while it folds away
+      el.classList.remove("active");
+      el.classList.add("leaving");
+      el.style.maxWidth = "";
+      var done = false;
+      var remove = function () { if (!done) { done = true; el.remove(); } };
+      el.addEventListener("transitionend", function (ev) { if (ev.propertyName === "max-width") remove(); });
+      setTimeout(remove, TAB_ANIM_MS + 80);
+    }
+  }
+
+  function renderTabLabels() {
+    openTabs.forEach(function (t) {
+      var el = tabEl(t.id);
+      if (!el) return;
+      el.querySelector(".label").textContent = tabLabel(t);
+      el.title = tabLabel(t);
+    });
+  }
+
+  var TAB_SCROLL_SPEED = 0.35; // fraction of the raw wheel delta
+  // Vertical wheel scrolls the strip horizontally (scrollbars are hidden globally).
+  tabStrip.addEventListener("wheel", function (ev) {
+    if (tabStrip.scrollWidth <= tabStrip.clientWidth) return;
+    var d = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+    if (!d) return;
+    ev.preventDefault();
+    if (ev.deltaMode === 1) d *= 16;           // lines -> px
+    tabStrip.scrollLeft += d * TAB_SCROLL_SPEED;
+  }, { passive: false });
+  // Double-click on an entity row in the hierarchy opens its tab.
+  tree.addEventListener("dblclick", function (ev) {
+    var r = ev.target.closest && ev.target.closest(".tree-row[data-id]");
+    if (r) openEntityTab(r.dataset.id);
+  });
+
+  openTabs.forEach(function (t) { tabStrip.appendChild(buildTab(t)); });
+  syncActive();
+
+  // ---- toolbar wiring (fake): play/stop toggle + pause ----
   var playing = false;
+  var paused = false;
   var playIcon = document.getElementById("play-icon");
+  var btnPlay = document.getElementById("btn-play");
+  var btnPause = document.getElementById("btn-pause");
+  function setPaused(on) {
+    paused = on;
+    btnPause.classList.toggle("paused", on);
+    btnPause.title = on ? "Resume" : "Pause";
+  }
   function setPlaying(on) {
     playing = on;
-    document.getElementById("btn-play").classList.toggle("playing", on);
-    document.getElementById("btn-play").title = on ? "Stop" : "Play";
+    btnPlay.classList.toggle("playing", on);
+    btnPlay.title = on ? "Stop" : "Play";
     playIcon.setAttribute("href", icon(on ? "stop" : "play"));
-    pill.textContent = on ? "Simulating…" : "Ready";
+    btnPause.disabled = !on;
+    setPaused(false);
     log(on ? "simulate started (mock)" : "simulate stopped (mock)");
   }
-  document.getElementById("btn-play").addEventListener("click", function () { setPlaying(!playing); });
+  btnPlay.addEventListener("click", function () { setPlaying(!playing); });
+  btnPause.addEventListener("click", function () {
+    if (!playing) return;
+    setPaused(!paused);
+    log(paused ? "simulate paused (mock)" : "simulate resumed (mock)");
+  });
   document.querySelectorAll(".viewport-gizmos .gizmo").forEach(function (b) {
     b.addEventListener("click", function () {
       document.querySelectorAll(".viewport-gizmos .gizmo").forEach(function (x) { x.classList.remove("active"); });
@@ -426,11 +620,25 @@
   var layout = document.querySelector(".layout");
   var toggleLeft = document.getElementById("toggle-left");
   var toggleRight = document.getElementById("toggle-right");
-  toggleLeft.addEventListener("click", function () {
-    layout.classList.toggle("hide-left");
+  var centerTop = document.querySelector(".center-top .top-row"); // docked toggles sit in the first row
+  // Collapsing hides the whole panel and docks its button in the top bar;
+  // expanding puts the button back into the panel's own bar.
+  function wirePanelToggle(button, hideClass) {
+    var home = button.parentNode;
+    button.addEventListener("click", function () {
+      var hidden = layout.classList.toggle(hideClass);
+      (hidden ? centerTop : home).appendChild(button);
+      button.classList.toggle("docked", hidden);
+      button.title = hidden ? "Expand panel" : "Collapse panel";
+    });
+  }
+  wirePanelToggle(toggleLeft, "hide-left");
+  wirePanelToggle(toggleRight, "hide-right");
+  document.getElementById("btn-settings").addEventListener("click", function () {
+    log("Settings — panel comes in a later iteration (mock)");
   });
-  toggleRight.addEventListener("click", function () {
-    layout.classList.toggle("hide-right");
+  document.getElementById("btn-preview-settings").addEventListener("click", function () {
+    log("Preview settings — panel comes in a later iteration (mock)");
   });
   document.getElementById("add-component").addEventListener("click", function () {
     log("Add Component — picker comes in the next iteration (mock)");
@@ -439,8 +647,21 @@
     log("Add Entity — creation flow comes in the next iteration (mock)");
   });
 
+  // ---- command palette (mock): Ctrl/Cmd+K focuses, Enter logs the query ----
+  var palette = document.getElementById("command-palette");
+  document.addEventListener("keydown", function (ev) {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") {
+      ev.preventDefault(); palette.focus(); palette.select();
+    } else if (ev.key === "Escape" && document.activeElement === palette) {
+      palette.value = ""; palette.blur();
+    }
+  });
+  palette.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" && palette.value.trim()) {
+      log("command: " + palette.value.trim() + " (mock)"); palette.value = "";
+    }
+  });
   treeFilter.addEventListener("input", renderTree);
-  assetFilter.addEventListener("input", renderContents);
 
   renderTree(); renderShapes(); renderInspector(); renderBrowser();
 })();
