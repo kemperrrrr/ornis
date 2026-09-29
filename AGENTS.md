@@ -58,3 +58,21 @@
 - `PLAN.md` — план реализации. `IDEAS.md` — архитектурные идеи.
 - `PROJECT_REVIEW.md` — текущие ограничения и активный план работ.
 - Меняете поведение/статусы — синхронизируйте README в том же коммите.
+
+## Cursor Cloud specific instructions
+
+- Образ уже содержит Rust из `rust-toolchain.toml` (сейчас 1.97) и таргет
+  `wasm32-unknown-unknown`. Поверх него ставятся `libasound2-dev`,
+  `libudev-dev`, `pkg-config`, `mesa-vulkan-drivers` (lavapipe: без этого
+  ICD нативные wgpu-тесты не находят адаптер), `mold` и бинарь `wasm-pack`.
+- Редактор — `cargo xtask editor`, затем http://127.0.0.1:3420.
+  Живое состояние: `GET /api/status` и `GET /api/scene`. `POST /api/command`
+  принимает JSON только с `Content-Type: application/json` и
+  `Origin: http://127.0.0.1:3420` (иначе 415/403).
+- `RUSTFLAGS=-C link-arg=-fuse-ld=mold` — только нативные таргеты. Тот же
+  флаг на `wasm32` ломает линковку; wasm-сборку (`wasm-pack`, `wasm-check`)
+  гоняйте без него. `.cargo/config.toml` ограничивает `jobs = 2`.
+- Звуковой карты в VM нет: поток cpal пишет ошибки ALSA и на редактор это
+  не влияет. У Chrome в этой VM нет WebGPU, поэтому 3D-viewport может
+  остаться пустым; оболочка редактора и HTTP API при этом работают.
+  Нативные GPU-тесты идут через lavapipe, не через браузер.
