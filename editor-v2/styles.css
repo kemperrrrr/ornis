@@ -27,13 +27,11 @@
 * {
   box-sizing: border-box;
   /* Light OS bars read as white stripes on the dark panels. Hide them;
-     overflow stays auto so the wheel and trackpad still scroll. */
+     overflow stays auto so the wheel and trackpad still scroll.
+     Do not style ::-webkit-scrollbar here: on this Chrome that switches
+     on the classic light bar instead of removing it. */
   scrollbar-width: none;
-}
-*::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
+  scrollbar-color: transparent transparent;
 }
 html, body { height: 100%; }
 body {

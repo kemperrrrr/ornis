@@ -12,14 +12,11 @@
     padding: 0;
     box-sizing: border-box;
     /* OS scrollbars render as light stripes on the dark panels.
-       Hide the bars; wheel and trackpad scrolling stays. */
+       Hide the bars; wheel and trackpad scrolling stays.
+       Do not style ::-webkit-scrollbar: that switches on the classic
+       light bar instead of removing it. */
     scrollbar-width: none;
-}
-
-*::-webkit-scrollbar {
-    width: 0;
-    height: 0;
-    display: none;
+    scrollbar-color: transparent transparent;
 }
 
 *::selection {
