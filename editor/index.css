@@ -11,6 +11,15 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+    /* OS scrollbars render as light stripes on the dark panels.
+       Hide the bars; wheel and trackpad scrolling stays. */
+    scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
 }
 
 *::selection {
