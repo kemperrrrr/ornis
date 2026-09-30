@@ -177,7 +177,10 @@
       var inp = document.createElement("input");
       inp.type = "number"; inp.step = "0.1"; inp.value = v;
       inp.addEventListener("change", function () { onChange(i, parseFloat(inp.value) || 0); });
-      wrap.appendChild(inp);
+      var cell = document.createElement("span"); // holds the inner axis-colour strip
+      cell.className = "vec-cell";
+      cell.appendChild(inp);
+      wrap.appendChild(cell);
     });
     return wrap;
   }

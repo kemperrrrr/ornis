@@ -79,7 +79,7 @@ button { font: inherit; color: inherit; }
 }
 .transport button svg { width: 14px; height: 14px; }
 .transport button:hover { background: #45454b; }
-.transport button.paused { background: var(--accent-soft); border-color: var(--accent); fill: var(--accent); }
+.transport button.paused, .transport button.paused:hover { fill: var(--accent); } /* only the icon turns blue */
 .transport button:disabled { opacity: 0.4; cursor: default; }
 .transport button:disabled:hover { background: var(--panel-2); }
 /* Layout: side panels span full height; center column stacks transport/viewport/browser */
@@ -147,22 +147,23 @@ button { font: inherit; color: inherit; }
 .tree-children { margin-left: 16px; padding-left: 4px; }
 
 /* Center */
-/* Collapse / expand side panels: the column eases to zero while the panel fades;
-   its content keeps a fixed width so it is clipped instead of reflowing. */
+/* Collapse / expand side panels: the column eases to zero and the panel shrinks with it,
+   no fading. Content keeps its full width and stays pinned to the outer edge. */
 .layout.hide-left { grid-template-columns: 0px 0px minmax(0, 1fr) 8px 300px; }
 .layout.hide-right { grid-template-columns: 260px 8px minmax(0, 1fr) 0px 0px; }
 .layout.hide-left.hide-right { grid-template-columns: 0px 0px minmax(0, 1fr) 0px 0px; }
 .layout > .left, .layout > .right {
-  position: relative; z-index: 0;
-  transition: opacity .24s ease, border-color .24s ease, visibility 0s linear 0s;
+  min-width: 0; overflow: hidden;
+  transition: border-color 0s linear 0s, visibility 0s linear 0s;
 }
-/* Panels keep their full width and slide under the centre column as it widens. */
-.layout > .left { width: 260px; justify-self: start; }
-.layout > .right { width: 300px; justify-self: end; }
-.layout > .viewport-panel, .layout > .browser-panel { position: relative; z-index: 1; }
+/* Content keeps its full width, so the shrinking panel clips it instead of reflowing. */
+.layout > .left > * { min-width: 258px; }
+.layout > .right > * { min-width: 298px; }
+.layout > .right > .add-component { min-width: 278px; } /* has 10px side margins */
+.layout > .right { align-items: flex-end; } /* pin content to the right edge while it folds */
 .layout.hide-left > .left, .layout.hide-right > .right {
-  opacity: 0; border-color: transparent; pointer-events: none; visibility: hidden;
-  transition: opacity .2s ease, border-color .2s ease, visibility 0s linear .32s;
+  border-color: transparent; pointer-events: none; visibility: hidden;
+  transition: border-color 0s linear .3s, visibility 0s linear .32s;
 }
 @media (prefers-reduced-motion: reduce) { .layout, .layout > .left, .layout > .right { transition: none; } }
 .center-top .docked { position: absolute; top: 50%; transform: translateY(-50%); }
@@ -374,3 +375,21 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .scene-tab.entering, .scene-tab.leaving { transform: none; }
 .scene-tab.anim .label { flex: none; text-overflow: clip; }
 .scene-tab.anim > * { flex-shrink: 0; }
+
+/* Vector fields: a thin strip on the left of X / Y / Z in the gizmo axis colours */
+:root { --axis-x: #e5484d; --axis-y: #7ec83a; --axis-z: #3e8cff; }
+/* A separate rounded strip sits inside the field, inset from its border */
+.field .vec .vec-cell { position: relative; display: block; min-width: 0; }
+.field .vec .vec-cell input { padding-left: 11px; }
+.field .vec .vec-cell::before {
+  content: ""; position: absolute; left: 4px; top: 5px; bottom: 5px; width: 2px;
+  border-radius: 2px; background: var(--axis); pointer-events: none;
+}
+.field .vec .vec-cell:nth-child(1) { --axis: var(--axis-x); }
+.field .vec .vec-cell:nth-child(2) { --axis: var(--axis-y); }
+.field .vec .vec-cell:nth-child(3) { --axis: var(--axis-z); }
+
+/* Hide the native number spinners (they cover most of the narrow vector fields) */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
