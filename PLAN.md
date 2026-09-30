@@ -343,6 +343,14 @@ stale не затирает newer preview),
 `EditableMesh::submit_exact/poll_exact` (stale считает в
 `dropped_exact_seq`, тайминги — через `observe_exact_result`).
 Адаптеры Rapier/Jolt не делались (явно исключены).
+- **Опсы, вторая волна (зафиксировано 2026-09-30, не начато):**
+  decimate (QEM — топ-приоритет: кормит LOD, физические прокси и
+  будущие мешлеты; синергия с D6 sizing map) → mirror/symmetrize
+  (дёшево) → adjacency-слой (half-edge; без него inset/loop-cut/knife —
+  костыли) → inset/loop-cut. UV-unwrap НЕ строить (плохой ROI —
+  покрывается box-project/triplanar в рендере). Инвариант §h в силе
+  для каждого опса: когерентный preview ≤1мс + точный exact фоном;
+  опс без preview-истории не принимать.
 
 ### g. Unified Scheduler (IDEAS §28, долгосрочно)
 
@@ -959,25 +967,28 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   parallel-transport фреймами + `RopeMesh`-компонент и ветка в
   `sync_soft_out`; рендер-крейт не тронут). Lib-сьют 159, bin
   engine_runtime 11/11, clippy/fmt чисто.
-- **D1-остатки — hardening XPBD/soft (зафиксировано 2026-09-27, не начато):**
-  soft-контакты discrete only (без CCD), одно witness-сопряжение на пару
-  (без multi-point манифолдов), inelastic+frictionless (velocity-пассы про
-  soft-ряды не знают), без `layer/mask` на soft-стороне
-  (`xpbd.rs:421-424` — цепляется ко всему), без сна/островов/событий,
-  однопоточно. Джойнты XPBD — только структура
-  (Ball/Distance/Fixed/Revolute/Prismatic), limits/motors/springs не
-  ведутся, Wheel/Gear/SixDof → `None`. Разрывы — holes-not-splits без
-  дупликации частиц (`soft.rs:718-731`: рвутся только Structural,
-  shear/bend нет, volume-поверхность цела, пины не снимаются).
-  Self-collision базовый (`soft_self.rs`: uniform-grid hash `cell=2r`,
-  скип связанных рядов и pin-pin, неравенства без lambda). Архитектура:
-  soft живёт во втором отдельном `XpbdEngine` в `PhysicsRuntime`
-  (`crates/app/src/physics_runtime.rs`), не в `Engine`/`SolverKind`-роутинге
-  (sequential_impulse/avbd частиц не знают). Доки отстают от кода (по
-  `AGENTS.md` верить коду): шапки `xpbd.rs:39-44` и `soft.rs:12-15` до
-  сих пор пишут «No self-collision / no render upload yet», хотя хуки
-  `solve_self_collision`, `surface`/`tube_*`, `sync_soft_out` →
-  `MeshDesc::Custom` уже в коде — починить доки.
+- **D1-остатки — hardening XPBD/soft ✅ DONE 2026-09-29** (два параллельных
+  агента + роутинг, верифицировано: lib 398 + app 11, clippy/fmt чисто):
+  доки приведены к коду (устаревшие «No self-collision / frictionless»
+  удалены); `layer/mask` на soft-стороне (`can_couple_with` — зеркало
+  `can_collide_with`); трение Кулона в soft↔rigid (velocity-пасс поверх
+  BDF1, `soft_friction` дефолт 0.5); warm-start `λ` вместо мультипоинта
+  (сфера-частица держит покой); CCD-кламп частиц через `cast_shape`;
+  сон (паритет 0.15 м/с + 0.5 c) + `SoftContactEvent{Begin|End}` +
+  `drain_soft_contact_events`; разрывы со сплитом частиц (BFS от пинов,
+  пины не дублируются); persistent `λ` в self-collision; soft заведён в
+  `Engine`/`SolverKind`-роутинг (дизайн b: `SolverKind::Xpbd`, вне XPBD —
+  парк в dense-порядке, хендлы стабильны, `soft_solver` из `PhysicsRuntime`
+  удалён, coupling soft↔rigid впервые реально работает). Острова для
+  soft и полный сплит частиц shear/bend — следующий шаг.
+  Было до закрытия: soft-контакты discrete only без CCD, одно
+  witness-сопряжение на пару, inelastic+frictionless, без `layer/mask`,
+  без сна/событий; разрывы holes-not-splits; self-collision без lambda;
+  soft в отдельном `XpbdEngine` вне `Engine`-роутинга; шапки `xpbd.rs` /
+  `soft.rs` врали про «no self-collision / no render upload».
+  Осталось честно открытым: limits/motors/springs XPBD-джойнтов,
+  Wheel/Gear/SixDof → `None`, острова для soft, shear/bend через разрыв
+  продолжают сшивать губы.
 - **D2 — Жидкости: Position Based Fluids (план, IDEAS §29):** тот же
   XPBD-ядро `Δλ = (−C − α̃λ)/(w + α̃)` из `crates/physics/src/xpbd.rs`,
   но констрейнт плотности `C = ρ/ρ₀ − 1` с Poly6/Spiky-ядрами +
@@ -1088,6 +1099,78 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   кластеров и тайлов); если понадобится единый бюджетник — тонкий
   селектор чистыми функциями поверх метрики, без знания о кластерах
   и текстурах.
+- **Шаг 4 — SDF в `geometry` (зафиксировано 2026-09-30).** SDF —
+  естественный interchange: analytic-примитивы под `Shape`-набор
+  (sphere/box/capsule/cylinder/cone/torus/plane) + CSG (`min`/`max`/
+  `smin` — гладкие бленды там, где B-rep булеаны мрут на касаниях) +
+  запекание в меш (marching cubes/surface nets → готовый
+  `MeshDesc::Custom`-суп). Зародыши уже размазаны по коду:
+  `distance*` в физике (знаковые дистанции без единого типа),
+  heightfield (частный случай сэмплированного поля), `level_set` из
+  manifold (§h). Едят обе стороны: физика (запросы, бейк коллайдеров),
+  рендер (превью). Ограничение: sphere-tracing в узкую фазу солвера
+  не тащить (дорого на сабстеп) — для физики SDF бейкается в меш,
+  analytic остаётся для запросов/пикинга.
+- **Шаг 5 — кривые: Безье да, NURBS-ядра нет (2026-09-30).** Кривые
+  Безье — дешёвый path-компонент (камера, траектории, дороги/реки),
+  экструзия профиля вдоль кривой, tube-геометрия; консьюмеры gameplay
+  и анимация уже стоят. Живут в `geometry` (параметрика — геометрия).
+  Полноценное CAD-ядро (B-rep NURBS-тела, trimming) НЕ строить
+  (уровень OpenCASCADE, человеко-десятилетия): нужны только
+  evaluation+tessellation — и то по требованию первого импорт-
+  консьюмера (STEP нет даже в плане, glTF NURBS не везёт);
+  lathe/loft-инструменты — через Безье-патчи без NURBS.
+
+## Выполнение 2026-09-30 (волны D1 + старый фон)
+
+Верифицировано прогоном (`cargo test`/`clippy -D warnings`/`fmt --check`):
+
+- **D1 ✅ закрыт целиком** (см. D1-остатки выше: доки, `layer/mask`,
+  трение, warm-start `λ`, CCD, сон/события, сплит разрывов, persistent
+  `λ` self-collision, `SolverKind::Xpbd`-роутинг).
+- **100k active ✅ −43%**: flat-шарды singleton-манифолдов
+  (`sequential_impulse/contacts.rs/islands.rs`, eligibility ≥2048 пар
+  без джойнтов, ниже гейта — старый путь побитово); зонд
+  `probe_100k --grid --cell-size 8 --bodies 100000`: ~770 → ~440–510
+  мс/шаг (solver 80–85% шага, broad ~4 мс не трогали); tiled 10k и
+  settled-путь без регресса, поведение доказано бит-в-бит (временный
+  md5-тест flat vs islands, удалён).
+- **GPU AVBD rung 2 ✅ уже был** (`bd3bad1`: `avbd_row_kernel`,
+  плотный 6×6 LDL, round-trip с допуском, opt-in `set_gpu_avbd`);
+  волной закрыт только док-долг («rung 1» → «rung 2» в `avbd/mod.rs`).
+  Остаток — rung 3 (host discovery, мульти-ряды, итерации + dual-update).
+- **Cross-solver joints ✅ v1** (`joint.rs`/`split.rs`/`lib.rs`):
+  `pin_body_solver` + coupling-пасс (`couple_cross_joints`: PBD-проекция
+  4 релаксации + velocity-импульс, канонический порядок, mass-restore),
+  Ball/Distance, остальные — явный `Unsupported`
+  (`cross_joint_status()`); `solver_cross_joints.rs` 5 тестов.
+  Вне скоупа подтверждено: сабстеп-частота coupling, O(n²) cross-AABB
+  (кросс-контактов нет — таблицы не видят друг друга).
+- **Rapier-адаптер ✅ (2а)** (`adapter_rapier.rs`, фича `rapier`,
+  opt-in, `rapier3d 0.36.0` + 23 транзитива, deny чист): маппинг 8 `Shape`,
+  степ, ray/shapecast, Ball→`SphericalJoint`, триггеры-сенсоры; 9 тестов,
+  паритет drop-settle поведенческий (не побитово). Jolt — документированный
+  follow-up (в реестре посторонние крейты, `jolt-physics` — C++-обёртка).
+  ⚠️ Цена: `cargo outdated --exit-code 1` теперь показывает ещё и
+  `glam 0.30/0.31/0.32` (пины `nalgebra 0.35`/`glamx` в поддереве rapier,
+  `cargo update` бессилен) поверх предсуществующего `manifold-rust
+  0.13.1→0.15.0`; гейт и раньше был красным — решение за владельцем
+  (принять исключение / поднять rapier / снять зависимость).
+  `rustqual` Score 90.4→90.1 (+20 violations, из них 7 новых),
+  `baseline.json` осознанно не тронут — follow-up владельцу.
+- **Shootout 2026-09-30 ✅** (`benches/engine_shootout.rs`, criterion,
+  `boxddd 0.4.0` за фичей `box3d`, без новых outdated-линий, deny чист):
+  одинаковые сцены (gravity −9.81, dt=1/60, боксы half 0.4 / масса 1,
+  friction 0.5; restitution 0.3 ornis/Rapier vs 0.0 Box3D — оговорка).
+  Box3D быстрейший на спящих сценах (sub-мкс), Rapier держит стек-28
+  (дрейф −0.48) при ~1–5 мкс/шаг. Наш SI: tiled 10k ~5–28 мс (не спит,
+  доминируют broadphase+trigger), islands на уровне, а **стек-28 рухнул
+  в обеих конфигурациях — честно согласуется с документированным
+  лимитом** (`tall_stack_stands_still`: 4–5 стоят, 6+ рассыпаются).
+  Находка: `adapter_rapier.rs` в 150–2500× медленнее raw Rapier на
+  settled-сценах (per-step mirror round-trip душит сон) — follow-up
+  чинить адаптер. Jolt не взлетел (`jolt-sys 0.1.5`: build.rs хардкодит
+  `Visual Studio 16 2019` + только Windows-либы) — follow-up апстрим.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
