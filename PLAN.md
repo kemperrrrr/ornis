@@ -241,7 +241,12 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 `fs_main_textured`, бинды 7–10; legacy пиксель-в-пиксель цел.
 ✅ **2026-09-22 — скелет C (проверено).** glTF-скин импортируется
 (топ-4, `skins[]`, клипы — `skipped_clips`); `skinned: true`
-заполняется в экстракции; GPU-скининг (D) — следом.
+заполняется в экстракции; сборка `SkelClip` из `animations[]` —
+следующий шаг трека (в работе: лоадер + STEP-режим сэмплера).
+✅ **2026-09-27 — GPU-скининг D закрыт (проверено, `ab9035b`).**
+`SkinningMode`, `JointLimit`-newtypes, палитра через `WgslStruct` +
+скин-стейдж через DSL, CPU-фолбэк, паритет картинки CPU vs GPU;
+скоуп кадров: FogState/FogDensity, SoupHash-дедуп, ExactWorker-пул.
 ✅ **2026-09-22 — хендлы удалены (вердикт проверен).**
 Позиция энтити ≠ identity, дедуп по значению сильнее, reload —
 replace; сервер/события/dirty живы.
@@ -535,6 +540,26 @@ runtime без отдельной extract-фазы — будущая цель, 
 **Не-цели:** DOM-панели в движок не тащим; второго мира под chrome нет
 (ссылки на recyclable id через границу — хрупко); `editor-backend`
 не раздуваем.
+
+### j. UI runtime: tech radar (согласован 2026-09-30)
+
+> Редактор — веб навсегда (доставка: webview-шелл `wry`, разработка:
+> Chrome). Игровой UI — webview-оверлей сейчас; нативный рантайм —
+> по спайкам ниже. Логика панелей остаётся в JS (переезд в Rust —
+> только осознанным решением). Ревью радара — раз в квартал.
+
+- **adopt:** `taffy` (layout; Yoga отклонён — C++ в сборке +
+  фрагментированные биндинги), `parley` (текст; запасной —
+  `cosmic-text`, переключение дешёвое), `usvg` (SVG-парсинг, конкурентов
+  нет), `wry` (шелл; tauri/CEF тяжелее, Ultralight проприетарен).
+- **trial:** `vello` + `vello_svg` (единственный честный риск —
+  зрелость; gated спайком), Blitz-зависимость (HUD-спайк, не форк),
+  SMIL-подсет поверх usvg.
+- **assess (смотрим, не зависим):** Ladybird, Ultralight, cosmic-text.
+- **hold (см. «Не делать» ниже):** форк Blitz/stylo, порт WebKit
+  (невыкидываемый JSC — `ScriptWrappable.h`, ~800k+ строк), UI-стек
+  с нуля (дубль taffy/parley/vello/usvg), NURBS-ядро, `dynamic_lod`,
+  RmlUi (Rust-биндингов нет — только как FFI-проект, не «взять»).
 
 ## ❌ Не делать / отложено (решения владельца)
 
@@ -1169,8 +1194,18 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   лимитом** (`tall_stack_stands_still`: 4–5 стоят, 6+ рассыпаются).
   Находка: `adapter_rapier.rs` в 150–2500× медленнее raw Rapier на
   settled-сценах (per-step mirror round-trip душит сон) — follow-up
-  чинить адаптер. Jolt не взлетел (`jolt-sys 0.1.5`: build.rs хардкодит
+  чинить адаптер.   Jolt не взлетел (`jolt-sys 0.1.5`: build.rs хардкодит
   `Visual Studio 16 2019` + только Windows-либы) — follow-up апстрим.
+- **Сон ✅ (point 2)**: pristine exact-rest острова копят сон в 6x
+  быстрее (~2–3 шага вместо ~13), end-of-step rebuild broadphase только
+  при триггерах, frozen-пары выкинуты из narrow-входа; всё двигавшееся —
+  legacy-путь побитово (снапшот цел). 10k steady ~55→~27 мс (−51%),
+  100k active ~516→~146 мс (−72%, asleep 4096→104096/104096).
+- **Адаптер Rapier ❌ снесён** (решение 2026-09-30): цена (23 крейта в
+  локе, +3 строки outdated, поддержка трейта, 9 тестов в мягких допусках,
+  враньё по времени) против гипотетической пользы. `rapier3d` оставлен
+  как bench-зависимость shootout (нативный путь, нулевая поддержка);
+  `RapierEngine` + тесты + путь `rapier_default`-через-адаптер удалены.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации
