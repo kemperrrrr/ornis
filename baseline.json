@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "quality_score": 0.22926084367177724,
+  "quality_score": 0.2510084164873114,
   "iosp_score": 0.9006174654513378,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 1034,
+  "magic_number_warnings": 947,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 104,
   "unsafe_warnings": 8,
   "error_handling_warnings": 175,
-  "duplicate_groups": 85,
+  "duplicate_groups": 83,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
-  "fragment_groups": 530,
+  "fragment_groups": 522,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
   "srp_module_warnings": 81,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 3450,
+  "total_findings": 3353,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -168,12 +168,12 @@
     {
       "name": "normalized_rotation",
       "file": "crates/render/src/extraction.rs",
-      "line": 945
+      "line": 951
     },
     {
       "name": "skinned_tangent",
       "file": "crates/render/src/extraction.rs",
-      "line": 1098
+      "line": 1104
     },
     {
       "name": "OrbitCamera::from_desc",
@@ -258,47 +258,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1116
+      "line": 1124
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3021
+      "line": 3029
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3224
+      "line": 3232
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3428
+      "line": 3436
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3599
+      "line": 3607
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3625
+      "line": 3633
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3707
+      "line": 3715
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3734
+      "line": 3742
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4183
+      "line": 4191
     },
     {
       "name": "RenderFrame3D::build",
@@ -1663,27 +1663,27 @@
     {
       "name": "blend_position",
       "file": "crates/animation/src/lib.rs",
-      "line": 1136
+      "line": 1143
     },
     {
       "name": "blend_normal",
       "file": "crates/animation/src/lib.rs",
-      "line": 1156
+      "line": 1163
     },
     {
       "name": "normalized_skel_quat",
       "file": "crates/animation/src/lib.rs",
-      "line": 1388
+      "line": 1395
     },
     {
       "name": "bake_bind_transform",
       "file": "crates/animation/src/lib.rs",
-      "line": 1784
+      "line": 1791
     },
     {
       "name": "blend_vertex_reference",
       "file": "crates/animation/src/skinning.rs",
-      "line": 231
+      "line": 238
     },
     {
       "name": "EventLog::push",
