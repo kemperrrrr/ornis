@@ -23,7 +23,26 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::Vec3;
 
 use crate::body::RigidBody;
-use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO};
+use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO, TET_VOLUME_DIVISOR};
+
+/// Corners of the soft-cube particle lattice.
+const CUBE_CORNERS: usize = 8;
+/// Quad faces on the soft cube (each becomes 2 triangles).
+const CUBE_FACES: usize = 6;
+/// Edges of the soft cube (structural constraints).
+const CUBE_EDGES: usize = 12;
+/// Vertices per face quad / triangle.
+const QUAD_VERTS: usize = 4;
+const TRI_VERTS: usize = 3;
+/// Axis span of the soft-cube lattice (`0..CUBE_AXIS` per dimension).
+const CUBE_AXIS: u32 = 2;
+/// XOR bit masks for soft-cube edges that differ in exactly one axis
+/// (index = x + 2y + 4z).
+const EDGE_BIT_X: u32 = 1;
+const EDGE_BIT_Y: u32 = 2;
+const EDGE_BIT_Z: u32 = 4;
+/// Default contact radius as a fraction of the cube edge length.
+const CUBE_CONTACT_RADIUS_FRAC: f32 = 0.1;
 
 /// Stable index of a soft body inside [`crate::xpbd::XpbdEngine`].
 ///
@@ -259,13 +278,13 @@ pub struct SoftBody {
     /// Distance rows over the particles.
     pub constraints: Vec<DeformConstraint>,
     /// Closed surface triangles (outward-wound) for the volume row.
-    pub triangles: Vec<[ParticleIdx; 3]>,
+    pub triangles: Vec<[ParticleIdx; TRI_VERTS]>,
     /// Render-only surface topology (D1.5): triangle indices into
     /// `particles`, wound CCW from outside (same convention as the
     /// asset-side `Custom` mesh soup). Unlike `triangles` this may describe
     /// an OPEN sheet (cloth) — it never drives physics, only the per-frame
     /// mesh upload. Bodies without a sheet (chains) leave it empty.
-    pub surface: Vec<[ParticleIdx; 3]>,
+    pub surface: Vec<[ParticleIdx; TRI_VERTS]>,
     /// Rest volume (m³) captured at build time.
     pub volume_rest: f32,
     /// Volume compliance `α` (0 = incompressible).
@@ -561,10 +580,10 @@ impl SoftBody {
         let corner = |x: u32, y: u32, z: u32| {
             origin + Vec3::new(x as f32 * size, y as f32 * size, z as f32 * size)
         };
-        let mut particles = Vec::with_capacity(8);
-        for z in 0..2 {
-            for y in 0..2 {
-                for x in 0..2 {
+        let mut particles = Vec::with_capacity(CUBE_CORNERS);
+        for z in 0..CUBE_AXIS {
+            for y in 0..CUBE_AXIS {
+                for x in 0..CUBE_AXIS {
                     let pos = corner(x, y, z);
                     particles.push(
                         Particle::try_new(pos, mass).unwrap_or_else(|| Particle::pinned(pos)),
@@ -573,12 +592,12 @@ impl SoftBody {
             }
         }
         // Index = x + 2*y + 4*z.
-        let mut constraints = Vec::with_capacity(12);
-        for a in 0..8usize {
-            for b in (a + 1)..8 {
+        let mut constraints = Vec::with_capacity(CUBE_EDGES);
+        for a in 0..CUBE_CORNERS {
+            for b in (a + 1)..CUBE_CORNERS {
                 let diff = (a ^ b) as u32;
                 // Exactly one coordinate differs: cube edge.
-                if diff == 1 || diff == 2 || diff == 4 {
+                if diff == EDGE_BIT_X || diff == EDGE_BIT_Y || diff == EDGE_BIT_Z {
                     constraints.push(DeformConstraint {
                         a: ParticleIdx::from(a),
                         b: ParticleIdx::from(b),
@@ -591,7 +610,7 @@ impl SoftBody {
             }
         }
         // Six quad faces as corner loops; triangulated + outward-fixed below.
-        let quads: [[ParticleIdx; 4]; 6] = [
+        let quads: [[ParticleIdx; QUAD_VERTS]; CUBE_FACES] = [
             [
                 ParticleIdx::from_raw(1),
                 ParticleIdx::from_raw(3),
@@ -631,13 +650,14 @@ impl SoftBody {
         ];
         let positions: Vec<Vec3> = particles.iter().map(|p| p.position).collect();
         let center = positions.iter().sum::<Vec3>() / positions.len() as f32;
-        let mut triangles: Vec<[ParticleIdx; 3]> = Vec::with_capacity(12);
+        let mut triangles: Vec<[ParticleIdx; TRI_VERTS]> = Vec::with_capacity(CUBE_FACES * 2);
         for [a, b, c, d] in quads {
             for (x, mut y, mut z) in [(a, b, c), (a, c, d)] {
                 let n = (positions[y.index()] - positions[x.index()])
                     .cross(positions[z.index()] - positions[x.index()]);
                 let face_center =
-                    (positions[x.index()] + positions[y.index()] + positions[z.index()]) / 3.0;
+                    (positions[x.index()] + positions[y.index()] + positions[z.index()])
+                        / TRI_VERTS as f32;
                 if n.dot(face_center - center) < 0.0 {
                     std::mem::swap(&mut y, &mut z);
                 }
@@ -650,7 +670,7 @@ impl SoftBody {
         body.surface = triangles;
         body.volume_rest = volume_rest;
         body.volume_compliance = volume_compliance;
-        body.contact_radius = size * 0.1;
+        body.contact_radius = size * CUBE_CONTACT_RADIUS_FRAC;
         body
     }
 
@@ -933,9 +953,9 @@ impl SoftBody {
                 positions[b.index()],
                 positions[c.index()],
             );
-            grads[a.index()] += pb.cross(pc) / (6.0 * self.volume_rest);
-            grads[b.index()] += pc.cross(pa) / (6.0 * self.volume_rest);
-            grads[c.index()] += pa.cross(pb) / (6.0 * self.volume_rest);
+            grads[a.index()] += pb.cross(pc) / (TET_VOLUME_DIVISOR * self.volume_rest);
+            grads[b.index()] += pc.cross(pa) / (TET_VOLUME_DIVISOR * self.volume_rest);
+            grads[c.index()] += pa.cross(pb) / (TET_VOLUME_DIVISOR * self.volume_rest);
         }
         if !valid {
             return;
@@ -981,7 +1001,7 @@ fn mesh_volume(positions: &[Vec3], triangles: &[[ParticleIdx; 3]]) -> f32 {
             positions.get(b.index()),
             positions.get(c.index()),
         ) {
-            volume += pa.cross(*pb).dot(*pc) / 6.0;
+            volume += pa.cross(*pb).dot(*pc) / TET_VOLUME_DIVISOR;
         }
     }
     volume

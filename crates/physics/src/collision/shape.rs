@@ -17,7 +17,7 @@
 
 use glam::{Quat, Vec2, Vec3};
 
-use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO};
+use crate::constants::{COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZERO, TET_VOLUME_DIVISOR};
 use crate::errors::MeshError;
 use crate::math::AABB;
 
@@ -46,14 +46,8 @@ const CYLINDER_TRANSVERSE_R2: f32 = 3.0;
 /// Cylinder transverse `h²` coefficient in `m (3r² + 4h²) / 12`.
 const CYLINDER_TRANSVERSE_H2: f32 = 4.0;
 
-/// Tetrahedron volume factor: `V = a·(b×c) / 6` (origin-based tet).
-const TET_VOLUME_DIVISOR: f32 = 6.0;
-/// Mirtich second-moment factor over the same tet: `∫x² = V/10 · (…)`.
+/// Mirtich second-moment factor over an origin-based tet: `∫x² = V/10 · (…)`.
 const TET_SECOND_MOMENT_DIVISOR: f32 = 10.0;
-
-/// Squared distance treated as "point is already on the surface" when the
-/// box clamp coincides with the query (interior vs exterior branch).
-const COINCIDENT_DIST_SQ: f32 = 1e-18;
 
 /// Vertices per triangle (index validation / centroid average).
 const TRI_VERTS: usize = 3;
@@ -724,7 +718,7 @@ impl Shape {
 /// queries, nearest-face projection for interior ones.
 fn closest_box_point(half_extents: Vec3, p: Vec3) -> Vec3 {
     let c = p.clamp(-half_extents, half_extents);
-    if (c - p).length_squared() > COINCIDENT_DIST_SQ {
+    if (c - p).length_squared() > COINCIDENT_LEN2 {
         return c; // Exterior: the clamp is the surface point.
     }
     // Interior: snap to the nearest face (deterministic x, then y, then z
@@ -873,7 +867,7 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
             z_origin + (row + 1) as f32 * hf.cell,
         ),
     );
-    if (c - p).length_squared() > COINCIDENT_DIST_SQ {
+    if (c - p).length_squared() > COINCIDENT_LEN2 {
         return c; // Exterior: the clamp is the surface point.
     }
     // Interior: nearest-face projection of the column box (same rule as

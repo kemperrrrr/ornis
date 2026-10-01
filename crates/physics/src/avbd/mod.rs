@@ -911,13 +911,13 @@ impl AvbdEngine {
                 pt.roll_lam[0] *= ALPHA * GAMMA;
                 pt.roll_lam[1] *= ALPHA * GAMMA;
                 pt.roll_lam[2] *= ALPHA * GAMMA;
-                for k in 0..3 {
+                for k in 0..ANGULAR_OFFSET {
                     pt.pen[k] = (pt.pen[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
                 }
             }
         }
         for j in &mut self.joints {
-            for k in 0..3 {
+            for k in 0..ANGULAR_OFFSET {
                 j.lam_l[k] *= ALPHA * GAMMA;
                 j.lam_a[k] *= ALPHA * GAMMA;
                 j.pen_l[k] = (j.pen_l[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);

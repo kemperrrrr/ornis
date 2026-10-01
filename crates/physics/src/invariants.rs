@@ -8,6 +8,7 @@
 use glam::Vec3;
 use thiserror::Error;
 
+use crate::constants::DEGENERATE_LEN2;
 use crate::shape::Shape;
 
 /// Positive finite `f32`: mass values, spacings, radii inputs.
@@ -52,7 +53,7 @@ impl UnitVec3 {
 
     /// Normalize any finite non-zero vector; `None` on zero/non-finite input.
     pub fn normalize_checked(v: Vec3) -> Option<Self> {
-        if !v.is_finite() || v.length_squared() < 1e-12 {
+        if !v.is_finite() || v.length_squared() < DEGENERATE_LEN2 {
             return None;
         }
         Some(Self(v.normalize()))

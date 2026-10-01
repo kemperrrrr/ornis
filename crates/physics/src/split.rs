@@ -16,6 +16,7 @@ use std::time::Instant;
 use glam::{Quat, Vec3};
 
 use crate::broadphase::PrevPose;
+use crate::constants::NEAR_ZERO;
 use crate::distance::{ShapeRef, cast_shape};
 use crate::engine::raycast_shape_hit;
 use crate::flags::{RoutePhase, SolverSide};
@@ -189,7 +190,7 @@ fn solve_cross_position(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
         }
         CrossRowKind::Distance => {
             let len = delta.length();
-            if len < 1e-9 || !len.is_finite() || !w.rest.is_finite() {
+            if len < NEAR_ZERO || !len.is_finite() || !w.rest.is_finite() {
                 return;
             }
             let correction = delta / len * (len - w.rest);
@@ -244,7 +245,7 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
         CrossRowKind::Distance => {
             let delta = (b.position + rb) - (a.position + ra);
             let len = delta.length();
-            if len < 1e-9 || !len.is_finite() {
+            if len < NEAR_ZERO || !len.is_finite() {
                 return;
             }
             let n = delta / len;
@@ -256,7 +257,7 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
             continue;
         }
         let k = cross_effective_mass(a, b, dir, ra, rb);
-        if k < 1e-9 {
+        if k < NEAR_ZERO {
             continue;
         }
         let vrel = (cross_point_velocity(b, rb) - cross_point_velocity(a, ra)).dot(dir);

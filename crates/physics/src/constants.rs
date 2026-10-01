@@ -32,3 +32,23 @@ pub(crate) const NEAR_ZERO: f32 = 1e-9;
 /// are treated as a different feature (rolling over an edge) and do not
 /// inherit warm impulses.
 pub(crate) const FEATURE_NORMAL_DOT_MIN: f32 = 0.7;
+
+/// Tetrahedron volume factor: `V = a·(b×c) / 6` (origin-based tet).
+///
+/// Shared by convex-hull inertia (Mirtich) and soft-body volume rows so
+/// the same surface triangulation cannot disagree on signed volume.
+pub(crate) const TET_VOLUME_DIVISOR: f32 = 6.0;
+
+/// Gap (m) at which shapes count as touching for conservative advancement
+/// and witness refine.
+///
+/// Shared by analytic `cast_shape` and the sequential-impulse kinematic
+/// cast so both CA loops agree on the touch band.
+pub(crate) const SHAPE_TOUCH: f32 = 1e-3;
+
+/// Squared length treated as numerically coincident / collapsed dust.
+///
+/// Tighter than [`DEGENERATE_LEN2`]: used when an O(1)-meter feature
+/// would have to live inside f32 rounding (coincident clamp, spin deadband,
+/// zero-area EPA faces). Not a mass-domain floor.
+pub(crate) const COINCIDENT_LEN2: f32 = 1e-18;

@@ -15,13 +15,12 @@
 
 use glam::{Quat, Vec3};
 
+use crate::constants::COINCIDENT_LEN2;
 use crate::distance::ShapeRef;
 use crate::shape::Shape;
 
 /// Numerical zero for squared-length degeneracy guards: rim radial projections, enclosing-simplex gaps and EPA seed dedupe distances at or below this carry no direction (collapsed circle, straddling simplex, repeated support) — values are f32 dust on O(1) geometry, not features.
 const DEGENERATE_EPS: f32 = 1e-12;
-/// Tighter numerical zero for near-coincident squared distances and degenerate face areas: collapsed segments, center-delta straddles and zero-area EPA faces below this are treated as exactly degenerate — one part in 1e9 of length, i.e. far inside f32 rounding on meter-scale scenes, so nothing geometric can live there.
-const DEGENERATE_LEN2: f32 = 1e-18;
 /// GJK support-progress tolerance (relative): a new Minkowski vertex must push past the current closest point by more than this fraction of its scale to count as progress — smaller advances are rim-circle zigzag, so the shapes are declared separated with the current weights instead of iterating forever.
 const GJK_PROGRESS_EPS: f32 = 1e-6;
 /// GJK zero-stall distance (m): a separated weight blend this short straddles the origin (the interior-segment trap, not a contact), so the query routes to EPA — reporting a zero-depth contact from here would disable positional correction and sink the pair.
@@ -33,6 +32,10 @@ const TET_VOLUME_EPS: f32 = 1e-9;
 const EPA_VISIBLE_EPS: f32 = 1e-9;
 /// Degenerate-growth cap for the EPA polytope (vertices): past this the expansion is zigzagging on curved features rather than converging, so the loop reports the best face so far instead of growing unbounded.
 const EPA_MAX_VERTS: usize = 128;
+/// GJK/EPA simplex capacity (tetrahedron = 4 Minkowski vertices).
+const SIMPLEX_CAPACITY: usize = 4;
+/// Vertices per EPA/simplex face (triangle).
+const FACE_VERTS: usize = 3;
 
 /// Separation/depth query result: surface distance (negative =
 /// penetration), the contact normal (first shape toward the second), and
@@ -170,7 +173,7 @@ fn minkowski(a: ShapeRef, b: ShapeRef, dir: Vec3) -> SVertex {
 fn closest_segment(p: Vec3, q: Vec3) -> (Vec3, f32, f32) {
     let pq = q - p;
     let len_sq = pq.length_squared();
-    if len_sq < DEGENERATE_LEN2 {
+    if len_sq < COINCIDENT_LEN2 {
         return (p, 1.0, 0.0);
     }
     let t = (-p.dot(pq) / len_sq).clamp(0.0, 1.0);
@@ -230,16 +233,16 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
     const MAX_ITERS: usize = 64;
     // Initial direction: center delta, exact fallback.
     let mut dir = a.pos - b.pos;
-    if dir.length_squared() < DEGENERATE_LEN2 {
+    if dir.length_squared() < COINCIDENT_LEN2 {
         dir = Vec3::X;
     }
-    let mut simplex = [minkowski(a, b, dir); 4];
+    let mut simplex = [minkowski(a, b, dir); SIMPLEX_CAPACITY];
     let mut count = 1usize;
     // Barycentric weights aligned with `simplex[..count]`; the witnesses
     // are always the weight blend of the stored preimages.
     let mut weights = [1.0f32, 0.0, 0.0, 0.0];
     let mut closest = simplex[0].v;
-    if closest.length_squared() < DEGENERATE_LEN2 {
+    if closest.length_squared() < COINCIDENT_LEN2 {
         // Centroid difference already spans the origin: touching.
         return Some(GjkDistance {
             dist: 0.0,
@@ -317,7 +320,7 @@ fn gjk_separated(a: ShapeRef, b: ShapeRef) -> Option<GjkDistance> {
 /// Returns the closest point, a keep-mask, and barycentric weights aligned
 /// with the input order. A 4-point simplex enclosing the origin reduces to
 /// nothing (empty mask = penetration signal).
-fn reduce_simplex(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
+fn reduce_simplex(s: &[SVertex]) -> (Vec3, [bool; SIMPLEX_CAPACITY], [f32; SIMPLEX_CAPACITY]) {
     match s.len() {
         1 => (s[0].v, [true, false, false, false], [1.0, 0.0, 0.0, 0.0]),
         2 => {
@@ -325,7 +328,7 @@ fn reduce_simplex(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
             let keep = [wa > 0.0, wb > 0.0, false, false];
             (p, keep, [wa, wb, 0.0, 0.0])
         }
-        3 => {
+        FACE_VERTS => {
             let (p, wa, wb, wc) = closest_triangle(s[0].v, s[1].v, s[2].v);
             let keep = [wa > 0.0, wb > 0.0, wc > 0.0, false];
             (p, keep, [wa, wb, wc, 0.0])
@@ -337,7 +340,7 @@ fn reduce_simplex(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
 /// Tetrahedron reduction: the closest of the four faces (each tested with
 /// outward orientation) wins; an origin strictly inside all four means
 /// penetration (empty mask). Barycentrics map back to tet vertices.
-fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
+fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; SIMPLEX_CAPACITY], [f32; SIMPLEX_CAPACITY]) {
     // Degenerate tetra (flat: repeated or coplanar supports): volume ~ 0
     // makes the inside test a coin flip and reports false enclosure for
     // separated shapes. Fall back to the best face without enclosing.
@@ -346,41 +349,41 @@ fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
     let e3 = s[3].v - s[0].v;
     let vol = e1.dot(e2.cross(e3)).abs();
     let scale = e1.length() * e2.length() * e3.length();
-    if vol <= TET_VOLUME_EPS * scale.max(DEGENERATE_LEN2) {
-        let mut best: Option<(Vec3, f32, [f32; 4])> = None;
+    if vol <= TET_VOLUME_EPS * scale.max(COINCIDENT_LEN2) {
+        let mut best: Option<(Vec3, f32, [f32; SIMPLEX_CAPACITY])> = None;
         for (a, b, c) in [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)] {
             let (p, wa, wb, wc) = closest_triangle(s[a].v, s[b].v, s[c].v);
             let gap = p.length();
             if best.is_none_or(|(_, g, _)| gap < g) {
-                let mut w = [0.0f32; 4];
+                let mut w = [0.0f32; SIMPLEX_CAPACITY];
                 w[a] = wa;
                 w[b] = wb;
                 w[c] = wc;
                 best = Some((p, gap, w));
             }
         }
-        let (p, _, w) = best.unwrap_or((Vec3::ZERO, 0.0, [0.0; 4]));
+        let (p, _, w) = best.unwrap_or((Vec3::ZERO, 0.0, [0.0; SIMPLEX_CAPACITY]));
         let keep = [w[0] > 0.0, w[1] > 0.0, w[2] > 0.0, w[3] > 0.0];
         return (p, keep, w);
     }
     // Faces with outward winding checked both ways; the split below keeps
     // the face whose plane separates the origin with the smallest gap.
-    const FACES: [(usize, usize, usize, usize); 4] =
+    const FACES: [(usize, usize, usize, usize); SIMPLEX_CAPACITY] =
         [(0, 1, 2, 3), (0, 3, 1, 2), (0, 2, 3, 1), (1, 3, 2, 0)];
-    let mut best: Option<(Vec3, f32, [f32; 4])> = None;
+    let mut best: Option<(Vec3, f32, [f32; SIMPLEX_CAPACITY])> = None;
     for (a, b, c, _apex) in FACES {
         let (p, wa, wb, wc) = closest_triangle(s[a].v, s[b].v, s[c].v);
         let gap = p.length();
         let better = best.is_none_or(|(_, g, _)| gap < g);
         if better {
-            let mut w = [0.0f32; 4];
+            let mut w = [0.0f32; SIMPLEX_CAPACITY];
             w[a] = wa;
             w[b] = wb;
             w[c] = wc;
             best = Some((p, gap, w));
         }
     }
-    let (p, _, w) = best.unwrap_or((Vec3::ZERO, 0.0, [0.0; 4]));
+    let (p, _, w) = best.unwrap_or((Vec3::ZERO, 0.0, [0.0; SIMPLEX_CAPACITY]));
     // Inside test: origin strictly behind every face plane means enclosed.
     // Reuse the gap: if the closest face still contains the origin in its
     // Voronoi interior AND all four face distances are ~0, the tet holds
@@ -402,7 +405,11 @@ fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
         }
     }
     if inside {
-        return (Vec3::ZERO, [false; 4], [0.0; 4]);
+        return (
+            Vec3::ZERO,
+            [false; SIMPLEX_CAPACITY],
+            [0.0; SIMPLEX_CAPACITY],
+        );
     }
     let keep = [w[0] > 0.0, w[1] > 0.0, w[2] > 0.0, w[3] > 0.0];
     (p, keep, w)
@@ -412,13 +419,13 @@ fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; 4], [f32; 4]) {
 /// polytope toward the closest face until the support converges. Returns
 /// (depth, normal toward B, witness_a, witness_b). Fixed 32-iteration cap;
 /// degenerates return a zero-depth contact instead of panicking.
-fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
+fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; SIMPLEX_CAPACITY]) -> (f32, Vec3, Vec3, Vec3) {
     const MAX_ITERS: usize = 32;
     const EPS: f32 = 1e-6;
     // Polytope vertices (Minkowski) with witness preimages.
     let mut verts: Vec<SVertex> = tet.into_iter().collect();
     // Faces as index triples, outward-oriented.
-    let mut faces: Vec<[usize; 3]> = vec![[0, 2, 1], [0, 3, 2], [0, 1, 3], [1, 2, 3]];
+    let mut faces: Vec<[usize; FACE_VERTS]> = vec![[0, 2, 1], [0, 3, 2], [0, 1, 3], [1, 2, 3]];
     // Orient outward: apex check per face via the fourth vertex.
     for f in faces.iter_mut() {
         let n = (verts[f[1]].v - verts[f[0]].v).cross(verts[f[2]].v - verts[f[0]].v);
@@ -439,7 +446,7 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
         for (i, f) in faces.iter().enumerate() {
             let n = (verts[f[1]].v - verts[f[0]].v).cross(verts[f[2]].v - verts[f[0]].v);
             let len = n.length();
-            if len < DEGENERATE_LEN2 {
+            if len < COINCIDENT_LEN2 {
                 continue;
             }
             let n = n / len;
@@ -469,7 +476,7 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
         for (i, f) in faces.iter().enumerate() {
             let n = (verts[f[1]].v - verts[f[0]].v).cross(verts[f[2]].v - verts[f[0]].v);
             let len = n.length();
-            if len < DEGENERATE_LEN2 {
+            if len < COINCIDENT_LEN2 {
                 continue;
             }
             if (n / len).dot(w.v - verts[f[0]].v) > EPA_VISIBLE_EPS {
@@ -483,8 +490,8 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
             if !visible[i] {
                 continue;
             }
-            for e in 0..3 {
-                edges.push((f[e], f[(e + 1) % 3]));
+            for e in 0..FACE_VERTS {
+                edges.push((f[e], f[(e + 1) % FACE_VERTS]));
             }
         }
         let mut horizon: Vec<(usize, usize)> = Vec::new();
@@ -495,7 +502,7 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; 4]) -> (f32, Vec3, Vec3, Vec3) {
             }
         }
         // Remove the visible set, add the vertex, reseal the fan.
-        let mut kept: Vec<[usize; 3]> = Vec::with_capacity(faces.len() + horizon.len());
+        let mut kept: Vec<[usize; FACE_VERTS]> = Vec::with_capacity(faces.len() + horizon.len());
         for (i, f) in faces.drain(..).enumerate() {
             if !visible[i] {
                 kept.push(f);
@@ -540,20 +547,22 @@ pub(crate) fn convex_distance(a: ShapeRef, b: ShapeRef) -> GjkDistance {
         Vec3::Z,
         Vec3::NEG_Z,
     ];
-    let mut tet = [minkowski(a, b, Vec3::X); 4];
+    let mut tet = [minkowski(a, b, Vec3::X); SIMPLEX_CAPACITY];
     let mut found = 0;
     for d in dirs {
         let w = minkowski(a, b, d);
         // Keep the extreme vertex per direction (dedupe by value).
-        if (0..found).all(|i| (tet[i].v - w.v).length_squared() > DEGENERATE_EPS) && found < 4 {
+        if (0..found).all(|i| (tet[i].v - w.v).length_squared() > DEGENERATE_EPS)
+            && found < SIMPLEX_CAPACITY
+        {
             tet[found] = w;
             found += 1;
         }
-        if found == 4 {
+        if found == SIMPLEX_CAPACITY {
             break;
         }
     }
-    if found < 4 {
+    if found < SIMPLEX_CAPACITY {
         // Degenerate (coincident shapes): zero-depth contact at the centers.
         return GjkDistance {
             dist: 0.0,
@@ -757,7 +766,7 @@ mod tests {
                 hull.vertices[f.2.index()],
             );
             let n = (b - a).cross(c - a).normalize();
-            let center = (a + b + c) / 3.0;
+            let center = (a + b + c) / FACE_VERTS as f32;
             assert!(n.dot(center) > 0.0, "face must point outward: {f:?} n={n}");
         }
     }

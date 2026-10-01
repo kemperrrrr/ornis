@@ -4,6 +4,7 @@
 use glam::{Quat, Vec3};
 
 use crate::body::RigidBody;
+use crate::constants::{NEAR_ZERO, SHAPE_TOUCH};
 use crate::distance;
 use crate::flags::HitKind;
 use crate::math::{Ray, RaycastHit};
@@ -16,11 +17,15 @@ use super::*;
 /// Numerical zero for degenerate guards: denominators, lengths and polynomial
 /// coefficients at or below this magnitude are treated as exactly zero
 /// (singular solve, zero-length direction, repeated root).
-const DEGENERATE_EPS: f32 = 1e-12;
+const DEGENERATE_EPS: f32 = crate::constants::DEGENERATE_LEN2;
 
 /// Minimum meaningful segment length: shorter extents are treated as
 /// collapsed (no sweep direction, no bound worth keeping).
-const MIN_SEGMENT_LENGTH: f32 = 1e-9;
+const MIN_SEGMENT_LENGTH: f32 = NEAR_ZERO;
+
+/// Edge-cross length floor for OBB SAT candidates (m): shorter means
+/// nearly parallel edges, so the axis is dropped.
+const PARALLEL_EDGE_EPS: f32 = 1e-3;
 
 /// Fraction of the thinnest feature that arms CCD: linear and angular
 /// sweeps shorter than this fraction of `shape_min_dimension` cannot
@@ -236,7 +241,7 @@ pub fn sweep_gap(
         for ai in &aa {
             for bi in &ba {
                 let c = ai.cross(*bi);
-                if c.length() < 1e-3 {
+                if c.length() < PARALLEL_EDGE_EPS {
                     continue;
                 }
                 let overlap = obb_overlap_on(
@@ -283,13 +288,12 @@ pub fn kinematic_cast(
         return None;
     }
     let dir = displacement / len;
-    const TOUCH: f32 = 1e-3;
     const MAX_ITERS: usize = 32;
     let mut t = 0.0f32;
     for _ in 0..MAX_ITERS {
         let pos = from + dir * t;
         let gap = sweep_gap(mover_shape, pos, mover_rot, target);
-        if gap <= TOUCH {
+        if gap <= SHAPE_TOUCH {
             if t > 0.0 {
                 // Witnesses at the touching pose: near-zero gap, so even the
                 // unsigned OBB oracle reads a valid contact frame here.
@@ -306,7 +310,7 @@ pub fn kinematic_cast(
             }
             return None;
         }
-        t += gap - TOUCH * 0.5;
+        t += gap - SHAPE_TOUCH * 0.5;
         if t >= len {
             break;
         }

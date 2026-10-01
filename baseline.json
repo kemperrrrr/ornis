@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.1828677313801489,
+  "quality_score": 0.19717804462433297,
   "iosp_score": 0.9006174654513378,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 1235,
+  "magic_number_warnings": 1173,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 104,
   "unsafe_warnings": 8,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 3651,
+  "total_findings": 3589,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -428,52 +428,52 @@
     {
       "name": "quat_integrate",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 107
+      "line": 108
     },
     {
       "name": "quat_diff_vec",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 125
+      "line": 126
     },
     {
       "name": "inverse_symmetric",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 208
+      "line": 209
     },
     {
       "name": "mat3_vec",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 240
+      "line": 241
     },
     {
       "name": "box_corners",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 276
+      "line": 277
     },
     {
       "name": "shape_min_dimension",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 301
+      "line": 302
     },
     {
       "name": "AvbdEngine::discover_pair",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 347
+      "line": 348
     },
     {
       "name": "AvbdEngine::generate_pairs",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 684
+      "line": 685
     },
     {
       "name": "AvbdEngine::friction_levers",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 906
+      "line": 907
     },
     {
       "name": "AvbdEngine::row_c_levers",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 925
+      "line": 926
     },
     {
       "name": "AvbdEngine::update_gear_mem",
@@ -503,222 +503,222 @@
     {
       "name": "AvbdEngine::solve_body",
       "file": "crates/physics/src/avbd/assembly.rs",
-      "line": 72
+      "line": 73
     },
     {
       "name": "cross_inv_inertia",
       "file": "crates/physics/src/split.rs",
-      "line": 131
+      "line": 132
     },
     {
       "name": "cross_apply_impulse",
       "file": "crates/physics/src/split.rs",
-      "line": 209
+      "line": 210
     },
     {
       "name": "cross_effective_mass",
       "file": "crates/physics/src/split.rs",
-      "line": 218
+      "line": 219
     },
     {
       "name": "solve_cross_velocity",
       "file": "crates/physics/src/split.rs",
-      "line": 230
+      "line": 231
     },
     {
       "name": "swept_bounds",
       "file": "crates/physics/src/split.rs",
-      "line": 382
+      "line": 383
     },
     {
       "name": "SplitState::step",
       "file": "crates/physics/src/split.rs",
-      "line": 948
+      "line": 949
     },
     {
       "name": "SplitState::couple_cross_joints",
       "file": "crates/physics/src/split.rs",
-      "line": 1086
+      "line": 1087
     },
     {
       "name": "SplitState::couple_velocity",
       "file": "crates/physics/src/split.rs",
-      "line": 1207
+      "line": 1208
     },
     {
       "name": "SplitState::shapecast",
       "file": "crates/physics/src/split.rs",
-      "line": 1277
+      "line": 1278
     },
     {
       "name": "SoftBody::chain",
       "file": "crates/physics/src/soft.rs",
-      "line": 340
+      "line": 359
     },
     {
       "name": "SoftBody::try_chain_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 378
+      "line": 397
     },
     {
       "name": "SoftBody::cloth_grid",
       "file": "crates/physics/src/soft.rs",
-      "line": 423
+      "line": 442
     },
     {
       "name": "SoftBody::try_cloth_grid_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 523
+      "line": 542
     },
     {
       "name": "SoftBody::soft_cube",
       "file": "crates/physics/src/soft.rs",
-      "line": 554
+      "line": 573
     },
     {
       "name": "SoftBody::try_soft_cube_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 659
+      "line": 678
     },
     {
       "name": "XpbdEngine::substep",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 591
+      "line": 592
     },
     {
       "name": "XpbdEngine::discover_contacts",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 691
+      "line": 692
     },
     {
       "name": "XpbdEngine::discover_soft_contacts",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 762
+      "line": 763
     },
     {
       "name": "XpbdEngine::solve_soft_contact",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 829
+      "line": 830
     },
     {
       "name": "XpbdEngine::solve_soft_velocities",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 879
+      "line": 880
     },
     {
       "name": "XpbdEngine::solve_contact",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 932
+      "line": 933
     },
     {
       "name": "XpbdEngine::solve_joint",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 960
+      "line": 961
     },
     {
       "name": "XpbdEngine::solve_position_row",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1067
+      "line": 1068
     },
     {
       "name": "XpbdEngine::solve_angular_lock",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1095
+      "line": 1096
     },
     {
       "name": "XpbdEngine::solve_axis_alignment",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1130
+      "line": 1131
     },
     {
       "name": "XpbdEngine::solve_velocities",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1166
+      "line": 1167
     },
     {
       "name": "XpbdEngine::solve_restitution",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1208
+      "line": 1209
     },
     {
       "name": "XpbdEngine::clamp_soft_ccd",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1240
+      "line": 1241
     },
     {
       "name": "XpbdEngine::reconcile_soft_events",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1404
+      "line": 1405
     },
     {
       "name": "XpbdEngine::rebuild_joint_pairs",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1490
+      "line": 1491
     },
     {
       "name": "XpbdEngine::step",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1520
+      "line": 1521
     },
     {
       "name": "XpbdEngine::remove_body",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1542
+      "line": 1543
     },
     {
       "name": "XpbdEngine::add_joint",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1572
+      "line": 1573
     },
     {
       "name": "XpbdEngine::remove_joint",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1632
+      "line": 1633
     },
     {
       "name": "XpbdEngine::shapecast",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1655
+      "line": 1656
     },
     {
       "name": "apply_inv_inertia",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1734
+      "line": 1735
     },
     {
       "name": "generalized_inverse_mass",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1752
+      "line": 1753
     },
     {
       "name": "angular_inverse_mass",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1763
+      "line": 1764
     },
     {
       "name": "apply_position_correction",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1771
+      "line": 1772
     },
     {
       "name": "apply_angular_correction",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1784
+      "line": 1785
     },
     {
       "name": "apply_velocity_impulse",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1795
+      "line": 1796
     },
     {
       "name": "integrate_orientation",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1810
+      "line": 1811
     },
     {
       "name": "angular_velocity_from_delta",
       "file": "crates/physics/src/xpbd.rs",
-      "line": 1819
+      "line": 1820
     },
     {
       "name": "RigidBody::try_sphere_units",
@@ -733,12 +733,12 @@
     {
       "name": "Capped4<T>::try_from_slice",
       "file": "crates/physics/src/invariants.rs",
-      "line": 278
+      "line": 279
     },
     {
       "name": "NonEmpty4<T>::try_from_slice",
       "file": "crates/physics/src/invariants.rs",
-      "line": 330
+      "line": 331
     },
     {
       "name": "Engine::set_solver_kind",
@@ -863,27 +863,27 @@
     {
       "name": "heightfield_convex",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 237
+      "line": 243
     },
     {
       "name": "refine_witnesses",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 336
+      "line": 342
     },
     {
       "name": "trimesh_convex",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 395
+      "line": 401
     },
     {
       "name": "shape_distance",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 498
+      "line": 504
     },
     {
       "name": "cast_shape",
       "file": "crates/physics/src/collision/distance.rs",
-      "line": 628
+      "line": 634
     },
     {
       "name": "Tree::insert_leaf",
@@ -943,137 +943,137 @@
     {
       "name": "Shape::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 443
+      "line": 438
     },
     {
       "name": "Shape::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 517
+      "line": 512
     },
     {
       "name": "Shape::convex_try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 534
+      "line": 529
     },
     {
       "name": "Shape::inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 622
+      "line": 617
     },
     {
       "name": "Shape::closest_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 694
+      "line": 689
     },
     {
       "name": "closest_box_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 725
+      "line": 720
     },
     {
       "name": "closest_cylinder_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 745
+      "line": 740
     },
     {
       "name": "closest_cone_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 782
+      "line": 777
     },
     {
       "name": "closest_heightfield_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 848
+      "line": 843
     },
     {
       "name": "ConvexHull::from_vertices",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 931
+      "line": 926
     },
     {
       "name": "ConvexHull::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1007
+      "line": 1002
     },
     {
       "name": "ConvexHull::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1044
+      "line": 1039
     },
     {
       "name": "ConvexHull::min_extent",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1095
+      "line": 1090
     },
     {
       "name": "Heightfield::local_extents",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1214
+      "line": 1209
     },
     {
       "name": "Heightfield::local_center",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1224
+      "line": 1219
     },
     {
       "name": "Heightfield::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1247
+      "line": 1242
     },
     {
       "name": "TriMesh::from_triangles",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1273
+      "line": 1268
     },
     {
       "name": "TriMesh::from_indexed",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1362
+      "line": 1357
     },
     {
       "name": "TriMesh::build_bvh",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1416
+      "line": 1411
     },
     {
       "name": "TriMesh::split",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1453
+      "line": 1448
     },
     {
       "name": "TriMesh::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1514
+      "line": 1509
     },
     {
       "name": "TriMesh::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1564
+      "line": 1559
     },
     {
       "name": "support",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 58
+      "line": 61
     },
     {
       "name": "minkowski",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 162
+      "line": 165
     },
     {
       "name": "gjk_separated",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 229
+      "line": 232
     },
     {
       "name": "epa",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 415
+      "line": 418
     },
     {
       "name": "convex_distance",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 529
+      "line": 532
     },
     {
       "name": "mul_inv_inertia",
@@ -1128,82 +1128,82 @@
     {
       "name": "shape_min_dimension",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 86
+      "line": 91
     },
     {
       "name": "shape_max_radius",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 106
+      "line": 111
     },
     {
       "name": "swept_orientation",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 137
+      "line": 142
     },
     {
       "name": "swept_distance",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 143
+      "line": 148
     },
     {
       "name": "swept_shape_overlaps",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 163
+      "line": 168
     },
     {
       "name": "remove_angular_approach",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 361
+      "line": 365
     },
     {
       "name": "ccd_impact_velocity",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 392
+      "line": 396
     },
     {
       "name": "find_linear_continuous_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 420
+      "line": 424
     },
     {
       "name": "first_angular_overlap_fraction",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 483
+      "line": 487
     },
     {
       "name": "find_angular_continuous_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 548
+      "line": 552
     },
     {
       "name": "ray_capsule_cylinder_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 783
+      "line": 787
     },
     {
       "name": "ray_capsule_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 823
+      "line": 827
     },
     {
       "name": "ray_cylinder_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 845
+      "line": 849
     },
     {
       "name": "ray_cone_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 894
+      "line": 898
     },
     {
       "name": "ray_heightfield_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 1009
+      "line": 1013
     },
     {
       "name": "SequentialImpulseEngine::raycast_body",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
-      "line": 1245
+      "line": 1249
     },
     {
       "name": "SequentialImpulseEngine::update_sleep",

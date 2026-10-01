@@ -22,6 +22,12 @@ pub(crate) use boxes::box_box_signed_gap;
 /// discriminants at or below this magnitude are treated as exactly zero
 /// (degenerate segment, parallel axes, repeated root).
 const DEGENERATE_EPS: f32 = 1e-12;
+/// Heightfield column treated as flat when height span is below this (m).
+const HEIGHTFIELD_FLAT_EPS: f32 = 1e-4;
+/// Floor for heightfield cell size when building a skirt (m).
+const HEIGHTFIELD_MIN_CELL: f32 = 1e-3;
+
+use crate::constants::{COINCIDENT_LEN2, NEAR_ZERO, SHAPE_TOUCH};
 
 /// A placed shape: geometry plus world transform.
 #[derive(Clone, Copy)]
@@ -283,10 +289,10 @@ fn heightfield_convex(
             // box oracles read as a plane with ambiguous side: give them a
             // one-cell skirt instead (same skirt as `closest_point`, so
             // distance and projection agree on the volume).
-            let y_low = if h - y_min >= 1e-4 {
+            let y_low = if h - y_min >= HEIGHTFIELD_FLAT_EPS {
                 y_min
             } else {
-                h - hf.cell.max(1e-3)
+                h - hf.cell.max(HEIGHTFIELD_MIN_CELL)
             };
             let local_min = Vec3::new(
                 x_origin + col as f32 * hf.cell,
@@ -348,7 +354,7 @@ fn refine_witnesses(
             point_b: pb,
         };
     }
-    let mut n = if normal.length_squared() > 1e-18 {
+    let mut n = if normal.length_squared() > COINCIDENT_LEN2 {
         normal.normalize()
     } else {
         (b.pos - a.pos).normalize_or(Vec3::Y)
@@ -362,7 +368,7 @@ fn refine_witnesses(
     // spinning the body from a centered bite): restart from the centers,
     // which projects to the centered face pair in one sweep. Sub-mm
     // features are below solver slop anyway, so nothing is lost.
-    let (mut pa, mut pb) = if dist < 1e-3 {
+    let (mut pa, mut pb) = if dist < SHAPE_TOUCH {
         (a.pos, b.pos)
     } else {
         (pa, pb)
@@ -373,7 +379,7 @@ fn refine_witnesses(
         // Re-derive the axis from the re-seated witnesses so a tilted
         // first guess cannot freeze the iteration sideways.
         let axis = pb - pa;
-        if axis.length_squared() > 1e-18 {
+        if axis.length_squared() > COINCIDENT_LEN2 {
             n = axis.normalize();
         }
     }
@@ -631,12 +637,10 @@ pub(crate) fn cast_shape<'t>(
     targets: impl Iterator<Item = (crate::body::BodyHandle, ShapeRef<'t>)>,
 ) -> Option<CastHit> {
     let len = delta.length();
-    if len < 1e-9 {
+    if len < NEAR_ZERO {
         return None;
     }
     let dir = delta / len;
-    /// Gap at which shapes count as touching.
-    const TOUCH: f32 = 1e-3;
     const MAX_ITERS: usize = 24;
 
     let mut best: Option<CastHit> = None;
@@ -653,7 +657,7 @@ pub(crate) fn cast_shape<'t>(
                 },
                 target,
             );
-            if d.dist <= TOUCH {
+            if d.dist <= SHAPE_TOUCH {
                 if t > 0.0 {
                     let n = (d.point_a - d.point_b).normalize_or(-dir);
                     hit = Some(CastHit {
@@ -667,7 +671,7 @@ pub(crate) fn cast_shape<'t>(
             }
             // Advance by slightly less than the exact gap: no shape can be
             // reached in less than `dist` along ANY direction.
-            t += d.dist - TOUCH * 0.5;
+            t += d.dist - SHAPE_TOUCH * 0.5;
             if t >= len {
                 break;
             }

@@ -73,6 +73,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::PrevPose;
+use crate::constants::{COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZERO};
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::errors::{JointError, QueryError};
@@ -735,7 +736,7 @@ impl XpbdEngine {
                     continue;
                 }
                 let mut normal = d.point_b - d.point_a;
-                if normal.length_squared() < 1e-12 {
+                if normal.length_squared() < DEGENERATE_LEN2 {
                     normal = bb.position - ba.position;
                 }
                 let normal = normal.normalize_or(Vec3::Y);
@@ -797,7 +798,7 @@ impl XpbdEngine {
                         continue;
                     }
                     let mut normal = d.point_b - d.point_a;
-                    if normal.length_squared() < 1e-12 {
+                    if normal.length_squared() < DEGENERATE_LEN2 {
                         normal = body.position - particle.position;
                     }
                     out.push(SoftContact {
@@ -904,7 +905,7 @@ impl XpbdEngine {
             let (t1, t2) = tangent_basis(c.n);
             let vt = t1 * vrel.dot(t1) + t2 * vrel.dot(t2);
             let speed = vt.length();
-            if speed < 1e-9 {
+            if speed < NEAR_ZERO {
                 continue;
             }
             let t = vt / speed;
@@ -983,7 +984,7 @@ impl XpbdEngine {
                 let pb = bb.position + bb.orientation * joint.lb;
                 let delta = pa - pb;
                 let dist = delta.length();
-                if dist < 1e-9 {
+                if dist < NEAR_ZERO {
                     return;
                 }
                 // C = |pa − pb| − rest; λ state would need persistence
@@ -1106,7 +1107,7 @@ impl XpbdEngine {
         }
         for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
             let c = theta.dot(axis);
-            if c.abs() < 1e-12 {
+            if c.abs() < DEGENERATE_LEN2 {
                 continue;
             }
             let w = {
@@ -1141,7 +1142,7 @@ impl XpbdEngine {
         }
         for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
             let c = corr.dot(axis);
-            if c.abs() < 1e-12 {
+            if c.abs() < DEGENERATE_LEN2 {
                 continue;
             }
             let w = {
@@ -1185,7 +1186,7 @@ impl XpbdEngine {
             let vrel = point_velocity(ba, ra) - point_velocity(bb, rb);
             let vt = vrel - c.n * vrel.dot(c.n);
             let speed = vt.length();
-            if speed < 1e-9 {
+            if speed < NEAR_ZERO {
                 continue;
             }
             let t = vt / speed;
@@ -1822,7 +1823,7 @@ fn angular_velocity_from_delta(q: Quat, q_prev: Quat, h: f32) -> Vec3 {
         dq = Quat::from_xyzw(-dq.x, -dq.y, -dq.z, -dq.w);
     }
     let spin = 2.0 * dq.xyz();
-    if spin.length_squared() < 1e-18 {
+    if spin.length_squared() < COINCIDENT_LEN2 {
         Vec3::ZERO
     } else {
         spin / h

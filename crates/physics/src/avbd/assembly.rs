@@ -12,6 +12,7 @@ use super::rows::{
     wrap_pi,
 };
 use super::*;
+use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO};
 use crate::engine::joints::{hinge_twist, quat_twist};
 use std::f32::consts::TAU;
 
@@ -34,7 +35,7 @@ pub fn solve_6x6(
                 s -= l[i][k] * d[k] * l[j][k];
             }
             if i == j {
-                if s <= 1e-12 {
+                if s <= DEGENERATE_LEN2 {
                     return None;
                 }
                 d[i] = s;
@@ -159,7 +160,11 @@ impl AvbdEngine {
                         let npts = self.pairs[pi].points.len().max(1) as f32;
                         let ka = eff_inv_mass(&self.bodies[self.pairs[pi].a]);
                         let kb = eff_inv_mass(&self.bodies[self.pairs[pi].b]);
-                        let m_red = if ka + kb > 1e-9 { 1.0 / (ka + kb) } else { 0.0 };
+                        let m_red = if ka + kb > NEAR_ZERO {
+                            1.0 / (ka + kb)
+                        } else {
+                            0.0
+                        };
                         if m_red > 0.0 {
                             let pen_d = (2.0 * m_red / (DT_STEP * DT_STEP) / npts).min(PENALTY_MAX);
                             let f_d = (pen_d * cn).min(0.0);
@@ -323,7 +328,7 @@ impl AvbdEngine {
                 AvbdJointKind::Distance => {
                     // Single rod row along the live anchor delta.
                     let len = live.length();
-                    let dir = if len > 1e-9 { live / len } else { Vec3::Y };
+                    let dir = if len > NEAR_ZERO { live / len } else { Vec3::Y };
                     let c = (len - j.ref_val) - ALPHA * (c0v.length() - j.ref_val);
                     let f = j.pen_l[0] * c + j.lam_l[0];
                     if row_live(c, f) {
@@ -466,7 +471,11 @@ impl AvbdEngine {
                     if j.susp[0] > 0.0 {
                         let ka = eff_inv_mass(a);
                         let kb = eff_inv_mass(b);
-                        let m = if ka + kb > 1e-9 { 1.0 / (ka + kb) } else { 0.0 };
+                        let m = if ka + kb > NEAR_ZERO {
+                            1.0 / (ka + kb)
+                        } else {
+                            0.0
+                        };
                         if m > 0.0 {
                             let omega = TAU * j.susp[0];
                             let stiff = m * omega * omega;

@@ -8,6 +8,7 @@
 //! from `avbd.rs` (phase 3).
 
 use super::*;
+use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO};
 use crate::distance::box_box_signed_gap;
 use glam::Mat3;
 use std::f32::consts::TAU;
@@ -106,7 +107,7 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// One sincos per body per step is negligible next to the 6x6 solves.
 pub(super) fn quat_integrate(q: Quat, v: Vec3) -> Quat {
     let theta = v.length();
-    if theta < 1e-9 {
+    if theta < NEAR_ZERO {
         return q;
     }
     let (s, c) = (0.5 * theta).sin_cos();
@@ -136,7 +137,7 @@ pub(super) fn quat_diff_vec(a: Quat, b: Quat) -> Vec3 {
         xyz = -xyz;
     }
     let s = xyz.length().min(1.0);
-    if s < 1e-9 {
+    if s < NEAR_ZERO {
         return Vec3::ZERO;
     }
     xyz * (2.0 * s.asin() / s)
@@ -209,7 +210,7 @@ pub(super) fn inverse_symmetric(m: [[f32; 3]; 3], diag: Vec3) -> [[f32; 3]; 3] {
     let (a, b, c) = (m[0][0], m[0][1], m[0][2]);
     let (d, e, f) = (m[1][1], m[1][2], m[2][2]);
     let det = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
-    if det.abs() < 1e-12 {
+    if det.abs() < DEGENERATE_LEN2 {
         let inv = Vec3::new(
             if diag.x > 0.0 { 1.0 / diag.x } else { 0.0 },
             if diag.y > 0.0 { 1.0 / diag.y } else { 0.0 },

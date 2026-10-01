@@ -32,7 +32,7 @@
 use glam::{Mat3, Vec3};
 
 use crate::body::RigidBody;
-use crate::constants::MIN_EFFECTIVE_MASS;
+use crate::constants::{DEGENERATE_LEN2, MIN_EFFECTIVE_MASS};
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState};
 
@@ -482,7 +482,7 @@ impl WideBatch {
         );
         let delta = new_acc - self.acc.lane(l);
         self.acc.set_lane(l, new_acc);
-        if delta.abs() > 1e-12 {
+        if delta.abs() > DEGENERATE_LEN2 {
             // apply_impulse: linear + angular, using the precomputed
             // factors (n·inv_mass and I⁻¹_world·(ra×n)).
             self.va
@@ -562,7 +562,7 @@ impl WideBatch {
         let r2 = if mu2 > 0.0 { u2 / mu2 } else { 0.0 };
         let r_len = r1.hypot(r2);
         let cap = self.acc.lane(l);
-        if r_len > cap && r_len > 1e-12 {
+        if r_len > cap && r_len > DEGENERATE_LEN2 {
             let s = cap / r_len;
             u1 *= s;
             u2 *= s;
