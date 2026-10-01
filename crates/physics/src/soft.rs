@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::Vec3;
 
 use crate::body::RigidBody;
+use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO};
 
 /// Stable index of a soft body inside [`crate::xpbd::XpbdEngine`].
 ///
@@ -717,7 +718,7 @@ impl SoftBody {
             };
             let delta = pa.position - pb.position;
             let dist = delta.length();
-            if dist < 1e-9 {
+            if dist < NEAR_ZERO {
                 continue;
             }
             let n = delta / dist;
@@ -799,7 +800,7 @@ impl SoftBody {
             if c.kind != DeformKind::Structural {
                 return true;
             }
-            if c.rest <= 1e-9 {
+            if c.rest <= NEAR_ZERO {
                 return true;
             }
             let (pa, pb) = match pair(particles, c.a, c.b) {
@@ -909,7 +910,7 @@ impl SoftBody {
     /// `C = (V − V0)/V0` over the closed surface, solved as one equality.
     /// Skipped without triangles or with a degenerate rest volume.
     pub fn solve_volume(&mut self, h: f32) {
-        if self.triangles.is_empty() || self.volume_rest <= 1e-12 {
+        if self.triangles.is_empty() || self.volume_rest <= DEGENERATE_LEN2 {
             return;
         }
         let positions: Vec<Vec3> = self.particles.iter().map(|p| p.position).collect();

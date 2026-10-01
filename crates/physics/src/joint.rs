@@ -572,7 +572,7 @@ impl RevoluteMotor {
 /// Expressions mirror the historical per-engine ones op-for-op so resolved
 /// values are bit-identical to what each engine computed before.
 ///
-/// Degenerate axes (squared length below 1e-12) fall back infallibly
+/// Degenerate axes (squared length below [`DEGENERATE_LEN2`]) fall back infallibly
 /// (`Z` for hinge/slide, `Y` for suspension — the SI policy) and set
 /// [`ResolvedJoint::degenerate`]; each engine keeps its own admission
 /// policy (SI accepts, AVBD rejects revolute/prismatic).
@@ -612,9 +612,7 @@ impl ResolvedJoint {
     }
 }
 
-/// Degenerate-axis boundary (squared length): mirrors AVBD's historical
-/// reject threshold so its admission policy is preserved bit-for-bit.
-const DEGENERATE_LEN2: f32 = 1e-12;
+use crate::constants::DEGENERATE_LEN2;
 
 /// Resolve joint frames and assembly references. Returns `None` for
 /// [`JointKind::Gear`], which coordinates other joints (needs the engine's

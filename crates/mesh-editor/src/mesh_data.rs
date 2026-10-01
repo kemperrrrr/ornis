@@ -109,18 +109,24 @@ impl MeshData {
     /// Normals are analytic (per-face), uvs are a placeholder planar map;
     /// both are recomputed by the editor after boolean operations anyway.
     pub fn unit_box() -> Self {
+        // Half-extent of the unit box (edge length 1, centered at origin).
+        const HALF: f32 = 0.5;
+        // Number of faces on a box; each face is a quad → 2 tris.
+        const FACE_COUNT: usize = 6;
+        const VERTS_PER_FACE: usize = 4;
+        const INDICES_PER_FACE: usize = 6;
         let p = [
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [-0.5, 0.5, 0.5],
+            [-HALF, -HALF, -HALF],
+            [HALF, -HALF, -HALF],
+            [HALF, HALF, -HALF],
+            [-HALF, HALF, -HALF],
+            [-HALF, -HALF, HALF],
+            [HALF, -HALF, HALF],
+            [HALF, HALF, HALF],
+            [-HALF, HALF, HALF],
         ];
         #[rustfmt::skip]
-        let faces: [[usize; 4]; 6] = [
+        let faces: [[usize; VERTS_PER_FACE]; FACE_COUNT] = [
             [0, 1, 2, 3], // -z
             [5, 4, 7, 6], // +z
             [4, 0, 3, 7], // -x
@@ -128,7 +134,7 @@ impl MeshData {
             [4, 5, 1, 0], // -y
             [3, 2, 6, 7], // +y
         ];
-        let normals: [[f32; 3]; 6] = [
+        let normals: [[f32; 3]; FACE_COUNT] = [
             [0.0, 0.0, -1.0],
             [0.0, 0.0, 1.0],
             [-1.0, 0.0, 0.0],
@@ -136,10 +142,10 @@ impl MeshData {
             [0.0, -1.0, 0.0],
             [0.0, 1.0, 0.0],
         ];
-        let mut positions = Vec::with_capacity(24);
-        let mut normals_out = Vec::with_capacity(24);
-        let mut uvs = Vec::with_capacity(24);
-        let mut indices = Vec::with_capacity(36);
+        let mut positions = Vec::with_capacity(FACE_COUNT * VERTS_PER_FACE);
+        let mut normals_out = Vec::with_capacity(FACE_COUNT * VERTS_PER_FACE);
+        let mut uvs = Vec::with_capacity(FACE_COUNT * VERTS_PER_FACE);
+        let mut indices = Vec::with_capacity(FACE_COUNT * INDICES_PER_FACE);
         for (face, n) in faces.iter().zip(normals) {
             let base = positions.len() as u32;
             for (k, &vi) in face.iter().enumerate() {

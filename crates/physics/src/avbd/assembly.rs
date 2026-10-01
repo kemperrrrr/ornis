@@ -73,11 +73,11 @@ impl AvbdEngine {
         let m_dt2 = 1.0 / eff_inv_mass(&self.bodies[h]) / (DT_STEP * DT_STEP);
         let iw = world_inertia(self.bodies[h].inertia, self.bodies[h].orientation);
         let mut lhs = [[0.0f32; SPATIAL_DOF]; SPATIAL_DOF];
-        for (i, row) in lhs.iter_mut().enumerate().take(3) {
+        for (i, row) in lhs.iter_mut().enumerate().take(ANGULAR_OFFSET) {
             row[i] = m_dt2;
         }
-        for a in 0..3 {
-            for b in 0..3 {
+        for a in 0..ANGULAR_OFFSET {
+            for b in 0..ANGULAR_OFFSET {
                 lhs[ANGULAR_OFFSET + a][ANGULAR_OFFSET + b] = iw[a][b] / (DT_STEP * DT_STEP);
             }
         }
@@ -91,8 +91,8 @@ impl AvbdEngine {
             quat_diff_vec(self.bodies[h].orientation, self.inertial_rot[h]),
         ) / (DT_STEP * DT_STEP);
         rhs[ANGULAR_OFFSET] = ra.x;
-        rhs[4] = ra.y;
-        rhs[5] = ra.z;
+        rhs[ANGULAR_OFFSET + 1] = ra.y;
+        rhs[ANGULAR_OFFSET + 2] = ra.z;
 
         // Contact rows.
         for pi in 0..self.pairs.len() {
@@ -233,14 +233,14 @@ impl AvbdEngine {
                         // Pure couple: angular-only gradient, opposite senses.
                         let g = if is_a { ax } else { -ax };
                         let o = outer(g, g);
-                        for x in 0..3 {
-                            for y in 0..3 {
+                        for x in 0..ANGULAR_OFFSET {
+                            for y in 0..ANGULAR_OFFSET {
                                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += ROLL_PEN * o[x][y];
                             }
                         }
                         rhs[ANGULAR_OFFSET] += fr * g.x;
-                        rhs[4] += fr * g.y;
-                        rhs[5] += fr * g.z;
+                        rhs[ANGULAR_OFFSET + 1] += fr * g.y;
+                        rhs[ANGULAR_OFFSET + 2] += fr * g.z;
                     }
                 }
             }
@@ -272,9 +272,9 @@ impl AvbdEngine {
             let mut fl = Vec3::ZERO;
             match j.kind {
                 AvbdJointKind::Ball | AvbdJointKind::Revolute | AvbdJointKind::Fixed => {
-                    for k in 0..3 {
+                    for k in 0..ANGULAR_OFFSET {
                         let axis = Vec3::from_array({
-                            let mut arr = [0.0f32; 3];
+                            let mut arr = [0.0f32; ANGULAR_OFFSET];
                             arr[k] = 1.0;
                             arr
                         });
@@ -505,11 +505,11 @@ impl AvbdEngine {
                     -(b.orientation * j.lb)
                 };
                 let fa = fl.to_array();
-                let mut h_mat = [[0.0f32; 3]; 3];
+                let mut h_mat = [[0.0f32; ANGULAR_OFFSET]; ANGULAR_OFFSET];
                 for (k, fk) in fa.iter().enumerate() {
                     let g = geometric_stiffness_ball_socket(k, r);
-                    for x in 0..3 {
-                        for y in 0..3 {
+                    for x in 0..ANGULAR_OFFSET {
+                        for y in 0..ANGULAR_OFFSET {
                             h_mat[x][y] += g[x][y] * fk;
                         }
                     }
@@ -540,14 +540,14 @@ impl AvbdEngine {
                         // Rotation-only rows: torque arms about the hinge axes.
                         let g_ang = if is_a { axa.cross(t) } else { -(axb.cross(t)) };
                         let o = outer(g_ang, g_ang);
-                        for x in 0..3 {
-                            for y in 0..3 {
+                        for x in 0..ANGULAR_OFFSET {
+                            for y in 0..ANGULAR_OFFSET {
                                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * o[x][y];
                             }
                         }
                         rhs[ANGULAR_OFFSET] += f * g_ang.x;
-                        rhs[4] += f * g_ang.y;
-                        rhs[5] += f * g_ang.z;
+                        rhs[ANGULAR_OFFSET + 1] += f * g_ang.y;
+                        rhs[ANGULAR_OFFSET + 2] += f * g_ang.z;
                     }
                 }
                 AvbdJointKind::Gear => {
@@ -570,15 +570,15 @@ impl AvbdEngine {
                                 let pen_c = j.pen_l[0] * coef * coef;
                                 let f_c = f * coef;
                                 let o = outer(g, g);
-                                for x in 0..3 {
-                                    for y in 0..3 {
+                                for x in 0..ANGULAR_OFFSET {
+                                    for y in 0..ANGULAR_OFFSET {
                                         lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
                                             pen_c * o[x][y];
                                     }
                                 }
                                 rhs[ANGULAR_OFFSET] += f_c * g.x;
-                                rhs[4] += f_c * g.y;
-                                rhs[5] += f_c * g.z;
+                                rhs[ANGULAR_OFFSET + 1] += f_c * g.y;
+                                rhs[ANGULAR_OFFSET + 2] += f_c * g.z;
                             }
                         }
                     }
@@ -603,15 +603,15 @@ impl AvbdEngine {
                                 }
                                 let g = if is_a { -dir } else { dir };
                                 let o = outer(g, g);
-                                for x in 0..3 {
-                                    for y in 0..3 {
+                                for x in 0..ANGULAR_OFFSET {
+                                    for y in 0..ANGULAR_OFFSET {
                                         lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
                                             j.pen_a[i] * o[x][y];
                                     }
                                 }
                                 rhs[ANGULAR_OFFSET] += f * g.x;
-                                rhs[4] += f * g.y;
-                                rhs[5] += f * g.z;
+                                rhs[ANGULAR_OFFSET + 1] += f * g.y;
+                                rhs[ANGULAR_OFFSET + 2] += f * g.z;
                             }
                             AxisConfig::Limited { min, max } => {
                                 let travel = hinge_twist(a.orientation, b.orientation, *e)
@@ -642,15 +642,15 @@ impl AvbdEngine {
                                     }
                                     let g = if is_a { -dir } else { dir };
                                     let o = outer(g, g);
-                                    for x in 0..3 {
-                                        for y in 0..3 {
+                                    for x in 0..ANGULAR_OFFSET {
+                                        for y in 0..ANGULAR_OFFSET {
                                             lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
                                                 j.pen_a[i] * o[x][y];
                                         }
                                     }
                                     rhs[ANGULAR_OFFSET] += f * g.x;
-                                    rhs[4] += f * g.y;
-                                    rhs[5] += f * g.z;
+                                    rhs[ANGULAR_OFFSET + 1] += f * g.y;
+                                    rhs[ANGULAR_OFFSET + 2] += f * g.z;
                                 }
                             }
                         }
@@ -677,14 +677,14 @@ impl AvbdEngine {
                         }
                         let g_ang = if is_a { axa.cross(t) } else { -(axb.cross(t)) };
                         let o = outer(g_ang, g_ang);
-                        for x in 0..3 {
-                            for y in 0..3 {
+                        for x in 0..ANGULAR_OFFSET {
+                            for y in 0..ANGULAR_OFFSET {
                                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * o[x][y];
                             }
                         }
                         rhs[ANGULAR_OFFSET] += f * g_ang.x;
-                        rhs[4] += f * g_ang.y;
-                        rhs[5] += f * g_ang.z;
+                        rhs[ANGULAR_OFFSET + 1] += f * g_ang.y;
+                        rhs[ANGULAR_OFFSET + 2] += f * g_ang.z;
                     }
                 }
                 AvbdJointKind::Fixed => {
@@ -692,7 +692,7 @@ impl AvbdEngine {
                     // apply their torque and Hessian along world axes.
                     let diff = quat_diff_vec(a.orientation.conjugate() * b.orientation, j.q_ref);
                     let diff0 = quat_diff_vec(self.rot0[j.a].conjugate() * self.rot0[j.b], j.q_ref);
-                    for k in 0..3 {
+                    for k in 0..ANGULAR_OFFSET {
                         let c = diff[k] - ALPHA * diff0[k];
                         let f = j.pen_a[k] * c + j.lam_a[k];
                         if !row_live(c, f) {
@@ -735,15 +735,15 @@ impl AvbdEngine {
                             if row_live(c, f) {
                                 let g = if is_a { -wa } else { wa };
                                 let o = outer(g, g);
-                                for x in 0..3 {
-                                    for y in 0..3 {
+                                for x in 0..ANGULAR_OFFSET {
+                                    for y in 0..ANGULAR_OFFSET {
                                         lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] +=
                                             j.pen_a[2] * o[x][y];
                                     }
                                 }
                                 rhs[ANGULAR_OFFSET] += f * g.x;
-                                rhs[4] += f * g.y;
-                                rhs[5] += f * g.z;
+                                rhs[ANGULAR_OFFSET + 1] += f * g.y;
+                                rhs[ANGULAR_OFFSET + 2] += f * g.z;
                             }
                         }
                     }
@@ -788,13 +788,20 @@ impl AvbdEngine {
             -rhs[1],
             -rhs[2],
             -rhs[ANGULAR_OFFSET],
-            -rhs[4],
-            -rhs[5],
+            -rhs[ANGULAR_OFFSET + 1],
+            -rhs[ANGULAR_OFFSET + 2],
         ];
         if let Some(dx) = solve_6x6(lhs, neg) {
             let body = &mut self.bodies[h];
             body.position += Vec3::new(dx[0], dx[1], dx[2]);
-            body.orientation = quat_integrate(body.orientation, Vec3::new(dx[3], dx[4], dx[5]));
+            body.orientation = quat_integrate(
+                body.orientation,
+                Vec3::new(
+                    dx[ANGULAR_OFFSET],
+                    dx[ANGULAR_OFFSET + 1],
+                    dx[ANGULAR_OFFSET + 2],
+                ),
+            );
         }
     }
 }

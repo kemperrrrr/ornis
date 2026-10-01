@@ -10,6 +10,7 @@ use crate::gpu::{pack_single_point_batches, write_back_acc};
 use rustc_hash::FxHashMap;
 
 use super::*;
+use crate::constants::{DEGENERATE_LEN2, FEATURE_NORMAL_DOT_MIN, MIN_EFFECTIVE_MASS};
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 
@@ -37,7 +38,7 @@ fn best_cached_point(
         }
         // Feature compatibility: same surface region AND a compatible contact
         // normal (rolling over an edge changes the feature, dot < 0.7 => no match).
-        if cp.normal.dot(n) < 0.7 {
+        if cp.normal.dot(n) < FEATURE_NORMAL_DOT_MIN {
             continue;
         }
         let d2 = (cp.la - la_k).length_squared() + (cp.lb - lb_k).length_squared();
@@ -207,7 +208,7 @@ fn apply_warm_start(
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
             let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-            if k_eff < 1e-10 {
+            if k_eff < MIN_EFFECTIVE_MASS {
                 warm_applied[k] = 0.0;
                 continue;
             }
@@ -290,7 +291,7 @@ fn prepare_manifold_state(
 ) -> Option<ManifoldState> {
     let (i, j) = (m.body_a.index(), m.body_b.index());
     let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-    if total_inv < 1e-10 {
+    if total_inv < MIN_EFFECTIVE_MASS {
         return None;
     }
     let n = m.normal;
@@ -651,7 +652,7 @@ impl SequentialImpulseEngine {
             }
             // A still-sleeping body is static for the solver (its inv_mass is
             // zeroed at sleep), so sleeper+static pairs carry no work.
-            if self.bodies[i].inv_mass + self.bodies[j].inv_mass < 1e-10 {
+            if self.bodies[i].inv_mass + self.bodies[j].inv_mass < MIN_EFFECTIVE_MASS {
                 continue;
             }
             // Hit events (Gameplay, Box3D parity): the hardest-approaching
@@ -791,7 +792,7 @@ impl SequentialImpulseEngine {
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
             let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-            if k_eff >= 1e-10 {
+            if k_eff >= MIN_EFFECTIVE_MASS {
                 let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
                 let vn = rel.dot(n);
                 // Inelastic contact: restitution is a separate one-shot stage
@@ -803,7 +804,7 @@ impl SequentialImpulseEngine {
                 let new_acc = contact_normal_step::eval(vn, st.target[k], 1.0 / k_eff, st.acc[k]);
                 let delta = new_acc - st.acc[k];
                 st.acc[k] = new_acc;
-                if delta.abs() > 1e-12 {
+                if delta.abs() > DEGENERATE_LEN2 {
                     apply_impulse(bodies, i, j, n * delta, ra, rb);
                 }
             }
@@ -845,7 +846,7 @@ impl SequentialImpulseEngine {
                     bodies[j].orientation,
                     rb_n,
                 ));
-            if k_eff < 1e-10 {
+            if k_eff < MIN_EFFECTIVE_MASS {
                 continue;
             }
             let vn = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
@@ -889,7 +890,7 @@ impl SequentialImpulseEngine {
                 for axis in 0..2 {
                     let t = if axis == 0 { st.t1 } else { st.t2 };
                     let k_t = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, t);
-                    if k_t < 1e-10 {
+                    if k_t < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let vt = rel.dot(t);
@@ -920,12 +921,12 @@ impl SequentialImpulseEngine {
                 // ellipse is the exact Coulomb generalization.
                 let k_t1 = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, st.t1);
                 let k_t2 = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, st.t2);
-                let lam1 = if k_t1 >= 1e-10 {
+                let lam1 = if k_t1 >= MIN_EFFECTIVE_MASS {
                     -rel.dot(st.t1) / k_t1
                 } else {
                     0.0
                 };
-                let lam2 = if k_t2 >= 1e-10 {
+                let lam2 = if k_t2 >= MIN_EFFECTIVE_MASS {
                     -rel.dot(st.t2) / k_t2
                 } else {
                     0.0
@@ -943,7 +944,7 @@ impl SequentialImpulseEngine {
                 let r2 = if st.mu2 > 0.0 { u2 / st.mu2 } else { 0.0 };
                 let r_len = r1.hypot(r2);
                 let cap = st.acc[k];
-                if r_len > cap && r_len > 1e-12 {
+                if r_len > cap && r_len > DEGENERATE_LEN2 {
                     let s = cap / r_len;
                     u1 *= s;
                     u2 *= s;
@@ -1030,7 +1031,7 @@ impl SequentialImpulseEngine {
             bodies[j].orientation,
             axis,
         ));
-        if k_rot < 1e-10 {
+        if k_rot < MIN_EFFECTIVE_MASS {
             return;
         }
         let cap = mu_axis * st.acc[k];
@@ -1097,7 +1098,7 @@ impl SequentialImpulseEngine {
                         + ra_n.dot(mul_inv_inertia(bodies[i].inertia, rot_a, ra_n))
                         + rb_n.dot(mul_inv_inertia(bodies[j].inertia, rot_b, rb_n));
                     let k_soft = make_soft(k_pos, cfm);
-                    if k_soft < 1e-10 {
+                    if k_soft < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let lam = BETA_POS * c / k_soft;

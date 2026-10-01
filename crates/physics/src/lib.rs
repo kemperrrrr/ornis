@@ -31,6 +31,8 @@
 pub mod colliders;
 /// Collision detection: broadphase backends, shapes and distance queries.
 pub mod collision;
+/// Shared solver thresholds (effective-mass floor, degenerate length, …).
+pub(crate) mod constants;
 mod contact_math;
 /// Typed physics failures (point 5: thiserror hierarchies).
 pub mod errors;

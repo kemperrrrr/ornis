@@ -32,6 +32,7 @@
 use glam::{Mat3, Vec3};
 
 use crate::body::RigidBody;
+use crate::constants::MIN_EFFECTIVE_MASS;
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState};
 
@@ -325,12 +326,30 @@ impl WideBatch {
             total_inv + ra_t1.dot(Self::matvec(&wa, ra_t1)) + rb_t1.dot(Self::matvec(&wb, rb_t1));
         let k_t2 =
             total_inv + ra_t2.dot(Self::matvec(&wa, ra_t2)) + rb_t2.dot(Self::matvec(&wb, rb_t2));
-        self.inv_k_n
-            .set_lane(l, if k_n >= 1e-10 { 1.0 / k_n } else { 0.0 });
-        self.inv_k_t1
-            .set_lane(l, if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 });
-        self.inv_k_t2
-            .set_lane(l, if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 });
+        self.inv_k_n.set_lane(
+            l,
+            if k_n >= MIN_EFFECTIVE_MASS {
+                1.0 / k_n
+            } else {
+                0.0
+            },
+        );
+        self.inv_k_t1.set_lane(
+            l,
+            if k_t1 >= MIN_EFFECTIVE_MASS {
+                1.0 / k_t1
+            } else {
+                0.0
+            },
+        );
+        self.inv_k_t2.set_lane(
+            l,
+            if k_t2 >= MIN_EFFECTIVE_MASS {
+                1.0 / k_t2
+            } else {
+                0.0
+            },
+        );
 
         self.apply_n_a.set_lane(l, n * a.inv_mass);
         self.apply_n_b.set_lane(l, n * bb.inv_mass);
@@ -352,7 +371,7 @@ impl WideBatch {
         let k_s = k_ang(n);
         self.inv_k_r1.set_lane(
             l,
-            if mu_r > 0.0 && k_r1 >= 1e-10 {
+            if mu_r > 0.0 && k_r1 >= MIN_EFFECTIVE_MASS {
                 1.0 / k_r1
             } else {
                 0.0
@@ -360,7 +379,7 @@ impl WideBatch {
         );
         self.inv_k_r2.set_lane(
             l,
-            if mu_r > 0.0 && k_r2 >= 1e-10 {
+            if mu_r > 0.0 && k_r2 >= MIN_EFFECTIVE_MASS {
                 1.0 / k_r2
             } else {
                 0.0
@@ -368,7 +387,7 @@ impl WideBatch {
         );
         self.inv_k_s.set_lane(
             l,
-            if mu_s > 0.0 && k_s >= 1e-10 {
+            if mu_s > 0.0 && k_s >= MIN_EFFECTIVE_MASS {
                 1.0 / k_s
             } else {
                 0.0

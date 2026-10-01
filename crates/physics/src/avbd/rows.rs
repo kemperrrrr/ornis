@@ -65,7 +65,7 @@ pub(super) fn outer(a: Vec3, b: Vec3) -> [[f32; 3]; 3] {
 /// long levers — the joint spins up exponentially. Row-major like theirs.
 pub(super) fn geometric_stiffness_ball_socket(k: usize, v: Vec3) -> [[f32; 3]; 3] {
     let arr = v.to_array();
-    let mut m = [[0.0f32; 3]; 3];
+    let mut m = [[0.0f32; ANGULAR_OFFSET]; ANGULAR_OFFSET];
     m[0][0] = -arr[k];
     m[1][1] = -arr[k];
     m[2][2] = -arr[k];
@@ -191,9 +191,9 @@ pub(super) fn regularized_limit(value: f32, initial: f32, bound: f32, lower: boo
 pub(super) fn world_inertia(inertia: Vec3, rot: Quat) -> [[f32; 3]; 3] {
     let r = Mat3::from_quat(rot);
     let cols = [r.x_axis, r.y_axis, r.z_axis];
-    let mut m = [[0.0f32; 3]; 3];
-    for a in 0..3 {
-        for b in 0..3 {
+    let mut m = [[0.0f32; ANGULAR_OFFSET]; ANGULAR_OFFSET];
+    for a in 0..ANGULAR_OFFSET {
+        for b in 0..ANGULAR_OFFSET {
             let ca = [cols[0][a], cols[1][a], cols[2][a]];
             let cb = [cols[0][b], cols[1][b], cols[2][b]];
             m[a][b] =
@@ -994,8 +994,8 @@ impl AvbdEngine {
         let o_nn = outer(nn, nn);
         let o_tt = outer(t, t);
         let o_nt = outer(nn, t);
-        for x in 0..3 {
-            for y in 0..3 {
+        for x in 0..ANGULAR_OFFSET {
+            for y in 0..ANGULAR_OFFSET {
                 lhs[x][y] += pen * o_nn[x][y];
                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * o_tt[x][y];
                 lhs[x][ANGULAR_OFFSET + y] += pen * o_nt[x][y];
@@ -1019,8 +1019,8 @@ impl AvbdEngine {
         force: f32,
     ) {
         let h = outer(axis, axis);
-        for x in 0..3 {
-            for y in 0..3 {
+        for x in 0..ANGULAR_OFFSET {
+            for y in 0..ANGULAR_OFFSET {
                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * h[x][y];
             }
         }
