@@ -306,7 +306,11 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
         // from `MeshData::unit_box`, whose index winding yields the
         // negated face normals — see the report; the editor crate is
         // outside this change.
-        indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+        // Two CCW triangles per quad: (0,2,1) and (0,3,2).
+        const V1: u32 = 1;
+        const V2: u32 = 2;
+        const V3: u32 = 3;
+        indices.extend([base, base + V2, base + V1, base, base + V3, base + V2]);
     }
     (vertices, indices)
 }
@@ -385,10 +389,11 @@ pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Ver
             tangent,
         });
     }
+    /// Side-quad index offsets within a cylinder ring pair.
+    const SIDE_QUAD: [u32; 6] = [0, 1, 3, 0, 3, 2];
     for j in 0..n {
-        let (b0, t0) = (2 * j, 2 * j + 1);
-        let (b1, t1) = (2 * j + 2, 2 * j + 3);
-        indices.extend([b0, t0, t1, b0, t1, b1]);
+        let base = 2 * j;
+        indices.extend(SIDE_QUAD.map(|o| base + o));
     }
 
     // Caps: center + ring per cap (seam duplicated for the planar UV map).

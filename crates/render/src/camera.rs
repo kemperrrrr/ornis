@@ -182,10 +182,12 @@ pub struct Frustum {
 impl Frustum {
     /// Extracts the six planes from `view_proj` and normalizes them.
     pub fn from_view_proj(view_proj: &Mat4) -> Self {
+        /// Homogeneous (clip-w) row of a 4×4 view-projection matrix.
+        const CLIP_W_ROW: usize = 3;
         let r0 = view_proj.row(0);
         let r1 = view_proj.row(1);
         let r2 = view_proj.row(2);
-        let r3 = view_proj.row(3);
+        let r3 = view_proj.row(CLIP_W_ROW);
         Self {
             planes: [
                 r3 + r0, // left

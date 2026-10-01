@@ -935,7 +935,7 @@ impl WgpuAvbdSolver {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &self.bind_group, &[]);
-            cpass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+            cpass.dispatch_workgroups(count.div_ceil(MIN_BUFFER_CAP as u32), 1, 1);
         }
         self.queue.submit([encoder.finish()]);
         self.device
@@ -963,7 +963,7 @@ impl WgpuAvbdSolver {
     /// mapped-range view fails. The numeric path is unchanged on success.
     pub fn try_download(&self) -> Result<(Vec<GpuBodyState>, Vec<f32>), GpuDispatchError> {
         let delta_size = self.max_bodies as u64 * super::GPU_BODY_STRIDE;
-        let ok_size = self.max_bodies as u64 * 4;
+        let ok_size = self.max_bodies as u64 * F32_BYTES;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {

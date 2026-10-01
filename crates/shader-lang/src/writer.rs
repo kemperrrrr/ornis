@@ -12,6 +12,11 @@ use crate::ir::{
     IrType, IrUnOp, UNSUPPORTED_MARKER,
 };
 
+/// Component count of a glam / WGSL `Vec3`.
+const VEC3_DIM: usize = 3;
+/// Component count of a glam / WGSL `Vec4`.
+const VEC4_DIM: usize = 4;
+
 /// Render a lowered type. The single place owning the `array<T, N>`
 /// spelling (lowering builds [`IrType`] structurally, never strings).
 pub fn print_ty(t: &IrType) -> String {
@@ -295,8 +300,8 @@ fn print_path(segs: &[String]) -> String {
     if let (Some(parent), Some(last)) = (parent, last) {
         let dim = match parent {
             "Vec2" => Some(2),
-            "Vec3" => Some(3),
-            "Vec4" => Some(4),
+            "Vec3" => Some(VEC3_DIM),
+            "Vec4" => Some(VEC4_DIM),
             _ => None,
         };
         if let Some(dim) = dim {

@@ -151,7 +151,9 @@ impl CompositePass {
 
         rpass.set_pipeline(&self.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        /// Fullscreen triangle-strip vertex count.
+        const FULLSCREEN_QUAD_VERTS: u32 = 4;
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 }
 

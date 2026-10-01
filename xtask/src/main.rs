@@ -87,7 +87,9 @@ fn install_hooks() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(
+        /// Executable bit for the installed pre-push hook (`rwxr-xr-x`).
+        const HOOK_MODE: u32 = 0o755;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(HOOK_MODE)).unwrap_or_else(
             |e| {
                 eprintln!("xtask: cannot chmod hook: {e}");
                 exit(1);

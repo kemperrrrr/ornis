@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.3984069121328686,
+  "quality_score": 0.40602369176283837,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 319,
+  "magic_number_warnings": 286,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 105,
   "unsafe_warnings": 8,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2709,
+  "total_findings": 2676,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -93,22 +93,22 @@
     {
       "name": "check_builtin_arity",
       "file": "crates/shader-lang/src/lib.rs",
-      "line": 370
+      "line": 375
     },
     {
       "name": "print_expr",
       "file": "crates/shader-lang/src/writer.rs",
-      "line": 128
+      "line": 133
     },
     {
       "name": "print_stmt",
       "file": "crates/shader-lang/src/writer.rs",
-      "line": 189
+      "line": 194
     },
     {
       "name": "print_if",
       "file": "crates/shader-lang/src/writer.rs",
-      "line": 269
+      "line": 274
     },
     {
       "name": "assemble_clips",
@@ -163,17 +163,17 @@
     {
       "name": "extract_render_data_with_stats",
       "file": "crates/render/src/extraction.rs",
-      "line": 507
+      "line": 509
     },
     {
       "name": "normalized_rotation",
       "file": "crates/render/src/extraction.rs",
-      "line": 954
+      "line": 956
     },
     {
       "name": "skinned_tangent",
       "file": "crates/render/src/extraction.rs",
-      "line": 1107
+      "line": 1109
     },
     {
       "name": "OrbitCamera::from_desc",
@@ -528,27 +528,27 @@
     {
       "name": "swept_bounds",
       "file": "crates/physics/src/split.rs",
-      "line": 383
+      "line": 385
     },
     {
       "name": "SplitState::step",
       "file": "crates/physics/src/split.rs",
-      "line": 949
+      "line": 951
     },
     {
       "name": "SplitState::couple_cross_joints",
       "file": "crates/physics/src/split.rs",
-      "line": 1087
+      "line": 1089
     },
     {
       "name": "SplitState::couple_velocity",
       "file": "crates/physics/src/split.rs",
-      "line": 1208
+      "line": 1210
     },
     {
       "name": "SplitState::shapecast",
       "file": "crates/physics/src/split.rs",
-      "line": 1278
+      "line": 1280
     },
     {
       "name": "SoftBody::chain",

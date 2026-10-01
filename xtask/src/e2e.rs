@@ -26,6 +26,12 @@ use std::time::{Duration, Instant};
 const DEFAULT_PORT: u16 = 3420;
 const POLL_DEADLINE_SECS: u64 = 30;
 const VIEWPORT: &str = "800,600";
+/// TCP connect / sleep poll interval while waiting for the server.
+const POLL_INTERVAL_MS: u64 = 500;
+/// Read timeout for the hand-rolled `GET /api/scene`.
+const SCENE_READ_TIMEOUT_SECS: u64 = 10;
+/// HTTP header/body separator length (`\r\n\r\n`).
+const HTTP_HEADER_SEP_LEN: usize = 4;
 
 const BROWSERS: &[&str] = &[
     "chromium",
@@ -127,13 +133,13 @@ fn wait_for_server(port: u16) -> bool {
     while Instant::now() < deadline {
         if TcpStream::connect_timeout(
             &format!("127.0.0.1:{port}").parse().expect("loopback addr"),
-            Duration::from_millis(500),
+            Duration::from_millis(POLL_INTERVAL_MS),
         )
         .is_ok()
         {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
     false
 }
@@ -147,7 +153,7 @@ fn fetch_scene(port: u16) -> Option<Vec<u8>> {
     )
     .ok()?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(SCENE_READ_TIMEOUT_SECS)))
         .ok()?;
     stream
         .write_all(
@@ -167,9 +173,9 @@ fn fetch_scene(port: u16) -> Option<Vec<u8>> {
         return None;
     }
     let sep = raw
-        .windows(4)
+        .windows(HTTP_HEADER_SEP_LEN)
         .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)?;
+        .map(|i| i + HTTP_HEADER_SEP_LEN)?;
     Some(raw[sep..].to_vec())
 }
 
@@ -289,7 +295,7 @@ fn wait_for_scene(port: u16) -> Option<Vec<u8>> {
                 return Some(body);
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
     None
 }

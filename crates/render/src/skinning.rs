@@ -181,11 +181,13 @@ fn vs_main_skinned(
 /// so the fragment stage is shared. Entry point `vs_main_skinned` is new
 /// (no legacy shape to preserve).
 pub fn wgsl_vertex_source_skinned() -> String {
+    /// Camera / per-object / joint-palette bind-group slots.
+    const SKINNED_BINDINGS: [u32; 3] = [0, 1, 3];
     ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(PerObjectGpu::WGSL_SOURCE)
         .decl(SkinJoint::WGSL_SOURCE)
-        .resources(&GBUFFER_SKINNED_RESOURCES, &[0, 1, 3])
+        .resources(&GBUFFER_SKINNED_RESOURCES, &SKINNED_BINDINGS)
         .decl(wgsl_decl(SkinnedVertexInput::WGSL_SOURCE))
         .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
         .entry(vs_main_skinned::wgsl_source())

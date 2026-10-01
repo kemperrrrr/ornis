@@ -240,7 +240,9 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
     }
     let ra = a.orientation * w.la;
     let rb = b.orientation * w.lb;
-    let dirs: [Vec3; 3] = match w.row {
+    /// Linear DOF count for ball-joint cross rows.
+    const LINEAR_DOF: usize = 3;
+    let dirs: [Vec3; LINEAR_DOF] = match w.row {
         CrossRowKind::Ball => [Vec3::X, Vec3::Y, Vec3::Z],
         CrossRowKind::Distance => {
             let delta = (b.position + rb) - (a.position + ra);
@@ -1119,7 +1121,7 @@ impl SplitState {
         }
         // Relaxation sweeps over the (tiny) cross set, then one velocity
         // sweep at the final anchors.
-        for _ in 0..4 {
+        for _ in 0..MAX_STEPS {
             for w in &work {
                 self.couple_position(w);
             }

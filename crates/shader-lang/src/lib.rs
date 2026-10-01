@@ -107,6 +107,9 @@ impl ShaderType {
     }
 }
 
+/// Argument count for ternary builtins (`mix`/`lerp`, `smoothstep`, `clamp`, …).
+const TERNARY_ARITY: usize = 3;
+
 /// Math built-ins the DSL renames or validates, by WGSL target.
 /// Several Rust spellings can share one variant (`mix`/`lerp`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,7 +239,9 @@ impl ShaderBuiltin {
             | Self::Step
             | Self::Reflect
             | Self::Atan2 => 2,
-            Self::Mix | Self::Smoothstep | Self::Clamp | Self::Select | Self::Refract => 3,
+            Self::Mix | Self::Smoothstep | Self::Clamp | Self::Select | Self::Refract => {
+                TERNARY_ARITY
+            }
         }
     }
 

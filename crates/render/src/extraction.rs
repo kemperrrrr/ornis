@@ -33,6 +33,8 @@ use ornis_core::units::PositiveF32;
 
 /// Squared length below which a direction is treated as degenerate.
 const DEGENERATE_LEN2: f32 = 1e-12;
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
 
 /// CPU-side render data read from the ECS lanes for one frame (X4
 /// Extract-free: a direct-read payload, not a scheduled snapshot —
@@ -982,7 +984,7 @@ fn skin_vertex_count(mesh: &SkinnedMesh) -> Option<usize> {
         return None;
     }
     if mesh.indices.is_empty()
-        || !mesh.indices.len().is_multiple_of(3)
+        || !mesh.indices.len().is_multiple_of(TRIANGLE_VERTS)
         || mesh.indices.iter().any(|index| (*index as usize) >= count)
     {
         return None;
