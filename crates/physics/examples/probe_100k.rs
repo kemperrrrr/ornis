@@ -22,19 +22,59 @@ use ornis_physics::{
     BodyHandle, BodyType, BroadPhaseKind, PhysicsEngine, RigidBody, SequentialImpulseEngine,
 };
 
+/// Earth-surface gravity along −Y (m/s²).
+const GRAVITY_Y: f32 = -9.81;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+/// Floor box half-height / Y center (m).
+const FLOOR_HALF_Y: f32 = HALF;
+/// Tiled-floor tile half-extent (m).
+const TILE_HALF: f32 = 5.0;
+/// Dynamic box half-extent (m).
+const BOX_HALF: f32 = 0.4;
+/// Giant-floor half-extent (m).
+const GIANT_FLOOR_HALF: f32 = 500.0;
+/// Sparse-scene body spacing (m).
+const SPARSE_SPACING: f32 = 20.0;
+/// Sparse-scene spawn height (m).
+const SPARSE_HEIGHT: f32 = 5.0;
+/// Island cluster pitch (m).
+const ISLAND_PITCH: f32 = 4.0;
+/// Dynamic bodies packed into each islands-scene cluster.
+const BODIES_PER_ISLAND: u32 = 10;
+/// Heterogeneous size base / step (m).
+const HETERO_SIZE_BASE: f32 = 0.3;
+const HETERO_SIZE_STEP: f32 = 0.15;
+/// Heterogeneous size period.
+const HETERO_SIZE_PERIOD: u32 = 7;
+/// Giant-floor Y jitter period.
+const GIANT_Y_PERIOD: u32 = 6;
+/// Fixed simulation timestep (s).
+const DT: f32 = 1.0 / 60.0;
+/// Cull dynamic bodies that fell below this Y (m).
+const FALLEN_CULL_Y: f32 = -10.0;
+/// Default dynamic body count.
+const DEFAULT_BODIES: u32 = 10_000;
+/// Default measured steps.
+const DEFAULT_STEPS: u32 = 20;
+/// Default uniform-grid cell size (m).
+const DEFAULT_CELL_SIZE: f32 = 4.0;
+/// Island clusters per XZ row when laying out the islands scene.
+const ISLAND_CLUSTER_COLS: u32 = 4;
+
 fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
-    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     let span = side as f32 * 2.0;
-    let tile_half = 5.0f32;
+    let tile_half = TILE_HALF;
     let tiles = (span / (2.0 * tile_half)).ceil() as i32;
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
+            let x = (tx as f32 - tiles as f32 / 2.0 + HALF) * 2.0 * tile_half;
+            let z = (tz as f32 - tiles as f32 / 2.0 + HALF) * 2.0 * tile_half;
             physics.add_body(RigidBody::new_box(
-                Vec3::new(x, -0.5, z),
-                Vec3::new(tile_half, 0.5, tile_half),
+                Vec3::new(x, -FLOOR_HALF_Y, z),
+                Vec3::new(tile_half, FLOOR_HALF_Y, tile_half),
                 0.0,
             ));
         }
@@ -45,8 +85,8 @@ fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
         let x = (gx as f32 - side as f32 / 2.0) * 2.0;
         let z = (gz as f32 - side as f32 / 2.0) * 2.0;
         physics.add_body(RigidBody::new_box(
-            Vec3::new(x, 0.4, z),
-            Vec3::splat(0.4),
+            Vec3::new(x, BOX_HALF, z),
+            Vec3::splat(BOX_HALF),
             1.0,
         ));
     }
@@ -56,10 +96,10 @@ fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
 /// One huge static floor + `n` dynamic boxes resting above it. Stresses the
 /// large-static-AABB path that makes Sweep-and-Prune quadratic.
 fn setup_giant_floor(n: u32) -> SequentialImpulseEngine {
-    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
     physics.add_body(RigidBody::new_box(
-        Vec3::new(0.0, -0.5, 0.0),
-        Vec3::splat(500.0),
+        Vec3::new(0.0, -FLOOR_HALF_Y, 0.0),
+        Vec3::splat(GIANT_FLOOR_HALF),
         0.0,
     ));
     let side = (n as f32).sqrt().ceil() as u32;
@@ -68,10 +108,10 @@ fn setup_giant_floor(n: u32) -> SequentialImpulseEngine {
         let gz = i / side;
         let x = (gx as f32 - side as f32 / 2.0) * 2.0;
         let z = (gz as f32 - side as f32 / 2.0) * 2.0;
-        let y = 1.0 + (i % 6) as f32;
+        let y = 1.0 + (i % GIANT_Y_PERIOD) as f32;
         physics.add_body(RigidBody::new_box(
             Vec3::new(x, y, z),
-            Vec3::splat(0.4),
+            Vec3::splat(BOX_HALF),
             1.0,
         ));
     }
@@ -80,17 +120,17 @@ fn setup_giant_floor(n: u32) -> SequentialImpulseEngine {
 
 /// `n` dynamic bodies spread far apart so almost no pairs overlap.
 fn setup_sparse(n: u32) -> SequentialImpulseEngine {
-    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
-    let spacing = 20.0f32;
+    let spacing = SPARSE_SPACING;
     for i in 0..n {
         let gx = i % side;
         let gz = i / side;
         let x = gx as f32 * spacing;
         let z = gz as f32 * spacing;
         physics.add_body(RigidBody::new_box(
-            Vec3::new(x, 5.0, z),
-            Vec3::splat(0.4),
+            Vec3::new(x, SPARSE_HEIGHT, z),
+            Vec3::splat(BOX_HALF),
             1.0,
         ));
     }
@@ -100,23 +140,22 @@ fn setup_sparse(n: u32) -> SequentialImpulseEngine {
 /// `n` dynamic bodies arranged in dense stacked clusters (islands), isolated
 /// from each other. Stresses clustering behaviour of each backend.
 fn setup_islands(n: u32) -> SequentialImpulseEngine {
-    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
-    let per = 10u32;
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
+    let per = BODIES_PER_ISLAND;
     let islands = (n as f32 / per as f32).ceil() as u32;
-    let cluster_spacing = 4u32;
     for c in 0..islands {
         if c * per >= n {
             break;
         }
-        let cx = (c % cluster_spacing) as f32 * 4.0;
-        let cz = (c / cluster_spacing) as f32 * 4.0;
+        let cx = (c % ISLAND_CLUSTER_COLS) as f32 * ISLAND_PITCH;
+        let cz = (c / ISLAND_CLUSTER_COLS) as f32 * ISLAND_PITCH;
         for k in 0..per {
             if c * per + k >= n {
                 break;
             }
             physics.add_body(RigidBody::new_box(
-                Vec3::new(cx, k as f32 + 0.5, cz),
-                Vec3::splat(0.4),
+                Vec3::new(cx, k as f32 + HALF, cz),
+                Vec3::splat(BOX_HALF),
                 1.0,
             ));
         }
@@ -126,14 +165,14 @@ fn setup_islands(n: u32) -> SequentialImpulseEngine {
 
 /// `n` dynamic bodies of mixed shape and size on a regular grid.
 fn setup_heterogeneous(n: u32) -> SequentialImpulseEngine {
-    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
     for i in 0..n {
         let gx = i % side;
         let gz = i / side;
         let x = (gx as f32 - side as f32 / 2.0) * 2.0;
         let z = (gz as f32 - side as f32 / 2.0) * 2.0;
-        let s = 0.3 + (i % 7) as f32 * 0.15;
+        let s = HETERO_SIZE_BASE + (i % HETERO_SIZE_PERIOD) as f32 * HETERO_SIZE_STEP;
         if i % 2 == 0 {
             physics.add_body(RigidBody::new_box(
                 Vec3::new(x, 1.0, z),
@@ -147,15 +186,19 @@ fn setup_heterogeneous(n: u32) -> SequentialImpulseEngine {
     physics
 }
 
-fn parse_value<T>(flag: &str, value: Option<String>) -> T
+fn parse_value<T>(flag: &str, value: Option<String>) -> Option<T>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
 {
-    let value = value.unwrap_or_else(|| panic!("{flag} requires a value"));
-    value
-        .parse()
-        .unwrap_or_else(|error| panic!("invalid value for {flag}: {error}"))
+    let value = value?;
+    match value.parse() {
+        Ok(parsed) => Some(parsed),
+        Err(error) => {
+            eprintln!("invalid value for {flag}: {error}");
+            None
+        }
+    }
 }
 
 fn print_usage() {
@@ -195,7 +238,10 @@ fn run_probe(
         "sparse" => setup_sparse(bodies),
         "islands" => setup_islands(bodies),
         "heterogeneous" => setup_heterogeneous(bodies),
-        other => panic!("unknown scene {other}; use --help for usage"),
+        other => {
+            eprintln!("unknown scene {other}; use --help for usage");
+            return;
+        }
     };
     match backend {
         BroadPhaseKind::SweepAndPrune => physics.set_broadphase(BroadPhaseKind::SweepAndPrune),
@@ -211,7 +257,7 @@ fn run_probe(
     let mut steady = Vec::new();
     for step in 0..steps {
         let started = Instant::now();
-        physics.step(1.0 / 60.0);
+        physics.step(DT);
         let elapsed = started.elapsed();
         println!("step {step}: {elapsed:?}");
         // Kill-plane experiment (substep-tax probe): remove dynamics fallen
@@ -224,7 +270,7 @@ fn run_probe(
                 let Some(b) = physics.get_body(BodyHandle::from(h)) else {
                     continue;
                 };
-                if b.body_type == BodyType::Dynamic && b.position.y < -10.0 {
+                if b.body_type == BodyType::Dynamic && b.position.y < FALLEN_CULL_Y {
                     fallen.push(h);
                 }
             }
@@ -336,8 +382,8 @@ fn main() {
     let mut backend = BroadPhaseKind::SweepAndPrune;
     let mut cell_size = None;
     let mut scene = "tiled".to_string();
-    let mut bodies = 10_000u32;
-    let mut steps = 20u32;
+    let mut bodies = DEFAULT_BODIES;
+    let mut steps = DEFAULT_STEPS;
     let mut kill_plane = false;
 
     let mut args = std::env::args().skip(1);
@@ -351,23 +397,44 @@ fn main() {
             "--tree" => backend = BroadPhaseKind::DynamicAabbTree,
             "--auto" => backend = BroadPhaseKind::Auto,
             "--cell-size" => {
-                cell_size = Some(parse_value("--cell-size", args.next()));
+                let Some(value) = parse_value("--cell-size", args.next()) else {
+                    return;
+                };
+                cell_size = Some(value);
                 backend = BroadPhaseKind::UniformGrid;
             }
-            "--scene" => scene = parse_value("--scene", args.next()),
-            "--bodies" => bodies = parse_value("--bodies", args.next()),
-            "--steps" => steps = parse_value("--steps", args.next()),
+            "--scene" => {
+                let Some(value) = parse_value("--scene", args.next()) else {
+                    return;
+                };
+                scene = value;
+            }
+            "--bodies" => {
+                let Some(value) = parse_value("--bodies", args.next()) else {
+                    return;
+                };
+                bodies = value;
+            }
+            "--steps" => {
+                let Some(value) = parse_value("--steps", args.next()) else {
+                    return;
+                };
+                steps = value;
+            }
             "--kill-plane" => kill_plane = true,
             "--help" | "-h" => {
                 print_usage();
                 return;
             }
-            unknown => panic!("unknown argument {unknown}; use --help for usage"),
+            unknown => {
+                eprintln!("unknown argument {unknown}; use --help for usage");
+                return;
+            }
         }
     }
     run_probe(
         backend,
-        cell_size.unwrap_or(4.0),
+        cell_size.unwrap_or(DEFAULT_CELL_SIZE),
         &scene,
         bodies,
         steps,

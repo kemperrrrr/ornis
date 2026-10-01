@@ -16,6 +16,7 @@ use std::time::Instant;
 use glam::{Quat, Vec3};
 
 use crate::broadphase::PrevPose;
+use crate::constants::NEAR_ZERO;
 use crate::distance::{ShapeRef, cast_shape};
 use crate::engine::raycast_shape_hit;
 use crate::flags::{RoutePhase, SolverSide};
@@ -31,7 +32,11 @@ use crate::{
 pub(super) const DT: f32 = 1.0 / 60.0;
 pub(super) const MAX_STEPS: usize = 4;
 const SLEEP_SPEED: f32 = 0.2;
-const WAKE_SPEED: f32 = 0.5;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+const WAKE_SPEED: f32 = HALF;
+/// Squared-length floor for a usable couple direction.
+const MIN_DIR_LEN2: f32 = HALF;
 const QUIET_STEPS: u32 = 30;
 const LINK_MARGIN: f32 = 0.05;
 
@@ -189,7 +194,7 @@ fn solve_cross_position(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
         }
         CrossRowKind::Distance => {
             let len = delta.length();
-            if len < 1e-9 || !len.is_finite() || !w.rest.is_finite() {
+            if len < NEAR_ZERO || !len.is_finite() || !w.rest.is_finite() {
                 return;
             }
             let correction = delta / len * (len - w.rest);
@@ -239,12 +244,14 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
     }
     let ra = a.orientation * w.la;
     let rb = b.orientation * w.lb;
-    let dirs: [Vec3; 3] = match w.row {
+    /// Linear DOF count for ball-joint cross rows.
+    const LINEAR_DOF: usize = 3;
+    let dirs: [Vec3; LINEAR_DOF] = match w.row {
         CrossRowKind::Ball => [Vec3::X, Vec3::Y, Vec3::Z],
         CrossRowKind::Distance => {
             let delta = (b.position + rb) - (a.position + ra);
             let len = delta.length();
-            if len < 1e-9 || !len.is_finite() {
+            if len < NEAR_ZERO || !len.is_finite() {
                 return;
             }
             let n = delta / len;
@@ -252,11 +259,11 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
         }
     };
     for dir in dirs {
-        if dir.length_squared() < 0.5 {
+        if dir.length_squared() < MIN_DIR_LEN2 {
             continue;
         }
         let k = cross_effective_mass(a, b, dir, ra, rb);
-        if k < 1e-9 {
+        if k < NEAR_ZERO {
             continue;
         }
         let vrel = (cross_point_velocity(b, rb) - cross_point_velocity(a, ra)).dot(dir);
@@ -589,11 +596,9 @@ impl SplitState {
                 self.bodies[j.b.index()].local_avbd,
             ) {
                 let spec = self.local_spec(j.spec, SolverSide::Avbd);
-                if let Some(spec) = spec {
-                    let h = self
-                        .avbd
-                        .add_joint_local(a, b, spec)
-                        .expect("validated AVBD joint");
+                if let Some(spec) = spec
+                    && let Ok(h) = self.avbd.add_joint_local(a, b, spec)
+                {
                     self.avbd.restore_joint_reference_local(h, j.reference);
                     self.joints[i].local_avbd = Some(h);
                 }
@@ -603,11 +608,9 @@ impl SplitState {
                 self.bodies[j.b.index()].local_si,
             ) {
                 let spec = self.local_spec(j.spec, SolverSide::SequentialImpulse);
-                if let Some(spec) = spec {
-                    let h = self
-                        .si
-                        .add_joint_local(a, b, spec)
-                        .expect("validated SI joint");
+                if let Some(spec) = spec
+                    && let Ok(h) = self.si.add_joint_local(a, b, spec)
+                {
                     self.si.restore_joint_reference_local(h, j.reference);
                     self.joints[i].local_si = Some(h);
                 }
@@ -625,11 +628,8 @@ impl SplitState {
                 let spec = self.xpbd_local_spec(j.spec);
                 if let Some(spec) = spec
                     && crate::xpbd::xpbd_supports_joint(&spec)
+                    && let Ok(h) = self.xpbd.add_joint(a.into(), b.into(), spec)
                 {
-                    let h = self
-                        .xpbd
-                        .add_joint(a.into(), b.into(), spec)
-                        .expect("validated XPBD joint");
                     self.xpbd.restore_joint_reference(h, j.reference);
                     self.joints[i].local_xpbd = Some(XpbdJoint(h.as_u32()));
                 }
@@ -1118,7 +1118,7 @@ impl SplitState {
         }
         // Relaxation sweeps over the (tiny) cross set, then one velocity
         // sweep at the final anchors.
-        for _ in 0..4 {
+        for _ in 0..MAX_STEPS {
             for w in &work {
                 self.couple_position(w);
             }

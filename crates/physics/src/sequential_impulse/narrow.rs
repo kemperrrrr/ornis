@@ -7,6 +7,7 @@ use ornis_schedule::run_levels;
 use rustc_hash::FxHashMap;
 
 use crate::body::{BodyType, RigidBody};
+use crate::constants::DEGENERATE_LEN2;
 use crate::distance;
 use crate::engine::{Contact, Manifold};
 use crate::flags::CachePolicy;
@@ -15,6 +16,23 @@ use crate::shape::Shape;
 use super::*;
 
 // ---- Narrow-phase: world-frame analytic contact tests (oriented shapes) ----
+
+/// Squared separation below which a contact distance is treated as collapsed
+/// (coincident centers / zero-length normal). Distinct from the mass-domain
+/// [`crate::constants::MIN_EFFECTIVE_MASS`] even though the literal matches.
+const DEGENERATE_DIST_SQ: f32 = 1e-10;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+/// Edge-axis length floor for SAT edge-edge candidates (m).
+const EDGE_AXIS_EPS: f32 = 1e-3;
+/// Pair count above which narrowphase shards across workers.
+const NARROW_PARALLEL_MIN_PAIRS: usize = 256;
+/// Fallback worker hint when `available_parallelism` is unavailable.
+const DEFAULT_WORKER_HINT: usize = 4;
+/// Coarse shards per worker (spike-tuned: too few starves, too many overhead).
+const SHARDS_PER_WORKER: usize = 4;
+/// Upper clamp on narrowphase shard count.
+const MAX_NARROW_SHARDS: usize = 64;
 
 /// Sphere-sphere. `margin` (G6 speculative): pairs separated by less than
 /// the margin still report a contact with NEGATIVE penetration (= the gap),
@@ -38,7 +56,7 @@ fn sphere_vs_sphere(
     Some(Contact {
         normal,
         penetration,
-        contact_point: pos_a + normal * (radius_a - penetration * 0.5),
+        contact_point: pos_a + normal * (radius_a - penetration * HALF),
     })
 }
 
@@ -57,7 +75,7 @@ fn sphere_vs_obb(
     let delta = clamped - local;
     let dist_sq = delta.length_squared();
     let reach = sphere_radius + margin;
-    if dist_sq > reach * reach || dist_sq < 1e-10 {
+    if dist_sq > reach * reach || dist_sq < DEGENERATE_DIST_SQ {
         return None;
     }
     let dist = dist_sq.sqrt();
@@ -72,7 +90,7 @@ fn sphere_vs_obb(
     // phantom "half-rolling" equilibrium v = ω·r/2 with live slip, because
     // the solver saw zero slip at the half-depth point.
     let dir = delta / dist; // box frame, sphere center toward box surface
-    let contact_point = local + dir * (sphere_radius + penetration * 0.5);
+    let contact_point = local + dir * (sphere_radius + penetration * HALF);
     Some(Contact {
         normal,
         penetration,
@@ -152,7 +170,7 @@ pub fn obb_sat(
             // face axes cover that case. A too-small threshold here lets
             // float noise produce false "separated" verdicts on micro-tilts
             // and the manifold blinks on/off — a warm-start energy pump.
-            if c.length() < 1e-3 {
+            if c.length() < EDGE_AXIS_EPS {
                 continue;
             }
             let u = c.normalize();
@@ -190,7 +208,7 @@ fn box_vs_box(
     Some(Contact {
         normal,
         penetration,
-        contact_point: (pos_a + pos_b) * 0.5,
+        contact_point: (pos_a + pos_b) * HALF,
     })
 }
 
@@ -245,7 +263,7 @@ pub fn box_manifold(
     // face edge (micro-tilts at face contacts) must still generate points,
     // otherwise the manifold collapses to the single-point fallback and the
     // body starts rocking on a corner.
-    let tangent_slack = 0.05;
+    let tangent_slack = SPEC_BASE;
 
     // B's corners touching A's face (the face most anti-parallel to `n`),
     // then A's corners touching B's face.
@@ -282,9 +300,9 @@ pub fn box_manifold(
     let mut points = [ManifoldPoint {
         world_point: Vec3::ZERO,
         penetration: 0.0,
-    }; 4];
+    }; MAX_MANIFOLD_POINTS];
     let mut count = 0;
-    for (p, d) in uniq.into_iter().take(4) {
+    for (p, d) in uniq.into_iter().take(MAX_MANIFOLD_POINTS) {
         // Speculative points keep their NEGATIVE depth (= the gap); the
         // velocity solver turns it into an approach-speed limit (G6).
         points[count] = ManifoldPoint {
@@ -359,7 +377,7 @@ fn dedupe_contact_points(cand: Vec<(Vec3, f32)>, n: Vec3) -> Vec<(Vec3, f32)> {
             let tangential = (p - *q) - n * (p - *q).dot(n);
             // 5 cm: near-coincident points make the constraint system
             // near-singular and PGS oscillates into runaway impulses.
-            if tangential.length() < 0.05 {
+            if tangential.length() < SPEC_BASE {
                 if d > *qd {
                     *q = p;
                     *qd = d;
@@ -395,13 +413,13 @@ fn sphere_vs_capsule(
     let to_sphere = sphere_pos - closest;
     let d = to_sphere.length();
     let rr = cap_radius + sphere_radius + margin;
-    if d >= rr || d < 1e-10 {
+    if d >= rr || d < DEGENERATE_DIST_SQ {
         return None;
     }
     // Normal points from the capsule toward the sphere.
     let n = to_sphere / d;
     let penetration = rr - d - margin;
-    let contact_point = closest + n * (cap_radius - penetration * 0.5);
+    let contact_point = closest + n * (cap_radius - penetration * HALF);
     Some(Contact {
         normal: n,
         penetration,
@@ -443,7 +461,7 @@ fn box_vs_capsule(
     }
     let ab = d.point_b - d.point_a;
     let len = ab.length();
-    if len < 1e-10 {
+    if len < DEGENERATE_DIST_SQ {
         return None;
     }
     let mut normal = ab / len; // box → capsule
@@ -456,7 +474,7 @@ fn box_vs_capsule(
         normal = -normal;
     }
     let penetration = -d.dist;
-    let contact_point = (d.point_a + d.point_b) * 0.5;
+    let contact_point = (d.point_a + d.point_b) * HALF;
     Some(Contact {
         normal,
         penetration,
@@ -490,7 +508,7 @@ fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option
     let e = seg_b.dot(diff);
     let det = q * c - r * r;
 
-    let (t_a, t_b) = if det.abs() < 1e-10 {
+    let (t_a, t_b) = if det.abs() < DEGENERATE_DIST_SQ {
         (0.0, if c > 0.0 { e / c } else { 0.0 })
     } else {
         ((r * e - c * d) / det, (q * e - r * d) / det)
@@ -503,7 +521,7 @@ fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option
     let diff2 = closest_b - closest_a;
     let dist_sq = diff2.length_squared();
     let radius_sum = a.radius + b.radius + margin;
-    if dist_sq > radius_sum * radius_sum || dist_sq < 1e-10 {
+    if dist_sq > radius_sum * radius_sum || dist_sq < DEGENERATE_DIST_SQ {
         return None;
     }
     let dist = dist_sq.sqrt();
@@ -512,7 +530,7 @@ fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option
     Some(Contact {
         normal,
         penetration,
-        contact_point: (closest_a + closest_b) * 0.5,
+        contact_point: (closest_a + closest_b) * HALF,
     })
 }
 
@@ -565,7 +583,7 @@ fn distance_contact(
         return None;
     }
     let axis = d.point_b - d.point_a;
-    let mut normal = if axis.length_squared() > 1e-12 {
+    let mut normal = if axis.length_squared() > DEGENERATE_LEN2 {
         axis.normalize()
     } else {
         (b.position - a.position).normalize_or(Vec3::Y)
@@ -585,7 +603,7 @@ fn distance_contact(
         Contact {
             normal,
             penetration,
-            contact_point: d.point_a - normal * (penetration * 0.5),
+            contact_point: d.point_a - normal * (penetration * HALF),
         },
     ))
 }
@@ -597,7 +615,13 @@ const SPEC_BASE: f32 = 0.05;
 /// Maximum relative linear speed (m/s) for the cached SAT/box path and the
 /// narrow-phase cache: faster pairs bypass the cache (near-zero hit rate)
 /// and run the full manifold build.
-const SAT_CACHE_MAX_REL_SPEED: f32 = 0.5;
+const SAT_CACHE_MAX_REL_SPEED: f32 = HALF;
+
+/// Squared angular-speed gate for the same cache (rad²/s²).
+///
+/// Equal to [`SAT_CACHE_MAX_REL_SPEED`]² so linear 0.5 m/s and angular
+/// 0.5 rad/s share one threshold magnitude.
+const SAT_CACHE_MAX_ANG_SPEED_SQ: f32 = SAT_CACHE_MAX_REL_SPEED * SAT_CACHE_MAX_REL_SPEED;
 
 /// Shard count rule for scheduler-dispatched narrowphase: enough coarse
 /// tasks to feed every worker without starving (the spike showed 8 shards
@@ -607,8 +631,10 @@ const SAT_CACHE_MAX_REL_SPEED: f32 = 0.5;
 fn narrow_shard_count(pairs: usize) -> usize {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(4);
-    (threads * 4).clamp(4, 64).min(pairs.max(1))
+        .unwrap_or(DEFAULT_WORKER_HINT);
+    (threads * SHARDS_PER_WORKER)
+        .clamp(DEFAULT_WORKER_HINT, MAX_NARROW_SHARDS)
+        .min(pairs.max(1))
 }
 
 /// Per-pair narrowphase kernel shared by the parallel and sequential paths:
@@ -689,8 +715,8 @@ fn narrow_pair(
             let use_sat = sat_cache.is_some()
                 && cur_substep == 0
                 && rel_speed <= SAT_CACHE_MAX_REL_SPEED
-                && a.angular_velocity.length_squared() <= 0.25
-                && b.angular_velocity.length_squared() <= 0.25;
+                && a.angular_velocity.length_squared() <= SAT_CACHE_MAX_ANG_SPEED_SQ
+                && b.angular_velocity.length_squared() <= SAT_CACHE_MAX_ANG_SPEED_SQ;
             if use_sat {
                 box_manifold_cached(
                     a.position,
@@ -858,7 +884,7 @@ pub fn detect_collisions_into(
     out.clear();
     // Parallel narrowphase for large candidate sets: SAT/box_manifold is heavy,
     // and bodies/asleep are read-only. Threshold keeps small scenes sequential.
-    if active.len() > 256 {
+    if active.len() > NARROW_PARALLEL_MIN_PAIRS {
         // Scheduler dispatch (one level, K coarse shards): same kernel, same
         // order-preserving concat as the flat rayon path it replaces, so
         // results are identical for any shard count. Shard buffers come from
@@ -869,7 +895,7 @@ pub fn detect_collisions_into(
         run_levels(&pool.level, shards, true, |shard| {
             let lo = shard * active.len() / shards;
             let hi = (shard + 1) * active.len() / shards;
-            let mut guard = bufs[shard].lock().unwrap();
+            let mut guard = bufs[shard].lock().unwrap_or_else(|e| e.into_inner());
             for &(i, j) in &active[lo..hi] {
                 if let Some(m) = narrow_pair(
                     bodies,
@@ -887,7 +913,7 @@ pub fn detect_collisions_into(
         });
         out.reserve(active.len());
         for b in &pool.bufs {
-            out.extend(b.lock().unwrap().drain(..));
+            out.extend(b.lock().unwrap_or_else(|e| e.into_inner()).drain(..));
         }
         return;
     }
@@ -954,8 +980,8 @@ pub fn detect_collisions_into(
                     let use_sat = sat_cache.is_some()
                         && cur_substep == 0
                         && (a.velocity - b.velocity).length() <= SAT_CACHE_MAX_REL_SPEED
-                        && a.angular_velocity.length_squared() <= 0.25
-                        && b.angular_velocity.length_squared() <= 0.25;
+                        && a.angular_velocity.length_squared() <= SAT_CACHE_MAX_ANG_SPEED_SQ
+                        && b.angular_velocity.length_squared() <= SAT_CACHE_MAX_ANG_SPEED_SQ;
                     if use_sat {
                         box_manifold_cached(
                             a.position,
@@ -1182,7 +1208,7 @@ fn box_manifold_cached(
         + half_b.y * ba[1].dot(n).abs()
         + half_b.z * ba[2].dot(n).abs();
     let depth_tol = margin;
-    let tangent_slack = 0.05;
+    let tangent_slack = SPEC_BASE;
     let mut cand: Vec<(Vec3, f32)> = Vec::new();
     cand.extend(collect_face_corners(
         &obb_corners(pos_b, half_b, rot_b),
@@ -1213,9 +1239,9 @@ fn box_manifold_cached(
     let mut points = [ManifoldPoint {
         world_point: Vec3::ZERO,
         penetration: 0.0,
-    }; 4];
+    }; MAX_MANIFOLD_POINTS];
     let mut count = 0;
-    for (p, d) in uniq.into_iter().take(4) {
+    for (p, d) in uniq.into_iter().take(MAX_MANIFOLD_POINTS) {
         points[count] = ManifoldPoint {
             world_point: p,
             penetration: d,
@@ -1306,13 +1332,13 @@ pub(crate) fn detect_collisions_into_with_cache(
         let rel_speed = (a.velocity - b.velocity).length();
         // Fast-moving pairs have near-zero cache hit rate — bypass HashMap lookup and don't cache.
         if rel_speed > SAT_CACHE_MAX_REL_SPEED
-            || a.angular_velocity.length_squared() > 0.25
-            || b.angular_velocity.length_squared() > 0.25
+            || a.angular_velocity.length_squared() > SAT_CACHE_MAX_ANG_SPEED_SQ
+            || b.angular_velocity.length_squared() > SAT_CACHE_MAX_ANG_SPEED_SQ
         {
             fast_misses.push((i, j));
             continue;
         }
-        let margin = 0.05 + rel_speed * sub_dt;
+        let margin = SPEC_BASE + rel_speed * sub_dt;
         let key = (i, j);
         if let Some(entry) = cache.get(&key) {
             if narrow_cache_hit(entry, a, b, margin) {
@@ -1375,7 +1401,7 @@ pub(crate) fn detect_collisions_into_with_cache(
         let a = &bodies[i];
         let b = &bodies[j];
         let rel_speed = (a.velocity - b.velocity).length();
-        let margin = 0.05 + rel_speed * sub_dt;
+        let margin = SPEC_BASE + rel_speed * sub_dt;
         let manifold = tmp_map.get(&(i, j)).and_then(|o| o.clone());
         cache.insert(
             (i, j),

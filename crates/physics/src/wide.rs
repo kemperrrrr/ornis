@@ -32,8 +32,16 @@
 use glam::{Mat3, Vec3};
 
 use crate::body::RigidBody;
+use crate::constants::{DEGENERATE_LEN2, FRICTION_IMPULSE_DUST, MIN_EFFECTIVE_MASS};
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState};
+
+/// SIMD contact batch width (lanes per SoA pack).
+const WIDE_LANES: usize = 4;
+/// Body-index slots reserved while packing a batch (2 bodies × lanes).
+const WIDE_BODY_SLOTS: usize = WIDE_LANES * 2;
+/// Spatial axes for world-inertia matrix rows.
+const SPATIAL_AXES: usize = 3;
 
 // ---------------------------------------------------------------------------
 // 4-lane SoA primitives
@@ -41,12 +49,12 @@ use crate::engine::{Manifold, ManifoldState};
 
 /// One 4-wide scalar in SoA layout: lane `l` is `.0[l]`.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Fx4(pub [f32; 4]);
+pub(crate) struct Fx4(pub [f32; WIDE_LANES]);
 
 impl Fx4 {
     #[inline]
     pub fn zero() -> Self {
-        Self([0.0; 4])
+        Self([0.0; WIDE_LANES])
     }
 
     #[inline]
@@ -98,13 +106,13 @@ impl Vec3x4 {
 /// Batch of up to 4 single-point contact constraints with DISJOINT body
 /// sets (guaranteed by `build_solver_steps`), solved in SoA lanes.
 pub struct WideBatch {
-    /// Active lane count (1..=4); lanes >= count are masked to body 0.
+    /// Active lane count (1..=[`WIDE_LANES`]); lanes >= count are masked to body 0.
     count: usize,
     /// Manifold-state index per lane, for writing accumulated impulses back.
-    state_idx: [usize; 4],
+    state_idx: [usize; WIDE_LANES],
     /// Island-local body indices per lane.
-    idx_a: [usize; 4],
-    idx_b: [usize; 4],
+    idx_a: [usize; WIDE_LANES],
+    idx_b: [usize; WIDE_LANES],
 
     // --- Constant per-solve geometry (precomputed at build time) ---
     n: Vec3x4,
@@ -132,8 +140,8 @@ pub struct WideBatch {
     apply_w_a: Vec3x4,
     apply_w_b: Vec3x4,
     /// World-space inverse inertia matrix rows per lane: `w_mat[lane][row]`.
-    wa_mat: [[Vec3; 3]; 4],
-    wb_mat: [[Vec3; 3]; 4],
+    wa_mat: [[Vec3; SPATIAL_AXES]; WIDE_LANES],
+    wb_mat: [[Vec3; SPATIAL_AXES]; WIDE_LANES],
     target: Fx4,
     mu: Fx4,
     /// Transverse Coulomb coefficient per lane (ODE `mu2` parity).
@@ -167,7 +175,7 @@ impl WideBatch {
     /// World-space inverse inertia tensor rows for one body:
     /// `I⁻¹_world = R · diag(1/Ix, 1/Iy, 1/Iz) · Rᵀ`, as 3 row vectors.
     #[inline]
-    fn world_inertia(rot: glam::Quat, inertia: Vec3) -> [Vec3; 3] {
+    fn world_inertia(rot: glam::Quat, inertia: Vec3) -> [Vec3; SPATIAL_AXES] {
         let inv = Vec3::new(
             if inertia.x > 0.0 {
                 1.0 / inertia.x
@@ -198,7 +206,7 @@ impl WideBatch {
     }
 
     #[inline]
-    fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
+    fn matvec(m: &[Vec3; SPATIAL_AXES], v: Vec3) -> Vec3 {
         Vec3::new(m[0].dot(v), m[1].dot(v), m[2].dot(v))
     }
 
@@ -207,12 +215,12 @@ impl WideBatch {
     /// Lanes beyond `count` are masked to body 0 (a static placeholder).
     pub fn build(items: &[(usize, &Manifold, &ManifoldState)], bodies: &[RigidBody]) -> Self {
         let count = items.len();
-        debug_assert!((1..=4).contains(&count));
+        debug_assert!((1..=WIDE_LANES).contains(&count));
         let mut b = WideBatch {
             count,
-            state_idx: [0; 4],
-            idx_a: [0; 4],
-            idx_b: [0; 4],
+            state_idx: [0; WIDE_LANES],
+            idx_a: [0; WIDE_LANES],
+            idx_b: [0; WIDE_LANES],
             n: Vec3x4::zero(),
             ra: Vec3x4::zero(),
             rb: Vec3x4::zero(),
@@ -229,8 +237,8 @@ impl WideBatch {
             apply_n_b: Vec3x4::zero(),
             apply_w_a: Vec3x4::zero(),
             apply_w_b: Vec3x4::zero(),
-            wa_mat: [[Vec3::ZERO; 3]; 4],
-            wb_mat: [[Vec3::ZERO; 3]; 4],
+            wa_mat: [[Vec3::ZERO; SPATIAL_AXES]; WIDE_LANES],
+            wb_mat: [[Vec3::ZERO; SPATIAL_AXES]; WIDE_LANES],
             target: Fx4::zero(),
             mu: Fx4::zero(),
             mu2: Fx4::zero(),
@@ -259,7 +267,7 @@ impl WideBatch {
         // Mask inactive lanes to body 0 — a static with inv_mass 0, so all
         // deltas and writes are zero. Body-set disjointness is preserved by
         // construction (build_solver_steps).
-        for l in count..4 {
+        for l in count..WIDE_LANES {
             b.idx_a[l] = 0;
             b.idx_b[l] = 0;
         }
@@ -325,12 +333,30 @@ impl WideBatch {
             total_inv + ra_t1.dot(Self::matvec(&wa, ra_t1)) + rb_t1.dot(Self::matvec(&wb, rb_t1));
         let k_t2 =
             total_inv + ra_t2.dot(Self::matvec(&wa, ra_t2)) + rb_t2.dot(Self::matvec(&wb, rb_t2));
-        self.inv_k_n
-            .set_lane(l, if k_n >= 1e-10 { 1.0 / k_n } else { 0.0 });
-        self.inv_k_t1
-            .set_lane(l, if k_t1 >= 1e-10 { 1.0 / k_t1 } else { 0.0 });
-        self.inv_k_t2
-            .set_lane(l, if k_t2 >= 1e-10 { 1.0 / k_t2 } else { 0.0 });
+        self.inv_k_n.set_lane(
+            l,
+            if k_n >= MIN_EFFECTIVE_MASS {
+                1.0 / k_n
+            } else {
+                0.0
+            },
+        );
+        self.inv_k_t1.set_lane(
+            l,
+            if k_t1 >= MIN_EFFECTIVE_MASS {
+                1.0 / k_t1
+            } else {
+                0.0
+            },
+        );
+        self.inv_k_t2.set_lane(
+            l,
+            if k_t2 >= MIN_EFFECTIVE_MASS {
+                1.0 / k_t2
+            } else {
+                0.0
+            },
+        );
 
         self.apply_n_a.set_lane(l, n * a.inv_mass);
         self.apply_n_b.set_lane(l, n * bb.inv_mass);
@@ -352,7 +378,7 @@ impl WideBatch {
         let k_s = k_ang(n);
         self.inv_k_r1.set_lane(
             l,
-            if mu_r > 0.0 && k_r1 >= 1e-10 {
+            if mu_r > 0.0 && k_r1 >= MIN_EFFECTIVE_MASS {
                 1.0 / k_r1
             } else {
                 0.0
@@ -360,7 +386,7 @@ impl WideBatch {
         );
         self.inv_k_r2.set_lane(
             l,
-            if mu_r > 0.0 && k_r2 >= 1e-10 {
+            if mu_r > 0.0 && k_r2 >= MIN_EFFECTIVE_MASS {
                 1.0 / k_r2
             } else {
                 0.0
@@ -368,7 +394,7 @@ impl WideBatch {
         );
         self.inv_k_s.set_lane(
             l,
-            if mu_s > 0.0 && k_s >= 1e-10 {
+            if mu_s > 0.0 && k_s >= MIN_EFFECTIVE_MASS {
                 1.0 / k_s
             } else {
                 0.0
@@ -423,7 +449,7 @@ impl WideBatch {
             // velocity is re-measured AFTER the normal impulse, exactly like
             // the scalar solver.
             let f_imp = self.solve_lane_friction(l, max_friction);
-            if f_imp.length_squared() > 1e-24 {
+            if f_imp.length_squared() > FRICTION_IMPULSE_DUST {
                 let inv_ma = self.inv_ma.lane(l);
                 let inv_mb = self.inv_mb.lane(l);
                 let ra = self.ra.lane(l);
@@ -463,7 +489,7 @@ impl WideBatch {
         );
         let delta = new_acc - self.acc.lane(l);
         self.acc.set_lane(l, new_acc);
-        if delta.abs() > 1e-12 {
+        if delta.abs() > DEGENERATE_LEN2 {
             // apply_impulse: linear + angular, using the precomputed
             // factors (n·inv_mass and I⁻¹_world·(ra×n)).
             self.va
@@ -543,7 +569,7 @@ impl WideBatch {
         let r2 = if mu2 > 0.0 { u2 / mu2 } else { 0.0 };
         let r_len = r1.hypot(r2);
         let cap = self.acc.lane(l);
-        if r_len > cap && r_len > 1e-12 {
+        if r_len > cap && r_len > DEGENERATE_LEN2 {
             let s = cap / r_len;
             u1 *= s;
             u2 *= s;
@@ -676,14 +702,14 @@ pub(crate) fn build_solver_steps(
     states: &[ManifoldState],
 ) -> Vec<SolverStep> {
     let mut steps: Vec<SolverStep> = Vec::with_capacity(states.len());
-    let mut cur: Vec<(usize, &Manifold, &ManifoldState)> = Vec::with_capacity(4);
-    // Body set of the current batch (up to 8 distinct island-local indices).
-    let mut cur_bodies: [usize; 8] = [usize::MAX; 8];
+    let mut cur: Vec<(usize, &Manifold, &ManifoldState)> = Vec::with_capacity(WIDE_LANES);
+    // Body set of the current batch (up to 2 bodies × lanes).
+    let mut cur_bodies: [usize; WIDE_BODY_SLOTS] = [usize::MAX; WIDE_BODY_SLOTS];
     let mut cur_n = 0usize;
 
     let flush = |steps: &mut Vec<SolverStep>,
                  cur: &mut Vec<(usize, &Manifold, &ManifoldState)>,
-                 cur_bodies: &mut [usize; 8],
+                 cur_bodies: &mut [usize; WIDE_BODY_SLOTS],
                  cur_n: &mut usize| {
         if cur.is_empty() {
             return;
@@ -692,7 +718,7 @@ pub(crate) fn build_solver_steps(
         steps.push(SolverStep::Wide(batch));
         cur.clear();
         *cur_n = 0;
-        *cur_bodies = [usize::MAX; 8];
+        *cur_bodies = [usize::MAX; WIDE_BODY_SLOTS];
     };
 
     for (si, st) in states.iter().enumerate() {
@@ -704,7 +730,7 @@ pub(crate) fn build_solver_steps(
         // Check disjointness against the current batch.
         let (i, j) = (st.i, st.j);
         let conflicts = cur_bodies[..cur_n].contains(&i) || cur_bodies[..cur_n].contains(&j);
-        if cur.len() >= 4 || conflicts {
+        if cur.len() >= WIDE_LANES || conflicts {
             flush(&mut steps, &mut cur, &mut cur_bodies, &mut cur_n);
         }
         cur.push((si, &manifolds[st.mi], st));

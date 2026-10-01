@@ -10,6 +10,9 @@ use crate::gpu::{pack_single_point_batches, write_back_acc};
 use rustc_hash::FxHashMap;
 
 use super::*;
+use crate::constants::{
+    DEGENERATE_LEN2, FEATURE_NORMAL_DOT_MIN, FRICTION_IMPULSE_DUST, MIN_EFFECTIVE_MASS,
+};
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 
@@ -18,6 +21,8 @@ use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
 const RESTITUTION_THRESHOLD: f32 = 1.0;
 const RESTITUTION_MAX_PEN: f32 = 0.05;
+/// Min total manifolds before flat/island contact stages go parallel.
+const PARALLEL_MIN_MANIFOLDS: usize = 24;
 
 /// Best matching unused cached point for warm point `k` (feature persistence,
 /// Jolt-style): nearest anchor within tolerance with a compatible normal.
@@ -37,7 +42,7 @@ fn best_cached_point(
         }
         // Feature compatibility: same surface region AND a compatible contact
         // normal (rolling over an edge changes the feature, dot < 0.7 => no match).
-        if cp.normal.dot(n) < 0.7 {
+        if cp.normal.dot(n) < FEATURE_NORMAL_DOT_MIN {
             continue;
         }
         let d2 = (cp.la - la_k).length_squared() + (cp.lb - lb_k).length_squared();
@@ -157,6 +162,9 @@ pub(crate) fn stack_path_for_island(manifold_count: usize) -> bool {
     manifold_count >= STACK_PATH_MIN_MANIFOLDS
 }
 
+/// Cap on stack-path velocity iters as a multiple of the base count.
+const STACK_ITERS_CAP_MUL: u32 = 3;
+
 /// Tall-stack velocity budget for an island with `manifold_count` manifolds:
 /// the full base budget (never the resting downscale) plus one extra sweep
 /// per two chain levels above the gate — support propagates a few levels per
@@ -168,9 +176,11 @@ pub(crate) fn stack_path_for_island(manifold_count: usize) -> bool {
 #[inline]
 pub(crate) fn stack_velocity_iters(base_iters: u32, manifold_count: usize) -> u32 {
     let extra = manifold_count.saturating_sub(STACK_PATH_MIN_MANIFOLDS) as u32 / 2;
-    base_iters
-        .saturating_add(extra)
-        .min(base_iters.saturating_mul(3).max(base_iters))
+    base_iters.saturating_add(extra).min(
+        base_iters
+            .saturating_mul(STACK_ITERS_CAP_MUL)
+            .max(base_iters),
+    )
 }
 
 /// WarmStart stage: apply cached impulses once (Box2D pattern). Capped so the
@@ -207,7 +217,7 @@ fn apply_warm_start(
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
             let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-            if k_eff < 1e-10 {
+            if k_eff < MIN_EFFECTIVE_MASS {
                 warm_applied[k] = 0.0;
                 continue;
             }
@@ -290,7 +300,7 @@ fn prepare_manifold_state(
 ) -> Option<ManifoldState> {
     let (i, j) = (m.body_a.index(), m.body_b.index());
     let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
-    if total_inv < 1e-10 {
+    if total_inv < MIN_EFFECTIVE_MASS {
         return None;
     }
     let n = m.normal;
@@ -416,8 +426,9 @@ impl SequentialImpulseEngine {
 
         // GPU solve single-point contacts.
         let mut gpu_warm: WarmCache = FxHashMap::default();
-        if !single_si.is_empty() {
-            let gpu = self.gpu_solver.as_mut().unwrap();
+        if !single_si.is_empty()
+            && let Some(gpu) = self.gpu_solver.as_mut()
+        {
             let (batches, num_batches) =
                 pack_single_point_batches(&self.bodies, &global_states, manifolds, &single_si);
             if num_batches > 0 {
@@ -651,7 +662,7 @@ impl SequentialImpulseEngine {
             }
             // A still-sleeping body is static for the solver (its inv_mass is
             // zeroed at sleep), so sleeper+static pairs carry no work.
-            if self.bodies[i].inv_mass + self.bodies[j].inv_mass < 1e-10 {
+            if self.bodies[i].inv_mass + self.bodies[j].inv_mass < MIN_EFFECTIVE_MASS {
                 continue;
             }
             // Hit events (Gameplay, Box3D parity): the hardest-approaching
@@ -791,7 +802,7 @@ impl SequentialImpulseEngine {
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
             let k_eff = effective_mass(bodies, i, j, n, ra, rb);
-            if k_eff >= 1e-10 {
+            if k_eff >= MIN_EFFECTIVE_MASS {
                 let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
                 let vn = rel.dot(n);
                 // Inelastic contact: restitution is a separate one-shot stage
@@ -803,7 +814,7 @@ impl SequentialImpulseEngine {
                 let new_acc = contact_normal_step::eval(vn, st.target[k], 1.0 / k_eff, st.acc[k]);
                 let delta = new_acc - st.acc[k];
                 st.acc[k] = new_acc;
-                if delta.abs() > 1e-12 {
+                if delta.abs() > DEGENERATE_LEN2 {
                     apply_impulse(bodies, i, j, n * delta, ra, rb);
                 }
             }
@@ -845,7 +856,7 @@ impl SequentialImpulseEngine {
                     bodies[j].orientation,
                     rb_n,
                 ));
-            if k_eff < 1e-10 {
+            if k_eff < MIN_EFFECTIVE_MASS {
                 continue;
             }
             let vn = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
@@ -889,7 +900,7 @@ impl SequentialImpulseEngine {
                 for axis in 0..2 {
                     let t = if axis == 0 { st.t1 } else { st.t2 };
                     let k_t = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, t);
-                    if k_t < 1e-10 {
+                    if k_t < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let vt = rel.dot(t);
@@ -909,7 +920,7 @@ impl SequentialImpulseEngine {
                         st.acc_friction2[k] = new_t;
                     }
                 }
-                if f_imp.length_squared() > 1e-24 {
+                if f_imp.length_squared() > FRICTION_IMPULSE_DUST {
                     apply_impulse(bodies, i, j, f_imp, ra, rb);
                 }
             } else {
@@ -920,12 +931,12 @@ impl SequentialImpulseEngine {
                 // ellipse is the exact Coulomb generalization.
                 let k_t1 = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, st.t1);
                 let k_t2 = total_inv + tangent_effective_mass(bodies, i, j, ra, rb, st.t2);
-                let lam1 = if k_t1 >= 1e-10 {
+                let lam1 = if k_t1 >= MIN_EFFECTIVE_MASS {
                     -rel.dot(st.t1) / k_t1
                 } else {
                     0.0
                 };
-                let lam2 = if k_t2 >= 1e-10 {
+                let lam2 = if k_t2 >= MIN_EFFECTIVE_MASS {
                     -rel.dot(st.t2) / k_t2
                 } else {
                     0.0
@@ -943,7 +954,7 @@ impl SequentialImpulseEngine {
                 let r2 = if st.mu2 > 0.0 { u2 / st.mu2 } else { 0.0 };
                 let r_len = r1.hypot(r2);
                 let cap = st.acc[k];
-                if r_len > cap && r_len > 1e-12 {
+                if r_len > cap && r_len > DEGENERATE_LEN2 {
                     let s = cap / r_len;
                     u1 *= s;
                     u2 *= s;
@@ -952,7 +963,7 @@ impl SequentialImpulseEngine {
                 let f_imp = st.t1 * (u1 - st.acc_friction[k]) + st.t2 * (u2 - st.acc_friction2[k]);
                 st.acc_friction[k] = u1;
                 st.acc_friction2[k] = u2;
-                if f_imp.length_squared() > 1e-24 {
+                if f_imp.length_squared() > FRICTION_IMPULSE_DUST {
                     apply_impulse(bodies, i, j, f_imp, ra, rb);
                 }
             }
@@ -1030,7 +1041,7 @@ impl SequentialImpulseEngine {
             bodies[j].orientation,
             axis,
         ));
-        if k_rot < 1e-10 {
+        if k_rot < MIN_EFFECTIVE_MASS {
             return;
         }
         let cap = mu_axis * st.acc[k];
@@ -1097,7 +1108,7 @@ impl SequentialImpulseEngine {
                         + ra_n.dot(mul_inv_inertia(bodies[i].inertia, rot_a, ra_n))
                         + rb_n.dot(mul_inv_inertia(bodies[j].inertia, rot_b, rb_n));
                     let k_soft = make_soft(k_pos, cfm);
-                    if k_soft < 1e-10 {
+                    if k_soft < MIN_EFFECTIVE_MASS {
                         continue;
                     }
                     let lam = BETA_POS * c / k_soft;
@@ -1297,7 +1308,8 @@ impl SequentialImpulseEngine {
         let base_iters = self.velocity_iterations;
         let path = self.wide_solver;
         let total_manifolds: usize = shards_out.iter().map(|s| s.manifolds.len()).sum();
-        let mode = Dispatch::from(shards_out.len() >= 2 && total_manifolds >= 24);
+        let mode =
+            Dispatch::from(shards_out.len() >= 2 && total_manifolds >= PARALLEL_MIN_MANIFOLDS);
         let this = &*self;
         let warm_in = &this.warm_impulses;
         Self::dispatch_islands(shards_out, mode, |_, shard| {
@@ -1446,7 +1458,7 @@ impl SequentialImpulseEngine {
         let base_iters = self.position_iterations;
         let softness = self.contact_softness;
         let total_manifolds: usize = shards.iter().map(|s| s.manifolds.len()).sum();
-        let mode = Dispatch::from(shards.len() >= 2 && total_manifolds >= 24);
+        let mode = Dispatch::from(shards.len() >= 2 && total_manifolds >= PARALLEL_MIN_MANIFOLDS);
         let this = &*self;
         Self::dispatch_islands(shards, mode, |_, shard| {
             for st in shard.states.iter() {

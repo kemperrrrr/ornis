@@ -52,6 +52,20 @@ use std::hash::{Hash, Hasher};
 /// Matches the guaranteed WebGPU limit (`maxTextureDimension2D` floor), so an
 /// image passing validation is uploadable on every backend.
 pub const MAX_TEXTURE_EDGE: u32 = 8192;
+/// Bytes per RGBA8 texel.
+const RGBA8_BYTES: usize = 4;
+/// Scale from an 8-bit channel to unit float.
+const U8_TO_UNIT: f32 = 255.0;
+/// sRGB IEC 61966-2-1 linear/power junction (normalized channel).
+const SRGB_LINEAR_THRESHOLD: f32 = 0.04045;
+/// Reciprocal of the sRGB linear-segment slope.
+const SRGB_LINEAR_SLOPE: f32 = 12.92;
+/// sRGB power-segment offset (numerator).
+const SRGB_POWER_OFFSET: f32 = 0.055;
+/// sRGB power-segment scale (denominator).
+const SRGB_POWER_SCALE: f32 = 1.055;
+/// sRGB power-segment exponent.
+const SRGB_POWER_GAMMA: f32 = 2.4;
 
 /// Which material slot an uploaded image feeds.
 ///
@@ -123,7 +137,7 @@ impl CpuImage {
                 height: self.height,
             });
         }
-        let expected = self.width as u64 * self.height as u64 * 4;
+        let expected = self.width as u64 * self.height as u64 * RGBA8_BYTES as u64;
         if self.pixels.len() as u64 != expected {
             return Err(TextureUploadError::PixelLengthMismatch {
                 expected,
@@ -141,8 +155,8 @@ impl CpuImage {
         if x >= self.width || y >= self.height {
             return None;
         }
-        let offset = (y as usize * self.width as usize + x as usize) * 4;
-        let slice = self.pixels.get(offset..offset + 4)?;
+        let offset = (y as usize * self.width as usize + x as usize) * RGBA8_BYTES;
+        let slice = self.pixels.get(offset..offset + RGBA8_BYTES)?;
         Some([slice[0], slice[1], slice[2], slice[3]])
     }
 }
@@ -209,11 +223,11 @@ pub fn sampler_descriptor_for_role(role: TextureRole) -> wgpu::SamplerDescriptor
 /// `0.04045` junction the curve is linear (`c / 12.92`), above it is the
 /// `((c + 0.055) / 1.055) ^ 2.4` power. Pure CPU mirror for tests.
 pub fn srgb_channel_to_linear(byte: u8) -> f32 {
-    let c = f32::from(byte) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
+    let c = f32::from(byte) / U8_TO_UNIT;
+    if c <= SRGB_LINEAR_THRESHOLD {
+        c / SRGB_LINEAR_SLOPE
     } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+        ((c + SRGB_POWER_OFFSET) / SRGB_POWER_SCALE).powf(SRGB_POWER_GAMMA)
     }
 }
 
@@ -227,7 +241,7 @@ pub fn sample_albedo_linear(texel: [u8; 4]) -> [f32; 4] {
         srgb_channel_to_linear(texel[0]),
         srgb_channel_to_linear(texel[1]),
         srgb_channel_to_linear(texel[2]),
-        f32::from(texel[3]) / 255.0,
+        f32::from(texel[3]) / U8_TO_UNIT,
     ]
 }
 
@@ -237,7 +251,10 @@ pub fn sample_albedo_linear(texel: [u8; 4]) -> [f32; 4] {
 /// channels scale by `1/255` with no sRGB decode (red/alpha are ignored).
 /// Pure CPU mirror of texel-center `Nearest` sampling.
 pub fn sample_metallic_roughness(texel: [u8; 4]) -> (f32, f32) {
-    (f32::from(texel[1]) / 255.0, f32::from(texel[2]) / 255.0)
+    (
+        f32::from(texel[1]) / U8_TO_UNIT,
+        f32::from(texel[2]) / U8_TO_UNIT,
+    )
 }
 
 /// Deterministic content key of one upload (role + size + pixels).
@@ -311,7 +328,7 @@ pub fn upload_texture(
     });
     // `write_texture` rows must honor the 256-byte copy alignment; pad any
     // narrow image instead of restricting uploads to wide ones.
-    let unpadded_bytes_per_row = image.width as usize * 4;
+    let unpadded_bytes_per_row = image.width as usize * RGBA8_BYTES;
     let padded_bytes_per_row =
         unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
     let mut staging = vec![0u8; padded_bytes_per_row * image.height as usize];

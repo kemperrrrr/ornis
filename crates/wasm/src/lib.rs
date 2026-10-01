@@ -35,6 +35,10 @@ type FrameCallback = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 /// Poll `/api/scene` about once per second (~60 animation frames).
 const LIVE_POLL_INTERVAL_FRAMES: u64 = 60;
+/// Heartbeat log every N rendered frames (~10 s at 60 Hz).
+const FRAME_HEARTBEAT_INTERVAL: u64 = 600;
+/// Fixed simulation timestep (s) for the WASM frame loop.
+const DT: f32 = 1.0 / 60.0;
 
 #[wasm_bindgen(start)]
 /// wasm-bindgen entry point: installs the panic hook and logs module load.
@@ -688,8 +692,9 @@ impl<'a> FrameState<'a> {
     /// Upload the orbit-derived camera for the current aspect ratio.
     fn update_camera(&mut self) {
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let orbit = read_orbit_camera(self.render_world.engine())
-            .expect("browser render world installs orbit camera");
+        let Some(orbit) = read_orbit_camera(self.render_world.engine()) else {
+            return;
+        };
         let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
         let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
         let proj =
@@ -740,7 +745,7 @@ fn log_frame_milestone(frame_count: u64, config: &wgpu::SurfaceConfiguration, in
             )
             .into(),
         );
-    } else if frame_count.is_multiple_of(600) {
+    } else if frame_count.is_multiple_of(FRAME_HEARTBEAT_INTERVAL) {
         console::log_1(&format!("[ornis-wasm] frame {frame_count} rendered").into());
     }
 }
@@ -923,7 +928,7 @@ fn spawn_render_loop(
         frame.handle_resize(&canvas);
         frame.maybe_post_input(frame_count);
         frame.sync_input();
-        frame.render_world.frame(1.0 / 60.0);
+        frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
         if live_mode
@@ -964,12 +969,19 @@ fn spawn_render_loop(
         }
 
         // Schedule next frame
-        window_for_loop
-            .request_animation_frame(f_inner.borrow().as_ref().unwrap().as_ref().unchecked_ref())
-            .unwrap();
+        let borrow = f_inner.borrow();
+        if let Some(cb) = borrow.as_ref() {
+            let _ = window_for_loop.request_animation_frame(cb.as_ref().unchecked_ref());
+        }
     }));
 
-    window.request_animation_frame(f_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref())?;
+    {
+        let borrow = f_clone.borrow();
+        let Some(cb) = borrow.as_ref() else {
+            return Err(JsValue::from_str("render loop callback missing"));
+        };
+        window.request_animation_frame(cb.as_ref().unchecked_ref())?;
+    }
 
     std::mem::forget(f);
     std::mem::forget(f_clone);

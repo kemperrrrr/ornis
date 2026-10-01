@@ -9,12 +9,16 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 use ornis_render::{Bloom, RenderFrame3D, Technique};
 
+/// Full-HD layout resolution used for the S0 baseline numbers.
+const LAYOUT_WIDTH: u32 = 1920;
+const LAYOUT_HEIGHT: u32 = 1080;
+
 /// The three production wirings (bloom on — the heaviest variant):
 /// Forward 7 passes / Deferred 8 / Hybrid 9, 10–12 declared resources.
 fn make(technique: Technique) -> RenderFrame3D {
     RenderFrame3D::new_with(
         wgpu::TextureFormat::Rgba8Unorm,
-        (1920, 1080),
+        (LAYOUT_WIDTH, LAYOUT_HEIGHT),
         technique,
         Bloom::On,
     )

@@ -4,6 +4,7 @@
 use glam::{Quat, Vec3};
 
 use crate::body::RigidBody;
+use crate::constants::{CCD_TRAVEL_GATE_FRACTION, NEAR_ZERO, SHAPE_TOUCH};
 use crate::distance;
 use crate::flags::HitKind;
 use crate::math::{Ray, RaycastHit};
@@ -16,16 +17,28 @@ use super::*;
 /// Numerical zero for degenerate guards: denominators, lengths and polynomial
 /// coefficients at or below this magnitude are treated as exactly zero
 /// (singular solve, zero-length direction, repeated root).
-const DEGENERATE_EPS: f32 = 1e-12;
+const DEGENERATE_EPS: f32 = crate::constants::DEGENERATE_LEN2;
 
 /// Minimum meaningful segment length: shorter extents are treated as
 /// collapsed (no sweep direction, no bound worth keeping).
-const MIN_SEGMENT_LENGTH: f32 = 1e-9;
+const MIN_SEGMENT_LENGTH: f32 = NEAR_ZERO;
 
-/// Fraction of the thinnest feature that arms CCD: linear and angular
-/// sweeps shorter than this fraction of `shape_min_dimension` cannot
-/// defeat the discrete phase, so they skip the time-of-impact walk.
-const CCD_TRAVEL_GATE_FRACTION: f32 = 0.5;
+/// Edge-cross length floor for OBB SAT candidates (m): shorter means
+/// nearly parallel edges, so the axis is dropped.
+const PARALLEL_EDGE_EPS: f32 = 1e-3;
+/// Overlap / SAT margin for swept-shape discrete probes (m).
+const OVERLAP_EPS: f32 = 1e-5;
+/// Angular-CCD touch band (m): tighter than [`SHAPE_TOUCH`] so binary
+/// refine does not stop a hair short of the contact.
+const ANGULAR_CCD_TOUCH: f32 = 1e-5;
+/// Binary-search refine iterations inside the angular TOI bracket.
+const BINARY_REFINE_ITERS: usize = 10;
+/// Minimum fractional advance of the angular CA loop.
+const CA_FRACTION_EPS: f32 = 1e-4;
+/// Explicit BVH walk stack for mesh raycasts (same depth as distance).
+const BVH_STACK_CAP: usize = 64;
+/// Midpoint / half-span scale for CCD and heightfield grid math.
+const HALF: f32 = 0.5;
 
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
@@ -96,10 +109,10 @@ pub(crate) fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::Cone {
             radius,
             half_height,
-        } => 0.5 * radius.min(*half_height),
-        Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
-        Shape::Heightfield(hf) => 0.5 * hf.cell(),
-        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature(),
+        } => HALF * radius.min(*half_height),
+        Shape::ConvexHull(hull) => HALF * hull.min_extent(),
+        Shape::Heightfield(hf) => HALF * hf.cell(),
+        Shape::TriMesh(mesh) => HALF * mesh.min_feature(),
     }
 }
 
@@ -184,7 +197,7 @@ fn swept_shape_overlaps(
             target.pos,
             *half_b,
             target.rot,
-            1e-5,
+            OVERLAP_EPS,
         )
         .is_some(),
         _ => {
@@ -196,7 +209,7 @@ fn swept_shape_overlaps(
                 },
                 target,
             );
-            distance.dist <= 1e-5
+            distance.dist <= OVERLAP_EPS
         }
     }
 }
@@ -236,7 +249,7 @@ pub fn sweep_gap(
         for ai in &aa {
             for bi in &ba {
                 let c = ai.cross(*bi);
-                if c.length() < 1e-3 {
+                if c.length() < PARALLEL_EDGE_EPS {
                     continue;
                 }
                 let overlap = obb_overlap_on(
@@ -283,13 +296,12 @@ pub fn kinematic_cast(
         return None;
     }
     let dir = displacement / len;
-    const TOUCH: f32 = 1e-3;
     const MAX_ITERS: usize = 32;
     let mut t = 0.0f32;
     for _ in 0..MAX_ITERS {
         let pos = from + dir * t;
         let gap = sweep_gap(mover_shape, pos, mover_rot, target);
-        if gap <= TOUCH {
+        if gap <= SHAPE_TOUCH {
             if t > 0.0 {
                 // Witnesses at the touching pose: near-zero gap, so even the
                 // unsigned OBB oracle reads a valid contact frame here.
@@ -306,7 +318,7 @@ pub fn kinematic_cast(
             }
             return None;
         }
-        t += gap - TOUCH * 0.5;
+        t += gap - SHAPE_TOUCH * HALF;
         if t >= len {
             break;
         }
@@ -326,12 +338,12 @@ fn cap_spin_correction(omega: Vec3, inertia: Vec3, orientation: Quat, delta: Vec
     let wb = qb * omega;
     let db = qb * delta;
     let iw = inertia * wb;
-    let e_omega = 0.5 * iw.dot(wb);
-    let e_out = 0.5 * (inertia * (wb - db)).dot(wb - db);
+    let e_omega = HALF * iw.dot(wb);
+    let e_out = HALF * (inertia * (wb - db)).dot(wb - db);
     if e_out <= e_omega {
         return out;
     }
-    let e_d = 0.5 * (inertia * db).dot(db);
+    let e_d = HALF * (inertia * db).dot(db);
     if !e_d.is_finite() || e_d <= 0.0 {
         return omega;
     }
@@ -494,7 +506,6 @@ fn first_angular_overlap_fraction(
     if bound < MIN_SEGMENT_LENGTH {
         return None;
     }
-    const TOUCH: f32 = 1e-5;
     const MAX_ITERS: usize = 32;
     let mut f = 0.0f32;
     let mut prev_f = 0.0f32;
@@ -509,8 +520,8 @@ fn first_angular_overlap_fraction(
             // Binary refine the bracket [prev_f, f] for sub-sample precision.
             let mut low = prev_f;
             let mut high = f;
-            for _ in 0..10 {
-                let mid = (low + high) * 0.5;
+            for _ in 0..BINARY_REFINE_ITERS {
+                let mid = (low + high) * HALF;
                 if swept_shape_overlaps(body, target, displacement, sub_dt, mid) {
                     high = mid;
                 } else {
@@ -522,16 +533,16 @@ fn first_angular_overlap_fraction(
         let d = swept_distance(body, target, displacement, sub_dt, f);
         // `d.dist` is the exact surface gap (positive = separated). Advance
         // by at most the gap over the worst-case point speed.
-        let gap = d.dist - TOUCH * 0.5;
+        let gap = d.dist - ANGULAR_CCD_TOUCH * HALF;
         if gap <= 0.0 {
             // Numerically touching — treat as overlap at next fraction.
-            let next = (f + 1e-4).min(1.0);
+            let next = (f + CA_FRACTION_EPS).min(1.0);
             if swept_shape_overlaps(body, target, displacement, sub_dt, next) {
                 return Some(next);
             }
             break;
         }
-        let step = (gap / bound).clamp(1e-4, 1.0 - f);
+        let step = (gap / bound).clamp(CA_FRACTION_EPS, 1.0 - f);
         prev_f = f;
         f += step;
         if f <= prev_f {
@@ -1018,7 +1029,7 @@ fn ray_heightfield_hit(
         return None;
     }
     // Local grid coordinates (float cell indices).
-    let to_cell = |x: f32, n: usize| x / hf.cell + (n - 1) as f32 * 0.5;
+    let to_cell = |x: f32, n: usize| x / hf.cell + (n - 1) as f32 * HALF;
     let mut cx = to_cell(origin.x, hf.cols).floor() as isize;
     let mut cz = to_cell(origin.z, hf.rows).floor() as isize;
     let step_x = if direction.x > 0.0 {
@@ -1036,8 +1047,8 @@ fn ray_heightfield_hit(
         0
     };
     // Parametric distance to the next cell boundary per axis.
-    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
-    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let x_origin = -((hf.cols - 1) as f32) * HALF * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * HALF * hf.cell;
     let mut t_max_x = if step_x == 0 {
         f32::INFINITY
     } else {
@@ -1062,7 +1073,9 @@ fn ray_heightfield_hit(
     };
     let (y_min, _) = hf.height_range();
     // Bounded walk: at most one full grid diagonal plus margin.
-    let max_steps = 4 * (hf.rows + hf.cols) + 8;
+    const HF_WALK_DIAG_MUL: usize = 4;
+    const HF_WALK_MARGIN: usize = 8;
+    let max_steps = HF_WALK_DIAG_MUL * (hf.rows + hf.cols) + HF_WALK_MARGIN;
     let mut best: Option<(f32, Vec3)> = None;
     // Degenerate ray (straight down the Y axis): a single cell owns the
     // whole walk — test it and return.
@@ -1135,7 +1148,7 @@ fn ray_trimesh_hit(
     }
     let mut best: Option<(f32, Vec3)> = None;
     let mut limit = max_dist;
-    let mut stack = [0u32; 64];
+    let mut stack = [0u32; BVH_STACK_CAP];
     let mut len = 1usize;
     while len > 0 {
         len -= 1;
@@ -1167,7 +1180,7 @@ fn ray_trimesh_hit(
                 }
             }
         } else if let Some((left, right)) = node.link.children() {
-            if len + 2 > 64 {
+            if len + 2 > BVH_STACK_CAP {
                 break; // Depth guard: keep the best hit so far.
             }
             // Near-first order is irrelevant for correctness (best-tracked

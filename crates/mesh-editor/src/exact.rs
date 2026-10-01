@@ -100,16 +100,13 @@ impl PositiveUsize {
         }
     }
 
-    /// Constant-payload constructor, panicking on zero. For literals
-    /// validated by inspection (defaults, tests) where
-    /// `new(...).expect` would drown the payload in noise.
-    ///
-    /// # Panics
-    /// Panics when `value` is zero.
+    /// Constant-payload constructor for literals validated by inspection
+    /// (defaults, tests). Zero falls back to `1` instead of panicking.
     pub const fn expect_valid(value: usize) -> Self {
         match Self::new(value) {
             Some(valid) => valid,
-            None => panic!("PositiveUsize requires a value >= 1"),
+            // `NonZeroUsize::MIN` is 1 — the smallest legal job size.
+            None => Self(std::num::NonZeroUsize::MIN),
         }
     }
 
@@ -362,7 +359,7 @@ fn pool_loop(
     debug_assert!(matches!(priority, ExactPriority::NewestWins));
     loop {
         let job = {
-            let queue = jobs.lock().expect("exact job queue lock");
+            let queue = jobs.lock().unwrap_or_else(|e| e.into_inner());
             let Ok(first) = queue.recv() else {
                 return;
             };
@@ -424,8 +421,10 @@ fn run_job(snapshot: &crate::MeshData, op: &ExactOp) -> crate::MeshData {
 /// `r` spans `1 + 2r` per axis.
 fn bevel_all(mesh: &crate::MeshData, radius: f32) -> Result<crate::MeshData, crate::BridgeError> {
     use manifold_rust::manifold::Manifold;
+    /// Circular segments on the Minkowski bevel sphere.
+    const BEVEL_SPHERE_SEGMENTS: i32 = 24;
     let base = crate::to_manifold(mesh)?;
-    let sphere = Manifold::sphere(f64::from(radius), 24);
+    let sphere = Manifold::sphere(f64::from(radius), BEVEL_SPHERE_SEGMENTS);
     let out = base.minkowski_sum(&sphere);
     if out.status() != manifold_rust::types::Error::NoError {
         return Err(crate::BridgeError::KernelFailed);

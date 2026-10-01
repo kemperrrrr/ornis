@@ -17,8 +17,54 @@
 
 use glam::{Quat, Vec2, Vec3};
 
+use crate::constants::{COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZERO, TET_VOLUME_DIVISOR};
 use crate::errors::MeshError;
 use crate::math::AABB;
+
+// ---- Analytic inertia coefficients (standard rigid-body formulas) ----
+
+/// Solid-sphere inertia factor about a diameter: `I = (2/5) m r²`.
+const SPHERE_INERTIA_FACTOR: f32 = 0.4;
+/// Uniform box inertia divisor: `I_xx = m/12 · (y² + z²)` on full side lengths.
+const BOX_INERTIA_DIVISOR: f32 = 12.0;
+/// Thin-disk / solid-cylinder inertia about the symmetry axis: `½ m r²`.
+const DISK_AXIS_INERTIA: f32 = 0.5;
+/// Midpoint / half-span scale used by heightfield grid math.
+const HALF: f32 = 0.5;
+/// Capsule transverse disk term: `¼ m r²`.
+const CAPSULE_DISK_TRANSVERSE: f32 = 0.25;
+/// Capsule stem coupling in the transverse inertia: `(m/3) · h · r`.
+const CAPSULE_STEM_FACTOR: f32 = 3.0;
+/// Solid cone inertia about the symmetry axis: `(3/10) m r²`.
+const CONE_AXIS_INERTIA: f32 = 0.3;
+/// Cone transverse inertia divisor in `m (3r² + 8h²) / 20`.
+const CONE_TRANSVERSE_DIVISOR: f32 = 20.0;
+/// Cone transverse `r²` coefficient inside that numerator.
+const CONE_TRANSVERSE_R2: f32 = 3.0;
+/// Cone transverse `h²` coefficient inside that numerator.
+const CONE_TRANSVERSE_H2: f32 = 8.0;
+/// Cylinder transverse `r²` coefficient in `m (3r² + 4h²) / 12`.
+const CYLINDER_TRANSVERSE_R2: f32 = 3.0;
+/// Cylinder transverse `h²` coefficient in `m (3r² + 4h²) / 12`.
+const CYLINDER_TRANSVERSE_H2: f32 = 4.0;
+
+/// Mirtich second-moment factor over an origin-based tet: `∫x² = V/10 · (…)`.
+const TET_SECOND_MOMENT_DIVISOR: f32 = 10.0;
+
+/// Vertices per triangle (index validation / centroid average).
+const TRI_VERTS: usize = 3;
+/// Minimum vertices for a usable convex hull (a tetrahedron).
+const MIN_HULL_VERTS: usize = 4;
+/// Corners of an AABB/OBB.
+const BOX_CORNERS: usize = 8;
+/// AABB-corner bit selecting the max endpoint on X / Y / Z.
+const AABB_BIT_X: usize = 4;
+const AABB_BIT_Y: usize = 2;
+const AABB_BIT_Z: usize = 1;
+/// Heightfield column treated as flat when height span is below this (m).
+const HEIGHTFIELD_FLAT_EPS: f32 = 1e-4;
+/// Floor for heightfield cell size when building a skirt (m).
+const HEIGHTFIELD_MIN_CELL: f32 = 1e-3;
 
 /// Convex collision primitives supported by the sequential-impulse engine.
 ///
@@ -134,17 +180,13 @@ impl Triangle {
         [self.0.0, self.1.0, self.2.0]
     }
 
-    /// `i`-th corner (`0..3`) as a vertex index.
-    ///
-    /// # Panics
-    ///
-    /// Panics on `i >= 3` (same contract as array indexing).
+    /// `i`-th corner (`0..3`) as a vertex index. Out-of-range indices
+    /// clamp to the last corner (same bit pattern as a saturated read).
     pub const fn index(self, i: usize) -> TriIndex {
         match i {
             0 => self.0,
             1 => self.1,
-            2 => self.2,
-            _ => panic!("triangle corner out of range"),
+            _ => self.2,
         }
     }
 }
@@ -474,7 +516,7 @@ impl Shape {
                 if !radius.is_finite() || *radius <= 0.0 || !mass.is_finite() || mass <= 0.0 {
                     return Err(MeshError::DegenerateMesh);
                 }
-                Ok(Vec3::splat(0.4 * mass * radius * radius))
+                Ok(Vec3::splat(SPHERE_INERTIA_FACTOR * mass * radius * radius))
             }
             _ => self
                 .convex_try_inertia(mass)
@@ -497,9 +539,9 @@ impl Shape {
                 let sides = *half_extents * 2.0;
                 let (x, y, z) = (right2(sides.x), right2(sides.y), right2(sides.z));
                 Vec3::new(
-                    (mass / 12.0) * (y + z),
-                    (mass / 12.0) * (z + x),
-                    (mass / 12.0) * (x + y),
+                    (mass / BOX_INERTIA_DIVISOR) * (y + z),
+                    (mass / BOX_INERTIA_DIVISOR) * (z + x),
+                    (mass / BOX_INERTIA_DIVISOR) * (x + y),
                 )
             }
             Shape::Capsule {
@@ -510,8 +552,10 @@ impl Shape {
                     return Err(MeshError::DegenerateMesh);
                 }
                 let (h, r) = (half_height, radius);
-                let i_y = 0.5 * mass * r * r;
-                let i_xz = 0.25 * mass * (r * r) + (mass / 3.0) * h * r + 0.25 * mass * h * h;
+                let i_y = DISK_AXIS_INERTIA * mass * r * r;
+                let i_xz = CAPSULE_DISK_TRANSVERSE * mass * (r * r)
+                    + (mass / CAPSULE_STEM_FACTOR) * h * r
+                    + CAPSULE_DISK_TRANSVERSE * mass * h * h;
                 Vec3::new(i_xz, i_y, i_xz)
             }
             Shape::Cylinder {
@@ -522,8 +566,9 @@ impl Shape {
                     return Err(MeshError::DegenerateMesh);
                 }
                 let (r, h) = (radius, half_height);
-                let i_y = 0.5 * mass * r * r;
-                let i_xz = mass * (3.0 * r * r + 4.0 * h * h) / 12.0;
+                let i_y = DISK_AXIS_INERTIA * mass * r * r;
+                let i_xz = mass * (CYLINDER_TRANSVERSE_R2 * r * r + CYLINDER_TRANSVERSE_H2 * h * h)
+                    / BOX_INERTIA_DIVISOR;
                 Vec3::new(i_xz, i_y, i_xz)
             }
             Shape::Cone {
@@ -534,8 +579,9 @@ impl Shape {
                     return Err(MeshError::DegenerateMesh);
                 }
                 let (r, h) = (radius, half_height);
-                let i_y = 0.3 * mass * r * r;
-                let i_xz = mass * (3.0 * r * r + 8.0 * h * h) / 20.0;
+                let i_y = CONE_AXIS_INERTIA * mass * r * r;
+                let i_xz = mass * (CONE_TRANSVERSE_R2 * r * r + CONE_TRANSVERSE_H2 * h * h)
+                    / CONE_TRANSVERSE_DIVISOR;
                 Vec3::new(i_xz, i_y, i_xz)
             }
             _ => return Err(MeshError::DegenerateMesh),
@@ -674,7 +720,7 @@ impl Shape {
 /// queries, nearest-face projection for interior ones.
 fn closest_box_point(half_extents: Vec3, p: Vec3) -> Vec3 {
     let c = p.clamp(-half_extents, half_extents);
-    if (c - p).length_squared() > 1e-18 {
+    if (c - p).length_squared() > COINCIDENT_LEN2 {
         return c; // Exterior: the clamp is the surface point.
     }
     // Interior: snap to the nearest face (deterministic x, then y, then z
@@ -696,7 +742,7 @@ fn closest_cylinder_point(radius: f32, half_height: f32, p: Vec3) -> Vec3 {
     let radial = Vec2::new(p.x, p.z);
     let len = radial.length();
     // Wall candidate: clamp height, snap the radius.
-    let wall = if len > 1e-9 {
+    let wall = if len > NEAR_ZERO {
         Vec3::new(
             radial.x / len * radius,
             p.y.clamp(-half_height, half_height),
@@ -707,7 +753,7 @@ fn closest_cylinder_point(radius: f32, half_height: f32, p: Vec3) -> Vec3 {
     };
     // Cap candidates: clamp the radius at each cap plane.
     let cap = |y: f32| {
-        let s = if len > 1e-9 {
+        let s = if len > NEAR_ZERO {
             (radius / len).min(1.0)
         } else {
             0.0
@@ -730,7 +776,7 @@ fn closest_cylinder_point(radius: f32, half_height: f32, p: Vec3) -> Vec3 {
 /// Closest point on a solid cone (local frame: apex `+half_height`, base
 /// disk at `-half_height`). Nearest of wall/base/apex candidates.
 fn closest_cone_point(radius: f32, half_height: f32, p: Vec3) -> Vec3 {
-    if half_height <= 1e-9 {
+    if half_height <= NEAR_ZERO {
         return Vec3::new(p.x.clamp(-radius, radius), 0.0, p.z.clamp(-radius, radius));
     }
     let radial = Vec2::new(p.x, p.z);
@@ -738,14 +784,14 @@ fn closest_cone_point(radius: f32, half_height: f32, p: Vec3) -> Vec3 {
     let y_c = p.y.clamp(-half_height, half_height);
     // Wall radius at the clamped height: r * (h - y) / (2h).
     let r_at = radius * (half_height - y_c) / (2.0 * half_height);
-    let wall = if len > 1e-9 {
+    let wall = if len > NEAR_ZERO {
         Vec3::new(radial.x / len * r_at, y_c, radial.y / len * r_at)
     } else {
         // On the axis: the wall circle is equidistant — pick +X
         // deterministically.
         Vec3::new(r_at, y_c, 0.0)
     };
-    let s = if len > 1e-9 {
+    let s = if len > NEAR_ZERO {
         (radius / len).min(1.0)
     } else {
         0.0
@@ -799,19 +845,19 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
     if hf.rows == 0 || hf.cols == 0 || !hf.cell.is_sign_positive() || hf.heights.is_empty() {
         return p;
     }
-    let col = ((p.x / hf.cell + (hf.cols - 1) as f32 * 0.5).floor() as isize)
+    let col = ((p.x / hf.cell + (hf.cols - 1) as f32 * HALF).floor() as isize)
         .clamp(0, hf.cols as isize - 1) as usize;
-    let row = ((p.z / hf.cell + (hf.rows - 1) as f32 * 0.5).floor() as isize)
+    let row = ((p.z / hf.cell + (hf.rows - 1) as f32 * HALF).floor() as isize)
         .clamp(0, hf.rows as isize - 1) as usize;
     let h = hf.heights[row * hf.cols + col];
     let (y_min, _) = hf.height_range();
-    let y_low = if h - y_min >= 1e-4 {
+    let y_low = if h - y_min >= HEIGHTFIELD_FLAT_EPS {
         y_min
     } else {
-        h - hf.cell.max(1e-3)
+        h - hf.cell.max(HEIGHTFIELD_MIN_CELL)
     };
-    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
-    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let x_origin = -((hf.cols - 1) as f32) * HALF * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * HALF * hf.cell;
     let c = Vec3::new(
         p.x.clamp(
             x_origin + col as f32 * hf.cell,
@@ -823,7 +869,7 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
             z_origin + (row + 1) as f32 * hf.cell,
         ),
     );
-    if (c - p).length_squared() > 1e-18 {
+    if (c - p).length_squared() > COINCIDENT_LEN2 {
         return c; // Exterior: the clamp is the surface point.
     }
     // Interior: nearest-face projection of the column box (same rule as
@@ -839,8 +885,8 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
         y_low.max(h),
         z_origin + (row + 1) as f32 * hf.cell,
     );
-    let mid = (lo + hi) * 0.5;
-    let half = (hi - lo) * 0.5;
+    let mid = (lo + hi) * HALF;
+    let half = (hi - lo) * HALF;
     let q = p - mid;
     let dx = half.x - q.x.abs();
     let dy = half.y - q.y.abs();
@@ -893,7 +939,7 @@ impl ConvexHull {
                 vertices.push(p);
             }
         }
-        let faces = if vertices.len() >= 4 && vertices.len() <= Self::FACE_CAP {
+        let faces = if vertices.len() >= MIN_HULL_VERTS && vertices.len() <= Self::FACE_CAP {
             Self::triangulate(&vertices)
         } else {
             Vec::new()
@@ -919,7 +965,7 @@ impl ConvexHull {
                         continue;
                     }
                     let normal = (vertices[j] - vertices[i]).cross(vertices[k] - vertices[i]);
-                    if normal.length_squared() < 1e-12 {
+                    if normal.length_squared() < DEGENERATE_LEN2 {
                         continue; // Collinear triple, no plane.
                     }
                     let mut outside = false;
@@ -1007,18 +1053,18 @@ impl ConvexHull {
                 self.vertices[f.1.index()],
                 self.vertices[f.2.index()],
             );
-            let v = a.dot(b.cross(c)) / 6.0;
+            let v = a.dot(b.cross(c)) / TET_VOLUME_DIVISOR;
             vol += v;
             // ∫x² over tet (origin,a,b,c) = v/10 * (xa²+xb²+xc²+xa·xb+...);
             // diagonal-only accumulation:
-            exx +=
-                v / 10.0 * (a.x * a.x + b.x * b.x + c.x * c.x + a.x * b.x + b.x * c.x + c.x * a.x);
-            eyy +=
-                v / 10.0 * (a.y * a.y + b.y * b.y + c.y * c.y + a.y * b.y + b.y * c.y + c.y * a.y);
-            ezz +=
-                v / 10.0 * (a.z * a.z + b.z * b.z + c.z * c.z + a.z * b.z + b.z * c.z + c.z * a.z);
+            exx += v / TET_SECOND_MOMENT_DIVISOR
+                * (a.x * a.x + b.x * b.x + c.x * c.x + a.x * b.x + b.x * c.x + c.x * a.x);
+            eyy += v / TET_SECOND_MOMENT_DIVISOR
+                * (a.y * a.y + b.y * b.y + c.y * c.y + a.y * b.y + b.y * c.y + c.y * a.y);
+            ezz += v / TET_SECOND_MOMENT_DIVISOR
+                * (a.z * a.z + b.z * b.z + c.z * c.z + a.z * b.z + b.z * c.z + c.z * a.z);
         }
-        if vol.abs() < 1e-9 {
+        if vol.abs() < NEAR_ZERO {
             return Err(MeshError::DegenerateMesh);
         }
         let density = mass / vol.abs();
@@ -1126,8 +1172,8 @@ impl Heightfield {
         if self.heights.len() != self.rows * self.cols || self.rows == 0 || self.cols == 0 {
             return 0.0;
         }
-        let fx = (x / self.cell + (self.cols - 1) as f32 * 0.5).clamp(0.0, (self.cols - 1) as f32);
-        let fz = (z / self.cell + (self.rows - 1) as f32 * 0.5).clamp(0.0, (self.rows - 1) as f32);
+        let fx = (x / self.cell + (self.cols - 1) as f32 * HALF).clamp(0.0, (self.cols - 1) as f32);
+        let fz = (z / self.cell + (self.rows - 1) as f32 * HALF).clamp(0.0, (self.rows - 1) as f32);
         let x0 = (fx as usize).min(self.cols - 1);
         let z0 = (fz as usize).min(self.rows - 1);
         let x1 = (x0 + 1).min(self.cols - 1);
@@ -1164,16 +1210,16 @@ impl Heightfield {
     pub fn local_extents(&self) -> Vec3 {
         let (lo, hi) = self.height_range();
         Vec3::new(
-            (self.cols.max(1) - 1) as f32 * 0.5 * self.cell,
-            ((hi - lo) * 0.5).max(0.0),
-            (self.rows.max(1) - 1) as f32 * 0.5 * self.cell,
+            (self.cols.max(1) - 1) as f32 * HALF * self.cell,
+            ((hi - lo) * HALF).max(0.0),
+            (self.rows.max(1) - 1) as f32 * HALF * self.cell,
         )
     }
 
     /// Local bounding center (x/z centered, y at mid-range).
     pub fn local_center(&self) -> Vec3 {
         let (lo, hi) = self.height_range();
-        Vec3::new(0.0, (lo + hi) * 0.5, 0.0)
+        Vec3::new(0.0, (lo + hi) * HALF, 0.0)
     }
 
     /// Typed cell-spacing entry point: same checks as [`Heightfield::new`]
@@ -1257,7 +1303,7 @@ impl TriMesh {
                         vertices: vertices.len(),
                     })?,
             ];
-            if (v[1] - v[0]).cross(v[2] - v[0]).length_squared() < 1e-12 {
+            if (v[1] - v[0]).cross(v[2] - v[0]).length_squared() < DEGENERATE_LEN2 {
                 continue; // Degenerate: zero-area sliver, no collision value.
             }
             for (a, b) in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
@@ -1268,15 +1314,17 @@ impl TriMesh {
                 local_max = local_max.max(p);
                 bound_radius = bound_radius.max(p.length());
             }
-            let c = (v[0] + v[1] + v[2]) / 3.0;
+            let c = (v[0] + v[1] + v[2]) / TRI_VERTS as f32;
             centroids.push(c);
             // `from_vertices` only triangulates 4+ vertices, so a lone
             // triangle would get no faces (dead raycast, centroid-fallback
             // closest point). Set both windings explicitly: raycasts flip
             // the normal toward the ray and closest-point is winding-free.
-            // Vertices are validated finite above, so this cannot fail.
-            let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
-                .expect("validated finite triangle vertices");
+            // Vertices are validated finite above; skip if hull construction
+            // still rejects the triple (defensive — should not happen).
+            let Ok(mut hull) = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c]) else {
+                continue;
+            };
             hull.faces = vec![Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 2, 1])];
             tris.push(Shape::ConvexHull(hull));
         }
@@ -1310,11 +1358,11 @@ impl TriMesh {
     /// plus the [`TriMesh::from_triangles`] errors for dangling or
     /// non-finite input.
     pub fn from_indexed(vertices: &[Vec3], indices: &[u32]) -> Result<Self, MeshError> {
-        if !indices.len().is_multiple_of(3) {
+        if !indices.len().is_multiple_of(TRI_VERTS) {
             return Err(MeshError::BadIndexCount { len: indices.len() });
         }
         let triangles: Vec<Triangle> = indices
-            .chunks_exact(3)
+            .chunks_exact(TRI_VERTS)
             .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
             .collect();
         Self::from_triangles(vertices, &triangles)
@@ -1464,19 +1512,19 @@ impl TriMesh {
     pub fn aabb(&self, position: Vec3, orientation: Quat) -> AABB {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
-        for i in 0..8 {
+        for i in 0..BOX_CORNERS {
             let corner = Vec3::new(
-                if i & 4 == 0 {
+                if i & AABB_BIT_X == 0 {
                     self.local_min.x
                 } else {
                     self.local_max.x
                 },
-                if i & 2 == 0 {
+                if i & AABB_BIT_Y == 0 {
                     self.local_min.y
                 } else {
                     self.local_max.y
                 },
-                if i & 1 == 0 {
+                if i & AABB_BIT_Z == 0 {
                     self.local_min.z
                 } else {
                     self.local_max.z
@@ -1523,7 +1571,7 @@ impl TriMesh {
             let Shape::ConvexHull(hull) = tri else {
                 continue;
             };
-            if hull.vertices.len() < 3 {
+            if hull.vertices.len() < TRI_VERTS {
                 continue;
             }
             // Mesh-frame triangle = centroid-relative verts + centroid.
@@ -1532,16 +1580,16 @@ impl TriMesh {
                 hull.vertices[1] + *c,
                 hull.vertices[2] + *c,
             );
-            let v = a.dot(b.cross(cc)) / 6.0;
+            let v = a.dot(b.cross(cc)) / TET_VOLUME_DIVISOR;
             vol += v;
-            exx += v / 10.0
+            exx += v / TET_SECOND_MOMENT_DIVISOR
                 * (a.x * a.x + b.x * b.x + cc.x * cc.x + a.x * b.x + b.x * cc.x + cc.x * a.x);
-            eyy += v / 10.0
+            eyy += v / TET_SECOND_MOMENT_DIVISOR
                 * (a.y * a.y + b.y * b.y + cc.y * cc.y + a.y * b.y + b.y * cc.y + cc.y * a.y);
-            ezz += v / 10.0
+            ezz += v / TET_SECOND_MOMENT_DIVISOR
                 * (a.z * a.z + b.z * b.z + cc.z * cc.z + a.z * b.z + b.z * cc.z + cc.z * a.z);
         }
-        if vol.abs() < 1e-9 {
+        if vol.abs() < NEAR_ZERO {
             return Err(MeshError::DegenerateMesh);
         }
         let density = mass / vol.abs();
@@ -1555,7 +1603,7 @@ impl TriMesh {
     /// Bounding-box inertia fallback (degenerate/empty soup).
     fn fallback_inertia(&self, mass: f32) -> Vec3 {
         Shape::Box {
-            half_extents: ((self.local_max - self.local_min) * 0.5).max(Vec3::ZERO),
+            half_extents: ((self.local_max - self.local_min) * HALF).max(Vec3::ZERO),
         }
         .inertia(mass)
     }
@@ -1596,17 +1644,20 @@ impl TriMesh {
 mod tests {
     use super::*;
 
+    /// Half-extent of the unit cube used by mesh tests.
+    const HALF: f32 = 0.5;
+
     /// Unit-cube mesh (outward wound, edge 1): shared by mesh tests.
     fn cube_mesh() -> TriMesh {
         let v = [
-            Vec3::new(-0.5, -0.5, -0.5),
-            Vec3::new(0.5, -0.5, -0.5),
-            Vec3::new(-0.5, 0.5, -0.5),
-            Vec3::new(0.5, 0.5, -0.5),
-            Vec3::new(-0.5, -0.5, 0.5),
-            Vec3::new(0.5, -0.5, 0.5),
-            Vec3::new(-0.5, 0.5, 0.5),
-            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-HALF, -HALF, -HALF),
+            Vec3::new(HALF, -HALF, -HALF),
+            Vec3::new(-HALF, HALF, -HALF),
+            Vec3::new(HALF, HALF, -HALF),
+            Vec3::new(-HALF, -HALF, HALF),
+            Vec3::new(HALF, -HALF, HALF),
+            Vec3::new(-HALF, HALF, HALF),
+            Vec3::new(HALF, HALF, HALF),
         ];
         let raw = [
             [0, 3, 1],
@@ -1633,10 +1684,10 @@ mod tests {
         assert_eq!(mesh.order.len(), 12);
         assert!(!mesh.nodes.is_empty());
         // Root bounds cover the cube.
-        assert_vec3_close(mesh.nodes[0].min, Vec3::splat(-0.5));
-        assert_vec3_close(mesh.nodes[0].max, Vec3::splat(0.5));
-        assert_vec3_close(mesh.local_min, Vec3::splat(-0.5));
-        assert_vec3_close(mesh.local_max, Vec3::splat(0.5));
+        assert_vec3_close(mesh.nodes[0].min, Vec3::splat(-HALF));
+        assert_vec3_close(mesh.nodes[0].max, Vec3::splat(HALF));
+        assert_vec3_close(mesh.local_min, Vec3::splat(-HALF));
+        assert_vec3_close(mesh.local_max, Vec3::splat(HALF));
         // Support radius = half space diagonal; min feature = edge.
         assert!(
             (mesh.bound_radius - 0.8660254).abs() < 1e-5,
@@ -1849,13 +1900,13 @@ mod tests {
     #[test]
     fn capsule_aabb_extends_along_local_y_plus_radius() {
         let shape = Shape::Capsule {
-            radius: 0.5,
+            radius: HALF,
             half_height: 2.0,
         };
         let aabb = shape.aabb(Vec3::ZERO, Quat::IDENTITY);
         // Along Y: half_height + radius. On X/Z: just the radius shell.
-        assert_vec3_close(aabb.min, Vec3::new(-0.5, -2.5, -0.5));
-        assert_vec3_close(aabb.max, Vec3::new(0.5, 2.5, 0.5));
+        assert_vec3_close(aabb.min, Vec3::new(-HALF, -2.5, -HALF));
+        assert_vec3_close(aabb.max, Vec3::new(HALF, 2.5, HALF));
     }
 
     #[test]
@@ -1866,21 +1917,21 @@ mod tests {
         // explicitly: an empty soup is an empty mesh (no contact), never a
         // fallback sphere.
         for shape in [
-            Shape::Sphere { radius: 0.5 },
+            Shape::Sphere { radius: HALF },
             Shape::Box {
-                half_extents: Vec3::splat(0.5),
+                half_extents: Vec3::splat(HALF),
             },
             Shape::Capsule {
                 radius: 0.3,
-                half_height: 0.5,
+                half_height: HALF,
             },
             Shape::Cylinder {
                 radius: 0.3,
-                half_height: 0.5,
+                half_height: HALF,
             },
             Shape::Cone {
                 radius: 0.3,
-                half_height: 0.5,
+                half_height: HALF,
             },
             Shape::ConvexHull(
                 ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z])
@@ -1908,21 +1959,21 @@ mod tests {
     #[test]
     fn pair_support_lists_supported_pairs_and_marks_undefined() {
         use super::PairSupport;
-        let sphere = Shape::Sphere { radius: 0.5 };
+        let sphere = Shape::Sphere { radius: HALF };
         let boxed = Shape::Box {
-            half_extents: Vec3::splat(0.5),
+            half_extents: Vec3::splat(HALF),
         };
         let capsule = Shape::Capsule {
             radius: 0.3,
-            half_height: 0.5,
+            half_height: HALF,
         };
         let cylinder = Shape::Cylinder {
             radius: 0.3,
-            half_height: 0.5,
+            half_height: HALF,
         };
         let cone = Shape::Cone {
             radius: 0.3,
-            half_height: 0.5,
+            half_height: HALF,
         };
         let hull = Shape::ConvexHull(
             ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z])

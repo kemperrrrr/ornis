@@ -118,7 +118,7 @@ pub fn read_orbit_camera(engine: &Engine) -> Option<OrbitCamera> {
         .world()
         .resources()
         .get::<Mutex<OrbitCamera>>()
-        .map(|camera| camera.lock().expect("orbit camera lock").clone())
+        .map(|camera| camera.lock().unwrap_or_else(|e| e.into_inner()).clone())
 }
 
 /// Once-per-frame system that applies the backend-neutral input snapshot to
@@ -143,7 +143,10 @@ impl System for OrbitCameraSystem {
         let Some(camera) = resources.get::<Mutex<OrbitCamera>>() else {
             return;
         };
-        camera.lock().expect("orbit camera lock").apply_input(input);
+        camera
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .apply_input(input);
     }
 }
 
@@ -182,10 +185,12 @@ pub struct Frustum {
 impl Frustum {
     /// Extracts the six planes from `view_proj` and normalizes them.
     pub fn from_view_proj(view_proj: &Mat4) -> Self {
+        /// Homogeneous (clip-w) row of a 4×4 view-projection matrix.
+        const CLIP_W_ROW: usize = 3;
         let r0 = view_proj.row(0);
         let r1 = view_proj.row(1);
         let r2 = view_proj.row(2);
-        let r3 = view_proj.row(3);
+        let r3 = view_proj.row(CLIP_W_ROW);
         Self {
             planes: [
                 r3 + r0, // left
@@ -197,7 +202,9 @@ impl Frustum {
             ]
             .map(|p| {
                 let len = p.truncate().length();
-                if len.is_finite() && len > 1e-12 {
+                /// Squared-length floor for a usable frustum-plane normal.
+                const PLANE_NORMAL_EPS: f32 = 1e-12;
+                if len.is_finite() && len > PLANE_NORMAL_EPS {
                     p / len
                 } else {
                     // Degenerate: mark with a NaN normal so the query

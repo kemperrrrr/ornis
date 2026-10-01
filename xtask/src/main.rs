@@ -15,7 +15,7 @@
 mod e2e;
 mod quality;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 fn main() {
@@ -87,7 +87,9 @@ fn install_hooks() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(
+        /// Executable bit for the installed pre-push hook (`rwxr-xr-x`).
+        const HOOK_MODE: u32 = 0o755;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(HOOK_MODE)).unwrap_or_else(
             |e| {
                 eprintln!("xtask: cannot chmod hook: {e}");
                 exit(1);
@@ -101,14 +103,18 @@ fn workspace_root() -> PathBuf {
     // xtask/Cargo.toml lives one level below the workspace root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask has a parent directory")
-        .to_path_buf()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn run(cmd: &mut Command, what: &str) {
-    let status = cmd
-        .status()
-        .unwrap_or_else(|e| panic!("xtask: failed to spawn {what}: {e}"));
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("xtask: failed to spawn {what}: {e}");
+            exit(1);
+        }
+    };
     if !status.success() {
         eprintln!("xtask: {what} failed with {status}");
         exit(status.code().unwrap_or(1));

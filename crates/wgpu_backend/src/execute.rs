@@ -57,7 +57,9 @@ impl ExecuteLane for GpuExecutor {
         label: &str,
     ) {
         if let (Some(pipeline), Some(bg)) = (pipeline, bind_group) {
-            let wgc = (element_count as u32).div_ceil(64);
+            /// Default compute workgroup size for GPU lane dispatch.
+            const WORKGROUP_SIZE: u32 = 64;
+            let wgc = (element_count as u32).div_ceil(WORKGROUP_SIZE);
             sync.dispatch_gpu(pipeline, bg, (wgc, 1, 1), label);
         }
     }

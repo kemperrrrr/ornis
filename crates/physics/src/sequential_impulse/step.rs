@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{BodyType, RigidBody};
 use crate::broadphase::PrevPose;
+use crate::constants::{CCD_TRAVEL_GATE_FRACTION, NEAR_ZERO, POS_CORRECTION_EPS, SHAPE_TOUCH};
 use crate::distance;
 use crate::engine::Manifold;
 
@@ -248,11 +249,17 @@ impl SequentialImpulseEngine {
         base_iters: u32,
     ) -> u32 {
         const MIN_SUBSTEPS: u32 = 4;
+        /// Above this base-iter budget, resting islands keep 2 velocity iters.
+        const ADAPTIVE_ITERS_GATE: u32 = 4;
         const SUB_DT_TARGET: f32 = 1.0 / 240.0;
         const PEN_SLOP: f32 = 0.01;
         // Keep at least 2 velocity / 1 position iteration so even resting
         // islands still correct residual penetration.
-        let min_iters = if base_iters > 4 { 2 } else { 1 };
+        let min_iters = if base_iters > ADAPTIVE_ITERS_GATE {
+            2
+        } else {
+            1
+        };
         let max_sub = self.substeps.max(1);
         let lower = MIN_SUBSTEPS.min(max_sub);
         let wanted_vel = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;
@@ -330,7 +337,7 @@ impl SequentialImpulseEngine {
             .abs()
             .max((inertia.y - inertia.z).abs())
             .max((inertia.z - inertia.x).abs());
-        if spread <= 1e-6 * imax {
+        if spread <= POS_CORRECTION_EPS * imax {
             return;
         }
         let (a, b, c) = (inertia.x, inertia.y, inertia.z);
@@ -356,7 +363,9 @@ impl SequentialImpulseEngine {
                 [h * (u.y - a * w2.y), h * (b * w2.x - u.x), c, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ];
-            let Some(d) = solve_small(&j, &[-r.x, -r.y, -r.z, 0.0], 3) else {
+            /// Spatial DOF of the gyroscopic Newton step (ωₓωᵧω_z).
+            const GYRO_DOF: usize = 3;
+            let Some(d) = solve_small(&j, &[-r.x, -r.y, -r.z, 0.0], GYRO_DOF) else {
                 break;
             };
             w2 += Vec3::new(d[0], d[1], d[2]);
@@ -461,14 +470,14 @@ impl SequentialImpulseEngine {
             let displacement = b.position - prev.pos;
             // Same travel gate as the sweep: the discrete phase owns short
             // segments, the implied motion owns long ones.
-            if displacement.length() <= 0.5 * shape_min_dimension(&b.shape) {
+            if displacement.length() <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&b.shape) {
                 continue;
             }
             let dq = b.orientation * prev.rot.conjugate();
             let mut spin = b.angular_velocity;
-            if dq.w < 1.0 - 1e-6 {
+            if dq.w < 1.0 - POS_CORRECTION_EPS {
                 let angle = 2.0 * dq.w.clamp(-1.0, 1.0).acos();
-                let axis = dq.xyz() / (1.0 - dq.w * dq.w).sqrt().max(1e-9);
+                let axis = dq.xyz() / (1.0 - dq.w * dq.w).sqrt().max(NEAR_ZERO);
                 if axis.is_finite() {
                     spin = axis * (angle / dt);
                 }
@@ -526,7 +535,9 @@ impl SequentialImpulseEngine {
                 // Travel gate, mirror of the linear CCD one: below half the
                 // thinnest feature the discrete phase + speculative margin
                 // own the contact, no sweep needed.
-                if displacement.length() <= 0.5 * shape_min_dimension(&mover.shape) {
+                if displacement.length()
+                    <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&mover.shape)
+                {
                     continue;
                 }
                 let mover_layer = mover.collision_layer;
@@ -623,7 +634,7 @@ impl SequentialImpulseEngine {
             let b = &mut self.bodies[h];
             // Back off a hair so the discrete narrow phase sees a clean
             // touching contact next substep, not a zero-gap flicker.
-            b.position += disp * hit.fraction + hit.normal * 1e-3;
+            b.position += disp * hit.fraction + hit.normal * SHAPE_TOUCH;
             b.orientation = orientation;
             skip[h] = true;
             if hit.kind.is_angular() {

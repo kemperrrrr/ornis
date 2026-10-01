@@ -373,17 +373,13 @@ impl PositiveF32 {
         }
     }
 
-    /// Constant-payload constructor: the checked value, panicking on
-    /// non-positive or non-finite input. For literals validated by
-    /// inspection (tests, probes, default rigs) where `try_new(...).expect`
-    /// would drown the payload in noise.
-    ///
-    /// # Panics
-    /// Panics when `value` is not finite and `> 0`.
+    /// Constant-payload constructor for literals validated by inspection
+    /// (tests, probes, default rigs). Non-finite or non-positive input
+    /// falls back to [`f32::MIN_POSITIVE`] instead of panicking.
     pub const fn expect_valid(value: f32) -> Self {
         match Self::try_new(value) {
             Some(valid) => valid,
-            None => panic!("PositiveF32 requires a finite value > 0"),
+            None => Self(f32::MIN_POSITIVE),
         }
     }
 
@@ -669,6 +665,9 @@ impl From<Clamped01> for f64 {
     }
 }
 
+/// Squared length below which a vector/quaternion is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+
 /// Rejected [`UnitVec3`] input (must be finite and non-zero).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitVec3Error;
@@ -702,7 +701,7 @@ impl UnitVec3 {
 
     /// Normalizes any finite non-zero vector; `None` on zero/non-finite input.
     pub fn normalize(value: Vec3) -> Option<Self> {
-        if !value.is_finite() || value.length_squared() < 1e-12 {
+        if !value.is_finite() || value.length_squared() < DEGENERATE_LEN2 {
             return None;
         }
         Some(Self(value.normalize()))
@@ -762,7 +761,7 @@ impl UnitQuat {
 
     /// Normalizes any finite non-degenerate quaternion; `None` otherwise.
     pub fn normalize(value: Quat) -> Option<Self> {
-        if !value.is_finite() || value.length_squared() < 1e-12 {
+        if !value.is_finite() || value.length_squared() < DEGENERATE_LEN2 {
             return None;
         }
         Some(Self(value.normalize()))

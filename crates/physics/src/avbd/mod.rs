@@ -136,6 +136,7 @@ use std::collections::BTreeSet;
 use std::f32::consts::PI;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::constants::CCD_TRAVEL_GATE_FRACTION;
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::errors::{JointError, QueryError};
@@ -203,11 +204,13 @@ const STICK_THRESH: f32 = 0.00001;
 /// does not propagate wake — documented M3 gap).
 const SLEEP_LIN: f32 = 0.15;
 const SLEEP_ANG: f32 = 0.15;
-const SLEEP_TIME: f32 = 0.5;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+const SLEEP_TIME: f32 = HALF;
 /// Gated-wake thresholds (builtin `wake_on_impact` + penetration-wake
-/// parity): a NEW pair wakes its sleepers only on 0.5 m/s approach or a
-/// fresh overlap deeper than 1 cm.
-const WAKE_IMPACT_SPEED: f32 = 0.5;
+/// parity): a NEW pair wakes its sleepers only on [`WAKE_IMPACT_SPEED`] m/s
+/// approach or a fresh overlap deeper than 1 cm.
+const WAKE_IMPACT_SPEED: f32 = HALF;
 const WAKE_PENETRATION: f32 = 0.01;
 
 /// Angular travel slop for revolute limits (official `ANGULAR_SLOP`).
@@ -247,15 +250,15 @@ const CCD_BOUNCE_SPEED: f32 = 1.0;
 struct AvbdPoint {
     ra: Vec3,
     rb: Vec3,
-    lam: [f32; 3],
-    pen: [f32; 3],
+    lam: [f32; ANGULAR_OFFSET],
+    pen: [f32; ANGULAR_OFFSET],
     /// Static grip held last step (official `stick`): anchors stay frozen.
     /// Rolling/sliding points refresh anchors to live geometry (otherwise a
     /// spinning body's frozen lever orbits and pumps energy).
     stuck: bool,
     /// Rolling/torsion dual memory `[roll_t1, roll_t2, spin_n]` (MuJoCo
     /// triple parity; fixed penalty, torque-capped, no ramp).
-    roll_lam: [f32; 3],
+    roll_lam: [f32; ANGULAR_OFFSET],
 }
 
 /// Contact pair: two bodies, one normal frame, up to [`MAX_POINTS`] points.
@@ -360,9 +363,9 @@ struct AvbdJoint {
     /// fraction of PI, so the unwrap stays correct all step).
     gear_mem: Option<([f32; 2], [f32; 2])>,
     /// SixDof per-axis config in body A's assembly frame (linear X/Y/Z).
-    six_lin: [AxisConfig; 3],
+    six_lin: [AxisConfig; ANGULAR_OFFSET],
     /// SixDof per-axis config in body A's assembly frame (angular X/Y/Z).
-    six_ang: [AxisConfig; 3],
+    six_ang: [AxisConfig; ANGULAR_OFFSET],
     /// SixDof/Fixed assembly anchor separation in A's frame
     /// (`qa^-1 * ((pb+rb)-(pa+ra))` at creation); locked linear axes
     /// measure drift relative to this.
@@ -371,10 +374,10 @@ struct AvbdJoint {
     /// 3..6 angular): warmstarted by the primal, committed by the dual —
     /// same discipline as `lim_dual`, one slot per limited axis.
     sacc: [f32; SPATIAL_DOF],
-    lam_l: [f32; 3],
-    lam_a: [f32; 3],
-    pen_l: [f32; 3],
-    pen_a: [f32; 3],
+    lam_l: [f32; ANGULAR_OFFSET],
+    lam_a: [f32; ANGULAR_OFFSET],
+    pen_l: [f32; ANGULAR_OFFSET],
+    pen_a: [f32; ANGULAR_OFFSET],
 }
 
 /// Read-only discovery bundle for one candidate pair: everything the
@@ -776,7 +779,9 @@ impl AvbdEngine {
             // OTHER bodies — a jointed partner sweeping through the mover's
             // own swing (ball-pendulum anchors, hinge arcs) is not a wall.
             // Partners joined to the mover are excluded from the targets.
-            if disp.length() <= 0.5 * shape_min_dimension(&self.bodies[h].shape) {
+            if disp.length()
+                <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&self.bodies[h].shape)
+            {
                 continue;
             }
             let mover = ShapeRef {
@@ -911,13 +916,13 @@ impl AvbdEngine {
                 pt.roll_lam[0] *= ALPHA * GAMMA;
                 pt.roll_lam[1] *= ALPHA * GAMMA;
                 pt.roll_lam[2] *= ALPHA * GAMMA;
-                for k in 0..3 {
+                for k in 0..ANGULAR_OFFSET {
                     pt.pen[k] = (pt.pen[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
                 }
             }
         }
         for j in &mut self.joints {
-            for k in 0..3 {
+            for k in 0..ANGULAR_OFFSET {
                 j.lam_l[k] *= ALPHA * GAMMA;
                 j.lam_a[k] *= ALPHA * GAMMA;
                 j.pen_l[k] = (j.pen_l[k] * GAMMA).clamp(PENALTY_MIN, PENALTY_MAX);
@@ -1271,14 +1276,14 @@ impl PhysicsEngine for AvbdEngine {
                 gb: [joint_a.index(), joint_b.index()],
                 gratio: ratio,
                 gear_mem: None,
-                six_lin: [AxisConfig::Free; 3],
-                six_ang: [AxisConfig::Free; 3],
+                six_lin: [AxisConfig::Free; ANGULAR_OFFSET],
+                six_ang: [AxisConfig::Free; ANGULAR_OFFSET],
                 dref: Vec3::ZERO,
                 sacc: [0.0; SPATIAL_DOF],
-                lam_l: [0.0; 3],
-                lam_a: [0.0; 3],
-                pen_l: [JOINT_PENALTY_INIT; 3],
-                pen_a: [JOINT_PENALTY_INIT; 3],
+                lam_l: [0.0; ANGULAR_OFFSET],
+                lam_a: [0.0; ANGULAR_OFFSET],
+                pen_l: [JOINT_PENALTY_INIT; ANGULAR_OFFSET],
+                pen_a: [JOINT_PENALTY_INIT; ANGULAR_OFFSET],
             };
             self.joints.push(joint);
             return Ok(JointHandle::from(self.joints.len() - 1));
@@ -1287,14 +1292,17 @@ impl PhysicsEngine for AvbdEngine {
         let bb = &self.bodies[ib];
         // Frames + assembly references, resolved once in the shared
         // `joint::resolve_joint` (same values the builtin engine captures).
-        let r = crate::joint::resolve_joint(
+        let Some(r) = crate::joint::resolve_joint(
             &kind,
             ba.position,
             ba.orientation,
             bb.position,
             bb.orientation,
-        )
-        .expect("non-gear/sixdof kinds resolve");
+        ) else {
+            return Err(crate::errors::JointError::BadAxis {
+                detail: "joint frame resolve failed".into(),
+            });
+        };
         let mut joint = AvbdJoint {
             a: ia,
             b: ib,
@@ -1316,14 +1324,14 @@ impl PhysicsEngine for AvbdEngine {
             gb: [0; 2],
             gratio: 0.0,
             gear_mem: None,
-            six_lin: [AxisConfig::Free; 3],
-            six_ang: [AxisConfig::Free; 3],
+            six_lin: [AxisConfig::Free; ANGULAR_OFFSET],
+            six_ang: [AxisConfig::Free; ANGULAR_OFFSET],
             dref: r.ref_anchor_delta,
             sacc: [0.0; SPATIAL_DOF],
-            lam_l: [0.0; 3],
-            lam_a: [0.0; 3],
-            pen_l: [JOINT_PENALTY_INIT; 3],
-            pen_a: [JOINT_PENALTY_INIT; 3],
+            lam_l: [0.0; ANGULAR_OFFSET],
+            lam_a: [0.0; ANGULAR_OFFSET],
+            pen_l: [JOINT_PENALTY_INIT; ANGULAR_OFFSET],
+            pen_a: [JOINT_PENALTY_INIT; ANGULAR_OFFSET],
         };
         match kind {
             JointKind::Ball { .. } => {}
@@ -1483,7 +1491,7 @@ impl AvbdEngine {
             let a = &self.bodies[p.a];
             let b = &self.bodies[p.b];
             let mut deepest = 0.0f32;
-            let mut witness = (a.position + b.position) * 0.5;
+            let mut witness = (a.position + b.position) * HALF;
             for pt in &p.points {
                 let pa = a.position + a.orientation * pt.ra;
                 let pb = b.position + b.orientation * pt.rb;

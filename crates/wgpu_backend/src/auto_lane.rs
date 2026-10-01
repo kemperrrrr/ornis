@@ -125,14 +125,13 @@ impl<T: bytemuck::Pod> AutoLane<T> {
             cpu_work(self.buf.cpu_data_mut());
             return true;
         }
+        let (Some(pipeline), Some(bind_group)) = (pipeline, bind_group) else {
+            cpu_work(self.buf.cpu_data_mut());
+            return true;
+        };
         self.buf.sync_to_gpu(&self.queue);
         let wgc = (n as u32).div_ceil(self.config.workgroup_size);
-        sync.dispatch_gpu(
-            pipeline.expect("checked above"),
-            bind_group.expect("checked above"),
-            (wgc, 1, 1),
-            &self.config.label,
-        );
+        sync.dispatch_gpu(pipeline, bind_group, (wgc, 1, 1), &self.config.label);
         sync.flush();
         self.buf.mark_gpu_dirty();
         self.buf

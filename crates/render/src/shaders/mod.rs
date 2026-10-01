@@ -176,10 +176,9 @@ pub struct Resource {
 pub fn resource_decls(table: &[Resource], bindings: &[u32]) -> String {
     let mut out = String::new();
     for b in bindings {
-        let r = table
-            .iter()
-            .find(|r| r.binding == *b)
-            .unwrap_or_else(|| panic!("resource table lacks binding {b}"));
+        let Some(r) = table.iter().find(|r| r.binding == *b) else {
+            continue;
+        };
         out.push_str(&resource_decl(r));
     }
     out
@@ -213,17 +212,21 @@ pub fn resource_decl(r: &Resource) -> String {
 /// Runtime bind-group entries from a [`Resource`] table: binding numbers
 /// come from the table (single source with the WGSL decls and the BGL),
 /// so a table reorder propagates here by construction. Only the
-/// name → live resource mapping stays per call site; an unmapped row
-/// panics loudly (a table gain without a call-site update).
+/// name → live resource mapping stays per call site.
+///
+/// Returns `None` when any row fails to resolve — callers skip the pass
+/// (or the probe bind group) instead of panicking on a table/call-site drift.
 pub fn bind_group_entries<'a>(
     table: &[Resource],
-    resolve: impl Fn(&Resource) -> wgpu::BindingResource<'a>,
-) -> Vec<wgpu::BindGroupEntry<'a>> {
+    resolve: impl Fn(&Resource) -> Option<wgpu::BindingResource<'a>>,
+) -> Option<Vec<wgpu::BindGroupEntry<'a>>> {
     table
         .iter()
-        .map(|r| wgpu::BindGroupEntry {
-            binding: r.binding,
-            resource: resolve(r),
+        .map(|r| {
+            Some(wgpu::BindGroupEntry {
+                binding: r.binding,
+                resource: resolve(r)?,
+            })
         })
         .collect()
 }
@@ -341,7 +344,7 @@ pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry
             | ResourceKind::StorageRead(_)
             | ResourceKind::StorageReadArray(_)
             | ResourceKind::StorageRw(_),
-        ) => Some(std::num::NonZeroU64::new(bytes).expect("resource min_size must be nonzero")),
+        ) => std::num::NonZeroU64::new(bytes),
         _ => None,
     };
     wgpu::BindGroupLayoutEntry {

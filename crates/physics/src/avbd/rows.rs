@@ -8,10 +8,13 @@
 //! from `avbd.rs` (phase 3).
 
 use super::*;
+use crate::constants::{AXIS_REST_LEN2, DEGENERATE_LEN2, NEAR_ZERO};
 use crate::distance::box_box_signed_gap;
 use glam::Mat3;
 use std::f32::consts::TAU;
 
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 /// Anisotropic contact frame (ODE `fdir1`/`mu`/`mu2` parity, local mirror of
 /// the builtin rule): body A wins `t1` (its local dir to world, projected
 /// onto the plane ⊥ `n`); degenerate projections fall back to the default
@@ -65,7 +68,7 @@ pub(super) fn outer(a: Vec3, b: Vec3) -> [[f32; 3]; 3] {
 /// long levers — the joint spins up exponentially. Row-major like theirs.
 pub(super) fn geometric_stiffness_ball_socket(k: usize, v: Vec3) -> [[f32; 3]; 3] {
     let arr = v.to_array();
-    let mut m = [[0.0f32; 3]; 3];
+    let mut m = [[0.0f32; ANGULAR_OFFSET]; ANGULAR_OFFSET];
     m[0][0] = -arr[k];
     m[1][1] = -arr[k];
     m[2][2] = -arr[k];
@@ -106,10 +109,10 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// One sincos per body per step is negligible next to the 6x6 solves.
 pub(super) fn quat_integrate(q: Quat, v: Vec3) -> Quat {
     let theta = v.length();
-    if theta < 1e-9 {
+    if theta < NEAR_ZERO {
         return q;
     }
-    let (s, c) = (0.5 * theta).sin_cos();
+    let (s, c) = (HALF * theta).sin_cos();
     let k = s / theta;
     let dq = quat_mul([v.x * k, v.y * k, v.z * k, c], q.to_array());
     Quat::from_xyzw(dq[0], dq[1], dq[2], dq[3]).normalize()
@@ -136,7 +139,7 @@ pub(super) fn quat_diff_vec(a: Quat, b: Quat) -> Vec3 {
         xyz = -xyz;
     }
     let s = xyz.length().min(1.0);
-    if s < 1e-9 {
+    if s < NEAR_ZERO {
         return Vec3::ZERO;
     }
     xyz * (2.0 * s.asin() / s)
@@ -191,9 +194,9 @@ pub(super) fn regularized_limit(value: f32, initial: f32, bound: f32, lower: boo
 pub(super) fn world_inertia(inertia: Vec3, rot: Quat) -> [[f32; 3]; 3] {
     let r = Mat3::from_quat(rot);
     let cols = [r.x_axis, r.y_axis, r.z_axis];
-    let mut m = [[0.0f32; 3]; 3];
-    for a in 0..3 {
-        for b in 0..3 {
+    let mut m = [[0.0f32; ANGULAR_OFFSET]; ANGULAR_OFFSET];
+    for a in 0..ANGULAR_OFFSET {
+        for b in 0..ANGULAR_OFFSET {
             let ca = [cols[0][a], cols[1][a], cols[2][a]];
             let cb = [cols[0][b], cols[1][b], cols[2][b]];
             m[a][b] =
@@ -209,7 +212,7 @@ pub(super) fn inverse_symmetric(m: [[f32; 3]; 3], diag: Vec3) -> [[f32; 3]; 3] {
     let (a, b, c) = (m[0][0], m[0][1], m[0][2]);
     let (d, e, f) = (m[1][1], m[1][2], m[2][2]);
     let det = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
-    if det.abs() < 1e-12 {
+    if det.abs() < DEGENERATE_LEN2 {
         let inv = Vec3::new(
             if diag.x > 0.0 { 1.0 / diag.x } else { 0.0 },
             if diag.y > 0.0 { 1.0 / diag.y } else { 0.0 },
@@ -274,9 +277,11 @@ fn bound_radius(shape: &Shape) -> f32 {
 
 /// Local-space corners of a box (empty for every other shape).
 fn box_corners(shape: &Shape) -> Vec<Vec3> {
+    /// Corners of an AABB/OBB.
+    const BOX_CORNERS: usize = 8;
     match shape {
         Shape::Box { half_extents: h } => {
-            let mut out = Vec::with_capacity(8);
+            let mut out = Vec::with_capacity(BOX_CORNERS);
             for &sx in &[-1.0f32, 1.0] {
                 for &sy in &[-1.0f32, 1.0] {
                     for &sz in &[-1.0f32, 1.0] {
@@ -310,10 +315,10 @@ pub(super) fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::Cone {
             radius,
             half_height,
-        } => 0.5 * radius.min(*half_height),
-        Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
-        Shape::Heightfield(hf) => 0.5 * hf.cell(),
-        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature(),
+        } => HALF * radius.min(*half_height),
+        Shape::ConvexHull(hull) => HALF * hull.min_extent(),
+        Shape::Heightfield(hf) => HALF * hf.cell(),
+        Shape::TriMesh(mesh) => HALF * mesh.min_feature(),
     }
 }
 
@@ -436,7 +441,7 @@ impl AvbdEngine {
         if d.dist < 0.0 {
             normal = -normal;
         }
-        if normal.length_squared() < 1e-16 {
+        if normal.length_squared() < AXIS_REST_LEN2 {
             normal = a.position - b.position;
         }
         let mut normal = normal.normalize_or(Vec3::Y);
@@ -516,7 +521,7 @@ impl AvbdEngine {
         // 3.5m away as phantom points — 2.5m levers whose meter-scale
         // Ct torqued every spin to death.
         let patch = ra.min(rb) + MARGIN;
-        let pp = (d.point_a + d.point_b) * 0.5;
+        let pp = (d.point_a + d.point_b) * HALF;
         // Per-body patch centers: each body's own center projected onto
         // the contact plane. Centers move smoothly (the anti-flicker
         // property the shared midpoint was built for), and each stays
@@ -603,7 +608,7 @@ impl AvbdEngine {
             } else if rb < ra {
                 pb_c
             } else {
-                (pa_c + pb_c) * 0.5
+                (pa_c + pb_c) * HALF
             };
             let pa = mid + normal * (plane_a - normal.dot(mid));
             let pb = mid + normal * (plane_b - normal.dot(mid));
@@ -619,7 +624,9 @@ impl AvbdEngine {
         // (non-material churn that rocks stacks), so it is only used
         // when corners give fewer than 3 points (edge/vertex and
         // non-box contacts).
-        if !separated && fresh.len() < 3 {
+        /// Prefer corner witnesses until at least this many points exist.
+        const WITNESS_FALLBACK_MIN: usize = ANGULAR_OFFSET;
+        if !separated && fresh.len() < WITNESS_FALLBACK_MIN {
             let inv_a = a.orientation.inverse();
             let inv_b = b.orientation.inverse();
             let ra_l = inv_a * (d.point_a - a.position);
@@ -725,11 +732,9 @@ impl AvbdEngine {
             }
             // Persist duals by matching material anchors (5cm window).
             if d.exists {
-                let idx = self
-                    .pairs
-                    .iter()
-                    .position(|p| p.a == ia && p.b == ib)
-                    .expect("discovery saw this pair a few microseconds ago on the same state");
+                let Some(idx) = self.pairs.iter().position(|p| p.a == ia && p.b == ib) else {
+                    continue;
+                };
                 seen[idx] = true;
                 let pair = &mut self.pairs[idx];
                 pair.n = d.normal;
@@ -813,10 +818,10 @@ impl AvbdEngine {
                         next.push(AvbdPoint {
                             ra: ra_l,
                             rb: rb_l,
-                            lam: [0.0; 3],
-                            pen: [PENALTY_INIT; 3],
+                            lam: [0.0; ANGULAR_OFFSET],
+                            pen: [PENALTY_INIT; ANGULAR_OFFSET],
                             stuck: true,
-                            roll_lam: [0.0; 3],
+                            roll_lam: [0.0; ANGULAR_OFFSET],
                         });
                     }
                 }
@@ -840,10 +845,10 @@ impl AvbdEngine {
                         .map(|(ra_l, rb_l)| AvbdPoint {
                             ra: ra_l,
                             rb: rb_l,
-                            lam: [0.0; 3],
-                            pen: [PENALTY_INIT; 3],
+                            lam: [0.0; ANGULAR_OFFSET],
+                            pen: [PENALTY_INIT; ANGULAR_OFFSET],
                             stuck: true,
-                            roll_lam: [0.0; 3],
+                            roll_lam: [0.0; ANGULAR_OFFSET],
                         })
                         .collect(),
                 });
@@ -911,7 +916,7 @@ impl AvbdEngine {
     ) -> (Vec3, Vec3) {
         let (ra_w, rb_w) = Self::contact_levers(a, b, n, pt);
         let sep = ((a.position + ra_w) - (b.position + rb_w)).dot(n);
-        (ra_w - n * (sep * 0.5), rb_w + n * (sep * 0.5))
+        (ra_w - n * (sep * HALF), rb_w + n * (sep * HALF))
     }
 
     /// Residual with explicit world levers (drags the matching stamp
@@ -994,8 +999,8 @@ impl AvbdEngine {
         let o_nn = outer(nn, nn);
         let o_tt = outer(t, t);
         let o_nt = outer(nn, t);
-        for x in 0..3 {
-            for y in 0..3 {
+        for x in 0..ANGULAR_OFFSET {
+            for y in 0..ANGULAR_OFFSET {
                 lhs[x][y] += pen * o_nn[x][y];
                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * o_tt[x][y];
                 lhs[x][ANGULAR_OFFSET + y] += pen * o_nt[x][y];
@@ -1019,8 +1024,8 @@ impl AvbdEngine {
         force: f32,
     ) {
         let h = outer(axis, axis);
-        for x in 0..3 {
-            for y in 0..3 {
+        for x in 0..ANGULAR_OFFSET {
+            for y in 0..ANGULAR_OFFSET {
                 lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * h[x][y];
             }
         }

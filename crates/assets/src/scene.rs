@@ -10,6 +10,19 @@ use ornis_core::units::{Clamped01, Degrees, Ior, LinearRgb, Meters, PositiveF32}
 
 pub use ornis_gltf::{TriIndex, Triangle};
 
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
+/// Minimum sphere sector / cylinder radial segments.
+const MIN_RADIAL_SEGMENTS: u32 = 3;
+/// Minimum sphere stack rings.
+const MIN_SPHERE_RINGS: u32 = 2;
+/// Squared length below which a direction/up is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+/// Open upper bound for camera FOV (degrees).
+const FOV_OPEN_MAX_DEG: f32 = 180.0;
+/// Absolute view·up cosine above which the camera basis is parallel.
+const CAMERA_UP_PARALLEL_DOT: f32 = 0.999;
+
 /// Full scene description in RON format (see `assets/scene.ron`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
@@ -116,11 +129,11 @@ impl MeshDesc {
     /// index is in range for `positions` (checked through
     /// [`Triangle::from_raw`] / [`TriIndex::index`).
     pub fn try_custom(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Option<Self> {
-        if !indices.len().is_multiple_of(3) {
+        if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
             return None;
         }
         let triangles: Vec<Triangle> = indices
-            .chunks_exact(3)
+            .chunks_exact(TRIANGLE_VERTS)
             .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
             .collect();
         if triangles
@@ -140,11 +153,11 @@ impl MeshDesc {
     /// (`body_for`) reports those as typed errors instead.
     pub fn as_triangles(&self) -> Option<Vec<Triangle>> {
         let (positions, indices) = self.as_custom()?;
-        if !indices.len().is_multiple_of(3) {
+        if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
             return None;
         }
         let triangles: Vec<Triangle> = indices
-            .chunks_exact(3)
+            .chunks_exact(TRIANGLE_VERTS)
             .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
             .collect();
         if triangles
@@ -163,7 +176,7 @@ impl MeshDesc {
     /// typed, so direct literals need [`PositiveF32`] values.
     pub fn try_sphere_units(radius: Meters, segments: u32, rings: u32) -> Option<Self> {
         let radius = PositiveF32::try_new(radius.get())?;
-        if segments >= 3 && rings >= 2 {
+        if segments >= MIN_RADIAL_SEGMENTS && rings >= MIN_SPHERE_RINGS {
             Some(Self::Sphere {
                 radius,
                 segments,
@@ -205,7 +218,7 @@ impl MeshDesc {
     ) -> Option<Self> {
         let radius = PositiveF32::try_new(radius.get())?;
         let height = PositiveF32::try_new(height.get())?;
-        if radial_segments >= 3 {
+        if radial_segments >= MIN_RADIAL_SEGMENTS {
             Some(Self::Cylinder {
                 radius,
                 height,
@@ -502,7 +515,7 @@ impl LightDesc {
             + direction[1] * direction[1]
             + direction[2] * direction[2])
             .sqrt();
-        if len.is_finite() && len > 1e-12 {
+        if len.is_finite() && len > DEGENERATE_LEN2 {
             Some([direction[0] / len, direction[1] / len, direction[2] / len])
         } else {
             None
@@ -672,7 +685,7 @@ impl CameraDesc {
             return None;
         }
         let fov = fov.get();
-        if !fov.is_finite() || fov <= 0.0 || fov >= 180.0 {
+        if !fov.is_finite() || fov <= 0.0 || fov >= FOV_OPEN_MAX_DEG {
             return None;
         }
         let (near, far) = (near.get(), far.get());
@@ -689,12 +702,16 @@ impl CameraDesc {
         ];
         let view_len2 = view[0] * view[0] + view[1] * view[1] + view[2] * view[2];
         let up_len2 = up[0] * up[0] + up[1] * up[1] + up[2] * up[2];
-        if !view_len2.is_finite() || view_len2 < 1e-12 || !up_len2.is_finite() || up_len2 < 1e-12 {
+        if !view_len2.is_finite()
+            || view_len2 < DEGENERATE_LEN2
+            || !up_len2.is_finite()
+            || up_len2 < DEGENERATE_LEN2
+        {
             return None;
         }
         let dot = (view[0] * up[0] + view[1] * up[1] + view[2] * up[2]).abs()
             / (view_len2.sqrt() * up_len2.sqrt());
-        if !dot.is_finite() || dot > 0.999 {
+        if !dot.is_finite() || dot > CAMERA_UP_PARALLEL_DOT {
             return None;
         }
         Some(Self {

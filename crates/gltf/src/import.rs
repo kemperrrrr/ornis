@@ -18,6 +18,17 @@ use crate::{
     LoadedSkin,
 };
 
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
+/// Spatial components in a position / translation.
+const VEC3_COMPONENTS: usize = 3;
+/// Max joint influences per skinned vertex (glTF top-4 contract).
+const MAX_INFLUENCES: usize = 4;
+/// Matrix column/row count for bind poses.
+const MAT4_DIM: usize = 4;
+/// Weight-sum floor before normalize.
+const NEAR_ZERO: f32 = 1e-6;
+
 /// Parses a `.glb` or `.gltf` document held in memory.
 ///
 /// `.glb` (binary chunk) and embedded `data:` buffers resolve directly;
@@ -264,7 +275,7 @@ impl<'a> Import<'a> {
             self.stats.skipped_no_position += 1;
             return None;
         };
-        let positions: Vec<[f32; 3]> = read_positions.collect();
+        let positions: Vec<[f32; VEC3_COMPONENTS]> = read_positions.collect();
         let flat: Vec<u32> = match reader.read_indices() {
             Some(indices) => collect_indices(indices),
             None => (0..positions.len() as u32).collect(),
@@ -275,12 +286,12 @@ impl<'a> Import<'a> {
         }
         // Typed validation: chunk through `Triangle::from_raw`, then check
         // triple alignment and vertex range via `TriIndex::index`.
-        if !flat.len().is_multiple_of(3) {
+        if !flat.len().is_multiple_of(TRIANGLE_VERTS) {
             self.stats.skipped_bad_index += 1;
             return None;
         }
         let triangles: Vec<crate::Triangle> = flat
-            .chunks_exact(3)
+            .chunks_exact(TRIANGLE_VERTS)
             .map(|c| crate::Triangle::from_raw([c[0], c[1], c[2]]))
             .collect();
         if triangles
@@ -310,7 +321,7 @@ impl<'a> Import<'a> {
         let normals = reader
             .read_normals()
             .map(Iterator::collect)
-            .filter(|normals: &Vec<[f32; 3]>| normals.len() == vertex_count);
+            .filter(|normals: &Vec<[f32; VEC3_COMPONENTS]>| normals.len() == vertex_count);
         let uvs = reader
             .read_tex_coords(0)
             .map(collect_tex_coords)
@@ -385,7 +396,7 @@ fn load_skin(
         .reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice))
         .read_inverse_bind_matrices()
         .map(Iterator::collect)
-        .filter(|matrices: &Vec<[[f32; 4]; 4]>| matrices.len() == joints.len())
+        .filter(|matrices: &Vec<[[f32; MAT4_DIM]; MAT4_DIM]>| matrices.len() == joints.len())
         .unwrap_or_else(|| vec![identity_bind(); joints.len()]);
     let joint_names = joints
         .iter()
@@ -403,7 +414,7 @@ fn load_skin(
 }
 
 /// Column-major identity bind matrix (glTF layout, `m[col][row]`).
-fn identity_bind() -> [[f32; 4]; 4] {
+fn identity_bind() -> [[f32; MAT4_DIM]; MAT4_DIM] {
     [
         [1.0, 0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -414,7 +425,7 @@ fn identity_bind() -> [[f32; 4]; 4] {
 
 /// Decoded skin influences: per-vertex top-4 joints plus normalized
 /// weights, and whether any nonzero influence was truncated.
-type SkinInfluences = (Vec<[u16; 4]>, Vec<[f32; 4]>, bool);
+type SkinInfluences = (Vec<[u16; MAX_INFLUENCES]>, Vec<[f32; MAX_INFLUENCES]>, bool);
 
 /// Reads and merges all dense influence sets from `0` into top-4 `u16`
 /// joints plus normalized `f32` weights (design §4.3).
@@ -438,7 +449,7 @@ where
         return None;
     }
     let mut pairs: Vec<Vec<(u16, f32)>> = vec![Vec::new(); vertex_count];
-    for set in 0..4 {
+    for set in 0u32..(MAX_INFLUENCES as u32) {
         if primitive.get(&Semantic::Joints(set)).is_none() {
             break;
         }
@@ -451,7 +462,7 @@ where
             return None;
         }
         for (slot, (joint, weight)) in joints.into_iter().zip(weights).enumerate() {
-            for lane in 0..4 {
+            for lane in 0..MAX_INFLUENCES {
                 pairs[slot].push((joint[lane], weight[lane]));
             }
         }
@@ -462,10 +473,13 @@ where
     for mut slot in pairs {
         // Heaviest first; the sort is stable, so ties keep set order.
         slot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        truncated |= slot.iter().skip(4).any(|&(_, weight)| weight > 0.0);
-        let mut joints = [0u16; 4];
-        let mut weights = [0.0f32; 4];
-        for (lane, (joint, weight)) in slot.into_iter().take(4).enumerate() {
+        truncated |= slot
+            .iter()
+            .skip(MAX_INFLUENCES)
+            .any(|&(_, weight)| weight > 0.0);
+        let mut joints = [0u16; MAX_INFLUENCES];
+        let mut weights = [0.0f32; MAX_INFLUENCES];
+        for (lane, (joint, weight)) in slot.into_iter().take(MAX_INFLUENCES).enumerate() {
             joints[lane] = joint;
             weights[lane] = weight;
         }
@@ -536,10 +550,10 @@ where
 /// Canonical per-vertex weights: a finite positive sum normalizes,
 /// otherwise the full weight falls back to the first slot (mirrors the
 /// animation canonical rule — joints are untouched).
-fn normalize_weights(weights: [f32; 4]) -> [f32; 4] {
+fn normalize_weights(weights: [f32; MAX_INFLUENCES]) -> [f32; MAX_INFLUENCES] {
     let finite = weights.iter().all(|slot| slot.is_finite());
     let sum: f32 = weights.iter().sum();
-    if finite && sum > 1e-6 {
+    if finite && sum > NEAR_ZERO {
         [
             weights[0] / sum,
             weights[1] / sum,

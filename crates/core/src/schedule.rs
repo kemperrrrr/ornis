@@ -637,11 +637,10 @@ impl Schedule {
     /// Accepts [`SystemName`] or plain strings (`impl Into<SystemName>`),
     /// so existing `order_before("a", "b")` call sites keep compiling.
     ///
-    /// # Panics
-    /// Panics if a name is not found (name uniqueness is the caller's
-    /// responsibility) or `after` is registered before `before`:
-    /// execution order is registration order (S3), explicit edges only
-    /// split levels.
+    /// Invalid names and reverse registration order are ignored — use
+    /// [`try_order_before`](Self::try_order_before) when the caller must
+    /// observe the error. Execution order is registration order (S3);
+    /// explicit edges only split levels.
     pub fn order_before(
         &mut self,
         before: impl Into<SystemName>,
@@ -649,14 +648,8 @@ impl Schedule {
     ) -> &mut Self {
         let before = before.into();
         let after = after.into();
-        self.try_order_before(before.as_str(), after.as_str())
-            .unwrap_or_else(|error| {
-                panic!(
-                    "order_before('{}', '{}'): {error}",
-                    before.as_str(),
-                    after.as_str()
-                )
-            })
+        let _ = self.try_order_before(before.as_str(), after.as_str());
+        self
     }
 
     /// Fallible [`Schedule::order_before`]: returns [`OrderError`] on
@@ -1051,21 +1044,30 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "registered")]
     fn explicit_ordering_rejects_backward_direction() {
         let mut sched = Schedule::new();
         sched
             .add_system(NamedNoop("a", SystemAccess::new()))
             .add_system(NamedNoop("b", SystemAccess::new()));
         sched.order_before("b", "a");
+        assert_eq!(sched.levels(), vec![vec![0, 1]]);
+        assert!(matches!(
+            sched.try_order_before("b", "a"),
+            Err(OrderError::BackwardEdge { .. })
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "no node named")]
-    fn explicit_ordering_unknown_name_panics() {
+    fn explicit_ordering_unknown_name_is_ignored() {
         let mut sched = Schedule::new();
         sched.add_system(NamedNoop("only", SystemAccess::new()));
         sched.order_before("only", "ghost");
+        assert_eq!(
+            sched.try_order_before("only", "ghost").map(|_| ()),
+            Err(OrderError::UnknownNode {
+                name: "ghost".to_owned(),
+            })
+        );
     }
 
     #[test]

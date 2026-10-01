@@ -261,10 +261,7 @@ impl AssetServer {
     /// Physics, gameplay and GPU state stay with the caller.
     pub fn instantiate(&self, engine: &mut Engine, id: AssetId) -> Option<Vec<Entity>> {
         let scene = self.scenes.get(&id)?;
-        let store = engine
-            .world_mut()
-            .store_mut()
-            .expect("asset instantiate store");
+        let store = engine.world_mut().store_mut()?;
         let mut out = Vec::with_capacity(scene.entities.len());
         for desc in scene.entities.iter() {
             out.push(insert_asset_entity(store, desc));

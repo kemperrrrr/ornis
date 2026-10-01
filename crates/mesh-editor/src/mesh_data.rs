@@ -9,6 +9,11 @@
 //! cheaply (lengths, bounds); closedness is reported back by the kernel
 //! via [`crate::BridgeError`].
 
+/// Indices per triangle (flat soup alignment).
+pub(crate) const TRIANGLE_VERTS: usize = 3;
+/// Spatial components in a position / normal.
+pub(crate) const VEC3_COMPONENTS: usize = 3;
+
 /// Canonical editable triangle mesh (engine source of truth).
 #[derive(Debug, Clone, Default)]
 pub struct MeshData {
@@ -67,7 +72,7 @@ impl MeshData {
     ///
     /// Returns [`MeshError`] on the first violation found.
     pub fn validate(&self) -> Result<(), MeshError> {
-        if !self.indices.len().is_multiple_of(3) {
+        if !self.indices.len().is_multiple_of(TRIANGLE_VERTS) {
             return Err(MeshError::IndexCountNotMultipleOfThree);
         }
         if self.normals.len() != self.positions.len() {
@@ -90,7 +95,7 @@ impl MeshData {
 
     /// Number of triangles (`indices.len() / 3`).
     pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
+        self.indices.len() / TRIANGLE_VERTS
     }
 
     /// Retained heap bytes of the attribute/index arrays (no header overhead).
@@ -98,8 +103,8 @@ impl MeshData {
     /// Powers [`UndoStrategy::Snapshots`](crate::UndoStrategy) byte
     /// eviction: a cheap `len × width` sum, no allocation walk.
     pub fn heap_bytes(&self) -> usize {
-        self.positions.len() * size_of::<[f32; 3]>()
-            + self.normals.len() * size_of::<[f32; 3]>()
+        self.positions.len() * size_of::<[f32; TRIANGLE_VERTS]>()
+            + self.normals.len() * size_of::<[f32; TRIANGLE_VERTS]>()
             + self.uvs.len() * size_of::<[f32; 2]>()
             + self.indices.len() * size_of::<u32>()
     }
@@ -109,26 +114,42 @@ impl MeshData {
     /// Normals are analytic (per-face), uvs are a placeholder planar map;
     /// both are recomputed by the editor after boolean operations anyway.
     pub fn unit_box() -> Self {
+        // Half-extent of the unit box (edge length 1, centered at origin).
+        const HALF: f32 = 0.5;
+        // Number of faces on a box; each face is a quad → 2 tris.
+        const FACE_COUNT: usize = 6;
+        const VERTS_PER_FACE: usize = 4;
+        const INDICES_PER_FACE: usize = 6;
+
+        /// Box corner indices (unit box centered at origin).
+        const C_LDB: usize = 0; // −x −y −z
+        const C_RDB: usize = 1; // +x −y −z
+        const C_RUB: usize = 2; // +x +y −z
+        const C_LUB: usize = 3; // −x +y −z
+        const C_LDF: usize = 4; // −x −y +z
+        const C_RDF: usize = 5; // +x −y +z
+        const C_RUF: usize = 6; // +x +y +z
+        const C_LUF: usize = 7; // −x +y +z
         let p = [
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [-0.5, 0.5, 0.5],
+            [-HALF, -HALF, -HALF],
+            [HALF, -HALF, -HALF],
+            [HALF, HALF, -HALF],
+            [-HALF, HALF, -HALF],
+            [-HALF, -HALF, HALF],
+            [HALF, -HALF, HALF],
+            [HALF, HALF, HALF],
+            [-HALF, HALF, HALF],
         ];
         #[rustfmt::skip]
-        let faces: [[usize; 4]; 6] = [
-            [0, 1, 2, 3], // -z
-            [5, 4, 7, 6], // +z
-            [4, 0, 3, 7], // -x
-            [1, 5, 6, 2], // +x
-            [4, 5, 1, 0], // -y
-            [3, 2, 6, 7], // +y
+        let faces: [[usize; VERTS_PER_FACE]; FACE_COUNT] = [
+            [C_LDB, C_RDB, C_RUB, C_LUB], // -z
+            [C_RDF, C_LDF, C_LUF, C_RUF], // +z
+            [C_LDF, C_LDB, C_LUB, C_LUF], // -x
+            [C_RDB, C_RDF, C_RUF, C_RUB], // +x
+            [C_LDF, C_RDF, C_RDB, C_LDB], // -y
+            [C_LUB, C_RUB, C_RUF, C_LUF], // +y
         ];
-        let normals: [[f32; 3]; 6] = [
+        let normals: [[f32; VEC3_COMPONENTS]; FACE_COUNT] = [
             [0.0, 0.0, -1.0],
             [0.0, 0.0, 1.0],
             [-1.0, 0.0, 0.0],
@@ -136,10 +157,10 @@ impl MeshData {
             [0.0, -1.0, 0.0],
             [0.0, 1.0, 0.0],
         ];
-        let mut positions = Vec::with_capacity(24);
-        let mut normals_out = Vec::with_capacity(24);
-        let mut uvs = Vec::with_capacity(24);
-        let mut indices = Vec::with_capacity(36);
+        let mut positions = Vec::with_capacity(FACE_COUNT * VERTS_PER_FACE);
+        let mut normals_out = Vec::with_capacity(FACE_COUNT * VERTS_PER_FACE);
+        let mut uvs = Vec::with_capacity(FACE_COUNT * VERTS_PER_FACE);
+        let mut indices = Vec::with_capacity(FACE_COUNT * INDICES_PER_FACE);
         for (face, n) in faces.iter().zip(normals) {
             let base = positions.len() as u32;
             for (k, &vi) in face.iter().enumerate() {
@@ -147,7 +168,11 @@ impl MeshData {
                 normals_out.push(n);
                 uvs.push([(k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32]);
             }
-            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            // Two CCW triangles per quad face (verts 0-1-2 and 0-2-3).
+            const V1: u32 = 1;
+            const V2: u32 = 2;
+            const V3: u32 = 3;
+            indices.extend([base, base + V1, base + V2, base, base + V2, base + V3]);
         }
         Self {
             positions,
@@ -182,7 +207,7 @@ impl MeshData {
     /// untouched by any triangle keep their current normal.
     pub fn with_computed_normals(mut self) -> Self {
         let mut acc = vec![[0.0f32; 3]; self.positions.len()];
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.chunks_exact(TRIANGLE_VERTS) {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             // `validate` guarantees in-bounds indices, but don't panic on
             // hand-built callers that skipped it.

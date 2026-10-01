@@ -43,20 +43,31 @@ pub(super) fn check(root: &Path) -> Result<(), String> {
     })
 }
 
+/// Editor smoke readiness deadline.
+const READY_DEADLINE_SECS: u64 = 90;
+/// Settle delay after the editor binds its port.
+const POST_BIND_SETTLE_MS: u64 = 300;
+/// Poll interval while waiting for the editor port.
+const READY_POLL_MS: u64 = 100;
+/// Fixed editor-only listen port (see `src/main.rs`).
+const EDITOR_PORT: u16 = 3420;
+
 fn wait_until_ready(child: &mut std::process::Child) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + Duration::from_secs(READY_DEADLINE_SECS);
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             return Err(format!("smoke exited before readiness: {status}"));
         }
-        if std::net::TcpStream::connect("127.0.0.1:3420").is_ok() {
-            std::thread::sleep(Duration::from_millis(300));
+        if std::net::TcpStream::connect(("127.0.0.1", EDITOR_PORT)).is_ok() {
+            std::thread::sleep(Duration::from_millis(POST_BIND_SETTLE_MS));
             return match child.try_wait().map_err(|e| e.to_string())? {
                 None => Ok(()),
                 Some(status) => Err(format!("smoke exited after binding: {status}")),
             };
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(READY_POLL_MS));
     }
-    Err("timeout 90s: editor did not bind 127.0.0.1:3420".into())
+    Err(format!(
+        "timeout {READY_DEADLINE_SECS}s: editor did not bind 127.0.0.1:{EDITOR_PORT}"
+    ))
 }

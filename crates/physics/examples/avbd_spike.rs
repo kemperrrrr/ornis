@@ -44,6 +44,34 @@ const PENALTY_MAX: f32 = 1.0e10;
 const GEN_MARGIN: f32 = 0.05;
 const MU: f32 = 0.5;
 const HALF: f32 = 0.5;
+/// Rigid spatial DOF: 3 linear + 3 angular (dense 6×6 LDL system).
+const SPATIAL_DOF: usize = 6;
+/// Linear half of [`SPATIAL_DOF`] (angular block starts at this index).
+const LINEAR_DOF: usize = 3;
+/// Dense LDL breakdown threshold (non-positive pivot).
+const LDL_BREAKDOWN_EPS: f32 = 1e-12;
+/// Corner match tolerance when warmstarting contacts across steps.
+const CORNER_MATCH_EPS: f32 = 1e-6;
+/// Avoid divide-by-zero when the normal force is near zero in the cone clamp.
+const FORCE_SCALE_EPS: f32 = 1e-12;
+/// Inverse inertia of a unit box with mass 1 (`I = 1/6` → `1/I = 6`).
+const UNIT_BOX_INV_INERTIA: f32 = 6.0;
+/// Stack height for the head-to-head scene.
+const STACK_LEVELS: usize = 4;
+/// Vertical drop spacing (cm gap before engagement).
+const DROP_SPACING: f32 = 1.02;
+/// SI floor half-extents on XZ.
+const FLOOR_HALF_XZ: f32 = 5.0;
+/// Skip the first N steps before settle detection (transient fall).
+const SETTLE_SKIP_STEPS: usize = 10;
+/// Max linear/angular speed that counts as settled.
+const SETTLE_VEL: f32 = 0.08;
+/// Max |Δy| from the expected rest height for a PASS.
+const MAX_DY: f32 = 0.1;
+/// Max XZ drift from the stack axis for a PASS.
+const MAX_DRIFT: f32 = 0.15;
+/// Wall-clock conversion for the head-to-head printout.
+const MS_PER_SEC: f64 = 1000.0;
 
 #[derive(Clone)]
 struct Body {
@@ -89,17 +117,20 @@ fn outer(a: Vec3, b: Vec3) -> [[f32; 3]; 3] {
 }
 
 /// Dense LDL (no pivoting) for a 6x6 SPD system. Returns None on breakdown.
-fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
-    let mut l = [[0.0f32; 6]; 6];
-    let mut d = [0.0f32; 6];
-    for i in 0..6 {
+fn solve_6x6(
+    lhs: [[f32; SPATIAL_DOF]; SPATIAL_DOF],
+    rhs: [f32; SPATIAL_DOF],
+) -> Option<[f32; SPATIAL_DOF]> {
+    let mut l = [[0.0f32; SPATIAL_DOF]; SPATIAL_DOF];
+    let mut d = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         for j in 0..=i {
             let mut s = lhs[i][j];
             for k in 0..j {
                 s -= l[i][k] * d[k] * l[j][k];
             }
             if i == j {
-                if s <= 1e-12 {
+                if s <= LDL_BREAKDOWN_EPS {
                     return None;
                 }
                 d[i] = s;
@@ -109,22 +140,22 @@ fn solve_6x6(lhs: [[f32; 6]; 6], rhs: [f32; 6]) -> Option<[f32; 6]> {
             }
         }
     }
-    let mut y = [0.0f32; 6];
-    for i in 0..6 {
+    let mut y = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         let mut s = rhs[i];
         for k in 0..i {
             s -= l[i][k] * y[k];
         }
         y[i] = s;
     }
-    let mut z = [0.0f32; 6];
-    for i in 0..6 {
+    let mut z = [0.0f32; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         z[i] = y[i] / d[i];
     }
-    let mut x = [0.0f32; 6];
-    for i in (0..6).rev() {
+    let mut x = [0.0f32; SPATIAL_DOF];
+    for i in (0..SPATIAL_DOF).rev() {
         let mut s = z[i];
-        for k in (i + 1)..6 {
+        for k in (i + 1)..SPATIAL_DOF {
             s -= l[k][i] * x[k];
         }
         x[i] = s;
@@ -263,8 +294,8 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
                 let (h, lower) = support_height(bodies, u, world.x, world.z, world.y);
                 let found = contacts.iter_mut().enumerate().find(|(_, c)| {
                     c.upper == u
-                        && (c.corner.x - corner.x).abs() < 1e-6
-                        && (c.corner.z - corner.z).abs() < 1e-6
+                        && (c.corner.x - corner.x).abs() < CORNER_MATCH_EPS
+                        && (c.corner.z - corner.z).abs() < CORNER_MATCH_EPS
                 });
                 match found {
                     Some((idx, c)) => {
@@ -358,14 +389,14 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
                 1.0 / bodies[i].inv_inertia.y,
                 1.0 / bodies[i].inv_inertia.z,
             ) / (DT * DT);
-            let mut lhs = [[0.0f32; 6]; 6];
-            for (i, row) in lhs.iter_mut().enumerate().take(3) {
+            let mut lhs = [[0.0f32; SPATIAL_DOF]; SPATIAL_DOF];
+            for (i, row) in lhs.iter_mut().enumerate().take(LINEAR_DOF) {
                 row[i] = m_dt2;
             }
-            lhs[3][3] = i_dt2.x;
-            lhs[4][4] = i_dt2.y;
-            lhs[5][5] = i_dt2.z;
-            let mut rhs = [0.0f32; 6];
+            lhs[LINEAR_DOF][LINEAR_DOF] = i_dt2.x;
+            lhs[LINEAR_DOF + 1][LINEAR_DOF + 1] = i_dt2.y;
+            lhs[LINEAR_DOF + 2][LINEAR_DOF + 2] = i_dt2.z;
+            let mut rhs = [0.0f32; SPATIAL_DOF];
             let rl = m_dt2 * (bodies[i].pos - inertial[i]);
             rhs[0] = rl.x;
             rhs[1] = rl.y;
@@ -375,9 +406,9 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
                 i_dt2.y * (bodies[i].rot - inertial_rot[i]).y,
                 i_dt2.z * (bodies[i].rot - inertial_rot[i]).z,
             );
-            rhs[3] = ra.x;
-            rhs[4] = ra.y;
-            rhs[5] = ra.z;
+            rhs[LINEAR_DOF] = ra.x;
+            rhs[LINEAR_DOF + 1] = ra.y;
+            rhs[LINEAR_DOF + 2] = ra.z;
 
             for c in contacts.iter() {
                 let is_up = c.upper == i;
@@ -411,27 +442,34 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
                     let o_nn = outer(nn, nn);
                     let o_tt = outer(t, t);
                     let o_nt = outer(nn, t);
-                    for a in 0..3 {
-                        for b2 in 0..3 {
+                    for a in 0..LINEAR_DOF {
+                        for b2 in 0..LINEAR_DOF {
                             lhs[a][b2] += pen * o_nn[a][b2];
-                            lhs[3 + a][3 + b2] += pen * o_tt[a][b2];
-                            lhs[a][3 + b2] += pen * o_nt[a][b2];
-                            lhs[3 + a][b2] += pen * o_nt[b2][a];
+                            lhs[LINEAR_DOF + a][LINEAR_DOF + b2] += pen * o_tt[a][b2];
+                            lhs[a][LINEAR_DOF + b2] += pen * o_nt[a][b2];
+                            lhs[LINEAR_DOF + a][b2] += pen * o_nt[b2][a];
                         }
                     }
                     rhs[0] += fv * nn.x;
                     rhs[1] += fv * nn.y;
                     rhs[2] += fv * nn.z;
-                    rhs[3] += fv * t.x;
-                    rhs[4] += fv * t.y;
-                    rhs[5] += fv * t.z;
+                    rhs[LINEAR_DOF] += fv * t.x;
+                    rhs[LINEAR_DOF + 1] += fv * t.y;
+                    rhs[LINEAR_DOF + 2] += fv * t.z;
                 }
             }
 
-            let neg_rhs = [-rhs[0], -rhs[1], -rhs[2], -rhs[3], -rhs[4], -rhs[5]];
+            let neg_rhs = [
+                -rhs[0],
+                -rhs[1],
+                -rhs[2],
+                -rhs[LINEAR_DOF],
+                -rhs[LINEAR_DOF + 1],
+                -rhs[LINEAR_DOF + 2],
+            ];
             if let Some(dx) = solve_6x6(lhs, neg_rhs) {
                 bodies[i].pos += Vec3::new(dx[0], dx[1], dx[2]);
-                bodies[i].rot += Vec3::new(dx[3], dx[4], dx[5]);
+                bodies[i].rot += Vec3::new(dx[LINEAR_DOF], dx[LINEAR_DOF + 1], dx[LINEAR_DOF + 2]);
             }
         }
 
@@ -455,7 +493,7 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
             if f[0] < 0.0 {
                 c.penalty_n = (c.penalty_n + BETA * cn.abs()).min(PENALTY_MAX);
             }
-            let t_scale = (f[1] * f[1] + f[2] * f[2]).sqrt() / (f[0].abs() * MU + 1e-12);
+            let t_scale = (f[1] * f[1] + f[2] * f[2]).sqrt() / (f[0].abs() * MU + FORCE_SCALE_EPS);
             if t_scale <= 1.0 {
                 c.penalty_t = (c.penalty_t + BETA * (ct1.abs() + ct2.abs())).min(PENALTY_MAX);
             }
@@ -480,12 +518,12 @@ fn build_avbd_scene() -> Vec<Body> {
         is_static: true,
     }];
     // Unit-box inertia m=1: I = m/3*(hy^2+hz^2) = 1/6 per axis.
-    let inv_i = Vec3::splat(6.0);
-    for level in 0..4 {
+    let inv_i = Vec3::splat(UNIT_BOX_INV_INERTIA);
+    for level in 0..STACK_LEVELS {
         bodies.push(Body {
-            // Drop transient (same 1.02 spacing as the SI scene): the stack
+            // Drop transient (same DROP_SPACING as the SI scene): the stack
             // falls 2cm before engaging. Robustness probe, not the reference.
-            pos: Vec3::new(0.0, 0.5 + level as f32 * 1.02, 0.0),
+            pos: Vec3::new(0.0, HALF + level as f32 * DROP_SPACING, 0.0),
             rot: Vec3::ZERO,
             vel: Vec3::ZERO,
             angvel: Vec3::ZERO,
@@ -498,17 +536,17 @@ fn build_avbd_scene() -> Vec<Body> {
 }
 
 fn build_si_scene() -> (SequentialImpulseEngine, Vec<BodyHandle>) {
-    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY, 0.0));
     physics.add_body(RigidBody::new_box(
         Vec3::new(0.0, -1.0, 0.0),
-        Vec3::new(5.0, 1.0, 5.0),
+        Vec3::new(FLOOR_HALF_XZ, 1.0, FLOOR_HALF_XZ),
         0.0,
     ));
     let mut handles = Vec::new();
-    for level in 0..4 {
+    for level in 0..STACK_LEVELS {
         handles.push(physics.add_body(RigidBody::new_box(
-            Vec3::new(0.0, 0.5 + level as f32 * 1.02, 0.0),
-            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(0.0, HALF + level as f32 * DROP_SPACING, 0.0),
+            Vec3::new(HALF, HALF, HALF),
             1.0,
         )));
     }
@@ -527,22 +565,22 @@ fn main() {
             .iter()
             .map(|b| b.vel.length().max(b.angvel.length()))
             .fold(0.0f32, f32::max);
-        if s > 10 && max_v < 0.08 && settle_step == STEPS {
+        if s > SETTLE_SKIP_STEPS && max_v < SETTLE_VEL && settle_step == STEPS {
             settle_step = s;
         }
     }
-    let avbd_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let avbd_ms = t0.elapsed().as_secs_f64() * MS_PER_SEC;
 
     println!("=== AVBD (spike, {ITERS} iters, dt={DT}) ===");
     println!("wall: {avbd_ms:.1} ms for {STEPS} steps, settled at step {settle_step}");
     let mut avbd_ok = true;
     for (k, b) in bodies[1..].iter().enumerate() {
-        let expected_y = 0.5 + k as f32;
+        let expected_y = HALF + k as f32;
         let dy = (b.pos.y - expected_y).abs();
         let drift = b.pos.x.abs().max(b.pos.z.abs());
         let v = b.vel.length();
         let w = b.angvel.length();
-        let ok = dy < 0.1 && drift < 0.15 && v < 0.08 && w < 0.08;
+        let ok = dy < MAX_DY && drift < MAX_DRIFT && v < SETTLE_VEL && w < SETTLE_VEL;
         avbd_ok &= ok;
         println!(
             "box{k}: y={:.4} (exp {expected_y:.2}, d={dy:.4}) drift={drift:.4} \
@@ -559,18 +597,22 @@ fn main() {
     for _ in 0..STEPS {
         physics.step(DT);
     }
-    let si_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let si_ms = t0.elapsed().as_secs_f64() * MS_PER_SEC;
     println!("=== SI (SequentialImpulseEngine) ===");
     println!("wall: {si_ms:.1} ms for {STEPS} steps");
     let mut si_ok = true;
     for (k, h) in si_handles.iter().enumerate() {
-        let b = physics.get_body(*h).unwrap();
-        let expected_y = 0.5 + k as f32;
+        let Some(b) = physics.get_body(*h) else {
+            si_ok = false;
+            println!("box{k}: missing body FAIL");
+            continue;
+        };
+        let expected_y = HALF + k as f32;
         let dy = (b.position.y - expected_y).abs();
         let drift = b.position.x.abs().max(b.position.z.abs());
         let v = b.velocity.length();
         let w = b.angular_velocity.length();
-        let ok = dy < 0.1 && drift < 0.15 && v < 0.08 && w < 0.08;
+        let ok = dy < MAX_DY && drift < MAX_DRIFT && v < SETTLE_VEL && w < SETTLE_VEL;
         si_ok &= ok;
         println!(
             "box{k}: y={:.4} (exp {expected_y:.2}, d={dy:.4}) drift={drift:.4} \

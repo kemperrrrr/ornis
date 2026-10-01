@@ -179,7 +179,10 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// Equivalent to calling [`extract_render_data`] on this world's
     /// store; provided for callers that own the [`GameWorld`].
     pub fn frame_upload(&self) -> FrameUpload {
-        extract_render_data(self.engine.world().store().expect("game world store"))
+        match self.engine.world().store() {
+            Some(store) => extract_render_data(store),
+            None => FrameUpload::default(),
+        }
     }
 
     /// Runs one frame and returns its CPU-side render payload.
@@ -202,7 +205,9 @@ impl<Role: SceneRole> GameWorld<Role> {
 }
 
 fn insert_scene_entities(engine: &mut Engine, entities: &[EntityDesc]) -> Vec<Entity> {
-    let store = engine.world_mut().store_mut().expect("game world store");
+    let Some(store) = engine.world_mut().store_mut() else {
+        return Vec::new();
+    };
     let mut handles = Vec::with_capacity(entities.len());
     for entity in entities {
         let handle = store.create_entity();
@@ -218,8 +223,8 @@ fn insert_scene_entities(engine: &mut Engine, entities: &[EntityDesc]) -> Vec<En
 ///
 /// The floor carries only a physics component, so it never enters the frame
 /// upload; it exists so dynamic showcase bodies have ground to rest on.
-pub fn spawn_static_floor(engine: &mut Engine) -> Entity {
-    let store = engine.world_mut().store_mut().expect("game runtime store");
+pub fn spawn_static_floor(engine: &mut Engine) -> Option<Entity> {
+    let store = engine.world_mut().store_mut()?;
     let floor = store.create_entity();
     store.insert(
         floor,
@@ -229,7 +234,7 @@ pub fn spawn_static_floor(engine: &mut Engine) -> Entity {
             0.0,
         ),
     );
-    floor
+    Some(floor)
 }
 
 #[cfg(test)]
@@ -362,7 +367,7 @@ mod tests {
     fn hidden_floor_never_enters_frame_upload() {
         let scene = two_sphere_scene();
         let mut world = GameWorld::from_scene(&scene);
-        let floor = spawn_static_floor(world.engine_mut());
+        let floor = spawn_static_floor(world.engine_mut()).expect("store registered");
         assert!(
             world
                 .engine()

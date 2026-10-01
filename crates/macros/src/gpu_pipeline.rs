@@ -57,6 +57,23 @@ use proc_macro2::{Delimiter, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::{ItemFn, LitInt, parse_macro_input, spanned::Spanned};
 
+/// Default compute workgroup size when the attribute omits one.
+const DEFAULT_WORKGROUP_SIZE: u32 = 64;
+/// Min components in a WGSL vector (`vec2`).
+const MIN_VEC_COMPONENTS: usize = 2;
+/// Max components in a WGSL vector (`vec4`).
+const MAX_VEC_COMPONENTS: usize = 4;
+/// Vertices in a fullscreen quad / UV corner list.
+const QUAD_VERTICES: usize = 4;
+/// Token index of the type in `name: Type` binding syntax.
+const BINDING_TYPE_TOKEN: usize = 2;
+/// Minimum tokens for `name: Type` (name, `:`, type).
+const BINDING_MIN_TOKENS: usize = 3;
+/// Token index of the optional access-mode comma.
+const BINDING_ACCESS_COMMA: usize = 3;
+/// Token index of the optional access-mode identifier.
+const BINDING_ACCESS_MODE: usize = 4;
+
 /// Parsed `#[gpu_pipeline(...)]` options (`syn::Path` has no `Debug`, so
 /// neither does this — format fields individually when debugging).
 struct ShaderConfig {
@@ -103,7 +120,7 @@ fn parse_binding_base_ty(tt: &TokenTree) -> syn::Result<IrType> {
             match elem_tt {
                 TokenTree::Ident(i) => {
                     let name = i.to_string();
-                    if (2..=4).contains(&len)
+                    if (MIN_VEC_COMPONENTS..=MAX_VEC_COMPONENTS).contains(&len)
                         && let Some(vec) = short_vec_ty(&name, len)
                     {
                         return Ok(vec);
@@ -175,14 +192,14 @@ fn parse_binding_group(kind: &str, ts: TokenStream2, binding_index: usize) -> sy
             ));
         }
     };
-    if toks.len() < 3 || !is_punct(&toks[1], ':') {
+    if toks.len() < BINDING_MIN_TOKENS || !is_punct(&toks[1], ':') {
         return Err(syn::Error::new(
             toks.first()
                 .map_or_else(proc_macro2::Span::call_site, |t| t.span()),
             format!("expected `{kind}(name: Type, ...)`"),
         ));
     }
-    let base = parse_binding_base_ty(&toks[2])?;
+    let base = parse_binding_base_ty(&toks[BINDING_TYPE_TOKEN])?;
     let binding = binding_index as u32;
     match kind {
         "storage" => {
@@ -210,23 +227,26 @@ fn parse_binding_group(kind: &str, ts: TokenStream2, binding_index: usize) -> sy
                 ty: base,
             }))
         }
-        _ => unreachable!("only storage/uniform are valid binding kinds"),
+        other => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("unsupported binding kind `{other}` (expected storage/uniform)"),
+        )),
     }
 }
 
 /// Parse the optional `, read` / `, read_write` tail (storage only):
 /// true for `read_write`.
 fn parse_access_rw(kind: &str, toks: &[TokenTree]) -> syn::Result<bool> {
-    if toks.len() <= 3 {
+    if toks.len() <= BINDING_MIN_TOKENS {
         return Ok(false);
     }
-    if !is_punct(&toks[3], ',') {
+    if !is_punct(&toks[BINDING_ACCESS_COMMA], ',') {
         return Err(syn::Error::new(
-            toks[3].span(),
+            toks[BINDING_ACCESS_COMMA].span(),
             "expected `,` before the access mode",
         ));
     }
-    let Some(acc_tt) = toks.get(4) else {
+    let Some(acc_tt) = toks.get(BINDING_ACCESS_MODE) else {
         return Ok(false);
     };
     let acc = match acc_tt {
@@ -304,7 +324,7 @@ fn parse_config(args: TokenStream2) -> syn::Result<Option<ShaderConfig>> {
     }
 
     let mut config = ShaderConfig {
-        workgroup_size: 64,
+        workgroup_size: DEFAULT_WORKGROUP_SIZE,
         items: Vec::new(),
         builtins: Vec::new(),
         vertex_entry: None,
@@ -396,7 +416,7 @@ fn apply_option(
 
 /// `workgroup_size = <integer>`
 fn parse_workgroup_size(item: &[TokenTree], config: &mut ShaderConfig) -> syn::Result<()> {
-    if item.len() < 3 || !is_punct(&item[1], '=') {
+    if item.len() < BINDING_MIN_TOKENS || !is_punct(&item[1], '=') {
         return Err(syn::Error::new(
             item[0].span(),
             "expected `workgroup_size = <integer>`",
@@ -511,7 +531,7 @@ fn parse_texture_sampler_group(
             ));
         }
     };
-    if toks.len() < 3 || !is_punct(&toks[1], ':') {
+    if toks.len() < BINDING_MIN_TOKENS || !is_punct(&toks[1], ':') {
         return Err(syn::Error::new(
             toks.first()
                 .map_or_else(proc_macro2::Span::call_site, |t| t.span()),
@@ -521,14 +541,14 @@ fn parse_texture_sampler_group(
     // Structural type: tokens up to the next top-level comma parse as one
     // `syn::Type`, classified into the closed texture world below. No
     // space-normalization paste — unknown shapes are loud here, not at naga.
-    let type_toks: Vec<TokenTree> = toks[2..]
+    let type_toks: Vec<TokenTree> = toks[BINDING_TYPE_TOKEN..]
         .iter()
         .take_while(|tt| !is_punct(tt, ','))
         .cloned()
         .collect();
     let ty: syn::Type = syn::parse2(TokenStream2::from_iter(type_toks)).map_err(|_| {
         syn::Error::new(
-            toks[2].span(),
+            toks[BINDING_TYPE_TOKEN].span(),
             "expected a texture/sampler type like `texture_2d<f32>` or `sampler`",
         )
     })?;
@@ -674,11 +694,11 @@ fn quad_items() -> Vec<IrItem> {
     }
     let quad_ty = IrType::Array {
         elem: Box::new(IrType::Scalar(ShaderType::Vec4)),
-        len: 4,
+        len: QUAD_VERTICES,
     };
     let uvs_ty = IrType::Array {
         elem: Box::new(IrType::Scalar(ShaderType::Vec2)),
-        len: 4,
+        len: QUAD_VERTICES,
     };
     vec![
         IrItem::Global(IrGlobal::Private {

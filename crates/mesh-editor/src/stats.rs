@@ -5,6 +5,9 @@
 //! the degradation ladder (L0 full preview → L1 decimated → L2 bounding
 //! proxy → L3 frozen preview + progress) honest instead of estimated.
 
+/// Microseconds in one millisecond.
+const MICROS_PER_MS: f32 = 1_000.0;
+
 /// Measured per-frame cost of the mesh-editing split.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameStats {
@@ -44,7 +47,7 @@ impl FrameStats {
     /// Coherence witness for the swap gate: `Some` while the preview is
     /// live, `None` once it degrades (decimated/proxy/frozen ladder).
     pub fn preview_coherence(&self) -> Option<PreviewStats> {
-        PreviewStats::try_new(self.preview_us as f32 / 1_000.0)
+        PreviewStats::try_new(self.preview_us as f32 / MICROS_PER_MS)
     }
 
     /// Record the timings of one finished exact result without touching

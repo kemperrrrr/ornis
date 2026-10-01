@@ -7,6 +7,9 @@
 
 use syn::{visit, visit::Visit};
 
+/// Max branch/op ratio for a lane that still prefers GPU.
+const GPU_BRANCH_RATIO: f64 = 0.05;
+
 #[derive(Default)]
 pub struct StaticProfile {
     pub compute_ops: usize,
@@ -24,7 +27,7 @@ impl StaticProfile {
     }
 
     pub fn prefers_gpu(&self) -> bool {
-        self.branch_ratio() <= 0.05
+        self.branch_ratio() <= GPU_BRANCH_RATIO
     }
 }
 

@@ -21,6 +21,16 @@ use ornis_macros::WgslStruct;
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
+/// Shared read guard that recovers from a poisoned [`std::sync::RwLock`].
+fn read_lock<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Exclusive write guard that recovers from a poisoned [`std::sync::RwLock`].
+fn write_lock<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Frame-global camera uniform (binding shared by every pass).
 ///
 /// The WGSL `Camera` declaration is generated from this layout
@@ -73,6 +83,16 @@ pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 /// first eight entries of any kind. Excess lights are dropped and reported
 /// in [`LightUploadStats::dropped_lights`] (never silently).
 pub const MAX_LIGHTS: usize = 8;
+/// Components in an RGB / xyz triple.
+const VEC3_COMPONENTS: usize = 3;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+/// Indices per triangle.
+const TRIANGLE_VERTS: usize = 3;
+/// Components in an RGBA / homogeneous vector.
+const VEC4_COMPONENTS: usize = 4;
+/// Vertices in a fullscreen triangle-strip quad (`draw(0..4)`).
+const FULLSCREEN_QUAD_VERTS: u32 = 4;
 /// Compile-time pin: the WGSL derive only accepts integer literals for
 /// array lengths, so [`LightingUniform::lights`] spells `8` literally —
 /// this assert keeps the spell and the limit in sync.
@@ -109,6 +129,20 @@ pub const SHADOW_SIZE: u32 = 1024;
 /// eye at `SHADOW_DIR_DIST` along the to-light direction.
 pub const SHADOW_ORTHO_HALF: f32 = 12.0;
 const SHADOW_DIR_DIST: f32 = 30.0;
+/// Near/far depth margin beyond the directional shadow box (m).
+const SHADOW_DIR_DEPTH_MARGIN: f32 = 20.0;
+/// Extra far-plane padding for fitted directional shadows (m).
+const SHADOW_FIT_FAR_PAD: f32 = 10.0;
+/// Absolute axis·Y above which the shadow look-at picks +X as up.
+const SHADOW_UP_AXIS_DOT: f32 = 0.98;
+/// Floor for light range / attenuation denominators (m).
+const LIGHT_RANGE_EPS: f32 = 1e-3;
+/// Initial per-object instance buffer capacity (grows on demand).
+const INITIAL_MAX_OBJECTS: u32 = 256;
+/// Initial material buffer capacity (grows on demand).
+const INITIAL_MAX_MATERIALS: u32 = 64;
+/// Default ambient when no scene lighting has been uploaded yet.
+const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.03, 0.03, 0.05];
 
 /// Depth-bias pair for the shadow pre-pass (2D layers and cube faces
 /// share it). The constant term is negligible on `Depth32Float`; the
@@ -131,6 +165,8 @@ pub const SHADOW_CUBE_SIZE: u32 = 512;
 /// Near plane shared by the cube-face renders and the analytic
 /// sampling formula — change both together.
 pub const SHADOW_CUBE_NEAR: f32 = 0.1;
+/// Faces on a cube-map shadow (must match [`CUBE_FACES`]).
+const CUBE_FACE_COUNT: usize = 6;
 /// Cube-face axes (direction from the light) with the ups that reproduce
 /// the hardware cube-sampling frame (OpenGL/Metal convention: +X: (−z,−y),
 /// −X: (+z,−y), +Y: (+x,+z), −Y: (+x,−z), +Z: (+x,−y), −Z: (−x,−y)).
@@ -139,7 +175,7 @@ pub const SHADOW_CUBE_NEAR: f32 = 0.1;
 /// NDC y+1 at texture row 0, the sampler reads v=0 from the top).
 /// Keep both together: correct depths at mirrored texels are what the
 /// sampler then misses (all-lit point shadows).
-const CUBE_FACES: [([f32; 3], [f32; 3]); 6] = [
+const CUBE_FACES: [([f32; 3], [f32; 3]); CUBE_FACE_COUNT] = [
     ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
     ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
     ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
@@ -841,9 +877,9 @@ pub struct Renderer3D {
     /// cube slot (a separate index space from the 2D layers above —
     /// the evaluator picks the pool by light kind).
     shadow_cube_maps: wgpu::Texture,
-    shadow_cube_views: [wgpu::TextureView; POINT_SHADOW_CUBES * 6],
+    shadow_cube_views: [wgpu::TextureView; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     shadow_cube_array_view: wgpu::TextureView,
-    shadow_cube_vp_buffers: [wgpu::Buffer; POINT_SHADOW_CUBES * 6],
+    shadow_cube_vp_buffers: [wgpu::Buffer; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     /// Mirrored depth-only pipeline for the cube faces (their VPs
     /// mirror NDC y — see [`point_cube_face_vp`] — so winding flips).
     shadow_cube_pipeline: wgpu::RenderPipeline,
@@ -852,7 +888,7 @@ pub struct Renderer3D {
 
 /// Pick an up vector non-parallel to the given shadow axis.
 fn shadow_up(axis: glam::Vec3) -> glam::Vec3 {
-    if axis.y.abs() > 0.98 {
+    if axis.y.abs() > SHADOW_UP_AXIS_DOT {
         glam::Vec3::X
     } else {
         glam::Vec3::Y
@@ -874,8 +910,8 @@ fn dir_shadow_vp(to_light: glam::Vec3) -> [[f32; 4]; 4] {
         SHADOW_ORTHO_HALF,
         -SHADOW_ORTHO_HALF,
         SHADOW_ORTHO_HALF,
-        SHADOW_DIR_DIST - 20.0,
-        SHADOW_DIR_DIST + 20.0,
+        SHADOW_DIR_DIST - SHADOW_DIR_DEPTH_MARGIN,
+        SHADOW_DIR_DIST + SHADOW_DIR_DEPTH_MARGIN,
     );
     (proj * view).to_cols_array_2d()
 }
@@ -888,13 +924,13 @@ fn dir_shadow_vp(to_light: glam::Vec3) -> [[f32; 4]; 4] {
 /// the projection.
 pub fn shadow_fit_for_bounds(min: [f32; 3], max: [f32; 3]) -> ([f32; 3], f32) {
     let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
+        (min[0] + max[0]) * HALF,
+        (min[1] + max[1]) * HALF,
+        (min[2] + max[2]) * HALF,
     ];
-    let half = ((max[0] - min[0]) * 0.5)
-        .max((max[1] - min[1]) * 0.5)
-        .max((max[2] - min[2]) * 0.5)
+    let half = ((max[0] - min[0]) * HALF)
+        .max((max[1] - min[1]) * HALF)
+        .max((max[2] - min[2]) * HALF)
         .max(SHADOW_ORTHO_HALF);
     if center.iter().all(|v| v.is_finite()) && half.is_finite() {
         (center, half)
@@ -909,7 +945,7 @@ pub fn shadow_fit_for_bounds(min: [f32; 3], max: [f32; 3]) -> ([f32; 3], f32) {
 /// Same `directx` depth convention as [`dir_shadow_vp`]; only used when a
 /// scene fit was set via [`Renderer3D::set_shadow_bounds`].
 fn dir_shadow_vp_fitted(to_light: glam::Vec3, center: [f32; 3], half: f32) -> [[f32; 4]; 4] {
-    let dist = half + 20.0;
+    let dist = half + SHADOW_DIR_DEPTH_MARGIN;
     let c = glam::Vec3::from_array(center);
     let view = glam::camera::rh::view::look_at_mat4(c + to_light * dist, c, shadow_up(to_light));
     let proj = glam::camera::rh::proj::directx::orthographic(
@@ -918,7 +954,7 @@ fn dir_shadow_vp_fitted(to_light: glam::Vec3, center: [f32; 3], half: f32) -> [[
         -half,
         half,
         1.0,
-        dist + half + 10.0,
+        dist + half + SHADOW_FIT_FAR_PAD,
     );
     (proj * view).to_cols_array_2d()
 }
@@ -937,7 +973,7 @@ fn spot_shadow_vp(
     let proj = glam::camera::rh::proj::directx::perspective(
         outer_angle_deg.to_radians() * 2.0,
         1.0,
-        0.5,
+        HALF,
         range.max(1.0),
     );
     (proj * view).to_cols_array_2d()
@@ -956,7 +992,7 @@ fn spot_shadow_vp(
 /// negation is a reflection — winding flips, so cube faces render
 /// through the mirrored shadow pipeline (`front_face: Cw`).
 fn point_cube_face_vp(position: [f32; 3], range: f32, face: usize) -> [[f32; 4]; 4] {
-    let (dir, up) = CUBE_FACES[face % 6];
+    let (dir, up) = CUBE_FACES[face % CUBE_FACE_COUNT];
     let eye = glam::Vec3::from_array(position);
     let view = glam::camera::rh::view::look_at_mat4(
         eye,
@@ -1045,7 +1081,7 @@ pub fn upload_skinned_mesh(
     if vertices.is_empty() || indices.is_empty() {
         return Err(UploadError::EmptyMesh);
     }
-    if !indices.len().is_multiple_of(3) {
+    if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
         return Err(UploadError::InvalidMesh(
             MeshError::IndexCountNotMultipleOfThree,
         ));
@@ -1121,7 +1157,7 @@ fn build_lighting_uniform(
     fit: Option<([f32; 3], f32)>,
 ) -> BuiltLighting {
     /// Normalize a direction, falling back to +Z on degenerate input.
-    fn norm_dir(d: [f32; 3]) -> [f32; 4] {
+    fn norm_dir(d: [f32; VEC3_COMPONENTS]) -> [f32; VEC4_COMPONENTS] {
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         if len > 0.0 {
             [d[0] / len, d[1] / len, d[2] / len, 0.0]
@@ -1130,7 +1166,7 @@ fn build_lighting_uniform(
         }
     }
     /// Same as [`norm_dir`](norm_dir) as a [`glam::Vec3`].
-    fn norm3(d: [f32; 3]) -> glam::Vec3 {
+    fn norm3(d: [f32; VEC3_COMPONENTS]) -> glam::Vec3 {
         let v = glam::Vec3::from_array(d);
         if v.length_squared() > 0.0 {
             v.normalize()
@@ -1143,17 +1179,17 @@ fn build_lighting_uniform(
         kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
         direction: [0.0, 0.0, 1.0, 0.0],
         position: [0.0, 0.0, 0.0, 1.0],
-        color: [0.0; 4],
+        color: [0.0; VEC4_COMPONENTS],
         params: [0.0, 0.0, 0.0, -1.0],
         shadow_vp: NO_SHADOW_VP,
-    }; 8];
+    }; MAX_LIGHTS];
     let mut shadow_count = 0u32;
     let mut cube_count = 0u32;
     let mut dropped_shadows = 0u32;
-    let mut shadow_layer_vps: Vec<[[f32; 4]; 4]> = Vec::new();
+    let mut shadow_layer_vps: Vec<[[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS]> = Vec::new();
     // (position, range, cube slot) for shadowed point lights, in
     // assignment order; face VPs are derived below.
-    let mut cube_lights: Vec<([f32; 3], f32, usize)> = Vec::new();
+    let mut cube_lights: Vec<([f32; VEC3_COMPONENTS], f32, usize)> = Vec::new();
     /// Assign the next shadow layer, or -1.0 when `wants` is false
     /// or the array is full. Returns `(layer, clip_matrix)`.
     macro_rules! shadow_layer {
@@ -1220,7 +1256,7 @@ fn build_lighting_uniform(
                     kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
                     position: [position[0], position[1], position[2], 1.0],
                     color: pack_light_color(*color, *intensity, exposure),
-                    params: [range.max(1e-3), 0.0, 0.0, slot],
+                    params: [range.max(LIGHT_RANGE_EPS), 0.0, 0.0, slot],
                     ..gpu_lights[i]
                 }
             }
@@ -1259,7 +1295,7 @@ fn build_lighting_uniform(
                     direction: norm_dir(*direction),
                     position: [position[0], position[1], position[2], 1.0],
                     color: pack_light_color(*color, *intensity, exposure),
-                    params: [range.max(1e-3), ci.max(co), co.min(ci), layer],
+                    params: [range.max(LIGHT_RANGE_EPS), ci.max(co), co.min(ci), layer],
                     shadow_vp: vp,
                 }
             }
@@ -1274,9 +1310,9 @@ fn build_lighting_uniform(
             dropped_shadows += 1;
         }
     }
-    let mut cube_face_vps = Vec::with_capacity(cube_lights.len() * 6);
+    let mut cube_face_vps = Vec::with_capacity(cube_lights.len() * CUBE_FACE_COUNT);
     for (position, range, _) in &cube_lights {
-        for face in 0..6 {
+        for face in 0..CUBE_FACE_COUNT {
             cube_face_vps.push(point_cube_face_vp(*position, *range, face));
         }
     }
@@ -1290,7 +1326,7 @@ fn build_lighting_uniform(
             ],
             lights: gpu_lights,
             light_count: count as u32,
-            _pad: [0; 3],
+            _pad: [0; VEC3_COMPONENTS],
         },
         stats: LightUploadStats {
             uploaded: count as u32,
@@ -1307,7 +1343,7 @@ fn build_lighting_uniform(
 /// free layer/cube slot. No GPU access — safe to call per frame; log on
 /// scene change, not per frame.
 pub fn count_light_drops(lights: &[LightDesc]) -> LightUploadStats {
-    build_lighting_uniform([0.0; 3], 1.0, 1.0, lights, None).stats
+    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None).stats
 }
 
 /// Exact CPU staging capacity for one [`Renderer3D::upload_instances`]
@@ -1332,8 +1368,8 @@ impl Renderer3D {
         surface_config: &wgpu::SurfaceConfiguration,
         sample_count: u32,
     ) -> Self {
-        let max_objects = 256u32;
-        let max_materials = 64u32;
+        let max_objects = INITIAL_MAX_OBJECTS;
+        let max_materials = INITIAL_MAX_MATERIALS;
         let format = surface_config.format;
         let width = surface_config.width.max(1);
         let height = surface_config.height.max(1);
@@ -1479,11 +1515,8 @@ impl Renderer3D {
         let mut this = Self::new(device, surface_config, sample_count);
         this.transparency = transparency;
         {
-            let per_object = this
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock");
-            let material = this.material_buffer.read().expect("material buffer lock");
+            let per_object = read_lock(&this.per_object_buffer);
+            let material = read_lock(&this.material_buffer);
             this.forward_pass = Self::create_forward_pass(
                 device,
                 &this.camera_buffer,
@@ -1567,12 +1600,17 @@ impl Renderer3D {
         });
 
         let default_lighting = LightingUniform {
-            ambient_color: [0.03, 0.03, 0.05, 1.0],
+            ambient_color: [
+                DEFAULT_AMBIENT_RGB[0],
+                DEFAULT_AMBIENT_RGB[1],
+                DEFAULT_AMBIENT_RGB[2],
+                1.0,
+            ],
             lights: [GpuLight {
                 kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
-                direction: [0.0; 4],
-                position: [0.0; 4],
-                color: [0.0; 4],
+                direction: [0.0; VEC4_COMPONENTS],
+                position: [0.0; VEC4_COMPONENTS],
+                color: [0.0; VEC4_COMPONENTS],
                 params: [0.0, 0.0, 0.0, -1.0],
                 shadow_vp: [
                     [1.0, 0.0, 0.0, 0.0],
@@ -1580,9 +1618,9 @@ impl Renderer3D {
                     [0.0, 0.0, 1.0, 0.0],
                     [0.0, 0.0, 0.0, 1.0],
                 ],
-            }; 8],
+            }; MAX_LIGHTS],
             light_count: 0,
-            _pad: [0; 3],
+            _pad: [0; VEC3_COMPONENTS],
         };
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting buffer"),
@@ -1622,16 +1660,19 @@ impl Renderer3D {
             // buffer mapping lives here.
             entries: &shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| {
                 match r.name {
-                    "camera" => buffers.camera.as_entire_binding(),
-                    "per_objects" => buffers.per_object.as_entire_binding(),
-                    "materials" => buffers.material.as_entire_binding(),
-                    "lighting" => buffers.lighting.as_entire_binding(),
-                    "shadow_tex" => wgpu::BindingResource::TextureView(shadow_array_view),
-                    "shadow_sampler" => wgpu::BindingResource::Sampler(shadow_sampler),
-                    "shadow_cube_tex" => wgpu::BindingResource::TextureView(shadow_cube_array_view),
-                    other => panic!("pbr bind group has no resource for `{other}`"),
+                    "camera" => Some(buffers.camera.as_entire_binding()),
+                    "per_objects" => Some(buffers.per_object.as_entire_binding()),
+                    "materials" => Some(buffers.material.as_entire_binding()),
+                    "lighting" => Some(buffers.lighting.as_entire_binding()),
+                    "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+                    "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
+                    "shadow_cube_tex" => {
+                        Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
+                    }
+                    _ => None,
                 }
-            }),
+            })
+            .unwrap_or_default(),
         });
 
         (bind_group_layout, bind_group)
@@ -1749,12 +1790,13 @@ impl Renderer3D {
             label: Some("skinned gbuffer bind group (probe)"),
             layout: &bind_group_layout,
             entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => camera_buffer.as_entire_binding(),
-                "per_objects" => per_object_buffer.as_entire_binding(),
-                "materials" => material_buffer.as_entire_binding(),
-                "palette" => palette_buffer.as_entire_binding(),
-                other => panic!("skinned bind group has no resource for `{other}`"),
-            }),
+                "camera" => Some(camera_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object_buffer.as_entire_binding()),
+                "materials" => Some(material_buffer.as_entire_binding()),
+                "palette" => Some(palette_buffer.as_entire_binding()),
+                _ => None,
+            })
+            .unwrap_or_default(),
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2075,12 +2117,13 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                 |r| match r.name {
-                    "camera" => camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object_buffer.as_entire_binding(),
-                    "materials" => material_buffer.as_entire_binding(),
-                    other => panic!("gbuffer bind group has no resource for `{other}`"),
+                    "camera" => Some(camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object_buffer.as_entire_binding()),
+                    "materials" => Some(material_buffer.as_entire_binding()),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2310,16 +2353,16 @@ impl Renderer3D {
         device: &wgpu::Device,
     ) -> (
         wgpu::Texture,
-        [wgpu::TextureView; POINT_SHADOW_CUBES * 6],
+        [wgpu::TextureView; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
         wgpu::TextureView,
-        [wgpu::Buffer; POINT_SHADOW_CUBES * 6],
+        [wgpu::Buffer; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     ) {
         let shadow_cube_maps = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("point shadow cubes"),
             size: wgpu::Extent3d {
                 width: SHADOW_CUBE_SIZE,
                 height: SHADOW_CUBE_SIZE,
-                depth_or_array_layers: (POINT_SHADOW_CUBES * 6) as u32,
+                depth_or_array_layers: (POINT_SHADOW_CUBES * CUBE_FACE_COUNT) as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -2386,8 +2429,8 @@ impl Renderer3D {
         if count == 0 && cubes == 0 {
             return;
         }
-        let per_object = self.per_object_buffer.read().unwrap();
-        let material = self.material_buffer.read().unwrap();
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
         for layer in 0..count as usize {
             self.render_shadow_layer(
                 device,
@@ -2402,8 +2445,8 @@ impl Renderer3D {
             );
         }
         for cube in 0..cubes as usize {
-            for face in 0..6 {
-                let idx = cube * 6 + face;
+            for face in 0..CUBE_FACE_COUNT {
+                let idx = cube * CUBE_FACE_COUNT + face;
                 self.render_shadow_layer(
                     device,
                     encoder,
@@ -2441,12 +2484,13 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                 |r| match r.name {
-                    "camera" => vp_buffer.as_entire_binding(),
-                    "per_objects" => per_object.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    other => panic!("shadow bind group has no resource for `{other}`"),
+                    "camera" => Some(vp_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shadow pass"),
@@ -2504,9 +2548,9 @@ impl Renderer3D {
         if count == 0 && cubes == 0 {
             return;
         }
-        let per_object = self.per_object_buffer.read().unwrap();
-        let material = self.material_buffer.read().unwrap();
-        let palette = self.palette_buffer.read().expect("palette buffer lock");
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        let palette = read_lock(&self.palette_buffer);
         for layer in 0..count as usize {
             self.render_skinned_shadow_layer(
                 device,
@@ -2522,8 +2566,8 @@ impl Renderer3D {
             );
         }
         for cube in 0..cubes as usize {
-            for face in 0..6 {
-                let idx = cube * 6 + face;
+            for face in 0..CUBE_FACE_COUNT {
+                let idx = cube * CUBE_FACE_COUNT + face;
                 self.render_skinned_shadow_layer(
                     device,
                     encoder,
@@ -2562,16 +2606,17 @@ impl Renderer3D {
             label: Some("skinned shadow bind group"),
             layout: &self.skinned_bind_group_layout,
             entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => vp_buffer.as_entire_binding(),
-                "per_objects" => per_object.as_entire_binding(),
-                "materials" => material.as_entire_binding(),
-                "palette" => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                "camera" => Some(vp_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object.as_entire_binding()),
+                "materials" => Some(material.as_entire_binding()),
+                "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: palette,
                     offset: handle.byte_offset(),
                     size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
-                }),
-                other => panic!("skinned shadow bind group has no resource for `{other}`"),
-            }),
+                })),
+                _ => None,
+            })
+            .unwrap_or_default(),
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skinned shadow pass"),
@@ -2709,26 +2754,28 @@ impl Renderer3D {
             entries: &bgl_entries,
         });
 
-        let bind_group =
-            std::sync::RwLock::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = std::sync::RwLock::new(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("forward bind group"),
                 layout: &bind_group_layout,
                 entries: &shaders::bind_group_entries(
                     &shaders::pbr_generated::PBR_RESOURCES,
                     |r| match r.name {
-                        "camera" => camera_buffer.as_entire_binding(),
-                        "per_objects" => per_object_buffer.as_entire_binding(),
-                        "materials" => material_buffer.as_entire_binding(),
-                        "lighting" => lighting_buffer.as_entire_binding(),
-                        "shadow_tex" => wgpu::BindingResource::TextureView(shadow_array_view),
-                        "shadow_sampler" => wgpu::BindingResource::Sampler(shadow_sampler),
+                        "camera" => Some(camera_buffer.as_entire_binding()),
+                        "per_objects" => Some(per_object_buffer.as_entire_binding()),
+                        "materials" => Some(material_buffer.as_entire_binding()),
+                        "lighting" => Some(lighting_buffer.as_entire_binding()),
+                        "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+                        "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
                         "shadow_cube_tex" => {
-                            wgpu::BindingResource::TextureView(shadow_cube_array_view)
+                            Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
                         }
-                        other => panic!("forward bind group has no resource for `{other}`"),
+                        _ => None,
                     },
-                ),
-            }));
+                )
+                .unwrap_or_default(),
+            }),
+        );
 
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("forward color target"),
@@ -2854,11 +2901,18 @@ impl Renderer3D {
         if self.textured_forward.is_some() {
             return;
         }
-        let white = CpuImage::from_rgba8(1, 1, vec![255; 4]).expect("1x1 white image validates");
-        let fallback_color = upload_texture(device, queue, &white, TextureRole::BaseColor)
-            .expect("1x1 fallback color texture uploads");
-        let fallback_data = upload_texture(device, queue, &white, TextureRole::MetallicRoughness)
-            .expect("1x1 fallback data texture uploads");
+        let Ok(white) = CpuImage::from_rgba8(1, 1, vec![255; 4]) else {
+            return;
+        };
+        let Ok(fallback_color) = upload_texture(device, queue, &white, TextureRole::BaseColor)
+        else {
+            return;
+        };
+        let Ok(fallback_data) =
+            upload_texture(device, queue, &white, TextureRole::MetallicRoughness)
+        else {
+            return;
+        };
         let sampler = device.create_sampler(&sampler_descriptor_for_role(TextureRole::BaseColor));
 
         // Same table-driven layout as every other pass: entries from the
@@ -3170,7 +3224,7 @@ impl Renderer3D {
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fog params buffer"),
-            contents: bytemuck::bytes_of(&FogUniform::pack([0.0; 3], 1.0)),
+            contents: bytemuck::bytes_of(&FogUniform::pack([0.0; VEC3_COMPONENTS], 1.0)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -3251,19 +3305,13 @@ impl Renderer3D {
                 device,
                 &self.gbuffer,
                 &self.camera_buffer,
-                &self
-                    .per_object_buffer
-                    .read()
-                    .expect("per-object buffer lock"),
-                &self.material_buffer.read().expect("material buffer lock"),
+                &read_lock(&self.per_object_buffer),
+                &read_lock(&self.material_buffer),
                 self.sample_count,
             );
         self.gbuffer_pipeline = gbuffer_pipeline;
         self.gbuffer_bind_group_layout = gbuffer_bind_group_layout;
-        *self
-            .gbuffer_bind_group
-            .write()
-            .expect("gbuffer bind group lock") = gbuffer_bind_group;
+        *write_lock(&self.gbuffer_bind_group) = gbuffer_bind_group;
 
         self.lighting_pass =
             Self::create_lighting_pass(device, &self.pbr_texture_view, self.sample_count);
@@ -3271,11 +3319,8 @@ impl Renderer3D {
         self.forward_pass = Self::create_forward_pass(
             device,
             &self.camera_buffer,
-            &self
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock"),
-            &self.material_buffer.read().expect("material buffer lock"),
+            &read_lock(&self.per_object_buffer),
+            &read_lock(&self.material_buffer),
             &self.lighting_buffer,
             &self.shadow_array_view,
             &self.shadow_sampler,
@@ -3337,10 +3382,12 @@ impl Renderer3D {
         queue: &wgpu::Queue,
         layer: u32,
     ) -> Vec<f32> {
+        /// Bytes per Depth32Float texel.
+        const DEPTH32_BYTES: u32 = 4;
         let size = SHADOW_SIZE;
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test shadow layer readback"),
-            size: (size * size * 4) as u64,
+            size: (size * size * DEPTH32_BYTES) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -3362,7 +3409,7 @@ impl Renderer3D {
                 buffer: &buf,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(size * 4),
+                    bytes_per_row: Some(size * DEPTH32_BYTES),
                     rows_per_image: Some(size),
                 },
             },
@@ -3374,11 +3421,19 @@ impl Renderer3D {
         );
         queue.submit(std::iter::once(enc.finish()));
         let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll");
-        let data = slice.get_mapped_range().expect("range");
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+            return Vec::new();
+        }
+        let Ok(Ok(())) = rx.recv() else {
+            return Vec::new();
+        };
+        let Ok(data) = slice.get_mapped_range() else {
+            return Vec::new();
+        };
         let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         buf.unmap();
@@ -3433,7 +3488,7 @@ impl Renderer3D {
         exposure: f32,
         lights: &[LightDesc],
     ) -> LightUploadStats {
-        let fit = *self.shadow_fit.read().expect("shadow fit lock");
+        let fit = *read_lock(&self.shadow_fit);
         let built = build_lighting_uniform(ambient, ambient_intensity, exposure, lights, fit);
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
         // Publish the light-space VPs for the depth pre-pass (as camera
@@ -3471,10 +3526,10 @@ impl Renderer3D {
             );
         }
         self.point_shadow_count.store(
-            (built.cube_face_vps.len() / 6) as u32,
+            (built.cube_face_vps.len() / CUBE_FACE_COUNT) as u32,
             std::sync::atomic::Ordering::Relaxed,
         );
-        *self.last_light_stats.write().expect("light stats lock") = built.stats;
+        *write_lock(&self.last_light_stats) = built.stats;
         built.stats
     }
 
@@ -3483,7 +3538,7 @@ impl Renderer3D {
     /// and what was dropped (excess lights, shadow requests without a
     /// slot). Starts at zero before the first upload.
     pub fn light_upload_stats(&self) -> LightUploadStats {
-        *self.last_light_stats.read().expect("light stats lock")
+        *read_lock(&self.last_light_stats)
     }
 
     /// Fit the directional shadow frustum to a scene AABB (`min`/`max`
@@ -3492,23 +3547,20 @@ impl Renderer3D {
     /// default to cover the box (see [`shadow_fit_for_bounds`]); pass the
     /// scene bounds once per scene, not per frame.
     pub fn set_shadow_bounds(&self, min: [f32; 3], max: [f32; 3]) {
-        *self.shadow_fit.write().expect("shadow fit lock") = Some(shadow_fit_for_bounds(min, max));
+        *write_lock(&self.shadow_fit) = Some(shadow_fit_for_bounds(min, max));
     }
 
     /// Drop the scene fit and return to the legacy ±[`SHADOW_ORTHO_HALF`]
     /// box around the origin.
     pub fn clear_shadow_bounds(&self) {
-        *self.shadow_fit.write().expect("shadow fit lock") = None;
+        *write_lock(&self.shadow_fit) = None;
     }
 
     /// Current directional-shadow ortho half-extent: the fitted value
     /// after [`set_shadow_bounds`](Self::set_shadow_bounds), else the
     /// ±[`SHADOW_ORTHO_HALF`] default.
     pub fn shadow_half_extent(&self) -> f32 {
-        self.shadow_fit
-            .read()
-            .expect("shadow fit lock")
-            .map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
+        read_lock(&self.shadow_fit).map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
     }
 
     /// Grow a storage buffer when `needed` exceeds `capacity`, doubling
@@ -3545,51 +3597,47 @@ impl Renderer3D {
     /// holds its own bind group over the same layout, so all three are
     /// rebuilt together whenever either buffer moves.
     fn rebind_storage_buffers(&self, device: &wgpu::Device) {
-        let per_object = self
-            .per_object_buffer
-            .read()
-            .expect("per-object buffer lock");
-        let material = self.material_buffer.read().expect("material buffer lock");
-        *self
-            .gbuffer_bind_group
-            .write()
-            .expect("gbuffer bind group lock") =
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        *write_lock(&self.gbuffer_bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gbuffer bind group (grown)"),
                 layout: &self.gbuffer_bind_group_layout,
                 entries: &shaders::bind_group_entries(
                     &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                     |r| match r.name {
-                        "camera" => self.camera_buffer.as_entire_binding(),
-                        "per_objects" => per_object.as_entire_binding(),
-                        "materials" => material.as_entire_binding(),
-                        other => panic!("gbuffer bind group has no resource for `{other}`"),
+                        "camera" => Some(self.camera_buffer.as_entire_binding()),
+                        "per_objects" => Some(per_object.as_entire_binding()),
+                        "materials" => Some(material.as_entire_binding()),
+                        _ => None,
                     },
-                ),
+                )
+                .unwrap_or_default(),
             });
-        *self
-            .forward_pass
-            .bind_group
-            .write()
-            .expect("forward bind group lock") =
+        *write_lock(&self.forward_pass.bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("forward bind group (grown)"),
                 layout: &self.forward_pass.bind_group_layout,
                 entries: &shaders::bind_group_entries(
                     &shaders::pbr_generated::PBR_RESOURCES,
                     |r| match r.name {
-                        "camera" => self.camera_buffer.as_entire_binding(),
-                        "per_objects" => per_object.as_entire_binding(),
-                        "materials" => material.as_entire_binding(),
-                        "lighting" => self.lighting_buffer.as_entire_binding(),
-                        "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
-                        "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                        "shadow_cube_tex" => {
-                            wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                        "camera" => Some(self.camera_buffer.as_entire_binding()),
+                        "per_objects" => Some(per_object.as_entire_binding()),
+                        "materials" => Some(material.as_entire_binding()),
+                        "lighting" => Some(self.lighting_buffer.as_entire_binding()),
+                        "shadow_tex" => {
+                            Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                         }
-                        other => panic!("forward bind group has no resource for `{other}`"),
+                        "shadow_sampler" => {
+                            Some(wgpu::BindingResource::Sampler(&self.shadow_sampler))
+                        }
+                        "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
+                            &self.shadow_cube_array_view,
+                        )),
+                        _ => None,
                     },
-                ),
+                )
+                .unwrap_or_default(),
             });
     }
 
@@ -3598,10 +3646,7 @@ impl Renderer3D {
     /// per frame from the live buffer, so it needs no rebuild here.
     fn ensure_instance_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock");
+            let old = read_lock(&self.per_object_buffer);
             Self::grown_storage_buffer(
                 device,
                 "per-object buffer (grown)",
@@ -3612,10 +3657,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self
-                .per_object_buffer
-                .write()
-                .expect("per-object buffer lock") = buffer;
+            *write_lock(&self.per_object_buffer) = buffer;
             self.rebind_storage_buffers(device);
         }
     }
@@ -3624,7 +3666,7 @@ impl Renderer3D {
     /// rebinding when it does not.
     fn ensure_material_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self.material_buffer.read().expect("material buffer lock");
+            let old = read_lock(&self.material_buffer);
             Self::grown_storage_buffer(
                 device,
                 "material buffer (grown)",
@@ -3635,7 +3677,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self.material_buffer.write().expect("material buffer lock") = buffer;
+            *write_lock(&self.material_buffer) = buffer;
             self.rebind_storage_buffers(device);
         }
     }
@@ -3655,7 +3697,7 @@ impl Renderer3D {
                 .load(std::sync::atomic::Ordering::Relaxed) as usize,
         );
         queue.write_buffer(
-            &self.material_buffer.read().expect("material buffer lock"),
+            &read_lock(&self.material_buffer),
             0,
             bytemuck::cast_slice(&materials[..count]),
         );
@@ -3682,20 +3724,19 @@ impl Renderer3D {
         let mut gpu_objects: Vec<PerObjectGpu> =
             Vec::with_capacity(staging_capacity_for_instances(count));
         for inst in instances.iter().take(count) {
-            let model_arr: [[f32; 4]; 4] = inst.model_matrix.to_cols_array_2d();
-            let normal_arr: [[f32; 4]; 4] = inst.normal_matrix.to_cols_array_2d();
+            let model_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
+                inst.model_matrix.to_cols_array_2d();
+            let normal_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
+                inst.normal_matrix.to_cols_array_2d();
             gpu_objects.push(PerObjectGpu {
                 model: model_arr,
                 normal_matrix: normal_arr,
                 material_index: inst.material_index,
-                _padding: [0; 3],
+                _padding: [0; VEC3_COMPONENTS],
             });
         }
         queue.write_buffer(
-            &self
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock"),
+            &read_lock(&self.per_object_buffer),
             0,
             bytemuck::cast_slice(&gpu_objects),
         );
@@ -3706,7 +3747,7 @@ impl Renderer3D {
     /// no pass needs rebinding here) when it does not.
     fn ensure_palette_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self.palette_buffer.read().expect("palette buffer lock");
+            let old = read_lock(&self.palette_buffer);
             Self::grown_storage_buffer(
                 device,
                 "skin palette buffer (grown)",
@@ -3717,7 +3758,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self.palette_buffer.write().expect("palette buffer lock") = buffer;
+            *write_lock(&self.palette_buffer) = buffer;
         }
     }
 
@@ -3751,11 +3792,7 @@ impl Renderer3D {
             bytes.extend_from_slice(&palette[..palette.len().min(PALETTE_BYTE_SIZE)]);
             bytes.resize((slot + 1) * PALETTE_BYTE_SIZE, 0);
         }
-        queue.write_buffer(
-            &self.palette_buffer.read().expect("palette buffer lock"),
-            0,
-            &bytes,
-        );
+        queue.write_buffer(&read_lock(&self.palette_buffer), 0, &bytes);
         self.palette_count
             .store(count as u32, std::sync::atomic::Ordering::Relaxed);
         (0..count as u32).map(PaletteHandle::from_raw).collect()
@@ -3814,23 +3851,24 @@ impl Renderer3D {
             return;
         }
         self.upload_instances(device, queue, std::slice::from_ref(instance));
-        let palette = self.palette_buffer.read().expect("palette buffer lock");
-        let per_object = self.per_object_buffer.read().unwrap();
-        let material = self.material_buffer.read().unwrap();
+        let palette = read_lock(&self.palette_buffer);
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skinned gbuffer bind group"),
             layout: &self.skinned_bind_group_layout,
             entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => self.camera_buffer.as_entire_binding(),
-                "per_objects" => per_object.as_entire_binding(),
-                "materials" => material.as_entire_binding(),
-                "palette" => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                "camera" => Some(self.camera_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object.as_entire_binding()),
+                "materials" => Some(material.as_entire_binding()),
+                "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &palette,
                     offset: handle.byte_offset(),
                     size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
-                }),
-                other => panic!("skinned bind group has no resource for `{other}`"),
-            }),
+                })),
+                _ => None,
+            })
+            .unwrap_or_default(),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skinned gbuffer pass"),
@@ -4024,10 +4062,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.gbuffer_pipeline);
         {
-            let bind_group = self
-                .gbuffer_bind_group
-                .read()
-                .expect("gbuffer bind group lock");
+            let bind_group = read_lock(&self.gbuffer_bind_group);
             rpass.set_bind_group(0, &*bind_group, &[]);
         }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -4049,33 +4084,36 @@ impl Renderer3D {
         // material buffer may have grown since the last frame.
         // Binding numbers come from the table; only the name → live
         // resource mapping is written out here.
-        let material = self.material_buffer.read().expect("material buffer lock");
+        let material = read_lock(&self.material_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting bind group (frame)"),
             layout: &self.lighting_pass.bind_group_layout,
             entries: &shaders::bind_group_entries(
                 &shaders::lighting_generated::LIGHTING_RESOURCES,
                 |r| match r.name {
-                    "camera" => self.camera_buffer.as_entire_binding(),
-                    "lighting" => self.lighting_buffer.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    "albedo_tex" => wgpu::BindingResource::TextureView(g.albedo),
-                    "normal_tex" => wgpu::BindingResource::TextureView(g.normal),
-                    "material_id_tex" => wgpu::BindingResource::TextureView(g.material_id),
-                    "world_pos_tex" => wgpu::BindingResource::TextureView(g.world_position),
-                    "mat_params_tex" => wgpu::BindingResource::TextureView(g.material_params),
-                    "depth_tex" => wgpu::BindingResource::TextureView(g.depth),
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
+                    "lighting" => Some(self.lighting_buffer.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "albedo_tex" => Some(wgpu::BindingResource::TextureView(g.albedo)),
+                    "normal_tex" => Some(wgpu::BindingResource::TextureView(g.normal)),
+                    "material_id_tex" => Some(wgpu::BindingResource::TextureView(g.material_id)),
+                    "world_pos_tex" => Some(wgpu::BindingResource::TextureView(g.world_position)),
+                    "mat_params_tex" => Some(wgpu::BindingResource::TextureView(g.material_params)),
+                    "depth_tex" => Some(wgpu::BindingResource::TextureView(g.depth)),
                     "lighting_sampler" => {
-                        wgpu::BindingResource::Sampler(&self.lighting_pass.sampler)
+                        Some(wgpu::BindingResource::Sampler(&self.lighting_pass.sampler))
                     }
-                    "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
-                    "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    "shadow_cube_tex" => {
-                        wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                    "shadow_tex" => {
+                        Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
-                    other => panic!("lighting bind group has no resource for `{other}`"),
+                    "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
+                    "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
+                        &self.shadow_cube_array_view,
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4102,7 +4140,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.lighting_pass.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Record the forward pass: draws lit geometry into the HDR `output`
@@ -4154,11 +4192,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.forward_pass.pipeline);
         {
-            let bind_group = self
-                .forward_pass
-                .bind_group
-                .read()
-                .expect("forward bind group lock");
+            let bind_group = read_lock(&self.forward_pass.bind_group);
             rpass.set_bind_group(0, &*bind_group, &[]);
         }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -4192,17 +4226,14 @@ impl Renderer3D {
         textures: &MaterialTextureSet,
         cache: &TextureCache,
     ) {
-        let pass = self.textured_forward.as_ref().expect(
-            "textured forward pass not built: call ensure_textured_forward(device, queue) first",
-        );
+        let Some(pass) = self.textured_forward.as_ref() else {
+            return;
+        };
         // The bind group is rebuilt per frame: the material buffer may have
         // grown and the bound set may have changed. Binding numbers come
         // from the table; only the name → live resource mapping is here.
-        let material = self.material_buffer.read().expect("material buffer lock");
-        let per_object = self
-            .per_object_buffer
-            .read()
-            .expect("per-object buffer lock");
+        let material = read_lock(&self.material_buffer);
+        let per_object = read_lock(&self.per_object_buffer);
         let base_color_view = Self::material_view(
             textures,
             cache,
@@ -4230,24 +4261,25 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::material_textures::TEXTURED_PBR_RESOURCES,
                 |r| match r.name {
-                    "camera" => self.camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    "lighting" => self.lighting_buffer.as_entire_binding(),
-                    "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
-                    "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    "shadow_cube_tex" => {
-                        wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "lighting" => Some(self.lighting_buffer.as_entire_binding()),
+                    "shadow_tex" => {
+                        Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
-                    "base_color_tex" => wgpu::BindingResource::TextureView(base_color_view),
-                    "metallic_roughness_tex" => wgpu::BindingResource::TextureView(data_view),
-                    "emissive_tex" => wgpu::BindingResource::TextureView(emissive_view),
-                    "material_sampler" => wgpu::BindingResource::Sampler(&pass.sampler),
-                    other => {
-                        panic!("textured forward bind group has no resource for `{other}`")
-                    }
+                    "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
+                    "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
+                        &self.shadow_cube_array_view,
+                    )),
+                    "base_color_tex" => Some(wgpu::BindingResource::TextureView(base_color_view)),
+                    "metallic_roughness_tex" => Some(wgpu::BindingResource::TextureView(data_view)),
+                    "emissive_tex" => Some(wgpu::BindingResource::TextureView(emissive_view)),
+                    "material_sampler" => Some(wgpu::BindingResource::Sampler(&pass.sampler)),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let depth_ops = wgpu::Operations {
@@ -4322,16 +4354,19 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::hdr_composite_generated::HDR_RESOURCES,
                 |r| match r.name {
-                    "deferred_tex" => wgpu::BindingResource::TextureView(inputs.hdr),
-                    "forward_tex" => wgpu::BindingResource::TextureView(inputs.hdr_fwd),
-                    "composite_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "bloom_tex" => wgpu::BindingResource::TextureView(inputs.bloom),
-                    "bloom_params" => wgpu::BindingResource::Buffer(
+                    "deferred_tex" => Some(wgpu::BindingResource::TextureView(inputs.hdr)),
+                    "forward_tex" => Some(wgpu::BindingResource::TextureView(inputs.hdr_fwd)),
+                    "composite_sampler" => {
+                        Some(wgpu::BindingResource::Sampler(&self.composite_sampler))
+                    }
+                    "bloom_tex" => Some(wgpu::BindingResource::TextureView(inputs.bloom)),
+                    "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("composite bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4358,7 +4393,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.composite_pass.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Record the opt-in distance-fog mix: `hdr` through the fog blend into
@@ -4391,16 +4426,17 @@ impl Renderer3D {
             layout: &self.fog.bind_group_layout,
             entries: &shaders::bind_group_entries(&shaders::fog_generated::FOG_RESOURCES, |r| {
                 match r.name {
-                    "hdr_tex" => wgpu::BindingResource::TextureView(inputs.hdr),
-                    "fog_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "depth_tex" => wgpu::BindingResource::TextureView(inputs.depth),
-                    "camera" => self.camera_buffer.as_entire_binding(),
-                    "fog_params" => wgpu::BindingResource::Buffer(
+                    "hdr_tex" => Some(wgpu::BindingResource::TextureView(inputs.hdr)),
+                    "fog_sampler" => Some(wgpu::BindingResource::Sampler(&self.composite_sampler)),
+                    "depth_tex" => Some(wgpu::BindingResource::TextureView(inputs.depth)),
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
+                    "fog_params" => Some(wgpu::BindingResource::Buffer(
                         self.fog.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("fog bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 }
-            }),
+            })
+            .unwrap_or_default(),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4422,7 +4458,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.fog.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// All-in-one legacy frame on the renderer's persistent targets:
@@ -4502,14 +4538,15 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::bloom_generated::BLOOM_RESOURCES,
                 |r| match r.name {
-                    "src_tex" => wgpu::BindingResource::TextureView(src),
-                    "src_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "bloom_params" => wgpu::BindingResource::Buffer(
+                    "src_tex" => Some(wgpu::BindingResource::TextureView(src)),
+                    "src_sampler" => Some(wgpu::BindingResource::Sampler(&self.composite_sampler)),
+                    "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("bloom bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom down pass"),
@@ -4529,7 +4566,7 @@ impl Renderer3D {
         });
         rpass.set_pipeline(&self.bloom_pass.down_pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Upsample pass of the bloom chain: samples `src`, adds the result over
@@ -4548,14 +4585,15 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::bloom_generated::BLOOM_RESOURCES,
                 |r| match r.name {
-                    "src_tex" => wgpu::BindingResource::TextureView(src),
-                    "src_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "bloom_params" => wgpu::BindingResource::Buffer(
+                    "src_tex" => Some(wgpu::BindingResource::TextureView(src)),
+                    "src_sampler" => Some(wgpu::BindingResource::Sampler(&self.composite_sampler)),
+                    "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("bloom bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom up pass"),
@@ -4575,7 +4613,7 @@ impl Renderer3D {
         });
         rpass.set_pipeline(&self.bloom_pass.up_pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 }
 
@@ -4690,23 +4728,18 @@ mod tests {
             "palette is vertex-only"
         );
         {
-            let per_object = renderer
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock");
-            let material = renderer
-                .material_buffer
-                .read()
-                .expect("material buffer lock");
-            let palette = renderer.palette_buffer.read().expect("palette buffer lock");
+            let per_object = read_lock(&renderer.per_object_buffer);
+            let material = read_lock(&renderer.material_buffer);
+            let palette = read_lock(&renderer.palette_buffer);
             let entries =
                 crate::shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                    "camera" => renderer.camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    "palette" => palette.as_entire_binding(),
-                    other => panic!("skinned bind group has no resource for `{other}`"),
-                });
+                    "camera" => Some(renderer.camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "palette" => Some(palette.as_entire_binding()),
+                    _ => None,
+                })
+                .expect("skinned resources resolve");
             assert_eq!(entries.len(), 4);
             assert_eq!(
                 entries.iter().map(|e| e.binding).collect::<Vec<_>>(),
@@ -4716,7 +4749,7 @@ mod tests {
 
         let mut red = ornis_core::OpenPBRMaterial::dielectric();
         red.base.color_rgb([0.8, 0.2, 0.2]);
-        red.specular.roughness(0.5);
+        red.specular.roughness(HALF);
         renderer.upload_materials(&device, &queue, &[red]);
         // Identity palette over one triangle: the vertex stage passes the
         // bind pose through (model is identity, like the extraction's
@@ -4732,9 +4765,9 @@ mod tests {
         let mesh = upload_skinned_mesh(
             &device,
             &[
-                row([-0.5, -0.5, 0.0]),
-                row([0.5, -0.5, 0.0]),
-                row([0.0, 0.5, 0.0]),
+                row([-HALF, -HALF, 0.0]),
+                row([HALF, -HALF, 0.0]),
+                row([0.0, HALF, 0.0]),
             ],
             &[0, 1, 2],
         )
@@ -5145,7 +5178,7 @@ mod tests {
         // non-finite is rejected.
         assert_eq!(BlendMode::from_opacity(1.0), Ok(BlendMode::Opaque));
         assert_eq!(BlendMode::from_opacity(2.0), Ok(BlendMode::Opaque));
-        assert_eq!(BlendMode::from_opacity(0.5), Ok(BlendMode::Transparent));
+        assert_eq!(BlendMode::from_opacity(HALF), Ok(BlendMode::Transparent));
         assert_eq!(BlendMode::from_opacity(0.0), Ok(BlendMode::Transparent));
         assert!(matches!(
             BlendMode::from_opacity(f32::NAN),
@@ -5183,12 +5216,12 @@ mod tests {
             "{}",
             FogUniform::WGSL_SOURCE
         );
-        let packed = FogUniform::pack([0.5, 0.6, 0.7], 0.1);
+        let packed = FogUniform::pack([HALF, 0.6, 0.7], 0.1);
         let bytes = bytemuck::bytes_of(&packed);
         assert_eq!(bytes.len(), 16);
         assert_eq!(
             &bytes[0..12],
-            bytemuck::cast_slice::<f32, u8>(&[0.5, 0.6, 0.7])
+            bytemuck::cast_slice::<f32, u8>(&[HALF, 0.6, 0.7])
         );
     }
 
@@ -5197,15 +5230,15 @@ mod tests {
         let lights = vec![LightDesc::Directional {
             direction: [1.0, 1.0, 1.0],
             intensity: 2.0,
-            color: [0.5, 0.25, 0.125],
+            color: [HALF, 0.25, 0.125],
             shadow: ShadowCast::Disabled,
         }];
-        let base = build_lighting_uniform([0.5, 0.25, 0.125], 1.0, 1.0, &lights, None);
-        assert_eq!(base.uniform.ambient_color, [0.5, 0.25, 0.125, 1.0]);
-        assert_eq!(base.uniform.lights[0].color, [0.5, 0.25, 0.125, 2.0]);
-        let scaled = build_lighting_uniform([0.5, 0.25, 0.125], 2.0, 4.0, &lights, None);
-        assert_eq!(scaled.uniform.ambient_color, [1.0, 0.5, 0.25, 1.0]);
-        assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, 0.5, 2.0]);
+        let base = build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None);
+        assert_eq!(base.uniform.ambient_color, [HALF, 0.25, 0.125, 1.0]);
+        assert_eq!(base.uniform.lights[0].color, [HALF, 0.25, 0.125, 2.0]);
+        let scaled = build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None);
+        assert_eq!(scaled.uniform.ambient_color, [1.0, HALF, 0.25, 1.0]);
+        assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, HALF, 2.0]);
     }
 
     #[test]
@@ -5438,8 +5471,8 @@ mod tests {
 
         // Reconstructed distance for texel (16, 1) under the identity
         // camera: uv = ((16+0.5)/32, (1+0.5)/2), NDC z = 1 (cleared far).
-        let u = (16.0 + 0.5) / W as f32;
-        let v = (1.0 + 0.5) / H as f32;
+        let u = (16.0 + HALF) / W as f32;
+        let v = (1.0 + HALF) / H as f32;
         let dist = ((2.0 * u - 1.0).powi(2) + (1.0 - 2.0 * v).powi(2) + 1.0).sqrt();
         let fog = crate::frame_passes::FogState::Enabled(
             crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, DENSITY)

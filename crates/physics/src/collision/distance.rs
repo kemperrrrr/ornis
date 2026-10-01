@@ -22,6 +22,22 @@ pub(crate) use boxes::box_box_signed_gap;
 /// discriminants at or below this magnitude are treated as exactly zero
 /// (degenerate segment, parallel axes, repeated root).
 const DEGENERATE_EPS: f32 = 1e-12;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+/// Heightfield column treated as flat when height span is below this (m).
+const HEIGHTFIELD_FLAT_EPS: f32 = 1e-4;
+/// Floor for heightfield cell size when building a skirt (m).
+const HEIGHTFIELD_MIN_CELL: f32 = 1e-3;
+/// Corners of an AABB when projecting into heightfield / mesh space.
+const BOX_CORNERS: usize = 8;
+/// AABB-corner bit selecting the max endpoint on X / Y / Z.
+const AABB_BIT_X: usize = 4;
+const AABB_BIT_Y: usize = 2;
+const AABB_BIT_Z: usize = 1;
+/// Explicit BVH walk stack (covers any buildable mesh).
+const BVH_STACK_CAP: usize = 64;
+
+use crate::constants::{COINCIDENT_LEN2, NEAR_ZERO, SHAPE_TOUCH};
 
 /// A placed shape: geometry plus world transform.
 #[derive(Clone, Copy)]
@@ -256,24 +272,36 @@ fn heightfield_convex(
     let aabb = convex.shape.aabb(convex.pos, convex.rot);
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for i in 0..8 {
+    for i in 0..BOX_CORNERS {
         let corner = Vec3::new(
-            if i & 4 == 0 { aabb.min.x } else { aabb.max.x },
-            if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
-            if i & 1 == 0 { aabb.min.z } else { aabb.max.z },
+            if i & AABB_BIT_X == 0 {
+                aabb.min.x
+            } else {
+                aabb.max.x
+            },
+            if i & AABB_BIT_Y == 0 {
+                aabb.min.y
+            } else {
+                aabb.max.y
+            },
+            if i & AABB_BIT_Z == 0 {
+                aabb.min.z
+            } else {
+                aabb.max.z
+            },
         );
         let local = inv * (corner - hf_pos);
         lo = lo.min(local);
         hi = hi.max(local);
     }
-    let col_at = |x: f32| (x / hf.cell + (hf.cols - 1) as f32 * 0.5).floor() as isize;
+    let col_at = |x: f32| (x / hf.cell + (hf.cols - 1) as f32 * HALF).floor() as isize;
     let c0 = col_at(lo.x).clamp(0, hf.cols as isize - 1);
     let c1 = col_at(hi.x).clamp(0, hf.cols as isize - 1);
     let r0 = col_at(lo.z).clamp(0, hf.rows as isize - 1);
     let r1 = col_at(hi.z).clamp(0, hf.rows as isize - 1);
     let (y_min, _) = hf.height_range();
-    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
-    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let x_origin = -((hf.cols - 1) as f32) * HALF * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * HALF * hf.cell;
     let mut best: Option<Distance> = None;
     for row in r0..=r1 {
         for col in c0..=c1 {
@@ -283,10 +311,10 @@ fn heightfield_convex(
             // box oracles read as a plane with ambiguous side: give them a
             // one-cell skirt instead (same skirt as `closest_point`, so
             // distance and projection agree on the volume).
-            let y_low = if h - y_min >= 1e-4 {
+            let y_low = if h - y_min >= HEIGHTFIELD_FLAT_EPS {
                 y_min
             } else {
-                h - hf.cell.max(1e-3)
+                h - hf.cell.max(HEIGHTFIELD_MIN_CELL)
             };
             let local_min = Vec3::new(
                 x_origin + col as f32 * hf.cell,
@@ -294,8 +322,8 @@ fn heightfield_convex(
                 z_origin + row as f32 * hf.cell,
             );
             let local_max = Vec3::new(local_min.x + hf.cell, h.max(y_low), local_min.z + hf.cell);
-            let center = (local_min + local_max) * 0.5;
-            let half = ((local_max - local_min) * 0.5).max(Vec3::ZERO);
+            let center = (local_min + local_max) * HALF;
+            let half = ((local_max - local_min) * HALF).max(Vec3::ZERO);
             let column = Shape::Box { half_extents: half };
             let d = shape_distance(
                 ShapeRef {
@@ -348,7 +376,7 @@ fn refine_witnesses(
             point_b: pb,
         };
     }
-    let mut n = if normal.length_squared() > 1e-18 {
+    let mut n = if normal.length_squared() > COINCIDENT_LEN2 {
         normal.normalize()
     } else {
         (b.pos - a.pos).normalize_or(Vec3::Y)
@@ -362,7 +390,7 @@ fn refine_witnesses(
     // spinning the body from a centered bite): restart from the centers,
     // which projects to the centered face pair in one sweep. Sub-mm
     // features are below solver slop anyway, so nothing is lost.
-    let (mut pa, mut pb) = if dist < 1e-3 {
+    let (mut pa, mut pb) = if dist < SHAPE_TOUCH {
         (a.pos, b.pos)
     } else {
         (pa, pb)
@@ -373,7 +401,7 @@ fn refine_witnesses(
         // Re-derive the axis from the re-seated witnesses so a tilted
         // first guess cannot freeze the iteration sideways.
         let axis = pb - pa;
-        if axis.length_squared() > 1e-18 {
+        if axis.length_squared() > COINCIDENT_LEN2 {
             n = axis.normalize();
         }
     }
@@ -420,20 +448,32 @@ fn trimesh_convex(
     let aabb = convex.shape.aabb(convex.pos, convex.rot);
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for i in 0..8 {
+    for i in 0..BOX_CORNERS {
         let corner = Vec3::new(
-            if i & 4 == 0 { aabb.min.x } else { aabb.max.x },
-            if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
-            if i & 1 == 0 { aabb.min.z } else { aabb.max.z },
+            if i & AABB_BIT_X == 0 {
+                aabb.min.x
+            } else {
+                aabb.max.x
+            },
+            if i & AABB_BIT_Y == 0 {
+                aabb.min.y
+            } else {
+                aabb.max.y
+            },
+            if i & AABB_BIT_Z == 0 {
+                aabb.min.z
+            } else {
+                aabb.max.z
+            },
         );
         let local = inv * (corner - mesh_pos);
         lo = lo.min(local);
         hi = hi.max(local);
     }
     let mut best: Option<Distance> = None;
-    // Explicit stack (depth 64 covers any buildable mesh); popped
-    // last-in-first-out in index order for determinism.
-    let mut stack = [0u32; 64];
+    // Explicit stack (depth `BVH_STACK_CAP` covers any buildable mesh);
+    // popped last-in-first-out in index order for determinism.
+    let mut stack = [0u32; BVH_STACK_CAP];
     let mut len = 1usize;
     while len > 0 {
         len -= 1;
@@ -471,7 +511,7 @@ fn trimesh_convex(
                 }
             }
         } else if let Some((left, right)) = node.link.children() {
-            if len + 2 > 64 {
+            if len + 2 > BVH_STACK_CAP {
                 break; // Depth guard: keep the best so far (deterministic).
             }
             stack[len] = left;
@@ -631,12 +671,10 @@ pub(crate) fn cast_shape<'t>(
     targets: impl Iterator<Item = (crate::body::BodyHandle, ShapeRef<'t>)>,
 ) -> Option<CastHit> {
     let len = delta.length();
-    if len < 1e-9 {
+    if len < NEAR_ZERO {
         return None;
     }
     let dir = delta / len;
-    /// Gap at which shapes count as touching.
-    const TOUCH: f32 = 1e-3;
     const MAX_ITERS: usize = 24;
 
     let mut best: Option<CastHit> = None;
@@ -653,7 +691,7 @@ pub(crate) fn cast_shape<'t>(
                 },
                 target,
             );
-            if d.dist <= TOUCH {
+            if d.dist <= SHAPE_TOUCH {
                 if t > 0.0 {
                     let n = (d.point_a - d.point_b).normalize_or(-dir);
                     hit = Some(CastHit {
@@ -667,7 +705,7 @@ pub(crate) fn cast_shape<'t>(
             }
             // Advance by slightly less than the exact gap: no shape can be
             // reached in less than `dist` along ANY direction.
-            t += d.dist - TOUCH * 0.5;
+            t += d.dist - SHAPE_TOUCH * HALF;
             if t >= len {
                 break;
             }
@@ -836,7 +874,7 @@ mod tests {
 
     #[test]
     fn sphere_sphere_touching() {
-        let (sa, sb) = (sphere(1.0), sphere(0.5));
+        let (sa, sb) = (sphere(1.0), sphere(HALF));
         let d = shape_distance(at(&sa, Vec3::ZERO), at(&sb, Vec3::new(1.5, 0.0, 0.0)));
         assert!(d.dist.abs() < EPS);
     }
@@ -845,7 +883,7 @@ mod tests {
     fn sphere_sphere_overlapping() {
         let (sa, sb) = (sphere(1.0), sphere(1.0));
         let d = shape_distance(at(&sa, Vec3::ZERO), at(&sb, Vec3::new(1.5, 0.0, 0.0)));
-        assert!((d.dist - (-0.5)).abs() < EPS);
+        assert!((d.dist - (-HALF)).abs() < EPS);
     }
 
     #[test]
@@ -862,7 +900,7 @@ mod tests {
 
     #[test]
     fn sphere_box_face() {
-        let (s, b) = (sphere(0.5), cuboid(Vec3::ONE));
+        let (s, b) = (sphere(HALF), cuboid(Vec3::ONE));
         let d = shape_distance(at(&s, Vec3::new(3.0, 0.0, 0.0)), at(&b, Vec3::ZERO));
         assert!((d.dist - 1.5).abs() < EPS);
         assert_vec3_close(d.point_a, Vec3::new(2.5, 0.0, 0.0));
@@ -879,11 +917,11 @@ mod tests {
     #[test]
     fn sphere_box_corner() {
         // Sphere on the box's space diagonal: closest feature is the corner.
-        let (s, b) = (sphere(0.5), cuboid(Vec3::ONE));
+        let (s, b) = (sphere(HALF), cuboid(Vec3::ONE));
         let corner = Vec3::ONE;
         let center = corner * 3.0;
         let d = shape_distance(at(&s, center), at(&b, Vec3::ZERO));
-        let want = (center - corner).length() - 0.5;
+        let want = (center - corner).length() - HALF;
         assert!((d.dist - want).abs() < EPS);
         assert_vec3_close(d.point_b, corner);
     }
@@ -893,7 +931,7 @@ mod tests {
         // Containment is overlap: escaping through the closest face needs
         // the center-to-face distance PLUS the sphere radius.
         let (s, b) = (sphere(0.25), cuboid(Vec3::ONE));
-        let d = shape_distance(at(&s, Vec3::new(0.5, 0.0, 0.0)), at(&b, Vec3::ZERO));
+        let d = shape_distance(at(&s, Vec3::new(HALF, 0.0, 0.0)), at(&b, Vec3::ZERO));
         assert!((d.dist + 0.75).abs() < EPS);
         assert_vec3_close(d.point_a, Vec3::new(0.25, 0.0, 0.0));
         assert_vec3_close(d.point_b, Vec3::X);
@@ -916,7 +954,7 @@ mod tests {
     #[test]
     fn box_sphere_swapped_witnesses() {
         // The Box/Sphere arm must mirror the Sphere/Box one, witnesses swapped.
-        let (s, b) = (sphere(0.5), cuboid(Vec3::ONE));
+        let (s, b) = (sphere(HALF), cuboid(Vec3::ONE));
         let d = shape_distance(at(&b, Vec3::ZERO), at(&s, Vec3::new(3.0, 0.0, 0.0)));
         assert!((d.dist - 1.5).abs() < EPS);
         assert_vec3_close(d.point_a, Vec3::X);
@@ -927,17 +965,17 @@ mod tests {
 
     #[test]
     fn sphere_capsule_side() {
-        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let (s, c) = (sphere(HALF), capsule(HALF, 1.0));
         let d = shape_distance(at(&s, Vec3::new(3.0, 0.0, 0.0)), at(&c, Vec3::ZERO));
         assert!((d.dist - 2.0).abs() < EPS);
         assert_vec3_close(d.point_a, Vec3::new(2.5, 0.0, 0.0));
-        assert_vec3_close(d.point_b, Vec3::new(0.5, 0.0, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(HALF, 0.0, 0.0));
     }
 
     #[test]
     fn sphere_capsule_cap() {
         // Above the cap: closest core point is the segment endpoint.
-        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let (s, c) = (sphere(HALF), capsule(HALF, 1.0));
         let d = shape_distance(at(&s, Vec3::new(0.0, 3.0, 0.0)), at(&c, Vec3::ZERO));
         assert!((d.dist - 1.0).abs() < EPS);
         assert_vec3_close(d.point_b, Vec3::new(0.0, 1.5, 0.0));
@@ -945,17 +983,17 @@ mod tests {
 
     #[test]
     fn sphere_capsule_touching() {
-        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let (s, c) = (sphere(HALF), capsule(HALF, 1.0));
         let d = shape_distance(at(&s, Vec3::new(1.0, 0.0, 0.0)), at(&c, Vec3::ZERO));
         assert!(d.dist.abs() < EPS);
     }
 
     #[test]
     fn capsule_sphere_swapped_witnesses() {
-        let (s, c) = (sphere(0.5), capsule(0.5, 1.0));
+        let (s, c) = (sphere(HALF), capsule(HALF, 1.0));
         let d = shape_distance(at(&c, Vec3::ZERO), at(&s, Vec3::new(3.0, 0.0, 0.0)));
         assert!((d.dist - 2.0).abs() < EPS);
-        assert_vec3_close(d.point_a, Vec3::new(0.5, 0.0, 0.0));
+        assert_vec3_close(d.point_a, Vec3::new(HALF, 0.0, 0.0));
         assert_vec3_close(d.point_b, Vec3::new(2.5, 0.0, 0.0));
     }
 
@@ -963,38 +1001,38 @@ mod tests {
 
     #[test]
     fn capsule_capsule_parallel() {
-        let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
+        let (ca, cb) = (capsule(HALF, 1.0), capsule(HALF, 1.0));
         let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(3.0, 0.0, 0.0)));
         assert!((d.dist - 2.0).abs() < EPS);
-        assert_vec3_close(d.point_a, Vec3::new(0.5, d.point_a.y, 0.0));
+        assert_vec3_close(d.point_a, Vec3::new(HALF, d.point_a.y, 0.0));
         assert_vec3_close(d.point_b, Vec3::new(2.5, d.point_b.y, 0.0));
     }
 
     #[test]
     fn capsule_capsule_perpendicular() {
         // a along Y at the origin, b along X two units above in Z.
-        let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
+        let (ca, cb) = (capsule(HALF, 1.0), capsule(HALF, 1.0));
         let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
         let d = shape_distance(
             at(&ca, Vec3::ZERO),
             at_rot(&cb, Vec3::new(0.0, 0.0, 2.0), rot),
         );
         assert!((d.dist - 1.0).abs() < EPS);
-        assert_vec3_close(d.point_a, Vec3::new(0.0, 0.0, 0.5));
+        assert_vec3_close(d.point_a, Vec3::new(0.0, 0.0, HALF));
         assert_vec3_close(d.point_b, Vec3::new(0.0, 0.0, 1.5));
     }
 
     #[test]
     fn capsule_capsule_overlapping() {
-        let (ca, cb) = (capsule(0.5, 1.0), capsule(0.5, 1.0));
-        let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(0.5, 0.0, 0.0)));
-        assert!((d.dist - (-0.5)).abs() < EPS);
+        let (ca, cb) = (capsule(HALF, 1.0), capsule(HALF, 1.0));
+        let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(HALF, 0.0, 0.0)));
+        assert!((d.dist - (-HALF)).abs() < EPS);
     }
 
     #[test]
     fn capsule_capsule_degenerate_zero_half_height() {
         // Zero half-height capsules behave as spheres.
-        let (ca, cb) = (capsule(0.5, 0.0), capsule(0.5, 0.0));
+        let (ca, cb) = (capsule(HALF, 0.0), capsule(HALF, 0.0));
         let d = shape_distance(at(&ca, Vec3::ZERO), at(&cb, Vec3::new(2.0, 0.0, 0.0)));
         assert!((d.dist - 1.0).abs() < EPS);
     }
@@ -1023,7 +1061,7 @@ mod tests {
 
     #[test]
     fn box_box_touching() {
-        let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::new(0.5, 0.5, 0.5)));
+        let (a, b) = (cuboid(Vec3::ONE), cuboid(Vec3::new(HALF, HALF, HALF)));
         let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::new(1.5, 0.0, 0.0)));
         assert!(d.dist.abs() < EPS);
     }
@@ -1040,7 +1078,7 @@ mod tests {
 
     #[test]
     fn box_capsule_side() {
-        let (b, c) = (cuboid(Vec3::ONE), capsule(0.5, 1.0));
+        let (b, c) = (cuboid(Vec3::ONE), capsule(HALF, 1.0));
         let d = shape_distance(at(&b, Vec3::ZERO), at(&c, Vec3::new(3.0, 0.0, 0.0)));
         // Face x=1 to core x=3 is 2, minus capsule radius.
         assert!((d.dist - 1.5).abs() < EPS);
@@ -1050,7 +1088,7 @@ mod tests {
 
     #[test]
     fn box_capsule_above_cap() {
-        let (b, c) = (cuboid(Vec3::ONE), capsule(0.5, 1.0));
+        let (b, c) = (cuboid(Vec3::ONE), capsule(HALF, 1.0));
         let d = shape_distance(at(&b, Vec3::ZERO), at(&c, Vec3::new(0.0, 4.0, 0.0)));
         // Core endpoint (0,3), box face y=1: gap 2 minus radius 0.5.
         assert!((d.dist - 1.5).abs() < EPS);
@@ -1058,7 +1096,7 @@ mod tests {
 
     #[test]
     fn capsule_box_swapped_witnesses() {
-        let (b, c) = (cuboid(Vec3::ONE), capsule(0.5, 1.0));
+        let (b, c) = (cuboid(Vec3::ONE), capsule(HALF, 1.0));
         let d = shape_distance(at(&c, Vec3::new(3.0, 0.0, 0.0)), at(&b, Vec3::ZERO));
         assert!((d.dist - 1.5).abs() < EPS);
         assert_vec3_close(d.point_a, Vec3::new(2.5, d.point_a.y, 0.0));

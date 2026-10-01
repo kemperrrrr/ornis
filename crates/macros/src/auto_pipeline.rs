@@ -35,10 +35,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .into();
             }
         };
-        let field_tys: Vec<_> = match fields {
-            Fields::Named(named) => named.named.iter().map(|f| &f.ty).collect(),
-            _ => unreachable!(),
+        let Fields::Named(named) = fields else {
+            return syn::Error::new_spanned(fields, "#[pack] requires named fields")
+                .to_compile_error()
+                .into();
         };
+        let field_tys: Vec<_> = named.named.iter().map(|f| &f.ty).collect();
 
         let expanded = quote! {
             impl #name {

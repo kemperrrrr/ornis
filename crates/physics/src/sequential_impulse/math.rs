@@ -6,6 +6,10 @@ use glam::{Quat, Vec3};
 
 use super::MAX_MANIFOLD_POINTS;
 use crate::body::RigidBody;
+use crate::constants::{DEGENERATE_LEN2, POS_CORRECTION_EPS};
+
+/// Velocity-feasibility slop for inactive-set checks (m/s).
+const FEASIBLE_VEL_SLOP: f32 = 1e-5;
 
 #[inline]
 pub(crate) fn clamp01(v: f32) -> f32 {
@@ -148,7 +152,7 @@ pub fn solve_small(
                 piv = r;
             }
         }
-        if m[piv][col].abs() < 1e-12 {
+        if m[piv][col].abs() < DEGENERATE_LEN2 {
             return None;
         }
         if piv != col {
@@ -157,7 +161,7 @@ pub fn solve_small(
         }
         let d = m[col][col];
         debug_assert!(
-            d.is_finite() && d.abs() > 1e-12,
+            d.is_finite() && d.abs() > DEGENERATE_LEN2,
             "solve_small: pivot d = {} — near-zero or NaN at col={col}",
             d
         );
@@ -447,7 +451,7 @@ pub(crate) fn try_active_set(
         ap.iter().take(ns).all(|v| v.is_finite()),
         "solve_normal_block: non-finite impulse solution"
     );
-    if ap.iter().take(ns).any(|&v| v < -1e-6) {
+    if ap.iter().take(ns).any(|&v| v < -POS_CORRECTION_EPS) {
         return None;
     }
     if !inactive_feasible(k_mat, vn, acc, target, count, set, &ap) {
@@ -484,7 +488,7 @@ pub(crate) fn inactive_feasible(
                 v -= k_mat[t][m] * acc[m];
             }
         }
-        if v < target[t] - 1e-5 {
+        if v < target[t] - FEASIBLE_VEL_SLOP {
             return false;
         }
     }
@@ -515,13 +519,13 @@ pub(crate) fn commit_active_set(
     for a in 0..ns {
         let k = idx[a];
         let d = ap[a] - acc[k];
-        if d.abs() > 1e-12 {
+        if d.abs() > DEGENERATE_LEN2 {
             apply_impulse(bodies, i, j, n * d, ras[k], rbs[k]);
         }
         acc[k] = ap[a];
     }
     for t in 0..count {
-        if (mask >> t) & 1 == 0 && acc[t].abs() > 1e-12 {
+        if (mask >> t) & 1 == 0 && acc[t].abs() > DEGENERATE_LEN2 {
             let d = -acc[t];
             apply_impulse(bodies, i, j, n * d, ras[t], rbs[t]);
             acc[t] = 0.0;

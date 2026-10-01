@@ -10,15 +10,30 @@ use ornis_gltf::LoadedScene;
 
 use crate::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
+/// Default ambient for glTF imports (matches the editor scene default).
+const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.10, 0.10, 0.15];
+/// Default camera eye height (m).
+const DEFAULT_CAMERA_EYE_Y: f32 = 2.5;
+/// Default camera eye distance along +Z (m).
+const DEFAULT_CAMERA_EYE_Z: f32 = 9.0;
+/// Default vertical FOV (degrees).
+const DEFAULT_CAMERA_FOV_DEG: f32 = 60.0;
+/// Default near clip (m).
+const DEFAULT_CAMERA_NEAR: f32 = 0.1;
+/// Default far clip (m).
+const DEFAULT_CAMERA_FAR: f32 = 100.0;
+
 /// Default viewing camera for imported scenes (matches the editor default).
 fn default_camera() -> CameraDesc {
     CameraDesc {
-        position: [0.0, 2.5, 9.0],
+        position: [0.0, DEFAULT_CAMERA_EYE_Y, DEFAULT_CAMERA_EYE_Z],
         target: [0.0, 0.0, 0.0],
         up: [0.0, 1.0, 0.0],
-        fov: 60.0,
-        near: 0.1,
-        far: 100.0,
+        fov: DEFAULT_CAMERA_FOV_DEG,
+        near: DEFAULT_CAMERA_NEAR,
+        far: DEFAULT_CAMERA_FAR,
     }
 }
 
@@ -34,7 +49,7 @@ pub fn scene_from_gltf(loaded: &LoadedScene) -> Scene {
         entities: loaded.entities.iter().map(entity_from_gltf).collect(),
         lights: Vec::new(),
         camera: default_camera(),
-        ambient: [0.10, 0.10, 0.15],
+        ambient: DEFAULT_AMBIENT_RGB,
     }
 }
 
@@ -44,7 +59,7 @@ fn entity_from_gltf(entity: &ornis_gltf::LoadedEntity) -> EntityDesc {
     // construction; the typed view below is the loud counterpart.
     let (positions, indices) = entity.mesh.clone().into_custom();
     let _typed: Vec<ornis_gltf::Triangle> = indices
-        .chunks_exact(3)
+        .chunks_exact(TRIANGLE_VERTS)
         .map(|c| ornis_gltf::Triangle::from_raw([c[0], c[1], c[2]]))
         .collect();
     EntityDesc {

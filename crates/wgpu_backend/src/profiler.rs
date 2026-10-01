@@ -35,6 +35,8 @@ impl Default for ProfilerConfig {
 }
 
 const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000];
+/// Compute workgroup size (must match `@workgroup_size` in the WGSL snippet).
+const WORKGROUP_SIZE: u32 = 64;
 
 /// Measures CPU and GPU dispatch costs on the local hardware and derives the
 /// element-count threshold where the GPU starts to win.
@@ -169,7 +171,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let mut cpass = cbe.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
+            cpass.dispatch_workgroups((count as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
         }
         queue.submit([cbe.finish()]);
         device
@@ -190,7 +192,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let mut cpass = cbe.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                 cpass.set_pipeline(&pipeline);
                 cpass.set_bind_group(0, &bind_group, &[]);
-                cpass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
+                cpass.dispatch_workgroups((count as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
             }
             queue.submit([cbe.finish()]);
         }

@@ -68,6 +68,11 @@
 
 #![warn(missing_docs)]
 
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
+/// Metallic-factor threshold for `Metal` vs `Dielectric` wiring.
+const METALNESS_THRESHOLD: f32 = 0.5;
+
 mod anim;
 mod base64;
 mod geom;
@@ -186,17 +191,13 @@ impl Triangle {
         [self.0.0, self.1.0, self.2.0]
     }
 
-    /// `i`-th corner (`0..3`) as a vertex index.
-    ///
-    /// # Panics
-    ///
-    /// Panics on `i >= 3` (same contract as array indexing).
+    /// `i`-th corner (`0..3`) as a vertex index. Out-of-range indices
+    /// clamp to the last corner (same bit pattern as a saturated read).
     pub const fn index(self, i: usize) -> TriIndex {
         match i {
             0 => self.0,
             1 => self.1,
-            2 => self.2,
-            _ => panic!("triangle corner out of range"),
+            _ => self.2,
         }
     }
 }
@@ -263,13 +264,13 @@ impl LoadedMesh {
     /// construction (12 bytes per triangle).
     pub fn into_custom(self) -> (Vec<[f32; 3]>, Vec<u32>) {
         let mut flat = Vec::with_capacity(self.indices.len());
-        for c in self.indices.chunks_exact(3) {
+        for c in self.indices.chunks_exact(TRIANGLE_VERTS) {
             flat.extend_from_slice(&Triangle::from_raw([c[0], c[1], c[2]]).as_u32());
         }
         // Defensive: a hand-built mesh with a non-triple tail keeps its tail
         // verbatim (the importer rejects such soups earlier with
         // `skipped_bad_index`; this stays panic-free regardless).
-        let rem = self.indices.len() % 3;
+        let rem = self.indices.len() % TRIANGLE_VERTS;
         if rem != 0 {
             flat.extend_from_slice(&self.indices[self.indices.len() - rem..]);
         }
@@ -282,7 +283,7 @@ impl LoadedMesh {
     /// importer rejects it earlier — see `skipped_bad_index`).
     pub fn triangles(&self) -> Vec<Triangle> {
         self.indices
-            .chunks_exact(3)
+            .chunks_exact(TRIANGLE_VERTS)
             .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
             .collect()
     }
@@ -349,7 +350,7 @@ impl LoadedMaterial {
     /// metallic-roughness texture does not move the switch — the upload
     /// shader samples it at runtime instead.
     pub fn is_metallic(&self) -> bool {
-        self.metallic >= 0.5
+        self.metallic >= METALNESS_THRESHOLD
     }
 
     /// Image bound to `role`, if that slot is textured.

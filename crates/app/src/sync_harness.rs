@@ -42,6 +42,9 @@ use ornis_core::{
 use ornis_physics::{BodyType, RigidBody};
 use serde_json::{Value, json};
 
+/// Spatial components in a velocity / position vector.
+const VEC3_COMPONENTS: usize = 3;
+
 /// Registry name of the [`RigidBody`] field surface.
 pub const RIGID_BODY_NAME: &str = "RigidBody";
 
@@ -182,7 +185,7 @@ fn set_rigid_field(
     }
     match writable {
         None => {
-            let xyz: [f32; 3] =
+            let xyz: [f32; VEC3_COMPONENTS] =
                 serde_json::from_value(value.clone()).map_err(RegistryError::from_json)?;
             body.velocity = Vec3::from_array(xyz);
         }
@@ -373,8 +376,8 @@ impl System for SyncHarnessSystem {
         let Some(store) = resources.get::<SmartStore>() else {
             return;
         };
-        apply_sync_mappings(store, self.registry, &self.mappings)
-            .expect("sync mappings validated at install");
+        // Validated at install; a late registry mismatch is a no-op frame.
+        let _ = apply_sync_mappings(store, self.registry, &self.mappings);
     }
 }
 

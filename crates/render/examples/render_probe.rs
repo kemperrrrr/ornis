@@ -18,6 +18,18 @@ use ornis_render::{
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+/// wgpu copy buffer row alignment (bytes).
+const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+/// Sphere-strip sample height as a fraction of the frame.
+const SAMPLE_STRIP_Y: f32 = 0.55;
+/// Horizontal sample fractions across the sphere strip.
+const SAMPLE_X_FRACS: [f32; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
+/// Default GPU object capacity for the probe backend.
+const MAX_OBJECTS: u32 = 256;
+/// Default GPU material capacity for the probe backend.
+const MAX_MATERIALS: u32 = 64;
+/// RGBA8 bytes per pixel.
+const BYTES_PER_PIXEL: u32 = 4;
 
 /// Peak-luminance emission mapping, mirroring `extraction::apply_emission`.
 fn apply_emission(mat: &mut OpenPBRMaterial, emission: [f32; 3]) {
@@ -99,8 +111,14 @@ fn main() {
         .nth(2)
         .unwrap_or_else(|| "target/render_probe.png".to_string());
 
-    let ron_text = std::fs::read_to_string(&scene_path).expect("read scene.ron");
-    let scene = Scene::from_ron(&ron_text).expect("parse scene.ron");
+    let Ok(ron_text) = std::fs::read_to_string(&scene_path) else {
+        eprintln!("failed to read {scene_path}");
+        return;
+    };
+    let Ok(scene) = Scene::from_ron(&ron_text) else {
+        eprintln!("failed to parse {scene_path}");
+        return;
+    };
     println!(
         "scene '{}': {} entities, {} lights, ambient {:?}",
         scene.name,
@@ -113,7 +131,7 @@ fn main() {
 }
 
 /// Headless adapter + device for offscreen probing.
-async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
+async fn create_headless_device(label: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),
@@ -127,7 +145,7 @@ async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
             ..Default::default()
         })
         .await
-        .expect("adapter");
+        .ok()?;
     println!("adapter: {:?}", adapter.get_info().name);
 
     adapter
@@ -139,7 +157,7 @@ async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
             ..Default::default()
         })
         .await
-        .expect("device")
+        .ok()
 }
 
 fn make_target(
@@ -168,8 +186,8 @@ fn make_target(
 fn build_scene_data(
     device: &wgpu::Device,
     scene: &Scene,
-) -> (ornis_render::Mesh, Vec<OpenPBRMaterial>, Vec<InstanceData>) {
-    let first = scene.entities.first().expect("scene has no entities");
+) -> Option<(ornis_render::Mesh, Vec<OpenPBRMaterial>, Vec<InstanceData>)> {
+    let first = scene.entities.first()?;
     let mesh = match &first.mesh {
         MeshDesc::Sphere {
             radius,
@@ -194,7 +212,7 @@ fn build_scene_data(
         ),
         // This probe renders procedural scenes; Custom soups have no
         // upload path here yet.
-        MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),
+        MeshDesc::Custom { .. } => return None,
     };
     println!(
         "mesh: {} vertices, {} indices",
@@ -218,7 +236,7 @@ fn build_scene_data(
             material_index: MaterialIdx::from(i as u32),
         });
     }
-    (mesh, materials, instances)
+    Some((mesh, materials, instances))
 }
 
 fn lights_of(scene: &Scene) -> Vec<LightDesc> {
@@ -250,7 +268,8 @@ fn read_back_pixels(
     bytes_per_pixel: u32,
 ) -> Vec<u8> {
     let unpadded_bytes_per_row = WIDTH * bytes_per_pixel;
-    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT)
+        * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("probe readback"),
         size: (padded_bytes_per_row * HEIGHT) as u64,
@@ -281,11 +300,22 @@ fn read_back_pixels(
     queue.submit(std::iter::once(encoder.finish()));
 
     let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let data = slice.get_mapped_range().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        eprintln!("GPU poll failed during readback");
+        return Vec::new();
+    }
+    let Ok(Ok(())) = rx.recv() else {
+        eprintln!("map readback failed");
+        return Vec::new();
+    };
+    let Ok(data) = slice.get_mapped_range() else {
+        eprintln!("get_mapped_range failed");
+        return Vec::new();
+    };
 
     let mut pixels = vec![0u8; (unpadded_bytes_per_row * HEIGHT) as usize];
     for y in 0..HEIGHT as usize {
@@ -299,12 +329,21 @@ fn read_back_pixels(
 }
 
 fn save_png(path: &str, pixels: &[u8]) {
-    let file = std::fs::File::create(path).expect("create png");
+    let Ok(file) = std::fs::File::create(path) else {
+        eprintln!("failed to create {path}");
+        return;
+    };
     let mut encoder_png = png::Encoder::new(std::io::BufWriter::new(file), WIDTH, HEIGHT);
     encoder_png.set_color(png::ColorType::Rgba);
     encoder_png.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder_png.write_header().expect("png header");
-    writer.write_image_data(pixels).expect("png data");
+    let Ok(mut writer) = encoder_png.write_header() else {
+        eprintln!("failed to write png header for {path}");
+        return;
+    };
+    if writer.write_image_data(pixels).is_err() {
+        eprintln!("failed to write png data for {path}");
+        return;
+    }
     println!("saved {path} ({WIDTH}x{HEIGHT})");
 }
 
@@ -320,8 +359,8 @@ fn log_pixel_samples(pixels: &[u8], bytes_per_pixel: u32) {
             pixels[off + 3],
         ]
     };
-    let mid_y = (HEIGHT as f32 * 0.55) as u32;
-    for frac in [0.1f32, 0.3, 0.5, 0.7, 0.9] {
+    let mid_y = (HEIGHT as f32 * SAMPLE_STRIP_Y) as u32;
+    for frac in SAMPLE_X_FRACS {
         let x = (WIDTH as f32 * frac) as u32;
         println!("pixel({x},{mid_y}) = {:?}", sample(x, mid_y));
     }
@@ -341,7 +380,10 @@ fn print_instance_dump(instances: &[InstanceData]) {
 
 async fn run(scene: &Scene, out_path: &str) {
     // ── Headless device ───────────────────────────────────────────────
-    let (device, queue) = create_headless_device("render_probe").await;
+    let Some((device, queue)) = create_headless_device("render_probe").await else {
+        eprintln!("no GPU adapter/device for render_probe");
+        return;
+    };
 
     // ── Offscreen target (same format the browser surface uses) ───────
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -362,13 +404,16 @@ async fn run(scene: &Scene, out_path: &str) {
         surface_config: surface_config.clone(),
         sample_count: 1,
         exposure: 1.0,
-        max_objects: 256,
-        max_materials: 64,
+        max_objects: MAX_OBJECTS,
+        max_materials: MAX_MATERIALS,
     };
     let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
 
     // ── Scene → GPU data ──────────────────────────────────────────────
-    let (mesh, materials, instances) = build_scene_data(&device, scene);
+    let Some((mesh, materials, instances)) = build_scene_data(&device, scene) else {
+        eprintln!("scene has no renderable entities");
+        return;
+    };
     renderer.upload_materials(&device, &queue, &materials);
     renderer.upload_instances(&device, &queue, &instances);
     renderer.set_lights(&queue, scene.ambient, &lights_of(scene));
@@ -385,7 +430,7 @@ async fn run(scene: &Scene, out_path: &str) {
     print_instance_dump(&instances);
 
     // ── Render ────────────────────────────────────────────────────────
-    let bytes_per_pixel = 4u32;
+    let bytes_per_pixel = BYTES_PER_PIXEL;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("probe encoder"),
     });

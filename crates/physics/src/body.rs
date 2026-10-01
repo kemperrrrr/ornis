@@ -12,6 +12,28 @@ use glam::{Quat, Vec3};
 use crate::invariants::{FrictionFrame, FrictionFrameError, Mass, MassKind, PositiveF32, UnitVec3};
 use crate::shape::Shape;
 
+// Default material coefficients for constructor helpers. Named so the
+// shape-specific recipes (`new_box` vs `new_sphere` vs hull rolling) stay
+// readable and cannot drift apart when one call site is retuned.
+
+/// Default restitution for boxes / cones / hulls / meshes.
+const RESTITUTION_DEFAULT: f32 = 0.3;
+/// Default slide friction for boxes / cones / hulls / meshes.
+const FRICTION_DEFAULT: f32 = 0.5;
+/// Sphere recipe: bouncier, slightly less sticky than the box default.
+const RESTITUTION_SPHERE: f32 = 0.5;
+const FRICTION_SPHERE: f32 = 0.3;
+/// Capsule / cylinder recipe: mid rubber.
+const RESTITUTION_CAPSULE: f32 = 0.4;
+const FRICTION_CAPSULE: f32 = 0.4;
+/// Heightfield terrain recipe: grip over bounce.
+const FRICTION_TERRAIN: f32 = 0.6;
+/// MuJoCo-style rolling/torsion torque caps (metres) for hulls and meshes.
+const ROLLING_FRICTION_DEBRIS: f32 = 0.2;
+const TORSION_FRICTION_DEBRIS: f32 = 0.05;
+/// Fallback half-extents when trimesh soup construction fails.
+const FALLBACK_BOX_HALF: f32 = 0.5;
+
 /// Stable index of a body inside its owning [`SequentialImpulseEngine`](crate::engine::SequentialImpulseEngine).
 ///
 /// Solver/routing migrations preserve handles. Removal swaps the final body
@@ -422,10 +444,17 @@ impl RigidBody {
         self.friction_dir = None;
     }
 
-    /// Sphere body with default material (restitution 0.5, friction 0.3).
-    /// Mass > 0 yields a dynamic body; mass 0 a static one.
+    /// Sphere body with default material ([`RESTITUTION_SPHERE`] /
+    /// [`FRICTION_SPHERE`]). Mass > 0 yields a dynamic body; mass 0 a static
+    /// one.
     pub fn new_sphere(position: Vec3, radius: f32, mass: f32) -> Self {
-        Self::build(position, mass, 0.5, 0.3, Shape::Sphere { radius })
+        Self::build(
+            position,
+            mass,
+            RESTITUTION_SPHERE,
+            FRICTION_SPHERE,
+            Shape::Sphere { radius },
+        )
     }
 
     /// Typed sphere entry point: radius as [`ornis_core::units::Meters`],
@@ -498,20 +527,27 @@ impl RigidBody {
         self.torque
     }
 
-    /// Axis-aligned box body (half-extents per axis), restitution 0.3,
-    /// friction 0.5.
+    /// Axis-aligned box body (half-extents per axis), default material
+    /// ([`RESTITUTION_DEFAULT`] / [`FRICTION_DEFAULT`]).
     pub fn new_box(position: Vec3, half_extents: Vec3, mass: f32) -> Self {
-        Self::build(position, mass, 0.3, 0.5, Shape::Box { half_extents })
+        Self::build(
+            position,
+            mass,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
+            Shape::Box { half_extents },
+        )
     }
 
     /// Capsule body aligned to the local +Y axis (`half_height` is the
-    /// cylinder half-length excluding the caps), restitution/friction 0.4.
+    /// cylinder half-length excluding the caps), capsule material
+    /// ([`RESTITUTION_CAPSULE`] / [`FRICTION_CAPSULE`]).
     pub fn new_capsule(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
             mass,
-            0.4,
-            0.4,
+            RESTITUTION_CAPSULE,
+            FRICTION_CAPSULE,
             Shape::Capsule {
                 radius,
                 half_height,
@@ -519,14 +555,14 @@ impl RigidBody {
         )
     }
 
-    /// Flat-capped cylinder body aligned to the local +Y axis,
-    /// restitution/friction 0.4.
+    /// Flat-capped cylinder body aligned to the local +Y axis, capsule
+    /// material ([`RESTITUTION_CAPSULE`] / [`FRICTION_CAPSULE`]).
     pub fn new_cylinder(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
             mass,
-            0.4,
-            0.4,
+            RESTITUTION_CAPSULE,
+            FRICTION_CAPSULE,
             Shape::Cylinder {
                 radius,
                 half_height,
@@ -535,13 +571,14 @@ impl RigidBody {
     }
 
     /// Solid cone body (apex `+half_height` on local +Y, base at
-    /// `-half_height`), restitution 0.3, friction 0.5.
+    /// `-half_height`), default material ([`RESTITUTION_DEFAULT`] /
+    /// [`FRICTION_DEFAULT`]).
     pub fn new_cone(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
             mass,
-            0.3,
-            0.5,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
             Shape::Cone {
                 radius,
                 half_height,
@@ -570,8 +607,8 @@ impl RigidBody {
             Self::build(
                 position,
                 mass,
-                0.3,
-                0.5,
+                RESTITUTION_DEFAULT,
+                FRICTION_DEFAULT,
                 Shape::ConvexHull(crate::shape::ConvexHull {
                     vertices: Vec::new(),
                     faces: Vec::new(),
@@ -593,12 +630,12 @@ impl RigidBody {
         let mut body = Self::build(
             position,
             mass,
-            0.3,
-            0.5,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
             Shape::ConvexHull(crate::shape::ConvexHull::from_vertices(vertices)?),
         );
-        body.rolling_friction = 0.2;
-        body.torsion_friction = 0.05;
+        body.rolling_friction = ROLLING_FRICTION_DEBRIS;
+        body.torsion_friction = TORSION_FRICTION_DEBRIS;
         Ok(body)
     }
 
@@ -628,8 +665,8 @@ impl RigidBody {
                 Self::build(
                     position,
                     mass,
-                    0.3,
-                    0.6,
+                    RESTITUTION_DEFAULT,
+                    FRICTION_TERRAIN,
                     Shape::Heightfield(crate::shape::Heightfield {
                         heights,
                         rows,
@@ -656,8 +693,8 @@ impl RigidBody {
         Ok(Self::build(
             position,
             mass,
-            0.3,
-            0.6,
+            RESTITUTION_DEFAULT,
+            FRICTION_TERRAIN,
             Shape::Heightfield(hf),
         ))
     }
@@ -685,11 +722,21 @@ impl RigidBody {
         mass: f32,
     ) -> Self {
         Self::try_new_trimesh(position, vertices, triangles, mass).unwrap_or_else(|_| {
-            let empty = crate::shape::TriMesh::from_triangles(&[], &[]).expect("empty soup builds");
-            let mut body = Self::build(position, mass, 0.3, 0.5, Shape::TriMesh(empty));
-            body.rolling_friction = 0.2;
-            body.torsion_friction = 0.05;
-            body
+            match crate::shape::TriMesh::from_triangles(&[], &[]) {
+                Ok(empty) => {
+                    let mut body = Self::build(
+                        position,
+                        mass,
+                        RESTITUTION_DEFAULT,
+                        FRICTION_DEFAULT,
+                        Shape::TriMesh(empty),
+                    );
+                    body.rolling_friction = ROLLING_FRICTION_DEBRIS;
+                    body.torsion_friction = TORSION_FRICTION_DEBRIS;
+                    body
+                }
+                Err(_) => Self::new_box(position, Vec3::splat(FALLBACK_BOX_HALF), mass),
+            }
         })
     }
 
@@ -708,12 +755,12 @@ impl RigidBody {
         let mut body = Self::build(
             position,
             mass,
-            0.3,
-            0.5,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
             Shape::TriMesh(crate::shape::TriMesh::from_triangles(vertices, triangles)?),
         );
-        body.rolling_friction = 0.2;
-        body.torsion_friction = 0.05;
+        body.rolling_friction = ROLLING_FRICTION_DEBRIS;
+        body.torsion_friction = TORSION_FRICTION_DEBRIS;
         Ok(body)
     }
 
@@ -734,12 +781,12 @@ impl RigidBody {
         let mut body = Self::build(
             position,
             mass,
-            0.3,
-            0.5,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
             Shape::TriMesh(crate::shape::TriMesh::from_indexed(vertices, indices)?),
         );
-        body.rolling_friction = 0.2;
-        body.torsion_friction = 0.05;
+        body.rolling_friction = ROLLING_FRICTION_DEBRIS;
+        body.torsion_friction = TORSION_FRICTION_DEBRIS;
         Ok(body)
     }
 

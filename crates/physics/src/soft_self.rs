@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use glam::Vec3;
 
+use crate::constants::NEAR_ZERO;
 use crate::soft::SoftBody;
 
 /// One Gauss–Seidel repulsion pass over the particles of `body`.
@@ -133,7 +134,11 @@ pub(crate) fn solve_self_collision(body: &mut SoftBody, h: f32) {
                             }
                             continue;
                         }
-                        let axis = if dist < 1e-9 { Vec3::X } else { delta / dist };
+                        let axis = if dist < NEAR_ZERO {
+                            Vec3::X
+                        } else {
+                            delta / dist
+                        };
                         let dlambda = crate::xpbd::delta_lambda(c, lambda, w, 0.0);
                         let next = (lambda + dlambda).max(0.0);
                         let applied = next - lambda;

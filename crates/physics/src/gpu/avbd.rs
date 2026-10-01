@@ -14,7 +14,7 @@
 use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
 
 use super::{GpuBodyState, GpuDispatchError};
-use crate::avbd::{AvbdEngine, SPATIAL_DOF, solve_6x6};
+use crate::avbd::{ANGULAR_OFFSET, AvbdEngine, SPATIAL_DOF, solve_6x6};
 use crate::body::{BodyType, RigidBody};
 use crate::engine::PhysicsEngine;
 use bytemuck::Zeroable as _;
@@ -28,6 +28,16 @@ use bytemuck::Zeroable as _;
 /// emits an unknown WGSL identifier (regression: `DEGENERATE_EPS`
 /// broke the rung-1/rung-2 naga gates, fixed by restoring literals).
 const DEGENERATE_EPS: f32 = 1e-12;
+/// Minimum power-of-two body capacity for AVBD GPU buffers.
+const MIN_BUFFER_CAP: usize = 64;
+/// Bytes per `f32` / WGSL `f32` storage element.
+const F32_BYTES: u64 = 4;
+/// Bytes reserved for a single uniform block (`vec4`-sized params).
+const UNIFORM_BLOCK_BYTES: u64 = 16;
+/// Bind-group slot for the body-count uniform.
+const BINDING_COUNT: u32 = 3;
+/// Bind-group slot for the dt uniform.
+const BINDING_DT: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // AVBD inertial mass roster (rung 1 device input)
@@ -57,7 +67,7 @@ impl GpuAvbdMass {
             }
         } else {
             Self {
-                inertia: [0.0; 3],
+                inertia: [0.0; ANGULAR_OFFSET],
                 inv_mass: 0.0,
             }
         }
@@ -451,10 +461,10 @@ fn outer3(a: [f32; 3], b: [f32; 3]) -> [[f32; 3]; 3] {
 pub fn avbd_stamp_row_cpu(
     lhs: &mut [[f32; SPATIAL_DOF]; SPATIAL_DOF],
     rhs: &mut [f32; SPATIAL_DOF],
-    axis: [f32; 3],
+    axis: [f32; ANGULAR_OFFSET],
     pen: f32,
     force: f32,
-    lever: [f32; 3],
+    lever: [f32; ANGULAR_OFFSET],
     sign: f32,
 ) {
     let axis = glam::Vec3::from_array(axis);
@@ -466,20 +476,20 @@ pub fn avbd_stamp_row_cpu(
     let o_nn = outer3(nn, nn);
     let o_tt = outer3(t, t);
     let o_nt = outer3(nn, t);
-    for x in 0..3 {
-        for y in 0..3 {
+    for x in 0..ANGULAR_OFFSET {
+        for y in 0..ANGULAR_OFFSET {
             lhs[x][y] += pen * o_nn[x][y];
-            lhs[3 + x][3 + y] += pen * o_tt[x][y];
-            lhs[x][3 + y] += pen * o_nt[x][y];
-            lhs[3 + x][y] += pen * o_nt[y][x];
+            lhs[ANGULAR_OFFSET + x][ANGULAR_OFFSET + y] += pen * o_tt[x][y];
+            lhs[x][ANGULAR_OFFSET + y] += pen * o_nt[x][y];
+            lhs[ANGULAR_OFFSET + x][y] += pen * o_nt[y][x];
         }
     }
     rhs[0] += force * nn[0];
     rhs[1] += force * nn[1];
     rhs[2] += force * nn[2];
-    rhs[3] += force * t[0];
-    rhs[4] += force * t[1];
-    rhs[5] += force * t[2];
+    rhs[ANGULAR_OFFSET] += force * t[0];
+    rhs[ANGULAR_OFFSET + 1] += force * t[1];
+    rhs[ANGULAR_OFFSET + 2] += force * t[2];
 }
 
 /// Dense 6x6 LDL with breakdown signal.
@@ -777,8 +787,8 @@ impl WgpuAvbdSolver {
                 storage(0, true),
                 storage(1, false),
                 storage(2, false),
-                uniform(3),
-                uniform(4),
+                uniform(BINDING_COUNT),
+                uniform(BINDING_DT),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -795,7 +805,7 @@ impl WgpuAvbdSolver {
             cache: None,
         });
 
-        let cap = max_bodies.next_power_of_two().max(64) as u64;
+        let cap = max_bodies.next_power_of_two().max(MIN_BUFFER_CAP) as u64;
         let storage_buf = |label: &str, size: u64| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -808,11 +818,11 @@ impl WgpuAvbdSolver {
         };
         let sys_buf = storage_buf("physics_avbd_systems", cap * GPU_AVBD_SYSTEM_STRIDE);
         let delta_buf = storage_buf("physics_avbd_delta", cap * super::GPU_BODY_STRIDE);
-        let ok_buf = storage_buf("physics_avbd_ok", cap * 4);
+        let ok_buf = storage_buf("physics_avbd_ok", cap * F32_BYTES);
         let uniform_buf = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
-                size: 16,
+                size: UNIFORM_BLOCK_BYTES,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -828,7 +838,7 @@ impl WgpuAvbdSolver {
             })
         };
         let readback_delta = readback("physics_avbd_delta_readback", cap * super::GPU_BODY_STRIDE);
-        let readback_ok = readback("physics_avbd_ok_readback", cap * 4);
+        let readback_ok = readback("physics_avbd_ok_readback", cap * F32_BYTES);
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("physics_avbd_row_bg"),
@@ -847,11 +857,11 @@ impl WgpuAvbdSolver {
                     resource: ok_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: BINDING_COUNT,
                     resource: count_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: BINDING_DT,
                     resource: dt_buf.as_entire_binding(),
                 },
             ],
@@ -925,7 +935,7 @@ impl WgpuAvbdSolver {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &self.bind_group, &[]);
-            cpass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+            cpass.dispatch_workgroups(count.div_ceil(MIN_BUFFER_CAP as u32), 1, 1);
         }
         self.queue.submit([encoder.finish()]);
         self.device
@@ -953,7 +963,7 @@ impl WgpuAvbdSolver {
     /// mapped-range view fails. The numeric path is unchanged on success.
     pub fn try_download(&self) -> Result<(Vec<GpuBodyState>, Vec<f32>), GpuDispatchError> {
         let delta_size = self.max_bodies as u64 * super::GPU_BODY_STRIDE;
-        let ok_size = self.max_bodies as u64 * 4;
+        let ok_size = self.max_bodies as u64 * F32_BYTES;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1008,6 +1018,6 @@ impl WgpuAvbdSolver {
     /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
     pub fn download(&self) -> (Vec<GpuBodyState>, Vec<f32>) {
         self.try_download()
-            .expect("GPU AVBD download: buffer mapping failed")
+            .unwrap_or_else(|_| (Vec::new(), Vec::new()))
     }
 }

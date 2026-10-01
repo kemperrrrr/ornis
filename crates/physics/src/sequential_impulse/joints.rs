@@ -8,22 +8,28 @@ use glam::Quat;
 use glam::Vec3;
 
 use super::*;
+use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO, POS_CORRECTION_EPS};
 use crate::joint::{
     AxisConfig, PrismaticLimit, PrismaticMotor, RevoluteLimit, RevoluteMotor, WheelSuspension,
 };
 
+/// Translational DOFs before angular slots in a 6-DOF joint.
+const LINEAR_DOF_COUNT: usize = 3;
+
 /// Numerical zero for effective-mass guards: rows with `k`/`k_eff` below
 /// this are skipped as degenerate (infinite mass ratio, collapsed axes).
-const MIN_EFFECTIVE_MASS: f32 = 1e-9;
+/// Same magnitude as [`NEAR_ZERO`] (length/residual domain), not the
+/// SI contact-row [`crate::constants::MIN_EFFECTIVE_MASS`] (`1e-10`).
+const MIN_EFFECTIVE_MASS: f32 = NEAR_ZERO;
 
 /// Numerical zero for segment-length guards: lengths below this are treated
 /// as collapsed (no meaningful direction to constrain along).
-const MIN_SEGMENT_LENGTH: f32 = 1e-9;
+const MIN_SEGMENT_LENGTH: f32 = NEAR_ZERO;
 
 /// Numerical zero for accumulated-impulse and squared-length guards: values
 /// at or below this magnitude are treated as exactly zero (nothing stored,
 /// no tangent to build).
-const DEGENERATE_EPS: f32 = 1e-12;
+const DEGENERATE_EPS: f32 = DEGENERATE_LEN2;
 
 /// Twist of B relative to A about A's hinge axis (rad, wrapped to
 /// [-PI, PI]). Decomposes `qa^-1 * qb` into twist about the axis plus
@@ -575,7 +581,7 @@ fn joint_linear_position_step(
     const BETA: f32 = 0.2;
     const MAX_LIN_CORRECTION: f32 = 0.25;
     let e = raw_e.clamp(-MAX_LIN_CORRECTION, MAX_LIN_CORRECTION);
-    if e.abs() < 1e-6 {
+    if e.abs() < POS_CORRECTION_EPS {
         return;
     }
     let k_eff = effective_mass(bodies, a, b, dir, ra, rb);
@@ -609,7 +615,7 @@ fn joint_angular_position_pass(
     let t2 = wa.cross(t1).normalize_or_zero();
     for t in [t1, t2] {
         let err = e.dot(t).clamp(-MAX_ANG_CORRECTION, MAX_ANG_CORRECTION);
-        if err.abs() < 1e-6 {
+        if err.abs() < POS_CORRECTION_EPS {
             continue;
         }
         let (ba, bb) = (&bodies[a], &bodies[b]);
@@ -803,14 +809,14 @@ fn joint_angular_lock_position_pass(
         q_err = -q_err;
     }
     let angle = 2.0 * q_err.xyz().length().atan2(q_err.w);
-    if angle < 1e-6 {
+    if angle < POS_CORRECTION_EPS {
         return;
     }
     // Vector part lives in A's frame; the error lever is needed in world.
     let e = (qa * q_err.xyz()).normalize_or(Vec3::X) * angle;
     for t in axes {
         let err = e.dot(*t).clamp(-MAX_ANG_CORRECTION, MAX_ANG_CORRECTION);
-        if err.abs() < 1e-6 {
+        if err.abs() < POS_CORRECTION_EPS {
             continue;
         }
         let (ba, bb) = (&bodies[a], &bodies[b]);
@@ -1110,7 +1116,7 @@ fn solve_new_joint_velocity(
             // (frame-independent, like the prismatic perp basis).
             joint_warm_start(bodies, joint, a, b, ra, rb, None);
             // Locked angular axes, X/Y/Z order, slots aligned 1:1.
-            let mut lock = [Vec3::ZERO; 3];
+            let mut lock = [Vec3::ZERO; FRAME.len()];
             let mut n_lock = 0;
             for (i, e) in FRAME.iter().enumerate() {
                 if angular[i] == AxisConfig::Locked {
@@ -1157,7 +1163,7 @@ fn solve_new_joint_velocity(
                     joint_sixdof_angular_limit_iteration(
                         bodies,
                         &mut joint.acc_6dof,
-                        3 + i,
+                        LINEAR_DOF_COUNT + i,
                         a,
                         b,
                         dir,
@@ -1251,7 +1257,7 @@ fn solve_new_joint_position(
                 return;
             };
             // Locked angular subset, X/Y/Z order (same order as velocity).
-            let mut lock = [Vec3::ZERO; 3];
+            let mut lock = [Vec3::ZERO; FRAME.len()];
             for _ in 0..iterations {
                 let ra = bodies[a].orientation * la;
                 let rb = bodies[b].orientation * lb;

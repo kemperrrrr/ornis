@@ -31,6 +31,11 @@ use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
 use ornis_core::units::PositiveF32;
 
+/// Squared length below which a direction is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
+
 /// CPU-side render data read from the ECS lanes for one frame (X4
 /// Extract-free: a direct-read payload, not a scheduled snapshot —
 /// no `Mutex` round-trip).
@@ -432,7 +437,10 @@ impl RenderWorld {
     /// Equivalent to calling [`extract_render_data`] on this world's
     /// store; provided for callers that own the [`RenderWorld`].
     pub fn frame_upload(&self) -> FrameUpload {
-        extract_render_data(self.engine.world().store().expect("render world store"))
+        match self.engine.world().store() {
+            Some(store) => extract_render_data(store),
+            None => FrameUpload::default(),
+        }
     }
 }
 
@@ -523,9 +531,15 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
     // once (see `mesh_upload::SoupCache`). Staging is reserved once from
     // the lane length (capped): the map grows at most once per frame and
     // `custom_meshes` amortizes its pushes the same way.
+    /// Cap on per-frame Custom soup cache entries (amortized staging).
+    const SOUP_CACHE_CAP: usize = 4096;
+    /// Reserved custom-mesh upload slots per frame.
+    const CUSTOM_MESH_RESERVE: usize = 256;
     let lane_len = transforms.entities.len();
-    let mut soup_cache = SoupCache::with_capacity(lane_len.min(4096));
-    extracted.custom_meshes.reserve(lane_len.min(256));
+    let mut soup_cache = SoupCache::with_capacity(lane_len.min(SOUP_CACHE_CAP));
+    extracted
+        .custom_meshes
+        .reserve(lane_len.min(CUSTOM_MESH_RESERVE));
     for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
         let Some(mesh) = meshes.get(entity) else {
             stats.skipped_incomplete += 1;
@@ -832,7 +846,9 @@ fn insert_scene_entities(
     engine: &mut Engine,
     entities: &[ornis_assets::scene::EntityDesc],
 ) -> Vec<Entity> {
-    let store = engine.world_mut().store_mut().expect("render world store");
+    let Some(store) = engine.world_mut().store_mut() else {
+        return Vec::new();
+    };
     let mut handles = Vec::with_capacity(entities.len());
     for entity in entities {
         let handle = store.create_entity();
@@ -945,7 +961,7 @@ fn apply_emission(output: &mut OpenPBRMaterial, emission: [f32; 3]) {
 fn normalized_rotation(rotation: [f32; 4]) -> Quat {
     let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
     let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         orientation.normalize()
     } else {
         Quat::IDENTITY
@@ -973,7 +989,7 @@ fn skin_vertex_count(mesh: &SkinnedMesh) -> Option<usize> {
         return None;
     }
     if mesh.indices.is_empty()
-        || !mesh.indices.len().is_multiple_of(3)
+        || !mesh.indices.len().is_multiple_of(TRIANGLE_VERTS)
         || mesh.indices.iter().any(|index| (*index as usize) >= count)
     {
         return None;

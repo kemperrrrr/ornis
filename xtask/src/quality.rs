@@ -939,6 +939,15 @@ fn ci_annotations() -> bool {
     std::env::var_os("GITHUB_ACTIONS").is_some()
 }
 
+/// Tail bytes kept when a stage log has no `failures:` marker.
+const STAGE_LOG_TAIL_BYTES: usize = 18_000;
+/// Cap on interesting lines before dropping `+`/`-` bodies.
+const INTERESTING_LINE_SOFT_CAP: usize = 15;
+/// Max interesting lines annotated per stage (GitHub ~10/step budget).
+const INTERESTING_LINE_HARD_CAP: usize = 40;
+/// Max characters per GitHub Actions error annotation line.
+const ANNOTATION_LINE_CHARS: usize = 220;
+
 /// Emits the most relevant error lines of a failed stage as annotations
 /// (max 8: cargo/rustc errors, failing tests, fmt diffs, clippy warnings).
 fn annotate_stage_failure(name: &str, log: &str) {
@@ -955,7 +964,7 @@ fn annotate_stage_failure(name: &str, log: &str) {
         let end = rest.find("test result:").unwrap_or(rest.len());
         &rest[..end]
     } else {
-        let mut tail = clean.len().saturating_sub(18_000);
+        let mut tail = clean.len().saturating_sub(STAGE_LOG_TAIL_BYTES);
         while !clean.is_char_boundary(tail) {
             tail += 1;
         }
@@ -992,13 +1001,13 @@ fn annotate_stage_failure(name: &str, log: &str) {
     let mut interesting: Vec<&str> = clean.lines().filter(|l| is_match(l)).collect();
     // GitHub surfaces only ~10 annotations per step: when the diff is large,
     // drop `+`/`-` bodies and keep headers/diagnostics so nothing is hidden.
-    if interesting.len() > 15 {
+    if interesting.len() > INTERESTING_LINE_SOFT_CAP {
         interesting.retain(|l| {
             let t = l.trim_start();
             !t.starts_with('+') && !t.starts_with('-')
         });
     }
-    let start = interesting.len().saturating_sub(40);
+    let start = interesting.len().saturating_sub(INTERESTING_LINE_HARD_CAP);
     let picked = &interesting[start..];
     if picked.is_empty() {
         annotate(
@@ -1068,9 +1077,9 @@ fn annotate(title: String, message: &str) {
             .replace('\n', "%0A")
     };
     let mut line = message.trim().to_string();
-    if line.len() > 220 {
+    if line.len() > ANNOTATION_LINE_CHARS {
         // Truncate at a char boundary: `str::truncate` panics mid-UTF-8.
-        let mut end = 220;
+        let mut end = ANNOTATION_LINE_CHARS;
         while !line.is_char_boundary(end) {
             end -= 1;
         }
@@ -1258,9 +1267,13 @@ pub fn fuzz(args: &[String]) {
         "xtask fuzz: cargo +nightly fuzz run {target} {}",
         extra.join(" ")
     );
-    let status = c
-        .status()
-        .unwrap_or_else(|e| panic!("xtask fuzz: failed to spawn cargo-fuzz: {e}"));
+    let status = match c.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("xtask fuzz: failed to spawn cargo-fuzz: {e}");
+            exit(1);
+        }
+    };
     exit(status.code().unwrap_or(1));
 }
 
@@ -1289,9 +1302,13 @@ pub fn mutants(args: &[String]) {
         "xtask mutants: cargo mutants -p ornis-core --features lock-free --timeout 300 {}",
         extra.join(" ")
     );
-    let status = c
-        .status()
-        .unwrap_or_else(|e| panic!("xtask mutants: failed to spawn cargo-mutants: {e}"));
+    let status = match c.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("xtask mutants: failed to spawn cargo-mutants: {e}");
+            exit(1);
+        }
+    };
     exit(status.code().unwrap_or(1));
 }
 

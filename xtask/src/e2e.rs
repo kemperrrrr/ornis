@@ -26,6 +26,12 @@ use std::time::{Duration, Instant};
 const DEFAULT_PORT: u16 = 3420;
 const POLL_DEADLINE_SECS: u64 = 30;
 const VIEWPORT: &str = "800,600";
+/// TCP connect / sleep poll interval while waiting for the server.
+const POLL_INTERVAL_MS: u64 = 500;
+/// Read timeout for the hand-rolled `GET /api/scene`.
+const SCENE_READ_TIMEOUT_SECS: u64 = 10;
+/// HTTP header/body separator length (`\r\n\r\n`).
+const HTTP_HEADER_SEP_LEN: usize = 4;
 
 const BROWSERS: &[&str] = &[
     "chromium",
@@ -117,23 +123,21 @@ fn dirs_home() -> PathBuf {
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask has a parent directory")
-        .to_path_buf()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Wait until `127.0.0.1:port` accepts TCP, then `true`. Polls, never hangs.
 fn wait_for_server(port: u16) -> bool {
     let deadline = Instant::now() + Duration::from_secs(POLL_DEADLINE_SECS);
     while Instant::now() < deadline {
-        if TcpStream::connect_timeout(
-            &format!("127.0.0.1:{port}").parse().expect("loopback addr"),
-            Duration::from_millis(500),
-        )
-        .is_ok()
-        {
+        let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
+            continue;
+        };
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(POLL_INTERVAL_MS)).is_ok() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
     false
 }
@@ -141,13 +145,10 @@ fn wait_for_server(port: u16) -> bool {
 /// Minimal blocking `GET /api/scene` over TCP. Returns the response body.
 fn fetch_scene(port: u16) -> Option<Vec<u8>> {
     let addr = format!("127.0.0.1:{port}");
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse().expect("loopback addr"),
-        Duration::from_secs(2),
-    )
-    .ok()?;
+    let socket = addr.parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(2)).ok()?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(SCENE_READ_TIMEOUT_SECS)))
         .ok()?;
     stream
         .write_all(
@@ -167,9 +168,9 @@ fn fetch_scene(port: u16) -> Option<Vec<u8>> {
         return None;
     }
     let sep = raw
-        .windows(4)
+        .windows(HTTP_HEADER_SEP_LEN)
         .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)?;
+        .map(|i| i + HTTP_HEADER_SEP_LEN)?;
     Some(raw[sep..].to_vec())
 }
 
@@ -289,7 +290,7 @@ fn wait_for_scene(port: u16) -> Option<Vec<u8>> {
                 return Some(body);
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
     None
 }

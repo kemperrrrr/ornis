@@ -27,12 +27,17 @@ use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
-use ornis_physics::soft_render::{tube_indices, tube_positions};
+use ornis_physics::soft_render::{MIN_TUBE_SIDES, tube_indices, tube_positions};
 use ornis_physics::{
     BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind,
 };
 #[cfg(test)]
 use ornis_render::extract_render_data;
+
+/// Squared length below which a quaternion is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+/// Spatial components in a world-space position.
+const VEC3_COMPONENTS: usize = 3;
 
 /// Render parameters for a chain/rope soft body (PLAN B2/D1 leftover #3).
 ///
@@ -300,7 +305,7 @@ impl PhysicsRuntime {
                 let Some(rope) = ropes.get(entity) else {
                     continue;
                 };
-                if !rope.radius.is_finite() || rope.radius <= 0.0 || rope.sides < 3 {
+                if !rope.radius.is_finite() || rope.radius <= 0.0 || rope.sides < MIN_TUBE_SIDES {
                     continue;
                 }
                 let count = body.particles.len();
@@ -325,7 +330,7 @@ impl PhysicsRuntime {
                 }
                 continue;
             }
-            let positions: Vec<[f32; 3]> = body
+            let positions: Vec<[f32; VEC3_COMPONENTS]> = body
                 .positions_snapshot()
                 .iter()
                 .map(Vec3::to_array)
@@ -403,7 +408,7 @@ impl System for PhysicsSyncIn {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let mut runtime = runtime_resource.lock().expect("physics runtime lock");
+        let mut runtime = runtime_resource.lock().unwrap_or_else(|e| e.into_inner());
         runtime.sync_in(&body_lane, transforms.as_deref());
     }
 }
@@ -431,7 +436,7 @@ impl System for PhysicsStep {
         };
         runtime_resource
             .lock()
-            .expect("physics runtime lock")
+            .unwrap_or_else(|e| e.into_inner())
             .step(time.delta_seconds());
     }
 }
@@ -467,7 +472,7 @@ impl System for PhysicsSyncOut {
         };
         runtime_resource
             .lock()
-            .expect("physics runtime lock")
+            .unwrap_or_else(|e| e.into_inner())
             .sync_out(&mut body_lane, &mut transform_lane);
     }
 }
@@ -497,7 +502,7 @@ impl System for SoftSyncIn {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let mut runtime = runtime_resource.lock().expect("physics runtime lock");
+        let mut runtime = runtime_resource.lock().unwrap_or_else(|e| e.into_inner());
         runtime.sync_soft_in(&soft_lane);
     }
 }
@@ -536,7 +541,7 @@ impl System for SoftSyncOut {
         let ropes = store.read_lane::<RopeMesh>();
         runtime_resource
             .lock()
-            .expect("physics runtime lock")
+            .unwrap_or_else(|e| e.into_inner())
             .sync_soft_out(&mut mesh_lane, &mut transform_lane, ropes.as_deref());
     }
 }
@@ -544,7 +549,7 @@ impl System for SoftSyncOut {
 fn normalized_rotation(rotation: [f32; 4]) -> Quat {
     let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
     let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         orientation.normalize()
     } else {
         Quat::IDENTITY

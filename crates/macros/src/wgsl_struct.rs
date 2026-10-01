@@ -55,6 +55,19 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 
+/// Bytes in a WGSL `f32` / `u32` / `i32` scalar.
+const SIZE_OF_F32: usize = 4;
+/// Columns/rows in a `mat4x4`.
+const MAT4_DIM: usize = 4;
+/// Byte size of a `mat4x4<f32>`.
+const SIZE_OF_MAT4: usize = 64;
+/// Alignment of a `mat4x4<f32>` / vec3+/vec4.
+const ALIGN_VEC4: usize = 16;
+/// Max components in a WGSL vector (`vec2`..=`vec4`).
+const MAX_VEC_COMPONENTS: usize = 4;
+/// Min components in a WGSL vector.
+const MIN_VEC_COMPONENTS: usize = 2;
+
 /// WGSL layout of one field: declaration type plus const-evaluable size and
 /// alignment expressions (literals for scalars, `size_of`/`align` queries for
 /// nested structs, whose layouts the macro cannot see).
@@ -89,16 +102,16 @@ fn scalar_elem(ty: &syn::Type) -> Option<(&'static str, usize)> {
             .map(|s| s.ident.to_string())
             .as_deref()
         {
-            Some("f32") => Some(("f32", 4)),
-            Some("u32") => Some(("u32", 4)),
-            Some("i32") => Some(("i32", 4)),
+            Some("f32") => Some(("f32", SIZE_OF_F32)),
+            Some("u32") => Some(("u32", SIZE_OF_F32)),
+            Some("i32") => Some(("i32", SIZE_OF_F32)),
             // `GpuBool` is a transparent u32 wrapper and is intentionally spelled
             // `u32` in host-shareable WGSL. Native Rust `bool` is not
             // recognized because its representation is not a GPU contract.
-            Some("GpuBool") => Some(("u32", 4)),
+            Some("GpuBool") => Some(("u32", SIZE_OF_F32)),
             // Transparent `u32` newtypes substitute to `u32`, like the CPU
             // compiler erases `repr(transparent)` wrappers.
-            Some("MaterialIdx" | "TextureHandle") => Some(("u32", 4)),
+            Some("MaterialIdx" | "TextureHandle") => Some(("u32", SIZE_OF_F32)),
             _ => None,
         }
     } else {
@@ -155,11 +168,11 @@ fn wgsl_field_layout(
         };
         // 4×4 float matrix: `[[f32; 4]; 4]` ↔ `mat4x4<f32>` (64 bytes,
         // 16-aligned — the same bytes `bytemuck` uploads for `[[f32; 4]; 4]`).
-        if len == 4
+        if len == MAT4_DIM
             && let syn::Type::Array(inner) = arr.elem.as_ref()
             && let syn::Expr::Lit(l) = &inner.len
             && let syn::Lit::Int(i) = &l.lit
-            && i.base10_parse::<usize>().is_ok_and(|n| n == 4)
+            && i.base10_parse::<usize>().is_ok_and(|n| n == MAT4_DIM)
             && let Some(("f32", _)) = scalar_elem(&inner.elem)
         {
             if as_name.is_some() {
@@ -168,11 +181,15 @@ fn wgsl_field_layout(
                     "WgslStruct: `to` only applies to nested struct fields",
                 ));
             }
+            let size = SIZE_OF_MAT4;
+            let align = ALIGN_VEC4;
+            let size_lit = proc_macro2::Literal::usize_suffixed(size);
+            let align_lit = proc_macro2::Literal::usize_suffixed(align);
             return Ok((
                 FieldLayout {
                     wgsl_ty: "mat4x4<f32>".to_string(),
-                    size: quote! { 64usize },
-                    align: quote! { 16usize },
+                    size: quote! { #size_lit },
+                    align: quote! { #align_lit },
                 },
                 None,
                 NagaField::Matrix,
@@ -186,7 +203,7 @@ fn wgsl_field_layout(
                     "WgslStruct: `to` only applies to nested struct fields",
                 ));
             }
-            if !(2..=4).contains(&len) {
+            if !(MIN_VEC_COMPONENTS..=MAX_VEC_COMPONENTS).contains(&len) {
                 return Err(syn::Error::new(
                     arr.len.span(),
                     format!(
@@ -195,10 +212,10 @@ fn wgsl_field_layout(
                 ));
             }
             // WGSL: vec2<T> aligns to 2×, vec3/vec4<T> to 4× the scalar.
-            let align = if len == 2 {
-                2 * elem_size
+            let align = if len == MIN_VEC_COMPONENTS {
+                MIN_VEC_COMPONENTS * elem_size
             } else {
-                4 * elem_size
+                MAX_VEC_COMPONENTS * elem_size
             };
             let size_lit = proc_macro2::Literal::usize_suffixed(len * elem_size);
             let align_lit = proc_macro2::Literal::usize_suffixed(align);
@@ -218,13 +235,13 @@ fn wgsl_field_layout(
         // Array of nested structs: `[Inner; K]` ↔ `array<W, K>` where `W` is
         // `#[wgsl(to)]` if given, else the Rust type name.
         if let syn::Type::Path(tp) = arr.elem.as_ref() {
-            let inner = tp
-                .path
-                .segments
-                .last()
-                .expect("path has segments")
-                .ident
-                .clone();
+            let Some(seg) = tp.path.segments.last() else {
+                return Err(syn::Error::new(
+                    tp.path.span(),
+                    "WgslStruct: empty path in array element type",
+                ));
+            };
+            let inner = seg.ident.clone();
             let wgsl_inner = as_name
                 .map(str::to_string)
                 .unwrap_or_else(|| inner.to_string());
@@ -246,13 +263,13 @@ fn wgsl_field_layout(
     }
     // Nested struct by value: `label: Inner` ↔ `label: W` (see above).
     if let syn::Type::Path(tp) = ty {
-        let inner = tp
-            .path
-            .segments
-            .last()
-            .expect("path has segments")
-            .ident
-            .clone();
+        let Some(seg) = tp.path.segments.last() else {
+            return Err(syn::Error::new(
+                tp.path.span(),
+                "WgslStruct: empty path in nested field type",
+            ));
+        };
+        let inner = seg.ident.clone();
         let wgsl_inner = as_name
             .map(str::to_string)
             .unwrap_or_else(|| inner.to_string());
@@ -376,7 +393,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut member_idx = 0usize;
 
     for (field_index, field) in named.named.iter().enumerate() {
-        let ident = field.ident.as_ref().expect("named field");
+        let Some(ident) = field.ident.as_ref() else {
+            return syn::Error::new_spanned(field, "WgslStruct: named field required")
+                .to_compile_error()
+                .into();
+        };
         let opts = match field_opts(&field.attrs) {
             Ok(opts) => opts,
             Err(e) => return e.to_compile_error().into(),
@@ -528,10 +549,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                                 name: None,
                                 inner: naga::TypeInner::Array {
                                     base: #b,
-                                    size: naga::ArraySize::Constant(
-                                        ::core::num::NonZeroU32::new(#len_lit as u32)
-                                            .expect("array length is nonzero"),
-                                    ),
+                                    size: naga::ArraySize::Constant({
+                                        const LEN: u32 = #len_lit as u32;
+                                        match ::core::num::NonZeroU32::new(LEN) {
+                                            Some(n) => n,
+                                            // Derive rejects zero-length arrays; this is defensive.
+                                            None => ::core::num::NonZeroU32::MIN,
+                                        }
+                                    }),
                                     stride: (::core::mem::size_of::<#inner>()
                                         .div_ceil(16usize) * 16usize)
                                         as u32,

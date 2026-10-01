@@ -2,6 +2,44 @@
 
 use wgpu::util::DeviceExt;
 
+/// Components in a `vec3` / position / normal / tangent attribute.
+const VEC3_COMPONENTS: usize = 3;
+/// Components in a `vec2` / UV attribute.
+const VEC2_COMPONENTS: usize = 2;
+/// Half-extent of a unit box / UV patch center.
+const HALF: f32 = 0.5;
+/// Max joint influences per skinned vertex.
+const MAX_INFLUENCES: usize = 4;
+/// Faces on a box mesh.
+const BOX_FACES: usize = 6;
+/// Vertices emitted per box face (unique UVs).
+const BOX_FACE_VERTS: usize = 4;
+/// Indices per box face (two triangles).
+const BOX_FACE_INDICES: usize = 6;
+/// Indices per cylinder radial segment (side quads + two cap triangles).
+const CYLINDER_INDICES_PER_SEGMENT: u32 = 12;
+/// Minimum sphere sector / cylinder radial segments.
+const MIN_RADIAL_SEGMENTS: u32 = 3;
+/// Minimum sphere stacks.
+const MIN_SPHERE_STACKS: u32 = 2;
+/// Vertex attribute locations (must match the mesh shaders).
+const ATTR_LOC_POSITION: u32 = 0;
+const ATTR_LOC_NORMAL: u32 = 1;
+const ATTR_LOC_UV: u32 = 2;
+const ATTR_LOC_TANGENT: u32 = 3;
+const ATTR_LOC_JOINTS: u32 = 4;
+const ATTR_LOC_WEIGHTS: u32 = 5;
+
+/// Box corner indices (unit box centered at origin).
+const C_LDB: usize = 0; // −x −y −z
+const C_RDB: usize = 1; // +x −y −z
+const C_RUB: usize = 2; // +x +y −z
+const C_LUB: usize = 3; // −x +y −z
+const C_LDF: usize = 4; // −x −y +z
+const C_RDF: usize = 5; // +x −y +z
+const C_RUF: usize = 6; // +x +y +z
+const C_LUF: usize = 7; // −x +y +z
+
 /// Vertex + index buffers uploaded to the device, ready to draw.
 pub struct Mesh {
     /// Interleaved [`Vertex`] data.
@@ -37,23 +75,25 @@ impl Vertex {
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 0,
+                    shader_location: ATTR_LOC_POSITION,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
+                    offset: std::mem::size_of::<[f32; VEC3_COMPONENTS]>() as wgpu::BufferAddress,
+                    shader_location: ATTR_LOC_NORMAL,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
-                    shader_location: 2,
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2)
+                        as wgpu::BufferAddress,
+                    shader_location: ATTR_LOC_UV,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>())
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2
+                        + std::mem::size_of::<[f32; VEC2_COMPONENTS]>())
                         as wgpu::BufferAddress,
-                    shader_location: 3,
+                    shader_location: ATTR_LOC_TANGENT,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],
@@ -97,34 +137,37 @@ impl SkinnedVertex {
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 0,
+                    shader_location: ATTR_LOC_POSITION,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
+                    offset: std::mem::size_of::<[f32; VEC3_COMPONENTS]>() as wgpu::BufferAddress,
+                    shader_location: ATTR_LOC_NORMAL,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
-                    shader_location: 2,
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2)
+                        as wgpu::BufferAddress,
+                    shader_location: ATTR_LOC_UV,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>())
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2
+                        + std::mem::size_of::<[f32; VEC2_COMPONENTS]>())
                         as wgpu::BufferAddress,
-                    shader_location: 3,
+                    shader_location: ATTR_LOC_TANGENT,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    shader_location: 4,
+                    shader_location: ATTR_LOC_JOINTS,
                     format: wgpu::VertexFormat::Uint32x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<Vertex>() + std::mem::size_of::<[u32; 4]>())
+                    offset: (std::mem::size_of::<Vertex>()
+                        + std::mem::size_of::<[u32; MAX_INFLUENCES]>())
                         as wgpu::BufferAddress,
-                    shader_location: 5,
+                    shader_location: ATTR_LOC_WEIGHTS,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],
@@ -139,8 +182,8 @@ pub fn create_sphere(device: &wgpu::Device, radius: f32, sectors: u32, stacks: u
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    let sector_count = sectors.max(3);
-    let stack_count = stacks.max(2);
+    let sector_count = sectors.max(MIN_RADIAL_SEGMENTS);
+    let stack_count = stacks.max(MIN_SPHERE_STACKS);
     let sector_step = 2.0 * std::f32::consts::PI / sector_count as f32;
     let stack_step = std::f32::consts::PI / stack_count as f32;
 
@@ -219,25 +262,25 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
     // Unit corners, scaled by `size` below (mirrors
     // `MeshData::unit_box`, whose winding is CCW from outside).
     let p = [
-        [-0.5, -0.5, -0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-        [-0.5, -0.5, 0.5],
-        [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [-0.5, 0.5, 0.5],
+        [-HALF, -HALF, -HALF],
+        [HALF, -HALF, -HALF],
+        [HALF, HALF, -HALF],
+        [-HALF, HALF, -HALF],
+        [-HALF, -HALF, HALF],
+        [HALF, -HALF, HALF],
+        [HALF, HALF, HALF],
+        [-HALF, HALF, HALF],
     ];
     #[rustfmt::skip]
-    let faces: [[usize; 4]; 6] = [
-        [0, 1, 2, 3], // -z
-        [5, 4, 7, 6], // +z
-        [4, 0, 3, 7], // -x
-        [1, 5, 6, 2], // +x
-        [4, 5, 1, 0], // -y
-        [3, 2, 6, 7], // +y
+    let faces: [[usize; BOX_FACE_VERTS]; BOX_FACES] = [
+        [C_LDB, C_RDB, C_RUB, C_LUB], // -z
+        [C_RDF, C_LDF, C_LUF, C_RUF], // +z
+        [C_LDF, C_LDB, C_LUB, C_LUF], // -x
+        [C_RDB, C_RDF, C_RUF, C_RUB], // +x
+        [C_LDF, C_RDF, C_RDB, C_LDB], // -y
+        [C_LUB, C_RUB, C_RUF, C_LUF], // +y
     ];
-    let normals: [[f32; 3]; 6] = [
+    let normals: [[f32; VEC3_COMPONENTS]; BOX_FACES] = [
         [0.0, 0.0, -1.0],
         [0.0, 0.0, 1.0],
         [-1.0, 0.0, 0.0],
@@ -245,8 +288,8 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
         [0.0, -1.0, 0.0],
         [0.0, 1.0, 0.0],
     ];
-    let mut vertices = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
+    let mut vertices = Vec::with_capacity(BOX_FACES * BOX_FACE_VERTS);
+    let mut indices = Vec::with_capacity(BOX_FACES * BOX_FACE_INDICES);
     for (face, normal) in faces.iter().zip(normals) {
         let base = vertices.len() as u32;
         let tangent = ortho_tangent(normal);
@@ -265,7 +308,11 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
         // from `MeshData::unit_box`, whose index winding yields the
         // negated face normals — see the report; the editor crate is
         // outside this change.
-        indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+        // Two CCW triangles per quad: (0,2,1) and (0,3,2).
+        const V1: u32 = 1;
+        const V2: u32 = 2;
+        const V3: u32 = 3;
+        indices.extend([base, base + V2, base + V1, base, base + V3, base + V2]);
     }
     (vertices, indices)
 }
@@ -275,7 +322,7 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
 /// tangent (unit, orthogonal to the normal — same contract as
 /// [`create_sphere` on the equator).
 pub fn plane_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
-    let (hx, hz) = (size[0] * 0.5, size[1] * 0.5);
+    let (hx, hz) = (size[0] * HALF, size[1] * HALF);
     let vertices = vec![
         Vertex {
             position: [-hx, 0.0, -hz],
@@ -313,11 +360,16 @@ pub fn plane_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
 /// ring, `∓Y` normals, `+X` tangents). Vertex count is `4 * n + 6`,
 /// index count `12 * n`.
 pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Vertex>, Vec<u32>) {
-    let n = radial_segments.max(3);
+    let n = radial_segments.max(MIN_RADIAL_SEGMENTS);
     let step = 2.0 * std::f32::consts::PI / n as f32;
-    let half = height * 0.5;
-    let mut vertices = Vec::with_capacity((4 * n + 6) as usize);
-    let mut indices = Vec::with_capacity((12 * n) as usize);
+    let half = height * HALF;
+    /// Side verts per segment (bottom+top) × (n+1 seam) + 2 caps × (n+2).
+    const SIDE_RINGS: u32 = 2;
+    const CAP_CENTER_AND_SEAM: u32 = 2;
+    let mut vertices = Vec::with_capacity(
+        (SIDE_RINGS * (n + 1) + SIDE_RINGS * (n + CAP_CENTER_AND_SEAM)) as usize,
+    );
+    let mut indices = Vec::with_capacity((CYLINDER_INDICES_PER_SEGMENT * n) as usize);
 
     // Side: bottom/top ring pair per step (seam duplicated for UVs).
     for j in 0..=n {
@@ -339,10 +391,11 @@ pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Ver
             tangent,
         });
     }
+    /// Side-quad index offsets within a cylinder ring pair.
+    const SIDE_QUAD: [u32; 6] = [0, 1, 3, 0, 3, 2];
     for j in 0..n {
-        let (b0, t0) = (2 * j, 2 * j + 1);
-        let (b1, t1) = (2 * j + 2, 2 * j + 3);
-        indices.extend([b0, t0, t1, b0, t1, b1]);
+        let base = 2 * j;
+        indices.extend(SIDE_QUAD.map(|o| base + o));
     }
 
     // Caps: center + ring per cap (seam duplicated for the planar UV map).
@@ -351,7 +404,7 @@ pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Ver
         vertices.push(Vertex {
             position: [0.0, y, 0.0],
             normal,
-            uv: [0.5, 0.5],
+            uv: [HALF, HALF],
             tangent: [1.0, 0.0, 0.0],
         });
         for j in 0..=n {
@@ -360,7 +413,7 @@ pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Ver
             vertices.push(Vertex {
                 position: [radius * ca, y, radius * sa],
                 normal,
-                uv: [ca * 0.5 + 0.5, sa * 0.5 + 0.5],
+                uv: [ca * HALF + HALF, sa * HALF + HALF],
                 tangent: [1.0, 0.0, 0.0],
             });
         }
@@ -496,8 +549,8 @@ mod tests {
                 .iter()
                 .map(|v| v.position[axis])
                 .fold(f32::NEG_INFINITY, f32::max);
-            assert_eq!(min, -extent * 0.5, "axis {axis} min");
-            assert_eq!(max, extent * 0.5, "axis {axis} max");
+            assert_eq!(min, -extent * HALF, "axis {axis} min");
+            assert_eq!(max, extent * HALF, "axis {axis} max");
         }
         // Every triangle winds CCW from outside (face normal agrees with
         // the stored vertex normal).

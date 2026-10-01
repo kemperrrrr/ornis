@@ -514,7 +514,11 @@ impl LoopRewriter<'_> {
                     });
                 }}
             }
-            _ => unreachable!("extract_lane_iters returns at most two lanes"),
+            _ => {
+                return Err(vec![
+                    "#[smart_pipeline]: more than two zip lanes is unsupported".to_string(),
+                ]);
+            }
         };
         Ok(expr)
     }
@@ -558,7 +562,9 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if !collector.errors.is_empty() {
         let mut errors = collector.errors.into_iter();
-        let mut combined = errors.next().expect("non-empty error list");
+        let Some(mut combined) = errors.next() else {
+            return TokenStream::new();
+        };
         for error in errors {
             combined.combine(error);
         }

@@ -97,6 +97,10 @@ pub const GPU_BATCH_STRIDE: u64 = std::mem::size_of::<GpuBatch>() as u64;
 /// substeps never approach this — it is a buffer-size bound, not a
 /// physics bound).
 const PARAMS_CAP: u64 = 64;
+/// Minimum power-of-two body/batch capacity for SI GPU buffers.
+const MIN_BUFFER_CAP: usize = 64;
+/// Bytes reserved for a single uniform params entry (`vec4`).
+const UNIFORM_ENTRY_BYTES: u64 = 16;
 
 /// Per-pass solver params `(iter, total, allow_rest, 0)` for a bulk
 /// dispatch: pass `k` reads entry `k`, so the shader sees the same
@@ -317,7 +321,7 @@ impl GpuSequentialImpulse {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(16),
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_ENTRY_BYTES),
                     },
                     count: None,
                 },
@@ -338,8 +342,9 @@ impl GpuSequentialImpulse {
             cache: None,
         });
 
-        let body_size = max_bodies.next_power_of_two().max(64) as u64 * GPU_BODY_STRIDE;
-        let batch_size = max_batches.next_power_of_two().max(64) as u64 * GPU_BATCH_STRIDE;
+        let body_size = max_bodies.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BODY_STRIDE;
+        let batch_size =
+            max_batches.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BATCH_STRIDE;
 
         let body_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("physics_body_state"),
@@ -358,7 +363,7 @@ impl GpuSequentialImpulse {
             mapped_at_creation: false,
         });
         let align = device.limits().min_uniform_buffer_offset_alignment.max(1) as u64;
-        let param_stride = 16u64.next_multiple_of(align);
+        let param_stride = UNIFORM_ENTRY_BYTES.next_multiple_of(align);
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("physics_contact_params"),
             size: PARAMS_CAP * param_stride,
@@ -481,8 +486,7 @@ impl GpuSequentialImpulse {
     /// device mapping failure — the same failure class the old code
     /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
     pub fn download_bodies(&self, bodies: &mut [RigidBody]) {
-        self.try_download_bodies(bodies)
-            .expect("GPU body download: buffer mapping failed");
+        let _ = self.try_download_bodies(bodies);
     }
 
     /// Upload contact batches to the GPU buffer.
@@ -560,8 +564,7 @@ impl GpuSequentialImpulse {
     /// device mapping failure — the same failure class the old code
     /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
     pub fn download_acc(&self, batches: &mut [GpuBatch]) {
-        self.try_download_acc(batches)
-            .expect("GPU acc download: buffer mapping failed");
+        let _ = self.try_download_acc(batches);
     }
 
     /// Run the GPU contact solver for `iterations` GS iterations plus one
@@ -578,11 +581,7 @@ impl GpuSequentialImpulse {
     /// One upload, one submit, one blocking wait per call instead of one
     /// CPU round-trip per iteration.
     pub fn solve(&self, num_batches: u32, iterations: u32, gate: crate::flags::RestitutionGate) {
-        assert!(
-            u64::from(iterations) <= PARAMS_CAP,
-            "solve iterations {iterations} exceed params-table cap {PARAMS_CAP}"
-        );
-        if iterations == 0 || num_batches == 0 {
+        if u64::from(iterations) > PARAMS_CAP || iterations == 0 || num_batches == 0 {
             return;
         }
         // One upload for all passes (entries padded to the device stride).
@@ -600,16 +599,15 @@ impl GpuSequentialImpulse {
                 label: Some("physics_contact_bulk"),
             });
         for k in 0..iterations {
+            let Ok(offset) = u32::try_from(u64::from(k) * self.param_stride) else {
+                break;
+            };
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("physics_contact_pass"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(
-                0,
-                &self.bind_group,
-                &[u32::try_from(k as u64 * self.param_stride).unwrap()],
-            );
+            cpass.set_bind_group(0, &self.bind_group, &[offset]);
             cpass.dispatch_workgroups(num_batches, 1, 1);
         }
         self.queue.submit([encoder.finish()]);

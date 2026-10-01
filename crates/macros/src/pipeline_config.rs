@@ -16,6 +16,63 @@ use syn::{
     WhereClause, WherePredicate, parse_macro_input, visit, visit::Visit,
 };
 
+/// Fallback byte-size estimate for an unrecognized type path.
+const UNKNOWN_TYPE_SIZE: usize = 64;
+/// Byte size of a GPU handle / small uniform blob estimate.
+const GPU_HANDLE_SIZE: usize = 16;
+/// Bytes in `f32` / `i32` / `u32`.
+const SIZE_OF_U32: usize = 4;
+/// Bytes in `f64` / `i64` / `u64` / pointer-width integers.
+const SIZE_OF_U64: usize = 8;
+/// Bytes in `Vec2`.
+const SIZE_OF_VEC2: usize = 8;
+/// Bytes in `Vec3` / `Vec3A`.
+const SIZE_OF_VEC3: usize = 12;
+/// Bytes in `Vec4` / `Quat`.
+const SIZE_OF_VEC4: usize = 16;
+/// Bytes in `Mat4`.
+const SIZE_OF_MAT4: usize = 64;
+/// Bytes in `String` / `Vec` fat pointer.
+const SIZE_OF_STRING: usize = 24;
+/// Bytes in `Box` / `Rc` / `Arc` / `Option` estimate.
+const SIZE_OF_BOX: usize = 8;
+/// Bytes estimate for hash/BTree containers.
+const SIZE_OF_HASHMAP: usize = 48;
+/// Bytes estimate for `Result`.
+const SIZE_OF_RESULT: usize = 16;
+/// Default Auto-lane entity-count threshold before profile scaling.
+const BASE_AUTO_THRESHOLD: usize = 10_000;
+/// Hard cap on the computed Auto threshold.
+const AUTO_THRESHOLD_CAP: usize = 1_000_000;
+/// Size above which the type is treated as large (×10 threshold).
+const SIZE_LARGE: usize = 256;
+/// Size above which the type is treated as medium (×5 threshold).
+const SIZE_MEDIUM: usize = 128;
+/// Size above which the type is treated as small-medium (×2 threshold).
+const SIZE_SMALL_MEDIUM: usize = 64;
+/// Branch count that forces CPU / max threshold.
+const BRANCHES_CPU: usize = 10;
+/// Branch count that heavily scales the Auto threshold.
+const BRANCHES_HEAVY: usize = 5;
+/// Branch count that mildly scales the Auto threshold.
+const BRANCHES_MILD: usize = 2;
+/// Loop count that forces CPU / max threshold.
+const LOOPS_CPU: usize = 5;
+/// Loop count that scales the Auto threshold.
+const LOOPS_MILD: usize = 2;
+/// Unique field-access count that heavily scales the threshold.
+const FIELDS_HEAVY: usize = 5;
+/// Unique field-access count that mildly scales the threshold.
+const FIELDS_MILD: usize = 3;
+/// Multiplier for large-size / heavy-branch / mild-field scaling.
+const SCALE_HEAVY: usize = 10;
+/// Multiplier for medium-size / mild-loop / heavy-field scaling.
+const SCALE_MEDIUM: usize = 5;
+/// Multiplier for small-medium size / mild-branch scaling.
+const SCALE_MILD: usize = 3;
+/// Multiplier for mild-field / size-small-medium alternate path.
+const SCALE_LIGHT: usize = 2;
+
 #[derive(Default)]
 struct TypeProfile {
     size_estimate: usize,
@@ -104,7 +161,7 @@ impl TypeAnalyzer {
             let path = &tp.path;
             self.estimate_type_size(path)
         } else {
-            64
+            UNKNOWN_TYPE_SIZE
         }
     }
 
@@ -216,13 +273,17 @@ impl TypeAnalyzer {
 
     fn estimate_type_size(&self, path: &syn::Path) -> usize {
         let Some(seg) = path.segments.last() else {
-            return 64;
+            return UNKNOWN_TYPE_SIZE;
         };
         let name = seg.ident.to_string();
         if let Some(size) = fixed_type_size(&name) {
             return size;
         }
-        if self.is_gpu_type(path) { 16 } else { 64 }
+        if self.is_gpu_type(path) {
+            GPU_HANDLE_SIZE
+        } else {
+            UNKNOWN_TYPE_SIZE
+        }
     }
 
     fn analyze_type(&mut self, ty: &Type) {
@@ -391,8 +452,8 @@ fn fixed_type_size(name: &str) -> Option<usize> {
 /// Byte sizes of fixed-width scalars.
 fn scalar_type_size(name: &str) -> Option<usize> {
     Some(match name {
-        "f32" | "i32" | "u32" => 4,
-        "f64" | "i64" | "u64" | "usize" | "isize" => 8,
+        "f32" | "i32" | "u32" => SIZE_OF_U32,
+        "f64" | "i64" | "u64" | "usize" | "isize" => SIZE_OF_U64,
         "i16" | "u16" => 2,
         "i8" | "u8" | "bool" => 1,
         _ => return None,
@@ -402,15 +463,17 @@ fn scalar_type_size(name: &str) -> Option<usize> {
 /// Byte sizes of composite handle / container types.
 fn composite_type_size(name: &str) -> Option<usize> {
     Some(match name {
-        "Vec2" | "Vec2A" => 8,
-        "Vec3" | "Vec3A" => 12,
-        "Vec4" | "Quat" => 16,
-        "Mat4" => 64,
-        "String" | "Vec" => 24,
-        "Box" | "Rc" | "Arc" => 8,
-        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "LinkedList" => 48,
-        "Option" => 8,
-        "Result" => 16,
+        "Vec2" | "Vec2A" => SIZE_OF_VEC2,
+        "Vec3" | "Vec3A" => SIZE_OF_VEC3,
+        "Vec4" | "Quat" => SIZE_OF_VEC4,
+        "Mat4" => SIZE_OF_MAT4,
+        "String" | "Vec" => SIZE_OF_STRING,
+        "Box" | "Rc" | "Arc" => SIZE_OF_BOX,
+        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "LinkedList" => {
+            SIZE_OF_HASHMAP
+        }
+        "Option" => SIZE_OF_BOX,
+        "Result" => SIZE_OF_RESULT,
         _ => return None,
     })
 }
@@ -492,14 +555,14 @@ fn compute_threshold(profile: &ProfileResult) -> usize {
     let type_profile = &profile.type_profile;
     let method_profiles = &profile.method_profiles;
 
-    let mut base_threshold = 10_000usize;
+    let mut base_threshold = BASE_AUTO_THRESHOLD;
 
-    if type_profile.size_estimate > 256 {
-        base_threshold = base_threshold.saturating_mul(10);
-    } else if type_profile.size_estimate > 128 {
-        base_threshold = base_threshold.saturating_mul(5);
-    } else if type_profile.size_estimate > 64 {
-        base_threshold = base_threshold.saturating_mul(2);
+    if type_profile.size_estimate > SIZE_LARGE {
+        base_threshold = base_threshold.saturating_mul(SCALE_HEAVY);
+    } else if type_profile.size_estimate > SIZE_MEDIUM {
+        base_threshold = base_threshold.saturating_mul(SCALE_MEDIUM);
+    } else if type_profile.size_estimate > SIZE_SMALL_MEDIUM {
+        base_threshold = base_threshold.saturating_mul(SCALE_LIGHT);
     }
 
     if type_profile.has_heap_types {
@@ -510,18 +573,18 @@ fn compute_threshold(profile: &ProfileResult) -> usize {
     let total_loops: usize = method_profiles.iter().map(|m| m.loop_count).sum();
     let total_recursive: usize = method_profiles.iter().map(|m| m.recursive_call_count).sum();
 
-    if total_branches > 10 {
+    if total_branches > BRANCHES_CPU {
         base_threshold = usize::MAX / 2;
-    } else if total_branches > 5 {
-        base_threshold = base_threshold.saturating_mul(10);
-    } else if total_branches > 2 {
-        base_threshold = base_threshold.saturating_mul(3);
+    } else if total_branches > BRANCHES_HEAVY {
+        base_threshold = base_threshold.saturating_mul(SCALE_HEAVY);
+    } else if total_branches > BRANCHES_MILD {
+        base_threshold = base_threshold.saturating_mul(SCALE_MILD);
     }
 
-    if total_loops > 5 {
+    if total_loops > LOOPS_CPU {
         base_threshold = usize::MAX / 2;
-    } else if total_loops > 2 {
-        base_threshold = base_threshold.saturating_mul(5);
+    } else if total_loops > LOOPS_MILD {
+        base_threshold = base_threshold.saturating_mul(SCALE_MEDIUM);
     }
 
     if total_recursive > 0 {
@@ -534,10 +597,10 @@ fn compute_threshold(profile: &ProfileResult) -> usize {
         .collect::<HashSet<_>>()
         .len();
 
-    if unique_fields >= 5 {
-        base_threshold = base_threshold.saturating_mul(5);
-    } else if unique_fields >= 3 {
-        base_threshold = base_threshold.saturating_mul(2);
+    if unique_fields >= FIELDS_HEAVY {
+        base_threshold = base_threshold.saturating_mul(SCALE_MEDIUM);
+    } else if unique_fields >= FIELDS_MILD {
+        base_threshold = base_threshold.saturating_mul(SCALE_LIGHT);
     }
 
     let (has_send, has_sync) = check_send_sync_bounds(&profile.generics, &profile.type_name);
@@ -549,7 +612,7 @@ fn compute_threshold(profile: &ProfileResult) -> usize {
         base_threshold = usize::MAX / 2;
     }
 
-    base_threshold.min(1_000_000)
+    base_threshold.min(AUTO_THRESHOLD_CAP)
 }
 
 fn compute_lane_target(profile: &ProfileResult) -> TokenStream2 {
@@ -614,8 +677,8 @@ fn classify_lane_target(
 
     let is_gpu_friendly = type_profile.has_gpu_types
         && !type_profile.has_heap_types
-        && type_profile.size_estimate <= 256
-        && total_branches <= 2
+        && type_profile.size_estimate <= SIZE_LARGE
+        && total_branches <= BRANCHES_MILD
         && total_loops == 0
         && total_recursive == 0
         && unique_fields <= 2
@@ -623,11 +686,11 @@ fn classify_lane_target(
         && has_sync;
 
     let is_cpu_forced = type_profile.has_heap_types
-        || type_profile.size_estimate > 256
-        || total_branches > 5
-        || total_loops > 2
+        || type_profile.size_estimate > SIZE_LARGE
+        || total_branches > BRANCHES_HEAVY
+        || total_loops > LOOPS_MILD
         || total_recursive > 0
-        || unique_fields >= 5
+        || unique_fields >= FIELDS_HEAVY
         || !has_send
         || !has_sync
         || type_profile.recursive_type;

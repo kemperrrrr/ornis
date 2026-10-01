@@ -69,6 +69,39 @@ pub enum KeyCode {
     Space,
 }
 
+/// winit 0.30 physical scan code for W.
+const WIN_SCAN_W: u32 = 17;
+/// Legacy DOM `keyCode` for W.
+const DOM_KEY_W: u32 = 87;
+/// winit 0.30 physical scan code for A.
+const WIN_SCAN_A: u32 = 30;
+/// Legacy DOM `keyCode` for A.
+const DOM_KEY_A: u32 = 65;
+/// winit 0.30 physical scan code for S.
+const WIN_SCAN_S: u32 = 31;
+/// Legacy DOM `keyCode` for S.
+const DOM_KEY_S: u32 = 83;
+/// winit 0.30 physical scan code for D (also ASCII Space — see module docs).
+const WIN_SCAN_D: u32 = 32;
+/// Legacy DOM `keyCode` for D.
+const DOM_KEY_D: u32 = 68;
+/// Legacy DOM `keyCode` for ArrowUp.
+const DOM_ARROW_UP: u32 = 38;
+/// Legacy DOM `keyCode` for ArrowDown.
+const DOM_ARROW_DOWN: u32 = 40;
+/// Legacy DOM `keyCode` for ArrowLeft.
+const DOM_ARROW_LEFT: u32 = 37;
+/// Legacy DOM `keyCode` for ArrowRight.
+const DOM_ARROW_RIGHT: u32 = 39;
+/// winit 0.30 physical scan code for Space.
+const WIN_SCAN_SPACE: u32 = 62;
+/// ASCII / DOM code for Space (collides with [`WIN_SCAN_D`]).
+const ASCII_SPACE: u32 = 32;
+/// Raw wire code for mouse Back.
+const MOUSE_BACK: u8 = 3;
+/// Raw wire code for mouse Forward.
+const MOUSE_FORWARD: u8 = 4;
+
 impl KeyCode {
     /// All raw wire codes that count as this key, in canonical order.
     ///
@@ -76,15 +109,15 @@ impl KeyCode {
     /// [`KeyCode::primary_code`].
     pub fn codes(self) -> &'static [u32] {
         match self {
-            KeyCode::KeyW => &[17, 87],
-            KeyCode::KeyA => &[30, 65],
-            KeyCode::KeyS => &[31, 83],
-            KeyCode::KeyD => &[32, 68],
-            KeyCode::ArrowUp => &[38],
-            KeyCode::ArrowDown => &[40],
-            KeyCode::ArrowLeft => &[37],
-            KeyCode::ArrowRight => &[39],
-            KeyCode::Space => &[62, 32],
+            KeyCode::KeyW => &[WIN_SCAN_W, DOM_KEY_W],
+            KeyCode::KeyA => &[WIN_SCAN_A, DOM_KEY_A],
+            KeyCode::KeyS => &[WIN_SCAN_S, DOM_KEY_S],
+            KeyCode::KeyD => &[WIN_SCAN_D, DOM_KEY_D],
+            KeyCode::ArrowUp => &[DOM_ARROW_UP],
+            KeyCode::ArrowDown => &[DOM_ARROW_DOWN],
+            KeyCode::ArrowLeft => &[DOM_ARROW_LEFT],
+            KeyCode::ArrowRight => &[DOM_ARROW_RIGHT],
+            KeyCode::Space => &[WIN_SCAN_SPACE, ASCII_SPACE],
         }
     }
 
@@ -156,8 +189,8 @@ impl MouseButton {
             MouseButton::Left => 0,
             MouseButton::Right => 1,
             MouseButton::Middle => 2,
-            MouseButton::Back => 3,
-            MouseButton::Forward => 4,
+            MouseButton::Back => MOUSE_BACK,
+            MouseButton::Forward => MOUSE_FORWARD,
         }
     }
 

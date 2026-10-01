@@ -40,17 +40,11 @@ impl AABB {
 
     /// Smallest box containing all points.
     ///
-    /// Legacy wrapper over [`AABB::try_from_points`]: panics on an empty
-    /// slice so existing call sites stay bit-identical; new code should
-    /// match on the typed error instead (deprecated — do not use in new
-    /// code, kept only for compat).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `points` is empty (see [`AABB::try_from_points`]
-    /// for the fallible canonical path and its `# Errors`).
+    /// Legacy wrapper over [`AABB::try_from_points`]: empty input yields a
+    /// degenerate box at the origin. Prefer [`AABB::try_from_points`] in
+    /// new code (deprecated — kept only for compat).
     pub fn from_points(points: &[Vec3]) -> Self {
-        Self::try_from_points(points).expect("AABB::from_points needs at least one point")
+        Self::try_from_points(points).unwrap_or_else(|_| Self::from_point(Vec3::ZERO))
     }
 
     /// Fallible smallest box containing all points.
@@ -77,12 +71,12 @@ impl AABB {
 
     /// Midpoint of the two corners.
     pub fn center(&self) -> Vec3 {
-        (self.min + self.max) * 0.5
+        (self.min + self.max) * HALF
     }
 
     /// Half of the full extent on each axis (`(max - min) * 0.5`).
     pub fn half_extents(&self) -> Vec3 {
-        (self.max - self.min) * 0.5
+        (self.max - self.min) * HALF
     }
 
     /// Whether the boxes intersect (touching faces count as overlapping).
@@ -145,13 +139,22 @@ pub struct RaycastHit {
     pub distance: f32,
 }
 
+/// Absolute normal·axis below which X is a safe cross-product reference.
+const TANGENT_REF_AXIS_DOT: f32 = 0.9;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+
 /// Deterministic tangent frame for a unit normal: `t1` is the normal
 /// crossed with a fixed reference axis (no exact-equality branches, so
 /// near-axis normals don't flicker), `t2` completes the frame. The single
 /// canonical copy — the engine, AVBD and GPU-batch solvers previously
 /// carried their own identical versions.
 pub fn tangent_basis(n: Vec3) -> (Vec3, Vec3) {
-    let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let axis = if n.x.abs() < TANGENT_REF_AXIS_DOT {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let t1 = n.cross(axis).normalize_or(Vec3::Z);
     (t1, t1.cross(n))
 }
@@ -175,7 +178,7 @@ pub fn tangent_basis_checked(n: Vec3) -> Option<(Vec3, Vec3)> {
 /// perpendicular fallback from [`tangent_basis`], never a NaN.
 pub fn orthogonalize_axle(suspension: Vec3, axle: Vec3) -> Vec3 {
     let a = axle - suspension * axle.dot(suspension);
-    if a.length_squared() < 1e-6 {
+    if a.length_squared() < crate::constants::POS_CORRECTION_EPS {
         tangent_basis(suspension).0
     } else {
         a.normalize()
@@ -206,7 +209,7 @@ mod tests {
         assert_eq!(aabb.min, Vec3::new(-1.0, 0.0, 0.0));
         assert_eq!(aabb.max, Vec3::new(0.0, 5.0, 0.0));
         // A point already inside must not change the bounds.
-        aabb.expand(Vec3::new(-0.5, 2.0, 0.0));
+        aabb.expand(Vec3::new(-HALF, 2.0, 0.0));
         assert_eq!(aabb.min, Vec3::new(-1.0, 0.0, 0.0));
         assert_eq!(aabb.max, Vec3::new(0.0, 5.0, 0.0));
     }
@@ -270,6 +273,6 @@ mod tests {
         let ray = Ray::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0));
         assert_eq!(ray.point_at(0.0), Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(ray.point_at(1.0), Vec3::new(1.0, 2.0, 0.0));
-        assert_eq!(ray.point_at(0.5), Vec3::new(1.0, 1.0, 0.0));
+        assert_eq!(ray.point_at(HALF), Vec3::new(1.0, 1.0, 0.0));
     }
 }

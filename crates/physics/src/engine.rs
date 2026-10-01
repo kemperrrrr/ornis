@@ -15,6 +15,7 @@ use crate::body::{BodyHandle, RigidBody};
 use crate::errors::{JointError, QueryError};
 use crate::joint::{JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
+use crate::sequential_impulse::MAX_MANIFOLD_POINTS;
 use crate::shape::Shape;
 use crate::trigger::{ContactEvent, TriggerEvent};
 
@@ -123,7 +124,7 @@ pub struct ManifoldPoint {
     pub penetration: f32,
 }
 
-/// Contact manifold: one normal + up to 4 points per body pair.
+/// Contact manifold: one normal + up to [`MAX_MANIFOLD_POINTS`] points per body pair.
 #[derive(Clone, Debug)]
 pub struct Manifold {
     /// First body handle.
@@ -132,12 +133,12 @@ pub struct Manifold {
     pub body_b: BodyHandle,
     /// Contact normal (body A to body B).
     pub normal: Vec3,
-    /// Active point count (1..=4). Enforced by the checked constructors
-    /// ([`Manifold::from_parts`], [`Manifold::from_nonempty`],
+    /// Active point count (`1..=MAX_MANIFOLD_POINTS`). Enforced by the checked
+    /// constructors ([`Manifold::from_parts`], [`Manifold::from_nonempty`],
     /// [`Manifold::try_from_points`]); direct writes bypass the invariant.
     pub point_count: usize,
     /// Contact points (only the first `point_count` are live).
-    pub points: [ManifoldPoint; 4],
+    pub points: [ManifoldPoint; MAX_MANIFOLD_POINTS],
 }
 
 impl Manifold {
@@ -166,7 +167,7 @@ impl Manifold {
         let mut buf = [ManifoldPoint {
             world_point: Vec3::ZERO,
             penetration: 0.0,
-        }; 4];
+        }; MAX_MANIFOLD_POINTS];
         for (k, p) in points.iter().enumerate() {
             buf[k] = p;
         }
@@ -179,7 +180,8 @@ impl Manifold {
         }
     }
 
-    /// Checked constructor from a slice: `None` when empty or longer than 4.
+    /// Checked constructor from a slice: `None` when empty or longer than
+    /// [`MAX_MANIFOLD_POINTS`].
     pub fn try_from_points(
         body_a: BodyHandle,
         body_b: BodyHandle,
@@ -191,17 +193,17 @@ impl Manifold {
     }
 
     /// Checked constructor from a raw buffer plus count: `None` unless
-    /// `count` is in `1..=4`. Single validation site for narrow-phase code
-    /// that fills the `[ManifoldPoint; 4]` buffer by hand (only the first
+    /// `count` is in `1..=MAX_MANIFOLD_POINTS`. Single validation site for
+    /// narrow-phase code that fills the buffer by hand (only the first
     /// `count` entries are live).
     pub fn from_parts(
         body_a: BodyHandle,
         body_b: BodyHandle,
         normal: Vec3,
-        points: [ManifoldPoint; 4],
+        points: [ManifoldPoint; MAX_MANIFOLD_POINTS],
         count: usize,
     ) -> Option<Self> {
-        if !(1..=4).contains(&count) {
+        if !(1..=MAX_MANIFOLD_POINTS).contains(&count) {
             return None;
         }
         Some(Self {
@@ -215,7 +217,7 @@ impl Manifold {
 
     /// Live contact points (`points[..point_count]`).
     pub fn points_slice(&self) -> &[ManifoldPoint] {
-        &self.points[..self.point_count.min(4)]
+        &self.points[..self.point_count.min(MAX_MANIFOLD_POINTS)]
     }
 
     /// Typed view of the live points as a [`crate::invariants::NonEmpty4`]:
@@ -224,9 +226,9 @@ impl Manifold {
         crate::invariants::NonEmpty4::try_from_slice(self.points_slice())
     }
 
-    /// Whether `point_count` satisfies the 1..=4 invariant.
+    /// Whether `point_count` satisfies the 1..=[`MAX_MANIFOLD_POINTS`] invariant.
     pub fn has_valid_count(&self) -> bool {
-        (1..=4).contains(&self.point_count)
+        (1..=MAX_MANIFOLD_POINTS).contains(&self.point_count)
     }
 }
 /// Joint constraint kernels (hinge twist, coordinates, sub-solvers) shared

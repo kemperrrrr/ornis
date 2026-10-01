@@ -35,6 +35,11 @@ use quote::quote;
 use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 
+/// Max components in a WGSL vector (`vec2`..=`vec4`).
+const MAX_VEC_COMPONENTS: usize = 4;
+/// Min components in a WGSL vector.
+const MIN_VEC_COMPONENTS: usize = 2;
+
 /// Per-field interface assignment parsed from `#[wgsl(...)]`.
 struct FieldAttr {
     location: Option<u32>,
@@ -133,7 +138,7 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
                 ));
             }
         };
-        if !(2..=4).contains(&len) {
+        if !(MIN_VEC_COMPONENTS..=MAX_VEC_COMPONENTS).contains(&len) {
             return Err(syn::Error::new(
                 arr.len.span(),
                 format!("WgslInterface: array length {len} is not supported; use 2..=4"),
@@ -203,7 +208,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut locations = HashSet::new();
     let mut builtins = HashSet::new();
     for field in &named.named {
-        let ident = field.ident.as_ref().expect("named field");
+        let Some(ident) = field.ident.as_ref() else {
+            return syn::Error::new_spanned(field, "WgslInterface: named field required")
+                .to_compile_error()
+                .into();
+        };
         let attr = match parse_field_attr(&field.attrs) {
             Ok(a) => a,
             Err(e) => return e.to_compile_error().into(),
@@ -284,7 +293,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let field_names: Vec<String> = named
         .named
         .iter()
-        .map(|f| f.ident.as_ref().expect("named field").to_string())
+        .filter_map(|f| f.ident.as_ref().map(|id| id.to_string()))
         .collect();
 
     let expanded = quote! {

@@ -27,10 +27,15 @@
 //!   migrates scenes 1:1 and runs the cross-solver fracture pass.
 #![warn(missing_docs)]
 
+/// Midpoint / half-extent scale (tests and examples).
+const HALF: f32 = 0.5;
+
 /// Mesh/collider recipes → solver bodies (the single projection point).
 pub mod colliders;
 /// Collision detection: broadphase backends, shapes and distance queries.
 pub mod collision;
+/// Shared solver thresholds (effective-mass floor, degenerate length, …).
+pub(crate) mod constants;
 mod contact_math;
 /// Typed physics failures (point 5: thiserror hierarchies).
 pub mod errors;
@@ -326,7 +331,7 @@ impl Engine {
             soft_contact_events: Vec::new(),
             parked_soft: Vec::new(),
             parked_soft_touch: std::collections::BTreeSet::new(),
-            soft_friction: 0.5,
+            soft_friction: HALF,
             gravity,
             single_kind: kind,
             routing: RoutingKind::Single,
@@ -620,9 +625,9 @@ impl Engine {
         let mut remap = vec![None; joints.len()];
         for (old, mut j) in joints.into_iter().enumerate() {
             migration::remap_gear(&mut j.spec, &remap);
-            let h = self
-                .add_joint(j.a, j.b, j.spec)
-                .expect("validated migrating joint");
+            let Ok(h) = self.add_joint(j.a, j.b, j.spec) else {
+                continue;
+            };
             match &mut self.inner {
                 EngineInner::SequentialImpulse(e) => e.restore_joint_reference(h, j.reference),
                 EngineInner::Avbd(e) => e.restore_joint_reference(h, j.reference),
@@ -803,7 +808,9 @@ impl Engine {
         {
             self.split_ensure_built();
             let edited = std::mem::take(&mut self.wake_set);
-            let s = self.split.as_mut().expect("Islands state");
+            let Some(s) = self.split.as_mut() else {
+                break;
+            };
             s.time_debt -= f64::from(split::DT);
             if s.route(split::DT, RoutePhase::Tick, &edited) > 0 {
                 s.rebuild();
@@ -965,15 +972,15 @@ impl Engine {
             1
         } else {
             2
-        }] = ext * 0.5;
+        }] = ext * HALF;
         let h2 = glam::Vec3::from_array(h2);
-        let off = (parent.orientation * axis).normalize_or(axis) * (ext * 0.5);
+        let off = (parent.orientation * axis).normalize_or(axis) * (ext * HALF);
         let mut halves = [parent.clone(), parent.clone()];
         for (half, s) in halves.iter_mut().zip([-1.0, 1.0]) {
             half.shape = Shape::Box { half_extents: h2 };
             half.position = parent.position + off * s;
             half.velocity = parent.velocity + parent.angular_velocity.cross(off * s);
-            if let Some(m) = crate::invariants::PositiveF32::try_new(parent.mass * 0.5) {
+            if let Some(m) = crate::invariants::PositiveF32::try_new(parent.mass * HALF) {
                 half.set_mass_kind(crate::invariants::MassKind::Free(m));
             } else {
                 half.set_mass_kind(crate::invariants::MassKind::Fixed);

@@ -7,6 +7,8 @@
 
 use thiserror::Error;
 
+use crate::constants::DEGENERATE_LEN2;
+
 /// Mesh construction failure: out-of-range indices, bad grids, non-finite input.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum MeshError {
@@ -165,7 +167,7 @@ pub(crate) fn check_ray_input(
             reason: "non-finite ray origin/direction".into(),
         });
     }
-    if direction.length_squared() < 1e-12 {
+    if direction.length_squared() < DEGENERATE_LEN2 {
         return Err(QueryError::InvalidInput {
             reason: "zero-length ray direction".into(),
         });

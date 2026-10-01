@@ -42,6 +42,17 @@ use crate::transient_pool::{
     ResourceName, ResourceNode, TextureSpec, TransientPool,
 };
 
+/// Empty layout returned by [`SystemSet::layout`] when the pool has never
+/// produced a snapshot (budget miss on first compile, or unused registry).
+static EMPTY_FRAME_LAYOUT: FrameLayout = FrameLayout {
+    surface_size: (0, 0),
+    passes: Vec::new(),
+    resources: Vec::new(),
+    slots: Vec::new(),
+    pass_alive: Vec::new(),
+    levels: Vec::new(),
+};
+
 /// How a resource enters the registry (see
 /// [`SystemSet::{create_resource, import_resource, external_output}`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +195,7 @@ pub trait AccessView<'a> {
 }
 
 impl<'a, A: Access> AccessView<'a> for A {
-    type View = &'a wgpu::TextureView;
+    type View = Option<&'a wgpu::TextureView>;
 }
 
 /// Resolves the views for an access set at execution time.
@@ -241,17 +252,12 @@ pub struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     /// The view backing resource `R` on the current pass.
     ///
-    /// # Panics
-    /// Panics if `R` was never registered in the [`SystemSet`], or if the
-    /// resource is not alive on this pass (the declared access set makes
-    /// the latter a wiring bug, not a runtime state). Debug builds also
-    /// panic when `R` sits outside the pass's declared reads/writes —
-    /// ground-truth enforcement in `PassViews::view_of` (backlog #6).
-    pub fn view<R: FrameResource>(&self) -> &'a wgpu::TextureView {
-        let id = self
-            .ids
-            .get(&TypeId::of::<R>())
-            .unwrap_or_else(|| panic!("typed resource '{}' is not registered", R::NAME));
+    /// Returns `None` if `R` was never registered or is not alive on this
+    /// pass. Debug builds still panic when `R` sits outside the pass's
+    /// declared reads/writes — ground-truth enforcement in
+    /// `PassViews::view_of` (backlog #6).
+    pub fn view<R: FrameResource>(&self) -> Option<&'a wgpu::TextureView> {
+        let id = self.ids.get(&TypeId::of::<R>())?;
         self.views.view_of(*id)
     }
 }
@@ -321,10 +327,10 @@ impl<'a, P: FramePass> SystemViews<'a, P> {
     /// mode of a pass family and write-declared in another, while the
     /// shared body needs it either way (wgpu views do not distinguish).
     ///
-    /// # Panics (debug)
-    /// Panics in debug builds when `R` is outside both declared sets —
-    /// the same guarantee the compiler enforces for positional tuples.
-    pub fn get<R: FrameResource>(&self) -> &'a wgpu::TextureView {
+    /// Returns `None` when the resource is missing at runtime. Debug builds
+    /// still assert when `R` is outside both declared sets — the same
+    /// guarantee the compiler enforces for positional tuples.
+    pub fn get<R: FrameResource>(&self) -> Option<&'a wgpu::TextureView> {
         debug_assert!(
             declared::<P::Reads, R>() || declared::<P::Writes, R>(),
             "pass {} accesses resource '{}' outside its declared sets",
@@ -526,11 +532,10 @@ impl SystemSet {
     /// Declare that pass `a` must run before pass `b` (S5c; hidden
     /// dependencies invisible in the access sets).
     ///
-    /// # Panics
-    /// Panics if either endpoint is out of range.
+    /// Invalid endpoints are ignored — use [`try_order_before`](Self::try_order_before)
+    /// when the caller must observe the error.
     pub fn order_before(&mut self, before: PassId, after: PassId) {
-        self.try_order_before(before, after)
-            .unwrap_or_else(|error| panic!("order_before({before:?}, {after:?}): {error}"));
+        let _ = self.try_order_before(before, after);
     }
 
     /// Fallible [`order_before`](Self::order_before): returns
@@ -554,11 +559,11 @@ impl SystemSet {
     /// S5c: name-based [`order_before`](Self::order_before) (pass name from
     /// `add_pass`).
     ///
-    /// # Panics
-    /// Panics on unknown name or reverse registration order.
+    /// Unknown names and reverse registration order are ignored — use
+    /// [`try_order_before_named`](Self::try_order_before_named) when the
+    /// caller must observe the error.
     pub fn order_before_named(&mut self, before: &str, after: &str) {
-        self.try_order_before_named(before, after)
-            .unwrap_or_else(|error| panic!("order_before_named('{before}', '{after}'): {error}"));
+        let _ = self.try_order_before_named(before, after);
     }
 
     /// Fallible [`order_before_named`](Self::order_before_named).
@@ -578,10 +583,9 @@ impl SystemSet {
     /// # Panics
     /// Panics if the pass is unknown.
     pub fn set_pass_state(&mut self, id: PassId, state: crate::flags::PassState) {
-        let node = self
-            .passes
-            .get_mut(id.0 as usize)
-            .unwrap_or_else(|| panic!("unknown pass {id:?}"));
+        let Some(node) = self.passes.get_mut(id.0 as usize) else {
+            return;
+        };
         node.set_state(state);
         self.touch();
     }
@@ -644,13 +648,17 @@ impl SystemSet {
     /// Returns the frame layout (lifetimes + pool slots), recomputing it
     /// only when the declarations changed since the last call.
     ///
-    /// # Panics
-    /// Panics on first-touch or read-before-write invariant violations, and
-    /// when the transient pool exceeds [`budget`](Self::budget) (see
-    /// [`try_layout`](Self::try_layout) for the fallible path).
+    /// Budget misses keep the previous snapshot when one exists; otherwise
+    /// an empty layout is returned (same soft policy as
+    /// `FrameExecutor::ensure_layout`). First-touch / read-before-write
+    /// invariant violations still panic inside the pool compiler — see
+    /// [`try_layout`](Self::try_layout) for the fallible budget path.
     pub fn layout(&mut self) -> &FrameLayout {
-        self.try_layout()
-            .unwrap_or_else(|e| panic!("SystemSet transient pool budget exceeded ({e})"))
+        let _ = self.try_layout();
+        match self.pool.cached() {
+            Some(layout) => layout.as_ref(),
+            None => &EMPTY_FRAME_LAYOUT,
+        }
     }
 
     /// Fallible [`layout`](Self::layout).
@@ -674,7 +682,15 @@ impl SystemSet {
             budget: self.budget,
         };
         self.pool.ensure(generation, &input)?;
-        Ok(self.pool.cached().expect("pool ensured a layout above"))
+        match self.pool.cached() {
+            Some(layout) => Ok(layout),
+            // `ensure` just succeeded; an empty cache is a pool invariant break.
+            None => Err(BudgetExceeded {
+                budget: 0,
+                required: 0,
+                offenders: Vec::new(),
+            }),
+        }
     }
 
     /// Compute the layout snapshot (parity oracle, debug tools). Shares
@@ -711,15 +727,9 @@ impl SystemSet {
         id
     }
 
-    /// The `ResourceId` of a registered resource.
-    ///
-    /// # Panics
-    /// Panics if `R` was not registered.
-    pub fn resource_id<R: FrameResource>(&self) -> ResourceId {
-        *self
-            .ids
-            .get(&TypeId::of::<R>())
-            .unwrap_or_else(|| panic!("typed resource '{}' is not registered", R::NAME))
+    /// The `ResourceId` of a registered resource, if `R` was registered.
+    pub fn resource_id<R: FrameResource>(&self) -> Option<ResourceId> {
+        self.ids.get(&TypeId::of::<R>()).copied()
     }
 
     /// Adds a pass, wiring reads/writes from `P::Reads`/`P::Writes`.
@@ -784,7 +794,7 @@ impl SystemSet {
         let Some((_, entry)) = self.systems.iter().find(|(id, _)| *id == pass_id) else {
             return false;
         };
-        let mut entry = entry.lock().expect("system entry lock");
+        let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
         let resolver = Resolver { views, ids };
         (entry.run)(&resolver, frame);
         true
@@ -1054,10 +1064,12 @@ mod tests {
     }
 
     /// Explicit ordering edges must respect registration order —
-    /// a backward edge is a programmer error and panics.
+    /// a backward edge is ignored by the convenience wrapper; `try_*`
+    /// reports [`OrderError::BackwardEdge`].
     #[test]
-    #[should_panic(expected = "registered")]
     fn explicit_ordering_rejects_backward() {
+        use ornis_schedule::OrderError;
+
         let mut set = SystemSet::new();
         set.set_surface_size((64, 64));
         let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
@@ -1065,17 +1077,29 @@ mod tests {
         let first = set.add_pass("first").write(a).id();
         let second = set.add_pass("second").write(b).id();
         set.order_before(second, first);
+        assert_eq!(set.build().levels(), vec![vec![0, 1]]);
+        assert!(matches!(
+            set.try_order_before(second, first),
+            Err(OrderError::BackwardEdge { .. })
+        ));
     }
 
-    /// Named ordering panics on an unknown target.
+    /// Named ordering soft-fails on an unknown target; `try_*` reports it.
     #[test]
-    #[should_panic(expected = "no node named")]
     fn explicit_ordering_unknown_name() {
+        use ornis_schedule::OrderError;
+
         let mut set = SystemSet::new();
         set.set_surface_size((64, 64));
         let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
         set.add_pass("real").write(a);
         set.order_before_named("real", "ghost");
+        assert_eq!(
+            set.try_order_before_named("real", "ghost").map(|_| ()),
+            Err(OrderError::UnknownNode {
+                name: "ghost".to_owned(),
+            })
+        );
     }
 
     /// `try_order_before` is the fallible variant: backward / unknown

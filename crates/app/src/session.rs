@@ -124,6 +124,8 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
 /// this window the loop wakes anyway so the simulation and the scene-file
 /// watcher advance at ~60 Hz even with no traffic.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 
 /// Upper bound for a measured wall-clock frame delta fed to the simulation.
 ///
@@ -299,12 +301,19 @@ pub struct EditorSession {
     scene_roots: SceneRoots,
 }
 
+/// Earth-surface gravity magnitude along −Y (m/s²).
+const DEFAULT_GRAVITY_Y: f32 = -9.81;
+/// Default procedural sphere sector count for editor placeholders.
+const DEFAULT_SPHERE_SEGMENTS: u32 = 32;
+/// Default procedural sphere stack count for editor placeholders.
+const DEFAULT_SPHERE_RINGS: u32 = 24;
+
 impl Default for EditorSession {
     fn default() -> Self {
         let mut world = GameWorld::new();
         let engine = world.engine_mut();
         let _ = engine.world_mut().insert(SceneEnvironment::default());
-        install_physics(engine, Vec3::new(0.0, -9.81, 0.0));
+        install_physics(engine, Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
         install_gameplay(engine);
         install_gameplay_physics_bridge(engine);
         // Audio mirrors the showcase runtime: real output when a device
@@ -409,7 +418,7 @@ impl EditorSession {
             .map(|runtime| {
                 runtime
                     .get_mut()
-                    .expect("physics runtime lock")
+                    .unwrap_or_else(|e| e.into_inner())
                     .take_changed()
             })
             .unwrap_or(false);
@@ -470,38 +479,28 @@ impl EditorSession {
         self.world.engine().world().resources().get::<MutationBus>()
     }
 
-    fn store(&self) -> &SmartStore {
-        self.world
-            .engine()
-            .world()
-            .store()
-            .expect("EditorSession always registers SmartStore")
+    fn store(&self) -> Option<&SmartStore> {
+        self.world.engine().world().store()
     }
 
-    fn store_mut(&mut self) -> &mut SmartStore {
-        self.world
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("EditorSession always registers SmartStore")
+    fn store_mut(&mut self) -> Option<&mut SmartStore> {
+        self.world.engine_mut().world_mut().store_mut()
     }
 
-    fn environment(&self) -> &SceneEnvironment {
+    fn environment(&self) -> Option<&SceneEnvironment> {
         self.world
             .engine()
             .world()
             .resources()
             .get::<SceneEnvironment>()
-            .expect("EditorSession always registers SceneEnvironment")
     }
 
-    fn environment_mut(&mut self) -> &mut SceneEnvironment {
+    fn environment_mut(&mut self) -> Option<&mut SceneEnvironment> {
         self.world
             .engine_mut()
             .world_mut()
             .resources_mut()
             .get_mut::<SceneEnvironment>()
-            .expect("EditorSession always registers SceneEnvironment")
     }
 
     /// Number of currently alive entities.
@@ -529,17 +528,23 @@ impl EditorSession {
         material: MaterialDesc,
     ) -> Entity {
         let physics_body = ornis_physics::colliders::body_for(&transform, &mesh, None, 0.0);
-        let entity = self.store().create_entity();
+        let Some(store) = self.store() else {
+            return Entity::new(0);
+        };
+        let entity = store.create_entity();
         self.alive.push(entity);
         let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
-        self.store_mut().insert(entity, Name(name));
-        self.store_mut().insert(entity, transform);
-        self.store_mut().insert(entity, mesh);
-        self.store_mut().insert(entity, material);
+        let Some(store) = self.store_mut() else {
+            return entity;
+        };
+        store.insert(entity, Name(name));
+        store.insert(entity, transform);
+        store.insert(entity, mesh);
+        store.insert(entity, material);
         // A broken collider (`Err`) spawns without a body, like the
         // no-recipe (`Ok(None)`) case — transport never invents colliders.
         if let Ok(Some(body)) = physics_body {
-            self.store_mut().insert(entity, body);
+            store.insert(entity, body);
         }
         self.version.bump();
         entity
@@ -548,11 +553,14 @@ impl EditorSession {
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
-        if !self.store().is_alive(entity) {
+        let store = self.store()?;
+        if !store.is_alive(entity) {
             return None;
         }
         self.alive.retain(|e| *e != entity);
-        self.store().destroy_entity(entity);
+        if let Some(store) = self.store() {
+            store.destroy_entity(entity);
+        }
         self.version.bump();
         Some(entity)
     }
@@ -560,7 +568,7 @@ impl EditorSession {
     /// Display name of `entity`, if alive and named.
     pub fn name_of(&self, entity: Entity) -> Option<String> {
         self.store()
-            .read_lane::<Name>()
+            .and_then(|store| store.read_lane::<Name>())
             .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
     }
 
@@ -582,11 +590,13 @@ impl EditorSession {
         for e in scene.entities {
             fresh.spawn_with(Some(e.name), e.transform, e.mesh, e.material);
         }
-        *fresh.environment_mut() = SceneEnvironment {
-            lights: scene.lights,
-            camera: scene.camera,
-            ambient: scene.ambient,
-        };
+        if let Some(env) = fresh.environment_mut() {
+            *env = SceneEnvironment {
+                lights: scene.lights,
+                camera: scene.camera,
+                ambient: scene.ambient,
+            };
+        }
         fresh.scene_name = scene.name;
         fresh.version = fresh.version.max(self.version.bumped());
         // The asset registry (load history, retained sources) survives the
@@ -613,11 +623,9 @@ impl EditorSession {
     /// not a valid scene; the world is untouched.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, ornis_assets::SceneLoadError> {
         let id = self.assets.load_scene_ron(ron_str)?;
-        let scene = self
-            .assets
-            .get_scene(id)
-            .expect("just-loaded scene")
-            .clone();
+        let Some(scene) = self.assets.get_scene(id).cloned() else {
+            return Ok(0);
+        };
         Ok(self.load_scene(scene))
     }
 
@@ -676,11 +684,9 @@ impl EditorSession {
                 .assets
                 .load_gltf_file(resolved)
                 .map_err(|e| SceneFileError::Parse(e.to_string()))?;
-            let scene = self
-                .assets
-                .get_scene(id)
-                .expect("just-loaded scene")
-                .clone();
+            let Some(scene) = self.assets.get_scene(id).cloned() else {
+                return Ok(0);
+            };
             return Ok(self.load_scene(scene));
         }
         let ron = fs::read_to_string(resolved).map_err(|e| SceneFileError::Read {
@@ -732,12 +738,13 @@ impl EditorSession {
 /// lights/camera/ambient come from the environment resource.
 fn to_scene(world: &EditorSession) -> Scene {
     let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
+    let env = world.environment().cloned().unwrap_or_default();
     Scene {
         name: world.scene_name.clone(),
         entities,
-        lights: world.environment().lights.clone(),
-        camera: world.environment().camera.clone(),
-        ambient: world.environment().ambient,
+        lights: env.lights,
+        camera: env.camera,
+        ambient: env.ambient,
     }
 }
 
@@ -747,9 +754,18 @@ fn entity_desc(world: &EditorSession, entity: Entity) -> EntityDesc {
         name: world
             .name_of(entity)
             .unwrap_or_else(|| format!("Entity {}", entity.id())),
-        transform: read_component(world.store(), entity).unwrap_or_else(default_transform),
-        mesh: read_component(world.store(), entity).unwrap_or_else(default_mesh),
-        material: read_component(world.store(), entity).unwrap_or_else(default_material),
+        transform: world
+            .store()
+            .and_then(|store| read_component(store, entity))
+            .unwrap_or_else(default_transform),
+        mesh: world
+            .store()
+            .and_then(|store| read_component(store, entity))
+            .unwrap_or_else(default_mesh),
+        material: world
+            .store()
+            .and_then(|store| read_component(store, entity))
+            .unwrap_or_else(default_material),
     }
 }
 
@@ -758,17 +774,18 @@ fn scene_json(world: &EditorSession) -> String {
     let entities: Vec<Value> = world
         .alive
         .iter()
-        .map(|&e| entity_json(world.store(), e))
+        .filter_map(|&e| world.store().map(|store| entity_json(store, e)))
         .collect();
-    let lights = serde_json::to_value(&world.environment().lights).expect("LightDesc serializes");
-    let camera = serde_json::to_value(&world.environment().camera).expect("CameraDesc serializes");
+    let env = world.environment().cloned().unwrap_or_default();
+    let lights = serde_json::to_value(&env.lights).unwrap_or(Value::Null);
+    let camera = serde_json::to_value(&env.camera).unwrap_or(Value::Null);
     serde_json::json!({
         "version": world.version(),
         "entity_count": world.entity_count(),
         "entities": entities,
         "lights": lights,
         "camera": camera,
-        "ambient": world.environment().ambient,
+        "ambient": env.ambient,
     })
     .to_string()
 }
@@ -868,10 +885,10 @@ fn apply_browser_input(world: &mut EditorSession, input: &editor_backend::ipc::B
         s
     } else {
         world_mut.resources_mut().insert(InputState::default());
-        world_mut
-            .resources_mut()
-            .get_mut::<InputState>()
-            .expect("just inserted")
+        let Some(s) = world_mut.resources_mut().get_mut::<InputState>() else {
+            return;
+        };
+        s
     };
     state.apply_snapshot(
         &input.pressed_keys,
@@ -999,8 +1016,11 @@ fn set_component(
         return Err(format!("unknown component '{type_name}'"));
     }
     let value: Value = serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
+    let Some(store) = world.store_mut() else {
+        return Err("SmartStore not registered".into());
+    };
     let report = apply_mutations(
-        world.store_mut(),
+        store,
         &REGISTRY,
         &[Mutation::Set {
             entity,
@@ -1016,7 +1036,9 @@ fn set_component(
     if type_name == "Collider" {
         // An explicit collider redefines collision: rebuild the lane body
         // from the current lanes (velocity state is preserved).
-        resync_collider_body(world.store_mut(), entity);
+        if let Some(store) = world.store_mut() {
+            resync_collider_body(store, entity);
+        }
     }
     world.version.bump();
     Ok(value)
@@ -1139,13 +1161,18 @@ fn cmd_create_entity(world: &mut EditorSession, data: &Value) -> Result<String, 
         Some(_) => return Err("'components': expected an object".into()),
     };
     let entity = world.spawn(name);
-    for (meta, boxed) in overrides {
-        // Parsed from the same meta — the box type always matches.
-        meta.insert_any(world.store_mut(), entity, boxed);
+    {
+        let Some(store) = world.store_mut() else {
+            return Err("SmartStore not registered".into());
+        };
+        for (meta, boxed) in overrides {
+            // Parsed from the same meta — the box type always matches.
+            meta.insert_any(store, entity, boxed);
+        }
+        // Overrides may have replaced the mesh or set an explicit collider:
+        // rebuild the body from the final lanes (velocity is fresh here).
+        resync_collider_body(store, entity);
     }
-    // Overrides may have replaced the mesh or set an explicit collider:
-    // rebuild the body from the final lanes (velocity is fresh here).
-    resync_collider_body(world.store_mut(), entity);
     Ok(serde_json::json!({
         "id": entity.id(),
         "generation": entity.generation(),
@@ -1171,7 +1198,8 @@ fn resolve_entity(world: &EditorSession, data: &Value) -> Result<Entity, String>
         .and_then(Value::as_u64)
         .ok_or("missing or invalid 'generation'")? as u32;
     let entity = Entity::new_with_gen(id, generation);
-    if !world.store().is_alive(entity) {
+    let alive = world.store().is_some_and(|store| store.is_alive(entity));
+    if !alive {
         return Err(format!("entity {id}:{generation} not found"));
     }
     Ok(entity)
@@ -1285,15 +1313,15 @@ fn default_transform() -> TransformDesc {
 fn default_mesh() -> MeshDesc {
     MeshDesc::Sphere {
         radius: PositiveF32::expect_valid(1.0),
-        segments: 32,
-        rings: 24,
+        segments: DEFAULT_SPHERE_SEGMENTS,
+        rings: DEFAULT_SPHERE_RINGS,
     }
 }
 
 fn default_material() -> MaterialDesc {
     MaterialDesc::Dielectric {
-        base_color: [0.5, 0.5, 0.5],
-        roughness: Clamped01::new(0.5),
+        base_color: [HALF, HALF, HALF],
+        roughness: Clamped01::new(HALF),
         emission: [0.0, 0.0, 0.0],
     }
 }
@@ -1503,69 +1531,79 @@ fn reload_watched_scene(
 /// time since the previous tick clamped by [`clamp_frame_dt`]; an idle loop
 /// keeps its historical ~16 ms cadence.
 pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name("editor-world".into())
-        .spawn(move || {
-            let mut world = EditorSession::new();
-            match startup_scene_ron() {
-                Some(ron) => {
-                    if let Err(e) = world.load_scene_ron(&ron) {
-                        eprintln!("ornis: failed to load startup scene: {e}");
-                    }
-                }
-                None => eprintln!("ornis: no startup scene found, starting with an empty world"),
+    // Prefer a named thread; fall back to an anonymous one if the OS rejects
+    // the name (values move into at most one closure).
+    let named = thread::Builder::new().name("editor-world".into());
+    match named.spawn({
+        let cmd_rx = cmd_rx.clone();
+        let ev_tx = ev_tx.clone();
+        move || editor_world_loop(cmd_rx, ev_tx)
+    }) {
+        Ok(handle) => handle,
+        Err(_) => thread::spawn(move || editor_world_loop(cmd_rx, ev_tx)),
+    }
+}
+
+/// Editor-world tick loop: commands, scene hot-reload, and wall-clock frames.
+fn editor_world_loop(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) {
+    let mut world = EditorSession::new();
+    match startup_scene_ron() {
+        Some(ron) => {
+            if let Err(e) = world.load_scene_ron(&ron) {
+                eprintln!("ornis: failed to load startup scene: {e}");
             }
-            // Publish the initial state so the HTTP caches are live
-            // before the first command arrives.
-            publish_state(&world, &ev_tx);
-            let mut scene_watch = watched_scene_path().map(FileWatch::new);
-            // Wall clock for the measured tick delta (see [`clamp_frame_dt`]).
-            let mut last_tick = Instant::now();
-            loop {
-                match cmd_rx.recv_timeout(IDLE_POLL_INTERVAL) {
-                    Ok(first) => world.handle_command(&first, &ev_tx),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-                // Drain the burst that queued while handling, without
-                // blocking: the tick below still runs this iteration.
-                let mut disconnected = false;
-                loop {
-                    match cmd_rx.try_recv() {
-                        Ok(cmd) => world.handle_command(&cmd, &ev_tx),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
-                if let Some(watch) = scene_watch.as_mut()
-                    && watch.poll()
-                {
-                    // The watcher only observes workspace scene files, so this
-                    // resolve is a fail-closed formality (defense in depth).
-                    let watched = watch.path.clone();
-                    match ScenePath::resolve(&world.scene_roots, &watched.to_string_lossy()) {
-                        Ok(path) => {
-                            reload_watched_scene(&mut world, &path, &ev_tx);
-                        }
-                        Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
-                    }
-                }
-                if world
-                    .tick_secs(clamp_frame_dt(last_tick.elapsed()))
-                    .changed()
-                {
-                    publish_state(&world, &ev_tx);
-                }
-                last_tick = Instant::now();
-                if disconnected {
+        }
+        None => eprintln!("ornis: no startup scene found, starting with an empty world"),
+    }
+    // Publish the initial state so the HTTP caches are live
+    // before the first command arrives.
+    publish_state(&world, &ev_tx);
+    let mut scene_watch = watched_scene_path().map(FileWatch::new);
+    // Wall clock for the measured tick delta (see [`clamp_frame_dt`]).
+    let mut last_tick = Instant::now();
+    loop {
+        match cmd_rx.recv_timeout(IDLE_POLL_INTERVAL) {
+            Ok(first) => world.handle_command(&first, &ev_tx),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        // Drain the burst that queued while handling, without
+        // blocking: the tick below still runs this iteration.
+        let mut disconnected = false;
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(cmd) => world.handle_command(&cmd, &ev_tx),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
                     break;
                 }
             }
-        })
-        .expect("spawn editor-world thread")
+        }
+        if let Some(watch) = scene_watch.as_mut()
+            && watch.poll()
+        {
+            // The watcher only observes workspace scene files, so this
+            // resolve is a fail-closed formality (defense in depth).
+            let watched = watch.path.clone();
+            match ScenePath::resolve(&world.scene_roots, &watched.to_string_lossy()) {
+                Ok(path) => {
+                    reload_watched_scene(&mut world, &path, &ev_tx);
+                }
+                Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
+            }
+        }
+        if world
+            .tick_secs(clamp_frame_dt(last_tick.elapsed()))
+            .changed()
+        {
+            publish_state(&world, &ev_tx);
+        }
+        last_tick = Instant::now();
+        if disconnected {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1816,7 +1854,9 @@ mod tests {
             world.version > version_before,
             "apply must bump the version"
         );
-        let name: Option<Name> = read_component(world.store(), entity);
+        let name: Option<Name> = world
+            .store()
+            .and_then(|store| read_component(store, entity));
         assert_eq!(name.expect("Name lane").0, "renamed");
     }
 
@@ -1994,7 +2034,10 @@ mod tests {
         use ornis_physics::Shape;
         let mut world = EditorSession::new();
         let sphere = world.spawn(None);
-        let lane = world.store().read_lane::<RigidBody>().expect("body lane");
+        let lane = world
+            .store()
+            .and_then(|store| store.read_lane::<RigidBody>())
+            .expect("body lane");
         assert!(matches!(
             lane.get(sphere).expect("sphere body").shape,
             Shape::Sphere { .. }
@@ -2016,7 +2059,10 @@ mod tests {
             },
             default_material(),
         );
-        let lane = world.store().read_lane::<RigidBody>().expect("body lane");
+        let lane = world
+            .store()
+            .and_then(|store| store.read_lane::<RigidBody>())
+            .expect("body lane");
         let boxed = world
             .alive
             .iter()
@@ -2083,7 +2129,7 @@ mod tests {
             &red_components["Material"]["Dielectric"]["base_color"],
             &[0.8, 0.2, 0.2],
         );
-        assert_f32(&red_components["Material"]["Dielectric"]["roughness"], 0.5);
+        assert_f32(&red_components["Material"]["Dielectric"]["roughness"], HALF);
 
         // Material variants survive the round trip.
         let gold = &entities[3]["components"];
@@ -2129,7 +2175,7 @@ mod tests {
         assert!(components["Mesh"]["Sphere"].is_object());
         assert_f32_seq(
             &components["Material"]["Dielectric"]["base_color"],
-            &[0.5, 0.5, 0.5],
+            &[HALF, HALF, HALF],
         );
         assert_eq!(entities[1]["components"]["Name"], "Hero");
     }
@@ -2532,7 +2578,7 @@ mod tests {
                 scale: [2.0, 2.0, 2.0],
             },
             MeshDesc::Sphere {
-                radius: PositiveF32::expect_valid(0.5),
+                radius: PositiveF32::expect_valid(HALF),
                 segments: 8,
                 rings: 4,
             },

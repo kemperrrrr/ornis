@@ -30,7 +30,7 @@ impl NarrowShardPool {
             self.level = vec![(0..shards).collect()];
         }
         for b in &self.bufs {
-            b.lock().unwrap().clear();
+            b.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
     }
 }

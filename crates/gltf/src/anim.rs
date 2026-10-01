@@ -22,6 +22,13 @@ use ornis_core::Entity;
 
 use crate::ImportStats;
 
+/// Squared length below which a quaternion is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+/// Spatial components in a translation / scale key.
+const VEC3_COMPONENTS: usize = 3;
+/// Components in a quaternion key.
+const QUAT_COMPONENTS: usize = 4;
+
 /// How to blend between the keys of a [`LoadedKeyTrack`].
 ///
 /// Mirrors `ornis-animation` `Interpolation` field-for-field; the wiring
@@ -426,7 +433,7 @@ fn read_channel(
             let ReadOutputs::Translations(outputs) = reader.read_outputs()? else {
                 return None;
             };
-            let values: Vec<[f32; 3]> = outputs.collect();
+            let values: Vec<[f32; VEC3_COMPONENTS]> = outputs.collect();
             check_counts(times.len(), values.len())?;
             let keys = times
                 .into_iter()
@@ -439,7 +446,7 @@ fn read_channel(
             let ReadOutputs::Scales(outputs) = reader.read_outputs()? else {
                 return None;
             };
-            let values: Vec<[f32; 3]> = outputs.collect();
+            let values: Vec<[f32; VEC3_COMPONENTS]> = outputs.collect();
             check_counts(times.len(), values.len())?;
             let keys = times
                 .into_iter()
@@ -455,7 +462,7 @@ fn read_channel(
             let ReadOutputs::Rotations(outputs) = reader.read_outputs()? else {
                 return None;
             };
-            let values: Vec<[f32; 4]> = outputs.into_f32().collect();
+            let values: Vec<[f32; QUAT_COMPONENTS]> = outputs.into_f32().collect();
             check_counts(times.len(), values.len())?;
             let keys = times
                 .into_iter()
@@ -511,7 +518,7 @@ fn make_quat_track(keys: Vec<LoadedKey<[f32; 4]>>, stepped: bool) -> LoadedKeyTr
 /// Normalizes a raw `(x, y, z, w)` quaternion, identity on degenerate input.
 fn normalize_quat(raw: [f32; 4]) -> [f32; 4] {
     let length_squared: f32 = raw.iter().map(|component| component * component).sum();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         let length = length_squared.sqrt();
         [
             raw[0] / length,

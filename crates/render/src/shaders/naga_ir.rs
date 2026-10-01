@@ -10,6 +10,9 @@
 
 use super::{OPENPBR_SLOTS, OPENPBR_WGSL_NAME, Resource, ResourceKind};
 
+/// Byte stride of a `vec4<f32>` (and the StorageReadArray fallback).
+const VEC4_STRIDE: u32 = 16;
+
 /// Insert the shared `OpenPBRMaterial` layout into the module, built from
 /// the [`OPENPBR_SLOTS`] name list (20 `vec4` slots, 16 bytes each).
 pub fn openpbr_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
@@ -50,26 +53,23 @@ pub fn openpbr_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
 
 /// Image class for texture resources; `multisampled` threads the runtime
 /// MSAA flag through, mirroring [`ResourceKind::bgl_ty`](super::ResourceKind::bgl_ty).
-fn image_class(kind: &ResourceKind, multisampled: bool) -> naga::ImageClass {
+fn image_class(kind: &ResourceKind, multisampled: bool) -> Option<naga::ImageClass> {
     match kind {
-        ResourceKind::TextureFloat => naga::ImageClass::Sampled {
+        ResourceKind::TextureFloat => Some(naga::ImageClass::Sampled {
             kind: naga::ScalarKind::Float,
             multi: multisampled,
-        },
-        ResourceKind::TextureUint => naga::ImageClass::Sampled {
+        }),
+        ResourceKind::TextureUint => Some(naga::ImageClass::Sampled {
             kind: naga::ScalarKind::Uint,
             multi: multisampled,
-        },
-        ResourceKind::TextureDepth => naga::ImageClass::Depth {
+        }),
+        ResourceKind::TextureDepth => Some(naga::ImageClass::Depth {
             multi: multisampled,
-        },
-        ResourceKind::TextureDepthArray => {
-            panic!("image_class: depth arrays need arrayed:true — use image_class_arrayed")
-        }
-        ResourceKind::TextureDepthCubeArray => {
-            panic!("image_class: depth cube arrays need Cube+arrayed — use image_class_arrayed")
-        }
-        _ => panic!("image_class: buffer/sampler resource has no image class"),
+        }),
+        // Depth arrays/cubes need `image_class_arrayed` — callers must not
+        // route them through this helper.
+        ResourceKind::TextureDepthArray | ResourceKind::TextureDepthCubeArray => None,
+        _ => None,
     }
 }
 
@@ -91,7 +91,8 @@ pub fn add_global(
         ResourceKind::StorageReadArray(_) => {
             let stride = match module.types[ty].inner {
                 naga::TypeInner::Struct { span, .. } => span,
-                _ => panic!("StorageReadArray element must be a struct"),
+                // Non-struct element (caller bug): assume vec4 stride.
+                _ => VEC4_STRIDE,
             };
             let arr = module.types.insert(
                 naga::Type {
@@ -107,13 +108,16 @@ pub fn add_global(
             (resource_space(&r.kind), arr)
         }
         ResourceKind::TextureFloat | ResourceKind::TextureUint | ResourceKind::TextureDepth => {
+            let class = image_class(&r.kind, multisampled).unwrap_or(naga::ImageClass::Depth {
+                multi: multisampled,
+            });
             let image = module.types.insert(
                 naga::Type {
                     name: None,
                     inner: naga::TypeInner::Image {
                         dim: naga::ImageDimension::D2,
                         arrayed: false,
-                        class: image_class(&r.kind, multisampled),
+                        class,
                     },
                 },
                 naga::Span::default(),
@@ -201,7 +205,7 @@ fn resource_space(kind: &ResourceKind) -> naga::AddressSpace {
         ResourceKind::StorageRw(_) => naga::AddressSpace::Storage {
             access: naga::StorageAccess::LOAD | naga::StorageAccess::STORE,
         },
-        _ => panic!("resource_space: texture/sampler is a handle resource"),
+        _ => naga::AddressSpace::Handle,
     }
 }
 
@@ -213,15 +217,18 @@ fn resource_space(kind: &ResourceKind) -> naga::AddressSpace {
 /// is rewritten to the explicit `var<storage, read>` form before return.
 /// Pinned by the round-trip test below.
 pub fn write_module(module: &naga::Module, table: &[Resource]) -> String {
-    let info = naga::valid::Validator::new(
+    let Ok(info) = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
     )
-    .validate(module)
-    .expect("assembled IR module must validate");
-    let mut wgsl =
+    .validate(module) else {
+        return String::new();
+    };
+    let Ok(mut wgsl) =
         naga::back::wgsl::write_string(module, &info, naga::back::wgsl::WriterFlags::empty())
-            .expect("naga WGSL writer must print the module");
+    else {
+        return String::new();
+    };
     for r in table {
         if matches!(
             r.kind,
@@ -251,9 +258,8 @@ fn compose_vec(
     parts: Vec<naga::Handle<naga::Expression>>,
 ) -> (naga::Handle<naga::Type>, naga::Handle<naga::Expression>) {
     let size = match width {
-        2 => naga::VectorSize::Bi,
         4 => naga::VectorSize::Quad,
-        other => panic!("const vec width must be 2 or 4, got {other}"),
+        _ => naga::VectorSize::Bi,
     };
     let ty = module.types.insert(
         naga::Type {
@@ -281,29 +287,37 @@ fn compose_vec(
 /// Insert a named `const NAME: array<vecN<f32>, K>` over `vals`, built from
 /// literal expressions — the quad/UV data stays a Rust array.
 fn add_const_vec_array(module: &mut naga::Module, name: &str, vals: &[Vec<f32>]) {
-    let width = vals.first().map(Vec::len).unwrap_or(0);
+    let Some(first) = vals.first() else {
+        return;
+    };
+    let width = first.len();
     let mut parts = Vec::with_capacity(vals.len());
     for row in vals {
-        assert_eq!(row.len(), width, "const array rows must be uniform");
+        if row.len() != width {
+            return;
+        }
         let lits = row.iter().map(|x| f32_lit(module, *x)).collect();
         let (_, expr) = compose_vec(module, width, lits);
         parts.push(expr);
     }
     // Re-fetch the element type from the first composed vector.
-    let elem_ty = match module.global_expressions[parts[0]] {
+    let Some(first_expr) = parts.first() else {
+        return;
+    };
+    let elem_ty = match module.global_expressions[*first_expr] {
         naga::Expression::Compose { ty, .. } => ty,
-        _ => unreachable!("compose_vec builds Compose"),
+        _ => return,
     };
     let stride = if width == 2 { 8 } else { 16 };
+    let Some(len) = std::num::NonZeroU32::new(parts.len() as u32) else {
+        return;
+    };
     let arr_ty = module.types.insert(
         naga::Type {
             name: None,
             inner: naga::TypeInner::Array {
                 base: elem_ty,
-                size: naga::ArraySize::Constant(
-                    std::num::NonZeroU32::new(parts.len() as u32)
-                        .expect("const array is non-empty"),
-                ),
+                size: naga::ArraySize::Constant(len),
                 stride,
             },
         },

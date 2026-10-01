@@ -16,11 +16,16 @@ pub(super) fn baseline(text: &str) {
     emit("warning", "rustqual-current", text);
 }
 
+/// Max UTF-8 bytes per GitHub Actions annotation chunk.
+const ANNOTATION_CHUNK_BYTES: usize = 3_000;
+/// Expected length of a git SHA-1 hex revision.
+const GIT_SHA1_HEX_LEN: usize = 40;
+
 fn emit(level: &str, label: &str, text: &str) {
     let mut parts = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        let mut end = (start + 3_000).min(text.len());
+        let mut end = (start + ANNOTATION_CHUNK_BYTES).min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -62,7 +67,7 @@ fn measure_reference(root: &Path) -> Result<(String, String), String> {
         .map_err(|e| e.to_string())?;
     let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !output.status.success()
-        || revision.len() != 40
+        || revision.len() != GIT_SHA1_HEX_LEN
         || !revision.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err("base commit is unavailable".into());
