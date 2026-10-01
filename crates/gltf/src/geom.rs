@@ -13,6 +13,8 @@ const VEC3_AXES: usize = 3;
 const TRIANGLE_VERTS: usize = 3;
 /// Shepperd quaternion-from-matrix scale factor (`0.25 * s`).
 const QUAT_FROM_MAT_SCALE: f32 = 0.25;
+/// UV fallback for a degenerate projected span.
+const HALF: f32 = 0.5;
 
 /// Column-major `4×4` matrix: `m[column][row]`, as in glTF.
 pub(crate) type Mat4 = [[f32; MAT4_DIM]; MAT4_DIM];
@@ -216,7 +218,7 @@ pub(crate) fn box_project_uvs(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> V
     let normalized = |value: f32, axis: usize| -> f32 {
         let span = max[axis] - min[axis];
         if span <= f32::EPSILON {
-            0.5
+            HALF
         } else {
             ((value - min[axis]) / span).clamp(0.0, 1.0)
         }

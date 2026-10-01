@@ -204,11 +204,13 @@ const STICK_THRESH: f32 = 0.00001;
 /// does not propagate wake — documented M3 gap).
 const SLEEP_LIN: f32 = 0.15;
 const SLEEP_ANG: f32 = 0.15;
-const SLEEP_TIME: f32 = 0.5;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+const SLEEP_TIME: f32 = HALF;
 /// Gated-wake thresholds (builtin `wake_on_impact` + penetration-wake
-/// parity): a NEW pair wakes its sleepers only on 0.5 m/s approach or a
-/// fresh overlap deeper than 1 cm.
-const WAKE_IMPACT_SPEED: f32 = 0.5;
+/// parity): a NEW pair wakes its sleepers only on [`WAKE_IMPACT_SPEED`] m/s
+/// approach or a fresh overlap deeper than 1 cm.
+const WAKE_IMPACT_SPEED: f32 = HALF;
 const WAKE_PENETRATION: f32 = 0.01;
 
 /// Angular travel slop for revolute limits (official `ANGULAR_SLOP`).
@@ -1486,7 +1488,7 @@ impl AvbdEngine {
             let a = &self.bodies[p.a];
             let b = &self.bodies[p.b];
             let mut deepest = 0.0f32;
-            let mut witness = (a.position + b.position) * 0.5;
+            let mut witness = (a.position + b.position) * HALF;
             for pt in &p.points {
                 let pa = a.position + a.orientation * pt.ra;
                 let pb = b.position + b.orientation * pt.rb;

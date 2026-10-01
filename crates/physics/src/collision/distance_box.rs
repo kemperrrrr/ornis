@@ -15,6 +15,8 @@ const SPINE_ALIGNMENT_EPS: f32 = 1e-6;
 const SPATIAL_AXES: usize = 3;
 /// Full OBB-OBB SAT axis set: 3 + 3 face normals + 9 edge crosses.
 const SAT_AXIS_COUNT: usize = SPATIAL_AXES * 2 + SPATIAL_AXES * SPATIAL_AXES;
+/// Midpoint scale for a 1D range.
+const HALF: f32 = 0.5;
 
 fn separating_axis(a: ShapeRef, ha: Vec3, b: ShapeRef, hb: Vec3) -> (f32, Vec3) {
     let ra = Mat3::from_quat(a.rot);
@@ -162,7 +164,7 @@ fn segment_box(start: Vec3, end: Vec3, lo: Vec3, hi: Vec3) -> (Vec3, Vec3, f32) 
     cuts.sort_by(f32::total_cmp);
     let mut result = (start, start.clamp(lo, hi), f32::INFINITY);
     for range in cuts.windows(2) {
-        let middle = (range[0] + range[1]) * 0.5;
+        let middle = (range[0] + range[1]) * HALF;
         let p = start + middle * delta;
         let (mut numerator, mut denominator) = (0.0, 0.0);
         for i in 0..SPATIAL_AXES {

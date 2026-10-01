@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.43700372473591065,
+  "quality_score": 0.43885021676741764,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 159,
+  "magic_number_warnings": 151,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 105,
   "unsafe_warnings": 8,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2539,
+  "total_findings": 2531,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -158,7 +158,7 @@
     {
       "name": "bench_recording",
       "file": "crates/render/benches/recording_bench.rs",
-      "line": 77
+      "line": 79
     },
     {
       "name": "extract_render_data_with_stats",
@@ -408,22 +408,22 @@
     {
       "name": "AvbdEngine::step_inner",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 736
+      "line": 738
     },
     {
       "name": "AvbdEngine::step",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1101
+      "line": 1103
     },
     {
       "name": "AvbdEngine::add_joint",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1199
+      "line": 1201
     },
     {
       "name": "AvbdEngine::shapecast",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1429
+      "line": 1431
     },
     {
       "name": "quat_integrate",
@@ -508,47 +508,47 @@
     {
       "name": "cross_inv_inertia",
       "file": "crates/physics/src/split.rs",
-      "line": 132
+      "line": 136
     },
     {
       "name": "cross_apply_impulse",
       "file": "crates/physics/src/split.rs",
-      "line": 210
+      "line": 214
     },
     {
       "name": "cross_effective_mass",
       "file": "crates/physics/src/split.rs",
-      "line": 219
+      "line": 223
     },
     {
       "name": "solve_cross_velocity",
       "file": "crates/physics/src/split.rs",
-      "line": 231
+      "line": 235
     },
     {
       "name": "swept_bounds",
       "file": "crates/physics/src/split.rs",
-      "line": 385
+      "line": 389
     },
     {
       "name": "SplitState::step",
       "file": "crates/physics/src/split.rs",
-      "line": 951
+      "line": 955
     },
     {
       "name": "SplitState::couple_cross_joints",
       "file": "crates/physics/src/split.rs",
-      "line": 1089
+      "line": 1093
     },
     {
       "name": "SplitState::couple_velocity",
       "file": "crates/physics/src/split.rs",
-      "line": 1210
+      "line": 1214
     },
     {
       "name": "SplitState::shapecast",
       "file": "crates/physics/src/split.rs",
-      "line": 1280
+      "line": 1284
     },
     {
       "name": "SoftBody::chain",

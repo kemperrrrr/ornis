@@ -32,7 +32,11 @@ use crate::{
 pub(super) const DT: f32 = 1.0 / 60.0;
 pub(super) const MAX_STEPS: usize = 4;
 const SLEEP_SPEED: f32 = 0.2;
-const WAKE_SPEED: f32 = 0.5;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
+const WAKE_SPEED: f32 = HALF;
+/// Squared-length floor for a usable couple direction.
+const MIN_DIR_LEN2: f32 = HALF;
 const QUIET_STEPS: u32 = 30;
 const LINK_MARGIN: f32 = 0.05;
 
@@ -255,7 +259,7 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
         }
     };
     for dir in dirs {
-        if dir.length_squared() < 0.5 {
+        if dir.length_squared() < MIN_DIR_LEN2 {
             continue;
         }
         let k = cross_effective_mass(a, b, dir, ra, rb);

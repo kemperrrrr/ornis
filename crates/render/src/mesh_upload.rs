@@ -15,6 +15,8 @@ use crate::mesh::{Mesh, Vertex};
 
 /// Spatial components in a position / normal.
 const VEC3_COMPONENTS: usize = 3;
+/// UV fallback for a degenerate projected span.
+const HALF: f32 = 0.5;
 
 /// Upload of [`ornis_mesh_editor::MeshData`] failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -374,7 +376,7 @@ fn apply_box_project_uvs(mesh: &mut ornis_mesh_editor::MeshData) {
     let normalized = |value: f32, axis: usize| -> f32 {
         let span = max[axis] - min[axis];
         if span <= f32::EPSILON {
-            0.5
+            HALF
         } else {
             ((value - min[axis]) / span).clamp(0.0, 1.0)
         }

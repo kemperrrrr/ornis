@@ -36,6 +36,8 @@ const FOV_DEG: f32 = 60.0;
 const NEAR: f32 = 0.1;
 /// Perspective far plane.
 const FAR: f32 = 10.0;
+/// Default dielectric specular roughness for the bench material.
+const DEFAULT_ROUGHNESS: f32 = 0.5;
 
 async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -97,7 +99,7 @@ fn bench_recording(c: &mut Criterion) {
     let material = {
         let mut mat = OpenPBRMaterial::dielectric();
         mat.base.color_rgb(BASE_COLOR);
-        mat.specular.roughness(0.5);
+        mat.specular.roughness(DEFAULT_ROUGHNESS);
         mat
     };
     renderer.upload_materials(&device, &queue, &[material]);

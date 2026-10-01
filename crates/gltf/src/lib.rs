@@ -70,6 +70,8 @@
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
+/// Metallic-factor threshold for `Metal` vs `Dielectric` wiring.
+const METALNESS_THRESHOLD: f32 = 0.5;
 
 mod anim;
 mod base64;
@@ -352,7 +354,7 @@ impl LoadedMaterial {
     /// metallic-roughness texture does not move the switch — the upload
     /// shader samples it at runtime instead.
     pub fn is_metallic(&self) -> bool {
-        self.metallic >= 0.5
+        self.metallic >= METALNESS_THRESHOLD
     }
 
     /// Image bound to `role`, if that slot is textured.

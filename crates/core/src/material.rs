@@ -39,6 +39,8 @@ const EMISSION_LUMINANCE_NITS: f32 = 1000.0;
 const EMISSION_TINT_RGB: [f32; 3] = [1.0, 0.8, 0.6];
 /// Thick transmission medium depth (m).
 const TRANSMISSION_DEPTH: f32 = 2.0;
+/// Threshold on the packed thin-walled geometry flag (`params[1]`).
+const THIN_WALLED_THRESHOLD: f32 = 0.5;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -519,7 +521,7 @@ impl GeometryGroup {
     }
     /// Current geometry transparency mode.
     pub fn transparency(&self) -> Transparency {
-        Transparency::from(self.params[1] >= 0.5)
+        Transparency::from(self.params[1] >= THIN_WALLED_THRESHOLD)
     }
 }
 
