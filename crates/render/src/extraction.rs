@@ -523,9 +523,15 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
     // once (see `mesh_upload::SoupCache`). Staging is reserved once from
     // the lane length (capped): the map grows at most once per frame and
     // `custom_meshes` amortizes its pushes the same way.
+    /// Cap on per-frame Custom soup cache entries (amortized staging).
+    const SOUP_CACHE_CAP: usize = 4096;
+    /// Reserved custom-mesh upload slots per frame.
+    const CUSTOM_MESH_RESERVE: usize = 256;
     let lane_len = transforms.entities.len();
-    let mut soup_cache = SoupCache::with_capacity(lane_len.min(4096));
-    extracted.custom_meshes.reserve(lane_len.min(256));
+    let mut soup_cache = SoupCache::with_capacity(lane_len.min(SOUP_CACHE_CAP));
+    extracted
+        .custom_meshes
+        .reserve(lane_len.min(CUSTOM_MESH_RESERVE));
     for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
         let Some(mesh) = meshes.get(entity) else {
             stats.skipped_incomplete += 1;

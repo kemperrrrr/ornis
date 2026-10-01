@@ -179,6 +179,9 @@ impl From<ShadowCast> for bool {
     }
 }
 
+/// wgpu LOD upper clamp shared by linear samplers (covers all mip levels).
+const LOD_MAX_CLAMP: f32 = 32.0;
+
 /// Sampler selection for frame/upload textures (typed replacement for
 /// inline `wgpu::SamplerDescriptor` literals scattered across the
 /// composite, renderer and texture-upload paths).
@@ -207,7 +210,7 @@ impl SamplerKind {
                 min_filter: wgpu::FilterMode::Linear,
                 mipmap_filter: wgpu::MipmapFilterMode::Nearest,
                 lod_min_clamp: 0.0,
-                lod_max_clamp: 32.0,
+                lod_max_clamp: LOD_MAX_CLAMP,
                 compare: None,
                 anisotropy_clamp: 1,
                 border_color: None,
@@ -221,7 +224,7 @@ impl SamplerKind {
                 min_filter: wgpu::FilterMode::Linear,
                 mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 lod_min_clamp: 0.0,
-                lod_max_clamp: 32.0,
+                lod_max_clamp: LOD_MAX_CLAMP,
                 compare: None,
                 anisotropy_clamp: 1,
                 border_color: None,

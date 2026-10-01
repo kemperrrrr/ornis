@@ -197,7 +197,9 @@ impl Frustum {
             ]
             .map(|p| {
                 let len = p.truncate().length();
-                if len.is_finite() && len > 1e-12 {
+                /// Squared-length floor for a usable frustum-plane normal.
+                const PLANE_NORMAL_EPS: f32 = 1e-12;
+                if len.is_finite() && len > PLANE_NORMAL_EPS {
                     p / len
                 } else {
                     // Degenerate: mark with a NaN normal so the query

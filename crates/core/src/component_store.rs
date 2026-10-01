@@ -279,11 +279,13 @@ impl<T> ComponentStore<T> {
     /// (SIMD-friendly width); any remainder is reachable via
     /// [`ChunkedIterMut::into_tail`].
     pub fn chunked_iter_mut(&mut self) -> ChunkedIterMut<'_, T> {
+        /// SIMD-friendly dense-lane chunk width.
+        const CHUNK_WIDTH: usize = 4;
         let n = self.data.len();
-        let chunk_end = (n / 4) * 4;
+        let chunk_end = (n / CHUNK_WIDTH) * CHUNK_WIDTH;
         let (head, tail) = self.data.split_at_mut(chunk_end);
         ChunkedIterMut {
-            chunks: head.chunks_exact_mut(4),
+            chunks: head.chunks_exact_mut(CHUNK_WIDTH),
             tail: if tail.is_empty() { None } else { Some(tail) },
         }
     }
@@ -294,7 +296,9 @@ impl<T> ComponentStore<T> {
     where
         T: Send,
     {
-        self.data.par_chunks_exact_mut(4).flatten()
+        /// SIMD-friendly dense-lane chunk width.
+        const CHUNK_WIDTH: usize = 4;
+        self.data.par_chunks_exact_mut(CHUNK_WIDTH).flatten()
     }
 
     /// Reorders the dense array by ascending entity id, restoring a

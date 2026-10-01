@@ -2,6 +2,25 @@
 
 use wgpu::util::DeviceExt;
 
+/// Components in a `vec3` / position / normal / tangent attribute.
+const VEC3_COMPONENTS: usize = 3;
+/// Components in a `vec2` / UV attribute.
+const VEC2_COMPONENTS: usize = 2;
+/// Max joint influences per skinned vertex.
+const MAX_INFLUENCES: usize = 4;
+/// Faces on a box mesh.
+const BOX_FACES: usize = 6;
+/// Vertices emitted per box face (unique UVs).
+const BOX_FACE_VERTS: usize = 4;
+/// Indices per box face (two triangles).
+const BOX_FACE_INDICES: usize = 6;
+/// Indices per cylinder radial segment (side quads + two cap triangles).
+const CYLINDER_INDICES_PER_SEGMENT: u32 = 12;
+/// Minimum sphere sector / cylinder radial segments.
+const MIN_RADIAL_SEGMENTS: u32 = 3;
+/// Minimum sphere stacks.
+const MIN_SPHERE_STACKS: u32 = 2;
+
 /// Vertex + index buffers uploaded to the device, ready to draw.
 pub struct Mesh {
     /// Interleaved [`Vertex`] data.
@@ -41,17 +60,19 @@ impl Vertex {
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: std::mem::size_of::<[f32; VEC3_COMPONENTS]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2)
+                        as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>())
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2
+                        + std::mem::size_of::<[f32; VEC2_COMPONENTS]>())
                         as wgpu::BufferAddress,
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32x3,
@@ -101,17 +122,19 @@ impl SkinnedVertex {
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: std::mem::size_of::<[f32; VEC3_COMPONENTS]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2)
+                        as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>())
+                    offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2
+                        + std::mem::size_of::<[f32; VEC2_COMPONENTS]>())
                         as wgpu::BufferAddress,
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32x3,
@@ -122,7 +145,8 @@ impl SkinnedVertex {
                     format: wgpu::VertexFormat::Uint32x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<Vertex>() + std::mem::size_of::<[u32; 4]>())
+                    offset: (std::mem::size_of::<Vertex>()
+                        + std::mem::size_of::<[u32; MAX_INFLUENCES]>())
                         as wgpu::BufferAddress,
                     shader_location: 5,
                     format: wgpu::VertexFormat::Float32x4,
@@ -139,8 +163,8 @@ pub fn create_sphere(device: &wgpu::Device, radius: f32, sectors: u32, stacks: u
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    let sector_count = sectors.max(3);
-    let stack_count = stacks.max(2);
+    let sector_count = sectors.max(MIN_RADIAL_SEGMENTS);
+    let stack_count = stacks.max(MIN_SPHERE_STACKS);
     let sector_step = 2.0 * std::f32::consts::PI / sector_count as f32;
     let stack_step = std::f32::consts::PI / stack_count as f32;
 
@@ -229,7 +253,7 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
         [-0.5, 0.5, 0.5],
     ];
     #[rustfmt::skip]
-    let faces: [[usize; 4]; 6] = [
+    let faces: [[usize; BOX_FACE_VERTS]; BOX_FACES] = [
         [0, 1, 2, 3], // -z
         [5, 4, 7, 6], // +z
         [4, 0, 3, 7], // -x
@@ -237,7 +261,7 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
         [4, 5, 1, 0], // -y
         [3, 2, 6, 7], // +y
     ];
-    let normals: [[f32; 3]; 6] = [
+    let normals: [[f32; VEC3_COMPONENTS]; BOX_FACES] = [
         [0.0, 0.0, -1.0],
         [0.0, 0.0, 1.0],
         [-1.0, 0.0, 0.0],
@@ -245,8 +269,8 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
         [0.0, -1.0, 0.0],
         [0.0, 1.0, 0.0],
     ];
-    let mut vertices = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
+    let mut vertices = Vec::with_capacity(BOX_FACES * BOX_FACE_VERTS);
+    let mut indices = Vec::with_capacity(BOX_FACES * BOX_FACE_INDICES);
     for (face, normal) in faces.iter().zip(normals) {
         let base = vertices.len() as u32;
         let tangent = ortho_tangent(normal);
@@ -313,11 +337,16 @@ pub fn plane_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
 /// ring, `∓Y` normals, `+X` tangents). Vertex count is `4 * n + 6`,
 /// index count `12 * n`.
 pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Vertex>, Vec<u32>) {
-    let n = radial_segments.max(3);
+    let n = radial_segments.max(MIN_RADIAL_SEGMENTS);
     let step = 2.0 * std::f32::consts::PI / n as f32;
     let half = height * 0.5;
-    let mut vertices = Vec::with_capacity((4 * n + 6) as usize);
-    let mut indices = Vec::with_capacity((12 * n) as usize);
+    /// Side verts per segment (bottom+top) × (n+1 seam) + 2 caps × (n+2).
+    const SIDE_RINGS: u32 = 2;
+    const CAP_CENTER_AND_SEAM: u32 = 2;
+    let mut vertices = Vec::with_capacity(
+        (SIDE_RINGS * (n + 1) + SIDE_RINGS * (n + CAP_CENTER_AND_SEAM)) as usize,
+    );
+    let mut indices = Vec::with_capacity((CYLINDER_INDICES_PER_SEGMENT * n) as usize);
 
     // Side: bottom/top ring pair per step (seam duplicated for UVs).
     for j in 0..=n {

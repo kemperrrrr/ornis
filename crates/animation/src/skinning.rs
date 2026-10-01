@@ -18,6 +18,13 @@
 
 use glam::{Mat4, Vec3};
 
+/// Squared length floor for collapsed blended normals.
+const DEGENERATE_LEN2: f32 = 1e-12;
+/// Weight-sum floor before normalize.
+const NEAR_ZERO: f32 = 1e-6;
+/// Max joint influences per skinned vertex.
+const MAX_INFLUENCES: usize = 4;
+
 /// How one skinned entry is blended: on the host or in the vertex shader.
 ///
 /// `Cpu` is the phase B path (pre-skinned world-space buffers, `IDENTITY`
@@ -240,7 +247,7 @@ pub fn blend_vertex_reference(
     let direction = Vec3::from_array(normal);
     let mut blended_position = Vec3::ZERO;
     let mut blended_normal = Vec3::ZERO;
-    for slot in 0..4 {
+    for slot in 0..MAX_INFLUENCES {
         let joint = palette
             .get(joints[slot] as usize)
             .copied()
@@ -249,7 +256,7 @@ pub fn blend_vertex_reference(
         blended_normal += joint.transform_vector3(direction) * weights[slot];
     }
     let position = blended_position.to_array();
-    let normal = if blended_normal.length_squared() > 1e-12 {
+    let normal = if blended_normal.length_squared() > DEGENERATE_LEN2 {
         blended_normal.normalize().to_array()
     } else {
         blended_normal.to_array()
@@ -264,10 +271,10 @@ pub fn blend_vertex_reference(
 /// raw weights without canonicalizing, so extraction stages these — not
 /// the lane values — for the palette blend. [`blend_vertex_reference`]
 /// applies the same rule, which is why the two agree.
-pub fn canonical_staged_weights(weights: [f32; 4]) -> [f32; 4] {
+pub fn canonical_staged_weights(weights: [f32; MAX_INFLUENCES]) -> [f32; MAX_INFLUENCES] {
     let finite = weights.iter().all(|slot| slot.is_finite());
     let sum: f32 = weights.iter().sum();
-    if finite && sum > 1e-6 {
+    if finite && sum > NEAR_ZERO {
         [
             weights[0] / sum,
             weights[1] / sum,

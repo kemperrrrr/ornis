@@ -669,6 +669,9 @@ impl From<Clamped01> for f64 {
     }
 }
 
+/// Squared length below which a vector/quaternion is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+
 /// Rejected [`UnitVec3`] input (must be finite and non-zero).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitVec3Error;
@@ -702,7 +705,7 @@ impl UnitVec3 {
 
     /// Normalizes any finite non-zero vector; `None` on zero/non-finite input.
     pub fn normalize(value: Vec3) -> Option<Self> {
-        if !value.is_finite() || value.length_squared() < 1e-12 {
+        if !value.is_finite() || value.length_squared() < DEGENERATE_LEN2 {
             return None;
         }
         Some(Self(value.normalize()))
@@ -762,7 +765,7 @@ impl UnitQuat {
 
     /// Normalizes any finite non-degenerate quaternion; `None` otherwise.
     pub fn normalize(value: Quat) -> Option<Self> {
-        if !value.is_finite() || value.length_squared() < 1e-12 {
+        if !value.is_finite() || value.length_squared() < DEGENERATE_LEN2 {
             return None;
         }
         Some(Self(value.normalize()))

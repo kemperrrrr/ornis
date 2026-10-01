@@ -9,6 +9,37 @@
 
 use crate::units::{Clamped01, LinearRgb, LinearRgba};
 
+// ---- OpenPBR preset scalars (shared across `pbr` / named recipes) ----
+
+/// Default dielectric base color (linear gray).
+const DIELECTRIC_BASE_RGB: [f32; 3] = [0.8, 0.8, 0.8];
+/// Default dielectric specular roughness.
+const DIELECTRIC_ROUGHNESS: f32 = 0.3;
+/// Default dielectric / glass / coat IOR (soda-lime glass).
+const DIELECTRIC_IOR: f32 = 1.5;
+/// Polished metal base color (linear).
+const METAL_BASE_RGB: [f32; 3] = [0.9, 0.9, 0.9];
+/// Polished metal specular roughness.
+const METAL_ROUGHNESS: f32 = 0.1;
+/// Organic subsurface IOR (skin-like).
+const SUBSURFACE_IOR: f32 = 1.3;
+/// Subsurface scatter radius (m).
+const SUBSURFACE_RADIUS: f32 = 0.1;
+/// Subsurface scatter tint (reddish).
+const SUBSURFACE_TINT_RGB: [f32; 3] = [0.8, 0.2, 0.1];
+/// Clearcoat / metal polish roughness.
+const COAT_ROUGHNESS: f32 = 0.1;
+/// Water / soap-film IOR.
+const WATER_IOR: f32 = 1.33;
+/// Thin-film thickness in micrometers (soap bubble).
+const THIN_FILM_THICKNESS_UM: f32 = 300.0;
+/// Emissive luminance (nits) for the warm light preset.
+const EMISSION_LUMINANCE_NITS: f32 = 1000.0;
+/// Warm emissive tint (linear).
+const EMISSION_TINT_RGB: [f32; 3] = [1.0, 0.8, 0.6];
+/// Thick transmission medium depth (m).
+const TRANSMISSION_DEPTH: f32 = 2.0;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 /// Base (diffuse) parameters — GPU slot 0.
@@ -541,10 +572,15 @@ impl OpenPBRMaterial {
         Self {
             base: BaseGroup {
                 params: [1.0, 0.0, 0.0, 0.0],
-                color: [0.8, 0.8, 0.8, 1.0],
+                color: [
+                    DIELECTRIC_BASE_RGB[0],
+                    DIELECTRIC_BASE_RGB[1],
+                    DIELECTRIC_BASE_RGB[2],
+                    1.0,
+                ],
             },
             specular: SpecularGroup {
-                params: [1.0, 0.3, 1.5, 0.0],
+                params: [1.0, DIELECTRIC_ROUGHNESS, DIELECTRIC_IOR, 0.0],
                 color: [1.0, 1.0, 1.0, 0.0],
             },
             transmission: TransmissionGroup {
@@ -554,7 +590,12 @@ impl OpenPBRMaterial {
             },
             subsurface: SubsurfaceGroup {
                 params: [0.0, 0.0, 1.0, 0.0],
-                color: [0.8, 0.8, 0.8, 1.0],
+                color: [
+                    DIELECTRIC_BASE_RGB[0],
+                    DIELECTRIC_BASE_RGB[1],
+                    DIELECTRIC_BASE_RGB[2],
+                    1.0,
+                ],
                 radius_scale_gb: [1.0, 1.0, 0.0, 0.0],
             },
             fuzz: FuzzGroup {
@@ -564,10 +605,10 @@ impl OpenPBRMaterial {
             coat: CoatGroup {
                 params: [0.0, 0.0, 0.0, 1.0],
                 color: [1.0, 1.0, 1.0, 0.0],
-                ior: [1.5, 0.0, 0.0, 0.0],
+                ior: [DIELECTRIC_IOR, 0.0, 0.0, 0.0],
             },
             thin_film: ThinFilmGroup {
-                params: [0.0, 0.0, 1.33, 0.0],
+                params: [0.0, 0.0, WATER_IOR, 0.0],
             },
             emission: EmissionGroup {
                 params: [0.0, 0.0, 0.0, 0.0],
@@ -584,9 +625,9 @@ impl OpenPBRMaterial {
     pub fn metal() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(1.0);
-        m.base.color_rgb([0.9, 0.9, 0.9]);
+        m.base.color_rgb(METAL_BASE_RGB);
         m.specular.weight(1.0);
-        m.specular.roughness(0.1);
+        m.specular.roughness(METAL_ROUGHNESS);
         m
     }
 
@@ -594,10 +635,10 @@ impl OpenPBRMaterial {
     pub fn dielectric() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
-        m.base.color_rgb([0.8, 0.8, 0.8]);
+        m.base.color_rgb(DIELECTRIC_BASE_RGB);
         m.specular.weight(1.0);
-        m.specular.roughness(0.3);
-        m.specular.ior(1.5);
+        m.specular.roughness(DIELECTRIC_ROUGHNESS);
+        m.specular.ior(DIELECTRIC_IOR);
         m
     }
 
@@ -608,7 +649,7 @@ impl OpenPBRMaterial {
         m.base.color_rgb([0.0, 0.0, 0.0]);
         m.specular.weight(1.0);
         m.specular.roughness(0.0);
-        m.specular.ior(1.5);
+        m.specular.ior(DIELECTRIC_IOR);
         m.transmission.weight(1.0);
         m.transmission.depth(1.0);
         m.transmission.color_rgb([1.0, 1.0, 1.0]);
@@ -620,13 +661,13 @@ impl OpenPBRMaterial {
     pub fn subsurface() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
-        m.base.color_rgb([0.8, 0.8, 0.8]);
+        m.base.color_rgb(DIELECTRIC_BASE_RGB);
         m.specular.weight(1.0);
-        m.specular.roughness(0.3);
-        m.specular.ior(1.3);
+        m.specular.roughness(DIELECTRIC_ROUGHNESS);
+        m.specular.ior(SUBSURFACE_IOR);
         m.subsurface.weight(1.0);
-        m.subsurface.radius(0.1);
-        m.subsurface.color_rgb([0.8, 0.2, 0.1]);
+        m.subsurface.radius(SUBSURFACE_RADIUS);
+        m.subsurface.color_rgb(SUBSURFACE_TINT_RGB);
         m
     }
 
@@ -634,13 +675,13 @@ impl OpenPBRMaterial {
     pub fn coat() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
-        m.base.color_rgb([0.8, 0.8, 0.8]);
+        m.base.color_rgb(DIELECTRIC_BASE_RGB);
         m.specular.weight(1.0);
-        m.specular.roughness(0.3);
-        m.specular.ior(1.5);
+        m.specular.roughness(DIELECTRIC_ROUGHNESS);
+        m.specular.ior(DIELECTRIC_IOR);
         m.coat.weight(1.0);
-        m.coat.roughness(0.1);
-        m.coat.ior(1.5);
+        m.coat.roughness(COAT_ROUGHNESS);
+        m.coat.ior(DIELECTRIC_IOR);
         m
     }
 
@@ -648,13 +689,13 @@ impl OpenPBRMaterial {
     pub fn fuzz() -> Self {
         let mut m = Self::pbr();
         m.base.metalness(0.0);
-        m.base.color_rgb([0.8, 0.8, 0.8]);
+        m.base.color_rgb(DIELECTRIC_BASE_RGB);
         m.specular.weight(1.0);
-        m.specular.roughness(0.3);
-        m.specular.ior(1.5);
+        m.specular.roughness(DIELECTRIC_ROUGHNESS);
+        m.specular.ior(DIELECTRIC_IOR);
         m.fuzz.weight(1.0);
-        m.fuzz.roughness(0.3);
-        m.fuzz.color_rgb([0.8, 0.8, 0.8]);
+        m.fuzz.roughness(DIELECTRIC_ROUGHNESS);
+        m.fuzz.color_rgb(DIELECTRIC_BASE_RGB);
         m
     }
 
@@ -665,10 +706,10 @@ impl OpenPBRMaterial {
         m.base.color_rgb([0.0, 0.0, 0.0]);
         m.specular.weight(1.0);
         m.specular.roughness(0.0);
-        m.specular.ior(1.5);
+        m.specular.ior(DIELECTRIC_IOR);
         m.thin_film.weight(1.0);
-        m.thin_film.thickness_um(300.0);
-        m.thin_film.ior(1.33);
+        m.thin_film.thickness_um(THIN_FILM_THICKNESS_UM);
+        m.thin_film.ior(WATER_IOR);
         m
     }
 
@@ -678,8 +719,8 @@ impl OpenPBRMaterial {
         m.base.metalness(0.0);
         m.base.color_rgb([0.0, 0.0, 0.0]);
         m.specular.weight(0.0);
-        m.emission.luminance(1000.0);
-        m.emission.color_rgb([1.0, 0.8, 0.6]);
+        m.emission.luminance(EMISSION_LUMINANCE_NITS);
+        m.emission.color_rgb(EMISSION_TINT_RGB);
         m
     }
 
@@ -690,9 +731,9 @@ impl OpenPBRMaterial {
         m.base.color_rgb([0.0, 0.0, 0.0]);
         m.specular.weight(1.0);
         m.specular.roughness(0.0);
-        m.specular.ior(1.5);
+        m.specular.ior(DIELECTRIC_IOR);
         m.transmission.weight(1.0);
-        m.transmission.depth(2.0);
+        m.transmission.depth(TRANSMISSION_DEPTH);
         m.transmission.color_rgb([1.0, 1.0, 1.0]);
         m
     }

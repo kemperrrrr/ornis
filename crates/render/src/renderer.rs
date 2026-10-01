@@ -109,6 +109,14 @@ pub const SHADOW_SIZE: u32 = 1024;
 /// eye at `SHADOW_DIR_DIST` along the to-light direction.
 pub const SHADOW_ORTHO_HALF: f32 = 12.0;
 const SHADOW_DIR_DIST: f32 = 30.0;
+/// Near/far depth margin beyond the directional shadow box (m).
+const SHADOW_DIR_DEPTH_MARGIN: f32 = 20.0;
+/// Extra far-plane padding for fitted directional shadows (m).
+const SHADOW_FIT_FAR_PAD: f32 = 10.0;
+/// Absolute axis·Y above which the shadow look-at picks +X as up.
+const SHADOW_UP_AXIS_DOT: f32 = 0.98;
+/// Floor for light range / attenuation denominators (m).
+const LIGHT_RANGE_EPS: f32 = 1e-3;
 
 /// Depth-bias pair for the shadow pre-pass (2D layers and cube faces
 /// share it). The constant term is negligible on `Depth32Float`; the
@@ -852,7 +860,7 @@ pub struct Renderer3D {
 
 /// Pick an up vector non-parallel to the given shadow axis.
 fn shadow_up(axis: glam::Vec3) -> glam::Vec3 {
-    if axis.y.abs() > 0.98 {
+    if axis.y.abs() > SHADOW_UP_AXIS_DOT {
         glam::Vec3::X
     } else {
         glam::Vec3::Y
@@ -874,8 +882,8 @@ fn dir_shadow_vp(to_light: glam::Vec3) -> [[f32; 4]; 4] {
         SHADOW_ORTHO_HALF,
         -SHADOW_ORTHO_HALF,
         SHADOW_ORTHO_HALF,
-        SHADOW_DIR_DIST - 20.0,
-        SHADOW_DIR_DIST + 20.0,
+        SHADOW_DIR_DIST - SHADOW_DIR_DEPTH_MARGIN,
+        SHADOW_DIR_DIST + SHADOW_DIR_DEPTH_MARGIN,
     );
     (proj * view).to_cols_array_2d()
 }
@@ -909,7 +917,7 @@ pub fn shadow_fit_for_bounds(min: [f32; 3], max: [f32; 3]) -> ([f32; 3], f32) {
 /// Same `directx` depth convention as [`dir_shadow_vp`]; only used when a
 /// scene fit was set via [`Renderer3D::set_shadow_bounds`].
 fn dir_shadow_vp_fitted(to_light: glam::Vec3, center: [f32; 3], half: f32) -> [[f32; 4]; 4] {
-    let dist = half + 20.0;
+    let dist = half + SHADOW_DIR_DEPTH_MARGIN;
     let c = glam::Vec3::from_array(center);
     let view = glam::camera::rh::view::look_at_mat4(c + to_light * dist, c, shadow_up(to_light));
     let proj = glam::camera::rh::proj::directx::orthographic(
@@ -918,7 +926,7 @@ fn dir_shadow_vp_fitted(to_light: glam::Vec3, center: [f32; 3], half: f32) -> [[
         -half,
         half,
         1.0,
-        dist + half + 10.0,
+        dist + half + SHADOW_FIT_FAR_PAD,
     );
     (proj * view).to_cols_array_2d()
 }
@@ -1220,7 +1228,7 @@ fn build_lighting_uniform(
                     kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
                     position: [position[0], position[1], position[2], 1.0],
                     color: pack_light_color(*color, *intensity, exposure),
-                    params: [range.max(1e-3), 0.0, 0.0, slot],
+                    params: [range.max(LIGHT_RANGE_EPS), 0.0, 0.0, slot],
                     ..gpu_lights[i]
                 }
             }

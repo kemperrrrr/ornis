@@ -32,6 +32,13 @@ use ornis_gameplay::Position;
 
 use ornis_assets::scene::{MeshDesc, TransformDesc};
 
+/// Squared length / determinant floor for degenerate skinning joints.
+const DEGENERATE_LEN2: f32 = 1e-12;
+/// Keyframe span / weight sum floor before divide.
+const NEAR_ZERO: f32 = 1e-6;
+/// Max joint influences per skinned vertex (glTF / engine contract).
+const MAX_INFLUENCES: usize = 4;
+
 /// Phase D GPU-skinning contract: [`SkinningMode`], [`JointCount`] /
 /// [`JointLimit`], [`SkinningResources`], [`SkinError`] and the shader-mirror
 /// reference blend.
@@ -147,7 +154,7 @@ fn segment<T: Copy>(keys: &[Key<T>], t: f32) -> Option<(&Key<T>, &Key<T>, f32)> 
     }
     let (before, after) = (&keys[upper - 1], &keys[upper]);
     let span = after.time - before.time;
-    let alpha = if span > 1e-6 {
+    let alpha = if span > NEAR_ZERO {
         ((t - before.time) / span).clamp(0.0, 1.0)
     } else {
         0.0
@@ -1109,7 +1116,7 @@ pub fn skin_vertices(
 /// fallback, not a silent entity-level stub).
 fn normal_part(joint: &Mat4) -> Mat3 {
     let determinant = joint.determinant();
-    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+    if !determinant.is_finite() || determinant.abs() < DEGENERATE_LEN2 {
         return Mat3::IDENTITY;
     }
     Mat3::from_mat4(joint.inverse().transpose())
@@ -1117,10 +1124,10 @@ fn normal_part(joint: &Mat4) -> Mat3 {
 
 /// Canonical per-vertex weights: normalize a finite positive sum,
 /// otherwise fall back to full weight on joint 0 (design §2.1 rule).
-fn canonical_weights(weights: [f32; 4]) -> [f32; 4] {
+fn canonical_weights(weights: [f32; MAX_INFLUENCES]) -> [f32; MAX_INFLUENCES] {
     let finite = weights.iter().all(|slot| slot.is_finite());
     let sum: f32 = weights.iter().sum();
-    if finite && sum > 1e-6 {
+    if finite && sum > NEAR_ZERO {
         [
             weights[0] / sum,
             weights[1] / sum,
@@ -1141,7 +1148,7 @@ fn blend_position(
 ) -> [f32; 3] {
     let vertex = Vec3::from_array(position);
     let mut blended = Vec3::ZERO;
-    for slot in 0..4 {
+    for slot in 0..MAX_INFLUENCES {
         let joint = joint_matrices
             .get(joint_index[slot] as usize)
             .copied()
@@ -1161,14 +1168,14 @@ fn blend_normal(
 ) -> [f32; 3] {
     let direction = Vec3::from_array(normal);
     let mut blended = Vec3::ZERO;
-    for slot in 0..4 {
+    for slot in 0..MAX_INFLUENCES {
         let joint = normal_matrices
             .get(joint_index[slot] as usize)
             .copied()
             .unwrap_or(Mat3::IDENTITY);
         blended += joint * direction * weights[slot];
     }
-    if blended.length_squared() > 1e-12 {
+    if blended.length_squared() > DEGENERATE_LEN2 {
         blended.normalize().to_array()
     } else {
         blended.to_array()
@@ -1388,7 +1395,7 @@ fn root_matrix(transforms: Option<&ComponentStore<TransformDesc>>, entity: Entit
 fn normalized_skel_quat(rotation: [f32; 4]) -> Quat {
     let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
     let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         orientation.normalize()
     } else {
         Quat::IDENTITY
@@ -1790,7 +1797,7 @@ pub fn bake_bind_transform(positions: &mut [[f32; 3]], normals: &mut [[f32; 3]],
     let normals_part = normal_part(&matrix);
     for normal in normals.iter_mut() {
         let blended = normals_part * Vec3::from_array(*normal);
-        if blended.length_squared() > 1e-12 {
+        if blended.length_squared() > DEGENERATE_LEN2 {
             *normal = blended.normalize().to_array();
         } else {
             *normal = blended.to_array();
