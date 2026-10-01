@@ -15,7 +15,7 @@
 mod e2e;
 mod quality;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 fn main() {
@@ -103,14 +103,18 @@ fn workspace_root() -> PathBuf {
     // xtask/Cargo.toml lives one level below the workspace root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask has a parent directory")
-        .to_path_buf()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn run(cmd: &mut Command, what: &str) {
-    let status = cmd
-        .status()
-        .unwrap_or_else(|e| panic!("xtask: failed to spawn {what}: {e}"));
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("xtask: failed to spawn {what}: {e}");
+            exit(1);
+        }
+    };
     if !status.success() {
         eprintln!("xtask: {what} failed with {status}");
         exit(status.code().unwrap_or(1));

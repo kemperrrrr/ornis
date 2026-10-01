@@ -1267,9 +1267,13 @@ pub fn fuzz(args: &[String]) {
         "xtask fuzz: cargo +nightly fuzz run {target} {}",
         extra.join(" ")
     );
-    let status = c
-        .status()
-        .unwrap_or_else(|e| panic!("xtask fuzz: failed to spawn cargo-fuzz: {e}"));
+    let status = match c.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("xtask fuzz: failed to spawn cargo-fuzz: {e}");
+            exit(1);
+        }
+    };
     exit(status.code().unwrap_or(1));
 }
 
@@ -1298,9 +1302,13 @@ pub fn mutants(args: &[String]) {
         "xtask mutants: cargo mutants -p ornis-core --features lock-free --timeout 300 {}",
         extra.join(" ")
     );
-    let status = c
-        .status()
-        .unwrap_or_else(|e| panic!("xtask mutants: failed to spawn cargo-mutants: {e}"));
+    let status = match c.status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("xtask mutants: failed to spawn cargo-mutants: {e}");
+            exit(1);
+        }
+    };
     exit(status.code().unwrap_or(1));
 }
 

@@ -362,7 +362,7 @@ fn pool_loop(
     debug_assert!(matches!(priority, ExactPriority::NewestWins));
     loop {
         let job = {
-            let queue = jobs.lock().expect("exact job queue lock");
+            let queue = jobs.lock().unwrap_or_else(|e| e.into_inner());
             let Ok(first) = queue.recv() else {
                 return;
             };

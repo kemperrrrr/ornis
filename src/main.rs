@@ -658,8 +658,9 @@ fn remote_editor_requested() -> bool {
 }
 
 #[cfg(not(feature = "editor-only"))]
-fn main() {
-    let event_loop = EventLoop::new().unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let event_loop = EventLoop::new()?;
     let mut app = GameApp::new();
-    event_loop.run_app(&mut app).unwrap();
+    event_loop.run_app(&mut app)?;
+    Ok(())
 }

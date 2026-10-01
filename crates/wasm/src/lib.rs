@@ -692,8 +692,9 @@ impl<'a> FrameState<'a> {
     /// Upload the orbit-derived camera for the current aspect ratio.
     fn update_camera(&mut self) {
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let orbit = read_orbit_camera(self.render_world.engine())
-            .expect("browser render world installs orbit camera");
+        let Some(orbit) = read_orbit_camera(self.render_world.engine()) else {
+            return;
+        };
         let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
         let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
         let proj =
