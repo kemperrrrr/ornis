@@ -103,6 +103,7 @@ mod tests {
             name: "wired".into(),
             entities: vec![ornis_gltf::LoadedEntity {
                 name: "part".into(),
+                node: 0,
                 translation: [1.0, 2.0, 3.0],
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [2.0, 2.0, 2.0],

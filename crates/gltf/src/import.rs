@@ -331,6 +331,7 @@ impl<'a> Import<'a> {
         let skin = node.skin().and_then(|skin| self.resolve_skin(&skin));
         Some(LoadedEntity {
             name: entity_name(node, mesh_name, mesh_index, primitive.index()),
+            node: node.index() as u32,
             translation,
             rotation,
             scale,

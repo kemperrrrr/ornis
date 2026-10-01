@@ -120,6 +120,8 @@ pub struct LoadedScene {
 pub struct LoadedEntity {
     /// Display name: node name → mesh name → `mesh_{mesh}_{primitive}`.
     pub name: String,
+    /// Source glTF node index of the mesh instance (object-track mapping key).
+    pub node: u32,
     /// World-space translation in glTF units.
     pub translation: [f32; 3],
     /// World-space orientation as `(x, y, z, w)`, unit length.

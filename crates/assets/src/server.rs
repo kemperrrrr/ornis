@@ -108,6 +108,11 @@ pub fn parse_scene_ron(ron_str: &str) -> Result<Scene, SceneLoadError> {
 pub struct AssetServer {
     next: u64,
     scenes: HashMap<AssetId, Scene>,
+    /// Retained glTF sources behind glTF-loaded ids: the converted
+    /// [`Scene`] drops node indices and animation data, so animation wiring
+    /// reads the [`LoadedScene`](ornis_gltf::LoadedScene) here instead.
+    /// `.ron` and manual loads have no entry.
+    loaded: HashMap<AssetId, ornis_gltf::LoadedScene>,
     sources: HashMap<AssetId, String>,
     dirty: HashSet<AssetId>,
     events: Vec<AssetEvent>,
@@ -125,6 +130,7 @@ impl AssetServer {
         Self {
             next: FIRST_ASSET_INDEX,
             scenes: HashMap::new(),
+            loaded: HashMap::new(),
             sources: HashMap::new(),
             dirty: HashSet::new(),
             events: Vec::new(),
@@ -186,6 +192,15 @@ impl AssetServer {
         self.scenes.get(&id)
     }
 
+    /// Borrows the retained glTF source behind a glTF-loaded id.
+    ///
+    /// Only [`AssetServer::load_gltf`]/[`load_gltf_file`] retain a source
+    /// (alongside the converted [`Scene`]); `.ron` and manual loads plus
+    /// unknown ids return `None`.
+    pub fn loaded_scene(&self, id: AssetId) -> Option<&ornis_gltf::LoadedScene> {
+        self.loaded.get(&id)
+    }
+
     /// Re-serializes a loaded scene to `.ron`.
     ///
     /// Round-trip proof: `parse(load(x).ron) == load(parse(x))` up to RON
@@ -196,18 +211,25 @@ impl AssetServer {
 
     /// Parses glTF bytes (`.glb` or `.gltf`) into a [`Scene`] via
     /// [`crate::import`] and stores it. Textured slots keep their scalar
-    /// fallback until the GPU upload step learns images.
+    /// fallback until the GPU upload step learns images. The
+    /// [`LoadedScene`](ornis_gltf::LoadedScene) is retained alongside (see
+    /// [`AssetServer::loaded_scene`]) so animation wiring can map node
+    /// indices the converted [`Scene`] drops.
     ///
     /// # Errors
     ///
     /// Returns the typed [`ornis_gltf::ImportError`]; the registry is untouched.
     pub fn load_gltf(&mut self, bytes: &[u8]) -> Result<AssetId, ornis_gltf::ImportError> {
         let loaded = ornis_gltf::load_slice(bytes)?;
-        Ok(self.load_scene(crate::import::scene_from_gltf(&loaded), None))
+        let id = self.load_scene(crate::import::scene_from_gltf(&loaded), None);
+        self.loaded.insert(id, loaded);
+        Ok(id)
     }
 
     /// Reads a glTF file (resolving sibling `.bin` like
-    /// [`ornis_gltf::load_path`]) and stores it as a scene.
+    /// [`ornis_gltf::load_path`]) and stores it as a scene. The
+    /// [`LoadedScene`](ornis_gltf::LoadedScene) is retained alongside (see
+    /// [`AssetServer::loaded_scene`]).
     ///
     /// # Errors
     ///
@@ -218,7 +240,9 @@ impl AssetServer {
         path: &std::path::Path,
     ) -> Result<AssetId, ornis_gltf::ImportError> {
         let loaded = ornis_gltf::load_path(path)?;
-        Ok(self.load_scene(crate::import::scene_from_gltf(&loaded), None))
+        let id = self.load_scene(crate::import::scene_from_gltf(&loaded), None);
+        self.loaded.insert(id, loaded);
+        Ok(id)
     }
 
     /// Marks an asset dirty for hot reload; `false` for unknown ids.
@@ -570,6 +594,33 @@ mod tests {
                 kind: AssetKind::Scene
             }]
         );
+    }
+
+    #[test]
+    fn load_gltf_retains_loaded_scene_alongside_converted() {
+        // The converted `Scene` drops node indices; the retained source
+        // keeps them for animation wiring.
+        let mut server = AssetServer::new();
+        let id = server
+            .load_gltf(triangle_gltf_json().as_bytes())
+            .expect("triangle gltf loads");
+        let scene = server.get_scene(id).expect("converted scene");
+        assert_eq!(scene.entities.len(), 1);
+        let loaded = server.loaded_scene(id).expect("loaded retained");
+        assert_eq!(loaded.entities.len(), 1);
+        assert_eq!(loaded.entities[0].name, "tri");
+        assert_eq!(loaded.entities[0].node, 0);
+        assert!(loaded.skins.is_empty());
+    }
+
+    #[test]
+    fn ron_and_manual_loads_retain_no_loaded_scene() {
+        let mut server = AssetServer::new();
+        let ron = server.load_scene_ron(DEMO_RON).expect("demo scene loads");
+        assert!(server.loaded_scene(ron).is_none());
+        let manual = server.load_scene(two_entity_scene(), None);
+        assert!(server.loaded_scene(manual).is_none());
+        assert!(server.loaded_scene(AssetId { index: 999 }).is_none());
     }
 
     #[test]

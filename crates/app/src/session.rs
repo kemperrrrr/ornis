@@ -69,6 +69,7 @@
 //! changes. Invalid commands never panic: they produce an `error` event and
 //! leave the world (and its version) untouched.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -80,6 +81,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ornis_animation::{AnimPlayer, ClipId, JointPose, SkelClip, SkelPlayer, Skeleton, SkinnedMesh};
 use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
@@ -89,8 +91,14 @@ use ornis_editor::{EditorMarks, install_editor, is_editor_only};
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
+use crate::anim_wiring::{
+    anim_clip_from_loaded, skel_clip_from_loaded, skeleton_from_loaded, skinned_mesh_from_loaded,
+};
 use crate::physics_runtime::{PhysicsRuntime, install_physics};
-use crate::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
+use crate::{
+    GameWorld, install_gameplay_physics_bridge, install_object_animation,
+    install_skeletal_animation,
+};
 use ornis_assets::collider::ColliderDesc;
 use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
@@ -339,6 +347,17 @@ impl Default for EditorSession {
         // Object animation in the same DAG (after body poses): no-op
         // until an entity carries animation lanes.
         install_object_animation(engine);
+        // Skeletal sampling + CPU skinning, same DAG position contract
+        // (`anim_sample → skel_sample → skel_skin_cpu`): no-op until a
+        // glTF load wires skeletal lanes.
+        install_skeletal_animation(engine);
+        // Skeletal lanes ride the same store (samplers read them when
+        // present): registered up front like the hot lanes, so glTF wiring
+        // only inserts. `AnimPlayer`/`AnimClip` are already covered by
+        // `install_object_animation`.
+        if let Some(store) = engine.world_mut().store_mut() {
+            ensure_anim_lanes(store);
+        }
         Self {
             world,
             alive: Vec::new(),
@@ -671,7 +690,9 @@ impl EditorSession {
 
     /// Read `path` and replace the world with its scene. `.ron` files go
     /// through the asset server (retained as sources); `.glb`/`.gltf`
-    /// files load geometry + scalar materials the same replace path.
+    /// files load geometry + scalar materials through the same replace
+    /// path, then wire skeletal/object animation clips (autoplaying, see
+    /// [`EditorSession::wire_gltf_animation`]).
     /// Any error (missing file, invalid content) leaves the world untouched.
     ///
     /// # Errors
@@ -695,7 +716,14 @@ impl EditorSession {
             let Some(scene) = self.assets.get_scene(id).cloned() else {
                 return Ok(0);
             };
-            return Ok(self.load_scene(scene));
+            let count = self.load_scene(scene);
+            // Animation wiring reads the retained `LoadedScene`: node
+            // indices never reach the converted `Scene`.
+            let added = match self.assets.loaded_scene(id).cloned() {
+                Some(loaded) => self.wire_gltf_animation(&loaded),
+                None => 0,
+            };
+            return Ok(count + added);
         }
         let ron = fs::read_to_string(resolved).map_err(|e| SceneFileError::Read {
             path: resolved.display().to_string(),
@@ -703,6 +731,170 @@ impl EditorSession {
         })?;
         self.load_scene_ron(&ron)
             .map_err(|e| SceneFileError::Parse(e.to_string()))
+    }
+
+    /// Wire glTF animation clips into the live world after a `.glb`/`.gltf`
+    /// replace (see [`EditorSession::load_scene_file`]).
+    ///
+    /// Mesh entities are already spawned in `loaded` order (the converter
+    /// [`ornis_assets::import::scene_from_gltf`] preserves it 1:1 and
+    /// [`EditorSession::load_scene`] spawns in order), so `loaded.entities`
+    /// zips with the pre-wire [`EditorSession::alive`] prefix to rebuild
+    /// the node→world-entity map the converted [`Scene`] dropped. For every
+    /// skin a skeleton-root entity spawns ([`Skeleton`] plus
+    /// [`JointPose::identity`]); mesh entities with skin data gain a
+    /// [`SkinnedMesh`] lane pointing at their root. Every skeletal clip
+    /// becomes one cold-[`SkelClip`] playlist entity and every object clip
+    /// one cold-[`AnimClip`] playlist entity; roots play the first skeletal
+    /// clip and every mapped object-track entity plays its clip.
+    ///
+    /// Players spawn with `playing: true`: a DELIBERATE deviation from the
+    /// paused default of `docs/animation-design.md` §4.5 — loaded demo
+    /// content autoplays so the editor visibly runs; editor pause control
+    /// is a separate follow-up. Unmapped node tracks were already dropped
+    /// by the converter; the dropped count is covered by converter unit
+    /// tests and nothing is stored at runtime.
+    ///
+    /// Returns the number of spawned animation entities (roots + playlists).
+    fn wire_gltf_animation(&mut self, loaded: &ornis_gltf::LoadedScene) -> usize {
+        if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
+            return 0;
+        }
+        if let Some(store) = self.store_mut() {
+            ensure_anim_lanes(store);
+        } else {
+            return 0;
+        }
+        // Mesh-entity snapshot: `alive` grows below (roots + playlists), so
+        // the `loaded`-order zip must pin the pre-wire prefix.
+        let mesh_entities: Vec<Entity> = self.alive.clone();
+        // Loader-local handles are `Entity::new(node)` (see the `ornis-gltf`
+        // clip assembly): first mesh entity wins per node.
+        let mut node_to_entity: HashMap<Entity, Entity> = HashMap::new();
+        for (desc, entity) in loaded.entities.iter().zip(mesh_entities.iter()) {
+            node_to_entity
+                .entry(Entity::new(desc.node))
+                .or_insert(*entity);
+        }
+        let mut added = 0usize;
+        let mut touched = false;
+        // Skeleton roots, one per skin.
+        let mut roots: Vec<Entity> = Vec::with_capacity(loaded.skins.len());
+        for (index, skin) in loaded.skins.iter().enumerate() {
+            let skeleton = skeleton_from_loaded(skin);
+            let joints = skeleton.joint_count();
+            let root = {
+                let Some(store) = self.store_mut() else {
+                    continue;
+                };
+                let root = store.create_entity();
+                store.insert(root, Name(format!("skeleton_{index}")));
+                store.insert(root, skeleton);
+                store.insert(root, JointPose::identity(joints));
+                root
+            };
+            self.alive.push(root);
+            self.version.bump();
+            roots.push(root);
+            added += 1;
+        }
+        // Skeletal playlists, one per clip and shared across roots; every
+        // root autoplays the first clip (one player lane per root — further
+        // clips stay retained for editor clip selection, a follow-up).
+        let mut skel_playlists = Vec::with_capacity(loaded.skel_clips.len());
+        for (index, clip) in loaded.skel_clips.iter().enumerate() {
+            let live = skel_clip_from_loaded(clip);
+            let playlist = {
+                let Some(store) = self.store_mut() else {
+                    continue;
+                };
+                let playlist = store.create_entity();
+                store.insert(playlist, Name(format!("skel_clip_{index}")));
+                store.insert_cold(playlist, live);
+                playlist
+            };
+            self.alive.push(playlist);
+            self.version.bump();
+            skel_playlists.push(playlist);
+            added += 1;
+        }
+        if let Some(&first) = skel_playlists.first() {
+            // DELIBERATE deviation from docs/animation-design.md §4.5
+            // (paused default): loaded demo content autoplays so the editor
+            // visibly runs; editor pause control is a separate follow-up.
+            let player = SkelPlayer {
+                clip: ClipId(first),
+                time: 0.0,
+                speed: 1.0,
+                weight: 1.0,
+                playing: true,
+            };
+            if let Some(store) = self.store_mut() {
+                for root in &roots {
+                    store.insert(*root, player);
+                }
+            }
+        }
+        // Skinned meshes: `SkinnedMesh.skeleton` points at the skin's root.
+        // `None` (unskinned primitive) keeps the regular `Custom` mesh.
+        for (desc, entity) in loaded.entities.iter().zip(mesh_entities.iter()) {
+            let Some(skin) = desc.skin else {
+                continue;
+            };
+            let Some(&root) = roots.get(skin) else {
+                continue;
+            };
+            let Some(skinned) = skinned_mesh_from_loaded(root, &desc.mesh) else {
+                continue;
+            };
+            if let Some(store) = self.store_mut() {
+                store.insert(*entity, skinned);
+                touched = true;
+            }
+        }
+        // Object playlists, one per clip; every mapped track entity gets an
+        // autoplay player (last clip wins on shared entities — one player
+        // lane per entity).
+        for clip in &loaded.anim_clips {
+            let (live, dropped) = anim_clip_from_loaded(clip.name.clone(), clip, &node_to_entity);
+            // Dropped (unmapped) tracks stay dropped: the count is covered
+            // by converter unit tests, nothing is stored at runtime.
+            let _ = dropped;
+            let targets: Vec<Entity> = live.tracks.iter().map(|track| track.entity).collect();
+            let playlist = {
+                let Some(store) = self.store_mut() else {
+                    continue;
+                };
+                let playlist = store.create_entity();
+                store.insert(playlist, Name(live.name.clone()));
+                store.insert_cold(playlist, live);
+                playlist
+            };
+            self.alive.push(playlist);
+            self.version.bump();
+            added += 1;
+            // DELIBERATE autoplay (see above): loaded demo content visibly
+            // runs; editor pause control is a separate follow-up.
+            if let Some(store) = self.store_mut() {
+                for target in &targets {
+                    store.insert(
+                        *target,
+                        AnimPlayer {
+                            clip: ClipId(playlist),
+                            time: 0.0,
+                            speed: 1.0,
+                            weight: 1.0,
+                            playing: true,
+                        },
+                    );
+                }
+                touched = true;
+            }
+        }
+        if touched {
+            self.version.bump();
+        }
+        added
     }
 
     /// Resolve a user-supplied scene `path` against this session's sandbox
@@ -1354,6 +1546,20 @@ fn default_material() -> MaterialDesc {
         roughness: Clamped01::new(HALF),
         emission: [0.0, 0.0, 0.0],
     }
+}
+
+/// Registers the skeletal animation lanes up front (hot
+/// [`Skeleton`]/[`JointPose`]/[`SkinnedMesh`]/[`SkelPlayer`], cold
+/// [`SkelClip`]): mirrors the [`install_object_animation`](crate::install_object_animation)
+/// pattern (`register` for hot lanes, `register_cold` for cold ones), so
+/// glTF wiring only inserts. `AnimPlayer`/`AnimClip` stay with
+/// `install_object_animation`.
+fn ensure_anim_lanes(store: &mut SmartStore) {
+    store.register::<Skeleton>();
+    store.register::<JointPose>();
+    store.register::<SkinnedMesh>();
+    store.register::<SkelPlayer>();
+    store.register_cold::<SkelClip>();
 }
 
 /// Scene path override from a `save_scene`/`load_scene` payload
@@ -2975,5 +3181,303 @@ mod tests {
             frozen,
             "evicted body no longer simulates"
         );
+    }
+
+    // ── glTF animation wiring ────────────────────────────────────────────
+
+    /// Cold object clips live here in tests (the lib import omits the name:
+    /// only the cold lane — registered by `install_object_animation` — holds
+    /// it at runtime).
+    use ornis_animation::AnimClip;
+
+    /// Render scene matching [`animated_loaded`] 1:1 (two mesh entities).
+    fn animated_scene() -> Scene {
+        fn desc(name: &str) -> EntityDesc {
+            EntityDesc {
+                name: name.into(),
+                transform: default_transform(),
+                mesh: MeshDesc::Custom {
+                    positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    indices: vec![0, 1, 2],
+                },
+                material: default_material(),
+            }
+        }
+        Scene {
+            name: "anim-fixture".into(),
+            entities: vec![desc("skinned"), desc("plain")],
+            lights: Vec::new(),
+            camera: CameraDesc {
+                position: [0.0, 2.5, 9.0],
+                target: [0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                fov: 60.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            ambient: [0.1, 0.1, 0.1],
+        }
+    }
+
+    /// Hand-built animated source: node 0 skinned (single-joint skin), node
+    /// 1 plain; one skeletal clip plus one object clip carrying an extra
+    /// unmapped track (node 99) that the converter must drop.
+    fn animated_loaded() -> ornis_gltf::LoadedScene {
+        use ornis_gltf::{
+            LoadedAnimClip, LoadedAnimTrack, LoadedJointTrack, LoadedKey, LoadedKeyTrack,
+            LoadedMaterial, LoadedMesh, LoadedScene, LoadedSkelClip, LoadedSkin,
+        };
+        fn mesh(skinned: bool) -> LoadedMesh {
+            LoadedMesh {
+                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                indices: vec![0, 1, 2],
+                normals: None,
+                uvs: None,
+                joints: skinned.then(|| vec![[0, 0, 0, 0]; 3]),
+                weights: skinned.then(|| vec![[1.0, 0.0, 0.0, 0.0]; 3]),
+            }
+        }
+        fn material() -> LoadedMaterial {
+            LoadedMaterial {
+                base_color: [0.8, 0.2, 0.2],
+                metallic: 0.0,
+                roughness: 0.5,
+                emission: [0.0, 0.0, 0.0],
+                base_color_texture: None,
+                metallic_roughness_texture: None,
+                emissive_texture: None,
+            }
+        }
+        fn entity(name: &str, node: u32, skinned: bool) -> ornis_gltf::LoadedEntity {
+            ornis_gltf::LoadedEntity {
+                name: name.into(),
+                node,
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+                mesh: mesh(skinned),
+                skin: skinned.then_some(0),
+                material: material(),
+            }
+        }
+        LoadedScene {
+            name: "anim-fixture".into(),
+            entities: vec![entity("skinned", 0, true), entity("plain", 1, false)],
+            skins: vec![LoadedSkin {
+                parents: vec![-1],
+                inverse_bind: vec![[
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]],
+                joint_names: vec!["j0".into()],
+            }],
+            skel_clips: vec![LoadedSkelClip {
+                duration: 1.0,
+                tracks: vec![LoadedJointTrack {
+                    joint: 0,
+                    translation: LoadedKeyTrack::linear(vec![
+                        LoadedKey {
+                            time: 0.0,
+                            value: [0.0, 0.0, 0.0],
+                        },
+                        LoadedKey {
+                            time: 1.0,
+                            value: [1.0, 0.0, 0.0],
+                        },
+                    ]),
+                    rotation: LoadedKeyTrack::linear(Vec::new()),
+                    scale: LoadedKeyTrack::linear(Vec::new()),
+                }],
+            }],
+            anim_clips: vec![LoadedAnimClip {
+                name: "walk".into(),
+                duration: 2.0,
+                looping: true,
+                tracks: vec![
+                    LoadedAnimTrack {
+                        entity: Entity::new(1),
+                        translation: LoadedKeyTrack::linear(vec![LoadedKey {
+                            time: 0.0,
+                            value: [0.0, 0.0, 0.0],
+                        }]),
+                        rotation: LoadedKeyTrack::linear(Vec::new()),
+                        scale: LoadedKeyTrack::linear(Vec::new()),
+                    },
+                    LoadedAnimTrack {
+                        entity: Entity::new(99),
+                        translation: LoadedKeyTrack::linear(vec![LoadedKey {
+                            time: 0.0,
+                            value: [5.0, 5.0, 5.0],
+                        }]),
+                        rotation: LoadedKeyTrack::linear(Vec::new()),
+                        scale: LoadedKeyTrack::linear(Vec::new()),
+                    },
+                ],
+            }],
+            stats: ornis_gltf::ImportStats::default(),
+        }
+    }
+
+    /// Skeletal + object wiring populates cold lanes and autoplay players:
+    /// one root (pose length == joint count), one skeletal playlist played
+    /// by the root, one object playlist played by the mapped entity (the
+    /// unmapped track drops), and a `SkinnedMesh` pointing at the root.
+    #[test]
+    fn gltf_animation_wiring_populates_cold_lanes_and_autoplays() {
+        let mut world = EditorSession::new();
+        let loaded = animated_loaded();
+        assert_eq!(world.load_scene(animated_scene()), 2);
+        let version_before = world.version;
+        assert_eq!(world.wire_gltf_animation(&loaded), 3);
+        assert!(world.version > version_before);
+        assert_eq!(world.entity_count(), 5);
+
+        let store = world.world().store().expect("world store");
+        let skeletons = store.read_lane::<Skeleton>().expect("skeleton lane");
+        assert_eq!(skeletons.len(), 1);
+        let root = skeletons.entities[0];
+        drop(skeletons);
+
+        let poses = store.read_lane::<JointPose>().expect("pose lane");
+        assert_eq!(
+            poses.get(root).expect("root pose").matrices.len(),
+            1,
+            "pose length == joint count"
+        );
+        drop(poses);
+
+        let skel_clips = store.read_cold_lane::<SkelClip>().expect("skel cold lane");
+        assert_eq!(skel_clips.len(), 1);
+        let anim_clips = store.read_cold_lane::<AnimClip>().expect("anim cold lane");
+        assert_eq!(anim_clips.len(), 1);
+
+        let players = store.read_lane::<SkelPlayer>().expect("skel players");
+        let player = players.get(root).expect("root player");
+        assert!(player.playing, "loaded clips autoplay");
+        assert!(
+            skel_clips.get(player.clip.0).is_some(),
+            "player points at the skeletal playlist"
+        );
+        drop(players);
+
+        let skinned = store.read_lane::<SkinnedMesh>().expect("skinned lane");
+        assert_eq!(
+            skinned.get(world.alive[0]).expect("skinned mesh").skeleton,
+            root
+        );
+        assert!(skinned.get(world.alive[1]).is_none());
+        drop(skinned);
+
+        let animated = world.alive[1];
+        let object_players = store.read_lane::<AnimPlayer>().expect("anim players");
+        let object = object_players.get(animated).expect("object player");
+        assert!(object.playing, "object clips autoplay");
+        let playlist = anim_clips.get(object.clip.0).expect("object playlist");
+        assert_eq!(playlist.tracks.len(), 1, "unmapped track dropped");
+        assert_eq!(playlist.tracks[0].entity, animated);
+    }
+
+    /// A source without skins or clips wires nothing: the `.ron` shape is
+    /// untouched and no animation lanes are populated.
+    #[test]
+    fn gltf_wiring_without_animation_adds_nothing() {
+        let mut world = EditorSession::new();
+        assert_eq!(world.load_scene(animated_scene()), 2);
+        let mut bare = animated_loaded();
+        bare.skins.clear();
+        bare.skel_clips.clear();
+        bare.anim_clips.clear();
+        for entity in &mut bare.entities {
+            entity.skin = None;
+        }
+        assert_eq!(world.wire_gltf_animation(&bare), 0);
+        assert_eq!(world.entity_count(), 2);
+
+        let store = world.world().store().expect("world store");
+        assert!(
+            store
+                .read_cold_lane::<SkelClip>()
+                .is_none_or(|lane| lane.is_empty())
+        );
+        assert!(
+            store
+                .read_cold_lane::<AnimClip>()
+                .is_none_or(|lane| lane.is_empty())
+        );
+        assert!(
+            store
+                .read_lane::<SkelPlayer>()
+                .is_none_or(|lane| lane.is_empty())
+        );
+        assert!(
+            store
+                .read_lane::<AnimPlayer>()
+                .is_none_or(|lane| lane.is_empty())
+        );
+        assert!(
+            store
+                .read_lane::<SkinnedMesh>()
+                .is_none_or(|lane| lane.is_empty())
+        );
+    }
+
+    // Starter-content playback: the vendored no-root-motion UAL pack
+    // plays end to end (load → autoplay → joints move). Read-only over
+    // the committed fixture; nothing is written back.
+    #[test]
+    fn starter_pack_playback_moves_joints() {
+        let mut session = EditorSession::new();
+        let path = session
+            .scene_path("assets/starter/ual1_standard.glb")
+            .unwrap();
+        let count = session.load_scene_file(&path).unwrap();
+        assert!(count > 0, "nothing spawned");
+
+        let store = session.world().store().unwrap();
+        let players = store.read_lane::<SkelPlayer>().unwrap();
+        assert!(!players.entities.is_empty(), "no players");
+        assert!(
+            players
+                .entities
+                .iter()
+                .all(|e| players.get(*e).is_some_and(|p| p.playing)),
+            "players must autoplay"
+        );
+        let before = store
+            .read_lane::<JointPose>()
+            .unwrap()
+            .entities
+            .first()
+            .and_then(|e| {
+                store
+                    .read_lane::<JointPose>()
+                    .unwrap()
+                    .get(*e)
+                    .map(|p| p.matrices.clone())
+            })
+            .expect("joint pose");
+        drop(players);
+
+        for _ in 0..30 {
+            session.tick_secs(Seconds::new(1.0 / 60.0));
+        }
+        let store = session.world().store().unwrap();
+        let after = store
+            .read_lane::<JointPose>()
+            .unwrap()
+            .entities
+            .first()
+            .and_then(|e| {
+                store
+                    .read_lane::<JointPose>()
+                    .unwrap()
+                    .get(*e)
+                    .map(|p| p.matrices.clone())
+            })
+            .expect("joint pose");
+        assert_eq!(before.len(), after.len());
+        assert!(before != after, "30 frames ran but no joint moved");
     }
 }

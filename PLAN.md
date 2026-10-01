@@ -246,7 +246,10 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 (`LINEAR` + первоклассный `STEP` через `KeyTrack::linear/stepped`,
 `CUBICSPLINE` — честный `skipped_cubicspline`); сэмплер держит `Step`.
 Зеркальные типы вместо прямой зависимости (цикл `gltf→animation→assets→gltf`).
-Следом: проводка зеркал в cold-лейны + плееры (пути клипов в мир пока нет).
+Следом: проводка зеркал в cold-лейны + плееры ✅ 2026-10-01
+(`install_skeletal_animation`, `AssetServer` удерживает `LoadedScene`,
+autoplay `playing: true`; стартер `assets/starter/ual1_standard.glb`,
+регрессия `starter_pack_playback_moves_joints`).
 ✅ **2026-09-27 — GPU-скининг D закрыт (проверено, `ab9035b`).**
 `SkinningMode`, `JointLimit`-newtypes, палитра через `WgslStruct` +
 скин-стейдж через DSL, CPU-фолбэк, паритет картинки CPU vs GPU;

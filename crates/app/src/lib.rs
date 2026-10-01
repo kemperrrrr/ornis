@@ -8,7 +8,7 @@
 //! type — extraction reads its lanes directly, never a second world copy.
 
 use glam::Vec3;
-use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem};
+use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem, SkelSampleSystem, SkelSkinSystem};
 use ornis_assets::scene::TransformDesc;
 use ornis_core::{
     Engine, FixedTime, InputState, Resources, SmartStore, System, SystemAccess, World,
@@ -17,6 +17,8 @@ use ornis_physics::RigidBody;
 
 pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 
+/// Pure `ornis-gltf` mirror → `ornis-animation` converters.
+pub mod anim_wiring;
 pub mod game_world;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
@@ -95,6 +97,27 @@ pub fn install_object_animation(engine: &mut Engine) {
     let _ = engine
         .schedule_mut()
         .try_order_before("body_to_transform", "anim_sample");
+}
+
+/// Installs skeletal animation (`skel_sample`, `skel_skin_cpu`) into
+/// the frame schedule after the object sampler.
+///
+/// Idempotent like [`install_object_animation`]: a second call on the
+/// same engine is a no-op. Ordering follows the animation crate contract:
+/// `anim_sample → skel_sample → skel_skin_cpu` (disjoint lanes, explicit
+/// edges for determinism). No-op until an entity carries skeletal lanes.
+pub fn install_skeletal_animation(engine: &mut Engine) {
+    if engine.schedule().mermaid().contains("skel_sample") {
+        return;
+    }
+    engine.schedule_mut().add_system(SkelSampleSystem::new());
+    engine.schedule_mut().add_system(SkelSkinSystem::new());
+    let _ = engine
+        .schedule_mut()
+        .try_order_before("anim_sample", "skel_sample");
+    let _ = engine
+        .schedule_mut()
+        .try_order_before("skel_sample", "skel_skin_cpu");
 }
 
 pub fn install_unified_runtime(engine: &mut Engine) {
