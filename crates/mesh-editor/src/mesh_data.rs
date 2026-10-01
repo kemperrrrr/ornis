@@ -12,7 +12,7 @@
 /// Indices per triangle (flat soup alignment).
 pub(crate) const TRIANGLE_VERTS: usize = 3;
 /// Spatial components in a position / normal.
-const VEC3_COMPONENTS: usize = 3;
+pub(crate) const VEC3_COMPONENTS: usize = 3;
 
 /// Canonical editable triangle mesh (engine source of truth).
 #[derive(Debug, Clone, Default)]
@@ -168,7 +168,11 @@ impl MeshData {
                 normals_out.push(n);
                 uvs.push([(k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32]);
             }
-            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            // Two CCW triangles per quad face (verts 0-1-2 and 0-2-3).
+            const V1: u32 = 1;
+            const V2: u32 = 2;
+            const V3: u32 = 3;
+            indices.extend([base, base + V1, base + V2, base, base + V2, base + V3]);
         }
         Self {
             positions,

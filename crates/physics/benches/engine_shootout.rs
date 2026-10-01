@@ -56,6 +56,42 @@ const BOX_MASS: f32 = 1.0;
 /// Box3D density giving [`BOX_MASS`] for a 0.8^3 box (mass = density*volume).
 #[cfg(feature = "box3d")]
 const BOX3D_DENSITY: f32 = BOX_MASS / 0.512;
+/// Floor half-extent on Y (top face at y = 0 when centered at -FLOOR_HALF_Y).
+const FLOOR_HALF_Y: f32 = 0.5;
+/// Body-grid tile half-extent on XZ.
+const TILE_HALF: f32 = 5.0;
+/// Tall-stack floor half-extents on XZ.
+const STACK_FLOOR_HALF: f32 = 10.0;
+/// Island-field floor half-extents on XZ.
+const GRID_FLOOR_HALF: f32 = 100.0;
+/// Boxes per island tower.
+const TOWER_HEIGHT: u32 = 4;
+/// Default ornis substep count.
+const ORNIS_DEFAULT_SUBSTEPS: u32 = 12;
+/// Tuned ornis substep count for the "fast" shootout arm.
+const ORNIS_TUNED_SUBSTEPS: u32 = 4;
+/// Default Rapier solver iterations.
+#[cfg(feature = "rapier")]
+const RAPIER_DEFAULT_ITERS: usize = 4;
+/// Tuned Rapier solver iterations.
+#[cfg(feature = "rapier")]
+const RAPIER_TUNED_ITERS: usize = 8;
+/// Default Rapier restitution for dynamic boxes.
+#[cfg(feature = "rapier")]
+const RAPIER_RESTITUTION: f32 = 0.3;
+/// Criterion sample size for shootout groups.
+const SAMPLE_SIZE: usize = 10;
+/// Criterion warm-up for grid group.
+const GRID_WARMUP_SECS: u64 = 1;
+/// Criterion measurement window for grid group.
+const GRID_MEASURE_SECS: u64 = 5;
+/// Criterion warm-up for stack group.
+const STACK_WARMUP_SECS: u64 = 1;
+/// Criterion measurement window for stack group.
+const STACK_MEASURE_SECS: u64 = 2;
+/// Tuned Box3D substep count for the "fast" shootout arm.
+#[cfg(feature = "box3d")]
+const BOX3D_TUNED_SUBSTEPS: i32 = 2;
 
 // ---------------------------------------------------------------------------
 // Small helpers (panics, never unwrap: keeps `-D warnings` clippy clean).
@@ -80,15 +116,14 @@ fn must<T, E: std::fmt::Debug>(result: Result<T, E>, what: &str) -> T {
 fn build_grid<E: PhysicsEngine>(engine: &mut E, n: u32) {
     let side = (n as f32).sqrt().ceil() as u32;
     let span = side as f32 * PITCH_XZ;
-    let tile_half = 5.0f32;
-    let tiles = (span / (2.0 * tile_half)).ceil() as i32;
+    let tiles = (span / (2.0 * TILE_HALF)).ceil() as i32;
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
+            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
+            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
             engine.add_body(RigidBody::new_box(
-                Vec3::new(x, -0.5, z),
-                Vec3::new(tile_half, 0.5, tile_half),
+                Vec3::new(x, -FLOOR_HALF_Y, z),
+                Vec3::new(TILE_HALF, FLOOR_HALF_Y, TILE_HALF),
                 0.0,
             ));
         }
@@ -110,8 +145,8 @@ fn build_grid<E: PhysicsEngine>(engine: &mut E, n: u32) {
 /// of the top box for the drift metric.
 fn build_stack<E: PhysicsEngine>(engine: &mut E, levels: u32) -> ornis_physics::body::BodyHandle {
     engine.add_body(RigidBody::new_box(
-        Vec3::new(0.0, -0.5, 0.0),
-        Vec3::new(10.0, 0.5, 10.0),
+        Vec3::new(0.0, -FLOOR_HALF_Y, 0.0),
+        Vec3::new(STACK_FLOOR_HALF, FLOOR_HALF_Y, STACK_FLOOR_HALF),
         0.0,
     ));
     let mut top = ornis_physics::body::BodyHandle::from(0u32);
@@ -128,15 +163,15 @@ fn build_stack<E: PhysicsEngine>(engine: &mut E, levels: u32) -> ornis_physics::
 /// `g x g` independent 4-box islands on one big static floor.
 fn build_islands<E: PhysicsEngine>(engine: &mut E, g: u32) {
     engine.add_body(RigidBody::new_box(
-        Vec3::new(0.0, -0.5, 0.0),
-        Vec3::new(100.0, 0.5, 100.0),
+        Vec3::new(0.0, -FLOOR_HALF_Y, 0.0),
+        Vec3::new(GRID_FLOOR_HALF, FLOOR_HALF_Y, GRID_FLOOR_HALF),
         0.0,
     ));
     for gx in 0..g {
         for gz in 0..g {
             let x = (gx as f32 - g as f32 / 2.0) * PITCH_XZ;
             let z = (gz as f32 - g as f32 / 2.0) * PITCH_XZ;
-            for level in 0..4 {
+            for level in 0..TOWER_HEIGHT {
                 engine.add_body(RigidBody::new_box(
                     Vec3::new(x, REST_Y + level as f32 * STACK_PITCH_Y, z),
                     Vec3::splat(BOX_HALF),
@@ -238,7 +273,7 @@ impl NativeRapier {
         let handle = self.bodies.insert(body);
         let mut collider = ColliderBuilder::cuboid(half[0], half[1], half[2])
             .friction(0.5)
-            .restitution(0.3);
+            .restitution(RAPIER_RESTITUTION);
         if mass > 0.0 {
             collider = collider.mass(mass);
         }
@@ -291,14 +326,13 @@ type GridLayout = (Vec<([f32; 3], [f32; 3])>, Vec<[f32; 3]>);
 fn grid_layout(n: u32) -> GridLayout {
     let side = (n as f32).sqrt().ceil() as u32;
     let span = side as f32 * PITCH_XZ;
-    let tile_half = 5.0f32;
-    let tiles = (span / (2.0 * tile_half)).ceil() as i32;
+    let tiles = (span / (2.0 * TILE_HALF)).ceil() as i32;
     let mut floors = Vec::new();
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
-            floors.push(([x, -0.5, z], [tile_half, 0.5, tile_half]));
+            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
+            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
+            floors.push(([x, -FLOOR_HALF_Y, z], [TILE_HALF, FLOOR_HALF_Y, TILE_HALF]));
         }
     }
     let mut boxes = Vec::with_capacity(n as usize);
@@ -330,7 +364,11 @@ fn native_rapier_grid(n: u32, iterations: usize) -> NativeRapier {
 #[cfg(feature = "rapier")]
 fn native_rapier_stack(levels: u32, iterations: usize) -> NativeRapier {
     let mut world = NativeRapier::fresh(iterations);
-    world.add_box([0.0, -0.5, 0.0], [10.0, 0.5, 10.0], 0.0);
+    world.add_box(
+        [0.0, -FLOOR_HALF_Y, 0.0],
+        [STACK_FLOOR_HALF, FLOOR_HALF_Y, STACK_FLOOR_HALF],
+        0.0,
+    );
     for level in 0..levels {
         let handle = world.add_box(
             [0.0, REST_Y + level as f32 * STACK_PITCH_Y, 0.0],
@@ -345,12 +383,16 @@ fn native_rapier_stack(levels: u32, iterations: usize) -> NativeRapier {
 #[cfg(feature = "rapier")]
 fn native_rapier_islands(g: u32, iterations: usize) -> NativeRapier {
     let mut world = NativeRapier::fresh(iterations);
-    world.add_box([0.0, -0.5, 0.0], [100.0, 0.5, 100.0], 0.0);
+    world.add_box(
+        [0.0, -FLOOR_HALF_Y, 0.0],
+        [GRID_FLOOR_HALF, FLOOR_HALF_Y, GRID_FLOOR_HALF],
+        0.0,
+    );
     for gx in 0..g {
         for gz in 0..g {
             let x = (gx as f32 - g as f32 / 2.0) * PITCH_XZ;
             let z = (gz as f32 - g as f32 / 2.0) * PITCH_XZ;
-            for level in 0..4 {
+            for level in 0..TOWER_HEIGHT {
                 world.add_box(
                     [x, REST_Y + level as f32 * STACK_PITCH_Y, z],
                     [BOX_HALF, BOX_HALF, BOX_HALF],
@@ -471,8 +513,8 @@ impl Box3dWorld {
         Self::add_box(
             &mut world.world,
             foundation,
-            [0.0, -0.5, 0.0],
-            [10.0, 0.5, 10.0],
+            [0.0, -FLOOR_HALF_Y, 0.0],
+            [STACK_FLOOR_HALF, FLOOR_HALF_Y, STACK_FLOOR_HALF],
             false,
         );
         for level in 0..levels {
@@ -493,15 +535,15 @@ impl Box3dWorld {
         Self::add_box(
             &mut world.world,
             foundation,
-            [0.0, -0.5, 0.0],
-            [100.0, 0.5, 100.0],
+            [0.0, -FLOOR_HALF_Y, 0.0],
+            [GRID_FLOOR_HALF, FLOOR_HALF_Y, GRID_FLOOR_HALF],
             false,
         );
         for gx in 0..g {
             for gz in 0..g {
                 let x = (gx as f32 - g as f32 / 2.0) * PITCH_XZ;
                 let z = (gz as f32 - g as f32 / 2.0) * PITCH_XZ;
-                for level in 0..4 {
+                for level in 0..TOWER_HEIGHT {
                     Self::add_box(
                         &mut world.world,
                         foundation,
@@ -539,13 +581,13 @@ const ISLAND_GRID: u32 = 8;
 
 fn bench_grids(c: &mut Criterion) {
     let mut group = c.benchmark_group("shootout/grid");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(SAMPLE_SIZE);
+    group.warm_up_time(Duration::from_secs(GRID_WARMUP_SECS));
+    group.measurement_time(Duration::from_secs(GRID_MEASURE_SECS));
 
     for n in [1_000u32, 10_000] {
         group.bench_function(BenchmarkId::new("ornis_default", n), |b| {
-            let mut physics = ornis_world(12);
+            let mut physics = ornis_world(ORNIS_DEFAULT_SUBSTEPS);
             build_grid(&mut physics, n);
             for _ in 0..WARMUP_STEPS {
                 physics.step(DT);
@@ -557,7 +599,7 @@ fn bench_grids(c: &mut Criterion) {
             b.iter(|| std::hint::black_box(&mut physics).step(std::hint::black_box(DT)));
         });
         group.bench_function(BenchmarkId::new("ornis_tuned_sub4", n), |b| {
-            let mut physics = ornis_world(4);
+            let mut physics = ornis_world(ORNIS_TUNED_SUBSTEPS);
             build_grid(&mut physics, n);
             for _ in 0..WARMUP_STEPS {
                 physics.step(DT);
@@ -571,25 +613,29 @@ fn bench_grids(c: &mut Criterion) {
 
         #[cfg(feature = "rapier")]
         group.bench_function(BenchmarkId::new("rapier_default", n), |b| {
-            let mut physics = native_rapier_grid(n, 4);
+            let mut physics = native_rapier_grid(n, RAPIER_DEFAULT_ITERS);
             for _ in 0..WARMUP_STEPS {
                 physics.step();
             }
-            eprintln!("SHOOTOUT rapier_default grid_{n}: native pipeline, iterations=4");
+            eprintln!(
+                "SHOOTOUT rapier_default grid_{n}: native pipeline, iterations={RAPIER_DEFAULT_ITERS}"
+            );
             b.iter(|| std::hint::black_box(&mut physics).step());
         });
         #[cfg(feature = "rapier")]
         group.bench_function(BenchmarkId::new("rapier_tuned_iter8", n), |b| {
-            let mut physics = native_rapier_grid(n, 8);
+            let mut physics = native_rapier_grid(n, RAPIER_TUNED_ITERS);
             for _ in 0..WARMUP_STEPS {
                 physics.step();
             }
-            eprintln!("SHOOTOUT rapier_tuned_iter8 grid_{n}: native pipeline, iterations=8");
+            eprintln!(
+                "SHOOTOUT rapier_tuned_iter8 grid_{n}: native pipeline, iterations={RAPIER_TUNED_ITERS}"
+            );
             b.iter(|| std::hint::black_box(&mut physics).step());
         });
         #[cfg(feature = "box3d")]
         group.bench_function(BenchmarkId::new("box3d_default_sub4", n), |b| {
-            let mut physics = Box3dWorld::grid(n, 4);
+            let mut physics = Box3dWorld::grid(n, ORNIS_TUNED_SUBSTEPS as i32);
             for _ in 0..WARMUP_STEPS {
                 physics.step();
             }
@@ -597,7 +643,7 @@ fn bench_grids(c: &mut Criterion) {
         });
         #[cfg(feature = "box3d")]
         group.bench_function(BenchmarkId::new("box3d_tuned_sub2", n), |b| {
-            let mut physics = Box3dWorld::grid(n, 2);
+            let mut physics = Box3dWorld::grid(n, BOX3D_TUNED_SUBSTEPS);
             for _ in 0..WARMUP_STEPS {
                 physics.step();
             }
@@ -609,13 +655,13 @@ fn bench_grids(c: &mut Criterion) {
 
 fn bench_stacks(c: &mut Criterion) {
     let mut group = c.benchmark_group("shootout/stack");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(2));
+    group.sample_size(SAMPLE_SIZE);
+    group.warm_up_time(Duration::from_secs(STACK_WARMUP_SECS));
+    group.measurement_time(Duration::from_secs(STACK_MEASURE_SECS));
     let rest_top = REST_Y + (STACK_LEVELS - 1) as f32 * STACK_PITCH_Y;
 
     group.bench_function("ornis_default", |b| {
-        let mut physics = ornis_world(12);
+        let mut physics = ornis_world(ORNIS_DEFAULT_SUBSTEPS);
         let top = build_stack(&mut physics, STACK_LEVELS);
         for _ in 0..DRIFT_STEPS {
             physics.step(DT);
@@ -625,7 +671,7 @@ fn bench_stacks(c: &mut Criterion) {
         b.iter(|| std::hint::black_box(&mut physics).step(std::hint::black_box(DT)));
     });
     group.bench_function("ornis_tuned_sub4", |b| {
-        let mut physics = ornis_world(4);
+        let mut physics = ornis_world(ORNIS_TUNED_SUBSTEPS);
         let top = build_stack(&mut physics, STACK_LEVELS);
         for _ in 0..DRIFT_STEPS {
             physics.step(DT);
@@ -637,7 +683,7 @@ fn bench_stacks(c: &mut Criterion) {
 
     #[cfg(feature = "rapier")]
     group.bench_function("rapier_default", |b| {
-        let mut physics = native_rapier_stack(STACK_LEVELS, 4);
+        let mut physics = native_rapier_stack(STACK_LEVELS, RAPIER_DEFAULT_ITERS);
         for _ in 0..DRIFT_STEPS {
             physics.step();
         }
@@ -647,7 +693,7 @@ fn bench_stacks(c: &mut Criterion) {
     });
     #[cfg(feature = "rapier")]
     group.bench_function("rapier_tuned_iter8", |b| {
-        let mut physics = native_rapier_stack(STACK_LEVELS, 8);
+        let mut physics = native_rapier_stack(STACK_LEVELS, RAPIER_TUNED_ITERS);
         for _ in 0..DRIFT_STEPS {
             physics.step();
         }
@@ -658,7 +704,7 @@ fn bench_stacks(c: &mut Criterion) {
 
     #[cfg(feature = "box3d")]
     group.bench_function("box3d_default_sub4", |b| {
-        let mut physics = Box3dWorld::stack(STACK_LEVELS, 4);
+        let mut physics = Box3dWorld::stack(STACK_LEVELS, ORNIS_TUNED_SUBSTEPS as i32);
         for _ in 0..DRIFT_STEPS {
             physics.step();
         }
@@ -668,7 +714,7 @@ fn bench_stacks(c: &mut Criterion) {
     });
     #[cfg(feature = "box3d")]
     group.bench_function("box3d_tuned_sub2", |b| {
-        let mut physics = Box3dWorld::stack(STACK_LEVELS, 2);
+        let mut physics = Box3dWorld::stack(STACK_LEVELS, BOX3D_TUNED_SUBSTEPS);
         for _ in 0..DRIFT_STEPS {
             physics.step();
         }
@@ -682,12 +728,12 @@ fn bench_stacks(c: &mut Criterion) {
 
 fn bench_islands(c: &mut Criterion) {
     let mut group = c.benchmark_group("shootout/islands");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(2));
+    group.sample_size(SAMPLE_SIZE);
+    group.warm_up_time(Duration::from_secs(STACK_WARMUP_SECS));
+    group.measurement_time(Duration::from_secs(STACK_MEASURE_SECS));
 
     group.bench_function("ornis_default", |b| {
-        let mut physics = ornis_world(12);
+        let mut physics = ornis_world(ORNIS_DEFAULT_SUBSTEPS);
         build_islands(&mut physics, ISLAND_GRID);
         for _ in 0..WARMUP_STEPS {
             physics.step(DT);
@@ -699,7 +745,7 @@ fn bench_islands(c: &mut Criterion) {
         b.iter(|| std::hint::black_box(&mut physics).step(std::hint::black_box(DT)));
     });
     group.bench_function("ornis_tuned_sub4", |b| {
-        let mut physics = ornis_world(4);
+        let mut physics = ornis_world(ORNIS_TUNED_SUBSTEPS);
         build_islands(&mut physics, ISLAND_GRID);
         for _ in 0..WARMUP_STEPS {
             physics.step(DT);
@@ -713,26 +759,30 @@ fn bench_islands(c: &mut Criterion) {
 
     #[cfg(feature = "rapier")]
     group.bench_function("rapier_default", |b| {
-        let mut physics = native_rapier_islands(ISLAND_GRID, 4);
+        let mut physics = native_rapier_islands(ISLAND_GRID, RAPIER_DEFAULT_ITERS);
         for _ in 0..WARMUP_STEPS {
             physics.step();
         }
-        eprintln!("SHOOTOUT rapier_default islands_8x8: native pipeline, iterations=4");
+        eprintln!(
+            "SHOOTOUT rapier_default islands_8x8: native pipeline, iterations={RAPIER_DEFAULT_ITERS}"
+        );
         b.iter(|| std::hint::black_box(&mut physics).step());
     });
     #[cfg(feature = "rapier")]
     group.bench_function("rapier_tuned_iter8", |b| {
-        let mut physics = native_rapier_islands(ISLAND_GRID, 8);
+        let mut physics = native_rapier_islands(ISLAND_GRID, RAPIER_TUNED_ITERS);
         for _ in 0..WARMUP_STEPS {
             physics.step();
         }
-        eprintln!("SHOOTOUT rapier_tuned_iter8 islands_8x8: native pipeline, iterations=8");
+        eprintln!(
+            "SHOOTOUT rapier_tuned_iter8 islands_8x8: native pipeline, iterations={RAPIER_TUNED_ITERS}"
+        );
         b.iter(|| std::hint::black_box(&mut physics).step());
     });
 
     #[cfg(feature = "box3d")]
     group.bench_function("box3d_default_sub4", |b| {
-        let mut physics = Box3dWorld::islands(ISLAND_GRID, 4);
+        let mut physics = Box3dWorld::islands(ISLAND_GRID, ORNIS_TUNED_SUBSTEPS as i32);
         for _ in 0..WARMUP_STEPS {
             physics.step();
         }
@@ -740,7 +790,7 @@ fn bench_islands(c: &mut Criterion) {
     });
     #[cfg(feature = "box3d")]
     group.bench_function("box3d_tuned_sub2", |b| {
-        let mut physics = Box3dWorld::islands(ISLAND_GRID, 2);
+        let mut physics = Box3dWorld::islands(ISLAND_GRID, BOX3D_TUNED_SUBSTEPS);
         for _ in 0..WARMUP_STEPS {
             physics.step();
         }

@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use crate::mesh_data::TRIANGLE_VERTS;
+use crate::mesh_data::{TRIANGLE_VERTS, VEC3_COMPONENTS};
 
 /// Recompute smooth area-weighted normals in place.
 ///
@@ -41,7 +41,7 @@ pub fn recompute_normals(mesh: &mut crate::MeshData, faces: Option<&[u32]>) {
         }
     }
     // Zero only dirty vertices, accumulate over the seam, normalize dirty.
-    let zero = [0.0f32; 3];
+    let zero = [0.0f32; VEC3_COMPONENTS];
     for &v in &verts {
         mesh.normals[v as usize] = zero;
     }
@@ -103,7 +103,7 @@ pub fn to_physics_arrays_gated(
 /// Zero all normals, accumulate over `range`, normalize everything.
 fn accumulate_all(mesh: &mut crate::MeshData, range: std::ops::Range<usize>) {
     for n in &mut mesh.normals {
-        *n = [0.0; 3];
+        *n = [0.0; VEC3_COMPONENTS];
     }
     let faces: Vec<usize> = range.collect();
     accumulate_faces(mesh, &faces, None);

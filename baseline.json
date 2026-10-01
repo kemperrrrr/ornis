@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "quality_score": 0.34343530561152813,
+  "quality_score": 0.37722354521585133,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 555,
+  "magic_number_warnings": 405,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 105,
   "unsafe_warnings": 8,
   "error_handling_warnings": 175,
-  "duplicate_groups": 80,
+  "duplicate_groups": 83,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
-  "fragment_groups": 510,
+  "fragment_groups": 512,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
   "srp_module_warnings": 82,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2948,
+  "total_findings": 2803,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -328,52 +328,52 @@
     {
       "name": "setup_islands_grid",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 12
+      "line": 45
     },
     {
       "name": "setup_big_stack",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 39
+      "line": 71
     },
     {
       "name": "setup_body_grid",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 61
+      "line": 93
     },
     {
       "name": "settled_body_grid",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 119
+      "line": 150
     },
     {
       "name": "bench_body_scaling",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 162
+      "line": 193
     },
     {
       "name": "build_grid",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 80
+      "line": 116
     },
     {
       "name": "build_stack",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 111
+      "line": 146
     },
     {
       "name": "build_islands",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 129
+      "line": 164
     },
     {
       "name": "Box3dWorld::stack",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 469
+      "line": 511
     },
     {
       "name": "Box3dWorld::islands",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 491
+      "line": 533
     },
     {
       "name": "body_for",
@@ -803,17 +803,17 @@
     {
       "name": "GpuBatch::fill_lane",
       "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 162
+      "line": 173
     },
     {
       "name": "world_inertia_matrix",
       "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 312
+      "line": 339
     },
     {
       "name": "pack_single_point_batches",
       "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 505
+      "line": 532
     },
     {
       "name": "avbd_hessian_ang",
@@ -1458,52 +1458,52 @@
     {
       "name": "avbd_step",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 253
+      "line": 284
     },
     {
       "name": "build_avbd_scene",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 472
+      "line": 515
     },
     {
       "name": "build_si_scene",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 500
+      "line": 543
     },
     {
       "name": "main",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 518
+      "line": 561
     },
     {
       "name": "setup_islands_grid",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 76
+      "line": 82
     },
     {
       "name": "setup_big_stack",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 101
+      "line": 107
     },
     {
       "name": "setup_many_islands",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 118
+      "line": 124
     },
     {
       "name": "setup_contact_cluster",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 137
+      "line": 143
     },
     {
       "name": "setup_tall_stack",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 157
+      "line": 163
     },
     {
       "name": "main",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 365
+      "line": 371
     },
     {
       "name": "setup_body_grid",

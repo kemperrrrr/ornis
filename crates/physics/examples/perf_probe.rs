@@ -72,6 +72,12 @@ const TALL_STACK_N: u32 = 50;
 const TALL_SETTLE: u32 = 120;
 /// Milliseconds scale for timing printouts.
 const MS_PER_SEC: f64 = 1000.0;
+/// Solver tuning sweep: `(substeps, velocity_iters, position_iters)`.
+const SOLVER_SWEEP: [(u32, u32, u32); 4] = [(12, 8, 4), (4, 8, 4), (4, 4, 2), (2, 4, 2)];
+/// Substep counts compared on stiff scenes.
+const SUBSTEP_COMPARE: [u32; 2] = [12, 4];
+/// Body handle kicked in the heterogeneous-islands probe (first tower top).
+const HETERO_KICK_HANDLE: u32 = 3;
 
 fn setup_islands_grid(g: u32) -> SequentialImpulseEngine {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
@@ -391,7 +397,7 @@ fn main() {
     // Solver tuning sweep on islands_grid: how much solver_ms moves with
     // substeps / velocity+position iterations. Isolates the dominant cost.
     let mut sweep = setup_islands_grid(GRID_SIDE);
-    for (sub, vel, pos) in [(12, 8, 4), (4, 8, 4), (4, 4, 2), (2, 4, 2)] {
+    for (sub, vel, pos) in SOLVER_SWEEP {
         sweep.set_substeps(sub);
         sweep.set_velocity_iterations(vel);
         sweep.set_position_iterations(pos);
@@ -425,7 +431,7 @@ fn main() {
     {
         let mut hetero = setup_many_islands(MANY_ISLANDS);
         // kick the top of the first tower (handle 3) — one fast island
-        if let Some(b) = hetero.get_body_mut(BodyHandle::from_raw(3)) {
+        if let Some(b) = hetero.get_body_mut(BodyHandle::from_raw(HETERO_KICK_HANDLE)) {
             b.velocity = Vec3::new(0.0, -DROP_SPEED, 0.0);
         }
         time_steps(
@@ -438,7 +444,7 @@ fn main() {
 
     // Stability vs substeps: does lowering substeps (4) cause jitter or
     // tunnelling on stiff scenes where the default (12) is conservative?
-    for sub in [12u32, 4u32] {
+    for sub in SUBSTEP_COMPARE {
         let mut tall = setup_tall_stack(TALL_STACK_N);
         tall.set_substeps(sub);
         time_steps(
