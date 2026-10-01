@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "quality_score": 0.3357415888135806,
+  "quality_score": 0.34343530561152813,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 584,
+  "magic_number_warnings": 555,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 105,
   "unsafe_warnings": 8,
   "error_handling_warnings": 175,
-  "duplicate_groups": 82,
+  "duplicate_groups": 80,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
-  "fragment_groups": 514,
+  "fragment_groups": 510,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
   "srp_module_warnings": 82,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2983,
+  "total_findings": 2948,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -1508,32 +1508,32 @@
     {
       "name": "setup_body_grid",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 25
+      "line": 62
     },
     {
       "name": "setup_giant_floor",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 58
+      "line": 95
     },
     {
       "name": "setup_sparse",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 82
+      "line": 119
     },
     {
       "name": "setup_islands",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 102
+      "line": 139
     },
     {
       "name": "setup_heterogeneous",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 128
+      "line": 165
     },
     {
       "name": "run_probe",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 177
+      "line": 214
     },
     {
       "name": "PositiveUsize::expect_valid",
