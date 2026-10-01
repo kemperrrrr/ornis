@@ -17,6 +17,16 @@ use crate::cold_store::ColdComponentStore;
 use crate::component_store::ComponentStore;
 use crate::entity::{Entity, EntityAllocator};
 
+/// Shared read guard that recovers from a poisoned [`RwLock`].
+fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Exclusive write guard that recovers from a poisoned [`RwLock`].
+fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Internal per-lane interface: erase storage details behind `SmartStore`.
 trait Lane: Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -212,7 +222,7 @@ impl SmartStore {
                 .as_any()
                 .downcast_ref::<RwLock<ColdComponentStore<T>>>()
         {
-            store.write().unwrap().insert(entity, component);
+            write_lock(store).insert(entity, component);
         }
     }
 
@@ -223,13 +233,10 @@ impl SmartStore {
     ) -> Option<std::sync::RwLockReadGuard<'_, ColdComponentStore<T>>> {
         let tid = TypeId::of::<T>();
         let lane = self.cold_lanes.get(&tid)?;
-        Some(
-            lane.as_any()
-                .downcast_ref::<RwLock<ColdComponentStore<T>>>()
-                .unwrap()
-                .read()
-                .unwrap(),
-        )
+        let store = lane
+            .as_any()
+            .downcast_ref::<RwLock<ColdComponentStore<T>>>()?;
+        Some(read_lock(store))
     }
 
     /// Exclusive write guard over the cold lane of `T`; `None` if the
@@ -239,13 +246,10 @@ impl SmartStore {
     ) -> Option<std::sync::RwLockWriteGuard<'_, ColdComponentStore<T>>> {
         let tid = TypeId::of::<T>();
         let lane = self.cold_lanes.get(&tid)?;
-        Some(
-            lane.as_any()
-                .downcast_ref::<RwLock<ColdComponentStore<T>>>()
-                .unwrap()
-                .write()
-                .unwrap(),
-        )
+        let store = lane
+            .as_any()
+            .downcast_ref::<RwLock<ColdComponentStore<T>>>()?;
+        Some(write_lock(store))
     }
 
     /// Allocates a new live entity handle (recycling freed ids with a
@@ -255,7 +259,7 @@ impl SmartStore {
     /// [`RwLock`] allocator, so `&self` suffices in both the [`Building`](crate::Building)
     /// and [`Running`](crate::Running) phases without a typestate split.
     pub fn create_entity(&self) -> Entity {
-        self.allocator.write().unwrap().allocate()
+        write_lock(&self.allocator).allocate()
     }
 
     /// Destroys `entity`: removes its components from every hot and cold
@@ -268,13 +272,13 @@ impl SmartStore {
         for lane in self.cold_lanes.values() {
             lane.remove_entity(entity);
         }
-        self.allocator.write().unwrap().deallocate(entity);
+        write_lock(&self.allocator).deallocate(entity);
     }
 
     /// Returns `true` if the handle matches the allocator's current
     /// generation - i.e. the entity was created and not yet destroyed.
     pub fn is_alive(&self, entity: Entity) -> bool {
-        self.allocator.read().unwrap().is_alive(entity)
+        read_lock(&self.allocator).is_alive(entity)
     }
 
     /// Inserts or replaces the hot component `T` for `entity`, creating
@@ -283,9 +287,11 @@ impl SmartStore {
     pub fn insert<T: 'static + Clone + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_lane::<T>();
         let tid = TypeId::of::<T>();
-        let lane = self.lanes.get(&tid).unwrap();
+        let Some(lane) = self.lanes.get(&tid) else {
+            return;
+        };
         if let Some(rwlock) = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>() {
-            rwlock.write().unwrap().insert(entity, component);
+            write_lock(rwlock).insert(entity, component);
         } else if let Some(lf) = lane.as_any().downcast_ref::<LockFreeLaneInner<T>>() {
             lf.write(|store| store.insert(entity, component));
         }
@@ -303,13 +309,8 @@ impl SmartStore {
         crate::schedule::assert_lane_access_declared::<T>(false);
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
-        Some(
-            lane.as_any()
-                .downcast_ref::<RwLock<ComponentStore<T>>>()
-                .unwrap()
-                .read()
-                .unwrap(),
-        )
+        let store = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>()?;
+        Some(read_lock(store))
     }
 
     /// Writes to the hot lane of component `T` behind an exclusive guard.
@@ -325,13 +326,8 @@ impl SmartStore {
         crate::schedule::assert_lane_access_declared::<T>(true);
         let tid = TypeId::of::<T>();
         let lane = self.lanes.get(&tid)?;
-        Some(
-            lane.as_any()
-                .downcast_ref::<RwLock<ComponentStore<T>>>()
-                .unwrap()
-                .write()
-                .unwrap(),
-        )
+        let store = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>()?;
+        Some(write_lock(store))
     }
 
     /// Runs `f` against an epoch-pinned snapshot of the lock-free lane of
@@ -359,7 +355,9 @@ impl SmartStore {
         f: impl FnOnce(&mut ComponentStore<T>),
     ) {
         let tid = TypeId::of::<T>();
-        let lane = self.lanes.get(&tid).unwrap();
+        let Some(lane) = self.lanes.get(&tid) else {
+            return;
+        };
         if let Some(lf) = lane.as_any().downcast_ref::<LockFreeLaneInner<T>>() {
             lf.write(f);
         }

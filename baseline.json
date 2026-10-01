@@ -1,16 +1,16 @@
 {
   "version": 2,
-  "quality_score": 0.43885021676741764,
+  "quality_score": 0.4508560830052073,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
-  "total": 5459,
+  "total": 5464,
   "complexity_warnings": 58,
   "magic_number_warnings": 151,
   "nesting_depth_warnings": 16,
-  "function_length_warnings": 105,
+  "function_length_warnings": 106,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 175,
-  "duplicate_groups": 81,
+  "error_handling_warnings": 125,
+  "duplicate_groups": 79,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
   "fragment_groups": 496,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2531,
+  "total_findings": 2480,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -88,7 +88,7 @@
     {
       "name": "normalized_rotation",
       "file": "crates/app/src/physics_runtime.rs",
-      "line": 549
+      "line": 553
     },
     {
       "name": "check_builtin_arity",
@@ -258,47 +258,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1142
+      "line": 1153
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3052
+      "line": 3060
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3255
+      "line": 3263
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3461
+      "line": 3460
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3632
+      "line": 3618
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3658
+      "line": 3638
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3742
+      "line": 3719
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3769
+      "line": 3746
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4218
+      "line": 4188
     },
     {
       "name": "RenderFrame3D::build",
@@ -1218,7 +1218,7 @@
     {
       "name": "SequentialImpulseEngine::dispatch_islands_velocity",
       "file": "crates/physics/src/sequential_impulse/islands.rs",
-      "line": 358
+      "line": 364
     },
     {
       "name": "SequentialImpulseEngine::apply_step_budget",

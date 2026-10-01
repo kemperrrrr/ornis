@@ -895,7 +895,7 @@ pub fn detect_collisions_into(
         run_levels(&pool.level, shards, true, |shard| {
             let lo = shard * active.len() / shards;
             let hi = (shard + 1) * active.len() / shards;
-            let mut guard = bufs[shard].lock().unwrap();
+            let mut guard = bufs[shard].lock().unwrap_or_else(|e| e.into_inner());
             for &(i, j) in &active[lo..hi] {
                 if let Some(m) = narrow_pair(
                     bodies,
@@ -913,7 +913,7 @@ pub fn detect_collisions_into(
         });
         out.reserve(active.len());
         for b in &pool.bufs {
-            out.extend(b.lock().unwrap().drain(..));
+            out.extend(b.lock().unwrap_or_else(|e| e.into_inner()).drain(..));
         }
         return;
     }

@@ -328,7 +328,7 @@ impl GameApp {
             }
             // Hidden static floor: it has a physics component but no render
             // components, so it does not enter the frame upload.
-            spawn_static_floor(runtime.engine_mut());
+            let _ = spawn_static_floor(runtime.engine_mut());
         }
         runtime.frame(0.0);
         (runtime, entity_count)

@@ -54,13 +54,16 @@ impl AudioHost {
     pub fn register_clip(&self, clip: AudioClip) -> crate::source::ClipId {
         self.engine
             .lock()
-            .expect("audio host lock")
+            .unwrap_or_else(|e| e.into_inner())
             .register_clip(clip)
     }
 
     /// One frame of orchestration against `store`.
     pub fn step(&self, store: &SmartStore) {
-        self.engine.lock().expect("audio host lock").step(store);
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .step(store);
     }
 
     /// Move/listen the virtual listener (schedule-safe counterpart of
@@ -68,14 +71,17 @@ impl AudioHost {
     pub fn set_listener(&self, pos: Vec3, gain: f32) {
         self.engine
             .lock()
-            .expect("audio host lock")
+            .unwrap_or_else(|e| e.into_inner())
             .set_listener(pos, gain);
     }
 
     /// Duck the master gain without moving the listener (schedule-safe
     /// counterpart of [`AudioEngine::set_gain`]).
     pub fn set_gain(&self, gain: f32) {
-        self.engine.lock().expect("audio host lock").set_gain(gain);
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_gain(gain);
     }
 }
 

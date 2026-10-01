@@ -418,7 +418,7 @@ impl EditorSession {
             .map(|runtime| {
                 runtime
                     .get_mut()
-                    .expect("physics runtime lock")
+                    .unwrap_or_else(|e| e.into_inner())
                     .take_changed()
             })
             .unwrap_or(false);

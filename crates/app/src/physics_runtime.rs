@@ -408,7 +408,9 @@ impl System for PhysicsSyncIn {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let mut runtime = runtime_resource.lock().expect("physics runtime lock");
+        let mut runtime = runtime_resource
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         runtime.sync_in(&body_lane, transforms.as_deref());
     }
 }
@@ -436,7 +438,7 @@ impl System for PhysicsStep {
         };
         runtime_resource
             .lock()
-            .expect("physics runtime lock")
+            .unwrap_or_else(|e| e.into_inner())
             .step(time.delta_seconds());
     }
 }
@@ -472,7 +474,7 @@ impl System for PhysicsSyncOut {
         };
         runtime_resource
             .lock()
-            .expect("physics runtime lock")
+            .unwrap_or_else(|e| e.into_inner())
             .sync_out(&mut body_lane, &mut transform_lane);
     }
 }
@@ -502,7 +504,9 @@ impl System for SoftSyncIn {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let mut runtime = runtime_resource.lock().expect("physics runtime lock");
+        let mut runtime = runtime_resource
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         runtime.sync_soft_in(&soft_lane);
     }
 }
@@ -541,7 +545,7 @@ impl System for SoftSyncOut {
         let ropes = store.read_lane::<RopeMesh>();
         runtime_resource
             .lock()
-            .expect("physics runtime lock")
+            .unwrap_or_else(|e| e.into_inner())
             .sync_soft_out(&mut mesh_lane, &mut transform_lane, ropes.as_deref());
     }
 }

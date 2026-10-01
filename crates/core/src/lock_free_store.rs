@@ -9,11 +9,17 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard};
 
 use crossbeam_epoch::{Atomic, Guard, Owned};
 
 use crate::component_store::ComponentStore;
 use crate::entity::{Entity, EntityAllocator};
+
+/// Mutex guard that recovers from poison instead of panicking.
+fn mutex_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 trait LockFreeLane: Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -60,7 +66,7 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLane for LaneInner<T> {
 
 pub struct LockFreeStore {
     lanes: HashMap<TypeId, Box<dyn LockFreeLane>>,
-    allocator: std::sync::Mutex<EntityAllocator>,
+    allocator: Mutex<EntityAllocator>,
 }
 
 impl Default for LockFreeStore {
@@ -92,37 +98,39 @@ impl LockFreeStore {
     }
 
     pub fn create_entity(&self) -> Entity {
-        self.allocator.lock().unwrap().allocate()
+        mutex_lock(&self.allocator).allocate()
     }
 
     pub fn destroy_entity(&self, entity: Entity) {
         for (_, lane) in self.lanes.iter() {
             lane.remove_entity(entity);
         }
-        self.allocator.lock().unwrap().deallocate(entity);
+        mutex_lock(&self.allocator).deallocate(entity);
     }
 
     pub fn is_alive(&self, entity: Entity) -> bool {
-        self.allocator.lock().unwrap().is_alive(entity)
+        mutex_lock(&self.allocator).is_alive(entity)
     }
 
     pub fn insert<T: 'static + Clone + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_lane::<T>();
         let tid = TypeId::of::<T>();
-        let lane = self.lanes.get(&tid).unwrap();
-        lane.as_any()
-            .downcast_ref::<LaneInner<T>>()
-            .unwrap()
-            .write(|store| {
+        if let Some(inner) = self
+            .lanes
+            .get(&tid)
+            .and_then(|lane| lane.as_any().downcast_ref::<LaneInner<T>>())
+        {
+            inner.write(|store| {
                 store.insert(entity, component);
             });
+        }
     }
 
     pub fn read_lane<T: 'static + Clone + Send + Sync>(&self) -> Option<LockFreeReadGuard<'_, T>> {
         let tid = TypeId::of::<T>();
         let guard = crossbeam_epoch::pin();
         let lane = self.lanes.get(&tid)?;
-        let inner = lane.as_any().downcast_ref::<LaneInner<T>>().unwrap();
+        let inner = lane.as_any().downcast_ref::<LaneInner<T>>()?;
         // Safety: `guard` is moved into the returned LockFreeReadGuard,
         // so the epoch pin outlives the reference loaded from the lane.
         let store_ptr: *const ComponentStore<T> = inner.read(&guard);

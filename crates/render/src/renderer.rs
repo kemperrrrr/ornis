@@ -21,6 +21,17 @@ use ornis_macros::WgslStruct;
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
+/// Shared read guard that recovers from a poisoned [`std::sync::RwLock`].
+fn read_lock<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Exclusive write guard that recovers from a poisoned [`std::sync::RwLock`].
+fn write_lock<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
+
+
 /// Frame-global camera uniform (binding shared by every pass).
 ///
 /// The WGSL `Camera` declaration is generated from this layout
@@ -1505,11 +1516,8 @@ impl Renderer3D {
         let mut this = Self::new(device, surface_config, sample_count);
         this.transparency = transparency;
         {
-            let per_object = this
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock");
-            let material = this.material_buffer.read().expect("material buffer lock");
+            let per_object = read_lock(&this.per_object_buffer);
+            let material = read_lock(&this.material_buffer);
             this.forward_pass = Self::create_forward_pass(
                 device,
                 &this.camera_buffer,
@@ -2417,8 +2425,8 @@ impl Renderer3D {
         if count == 0 && cubes == 0 {
             return;
         }
-        let per_object = self.per_object_buffer.read().unwrap();
-        let material = self.material_buffer.read().unwrap();
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
         for layer in 0..count as usize {
             self.render_shadow_layer(
                 device,
@@ -2535,9 +2543,9 @@ impl Renderer3D {
         if count == 0 && cubes == 0 {
             return;
         }
-        let per_object = self.per_object_buffer.read().unwrap();
-        let material = self.material_buffer.read().unwrap();
-        let palette = self.palette_buffer.read().expect("palette buffer lock");
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        let palette = read_lock(&self.palette_buffer);
         for layer in 0..count as usize {
             self.render_skinned_shadow_layer(
                 device,
@@ -3282,19 +3290,13 @@ impl Renderer3D {
                 device,
                 &self.gbuffer,
                 &self.camera_buffer,
-                &self
-                    .per_object_buffer
-                    .read()
-                    .expect("per-object buffer lock"),
-                &self.material_buffer.read().expect("material buffer lock"),
+                &read_lock(&self.per_object_buffer),
+                &read_lock(&self.material_buffer),
                 self.sample_count,
             );
         self.gbuffer_pipeline = gbuffer_pipeline;
         self.gbuffer_bind_group_layout = gbuffer_bind_group_layout;
-        *self
-            .gbuffer_bind_group
-            .write()
-            .expect("gbuffer bind group lock") = gbuffer_bind_group;
+        *write_lock(&self.gbuffer_bind_group) = gbuffer_bind_group;
 
         self.lighting_pass =
             Self::create_lighting_pass(device, &self.pbr_texture_view, self.sample_count);
@@ -3302,11 +3304,8 @@ impl Renderer3D {
         self.forward_pass = Self::create_forward_pass(
             device,
             &self.camera_buffer,
-            &self
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock"),
-            &self.material_buffer.read().expect("material buffer lock"),
+            &read_lock(&self.per_object_buffer),
+            &read_lock(&self.material_buffer),
             &self.lighting_buffer,
             &self.shadow_array_view,
             &self.shadow_sampler,
@@ -3466,7 +3465,7 @@ impl Renderer3D {
         exposure: f32,
         lights: &[LightDesc],
     ) -> LightUploadStats {
-        let fit = *self.shadow_fit.read().expect("shadow fit lock");
+        let fit = *read_lock(&self.shadow_fit);
         let built = build_lighting_uniform(ambient, ambient_intensity, exposure, lights, fit);
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
         // Publish the light-space VPs for the depth pre-pass (as camera
@@ -3507,7 +3506,7 @@ impl Renderer3D {
             (built.cube_face_vps.len() / CUBE_FACE_COUNT) as u32,
             std::sync::atomic::Ordering::Relaxed,
         );
-        *self.last_light_stats.write().expect("light stats lock") = built.stats;
+        *write_lock(&self.last_light_stats) = built.stats;
         built.stats
     }
 
@@ -3516,7 +3515,7 @@ impl Renderer3D {
     /// and what was dropped (excess lights, shadow requests without a
     /// slot). Starts at zero before the first upload.
     pub fn light_upload_stats(&self) -> LightUploadStats {
-        *self.last_light_stats.read().expect("light stats lock")
+        *read_lock(&self.last_light_stats)
     }
 
     /// Fit the directional shadow frustum to a scene AABB (`min`/`max`
@@ -3525,23 +3524,20 @@ impl Renderer3D {
     /// default to cover the box (see [`shadow_fit_for_bounds`]); pass the
     /// scene bounds once per scene, not per frame.
     pub fn set_shadow_bounds(&self, min: [f32; 3], max: [f32; 3]) {
-        *self.shadow_fit.write().expect("shadow fit lock") = Some(shadow_fit_for_bounds(min, max));
+        *write_lock(&self.shadow_fit) = Some(shadow_fit_for_bounds(min, max));
     }
 
     /// Drop the scene fit and return to the legacy ±[`SHADOW_ORTHO_HALF`]
     /// box around the origin.
     pub fn clear_shadow_bounds(&self) {
-        *self.shadow_fit.write().expect("shadow fit lock") = None;
+        *write_lock(&self.shadow_fit) = None;
     }
 
     /// Current directional-shadow ortho half-extent: the fitted value
     /// after [`set_shadow_bounds`](Self::set_shadow_bounds), else the
     /// ±[`SHADOW_ORTHO_HALF`] default.
     pub fn shadow_half_extent(&self) -> f32 {
-        self.shadow_fit
-            .read()
-            .expect("shadow fit lock")
-            .map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
+        read_lock(&self.shadow_fit).map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
     }
 
     /// Grow a storage buffer when `needed` exceeds `capacity`, doubling
@@ -3578,15 +3574,9 @@ impl Renderer3D {
     /// holds its own bind group over the same layout, so all three are
     /// rebuilt together whenever either buffer moves.
     fn rebind_storage_buffers(&self, device: &wgpu::Device) {
-        let per_object = self
-            .per_object_buffer
-            .read()
-            .expect("per-object buffer lock");
-        let material = self.material_buffer.read().expect("material buffer lock");
-        *self
-            .gbuffer_bind_group
-            .write()
-            .expect("gbuffer bind group lock") =
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        *write_lock(&self.gbuffer_bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gbuffer bind group (grown)"),
                 layout: &self.gbuffer_bind_group_layout,
@@ -3600,11 +3590,7 @@ impl Renderer3D {
                     },
                 ),
             });
-        *self
-            .forward_pass
-            .bind_group
-            .write()
-            .expect("forward bind group lock") =
+        *write_lock(&self.forward_pass.bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("forward bind group (grown)"),
                 layout: &self.forward_pass.bind_group_layout,
@@ -3631,10 +3617,7 @@ impl Renderer3D {
     /// per frame from the live buffer, so it needs no rebuild here.
     fn ensure_instance_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock");
+            let old = read_lock(&self.per_object_buffer);
             Self::grown_storage_buffer(
                 device,
                 "per-object buffer (grown)",
@@ -3645,10 +3628,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self
-                .per_object_buffer
-                .write()
-                .expect("per-object buffer lock") = buffer;
+            *write_lock(&self.per_object_buffer) = buffer;
             self.rebind_storage_buffers(device);
         }
     }
@@ -3657,7 +3637,7 @@ impl Renderer3D {
     /// rebinding when it does not.
     fn ensure_material_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self.material_buffer.read().expect("material buffer lock");
+            let old = read_lock(&self.material_buffer);
             Self::grown_storage_buffer(
                 device,
                 "material buffer (grown)",
@@ -3668,7 +3648,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self.material_buffer.write().expect("material buffer lock") = buffer;
+            *write_lock(&self.material_buffer) = buffer;
             self.rebind_storage_buffers(device);
         }
     }
@@ -3688,7 +3668,7 @@ impl Renderer3D {
                 .load(std::sync::atomic::Ordering::Relaxed) as usize,
         );
         queue.write_buffer(
-            &self.material_buffer.read().expect("material buffer lock"),
+            &read_lock(&self.material_buffer),
             0,
             bytemuck::cast_slice(&materials[..count]),
         );
@@ -3727,10 +3707,7 @@ impl Renderer3D {
             });
         }
         queue.write_buffer(
-            &self
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock"),
+            &read_lock(&self.per_object_buffer),
             0,
             bytemuck::cast_slice(&gpu_objects),
         );
@@ -3741,7 +3718,7 @@ impl Renderer3D {
     /// no pass needs rebinding here) when it does not.
     fn ensure_palette_capacity(&self, device: &wgpu::Device, needed: usize) {
         let grown = {
-            let old = self.palette_buffer.read().expect("palette buffer lock");
+            let old = read_lock(&self.palette_buffer);
             Self::grown_storage_buffer(
                 device,
                 "skin palette buffer (grown)",
@@ -3752,7 +3729,7 @@ impl Renderer3D {
             )
         };
         if let Some(buffer) = grown {
-            *self.palette_buffer.write().expect("palette buffer lock") = buffer;
+            *write_lock(&self.palette_buffer) = buffer;
         }
     }
 
@@ -3787,7 +3764,7 @@ impl Renderer3D {
             bytes.resize((slot + 1) * PALETTE_BYTE_SIZE, 0);
         }
         queue.write_buffer(
-            &self.palette_buffer.read().expect("palette buffer lock"),
+            &read_lock(&self.palette_buffer),
             0,
             &bytes,
         );
@@ -3849,9 +3826,9 @@ impl Renderer3D {
             return;
         }
         self.upload_instances(device, queue, std::slice::from_ref(instance));
-        let palette = self.palette_buffer.read().expect("palette buffer lock");
-        let per_object = self.per_object_buffer.read().unwrap();
-        let material = self.material_buffer.read().unwrap();
+        let palette = read_lock(&self.palette_buffer);
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skinned gbuffer bind group"),
             layout: &self.skinned_bind_group_layout,
@@ -4059,10 +4036,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.gbuffer_pipeline);
         {
-            let bind_group = self
-                .gbuffer_bind_group
-                .read()
-                .expect("gbuffer bind group lock");
+            let bind_group = read_lock(&self.gbuffer_bind_group);
             rpass.set_bind_group(0, &*bind_group, &[]);
         }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -4084,7 +4058,7 @@ impl Renderer3D {
         // material buffer may have grown since the last frame.
         // Binding numbers come from the table; only the name → live
         // resource mapping is written out here.
-        let material = self.material_buffer.read().expect("material buffer lock");
+        let material = read_lock(&self.material_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting bind group (frame)"),
             layout: &self.lighting_pass.bind_group_layout,
@@ -4189,11 +4163,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.forward_pass.pipeline);
         {
-            let bind_group = self
-                .forward_pass
-                .bind_group
-                .read()
-                .expect("forward bind group lock");
+            let bind_group = read_lock(&self.forward_pass.bind_group);
             rpass.set_bind_group(0, &*bind_group, &[]);
         }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -4233,11 +4203,8 @@ impl Renderer3D {
         // The bind group is rebuilt per frame: the material buffer may have
         // grown and the bound set may have changed. Binding numbers come
         // from the table; only the name → live resource mapping is here.
-        let material = self.material_buffer.read().expect("material buffer lock");
-        let per_object = self
-            .per_object_buffer
-            .read()
-            .expect("per-object buffer lock");
+        let material = read_lock(&self.material_buffer);
+        let per_object = read_lock(&self.per_object_buffer);
         let base_color_view = Self::material_view(
             textures,
             cache,
@@ -4725,15 +4692,9 @@ mod tests {
             "palette is vertex-only"
         );
         {
-            let per_object = renderer
-                .per_object_buffer
-                .read()
-                .expect("per-object buffer lock");
-            let material = renderer
-                .material_buffer
-                .read()
-                .expect("material buffer lock");
-            let palette = renderer.palette_buffer.read().expect("palette buffer lock");
+            let per_object = read_lock(&renderer.per_object_buffer);
+            let material = read_lock(&renderer.material_buffer);
+            let palette = read_lock(&renderer.palette_buffer);
             let entries =
                 crate::shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
                     "camera" => renderer.camera_buffer.as_entire_binding(),

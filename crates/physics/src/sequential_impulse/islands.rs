@@ -300,14 +300,20 @@ impl SequentialImpulseEngine {
             body_idx.sort_unstable();
             body_idx.dedup();
             let shard: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
-            let local = |g: usize| body_idx.binary_search(&g).expect("island body");
+            let local_of: FxHashMap<usize, usize> = body_idx
+                .iter()
+                .enumerate()
+                .map(|(i, &g)| (g, i))
+                .collect();
             let island_manifolds: Vec<Manifold> = group
                 .iter()
-                .map(|&mi| {
+                .filter_map(|&mi| {
+                    let a = *local_of.get(&manifolds[mi].body_a.index())?;
+                    let b = *local_of.get(&manifolds[mi].body_b.index())?;
                     let mut mc = manifolds[mi].clone();
-                    mc.body_a = crate::body::BodyHandle::from(local(manifolds[mi].body_a.index()));
-                    mc.body_b = crate::body::BodyHandle::from(local(manifolds[mi].body_b.index()));
-                    mc
+                    mc.body_a = crate::body::BodyHandle::from(a);
+                    mc.body_b = crate::body::BodyHandle::from(b);
+                    Some(mc)
                 })
                 .collect();
             let keys: Vec<(usize, usize)> = group
@@ -349,7 +355,7 @@ impl SequentialImpulseEngine {
         let guarded: Vec<Mutex<&mut IslandWork>> = islands.iter_mut().map(Mutex::new).collect();
         let level = vec![(0..guarded.len()).collect::<Vec<usize>>()];
         run_levels(&level, guarded.len(), true, |idx| {
-            f(idx, &mut guarded[idx].lock().unwrap());
+            f(idx, &mut guarded[idx].lock().unwrap_or_else(|e| e.into_inner()));
         });
     }
 
@@ -601,14 +607,20 @@ impl SequentialImpulseEngine {
             body_idx.sort_unstable();
             body_idx.dedup();
             let bodies: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
-            let local = |g: usize| body_idx.binary_search(&g).expect("shard body");
+            let local_of: FxHashMap<usize, usize> = body_idx
+                .iter()
+                .enumerate()
+                .map(|(i, &g)| (g, i))
+                .collect();
             let shard_manifolds: Vec<Manifold> = part
                 .iter()
-                .map(|&gmi| {
+                .filter_map(|&gmi| {
+                    let a = *local_of.get(&manifolds[gmi].body_a.index())?;
+                    let b = *local_of.get(&manifolds[gmi].body_b.index())?;
                     let mut mc = manifolds[gmi].clone();
-                    mc.body_a = crate::body::BodyHandle::from(local(manifolds[gmi].body_a.index()));
-                    mc.body_b = crate::body::BodyHandle::from(local(manifolds[gmi].body_b.index()));
-                    mc
+                    mc.body_a = crate::body::BodyHandle::from(a);
+                    mc.body_b = crate::body::BodyHandle::from(b);
+                    Some(mc)
                 })
                 .collect();
             let keys: Vec<(usize, usize)> = part
