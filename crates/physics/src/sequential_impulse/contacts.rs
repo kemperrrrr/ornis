@@ -259,7 +259,12 @@ fn apply_warm_start(
 /// With all defaults (`friction_dir: None`, transverse mirrored from
 /// `friction`) the returned `mu == mu2`, routing the solver through the
 /// legacy circular-cone path bit-identically.
-fn anisotropic_frame(bodies: &[RigidBody], i: usize, j: usize, n: Vec3) -> (Vec3, f32, f32) {
+pub(super) fn anisotropic_frame(
+    bodies: &[RigidBody],
+    i: usize,
+    j: usize,
+    n: Vec3,
+) -> (Vec3, f32, f32) {
     let pick_dir = |b: &RigidBody| -> Option<Vec3> {
         let frame = b.friction_frame().ok()?;
         let axis = match frame {
@@ -297,6 +302,7 @@ fn prepare_manifold_state(
     sub_dt: f32,
     mi: usize,
     full_support: bool,
+    hook: Option<&HookOverride>,
 ) -> Option<ManifoldState> {
     let (i, j) = (m.body_a.index(), m.body_b.index());
     let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
@@ -322,8 +328,17 @@ fn prepare_manifold_state(
 
     let (warm, matched) = match_warm_points(&la, &lb, n, key, warm_in, count);
 
-    let e = bodies[i].restitution.min(bodies[j].restitution);
-    let (t1, mu, mu2) = anisotropic_frame(bodies, i, j, n);
+    let e = hook
+        .and_then(|h| h.restitution)
+        .unwrap_or_else(|| bodies[i].restitution.min(bodies[j].restitution));
+    let (t1, legacy_mu, legacy_mu2) = anisotropic_frame(bodies, i, j, n);
+    // Hook friction is an isotropic override (both Coulomb axes take the
+    // hook value, replacing body-level anisotropy for this pair); without
+    // one the legacy pair frame stands exactly.
+    let (mu, mu2) = hook
+        .and_then(|h| h.friction)
+        .map_or((legacy_mu, legacy_mu2), |f| (f, f));
+    let surface_velocity = hook.and_then(|h| h.surface_velocity).unwrap_or(Vec3::ZERO);
     let mu_roll = bodies[i].rolling_friction.max(bodies[j].rolling_friction);
     let mu_spin = bodies[i].torsion_friction.max(bodies[j].torsion_friction);
     let target = speculative_targets(&pen0, count, sub_dt);
@@ -349,6 +364,7 @@ fn prepare_manifold_state(
         acc_spin: [0.0; MAX_MANIFOLD_POINTS],
         t1,
         t2: t1.cross(n),
+        surface_velocity,
         la,
         lb,
         pen0,
@@ -375,6 +391,7 @@ impl SequentialImpulseEngine {
             ctx.sub_dt,
             ctx.mi,
             false,
+            None,
         )
     }
 
@@ -472,7 +489,7 @@ impl SequentialImpulseEngine {
         let islands = if multi_mi.is_empty() {
             Vec::new()
         } else {
-            let mut islands = self.partition_into_islands(&multi_mi, manifolds);
+            let mut islands = self.partition_into_islands(&multi_mi, manifolds, &[]);
             self.dispatch_islands_velocity(&mut islands, gate, sub_dt, dt);
             islands
         };
@@ -491,7 +508,7 @@ impl SequentialImpulseEngine {
     /// stage reuses them (states + remapped manifolds) after integration.
     pub(super) fn solve_contacts_velocity(
         &mut self,
-        manifolds: &[Manifold],
+        manifolds: &mut [Manifold],
         gate: RestitutionGate,
         sub_dt: f32,
         dt: f32,
@@ -509,16 +526,24 @@ impl SequentialImpulseEngine {
         // passes are NOT interleaved per Gauss-Seidel iteration (they run
         // sequentially per substep) — a Jacobi/GS hybrid that is physically
         // correct but not bit-identical to the pure CPU path (see PLAN.md).
+        // Contact hooks stay on the CPU island path, which alone implements
+        // overrides (see the `hooks` module docs).
         #[cfg(feature = "gpu")]
-        if self.gpu_solver.is_some() {
+        if self.gpu_solver.is_some() && !self.has_contact_hooks() {
             return self.solve_contacts_velocity_gpu(active, manifolds, gate, sub_dt, dt);
         }
+
+        // --- H2 contact-hooks pre-solve (sequential, manifold order) ---
+        // Runs after the sleep/wake pre-pass, before island partitioning,
+        // so the call order is deterministic and the overrides travel with
+        // the manifolds into the islands.
+        let overrides = self.apply_hook_modify(manifolds, &active, sub_dt);
 
         // --- Partition into islands + dispatch (G7) ---
         // Islands are disjoint over dynamic bodies by construction, so
         // concurrent solves are race-free and bit-identical for any thread
         // count (Strong Confluence).
-        let mut islands = self.partition_into_islands(&active, manifolds);
+        let mut islands = self.partition_into_islands(&active, manifolds, &overrides);
         self.dispatch_islands_velocity(&mut islands, gate, sub_dt, dt);
         islands
     }
@@ -711,9 +736,11 @@ impl SequentialImpulseEngine {
     /// restitution, cache persist), operating on an island-local body shard.
     /// All body indices in `manifolds` and the returned states are LOCAL;
     /// `keys` maps each local manifold to its global body-pair warm-cache key.
+    /// `hook` carries the validated contact-hooks overrides aligned with the
+    /// local manifolds (missing entries read as `None` = legacy preamble).
     /// When `path` is [`SolvePath::Wide`], single-point manifolds are solved
     /// in SIMD-wide batches (G7); multi-point (block LCP) stays scalar.
-    // The 8th parameter (`path`, G7) tips this over clippy's default
+    // The 9th parameter (`path`, G7) tips this over clippy's default
     // 7-argument limit; packing them into a struct would only add churn.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn solve_island_velocity(
@@ -725,8 +752,10 @@ impl SequentialImpulseEngine {
         gate: RestitutionGate,
         sub_dt: f32,
         path: SolvePath,
+        hook: &[Option<HookOverride>],
     ) -> (Vec<ManifoldState>, WarmCache) {
-        let mut states = prepare_island_states(bodies, manifolds, keys, warm_in, gate, sub_dt);
+        let mut states =
+            prepare_island_states(bodies, manifolds, keys, warm_in, gate, sub_dt, hook);
         // --- Velocity solve: Gauss-Seidel iterations over ALL manifolds ---
         // G7: single-point manifolds are packed into SIMD-wide batches
         // (disjoint body sets, original GS order preserved — every contact
@@ -892,6 +921,14 @@ impl SequentialImpulseEngine {
             let ra = p - bodies[i].position;
             let rb = p - bodies[j].position;
             let rel = point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra);
+            // Conveyor hook: friction drives the slip toward the belt
+            // velocity instead of zero. The zero branch keeps the legacy
+            // rows bit-exact (no subtract is issued at all without hooks).
+            let rel = if st.surface_velocity == Vec3::ZERO {
+                rel
+            } else {
+                rel - st.surface_velocity
+            };
             if st.mu == st.mu2 {
                 // Legacy circular-cone path (isotropic): sequential
                 // per-axis clamp, bit-identical to the pre-anisotropy code.
@@ -1122,6 +1159,8 @@ impl SequentialImpulseEngine {
 /// Build the per-manifold solver states for every solvable manifold of an
 /// island (warm-start matching, restitution bias, capped warm start). Runs
 /// before any iteration; identical preamble for wide and scalar paths.
+/// `hook` carries the validated contact-hooks overrides aligned with the
+/// island-local manifolds (missing entries read as `None` = legacy).
 fn prepare_island_states(
     bodies: &mut [RigidBody],
     manifolds: &[Manifold],
@@ -1129,6 +1168,7 @@ fn prepare_island_states(
     warm_in: &WarmCache,
     gate: RestitutionGate,
     sub_dt: f32,
+    hook: &[Option<HookOverride>],
 ) -> Vec<ManifoldState> {
     // G2b: warm-start cache matches points by proximity, not by index —
     // manifold point order changes frame to frame (sorted by depth).
@@ -1137,9 +1177,18 @@ fn prepare_island_states(
     let mut states: Vec<ManifoldState> = Vec::with_capacity(manifolds.len());
     for (mi, m) in manifolds.iter().enumerate() {
         let key = keys[mi];
-        if let Some(st) =
-            prepare_manifold_state(bodies, m, key, warm_in, gate, sub_dt, mi, full_support)
-        {
+        let hook_m = hook.get(mi).and_then(|o| o.as_ref());
+        if let Some(st) = prepare_manifold_state(
+            bodies,
+            m,
+            key,
+            warm_in,
+            gate,
+            sub_dt,
+            mi,
+            full_support,
+            hook_m,
+        ) {
             states.push(st);
         }
     }
@@ -1389,6 +1438,7 @@ impl SequentialImpulseEngine {
                     sub_dt,
                     li,
                     false,
+                    None,
                 ) {
                     shard.states.push(st);
                 }

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use ornis_schedule::run_levels;
 
 use super::*;
-use crate::flags::{Dispatch, RestitutionGate};
+use crate::flags::{Dispatch, RestitutionGate, SolvePath};
 
 impl SequentialImpulseEngine {
     /// Rebuild the constraint-graph islands (union-find over dynamic bodies
@@ -247,11 +247,15 @@ impl SequentialImpulseEngine {
 
     /// Partition `active` (manifold indices) into islands and build work
     /// items. Extracted so both the CPU path and the GPU hybrid path reuse
-    /// the same island-building logic.
+    /// the same island-building logic. `hook` carries the validated
+    /// contact-hooks overrides aligned with the global `manifolds` slice
+    /// (missing entries read as `None`); each island keeps its own aligned
+    /// copy for the velocity preamble.
     pub(super) fn partition_into_islands(
         &mut self,
         active: &[usize],
         manifolds: &[Manifold],
+        hook: &[Option<HookOverride>],
     ) -> Vec<IslandWork> {
         let n = self.bodies.len();
         self.scratch_parent.clear();
@@ -321,6 +325,13 @@ impl SequentialImpulseEngine {
                     (a.min(b), a.max(b))
                 })
                 .collect();
+            // Contact-hooks overrides aligned with the island manifolds
+            // (same group order as `keys` above; missing global entries
+            // read as `None` = legacy preamble).
+            let island_hook: Vec<Option<HookOverride>> = group
+                .iter()
+                .map(|&mi| hook.get(mi).cloned().unwrap_or(None))
+                .collect();
             islands.push(IslandWork {
                 body_idx,
                 bodies: shard,
@@ -328,6 +339,7 @@ impl SequentialImpulseEngine {
                 keys,
                 states: Vec::new(),
                 warm: FxHashMap::default(),
+                hook: island_hook,
             });
         }
         islands
@@ -379,7 +391,15 @@ impl SequentialImpulseEngine {
         );
         let warm_in = &self.warm_impulses;
         let base_iters = self.velocity_iterations;
-        let path = self.wide_solver;
+        // Contact hooks override friction/restitution/surface velocity in
+        // the scalar preamble only: while hooks are attached the SIMD-wide
+        // batches are off, so every override routes through the one solver
+        // that implements them. Without hooks the configured path stands.
+        let path = if self.contact_hooks.is_some() {
+            SolvePath::Scalar
+        } else {
+            self.wide_solver
+        };
         // per-island adaptive iters: precompute outside the dispatched closure
         // so we don't borrow `self` inside it (borrow checker). Tall-stack
         // islands never scale below the full base budget (the resting
@@ -422,6 +442,7 @@ impl SequentialImpulseEngine {
                 gate,
                 sub_dt,
                 path,
+                &isl.hook,
             );
             isl.states = states;
             isl.warm = warm;
@@ -635,6 +656,7 @@ impl SequentialImpulseEngine {
                 keys,
                 states: Vec::new(),
                 warm: FxHashMap::default(),
+                hook: Vec::new(),
             });
         }
         shards

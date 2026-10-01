@@ -91,6 +91,11 @@ pub struct ManifoldState {
     pub t1: Vec3,
     /// Second fixed tangent axis.
     pub t2: Vec3,
+    /// Conveyor surface velocity in world space (contact-hooks override,
+    /// default zero): the friction solver drives the relative contact
+    /// velocity toward this instead of zero. Always zero without hooks,
+    /// so the legacy friction rows are untouched.
+    pub surface_velocity: Vec3,
     /// G3 body-frame anchors and detection-time penetration per point,
     /// so the positional pass can re-measure live separation.
     pub la: [Vec3; MAX_MANIFOLD_POINTS],
@@ -148,6 +153,10 @@ pub(crate) struct IslandWork {
     pub(crate) states: Vec<ManifoldState>,
     /// This island's updated warm-cache entries (merged after the join).
     pub(crate) warm: WarmCache,
+    /// Validated contact-hooks overrides aligned with `manifolds`
+    /// (island-local order; `None` = legacy preamble). Empty on the flat
+    /// path, which never carries hooks.
+    pub(crate) hook: Vec<Option<HookOverride>>,
 }
 
 /// Context for building a ManifoldState (packs the per-manifold parameters,

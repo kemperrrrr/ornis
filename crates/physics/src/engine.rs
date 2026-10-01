@@ -241,11 +241,11 @@ pub(crate) use crate::sequential_impulse::raycast_shape_hit;
 /// solver-state and query kernels. [`PhysicsEngine`], [`Contact`] and
 /// [`Manifold`] stay defined here.
 pub use crate::sequential_impulse::{
-    ContinuousHit, ManifoldState, NarrowShardPool, SatCache, SatCacheEntry,
-    SequentialImpulseEngine, apply_impulse, box_manifold, ccd_impact_velocity,
-    detect_collisions_into, effective_mass, find_angular_continuous_hit, inv_inertia_axis,
-    kinematic_cast, mul_inv_inertia, obb_sat, point_velocity, remove_angular_approach,
-    solve_normal_block, solve_small, sweep_gap,
+    ContactHooks, ContactView, ContinuousHit, ManifoldState, ModifyContext, NarrowShardPool,
+    PairFilterContext, SatCache, SatCacheEntry, SequentialImpulseEngine, apply_impulse,
+    box_manifold, ccd_impact_velocity, detect_collisions_into, effective_mass,
+    find_angular_continuous_hit, inv_inertia_axis, kinematic_cast, mul_inv_inertia, obb_sat,
+    point_velocity, remove_angular_approach, solve_normal_block, solve_small, sweep_gap,
 };
 
 #[cfg(test)]

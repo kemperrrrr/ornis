@@ -1219,6 +1219,17 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   враньё по времени) против гипотетической пользы. `rapier3d` оставлен
   как bench-зависимость shootout (нативный путь, нулевая поддержка);
   `RapierEngine` + тесты + путь `rapier_default`-через-адаптер удалены.
+  2026-10-01: зависимости `rapier3d`/`boxddd` из `Cargo.toml` убраны
+  полностью (пустые фичи `rapier`/`box3d` оставлены под будущий
+  bench-возврат); rapier-аудит при этом сохранён как внешняя точка
+  отсчёта (см. отчёт субагента в чате 2026-09-30).
+- **Контактные хуки ✅ (2026-10-01)**: шов в SI-пайплайне в духе Rapier
+  `filter_pair`/`modify_solver_contacts` — `ContactHooks: Send + Sync`
+  (`sequential_impulse/hooks.rs`): `filter_pair` после broadphase,
+  `modify_contact` (normal/friction/restitution/surface_velocity +
+  read-only impulse/approach/penetration) перед velocity solve;
+  `None` ⇒ бит-в-бит legacy (снапшот цел), с хуками — scalar island-путь.
+  Тесты: односторонняя платформа, конвейер, contact force, no-op снапшот.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

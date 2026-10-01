@@ -7,6 +7,7 @@
 mod caches;
 mod contacts;
 mod events;
+pub mod hooks;
 mod islands;
 pub mod joints;
 mod math;
@@ -17,6 +18,8 @@ mod step;
 
 pub(crate) use crate::engine::{Manifold, ManifoldPoint, PhysicsEngine};
 pub use caches::{NarrowShardPool, SatCache, SatCacheEntry};
+pub(crate) use hooks::HookOverride;
+pub use hooks::{ContactHooks, ContactView, ModifyContext, PairFilterContext};
 pub use math::{
     apply_impulse, effective_mass, inv_inertia_axis, mul_inv_inertia, point_velocity,
     solve_normal_block, solve_small,
@@ -198,6 +201,11 @@ pub struct SequentialImpulseEngine {
     gpu_solver: Option<GpuSequentialImpulse>,
     narrow_cache: FxHashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: SatCache,
+    /// Optional Rapier-style contact hooks (`filter_pair` at the narrow
+    /// input, `modify_contact` pre-solve). `None` (default) is the legacy
+    /// bit-exact path; see the [`hooks`](crate::sequential_impulse::hooks)
+    /// module docs for the determinism contract.
+    contact_hooks: Option<Box<dyn ContactHooks>>,
 }
 
 /// Dense joint rebuild after removals: drops the marked joints, remaps
@@ -442,6 +450,7 @@ impl SequentialImpulseEngine {
             scratch_flat_shards: Vec::new(),
             narrow_cache: FxHashMap::default(),
             sat_cache: DashMap::default(),
+            contact_hooks: None,
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
@@ -644,6 +653,9 @@ impl PhysicsEngine for SequentialImpulseEngine {
             .update(&self.bodies, dt, Some(&self.prev_pose));
         let broad_phase_ms = t0.elapsed().as_secs_f64() * MS_PER_SEC;
         let mut broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
+        // H1 contact-hooks filter: cheap pair veto after the broadphase,
+        // before the narrowphase (no-op without hooks, order-preserving).
+        self.apply_hook_filter(&mut broad_active);
         // Kinematic sweep BEFORE the substep loop: teleported/fast drivers
         // cast their step segment against dynamics, wake victims and
         // transfer the normal approach. Runs on final driver poses, so the
@@ -779,9 +791,13 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // the same kernels (see `solve_flat_velocity`). Decided once per
         // step from the broadphase pairs; snapshot/confluence scenes stay
         // below the pair gate and keep the island path exactly.
-        // Eligibility runs on the UNFILTERED pairs (see below), so the
-        // path decision never depends on sleep state.
-        let use_flat = self.flat_singleton_eligible(&broad_active);
+        // Eligibility runs on the hook-filtered pairs (hook vetoes produce
+        // no contacts, so they cannot break singleton disjointness), before
+        // the frozen-pair filter below, so the path decision never depends
+        // on sleep state. Contact hooks force the island path: flat shards
+        // and the GPU batch path do not implement overrides (see the
+        // `hooks` module docs).
+        let use_flat = self.flat_singleton_eligible(&broad_active) && !self.has_contact_hooks();
         // Frozen-pair filter: both-asleep pairs are skipped by the
         // narrowphase unconditionally (see `narrow_pair`), so dropping them
         // here only removes per-substep rejections — the manifold stream
@@ -844,7 +860,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
             if use_flat {
                 self.solve_flat_velocity(&manifolds_buf, gate, sub_dt, dt, &mut flat_shards);
             } else {
-                islands = self.solve_contacts_velocity(&manifolds_buf, gate, sub_dt, dt);
+                islands = self.solve_contacts_velocity(&mut manifolds_buf, gate, sub_dt, dt);
             }
             self.solve_joints_velocity(sub_dt);
             // Continuous pass on the solver-adjusted velocities: clamp fast

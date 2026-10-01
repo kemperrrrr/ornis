@@ -780,6 +780,7 @@ mod tests {
             acc_spin: [0.0; 4],
             t1: Vec3::X,
             t2: Vec3::Z,
+            surface_velocity: Vec3::ZERO,
             la: [Vec3::ZERO; 4],
             lb: [Vec3::ZERO; 4],
             pen0: [0.0; 4],
