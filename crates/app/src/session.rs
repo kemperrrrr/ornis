@@ -27,7 +27,8 @@
 //!       "Transform": {"translation": [-5.6, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
 //!       "Mesh": {"Sphere": {"radius": 1.0, "segments": 32, "rings": 24}},
 //!       "Material": {"Dielectric": {"base_color": [0.8, 0.2, 0.2], "roughness": 0.5}}
-//!     }
+//!     },
+//!     "editor": {"editor_only": false, "selected": false, "hovered": false}
 //!   }],
 //!   "lights": [{"Directional": {"direction": [1, 1, 1], "intensity": 0.6, "color": [1, 1, 1]}}],
 //!   "camera": {"position": [0, 2.5, 9], "target": [0, 0, 0], "up": [0, 1, 0], "fov": 60.0, "near": 0.1, "far": 100.0},
@@ -84,6 +85,7 @@ use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
     ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, Seconds, SmartStore, World,
 };
+use ornis_editor::{EditorMarks, install_editor, is_editor_only};
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
@@ -316,6 +318,12 @@ impl Default for EditorSession {
         install_physics(engine, Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
         install_gameplay(engine);
         install_gameplay_physics_bridge(engine);
+        // Editor viewport domain (PLAN §i, E0): marker lanes + skeleton
+        // systems on the same authoritative world. The single install point
+        // for every construction route (`new`/`Default` delegate here, and
+        // `load_scene` rebuilds through `new`), so editor entities always
+        // have their lanes and filters.
+        install_editor(engine);
         // Audio mirrors the showcase runtime: real output when a device
         // exists, silent otherwise; the bridge is a no-op without a host.
         if let Some(audio) = AudioPlugin::try_default() {
@@ -736,8 +744,23 @@ impl EditorSession {
 /// Snapshot `world` as a [`Scene`]: every alive entity becomes an
 /// [`EntityDesc`] (missing components fall back to the spawn defaults),
 /// lights/camera/ambient come from the environment resource.
+///
+/// Editor chrome ([`EditorOnly`](ornis_editor::EditorOnly)) is excluded:
+/// gizmos and selection proxies replicate through [`scene_json`] but must
+/// never persist into the scene file. The check is the shared
+/// [`is_editor_only`](ornis_editor::is_editor_only) predicate — the same
+/// one physics sync-in uses.
 fn to_scene(world: &EditorSession) -> Scene {
-    let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
+    let entities = world
+        .alive
+        .iter()
+        .filter(|entity| {
+            !world
+                .store()
+                .is_some_and(|store| is_editor_only(store, **entity))
+        })
+        .map(|&e| entity_desc(world, e))
+        .collect();
     let env = world.environment().cloned().unwrap_or_default();
     Scene {
         name: world.scene_name.clone(),
@@ -1207,7 +1230,12 @@ fn resolve_entity(world: &EditorSession, data: &Value) -> Result<Entity, String>
 
 /// One entity entry: `id`/`generation` plus a map
 /// «registry name → serde-canonical component JSON» — generic over the
-/// registered component set (registry ops, no per-type code).
+/// registered component set (registry ops, no per-type code) — plus the
+/// `editor` marks object ([`EditorMarks`]: `{"editor_only": …,
+/// `"selected": …, `"hovered": …}`, always present). Editor chrome
+/// ([`EditorOnly`](ornis_editor::EditorOnly)) is listed here like any
+/// entity — the replica draws gizmos and selection from these labels —
+/// while [`to_scene`] filters it out of the saved scene.
 fn entity_json(store: &SmartStore, entity: Entity) -> Value {
     let mut components = serde_json::Map::new();
     for meta in REGISTRY.iter() {
@@ -1216,10 +1244,12 @@ fn entity_json(store: &SmartStore, entity: Entity) -> Value {
             components.insert(meta.name().to_string(), value);
         }
     }
+    let editor = serde_json::to_value(EditorMarks::of(store, entity)).unwrap_or(Value::Null);
     serde_json::json!({
         "id": entity.id(),
         "generation": entity.generation(),
         "components": components,
+        "editor": editor,
     })
 }
 
@@ -2773,5 +2803,177 @@ mod tests {
         let scene: Value = serde_json::from_str(&scenes[0]).unwrap();
         assert_eq!(scene["entities"][0]["components"]["Name"], "Hero");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── E0 editor domain (PLAN §i) ───────────────────────────────────────
+
+    /// Every construction route installs the editor domain (marker lanes +
+    /// skeleton system); `load_scene` rebuilds through `new`, so the
+    /// install survives world replacement. An empty tick never fails.
+    #[test]
+    fn editor_domain_installed_on_every_construction_route() {
+        for mut world in [EditorSession::new(), EditorSession::default()] {
+            let store = world.world().store().expect("world store");
+            assert!(store.read_lane::<ornis_editor::EditorOnly>().is_some());
+            assert!(store.read_lane::<ornis_editor::Selected>().is_some());
+            assert!(store.read_lane::<ornis_editor::Hovered>().is_some());
+            assert!(
+                world
+                    .world
+                    .engine()
+                    .schedule()
+                    .mermaid()
+                    .contains("editor_maintain"),
+                "skeleton system wired"
+            );
+            world.tick(1.0 / 60.0);
+        }
+
+        let mut world = EditorSession::new();
+        world.spawn(Some("Hero".into()));
+        world.load_scene(world.to_scene());
+        assert_eq!(world.entity_count(), 1);
+        assert!(
+            world
+                .world()
+                .store()
+                .expect("world store")
+                .read_lane::<ornis_editor::EditorOnly>()
+                .is_some(),
+            "install survives load_scene replacement"
+        );
+    }
+
+    /// Editor chrome replicates through the snapshot (with marks) but never
+    /// persists: save/load round-trips contain only scene entities, while
+    /// `scene_json` labels both. Handles stay stable throughout.
+    #[test]
+    fn editor_entities_excluded_from_save_but_visible_in_snapshot() {
+        let (mut world, dir) = sandboxed_session("editor-filter");
+        let hero = world.spawn(Some("Hero".into()));
+        let gizmo = world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .create_entity();
+        {
+            let store = world.world_mut().store_mut().expect("store");
+            store.insert(gizmo, Name("Gizmo".into()));
+            store.insert(gizmo, default_transform());
+            store.insert(gizmo, default_mesh());
+            store.insert(gizmo, default_material());
+            store.insert(gizmo, ornis_editor::EditorOnly);
+            store.insert(gizmo, ornis_editor::Selected);
+        }
+        world.alive.push(gizmo);
+        assert_eq!(world.entity_count(), 2);
+
+        // Snapshot: both entities, editor labels always present.
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        assert_eq!(scene["entity_count"], 2);
+        let entities = scene["entities"].as_array().unwrap();
+        assert_eq!(entities.len(), 2);
+        let by_id = |id: u32| {
+            entities
+                .iter()
+                .find(|e| e["id"] == id)
+                .expect("entity in snapshot")
+        };
+        assert_eq!(
+            by_id(hero.id())["editor"],
+            serde_json::json!({
+                "editor_only": false, "selected": false, "hovered": false,
+            })
+        );
+        assert_eq!(
+            by_id(gizmo.id())["editor"],
+            serde_json::json!({
+                "editor_only": true, "selected": true, "hovered": false,
+            })
+        );
+        assert_eq!(by_id(gizmo.id())["components"]["Name"], "Gizmo");
+
+        // Save path: chrome filtered out.
+        assert_eq!(world.to_scene().entities.len(), 1);
+        assert_eq!(world.to_scene().entities[0].name, "Hero");
+        let path = world.scene_path("editor/filter.ron").expect("sandboxed");
+        world.save_scene_file(&path).expect("save");
+        let on_disk =
+            Scene::from_ron(&fs::read_to_string(path.as_path()).unwrap()).expect("valid RON");
+        assert_eq!(on_disk.entities.len(), 1);
+        assert_eq!(on_disk.entities[0].name, "Hero");
+
+        // Load path: only scene entities come back; handles restart at zero.
+        let mut restored = EditorSession::with_roots(SceneRoots::new(&dir));
+        assert_eq!(restored.load_scene_file(&path).expect("load"), 1);
+        assert_eq!(restored.entity_count(), 1);
+        assert_eq!(restored.name_of(restored.alive[0]).as_deref(), Some("Hero"));
+        // The live world (and its handles) is untouched by save/load.
+        assert_eq!(world.entity_count(), 2);
+        assert_eq!(world.name_of(hero).as_deref(), Some("Hero"));
+        assert_eq!(world.name_of(gizmo).as_deref(), Some("Gizmo"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `EditorOnly` bodies never reach the solver — neither at bind time
+    /// nor when marked after binding (the binding is evicted on next sync,
+    /// the pose freezes instead of simulating once more).
+    #[test]
+    fn editor_only_bodies_never_reach_solver() {
+        let mut world = EditorSession::new();
+        let plain = world.spawn(None);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(plain, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        let gizmo = world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .create_entity();
+        {
+            let store = world.world_mut().store_mut().expect("store");
+            store.insert(gizmo, Name("Gizmo".into()));
+            store.insert(gizmo, default_transform());
+            store.insert(gizmo, ornis_editor::EditorOnly);
+            store.insert(gizmo, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        }
+        world.alive.push(gizmo);
+
+        world.tick(1.0 / 60.0);
+        let lane = |world: &EditorSession| {
+            world
+                .store()
+                .and_then(|store| read_component::<TransformDesc>(store, plain))
+                .expect("plain transform")
+        };
+        assert!(
+            lane(&world).translation[1] < 0.0,
+            "scene body falls under gravity"
+        );
+        let gizmo_pose: TransformDesc = world
+            .store()
+            .and_then(|store| read_component(store, gizmo))
+            .expect("gizmo transform");
+        assert_eq!(
+            gizmo_pose.translation,
+            [0.0, 0.0, 0.0],
+            "chrome body never bound, pose untouched"
+        );
+
+        // Late marking evicts the live binding: the pose freezes.
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(plain, ornis_editor::EditorOnly);
+        let frozen = lane(&world).translation[1];
+        world.tick(1.0 / 60.0);
+        assert_eq!(
+            lane(&world).translation[1],
+            frozen,
+            "evicted body no longer simulates"
+        );
     }
 }

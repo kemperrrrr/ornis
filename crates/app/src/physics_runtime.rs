@@ -27,6 +27,7 @@ use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
+use ornis_editor::EditorOnly;
 use ornis_physics::soft_render::{MIN_TUBE_SIDES, tube_indices, tube_positions};
 use ornis_physics::{
     BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind,
@@ -87,14 +88,24 @@ impl PhysicsRuntime {
         }
     }
 
+    /// Syncs ECS rigid bodies into the solver, skipping editor chrome.
+    ///
+    /// Entities carrying [`EditorOnly`] never reach the solver (a gizmo must
+    /// not fall under gravity) and lose a stale binding if marked later —
+    /// the single [`ornis_editor::is_editor_only`] rule, threaded through
+    /// as a lane instead of a second query so the hot loop stays one pass.
     fn sync_in(
         &mut self,
         bodies: &ComponentStore<RigidBody>,
         transforms: Option<&ComponentStore<TransformDesc>>,
+        excluded: Option<&ComponentStore<EditorOnly>>,
     ) {
-        self.remove_stale_bindings(bodies);
+        self.remove_stale_bindings(bodies, excluded);
 
         for (&entity, source) in bodies.entities.iter().zip(&bodies.data) {
+            if excluded.is_some_and(|lane| lane.contains(entity)) {
+                continue;
+            }
             if let Some(&handle) = self.bindings.get(&entity) {
                 self.sync_external_pose(
                     handle,
@@ -113,11 +124,20 @@ impl PhysicsRuntime {
         }
     }
 
-    fn remove_stale_bindings(&mut self, bodies: &ComponentStore<RigidBody>) {
+    /// Drops bindings whose lane component is gone — or whose entity
+    /// became editor chrome ([`EditorOnly`]): marking an entity later
+    /// evicts its body on the next sync instead of simulating it once more.
+    fn remove_stale_bindings(
+        &mut self,
+        bodies: &ComponentStore<RigidBody>,
+        excluded: Option<&ComponentStore<EditorOnly>>,
+    ) {
         let mut stale: Vec<(Entity, BodyHandle)> = self
             .bindings
             .iter()
-            .filter(|(entity, _)| !bodies.contains(**entity))
+            .filter(|(entity, _)| {
+                !bodies.contains(**entity) || excluded.is_some_and(|lane| lane.contains(**entity))
+            })
             .map(|(&entity, &handle)| (entity, handle))
             .collect();
         stale.sort_unstable_by_key(|&(_, handle)| Reverse(handle));
@@ -394,6 +414,7 @@ impl System for PhysicsSyncIn {
             .reads::<SmartStore>()
             .reads_lane::<RigidBody>()
             .reads_lane::<TransformDesc>()
+            .reads_lane::<EditorOnly>()
             .writes::<Mutex<PhysicsRuntime>>()
     }
 
@@ -405,11 +426,12 @@ impl System for PhysicsSyncIn {
             return;
         };
         let transforms = store.read_lane::<TransformDesc>();
+        let excluded = store.read_lane::<EditorOnly>();
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
         let mut runtime = runtime_resource.lock().unwrap_or_else(|e| e.into_inner());
-        runtime.sync_in(&body_lane, transforms.as_deref());
+        runtime.sync_in(&body_lane, transforms.as_deref(), excluded.as_deref());
     }
 }
 
@@ -909,6 +931,13 @@ mod tests {
                 .access()
                 .reads_lanes
                 .contains(&std::any::TypeId::of::<RigidBody>())
+        );
+        assert!(
+            PhysicsSyncIn
+                .access()
+                .reads_lanes
+                .contains(&std::any::TypeId::of::<EditorOnly>()),
+            "sync-in must declare the EditorOnly exclusion lane"
         );
         assert!(
             PhysicsSyncOut

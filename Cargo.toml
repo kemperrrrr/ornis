@@ -17,6 +17,7 @@ members = [
     "crates/assets",
     "crates/gameplay",
     "crates/editor-backend",
+    "crates/editor",
     "crates/mesh-editor",
     "crates/gltf",
     "xtask",

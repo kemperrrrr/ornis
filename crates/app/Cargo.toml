@@ -11,7 +11,9 @@ ornis-animation = { path = "../animation" }
 ornis-assets = { path = "../assets" }
 ornis-audio = { path = "../audio" }
 ornis-core = { path = "../core" }
+ornis-editor = { path = "../editor" }
 ornis-gameplay = { path = "../gameplay" }
+ornis-gltf = { path = "../gltf" }
 ornis-physics = { path = "../physics" }
 ornis-render = { path = "../render" }
 crossbeam-channel = "0.5"
