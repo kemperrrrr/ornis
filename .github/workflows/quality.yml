@@ -109,7 +109,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install system dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
@@ -163,7 +163,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install system dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
@@ -220,7 +220,7 @@ jobs:
       # Ubuntu runners have no GPU; without an ICD no adapter is found
       # (no compatible GPU adapter found in ornis-wgpu-backend).
       - name: Install system dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
@@ -274,7 +274,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install system dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
