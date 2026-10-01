@@ -969,15 +969,19 @@ fn spawn_render_loop(
         }
 
         // Schedule next frame
-        if let Some(cb) = f_inner.borrow().as_ref() {
+        let borrow = f_inner.borrow();
+        if let Some(cb) = borrow.as_ref() {
             let _ = window_for_loop.request_animation_frame(cb.as_ref().unchecked_ref());
         }
     }));
 
-    let Some(cb) = f_clone.borrow().as_ref() else {
-        return Err(JsValue::from_str("render loop callback missing"));
-    };
-    window.request_animation_frame(cb.as_ref().unchecked_ref())?;
+    {
+        let borrow = f_clone.borrow();
+        let Some(cb) = borrow.as_ref() else {
+            return Err(JsValue::from_str("render loop callback missing"));
+        };
+        window.request_animation_frame(cb.as_ref().unchecked_ref())?;
+    }
 
     std::mem::forget(f);
     std::mem::forget(f_clone);
