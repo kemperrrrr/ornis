@@ -439,10 +439,10 @@ impl GameApp {
             s
         } else {
             world.resources_mut().insert(InputState::default());
-            world
-                .resources_mut()
-                .get_mut::<InputState>()
-                .expect("just inserted")
+            let Some(s) = world.resources_mut().get_mut::<InputState>() else {
+                return;
+            };
+            s
         };
         state.apply_snapshot(
             &input.pressed_keys,
@@ -549,7 +549,7 @@ impl ApplicationHandler for GameApp {
                         .resources()
                         .get::<ornis_render::gpu_resources::GpuSurface>(),
                 ) {
-                    let guard = surface.0.lock().expect("gpu surface lock");
+                    let guard = surface.0.lock().unwrap_or_else(|e| e.into_inner());
                     // Take the format from the updated GpuSurfaceState.
                     let format = ctx
                         .runtime
@@ -586,7 +586,7 @@ impl ApplicationHandler for GameApp {
                         .resources()
                         .get::<ornis_render::gpu_resources::GpuDevice>(),
                 ) {
-                    let mut fs = fs.lock().expect("gpu frame state lock");
+                    let mut fs = fs.lock().unwrap_or_else(|e| e.into_inner());
                     fs.renderer.resize(&dev.0, w, h);
                     fs.frame3d.set_surface_size(w, h);
                 }

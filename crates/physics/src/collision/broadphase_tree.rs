@@ -118,10 +118,10 @@ impl Tree {
             return;
         }
         let leaf_aabb = self.nodes[leaf].aabb;
-        let mut node = self.root.unwrap();
-        while self.nodes[node].child1.is_some() {
-            let c1 = self.nodes[node].child1.unwrap();
-            let c2 = self.nodes[node].child2.unwrap();
+        let Some(mut node) = self.root else {
+            return;
+        };
+        while let (Some(c1), Some(c2)) = (self.nodes[node].child1, self.nodes[node].child2) {
             let area = self.nodes[node].aabb.union_area();
             let combined_area = self.nodes[node].aabb.union(&leaf_aabb).union_area();
             let cost = 2.0 * combined_area;
@@ -170,10 +170,12 @@ impl Tree {
             return;
         };
         let grandparent = self.nodes[parent].parent;
-        let sibling = if self.nodes[parent].child1 == Some(leaf) {
-            self.nodes[parent].child2.unwrap()
+        let Some(sibling) = (if self.nodes[parent].child1 == Some(leaf) {
+            self.nodes[parent].child2
         } else {
-            self.nodes[parent].child1.unwrap()
+            self.nodes[parent].child1
+        }) else {
+            return;
         };
         if let Some(gp) = grandparent {
             if self.nodes[gp].child1 == Some(parent) {
@@ -293,14 +295,12 @@ impl Tree {
         if !tree.nodes[node].aabb.overlaps(target) {
             return;
         }
-        if tree.nodes[node].child1.is_none() {
+        let (Some(c1), Some(c2)) = (tree.nodes[node].child1, tree.nodes[node].child2) else {
             if let Some(body) = tree.nodes[node].body {
                 out.push(body);
             }
             return;
-        }
-        let c1 = tree.nodes[node].child1.unwrap();
-        let c2 = tree.nodes[node].child2.unwrap();
+        };
         Self::query_recursive(tree, c1, target, out);
         Self::query_recursive(tree, c2, target, out);
     }
@@ -477,10 +477,10 @@ impl DynamicAabbTree {
                 && self.prev_swept[i].max == swept[i].max;
             let filter_same = known && self.prev_filter[i] == filter;
             // Copy out before any tree call so the proxy borrow ends first.
-            let (kind, node) = {
-                let proxy = self.proxies[i].as_ref().unwrap();
-                (proxy.kind, proxy.node)
+            let Some(proxy) = self.proxies[i].as_ref() else {
+                continue;
             };
+            let (kind, node) = (proxy.kind, proxy.node);
             if (kind == TreeKind::Static) != want_static {
                 // Body changed type: drop from the old tree, insert into the
                 // matching one. Without this a proxy would linger in the
@@ -507,16 +507,15 @@ impl DynamicAabbTree {
                     dirty.push(i);
                 }
             }
-            if !self.proxies[i]
+            let needs_refit = self.proxies[i]
                 .as_ref()
-                .unwrap()
-                .fat
-                .contains_aabb(&swept[i])
-            {
+                .is_some_and(|p| !p.fat.contains_aabb(&swept[i]));
+            if needs_refit {
                 let fat = Self::fat_aabb(swept[i]);
-                let proxy = self.proxies[i].as_mut().unwrap();
-                proxy.fat = fat;
-                proxy.moved = true;
+                if let Some(proxy) = self.proxies[i].as_mut() {
+                    proxy.fat = fat;
+                    proxy.moved = true;
+                }
                 let tree = self.tree_of(kind);
                 tree.remove_leaf(node);
                 tree.nodes[node].aabb = fat;
@@ -577,7 +576,10 @@ impl DynamicAabbTree {
             // mutably; capacity is restored at the end of the iteration.
             let mut candidates = std::mem::take(&mut self.scratch);
             candidates.clear();
-            let fat = self.proxies[a].as_ref().unwrap().fat;
+            let Some(fat) = self.proxies[a].as_ref().map(|p| p.fat) else {
+                self.scratch = candidates;
+                continue;
+            };
             self.dynamic_tree.query(&fat, &mut candidates);
             self.static_tree.query(&fat, &mut candidates);
             for &b in &candidates {

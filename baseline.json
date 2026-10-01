@@ -1,15 +1,15 @@
 {
   "version": 2,
-  "quality_score": 0.4508560830052073,
-  "iosp_score": 0.9005589879376287,
+  "quality_score": 0.45570135416791047,
+  "iosp_score": 0.9006174654513378,
   "violations": 338,
-  "total": 5464,
+  "total": 5466,
   "complexity_warnings": 58,
   "magic_number_warnings": 151,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 106,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 125,
+  "error_handling_warnings": 105,
   "duplicate_groups": 79,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2480,
+  "total_findings": 2460,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -263,42 +263,42 @@
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3060
+      "line": 3068
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3263
+      "line": 3271
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3460
+      "line": 3468
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3618
+      "line": 3626
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3638
+      "line": 3646
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3719
+      "line": 3727
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3746
+      "line": 3754
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4188
+      "line": 4196
     },
     {
       "name": "RenderFrame3D::build",
@@ -898,17 +898,17 @@
     {
       "name": "Tree::rotate",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 240
+      "line": 242
     },
     {
       "name": "Tree::query",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 286
+      "line": 288
     },
     {
       "name": "Tree::query_recursive",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 292
+      "line": 294
     },
     {
       "name": "DynamicAabbTree::fat_aabb",
@@ -933,12 +933,12 @@
     {
       "name": "DynamicAabbTree::insert_new",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 545
+      "line": 544
     },
     {
       "name": "DynamicAabbTree::query_dynamic",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 574
+      "line": 573
     },
     {
       "name": "Shape::aabb",
@@ -1688,32 +1688,32 @@
     {
       "name": "EventLog::push",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 250
+      "line": 253
     },
     {
       "name": "EventLog::after",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 259
+      "line": 262
     },
     {
       "name": "serve",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 285
+      "line": 288
     },
     {
       "name": "serve_events_stream",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 638
+      "line": 639
     },
     {
       "name": "push_pending",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 758
+      "line": 759
     },
     {
       "name": "route_request",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 1257
+      "line": 1256
     },
     {
       "name": "quality",

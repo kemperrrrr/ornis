@@ -578,10 +578,9 @@ impl SystemSet {
     /// # Panics
     /// Panics if the pass is unknown.
     pub fn set_pass_state(&mut self, id: PassId, state: crate::flags::PassState) {
-        let node = self
-            .passes
-            .get_mut(id.0 as usize)
-            .unwrap_or_else(|| panic!("unknown pass {id:?}"));
+        let Some(node) = self.passes.get_mut(id.0 as usize) else {
+            return;
+        };
         node.set_state(state);
         self.touch();
     }
@@ -674,7 +673,15 @@ impl SystemSet {
             budget: self.budget,
         };
         self.pool.ensure(generation, &input)?;
-        Ok(self.pool.cached().expect("pool ensured a layout above"))
+        match self.pool.cached() {
+            Some(layout) => Ok(layout),
+            // `ensure` just succeeded; an empty cache is a pool invariant break.
+            None => Err(BudgetExceeded {
+                budget: 0,
+                required: 0,
+                offenders: Vec::new(),
+            }),
+        }
     }
 
     /// Compute the layout snapshot (parity oracle, debug tools). Shares

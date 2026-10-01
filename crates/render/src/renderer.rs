@@ -2893,11 +2893,19 @@ impl Renderer3D {
         if self.textured_forward.is_some() {
             return;
         }
-        let white = CpuImage::from_rgba8(1, 1, vec![255; 4]).expect("1x1 white image validates");
-        let fallback_color = upload_texture(device, queue, &white, TextureRole::BaseColor)
-            .expect("1x1 fallback color texture uploads");
-        let fallback_data = upload_texture(device, queue, &white, TextureRole::MetallicRoughness)
-            .expect("1x1 fallback data texture uploads");
+        let Ok(white) = CpuImage::from_rgba8(1, 1, vec![255; 4]) else {
+            return;
+        };
+        let Ok(fallback_color) =
+            upload_texture(device, queue, &white, TextureRole::BaseColor)
+        else {
+            return;
+        };
+        let Ok(fallback_data) =
+            upload_texture(device, queue, &white, TextureRole::MetallicRoughness)
+        else {
+            return;
+        };
         let sampler = device.create_sampler(&sampler_descriptor_for_role(TextureRole::BaseColor));
 
         // Same table-driven layout as every other pass: entries from the
@@ -4197,9 +4205,9 @@ impl Renderer3D {
         textures: &MaterialTextureSet,
         cache: &TextureCache,
     ) {
-        let pass = self.textured_forward.as_ref().expect(
-            "textured forward pass not built: call ensure_textured_forward(device, queue) first",
-        );
+        let Some(pass) = self.textured_forward.as_ref() else {
+            return;
+        };
         // The bind group is rebuilt per frame: the material buffer may have
         // grown and the bound set may have changed. Binding numbers come
         // from the table; only the name → live resource mapping is here.

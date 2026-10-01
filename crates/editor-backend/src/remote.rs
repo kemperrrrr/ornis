@@ -140,10 +140,13 @@ impl RemoteEditor {
         );
         let stop_clone = stop.clone();
 
-        let handle = thread::Builder::new()
+        let Ok(handle) = thread::Builder::new()
             .name("remote-editor".into())
             .spawn(move || serve(internal, stop_clone, game_tx, game_rx, event_log, port))
-            .expect("spawn remote-editor thread");
+        else {
+            eprintln!("ornis: remote editor failed to spawn serve thread");
+            return inert();
+        };
 
         eprintln!("ornis: remote editor at http://{addr}");
         Self {
@@ -404,22 +407,20 @@ fn spawn_accept_loop(
     internal_port: u16,
     server_port: u16,
 ) -> Option<JoinHandle<()>> {
-    Some(
-        thread::Builder::new()
-            .name("remote-editor-accept".into())
-            .spawn(move || {
-                accept_loop(
-                    listener,
-                    stop,
-                    game_tx,
-                    event_log,
-                    websocket_handles,
-                    internal_port,
-                    server_port,
-                )
-            })
-            .expect("spawn remote-editor-accept thread"),
-    )
+    thread::Builder::new()
+        .name("remote-editor-accept".into())
+        .spawn(move || {
+            accept_loop(
+                listener,
+                stop,
+                game_tx,
+                event_log,
+                websocket_handles,
+                internal_port,
+                server_port,
+            )
+        })
+        .ok()
 }
 
 /// wasm32 twin of [`spawn_accept_loop`]: no accept loop in the browser.
@@ -1075,9 +1076,7 @@ fn check_post_guards(request: &Request, server_port: u16) -> Result<(), ApiGuard
 /// JSON rejection body for a guard failure, carrying its status code.
 fn guard_response(error: ApiGuardError) -> Response<Cursor<Vec<u8>>> {
     let body = serde_json::json!({"accepted": false, "error": error.to_string()}).to_string();
-    Response::from_string(body)
-        .with_status_code(error.status_code())
-        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+    with_json_content_type(Response::from_string(body).with_status_code(error.status_code()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1305,9 +1304,10 @@ fn route_request(
                 let _ = game_tx.send(UiCommand::Input { input });
                 json_response(r#"{"accepted":true}"#)
             } else {
-                Response::from_string(r#"{"accepted":false,"error":"invalid input"}"#)
-                    .with_status_code(HTTP_BAD_REQUEST)
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                with_json_content_type(
+                    Response::from_string(r#"{"accepted":false,"error":"invalid input"}"#)
+                        .with_status_code(HTTP_BAD_REQUEST),
+                )
             }
         }
         ("GET", _) => serve_static(root, &url),
@@ -1343,7 +1343,13 @@ fn serve_static(root: &Path, url_path: &str) -> Response<Cursor<Vec<u8>>> {
     }
 
     match fs::read(&full) {
-        Ok(bytes) => Response::from_data(bytes).with_header(content_type(&full)),
+        Ok(bytes) => {
+            let response = Response::from_data(bytes);
+            match content_type(&full) {
+                Some(header) => response.with_header(header),
+                None => response,
+            }
+        }
         Err(_) => not_found(),
     }
 }
@@ -1512,15 +1518,23 @@ fn parse_browser_input(bytes: &[u8]) -> Option<crate::ipc::BrowserInput> {
 }
 
 fn json_response(body: &str) -> Response<Cursor<Vec<u8>>> {
-    Response::from_data(body)
-        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+    with_json_content_type(Response::from_data(body))
+}
+
+fn with_json_content_type(
+    response: Response<Cursor<Vec<u8>>>,
+) -> Response<Cursor<Vec<u8>>> {
+    match Header::from_bytes("Content-Type", "application/json") {
+        Ok(header) => response.with_header(header),
+        Err(_) => response,
+    }
 }
 
 fn not_found() -> Response<Cursor<Vec<u8>>> {
     Response::from_data("404 Not Found").with_status_code(404)
 }
 
-fn content_type(path: &Path) -> Header {
+fn content_type(path: &Path) -> Option<Header> {
     let ct = match path.extension().and_then(|e| e.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
@@ -1533,7 +1547,7 @@ fn content_type(path: &Path) -> Header {
         Some("woff") => "font/woff",
         _ => "application/octet-stream",
     };
-    Header::from_bytes("Content-Type", ct).unwrap()
+    Header::from_bytes("Content-Type", ct).ok()
 }
 
 fn event_json_data(json_data: &str) -> serde_json::Value {
@@ -1989,7 +2003,10 @@ mod tests {
     fn content_type_variants() {
         let ct = |ext: &str| {
             let p = PathBuf::from(format!("x.{ext}"));
-            content_type(&p).value.to_string()
+            content_type(&p)
+                .expect("ASCII content-type literals parse")
+                .value
+                .to_string()
         };
         assert!(ct("html").starts_with("text/html"));
         assert!(ct("css").starts_with("text/css"));

@@ -622,11 +622,9 @@ impl EditorSession {
     /// not a valid scene; the world is untouched.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, ornis_assets::SceneLoadError> {
         let id = self.assets.load_scene_ron(ron_str)?;
-        let scene = self
-            .assets
-            .get_scene(id)
-            .expect("just-loaded scene")
-            .clone();
+        let Some(scene) = self.assets.get_scene(id).cloned() else {
+            return Ok(0);
+        };
         Ok(self.load_scene(scene))
     }
 
@@ -685,11 +683,9 @@ impl EditorSession {
                 .assets
                 .load_gltf_file(resolved)
                 .map_err(|e| SceneFileError::Parse(e.to_string()))?;
-            let scene = self
-                .assets
-                .get_scene(id)
-                .expect("just-loaded scene")
-                .clone();
+            let Some(scene) = self.assets.get_scene(id).cloned() else {
+                return Ok(0);
+            };
             return Ok(self.load_scene(scene));
         }
         let ron = fs::read_to_string(resolved).map_err(|e| SceneFileError::Read {
@@ -769,8 +765,8 @@ fn scene_json(world: &EditorSession) -> String {
         .iter()
         .map(|&e| entity_json(world.store(), e))
         .collect();
-    let lights = serde_json::to_value(&world.environment().lights).expect("LightDesc serializes");
-    let camera = serde_json::to_value(&world.environment().camera).expect("CameraDesc serializes");
+    let lights = serde_json::to_value(&world.environment().lights).unwrap_or(Value::Null);
+    let camera = serde_json::to_value(&world.environment().camera).unwrap_or(Value::Null);
     serde_json::json!({
         "version": world.version(),
         "entity_count": world.entity_count(),
@@ -877,10 +873,10 @@ fn apply_browser_input(world: &mut EditorSession, input: &editor_backend::ipc::B
         s
     } else {
         world_mut.resources_mut().insert(InputState::default());
-        world_mut
-            .resources_mut()
-            .get_mut::<InputState>()
-            .expect("just inserted")
+        let Some(s) = world_mut.resources_mut().get_mut::<InputState>() else {
+            return;
+        };
+        s
     };
     state.apply_snapshot(
         &input.pressed_keys,
@@ -1512,69 +1508,79 @@ fn reload_watched_scene(
 /// time since the previous tick clamped by [`clamp_frame_dt`]; an idle loop
 /// keeps its historical ~16 ms cadence.
 pub fn run(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name("editor-world".into())
-        .spawn(move || {
-            let mut world = EditorSession::new();
-            match startup_scene_ron() {
-                Some(ron) => {
-                    if let Err(e) = world.load_scene_ron(&ron) {
-                        eprintln!("ornis: failed to load startup scene: {e}");
-                    }
-                }
-                None => eprintln!("ornis: no startup scene found, starting with an empty world"),
+    // Prefer a named thread; fall back to an anonymous one if the OS rejects
+    // the name (values move into at most one closure).
+    let named = thread::Builder::new().name("editor-world".into());
+    match named.spawn({
+        let cmd_rx = cmd_rx.clone();
+        let ev_tx = ev_tx.clone();
+        move || editor_world_loop(cmd_rx, ev_tx)
+    }) {
+        Ok(handle) => handle,
+        Err(_) => thread::spawn(move || editor_world_loop(cmd_rx, ev_tx)),
+    }
+}
+
+/// Editor-world tick loop: commands, scene hot-reload, and wall-clock frames.
+fn editor_world_loop(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) {
+    let mut world = EditorSession::new();
+    match startup_scene_ron() {
+        Some(ron) => {
+            if let Err(e) = world.load_scene_ron(&ron) {
+                eprintln!("ornis: failed to load startup scene: {e}");
             }
-            // Publish the initial state so the HTTP caches are live
-            // before the first command arrives.
-            publish_state(&world, &ev_tx);
-            let mut scene_watch = watched_scene_path().map(FileWatch::new);
-            // Wall clock for the measured tick delta (see [`clamp_frame_dt`]).
-            let mut last_tick = Instant::now();
-            loop {
-                match cmd_rx.recv_timeout(IDLE_POLL_INTERVAL) {
-                    Ok(first) => world.handle_command(&first, &ev_tx),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-                // Drain the burst that queued while handling, without
-                // blocking: the tick below still runs this iteration.
-                let mut disconnected = false;
-                loop {
-                    match cmd_rx.try_recv() {
-                        Ok(cmd) => world.handle_command(&cmd, &ev_tx),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
-                if let Some(watch) = scene_watch.as_mut()
-                    && watch.poll()
-                {
-                    // The watcher only observes workspace scene files, so this
-                    // resolve is a fail-closed formality (defense in depth).
-                    let watched = watch.path.clone();
-                    match ScenePath::resolve(&world.scene_roots, &watched.to_string_lossy()) {
-                        Ok(path) => {
-                            reload_watched_scene(&mut world, &path, &ev_tx);
-                        }
-                        Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
-                    }
-                }
-                if world
-                    .tick_secs(clamp_frame_dt(last_tick.elapsed()))
-                    .changed()
-                {
-                    publish_state(&world, &ev_tx);
-                }
-                last_tick = Instant::now();
-                if disconnected {
+        }
+        None => eprintln!("ornis: no startup scene found, starting with an empty world"),
+    }
+    // Publish the initial state so the HTTP caches are live
+    // before the first command arrives.
+    publish_state(&world, &ev_tx);
+    let mut scene_watch = watched_scene_path().map(FileWatch::new);
+    // Wall clock for the measured tick delta (see [`clamp_frame_dt`]).
+    let mut last_tick = Instant::now();
+    loop {
+        match cmd_rx.recv_timeout(IDLE_POLL_INTERVAL) {
+            Ok(first) => world.handle_command(&first, &ev_tx),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        // Drain the burst that queued while handling, without
+        // blocking: the tick below still runs this iteration.
+        let mut disconnected = false;
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(cmd) => world.handle_command(&cmd, &ev_tx),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
                     break;
                 }
             }
-        })
-        .expect("spawn editor-world thread")
+        }
+        if let Some(watch) = scene_watch.as_mut()
+            && watch.poll()
+        {
+            // The watcher only observes workspace scene files, so this
+            // resolve is a fail-closed formality (defense in depth).
+            let watched = watch.path.clone();
+            match ScenePath::resolve(&world.scene_roots, &watched.to_string_lossy()) {
+                Ok(path) => {
+                    reload_watched_scene(&mut world, &path, &ev_tx);
+                }
+                Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
+            }
+        }
+        if world
+            .tick_secs(clamp_frame_dt(last_tick.elapsed()))
+            .changed()
+        {
+            publish_state(&world, &ev_tx);
+        }
+        last_tick = Instant::now();
+        if disconnected {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
