@@ -8,7 +8,7 @@
 //! from `avbd.rs` (phase 3).
 
 use super::*;
-use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO};
+use crate::constants::{AXIS_REST_LEN2, DEGENERATE_LEN2, NEAR_ZERO};
 use crate::distance::box_box_signed_gap;
 use glam::Mat3;
 use std::f32::consts::TAU;
@@ -275,9 +275,11 @@ fn bound_radius(shape: &Shape) -> f32 {
 
 /// Local-space corners of a box (empty for every other shape).
 fn box_corners(shape: &Shape) -> Vec<Vec3> {
+    /// Corners of an AABB/OBB.
+    const BOX_CORNERS: usize = 8;
     match shape {
         Shape::Box { half_extents: h } => {
-            let mut out = Vec::with_capacity(8);
+            let mut out = Vec::with_capacity(BOX_CORNERS);
             for &sx in &[-1.0f32, 1.0] {
                 for &sy in &[-1.0f32, 1.0] {
                     for &sz in &[-1.0f32, 1.0] {
@@ -437,7 +439,7 @@ impl AvbdEngine {
         if d.dist < 0.0 {
             normal = -normal;
         }
-        if normal.length_squared() < 1e-16 {
+        if normal.length_squared() < AXIS_REST_LEN2 {
             normal = a.position - b.position;
         }
         let mut normal = normal.normalize_or(Vec3::Y);
@@ -620,7 +622,9 @@ impl AvbdEngine {
         // (non-material churn that rocks stacks), so it is only used
         // when corners give fewer than 3 points (edge/vertex and
         // non-box contacts).
-        if !separated && fresh.len() < 3 {
+        /// Prefer corner witnesses until at least this many points exist.
+        const WITNESS_FALLBACK_MIN: usize = ANGULAR_OFFSET;
+        if !separated && fresh.len() < WITNESS_FALLBACK_MIN {
             let inv_a = a.orientation.inverse();
             let inv_b = b.orientation.inverse();
             let ra_l = inv_a * (d.point_a - a.position);
@@ -814,10 +818,10 @@ impl AvbdEngine {
                         next.push(AvbdPoint {
                             ra: ra_l,
                             rb: rb_l,
-                            lam: [0.0; 3],
-                            pen: [PENALTY_INIT; 3],
+                            lam: [0.0; ANGULAR_OFFSET],
+                            pen: [PENALTY_INIT; ANGULAR_OFFSET],
                             stuck: true,
-                            roll_lam: [0.0; 3],
+                            roll_lam: [0.0; ANGULAR_OFFSET],
                         });
                     }
                 }
@@ -841,10 +845,10 @@ impl AvbdEngine {
                         .map(|(ra_l, rb_l)| AvbdPoint {
                             ra: ra_l,
                             rb: rb_l,
-                            lam: [0.0; 3],
-                            pen: [PENALTY_INIT; 3],
+                            lam: [0.0; ANGULAR_OFFSET],
+                            pen: [PENALTY_INIT; ANGULAR_OFFSET],
                             stuck: true,
-                            roll_lam: [0.0; 3],
+                            roll_lam: [0.0; ANGULAR_OFFSET],
                         })
                         .collect(),
                 });

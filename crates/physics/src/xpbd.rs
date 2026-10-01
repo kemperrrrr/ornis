@@ -73,7 +73,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::PrevPose;
-use crate::constants::{COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZERO};
+use crate::constants::{AXIS_REST_LEN2, COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZERO};
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::errors::{JointError, QueryError};
@@ -1102,7 +1102,7 @@ impl XpbdEngine {
             }
             2.0 * q_err.xyz()
         };
-        if theta.length_squared() < 1e-16 {
+        if theta.length_squared() < AXIS_REST_LEN2 {
             return;
         }
         for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
@@ -1137,7 +1137,7 @@ impl XpbdEngine {
             corr -= axis_a * corr.dot(axis_a);
             corr
         };
-        if corr.length_squared() < 1e-16 {
+        if corr.length_squared() < AXIS_REST_LEN2 {
             return;
         }
         for axis in [Vec3::X, Vec3::Y, Vec3::Z] {

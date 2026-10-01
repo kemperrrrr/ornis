@@ -4,7 +4,7 @@
 use glam::{Quat, Vec3};
 
 use crate::body::RigidBody;
-use crate::constants::{NEAR_ZERO, SHAPE_TOUCH};
+use crate::constants::{CCD_TRAVEL_GATE_FRACTION, NEAR_ZERO, SHAPE_TOUCH};
 use crate::distance;
 use crate::flags::HitKind;
 use crate::math::{Ray, RaycastHit};
@@ -26,11 +26,17 @@ const MIN_SEGMENT_LENGTH: f32 = NEAR_ZERO;
 /// Edge-cross length floor for OBB SAT candidates (m): shorter means
 /// nearly parallel edges, so the axis is dropped.
 const PARALLEL_EDGE_EPS: f32 = 1e-3;
-
-/// Fraction of the thinnest feature that arms CCD: linear and angular
-/// sweeps shorter than this fraction of `shape_min_dimension` cannot
-/// defeat the discrete phase, so they skip the time-of-impact walk.
-const CCD_TRAVEL_GATE_FRACTION: f32 = 0.5;
+/// Overlap / SAT margin for swept-shape discrete probes (m).
+const OVERLAP_EPS: f32 = 1e-5;
+/// Angular-CCD touch band (m): tighter than [`SHAPE_TOUCH`] so binary
+/// refine does not stop a hair short of the contact.
+const ANGULAR_CCD_TOUCH: f32 = 1e-5;
+/// Binary-search refine iterations inside the angular TOI bracket.
+const BINARY_REFINE_ITERS: usize = 10;
+/// Minimum fractional advance of the angular CA loop.
+const CA_FRACTION_EPS: f32 = 1e-4;
+/// Explicit BVH walk stack for mesh raycasts (same depth as distance).
+const BVH_STACK_CAP: usize = 64;
 
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
@@ -189,7 +195,7 @@ fn swept_shape_overlaps(
             target.pos,
             *half_b,
             target.rot,
-            1e-5,
+            OVERLAP_EPS,
         )
         .is_some(),
         _ => {
@@ -201,7 +207,7 @@ fn swept_shape_overlaps(
                 },
                 target,
             );
-            distance.dist <= 1e-5
+            distance.dist <= OVERLAP_EPS
         }
     }
 }
@@ -498,7 +504,6 @@ fn first_angular_overlap_fraction(
     if bound < MIN_SEGMENT_LENGTH {
         return None;
     }
-    const TOUCH: f32 = 1e-5;
     const MAX_ITERS: usize = 32;
     let mut f = 0.0f32;
     let mut prev_f = 0.0f32;
@@ -513,7 +518,7 @@ fn first_angular_overlap_fraction(
             // Binary refine the bracket [prev_f, f] for sub-sample precision.
             let mut low = prev_f;
             let mut high = f;
-            for _ in 0..10 {
+            for _ in 0..BINARY_REFINE_ITERS {
                 let mid = (low + high) * 0.5;
                 if swept_shape_overlaps(body, target, displacement, sub_dt, mid) {
                     high = mid;
@@ -526,16 +531,16 @@ fn first_angular_overlap_fraction(
         let d = swept_distance(body, target, displacement, sub_dt, f);
         // `d.dist` is the exact surface gap (positive = separated). Advance
         // by at most the gap over the worst-case point speed.
-        let gap = d.dist - TOUCH * 0.5;
+        let gap = d.dist - ANGULAR_CCD_TOUCH * 0.5;
         if gap <= 0.0 {
             // Numerically touching — treat as overlap at next fraction.
-            let next = (f + 1e-4).min(1.0);
+            let next = (f + CA_FRACTION_EPS).min(1.0);
             if swept_shape_overlaps(body, target, displacement, sub_dt, next) {
                 return Some(next);
             }
             break;
         }
-        let step = (gap / bound).clamp(1e-4, 1.0 - f);
+        let step = (gap / bound).clamp(CA_FRACTION_EPS, 1.0 - f);
         prev_f = f;
         f += step;
         if f <= prev_f {
@@ -1139,7 +1144,7 @@ fn ray_trimesh_hit(
     }
     let mut best: Option<(f32, Vec3)> = None;
     let mut limit = max_dist;
-    let mut stack = [0u32; 64];
+    let mut stack = [0u32; BVH_STACK_CAP];
     let mut len = 1usize;
     while len > 0 {
         len -= 1;
@@ -1171,7 +1176,7 @@ fn ray_trimesh_hit(
                 }
             }
         } else if let Some((left, right)) = node.link.children() {
-            if len + 2 > 64 {
+            if len + 2 > BVH_STACK_CAP {
                 break; // Depth guard: keep the best hit so far.
             }
             // Near-first order is irrelevant for correctness (best-tracked

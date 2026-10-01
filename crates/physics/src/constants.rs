@@ -52,3 +52,23 @@ pub(crate) const SHAPE_TOUCH: f32 = 1e-3;
 /// would have to live inside f32 rounding (coincident clamp, spin deadband,
 /// zero-area EPA faces). Not a mass-domain floor.
 pub(crate) const COINCIDENT_LEN2: f32 = 1e-18;
+
+/// Squared length at which an angular/axis residual is treated as rest.
+///
+/// Between [`DEGENERATE_LEN2`] and [`COINCIDENT_LEN2`]: small-angle XPBD
+/// locks and AVBD contact normals that have collapsed but are not yet
+/// f32 dust. Keeps those gates coupled across solvers.
+pub(crate) const AXIS_REST_LEN2: f32 = 1e-16;
+
+/// Position / angle correction deadband (m or rad).
+///
+/// Joint NGS rows and gyroscopic-spread ratios below this skip the
+/// impulse — residues smaller than solver slop.
+pub(crate) const POS_CORRECTION_EPS: f32 = 1e-6;
+
+/// Fraction of the thinnest shape feature that arms CCD / TOI casts.
+///
+/// Linear (and angular) sweeps shorter than this fraction of
+/// `shape_min_dimension` cannot defeat the discrete phase, so both the
+/// sequential-impulse and AVBD continuous paths skip them together.
+pub(crate) const CCD_TRAVEL_GATE_FRACTION: f32 = 0.5;

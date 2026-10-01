@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{BodyType, RigidBody};
 use crate::broadphase::PrevPose;
+use crate::constants::{CCD_TRAVEL_GATE_FRACTION, NEAR_ZERO, POS_CORRECTION_EPS, SHAPE_TOUCH};
 use crate::distance;
 use crate::engine::Manifold;
 
@@ -330,7 +331,7 @@ impl SequentialImpulseEngine {
             .abs()
             .max((inertia.y - inertia.z).abs())
             .max((inertia.z - inertia.x).abs());
-        if spread <= 1e-6 * imax {
+        if spread <= POS_CORRECTION_EPS * imax {
             return;
         }
         let (a, b, c) = (inertia.x, inertia.y, inertia.z);
@@ -461,14 +462,14 @@ impl SequentialImpulseEngine {
             let displacement = b.position - prev.pos;
             // Same travel gate as the sweep: the discrete phase owns short
             // segments, the implied motion owns long ones.
-            if displacement.length() <= 0.5 * shape_min_dimension(&b.shape) {
+            if displacement.length() <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&b.shape) {
                 continue;
             }
             let dq = b.orientation * prev.rot.conjugate();
             let mut spin = b.angular_velocity;
-            if dq.w < 1.0 - 1e-6 {
+            if dq.w < 1.0 - POS_CORRECTION_EPS {
                 let angle = 2.0 * dq.w.clamp(-1.0, 1.0).acos();
-                let axis = dq.xyz() / (1.0 - dq.w * dq.w).sqrt().max(1e-9);
+                let axis = dq.xyz() / (1.0 - dq.w * dq.w).sqrt().max(NEAR_ZERO);
                 if axis.is_finite() {
                     spin = axis * (angle / dt);
                 }
@@ -526,7 +527,9 @@ impl SequentialImpulseEngine {
                 // Travel gate, mirror of the linear CCD one: below half the
                 // thinnest feature the discrete phase + speculative margin
                 // own the contact, no sweep needed.
-                if displacement.length() <= 0.5 * shape_min_dimension(&mover.shape) {
+                if displacement.length()
+                    <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&mover.shape)
+                {
                     continue;
                 }
                 let mover_layer = mover.collision_layer;
@@ -623,7 +626,7 @@ impl SequentialImpulseEngine {
             let b = &mut self.bodies[h];
             // Back off a hair so the discrete narrow phase sees a clean
             // touching contact next substep, not a zero-gap flicker.
-            b.position += disp * hit.fraction + hit.normal * 1e-3;
+            b.position += disp * hit.fraction + hit.normal * SHAPE_TOUCH;
             b.orientation = orientation;
             skip[h] = true;
             if hit.kind.is_angular() {

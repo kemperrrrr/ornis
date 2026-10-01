@@ -26,6 +26,14 @@ const DEGENERATE_EPS: f32 = 1e-12;
 const HEIGHTFIELD_FLAT_EPS: f32 = 1e-4;
 /// Floor for heightfield cell size when building a skirt (m).
 const HEIGHTFIELD_MIN_CELL: f32 = 1e-3;
+/// Corners of an AABB when projecting into heightfield / mesh space.
+const BOX_CORNERS: usize = 8;
+/// AABB-corner bit selecting the max endpoint on X / Y / Z.
+const AABB_BIT_X: usize = 4;
+const AABB_BIT_Y: usize = 2;
+const AABB_BIT_Z: usize = 1;
+/// Explicit BVH walk stack (covers any buildable mesh).
+const BVH_STACK_CAP: usize = 64;
 
 use crate::constants::{COINCIDENT_LEN2, NEAR_ZERO, SHAPE_TOUCH};
 
@@ -262,11 +270,23 @@ fn heightfield_convex(
     let aabb = convex.shape.aabb(convex.pos, convex.rot);
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for i in 0..8 {
+    for i in 0..BOX_CORNERS {
         let corner = Vec3::new(
-            if i & 4 == 0 { aabb.min.x } else { aabb.max.x },
-            if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
-            if i & 1 == 0 { aabb.min.z } else { aabb.max.z },
+            if i & AABB_BIT_X == 0 {
+                aabb.min.x
+            } else {
+                aabb.max.x
+            },
+            if i & AABB_BIT_Y == 0 {
+                aabb.min.y
+            } else {
+                aabb.max.y
+            },
+            if i & AABB_BIT_Z == 0 {
+                aabb.min.z
+            } else {
+                aabb.max.z
+            },
         );
         let local = inv * (corner - hf_pos);
         lo = lo.min(local);
@@ -426,20 +446,32 @@ fn trimesh_convex(
     let aabb = convex.shape.aabb(convex.pos, convex.rot);
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for i in 0..8 {
+    for i in 0..BOX_CORNERS {
         let corner = Vec3::new(
-            if i & 4 == 0 { aabb.min.x } else { aabb.max.x },
-            if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
-            if i & 1 == 0 { aabb.min.z } else { aabb.max.z },
+            if i & AABB_BIT_X == 0 {
+                aabb.min.x
+            } else {
+                aabb.max.x
+            },
+            if i & AABB_BIT_Y == 0 {
+                aabb.min.y
+            } else {
+                aabb.max.y
+            },
+            if i & AABB_BIT_Z == 0 {
+                aabb.min.z
+            } else {
+                aabb.max.z
+            },
         );
         let local = inv * (corner - mesh_pos);
         lo = lo.min(local);
         hi = hi.max(local);
     }
     let mut best: Option<Distance> = None;
-    // Explicit stack (depth 64 covers any buildable mesh); popped
-    // last-in-first-out in index order for determinism.
-    let mut stack = [0u32; 64];
+    // Explicit stack (depth `BVH_STACK_CAP` covers any buildable mesh);
+    // popped last-in-first-out in index order for determinism.
+    let mut stack = [0u32; BVH_STACK_CAP];
     let mut len = 1usize;
     while len > 0 {
         len -= 1;
@@ -477,7 +509,7 @@ fn trimesh_convex(
                 }
             }
         } else if let Some((left, right)) = node.link.children() {
-            if len + 2 > 64 {
+            if len + 2 > BVH_STACK_CAP {
                 break; // Depth guard: keep the best so far (deterministic).
             }
             stack[len] = left;
