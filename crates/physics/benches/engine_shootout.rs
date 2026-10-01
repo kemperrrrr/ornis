@@ -8,7 +8,10 @@
 //! then reports the steady-state single-step cost through criterion.
 //!
 //! Engine selection is by cargo feature: ornis always runs; Rapier needs
-//! `--features rapier`, Box3D needs `--features box3d`. Jolt is deliberately
+//! `--features rapier`, Box3D needs `--features box3d`. Those optional deps
+//! are currently omitted from `Cargo.toml` (nalgebra convert-glam030/031/032
+//! trips the workspace `cargo outdated` hard gate); the cfg-gated backends
+//! below stay ready to restore. Jolt is deliberately
 //! absent: `jolt-sys 0.1.5` hardcodes a `Visual Studio 16 2019` CMake
 //! generator plus Windows-only link libs, so it cannot build on macOS/Linux
 //! (see the shootout report); wiring it needs an upstream fix or a new
