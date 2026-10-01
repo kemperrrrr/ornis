@@ -96,7 +96,9 @@ impl GpuLanes {
                 config.clone(),
                 "gpu_lanes slot",
             );
-            let buf = lane.gpu_buffer().expect("slot owns its buffer");
+            let Some(buf) = lane.gpu_buffer() else {
+                return Some(false);
+            };
             let (pipeline, bind_group) = build(&self.device, buf);
             self.slots.insert(
                 TypeId::of::<T>(),
@@ -111,18 +113,22 @@ impl GpuLanes {
             // runs (ECS/gameplay writes land there), so refresh the slot's
             // CPU copy — otherwise the kernel would rerun on the previous
             // run's result and clobber the fresh store data on write-back.
-            let slot = self
+            let Some(slot) = self
                 .slots
                 .get_mut(&TypeId::of::<T>())
                 .and_then(|s| s.downcast_mut::<TypedSlot<T>>())
-                .expect("slot present when not stale");
+            else {
+                return Some(false);
+            };
             slot.lane.refresh_cpu_data(&data);
         }
-        let slot = self
+        let Some(slot) = self
             .slots
             .get_mut(&TypeId::of::<T>())
             .and_then(|s| s.downcast_mut::<TypedSlot<T>>())
-            .expect("slot just built");
+        else {
+            return Some(false);
+        };
 
         let ok = slot
             .lane

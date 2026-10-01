@@ -62,7 +62,6 @@ const DEFAULT_CELL_SIZE: f32 = 4.0;
 /// Island clusters per XZ row when laying out the islands scene.
 const ISLAND_CLUSTER_COLS: u32 = 4;
 
-
 fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
     let side = (n as f32).sqrt().ceil() as u32;
@@ -235,7 +234,10 @@ fn run_probe(
         "sparse" => setup_sparse(bodies),
         "islands" => setup_islands(bodies),
         "heterogeneous" => setup_heterogeneous(bodies),
-        other => panic!("unknown scene {other}; use --help for usage"),
+        other => {
+            eprintln!("unknown scene {other}; use --help for usage");
+            return;
+        }
     };
     match backend {
         BroadPhaseKind::SweepAndPrune => physics.set_broadphase(BroadPhaseKind::SweepAndPrune),

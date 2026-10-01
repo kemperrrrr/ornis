@@ -300,11 +300,8 @@ impl SequentialImpulseEngine {
             body_idx.sort_unstable();
             body_idx.dedup();
             let shard: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
-            let local_of: FxHashMap<usize, usize> = body_idx
-                .iter()
-                .enumerate()
-                .map(|(i, &g)| (g, i))
-                .collect();
+            let local_of: FxHashMap<usize, usize> =
+                body_idx.iter().enumerate().map(|(i, &g)| (g, i)).collect();
             let island_manifolds: Vec<Manifold> = group
                 .iter()
                 .filter_map(|&mi| {
@@ -355,7 +352,10 @@ impl SequentialImpulseEngine {
         let guarded: Vec<Mutex<&mut IslandWork>> = islands.iter_mut().map(Mutex::new).collect();
         let level = vec![(0..guarded.len()).collect::<Vec<usize>>()];
         run_levels(&level, guarded.len(), true, |idx| {
-            f(idx, &mut guarded[idx].lock().unwrap_or_else(|e| e.into_inner()));
+            f(
+                idx,
+                &mut guarded[idx].lock().unwrap_or_else(|e| e.into_inner()),
+            );
         });
     }
 
@@ -607,11 +607,8 @@ impl SequentialImpulseEngine {
             body_idx.sort_unstable();
             body_idx.dedup();
             let bodies: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
-            let local_of: FxHashMap<usize, usize> = body_idx
-                .iter()
-                .enumerate()
-                .map(|(i, &g)| (g, i))
-                .collect();
+            let local_of: FxHashMap<usize, usize> =
+                body_idx.iter().enumerate().map(|(i, &g)| (g, i)).collect();
             let shard_manifolds: Vec<Manifold> = part
                 .iter()
                 .filter_map(|&gmi| {

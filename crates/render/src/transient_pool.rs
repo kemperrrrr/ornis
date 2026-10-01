@@ -45,7 +45,9 @@ pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
         | wgpu::TextureFormat::Depth24Plus => BYTES_PER_PIXEL_32,
         wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => BYTES_PER_PIXEL_64,
         wgpu::TextureFormat::Rgba32Float => BYTES_PER_PIXEL_128,
-        other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
+        // Unknown formats: budget accounting uses the common 32-bit stride
+        // rather than aborting layout compilation.
+        _ => BYTES_PER_PIXEL_32,
     }
 }
 

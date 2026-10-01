@@ -342,8 +342,7 @@ impl GpuSequentialImpulse {
             cache: None,
         });
 
-        let body_size =
-            max_bodies.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BODY_STRIDE;
+        let body_size = max_bodies.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BODY_STRIDE;
         let batch_size =
             max_batches.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BATCH_STRIDE;
 

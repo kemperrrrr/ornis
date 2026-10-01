@@ -258,8 +258,7 @@ async fn read_target(
     label: &str,
 ) -> (Vec<u8>, u32) {
     let unpadded = WIDTH * BYTES_PER_PIXEL;
-    let padded =
-        unpadded.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (padded * HEIGHT) as u64,

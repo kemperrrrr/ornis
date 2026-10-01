@@ -252,8 +252,7 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     queue.submit(std::iter::once(encoder.finish()));
 
     let unpadded = WIDTH * BYTES_PER_PIXEL;
-    let padded =
-        unpadded.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("technique readback"),
         size: (padded * HEIGHT) as u64,

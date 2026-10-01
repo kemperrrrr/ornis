@@ -469,11 +469,7 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
             ];
             if let Some(dx) = solve_6x6(lhs, neg_rhs) {
                 bodies[i].pos += Vec3::new(dx[0], dx[1], dx[2]);
-                bodies[i].rot += Vec3::new(
-                    dx[LINEAR_DOF],
-                    dx[LINEAR_DOF + 1],
-                    dx[LINEAR_DOF + 2],
-                );
+                bodies[i].rot += Vec3::new(dx[LINEAR_DOF], dx[LINEAR_DOF + 1], dx[LINEAR_DOF + 2]);
             }
         }
 
@@ -497,8 +493,7 @@ fn avbd_step(bodies: &mut [Body], contacts: &mut Vec<Contact>) {
             if f[0] < 0.0 {
                 c.penalty_n = (c.penalty_n + BETA * cn.abs()).min(PENALTY_MAX);
             }
-            let t_scale =
-                (f[1] * f[1] + f[2] * f[2]).sqrt() / (f[0].abs() * MU + FORCE_SCALE_EPS);
+            let t_scale = (f[1] * f[1] + f[2] * f[2]).sqrt() / (f[0].abs() * MU + FORCE_SCALE_EPS);
             if t_scale <= 1.0 {
                 c.penalty_t = (c.penalty_t + BETA * (ct1.abs() + ct2.abs())).min(PENALTY_MAX);
             }
@@ -607,7 +602,11 @@ fn main() {
     println!("wall: {si_ms:.1} ms for {STEPS} steps");
     let mut si_ok = true;
     for (k, h) in si_handles.iter().enumerate() {
-        let b = physics.get_body(*h).unwrap();
+        let Some(b) = physics.get_body(*h) else {
+            si_ok = false;
+            println!("box{k}: missing body FAIL");
+            continue;
+        };
         let expected_y = HALF + k as f32;
         let dy = (b.position.y - expected_y).abs();
         let drift = b.position.x.abs().max(b.position.z.abs());

@@ -408,9 +408,7 @@ impl System for PhysicsSyncIn {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let mut runtime = runtime_resource
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut runtime = runtime_resource.lock().unwrap_or_else(|e| e.into_inner());
         runtime.sync_in(&body_lane, transforms.as_deref());
     }
 }
@@ -504,9 +502,7 @@ impl System for SoftSyncIn {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let mut runtime = runtime_resource
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut runtime = runtime_resource.lock().unwrap_or_else(|e| e.into_inner());
         runtime.sync_soft_in(&soft_lane);
     }
 }

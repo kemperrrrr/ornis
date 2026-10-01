@@ -95,12 +95,7 @@ impl Drop for AudioBackend {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         let _ = self.command_tx.send(AudioCommand::Shutdown);
-        if let Some(handle) = self
-            .handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+        if let Some(handle) = self.handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = handle.join();
         }
     }

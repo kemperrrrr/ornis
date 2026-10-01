@@ -318,11 +318,7 @@ impl GpuBatch {
         let k_t2 = total
             + ra.cross(t2).dot(matvec(&wa, ra.cross(t2)))
             + rb.cross(t2).dot(matvec(&wb, rb.cross(t2)));
-        self.inv_k_n[lane] = if k_n >= STIFFNESS_EPS {
-            1.0 / k_n
-        } else {
-            0.0
-        };
+        self.inv_k_n[lane] = if k_n >= STIFFNESS_EPS { 1.0 / k_n } else { 0.0 };
         self.inv_k_t1[lane] = if k_t1 >= STIFFNESS_EPS {
             1.0 / k_t1
         } else {

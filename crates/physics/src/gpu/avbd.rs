@@ -1017,6 +1017,7 @@ impl WgpuAvbdSolver {
     /// a device mapping failure — the same failure class the old code
     /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
     pub fn download(&self) -> (Vec<GpuBodyState>, Vec<f32>) {
-        self.try_download().unwrap_or_else(|_| (Vec::new(), Vec::new()))
+        self.try_download()
+            .unwrap_or_else(|_| (Vec::new(), Vec::new()))
     }
 }

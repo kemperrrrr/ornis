@@ -31,7 +31,6 @@ fn write_lock<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_,
     lock.write().unwrap_or_else(|e| e.into_inner())
 }
 
-
 /// Frame-global camera uniform (binding shared by every pass).
 ///
 /// The WGSL `Camera` declaration is generated from this layout
@@ -1661,16 +1660,19 @@ impl Renderer3D {
             // buffer mapping lives here.
             entries: &shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| {
                 match r.name {
-                    "camera" => buffers.camera.as_entire_binding(),
-                    "per_objects" => buffers.per_object.as_entire_binding(),
-                    "materials" => buffers.material.as_entire_binding(),
-                    "lighting" => buffers.lighting.as_entire_binding(),
-                    "shadow_tex" => wgpu::BindingResource::TextureView(shadow_array_view),
-                    "shadow_sampler" => wgpu::BindingResource::Sampler(shadow_sampler),
-                    "shadow_cube_tex" => wgpu::BindingResource::TextureView(shadow_cube_array_view),
-                    other => panic!("pbr bind group has no resource for `{other}`"),
+                    "camera" => Some(buffers.camera.as_entire_binding()),
+                    "per_objects" => Some(buffers.per_object.as_entire_binding()),
+                    "materials" => Some(buffers.material.as_entire_binding()),
+                    "lighting" => Some(buffers.lighting.as_entire_binding()),
+                    "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+                    "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
+                    "shadow_cube_tex" => {
+                        Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
+                    }
+                    _ => None,
                 }
-            }),
+            })
+            .unwrap_or_default(),
         });
 
         (bind_group_layout, bind_group)
@@ -1788,12 +1790,13 @@ impl Renderer3D {
             label: Some("skinned gbuffer bind group (probe)"),
             layout: &bind_group_layout,
             entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => camera_buffer.as_entire_binding(),
-                "per_objects" => per_object_buffer.as_entire_binding(),
-                "materials" => material_buffer.as_entire_binding(),
-                "palette" => palette_buffer.as_entire_binding(),
-                other => panic!("skinned bind group has no resource for `{other}`"),
-            }),
+                "camera" => Some(camera_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object_buffer.as_entire_binding()),
+                "materials" => Some(material_buffer.as_entire_binding()),
+                "palette" => Some(palette_buffer.as_entire_binding()),
+                _ => None,
+            })
+            .unwrap_or_default(),
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2114,12 +2117,13 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                 |r| match r.name {
-                    "camera" => camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object_buffer.as_entire_binding(),
-                    "materials" => material_buffer.as_entire_binding(),
-                    other => panic!("gbuffer bind group has no resource for `{other}`"),
+                    "camera" => Some(camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object_buffer.as_entire_binding()),
+                    "materials" => Some(material_buffer.as_entire_binding()),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2480,12 +2484,13 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                 |r| match r.name {
-                    "camera" => vp_buffer.as_entire_binding(),
-                    "per_objects" => per_object.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    other => panic!("shadow bind group has no resource for `{other}`"),
+                    "camera" => Some(vp_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shadow pass"),
@@ -2601,16 +2606,17 @@ impl Renderer3D {
             label: Some("skinned shadow bind group"),
             layout: &self.skinned_bind_group_layout,
             entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => vp_buffer.as_entire_binding(),
-                "per_objects" => per_object.as_entire_binding(),
-                "materials" => material.as_entire_binding(),
-                "palette" => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                "camera" => Some(vp_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object.as_entire_binding()),
+                "materials" => Some(material.as_entire_binding()),
+                "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: palette,
                     offset: handle.byte_offset(),
                     size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
-                }),
-                other => panic!("skinned shadow bind group has no resource for `{other}`"),
-            }),
+                })),
+                _ => None,
+            })
+            .unwrap_or_default(),
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skinned shadow pass"),
@@ -2748,26 +2754,28 @@ impl Renderer3D {
             entries: &bgl_entries,
         });
 
-        let bind_group =
-            std::sync::RwLock::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = std::sync::RwLock::new(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("forward bind group"),
                 layout: &bind_group_layout,
                 entries: &shaders::bind_group_entries(
                     &shaders::pbr_generated::PBR_RESOURCES,
                     |r| match r.name {
-                        "camera" => camera_buffer.as_entire_binding(),
-                        "per_objects" => per_object_buffer.as_entire_binding(),
-                        "materials" => material_buffer.as_entire_binding(),
-                        "lighting" => lighting_buffer.as_entire_binding(),
-                        "shadow_tex" => wgpu::BindingResource::TextureView(shadow_array_view),
-                        "shadow_sampler" => wgpu::BindingResource::Sampler(shadow_sampler),
+                        "camera" => Some(camera_buffer.as_entire_binding()),
+                        "per_objects" => Some(per_object_buffer.as_entire_binding()),
+                        "materials" => Some(material_buffer.as_entire_binding()),
+                        "lighting" => Some(lighting_buffer.as_entire_binding()),
+                        "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+                        "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
                         "shadow_cube_tex" => {
-                            wgpu::BindingResource::TextureView(shadow_cube_array_view)
+                            Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
                         }
-                        other => panic!("forward bind group has no resource for `{other}`"),
+                        _ => None,
                     },
-                ),
-            }));
+                )
+                .unwrap_or_default(),
+            }),
+        );
 
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("forward color target"),
@@ -2896,8 +2904,7 @@ impl Renderer3D {
         let Ok(white) = CpuImage::from_rgba8(1, 1, vec![255; 4]) else {
             return;
         };
-        let Ok(fallback_color) =
-            upload_texture(device, queue, &white, TextureRole::BaseColor)
+        let Ok(fallback_color) = upload_texture(device, queue, &white, TextureRole::BaseColor)
         else {
             return;
         };
@@ -3591,12 +3598,13 @@ impl Renderer3D {
                 entries: &shaders::bind_group_entries(
                     &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                     |r| match r.name {
-                        "camera" => self.camera_buffer.as_entire_binding(),
-                        "per_objects" => per_object.as_entire_binding(),
-                        "materials" => material.as_entire_binding(),
-                        other => panic!("gbuffer bind group has no resource for `{other}`"),
+                        "camera" => Some(self.camera_buffer.as_entire_binding()),
+                        "per_objects" => Some(per_object.as_entire_binding()),
+                        "materials" => Some(material.as_entire_binding()),
+                        _ => None,
                     },
-                ),
+                )
+                .unwrap_or_default(),
             });
         *write_lock(&self.forward_pass.bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3605,18 +3613,23 @@ impl Renderer3D {
                 entries: &shaders::bind_group_entries(
                     &shaders::pbr_generated::PBR_RESOURCES,
                     |r| match r.name {
-                        "camera" => self.camera_buffer.as_entire_binding(),
-                        "per_objects" => per_object.as_entire_binding(),
-                        "materials" => material.as_entire_binding(),
-                        "lighting" => self.lighting_buffer.as_entire_binding(),
-                        "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
-                        "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                        "shadow_cube_tex" => {
-                            wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                        "camera" => Some(self.camera_buffer.as_entire_binding()),
+                        "per_objects" => Some(per_object.as_entire_binding()),
+                        "materials" => Some(material.as_entire_binding()),
+                        "lighting" => Some(self.lighting_buffer.as_entire_binding()),
+                        "shadow_tex" => {
+                            Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                         }
-                        other => panic!("forward bind group has no resource for `{other}`"),
+                        "shadow_sampler" => {
+                            Some(wgpu::BindingResource::Sampler(&self.shadow_sampler))
+                        }
+                        "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
+                            &self.shadow_cube_array_view,
+                        )),
+                        _ => None,
                     },
-                ),
+                )
+                .unwrap_or_default(),
             });
     }
 
@@ -3771,11 +3784,7 @@ impl Renderer3D {
             bytes.extend_from_slice(&palette[..palette.len().min(PALETTE_BYTE_SIZE)]);
             bytes.resize((slot + 1) * PALETTE_BYTE_SIZE, 0);
         }
-        queue.write_buffer(
-            &read_lock(&self.palette_buffer),
-            0,
-            &bytes,
-        );
+        queue.write_buffer(&read_lock(&self.palette_buffer), 0, &bytes);
         self.palette_count
             .store(count as u32, std::sync::atomic::Ordering::Relaxed);
         (0..count as u32).map(PaletteHandle::from_raw).collect()
@@ -3841,16 +3850,17 @@ impl Renderer3D {
             label: Some("skinned gbuffer bind group"),
             layout: &self.skinned_bind_group_layout,
             entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => self.camera_buffer.as_entire_binding(),
-                "per_objects" => per_object.as_entire_binding(),
-                "materials" => material.as_entire_binding(),
-                "palette" => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                "camera" => Some(self.camera_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object.as_entire_binding()),
+                "materials" => Some(material.as_entire_binding()),
+                "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &palette,
                     offset: handle.byte_offset(),
                     size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
-                }),
-                other => panic!("skinned bind group has no resource for `{other}`"),
-            }),
+                })),
+                _ => None,
+            })
+            .unwrap_or_default(),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skinned gbuffer pass"),
@@ -4073,26 +4083,29 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::lighting_generated::LIGHTING_RESOURCES,
                 |r| match r.name {
-                    "camera" => self.camera_buffer.as_entire_binding(),
-                    "lighting" => self.lighting_buffer.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    "albedo_tex" => wgpu::BindingResource::TextureView(g.albedo),
-                    "normal_tex" => wgpu::BindingResource::TextureView(g.normal),
-                    "material_id_tex" => wgpu::BindingResource::TextureView(g.material_id),
-                    "world_pos_tex" => wgpu::BindingResource::TextureView(g.world_position),
-                    "mat_params_tex" => wgpu::BindingResource::TextureView(g.material_params),
-                    "depth_tex" => wgpu::BindingResource::TextureView(g.depth),
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
+                    "lighting" => Some(self.lighting_buffer.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "albedo_tex" => Some(wgpu::BindingResource::TextureView(g.albedo)),
+                    "normal_tex" => Some(wgpu::BindingResource::TextureView(g.normal)),
+                    "material_id_tex" => Some(wgpu::BindingResource::TextureView(g.material_id)),
+                    "world_pos_tex" => Some(wgpu::BindingResource::TextureView(g.world_position)),
+                    "mat_params_tex" => Some(wgpu::BindingResource::TextureView(g.material_params)),
+                    "depth_tex" => Some(wgpu::BindingResource::TextureView(g.depth)),
                     "lighting_sampler" => {
-                        wgpu::BindingResource::Sampler(&self.lighting_pass.sampler)
+                        Some(wgpu::BindingResource::Sampler(&self.lighting_pass.sampler))
                     }
-                    "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
-                    "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    "shadow_cube_tex" => {
-                        wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                    "shadow_tex" => {
+                        Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
-                    other => panic!("lighting bind group has no resource for `{other}`"),
+                    "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
+                    "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
+                        &self.shadow_cube_array_view,
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4240,24 +4253,25 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::material_textures::TEXTURED_PBR_RESOURCES,
                 |r| match r.name {
-                    "camera" => self.camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    "lighting" => self.lighting_buffer.as_entire_binding(),
-                    "shadow_tex" => wgpu::BindingResource::TextureView(&self.shadow_array_view),
-                    "shadow_sampler" => wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    "shadow_cube_tex" => {
-                        wgpu::BindingResource::TextureView(&self.shadow_cube_array_view)
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "lighting" => Some(self.lighting_buffer.as_entire_binding()),
+                    "shadow_tex" => {
+                        Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
-                    "base_color_tex" => wgpu::BindingResource::TextureView(base_color_view),
-                    "metallic_roughness_tex" => wgpu::BindingResource::TextureView(data_view),
-                    "emissive_tex" => wgpu::BindingResource::TextureView(emissive_view),
-                    "material_sampler" => wgpu::BindingResource::Sampler(&pass.sampler),
-                    other => {
-                        panic!("textured forward bind group has no resource for `{other}`")
-                    }
+                    "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
+                    "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
+                        &self.shadow_cube_array_view,
+                    )),
+                    "base_color_tex" => Some(wgpu::BindingResource::TextureView(base_color_view)),
+                    "metallic_roughness_tex" => Some(wgpu::BindingResource::TextureView(data_view)),
+                    "emissive_tex" => Some(wgpu::BindingResource::TextureView(emissive_view)),
+                    "material_sampler" => Some(wgpu::BindingResource::Sampler(&pass.sampler)),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let depth_ops = wgpu::Operations {
@@ -4332,16 +4346,19 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::hdr_composite_generated::HDR_RESOURCES,
                 |r| match r.name {
-                    "deferred_tex" => wgpu::BindingResource::TextureView(inputs.hdr),
-                    "forward_tex" => wgpu::BindingResource::TextureView(inputs.hdr_fwd),
-                    "composite_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "bloom_tex" => wgpu::BindingResource::TextureView(inputs.bloom),
-                    "bloom_params" => wgpu::BindingResource::Buffer(
+                    "deferred_tex" => Some(wgpu::BindingResource::TextureView(inputs.hdr)),
+                    "forward_tex" => Some(wgpu::BindingResource::TextureView(inputs.hdr_fwd)),
+                    "composite_sampler" => {
+                        Some(wgpu::BindingResource::Sampler(&self.composite_sampler))
+                    }
+                    "bloom_tex" => Some(wgpu::BindingResource::TextureView(inputs.bloom)),
+                    "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("composite bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4401,16 +4418,17 @@ impl Renderer3D {
             layout: &self.fog.bind_group_layout,
             entries: &shaders::bind_group_entries(&shaders::fog_generated::FOG_RESOURCES, |r| {
                 match r.name {
-                    "hdr_tex" => wgpu::BindingResource::TextureView(inputs.hdr),
-                    "fog_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "depth_tex" => wgpu::BindingResource::TextureView(inputs.depth),
-                    "camera" => self.camera_buffer.as_entire_binding(),
-                    "fog_params" => wgpu::BindingResource::Buffer(
+                    "hdr_tex" => Some(wgpu::BindingResource::TextureView(inputs.hdr)),
+                    "fog_sampler" => Some(wgpu::BindingResource::Sampler(&self.composite_sampler)),
+                    "depth_tex" => Some(wgpu::BindingResource::TextureView(inputs.depth)),
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
+                    "fog_params" => Some(wgpu::BindingResource::Buffer(
                         self.fog.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("fog bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 }
-            }),
+            })
+            .unwrap_or_default(),
         });
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4512,14 +4530,15 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::bloom_generated::BLOOM_RESOURCES,
                 |r| match r.name {
-                    "src_tex" => wgpu::BindingResource::TextureView(src),
-                    "src_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "bloom_params" => wgpu::BindingResource::Buffer(
+                    "src_tex" => Some(wgpu::BindingResource::TextureView(src)),
+                    "src_sampler" => Some(wgpu::BindingResource::Sampler(&self.composite_sampler)),
+                    "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("bloom bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom down pass"),
@@ -4558,14 +4577,15 @@ impl Renderer3D {
             entries: &shaders::bind_group_entries(
                 &shaders::bloom_generated::BLOOM_RESOURCES,
                 |r| match r.name {
-                    "src_tex" => wgpu::BindingResource::TextureView(src),
-                    "src_sampler" => wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    "bloom_params" => wgpu::BindingResource::Buffer(
+                    "src_tex" => Some(wgpu::BindingResource::TextureView(src)),
+                    "src_sampler" => Some(wgpu::BindingResource::Sampler(&self.composite_sampler)),
+                    "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
-                    ),
-                    other => panic!("bloom bind group has no resource for `{other}`"),
+                    )),
+                    _ => None,
                 },
-            ),
+            )
+            .unwrap_or_default(),
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom up pass"),
@@ -4705,12 +4725,13 @@ mod tests {
             let palette = read_lock(&renderer.palette_buffer);
             let entries =
                 crate::shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                    "camera" => renderer.camera_buffer.as_entire_binding(),
-                    "per_objects" => per_object.as_entire_binding(),
-                    "materials" => material.as_entire_binding(),
-                    "palette" => palette.as_entire_binding(),
-                    other => panic!("skinned bind group has no resource for `{other}`"),
-                });
+                    "camera" => Some(renderer.camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "palette" => Some(palette.as_entire_binding()),
+                    _ => None,
+                })
+                .expect("skinned resources resolve");
             assert_eq!(entries.len(), 4);
             assert_eq!(
                 entries.iter().map(|e| e.binding).collect::<Vec<_>>(),

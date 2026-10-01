@@ -262,8 +262,8 @@ fn read_back_pixels(
     bytes_per_pixel: u32,
 ) -> Vec<u8> {
     let unpadded_bytes_per_row = WIDTH * bytes_per_pixel;
-    let padded_bytes_per_row =
-        unpadded_bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT)
+        * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("probe readback"),
         size: (padded_bytes_per_row * HEIGHT) as u64,

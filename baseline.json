@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.46749567494023103,
-  "iosp_score": 0.9005589879376287,
+  "quality_score": 0.47407153688261094,
+  "iosp_score": 0.9005297233666862,
   "violations": 338,
   "total": 5466,
   "complexity_warnings": 58,
   "magic_number_warnings": 151,
   "nesting_depth_warnings": 16,
-  "function_length_warnings": 107,
+  "function_length_warnings": 105,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 51,
+  "error_handling_warnings": 25,
   "duplicate_groups": 81,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
   "fragment_groups": 496,
-  "boilerplate_warnings": 271,
+  "boilerplate_warnings": 270,
   "srp_struct_warnings": 20,
   "srp_module_warnings": 82,
   "wildcard_import_warnings": 22,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2409,
+  "total_findings": 2380,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -88,7 +88,7 @@
     {
       "name": "normalized_rotation",
       "file": "crates/app/src/physics_runtime.rs",
-      "line": 553
+      "line": 549
     },
     {
       "name": "check_builtin_arity",
@@ -258,47 +258,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1153
+      "line": 1152
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3068
+      "line": 3075
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3271
+      "line": 3278
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3468
+      "line": 3475
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3626
+      "line": 3639
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3646
+      "line": 3659
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3727
+      "line": 3740
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3754
+      "line": 3767
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4196
+      "line": 4209
     },
     {
       "name": "RenderFrame3D::build",
@@ -323,7 +323,7 @@
     {
       "name": "run",
       "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 486
+      "line": 485
     },
     {
       "name": "setup_islands_grid",
@@ -798,7 +798,7 @@
     {
       "name": "GpuSequentialImpulse::solve",
       "file": "crates/physics/src/gpu/mod.rs",
-      "line": 584
+      "line": 583
     },
     {
       "name": "GpuBatch::fill_lane",
@@ -808,12 +808,12 @@
     {
       "name": "world_inertia_matrix",
       "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 339
+      "line": 335
     },
     {
       "name": "pack_single_point_batches",
       "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 532
+      "line": 528
     },
     {
       "name": "avbd_hessian_ang",
@@ -1028,27 +1028,27 @@
     {
       "name": "TriMesh::from_indexed",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1362
+      "line": 1360
     },
     {
       "name": "TriMesh::build_bvh",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1416
+      "line": 1414
     },
     {
       "name": "TriMesh::split",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1453
+      "line": 1451
     },
     {
       "name": "TriMesh::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1514
+      "line": 1512
     },
     {
       "name": "TriMesh::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1564
+      "line": 1562
     },
     {
       "name": "support",
@@ -1463,17 +1463,17 @@
     {
       "name": "build_avbd_scene",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 515
+      "line": 510
     },
     {
       "name": "build_si_scene",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 543
+      "line": 538
     },
     {
       "name": "main",
       "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 561
+      "line": 556
     },
     {
       "name": "setup_islands_grid",
@@ -1508,32 +1508,32 @@
     {
       "name": "setup_body_grid",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 66
+      "line": 65
     },
     {
       "name": "setup_giant_floor",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 99
+      "line": 98
     },
     {
       "name": "setup_sparse",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 123
+      "line": 122
     },
     {
       "name": "setup_islands",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 143
+      "line": 142
     },
     {
       "name": "setup_heterogeneous",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 168
+      "line": 167
     },
     {
       "name": "run_probe",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 217
+      "line": 216
     },
     {
       "name": "PositiveUsize::expect_valid",

@@ -546,7 +546,11 @@ mod tests {
             .get::<FrameCommandBuffers>()
             .expect("frame buffers resource");
         assert!(
-            buffers.0.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            buffers
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
             "fresh install holds no pending buffers"
         );
     }

@@ -1521,9 +1521,7 @@ fn json_response(body: &str) -> Response<Cursor<Vec<u8>>> {
     with_json_content_type(Response::from_data(body))
 }
 
-fn with_json_content_type(
-    response: Response<Cursor<Vec<u8>>>,
-) -> Response<Cursor<Vec<u8>>> {
+fn with_json_content_type(response: Response<Cursor<Vec<u8>>>) -> Response<Cursor<Vec<u8>>> {
     match Header::from_bytes("Content-Type", "application/json") {
         Ok(header) => response.with_header(header),
         Err(_) => response,

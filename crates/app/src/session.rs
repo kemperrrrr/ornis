@@ -479,38 +479,28 @@ impl EditorSession {
         self.world.engine().world().resources().get::<MutationBus>()
     }
 
-    fn store(&self) -> &SmartStore {
-        self.world
-            .engine()
-            .world()
-            .store()
-            .expect("EditorSession always registers SmartStore")
+    fn store(&self) -> Option<&SmartStore> {
+        self.world.engine().world().store()
     }
 
-    fn store_mut(&mut self) -> &mut SmartStore {
-        self.world
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("EditorSession always registers SmartStore")
+    fn store_mut(&mut self) -> Option<&mut SmartStore> {
+        self.world.engine_mut().world_mut().store_mut()
     }
 
-    fn environment(&self) -> &SceneEnvironment {
+    fn environment(&self) -> Option<&SceneEnvironment> {
         self.world
             .engine()
             .world()
             .resources()
             .get::<SceneEnvironment>()
-            .expect("EditorSession always registers SceneEnvironment")
     }
 
-    fn environment_mut(&mut self) -> &mut SceneEnvironment {
+    fn environment_mut(&mut self) -> Option<&mut SceneEnvironment> {
         self.world
             .engine_mut()
             .world_mut()
             .resources_mut()
             .get_mut::<SceneEnvironment>()
-            .expect("EditorSession always registers SceneEnvironment")
     }
 
     /// Number of currently alive entities.
@@ -538,17 +528,23 @@ impl EditorSession {
         material: MaterialDesc,
     ) -> Entity {
         let physics_body = ornis_physics::colliders::body_for(&transform, &mesh, None, 0.0);
-        let entity = self.store().create_entity();
+        let Some(store) = self.store() else {
+            return Entity::new(0);
+        };
+        let entity = store.create_entity();
         self.alive.push(entity);
         let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
-        self.store_mut().insert(entity, Name(name));
-        self.store_mut().insert(entity, transform);
-        self.store_mut().insert(entity, mesh);
-        self.store_mut().insert(entity, material);
+        let Some(store) = self.store_mut() else {
+            return entity;
+        };
+        store.insert(entity, Name(name));
+        store.insert(entity, transform);
+        store.insert(entity, mesh);
+        store.insert(entity, material);
         // A broken collider (`Err`) spawns without a body, like the
         // no-recipe (`Ok(None)`) case — transport never invents colliders.
         if let Ok(Some(body)) = physics_body {
-            self.store_mut().insert(entity, body);
+            store.insert(entity, body);
         }
         self.version.bump();
         entity
@@ -557,11 +553,14 @@ impl EditorSession {
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
-        if !self.store().is_alive(entity) {
+        let store = self.store()?;
+        if !store.is_alive(entity) {
             return None;
         }
         self.alive.retain(|e| *e != entity);
-        self.store().destroy_entity(entity);
+        if let Some(store) = self.store() {
+            store.destroy_entity(entity);
+        }
         self.version.bump();
         Some(entity)
     }
@@ -569,7 +568,7 @@ impl EditorSession {
     /// Display name of `entity`, if alive and named.
     pub fn name_of(&self, entity: Entity) -> Option<String> {
         self.store()
-            .read_lane::<Name>()
+            .and_then(|store| store.read_lane::<Name>())
             .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
     }
 
@@ -591,11 +590,13 @@ impl EditorSession {
         for e in scene.entities {
             fresh.spawn_with(Some(e.name), e.transform, e.mesh, e.material);
         }
-        *fresh.environment_mut() = SceneEnvironment {
-            lights: scene.lights,
-            camera: scene.camera,
-            ambient: scene.ambient,
-        };
+        if let Some(env) = fresh.environment_mut() {
+            *env = SceneEnvironment {
+                lights: scene.lights,
+                camera: scene.camera,
+                ambient: scene.ambient,
+            };
+        }
         fresh.scene_name = scene.name;
         fresh.version = fresh.version.max(self.version.bumped());
         // The asset registry (load history, retained sources) survives the
@@ -737,12 +738,13 @@ impl EditorSession {
 /// lights/camera/ambient come from the environment resource.
 fn to_scene(world: &EditorSession) -> Scene {
     let entities = world.alive.iter().map(|&e| entity_desc(world, e)).collect();
+    let env = world.environment().cloned().unwrap_or_default();
     Scene {
         name: world.scene_name.clone(),
         entities,
-        lights: world.environment().lights.clone(),
-        camera: world.environment().camera.clone(),
-        ambient: world.environment().ambient,
+        lights: env.lights,
+        camera: env.camera,
+        ambient: env.ambient,
     }
 }
 
@@ -752,9 +754,18 @@ fn entity_desc(world: &EditorSession, entity: Entity) -> EntityDesc {
         name: world
             .name_of(entity)
             .unwrap_or_else(|| format!("Entity {}", entity.id())),
-        transform: read_component(world.store(), entity).unwrap_or_else(default_transform),
-        mesh: read_component(world.store(), entity).unwrap_or_else(default_mesh),
-        material: read_component(world.store(), entity).unwrap_or_else(default_material),
+        transform: world
+            .store()
+            .and_then(|store| read_component(store, entity))
+            .unwrap_or_else(default_transform),
+        mesh: world
+            .store()
+            .and_then(|store| read_component(store, entity))
+            .unwrap_or_else(default_mesh),
+        material: world
+            .store()
+            .and_then(|store| read_component(store, entity))
+            .unwrap_or_else(default_material),
     }
 }
 
@@ -763,17 +774,18 @@ fn scene_json(world: &EditorSession) -> String {
     let entities: Vec<Value> = world
         .alive
         .iter()
-        .map(|&e| entity_json(world.store(), e))
+        .filter_map(|&e| world.store().map(|store| entity_json(store, e)))
         .collect();
-    let lights = serde_json::to_value(&world.environment().lights).unwrap_or(Value::Null);
-    let camera = serde_json::to_value(&world.environment().camera).unwrap_or(Value::Null);
+    let env = world.environment().cloned().unwrap_or_default();
+    let lights = serde_json::to_value(&env.lights).unwrap_or(Value::Null);
+    let camera = serde_json::to_value(&env.camera).unwrap_or(Value::Null);
     serde_json::json!({
         "version": world.version(),
         "entity_count": world.entity_count(),
         "entities": entities,
         "lights": lights,
         "camera": camera,
-        "ambient": world.environment().ambient,
+        "ambient": env.ambient,
     })
     .to_string()
 }
@@ -1004,8 +1016,11 @@ fn set_component(
         return Err(format!("unknown component '{type_name}'"));
     }
     let value: Value = serde_json::from_str(json_data).map_err(|e| format!("invalid JSON: {e}"))?;
+    let Some(store) = world.store_mut() else {
+        return Err("SmartStore not registered".into());
+    };
     let report = apply_mutations(
-        world.store_mut(),
+        store,
         &REGISTRY,
         &[Mutation::Set {
             entity,
@@ -1021,7 +1036,9 @@ fn set_component(
     if type_name == "Collider" {
         // An explicit collider redefines collision: rebuild the lane body
         // from the current lanes (velocity state is preserved).
-        resync_collider_body(world.store_mut(), entity);
+        if let Some(store) = world.store_mut() {
+            resync_collider_body(store, entity);
+        }
     }
     world.version.bump();
     Ok(value)
@@ -1144,13 +1161,18 @@ fn cmd_create_entity(world: &mut EditorSession, data: &Value) -> Result<String, 
         Some(_) => return Err("'components': expected an object".into()),
     };
     let entity = world.spawn(name);
-    for (meta, boxed) in overrides {
-        // Parsed from the same meta — the box type always matches.
-        meta.insert_any(world.store_mut(), entity, boxed);
+    {
+        let Some(store) = world.store_mut() else {
+            return Err("SmartStore not registered".into());
+        };
+        for (meta, boxed) in overrides {
+            // Parsed from the same meta — the box type always matches.
+            meta.insert_any(store, entity, boxed);
+        }
+        // Overrides may have replaced the mesh or set an explicit collider:
+        // rebuild the body from the final lanes (velocity is fresh here).
+        resync_collider_body(store, entity);
     }
-    // Overrides may have replaced the mesh or set an explicit collider:
-    // rebuild the body from the final lanes (velocity is fresh here).
-    resync_collider_body(world.store_mut(), entity);
     Ok(serde_json::json!({
         "id": entity.id(),
         "generation": entity.generation(),
@@ -1176,7 +1198,8 @@ fn resolve_entity(world: &EditorSession, data: &Value) -> Result<Entity, String>
         .and_then(Value::as_u64)
         .ok_or("missing or invalid 'generation'")? as u32;
     let entity = Entity::new_with_gen(id, generation);
-    if !world.store().is_alive(entity) {
+    let alive = world.store().is_some_and(|store| store.is_alive(entity));
+    if !alive {
         return Err(format!("entity {id}:{generation} not found"));
     }
     Ok(entity)
@@ -1831,7 +1854,9 @@ mod tests {
             world.version > version_before,
             "apply must bump the version"
         );
-        let name: Option<Name> = read_component(world.store(), entity);
+        let name: Option<Name> = world
+            .store()
+            .and_then(|store| read_component(store, entity));
         assert_eq!(name.expect("Name lane").0, "renamed");
     }
 
@@ -2009,7 +2034,10 @@ mod tests {
         use ornis_physics::Shape;
         let mut world = EditorSession::new();
         let sphere = world.spawn(None);
-        let lane = world.store().read_lane::<RigidBody>().expect("body lane");
+        let lane = world
+            .store()
+            .and_then(|store| store.read_lane::<RigidBody>())
+            .expect("body lane");
         assert!(matches!(
             lane.get(sphere).expect("sphere body").shape,
             Shape::Sphere { .. }
@@ -2031,7 +2059,10 @@ mod tests {
             },
             default_material(),
         );
-        let lane = world.store().read_lane::<RigidBody>().expect("body lane");
+        let lane = world
+            .store()
+            .and_then(|store| store.read_lane::<RigidBody>())
+            .expect("body lane");
         let boxed = world
             .alive
             .iter()

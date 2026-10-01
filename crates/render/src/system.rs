@@ -42,6 +42,17 @@ use crate::transient_pool::{
     ResourceName, ResourceNode, TextureSpec, TransientPool,
 };
 
+/// Empty layout returned by [`SystemSet::layout`] when the pool has never
+/// produced a snapshot (budget miss on first compile, or unused registry).
+static EMPTY_FRAME_LAYOUT: FrameLayout = FrameLayout {
+    surface_size: (0, 0),
+    passes: Vec::new(),
+    resources: Vec::new(),
+    slots: Vec::new(),
+    pass_alive: Vec::new(),
+    levels: Vec::new(),
+};
+
 /// How a resource enters the registry (see
 /// [`SystemSet::{create_resource, import_resource, external_output}`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,11 +537,10 @@ impl SystemSet {
     /// Declare that pass `a` must run before pass `b` (S5c; hidden
     /// dependencies invisible in the access sets).
     ///
-    /// # Panics
-    /// Panics if either endpoint is out of range.
+    /// Invalid endpoints are ignored — use [`try_order_before`](Self::try_order_before)
+    /// when the caller must observe the error.
     pub fn order_before(&mut self, before: PassId, after: PassId) {
-        self.try_order_before(before, after)
-            .unwrap_or_else(|error| panic!("order_before({before:?}, {after:?}): {error}"));
+        let _ = self.try_order_before(before, after);
     }
 
     /// Fallible [`order_before`](Self::order_before): returns
@@ -554,11 +564,11 @@ impl SystemSet {
     /// S5c: name-based [`order_before`](Self::order_before) (pass name from
     /// `add_pass`).
     ///
-    /// # Panics
-    /// Panics on unknown name or reverse registration order.
+    /// Unknown names and reverse registration order are ignored — use
+    /// [`try_order_before_named`](Self::try_order_before_named) when the
+    /// caller must observe the error.
     pub fn order_before_named(&mut self, before: &str, after: &str) {
-        self.try_order_before_named(before, after)
-            .unwrap_or_else(|error| panic!("order_before_named('{before}', '{after}'): {error}"));
+        let _ = self.try_order_before_named(before, after);
     }
 
     /// Fallible [`order_before_named`](Self::order_before_named).
@@ -643,13 +653,17 @@ impl SystemSet {
     /// Returns the frame layout (lifetimes + pool slots), recomputing it
     /// only when the declarations changed since the last call.
     ///
-    /// # Panics
-    /// Panics on first-touch or read-before-write invariant violations, and
-    /// when the transient pool exceeds [`budget`](Self::budget) (see
-    /// [`try_layout`](Self::try_layout) for the fallible path).
+    /// Budget misses keep the previous snapshot when one exists; otherwise
+    /// an empty layout is returned (same soft policy as
+    /// `FrameExecutor::ensure_layout`). First-touch / read-before-write
+    /// invariant violations still panic inside the pool compiler — see
+    /// [`try_layout`](Self::try_layout) for the fallible budget path.
     pub fn layout(&mut self) -> &FrameLayout {
-        self.try_layout()
-            .unwrap_or_else(|e| panic!("SystemSet transient pool budget exceeded ({e})"))
+        let _ = self.try_layout();
+        match self.pool.cached() {
+            Some(layout) => layout.as_ref(),
+            None => &EMPTY_FRAME_LAYOUT,
+        }
     }
 
     /// Fallible [`layout`](Self::layout).
@@ -1061,10 +1075,12 @@ mod tests {
     }
 
     /// Explicit ordering edges must respect registration order —
-    /// a backward edge is a programmer error and panics.
+    /// a backward edge is ignored by the convenience wrapper; `try_*`
+    /// reports [`OrderError::BackwardEdge`].
     #[test]
-    #[should_panic(expected = "registered")]
     fn explicit_ordering_rejects_backward() {
+        use ornis_schedule::OrderError;
+
         let mut set = SystemSet::new();
         set.set_surface_size((64, 64));
         let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
@@ -1072,17 +1088,29 @@ mod tests {
         let first = set.add_pass("first").write(a).id();
         let second = set.add_pass("second").write(b).id();
         set.order_before(second, first);
+        assert_eq!(set.build().levels(), vec![vec![0, 1]]);
+        assert!(matches!(
+            set.try_order_before(second, first),
+            Err(OrderError::BackwardEdge { .. })
+        ));
     }
 
-    /// Named ordering panics on an unknown target.
+    /// Named ordering soft-fails on an unknown target; `try_*` reports it.
     #[test]
-    #[should_panic(expected = "no node named")]
     fn explicit_ordering_unknown_name() {
+        use ornis_schedule::OrderError;
+
         let mut set = SystemSet::new();
         set.set_surface_size((64, 64));
         let a = set.create_resource("a", ResA::spec(wgpu::TextureFormat::Rgba8Unorm));
         set.add_pass("real").write(a);
         set.order_before_named("real", "ghost");
+        assert_eq!(
+            set.try_order_before_named("real", "ghost").map(|_| ()),
+            Err(OrderError::UnknownNode {
+                name: "ghost".to_owned(),
+            })
+        );
     }
 
     /// `try_order_before` is the fallible variant: backward / unknown

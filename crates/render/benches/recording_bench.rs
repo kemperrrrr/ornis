@@ -122,14 +122,9 @@ fn bench_recording(c: &mut Criterion) {
     );
     let view =
         glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, CAMERA_Z), Vec3::ZERO, Vec3::Y);
-    let proj =
-        glam::camera::rh::proj::directx::perspective(FOV_DEG.to_radians(), 1.0, NEAR, FAR);
+    let proj = glam::camera::rh::proj::directx::perspective(FOV_DEG.to_radians(), 1.0, NEAR, FAR);
     let view_proj = proj * view;
-    renderer.set_camera(
-        &queue,
-        &view_proj.to_cols_array_2d(),
-        [0.0, 0.0, CAMERA_Z],
-    );
+    renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), [0.0, 0.0, CAMERA_Z]);
 
     let view_seq = target_view(&device);
     let view_par = target_view(&device);

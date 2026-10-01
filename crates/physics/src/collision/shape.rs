@@ -1322,9 +1322,7 @@ impl TriMesh {
             // the normal toward the ray and closest-point is winding-free.
             // Vertices are validated finite above; skip if hull construction
             // still rejects the triple (defensive — should not happen).
-            let Ok(mut hull) =
-                ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
-            else {
+            let Ok(mut hull) = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c]) else {
                 continue;
             };
             hull.faces = vec![Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 2, 1])];

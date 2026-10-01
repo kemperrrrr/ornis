@@ -1984,7 +1984,8 @@ mod tests {
         use crate::soft::SoftBody;
 
         let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
-        let rope = engine.add_soft_body(SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 6, HALF, 1.0, 0.0));
+        let rope =
+            engine.add_soft_body(SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 6, HALF, 1.0, 0.0));
         for _ in 0..180 {
             engine.step(1.0 / 60.0);
         }
