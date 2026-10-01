@@ -32,7 +32,7 @@
 use glam::{Mat3, Vec3};
 
 use crate::body::RigidBody;
-use crate::constants::{DEGENERATE_LEN2, MIN_EFFECTIVE_MASS};
+use crate::constants::{DEGENERATE_LEN2, FRICTION_IMPULSE_DUST, MIN_EFFECTIVE_MASS};
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState};
 
@@ -40,8 +40,6 @@ use crate::engine::{Manifold, ManifoldState};
 const WIDE_LANES: usize = 4;
 /// Body-index slots reserved while packing a batch (2 bodies × lanes).
 const WIDE_BODY_SLOTS: usize = WIDE_LANES * 2;
-/// Squared friction impulse treated as dust (skip applying).
-const FRICTION_IMPULSE_DUST: f32 = 1e-24;
 
 // ---------------------------------------------------------------------------
 // 4-lane SoA primitives

@@ -43,6 +43,17 @@ const EDGE_BIT_Y: u32 = 2;
 const EDGE_BIT_Z: u32 = 4;
 /// Default contact radius as a fraction of the cube edge length.
 const CUBE_CONTACT_RADIUS_FRAC: f32 = 0.1;
+/// Default contact radius as a fraction of chain/cloth spacing.
+const STRAND_CONTACT_RADIUS_FRAC: f32 = 0.2;
+/// Soft-cube corner indices (`index = x + 2y + 4z`).
+const C000: u32 = 0;
+const C100: u32 = 1;
+const C010: u32 = 2;
+const C110: u32 = 3;
+const C001: u32 = 4;
+const C101: u32 = 5;
+const C011: u32 = 6;
+const C111: u32 = 7;
 
 /// Stable index of a soft body inside [`crate::xpbd::XpbdEngine`].
 ///
@@ -386,7 +397,7 @@ impl SoftBody {
             });
         }
         let mut body = Self::raw(particles, constraints);
-        body.contact_radius = spacing * 0.2;
+        body.contact_radius = spacing * STRAND_CONTACT_RADIUS_FRAC;
         body
     }
 
@@ -531,7 +542,7 @@ impl SoftBody {
             }
         }
         let mut body = Self::raw(particles, constraints);
-        body.contact_radius = spacing * 0.2;
+        body.contact_radius = spacing * STRAND_CONTACT_RADIUS_FRAC;
         body.surface = surface;
         body
     }
@@ -612,40 +623,40 @@ impl SoftBody {
         // Six quad faces as corner loops; triangulated + outward-fixed below.
         let quads: [[ParticleIdx; QUAD_VERTS]; CUBE_FACES] = [
             [
-                ParticleIdx::from_raw(1),
-                ParticleIdx::from_raw(3),
-                ParticleIdx::from_raw(7),
-                ParticleIdx::from_raw(5),
+                ParticleIdx::from_raw(C100),
+                ParticleIdx::from_raw(C110),
+                ParticleIdx::from_raw(C111),
+                ParticleIdx::from_raw(C101),
             ],
             [
-                ParticleIdx::from_raw(0),
-                ParticleIdx::from_raw(4),
-                ParticleIdx::from_raw(6),
-                ParticleIdx::from_raw(2),
+                ParticleIdx::from_raw(C000),
+                ParticleIdx::from_raw(C001),
+                ParticleIdx::from_raw(C011),
+                ParticleIdx::from_raw(C010),
             ],
             [
-                ParticleIdx::from_raw(2),
-                ParticleIdx::from_raw(6),
-                ParticleIdx::from_raw(7),
-                ParticleIdx::from_raw(3),
+                ParticleIdx::from_raw(C010),
+                ParticleIdx::from_raw(C011),
+                ParticleIdx::from_raw(C111),
+                ParticleIdx::from_raw(C110),
             ],
             [
-                ParticleIdx::from_raw(0),
-                ParticleIdx::from_raw(1),
-                ParticleIdx::from_raw(5),
-                ParticleIdx::from_raw(4),
+                ParticleIdx::from_raw(C000),
+                ParticleIdx::from_raw(C100),
+                ParticleIdx::from_raw(C101),
+                ParticleIdx::from_raw(C001),
             ],
             [
-                ParticleIdx::from_raw(4),
-                ParticleIdx::from_raw(5),
-                ParticleIdx::from_raw(7),
-                ParticleIdx::from_raw(6),
+                ParticleIdx::from_raw(C001),
+                ParticleIdx::from_raw(C101),
+                ParticleIdx::from_raw(C111),
+                ParticleIdx::from_raw(C011),
             ],
             [
-                ParticleIdx::from_raw(0),
-                ParticleIdx::from_raw(2),
-                ParticleIdx::from_raw(3),
-                ParticleIdx::from_raw(1),
+                ParticleIdx::from_raw(C000),
+                ParticleIdx::from_raw(C010),
+                ParticleIdx::from_raw(C110),
+                ParticleIdx::from_raw(C100),
             ],
         ];
         let positions: Vec<Vec3> = particles.iter().map(|p| p.position).collect();

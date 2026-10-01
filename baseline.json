@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.21218079238033227,
+  "quality_score": 0.22349055607331603,
   "iosp_score": 0.9006174654513378,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 1108,
+  "magic_number_warnings": 1059,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 104,
   "unsafe_warnings": 8,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 3524,
+  "total_findings": 3475,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -383,27 +383,27 @@
     {
       "name": "WideBatch::world_inertia",
       "file": "crates/physics/src/wide.rs",
-      "line": 178
+      "line": 176
     },
     {
       "name": "WideBatch::build",
       "file": "crates/physics/src/wide.rs",
-      "line": 216
+      "line": 214
     },
     {
       "name": "WideBatch::fill_lane",
       "file": "crates/physics/src/wide.rs",
-      "line": 280
+      "line": 278
     },
     {
       "name": "WideBatch::solve_iteration",
       "file": "crates/physics/src/wide.rs",
-      "line": 444
+      "line": 442
     },
     {
       "name": "WideBatch::solve_lane_rolling",
       "file": "crates/physics/src/wide.rs",
-      "line": 587
+      "line": 585
     },
     {
       "name": "AvbdEngine::step_inner",
@@ -553,32 +553,32 @@
     {
       "name": "SoftBody::chain",
       "file": "crates/physics/src/soft.rs",
-      "line": 359
+      "line": 370
     },
     {
       "name": "SoftBody::try_chain_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 397
+      "line": 408
     },
     {
       "name": "SoftBody::cloth_grid",
       "file": "crates/physics/src/soft.rs",
-      "line": 442
+      "line": 453
     },
     {
       "name": "SoftBody::try_cloth_grid_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 542
+      "line": 553
     },
     {
       "name": "SoftBody::soft_cube",
       "file": "crates/physics/src/soft.rs",
-      "line": 573
+      "line": 584
     },
     {
       "name": "SoftBody::try_soft_cube_units",
       "file": "crates/physics/src/soft.rs",
-      "line": 679
+      "line": 690
     },
     {
       "name": "XpbdEngine::substep",
@@ -1123,7 +1123,7 @@
     {
       "name": "SequentialImpulseEngine::step",
       "file": "crates/physics/src/sequential_impulse/mod.rs",
-      "line": 579
+      "line": 590
     },
     {
       "name": "shape_min_dimension",
@@ -1213,12 +1213,12 @@
     {
       "name": "SequentialImpulseEngine::collect_sleep_flags",
       "file": "crates/physics/src/sequential_impulse/islands.rs",
-      "line": 193
+      "line": 202
     },
     {
       "name": "SequentialImpulseEngine::dispatch_islands_velocity",
       "file": "crates/physics/src/sequential_impulse/islands.rs",
-      "line": 349
+      "line": 358
     },
     {
       "name": "SequentialImpulseEngine::apply_step_budget",
@@ -1368,92 +1368,92 @@
     {
       "name": "apply_warm_start",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 194
+      "line": 198
     },
     {
       "name": "prepare_manifold_state",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 282
+      "line": 286
     },
     {
       "name": "SequentialImpulseEngine::solve_contacts_velocity_gpu",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 379
+      "line": 383
     },
     {
       "name": "SequentialImpulseEngine::solve_contacts_velocity",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 482
+      "line": 486
     },
     {
       "name": "SequentialImpulseEngine::solve_contacts_position",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 523
+      "line": 527
     },
     {
       "name": "SequentialImpulseEngine::solve_island_velocity",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 709
+      "line": 713
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_velocity_step",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 768
+      "line": 772
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_restitution_step",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 820
+      "line": 824
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_friction",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 866
+      "line": 870
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_rolling",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1011
+      "line": 1015
     },
     {
       "name": "SequentialImpulseEngine::solve_island_position",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1062
+      "line": 1066
     },
     {
       "name": "prepare_island_states",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1115
+      "line": 1119
     },
     {
       "name": "run_velocity_iterations",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1142
+      "line": 1146
     },
     {
       "name": "run_restitution_stage",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1177
+      "line": 1181
     },
     {
       "name": "tangent_effective_mass",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1240
+      "line": 1244
     },
     {
       "name": "SequentialImpulseEngine::solve_flat_velocity",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1283
+      "line": 1287
     },
     {
       "name": "SequentialImpulseEngine::solve_one_flat_shard",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1328
+      "line": 1333
     },
     {
       "name": "SequentialImpulseEngine::solve_flat_position",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1436
+      "line": 1441
     },
     {
       "name": "avbd_step",

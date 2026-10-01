@@ -410,7 +410,7 @@ impl AvbdEngine {
             // Linear equality rows, same C as the primal per kind.
             match j.kind {
                 AvbdJointKind::Ball | AvbdJointKind::Revolute | AvbdJointKind::Fixed => {
-                    for k in 0..3 {
+                    for k in 0..ANGULAR_OFFSET {
                         let (live, initial) = if j.kind == AvbdJointKind::Fixed {
                             (live + a.orientation * j.dref, c0v + self.rot0[j.a] * j.dref)
                         } else {
@@ -601,7 +601,7 @@ impl AvbdEngine {
                 AvbdJointKind::Fixed => {
                     let diff = quat_diff_vec(a.orientation.conjugate() * b.orientation, j.q_ref);
                     let diff0 = quat_diff_vec(self.rot0[j.a].conjugate() * self.rot0[j.b], j.q_ref);
-                    for k in 0..3 {
+                    for k in 0..ANGULAR_OFFSET {
                         let c = diff[k] - ALPHA * diff0[k];
                         if c.abs() < C_EPS {
                             continue;

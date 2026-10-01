@@ -10,7 +10,9 @@ use crate::gpu::{pack_single_point_batches, write_back_acc};
 use rustc_hash::FxHashMap;
 
 use super::*;
-use crate::constants::{DEGENERATE_LEN2, FEATURE_NORMAL_DOT_MIN, MIN_EFFECTIVE_MASS};
+use crate::constants::{
+    DEGENERATE_LEN2, FEATURE_NORMAL_DOT_MIN, FRICTION_IMPULSE_DUST, MIN_EFFECTIVE_MASS,
+};
 use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 
@@ -19,6 +21,8 @@ use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
 const RESTITUTION_THRESHOLD: f32 = 1.0;
 const RESTITUTION_MAX_PEN: f32 = 0.05;
+/// Min total manifolds before flat/island contact stages go parallel.
+const PARALLEL_MIN_MANIFOLDS: usize = 24;
 
 /// Best matching unused cached point for warm point `k` (feature persistence,
 /// Jolt-style): nearest anchor within tolerance with a compatible normal.
@@ -910,7 +914,7 @@ impl SequentialImpulseEngine {
                         st.acc_friction2[k] = new_t;
                     }
                 }
-                if f_imp.length_squared() > 1e-24 {
+                if f_imp.length_squared() > FRICTION_IMPULSE_DUST {
                     apply_impulse(bodies, i, j, f_imp, ra, rb);
                 }
             } else {
@@ -953,7 +957,7 @@ impl SequentialImpulseEngine {
                 let f_imp = st.t1 * (u1 - st.acc_friction[k]) + st.t2 * (u2 - st.acc_friction2[k]);
                 st.acc_friction[k] = u1;
                 st.acc_friction2[k] = u2;
-                if f_imp.length_squared() > 1e-24 {
+                if f_imp.length_squared() > FRICTION_IMPULSE_DUST {
                     apply_impulse(bodies, i, j, f_imp, ra, rb);
                 }
             }
@@ -1298,7 +1302,8 @@ impl SequentialImpulseEngine {
         let base_iters = self.velocity_iterations;
         let path = self.wide_solver;
         let total_manifolds: usize = shards_out.iter().map(|s| s.manifolds.len()).sum();
-        let mode = Dispatch::from(shards_out.len() >= 2 && total_manifolds >= 24);
+        let mode =
+            Dispatch::from(shards_out.len() >= 2 && total_manifolds >= PARALLEL_MIN_MANIFOLDS);
         let this = &*self;
         let warm_in = &this.warm_impulses;
         Self::dispatch_islands(shards_out, mode, |_, shard| {
@@ -1447,7 +1452,7 @@ impl SequentialImpulseEngine {
         let base_iters = self.position_iterations;
         let softness = self.contact_softness;
         let total_manifolds: usize = shards.iter().map(|s| s.manifolds.len()).sum();
-        let mode = Dispatch::from(shards.len() >= 2 && total_manifolds >= 24);
+        let mode = Dispatch::from(shards.len() >= 2 && total_manifolds >= PARALLEL_MIN_MANIFOLDS);
         let this = &*self;
         Self::dispatch_islands(shards, mode, |_, shard| {
             for st in shard.states.iter() {

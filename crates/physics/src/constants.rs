@@ -72,3 +72,9 @@ pub(crate) const POS_CORRECTION_EPS: f32 = 1e-6;
 /// `shape_min_dimension` cannot defeat the discrete phase, so both the
 /// sequential-impulse and AVBD continuous paths skip them together.
 pub(crate) const CCD_TRAVEL_GATE_FRACTION: f32 = 0.5;
+
+/// Squared friction impulse treated as dust (skip applying).
+///
+/// Shared by the scalar SI contact path and the SIMD-wide batch so both
+/// skip the same near-zero Coulomb deltas.
+pub(crate) const FRICTION_IMPULSE_DUST: f32 = 1e-24;

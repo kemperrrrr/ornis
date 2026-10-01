@@ -42,6 +42,11 @@ use dashmap::DashMap;
 
 use glam::{Quat, Vec3};
 
+/// Seconds → milliseconds for step-timing telemetry.
+const MS_PER_SEC: f64 = 1000.0;
+/// Max spread of per-body required substeps that still skips the filter.
+const SUBSTEP_FILTER_SPREAD: u32 = 4;
+
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{
     BroadPhase, BroadPhaseBackend, BroadPhaseKind, BroadPhaseStats, PrevPose, StepBudget,
@@ -392,13 +397,19 @@ impl SequentialImpulseEngine {
     /// on, no gravity until set here. `gravity` is a constant world-space
     /// acceleration (m/s²) applied to dynamic bodies each step.
     pub fn new(gravity: Vec3) -> Self {
+        /// Default substeps per `step` call.
+        const DEFAULT_SUBSTEPS: u32 = 12;
+        /// Default velocity Gauss-Seidel iterations per substep.
+        const DEFAULT_VELOCITY_ITERS: u32 = 8;
+        /// Default NGS position iterations per substep.
+        const DEFAULT_POSITION_ITERS: u32 = 4;
         Self {
             bodies: Vec::new(),
             broadphase: BroadPhaseBackend::new(BroadPhaseKind::UniformGrid),
             gravity,
-            substeps: 12,
-            velocity_iterations: 8,
-            position_iterations: 4,
+            substeps: DEFAULT_SUBSTEPS,
+            velocity_iterations: DEFAULT_VELOCITY_ITERS,
+            position_iterations: DEFAULT_POSITION_ITERS,
             contact_softness: 0.0,
             warm_impulses: FxHashMap::default(),
             island: Vec::new(),
@@ -631,7 +642,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         let t0 = Instant::now();
         self.broadphase
             .update(&self.bodies, dt, Some(&self.prev_pose));
-        let broad_phase_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let broad_phase_ms = t0.elapsed().as_secs_f64() * MS_PER_SEC;
         let mut broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
         // Kinematic sweep BEFORE the substep loop: teleported/fast drivers
         // cast their step segment against dynamics, wake victims and
@@ -658,7 +669,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         let body_needed_opt: Option<&[u32]> = {
             let min_needed = body_needed.iter().copied().min().unwrap_or(0);
             let max_needed = body_needed.iter().copied().max().unwrap_or(0);
-            if max_needed - min_needed < 4 {
+            if max_needed - min_needed < SUBSTEP_FILTER_SPREAD {
                 None
             } else {
                 Some(&body_needed)
@@ -825,7 +836,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
                     &mut narrow_shards,
                 );
             }
-            timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * 1000.0;
+            timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * MS_PER_SEC;
             // Restitution is one-shot per step, evaluated on the first substep.
             let t0 = Instant::now();
             let gate = crate::flags::RestitutionGate::from(s == 0);
@@ -851,7 +862,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 self.solve_contacts_position(&mut islands, dt);
             }
             self.solve_joints_position();
-            timing.solver_ms += t0.elapsed().as_secs_f64() * 1000.0;
+            timing.solver_ms += t0.elapsed().as_secs_f64() * MS_PER_SEC;
             // Snapshot last manifolds for island rebuild; clone only once per frame
             if s + 1 == eff_substeps {
                 last_manifolds_snapshot.clear();
@@ -875,7 +886,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         let t_island = Instant::now();
         self.rebuild_islands(&last_manifolds_snapshot);
         self.update_sleep(dt);
-        timing.island_ms += t_island.elapsed().as_secs_f64() * 1000.0;
+        timing.island_ms += t_island.elapsed().as_secs_f64() * MS_PER_SEC;
         self.last_step_timing = timing;
 
         // Rebuild the broadphase at the completed poses so trigger events
@@ -956,7 +967,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         }
         self.contact_events
             .sort_by_key(|e| (e.body_a.min(e.body_b), e.body_a.max(e.body_b)));
-        self.last_step_timing.trigger_ms += t_trigger.elapsed().as_secs_f64() * 1000.0;
+        self.last_step_timing.trigger_ms += t_trigger.elapsed().as_secs_f64() * MS_PER_SEC;
         // Hand the velocity fields back to the driver: solver impulses must
         // never corrupt driver-owned kinematic state across steps. Then
         // refresh the step-start baseline for the next step's teleport cover.

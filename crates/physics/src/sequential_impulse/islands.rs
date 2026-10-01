@@ -99,7 +99,7 @@ impl SequentialImpulseEngine {
                 let fast = frozen.get(&root).copied().unwrap_or(false)
                     && !disturbed.get(&root).copied().unwrap_or(false)
                     && !self.island_grace.contains_key(&root);
-                *timer += dt * if fast { 6.0 } else { 1.0 };
+                *timer += dt * if fast { Self::FROZEN_SLEEP_RATE } else { 1.0 };
                 if *timer >= sleep_time {
                     to_sleep.push(root);
                 }
@@ -159,9 +159,18 @@ impl SequentialImpulseEngine {
     /// teleport overlap; 8 keeps a 3-step margin while still sleeping
     /// never-woken rest scenes in ~2.
     const WAKE_GRACE_STEPS: u32 = 8;
+    /// Sleep-timer multiplier for pristine frozen islands (vs legacy 1×).
+    const FROZEN_SLEEP_RATE: f32 = 6.0;
+    /// Base sleep dwell (s) before an island may freeze.
+    const SLEEP_TIME_BASE: f32 = 0.2;
+    /// Extra sleep dwell (s) per body in the island.
+    const SLEEP_TIME_PER_BODY: f32 = 0.02;
+    /// Upper clamp on size-scaled sleep dwell (s).
+    const SLEEP_TIME_MAX: f32 = 0.6;
 
     fn sleep_time_for_size(size: usize) -> f32 {
-        (0.2 + 0.02 * size as f32).clamp(0.2, 0.6)
+        (Self::SLEEP_TIME_BASE + Self::SLEEP_TIME_PER_BODY * size as f32)
+            .clamp(Self::SLEEP_TIME_BASE, Self::SLEEP_TIME_MAX)
     }
 
     fn is_body_slow(b: &RigidBody) -> bool {
@@ -510,11 +519,20 @@ pub(super) const FLAT_MIN_PAIRS: usize = 2048;
 /// feed every worker without the 100k-node dispatch the island path pays
 /// (same shape as the narrowphase rule, so both stages scale together).
 /// Order-preserving chunking keeps the assignment deterministic.
+/// Fallback worker hint when `available_parallelism` is unavailable.
+const DEFAULT_WORKER_HINT: usize = 4;
+/// Coarse shards per worker on the flat singleton path.
+const FLAT_SHARDS_PER_WORKER: usize = 4;
+/// Upper clamp on flat-path shard count.
+const MAX_FLAT_SHARDS: usize = 64;
+
 fn flat_shard_count(pairs: usize) -> usize {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(4);
-    (threads * 4).clamp(4, 64).min(pairs.max(1))
+        .unwrap_or(DEFAULT_WORKER_HINT);
+    (threads * FLAT_SHARDS_PER_WORKER)
+        .clamp(DEFAULT_WORKER_HINT, MAX_FLAT_SHARDS)
+        .min(pairs.max(1))
 }
 
 impl SequentialImpulseEngine {

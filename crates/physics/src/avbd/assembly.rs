@@ -60,7 +60,7 @@ pub fn solve_6x6(
     let mut x = [0.0f32; SPATIAL_DOF];
     for i in (0..SPATIAL_DOF).rev() {
         let mut s = z[i];
-        for k in (i + 1)..6 {
+        for k in (i + 1)..SPATIAL_DOF {
             s -= l[k][i] * x[k];
         }
         x[i] = s;
