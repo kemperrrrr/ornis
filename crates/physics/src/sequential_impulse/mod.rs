@@ -1104,7 +1104,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 motor,
                 ..
             } => {
-                let r = resolved.as_ref().expect("non-gear kinds resolve");
+                let Some(r) = resolved.as_ref() else {
+                    return Err(JointError::BadAxis {
+                        detail: "joint frame resolve failed".into(),
+                    });
+                };
                 JointKind::Revolute {
                     local_anchor_a,
                     local_anchor_b,
@@ -1121,7 +1125,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 motor,
                 ..
             } => {
-                let r = resolved.as_ref().expect("non-gear kinds resolve");
+                let Some(r) = resolved.as_ref() else {
+                    return Err(JointError::BadAxis {
+                        detail: "joint frame resolve failed".into(),
+                    });
+                };
                 JointKind::Prismatic {
                     local_anchor_a,
                     local_anchor_b,
@@ -1138,7 +1146,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 motor,
                 ..
             } => {
-                let r = resolved.as_ref().expect("non-gear kinds resolve");
+                let Some(r) = resolved.as_ref() else {
+                    return Err(JointError::BadAxis {
+                        detail: "joint frame resolve failed".into(),
+                    });
+                };
                 JointKind::Wheel {
                     local_anchor_a,
                     local_anchor_b,

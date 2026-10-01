@@ -1292,14 +1292,17 @@ impl PhysicsEngine for AvbdEngine {
         let bb = &self.bodies[ib];
         // Frames + assembly references, resolved once in the shared
         // `joint::resolve_joint` (same values the builtin engine captures).
-        let r = crate::joint::resolve_joint(
+        let Some(r) = crate::joint::resolve_joint(
             &kind,
             ba.position,
             ba.orientation,
             bb.position,
             bb.orientation,
-        )
-        .expect("non-gear/sixdof kinds resolve");
+        ) else {
+            return Err(crate::errors::JointError::BadAxis {
+                detail: "joint frame resolve failed".into(),
+            });
+        };
         let mut joint = AvbdJoint {
             a: ia,
             b: ib,

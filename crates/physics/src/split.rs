@@ -596,11 +596,9 @@ impl SplitState {
                 self.bodies[j.b.index()].local_avbd,
             ) {
                 let spec = self.local_spec(j.spec, SolverSide::Avbd);
-                if let Some(spec) = spec {
-                    let h = self
-                        .avbd
-                        .add_joint_local(a, b, spec)
-                        .expect("validated AVBD joint");
+                if let Some(spec) = spec
+                    && let Ok(h) = self.avbd.add_joint_local(a, b, spec)
+                {
                     self.avbd.restore_joint_reference_local(h, j.reference);
                     self.joints[i].local_avbd = Some(h);
                 }
@@ -610,11 +608,9 @@ impl SplitState {
                 self.bodies[j.b.index()].local_si,
             ) {
                 let spec = self.local_spec(j.spec, SolverSide::SequentialImpulse);
-                if let Some(spec) = spec {
-                    let h = self
-                        .si
-                        .add_joint_local(a, b, spec)
-                        .expect("validated SI joint");
+                if let Some(spec) = spec
+                    && let Ok(h) = self.si.add_joint_local(a, b, spec)
+                {
                     self.si.restore_joint_reference_local(h, j.reference);
                     self.joints[i].local_si = Some(h);
                 }
@@ -632,11 +628,8 @@ impl SplitState {
                 let spec = self.xpbd_local_spec(j.spec);
                 if let Some(spec) = spec
                     && crate::xpbd::xpbd_supports_joint(&spec)
+                    && let Ok(h) = self.xpbd.add_joint(a.into(), b.into(), spec)
                 {
-                    let h = self
-                        .xpbd
-                        .add_joint(a.into(), b.into(), spec)
-                        .expect("validated XPBD joint");
                     self.xpbd.restore_joint_reference(h, j.reference);
                     self.joints[i].local_xpbd = Some(XpbdJoint(h.as_u32()));
                 }

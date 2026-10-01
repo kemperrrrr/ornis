@@ -341,7 +341,7 @@ pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry
             | ResourceKind::StorageRead(_)
             | ResourceKind::StorageReadArray(_)
             | ResourceKind::StorageRw(_),
-        ) => Some(std::num::NonZeroU64::new(bytes).expect("resource min_size must be nonzero")),
+        ) => std::num::NonZeroU64::new(bytes),
         _ => None,
     };
     wgpu::BindGroupLayoutEntry {

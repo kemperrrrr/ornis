@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "quality_score": 0.4626998816211454,
+  "quality_score": 0.46408297712059565,
   "iosp_score": 0.9005882352941177,
   "violations": 338,
   "total": 5466,
@@ -9,7 +9,7 @@
   "nesting_depth_warnings": 16,
   "function_length_warnings": 107,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 72,
+  "error_handling_warnings": 66,
   "duplicate_groups": 81,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2430,
+  "total_findings": 2424,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -423,7 +423,7 @@
     {
       "name": "AvbdEngine::shapecast",
       "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1431
+      "line": 1434
     },
     {
       "name": "quat_integrate",
@@ -533,22 +533,22 @@
     {
       "name": "SplitState::step",
       "file": "crates/physics/src/split.rs",
-      "line": 955
+      "line": 948
     },
     {
       "name": "SplitState::couple_cross_joints",
       "file": "crates/physics/src/split.rs",
-      "line": 1093
+      "line": 1086
     },
     {
       "name": "SplitState::couple_velocity",
       "file": "crates/physics/src/split.rs",
-      "line": 1214
+      "line": 1207
     },
     {
       "name": "SplitState::shapecast",
       "file": "crates/physics/src/split.rs",
-      "line": 1284
+      "line": 1277
     },
     {
       "name": "SoftBody::chain",

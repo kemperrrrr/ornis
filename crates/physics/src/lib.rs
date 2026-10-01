@@ -625,9 +625,9 @@ impl Engine {
         let mut remap = vec![None; joints.len()];
         for (old, mut j) in joints.into_iter().enumerate() {
             migration::remap_gear(&mut j.spec, &remap);
-            let h = self
-                .add_joint(j.a, j.b, j.spec)
-                .expect("validated migrating joint");
+            let Ok(h) = self.add_joint(j.a, j.b, j.spec) else {
+                continue;
+            };
             match &mut self.inner {
                 EngineInner::SequentialImpulse(e) => e.restore_joint_reference(h, j.reference),
                 EngineInner::Avbd(e) => e.restore_joint_reference(h, j.reference),
