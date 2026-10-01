@@ -11,6 +11,8 @@
 
 /// Indices per triangle (flat soup alignment).
 pub(crate) const TRIANGLE_VERTS: usize = 3;
+/// Spatial components in a position / normal.
+const VEC3_COMPONENTS: usize = 3;
 
 /// Canonical editable triangle mesh (engine source of truth).
 #[derive(Debug, Clone, Default)]
@@ -101,8 +103,8 @@ impl MeshData {
     /// Powers [`UndoStrategy::Snapshots`](crate::UndoStrategy) byte
     /// eviction: a cheap `len × width` sum, no allocation walk.
     pub fn heap_bytes(&self) -> usize {
-        self.positions.len() * size_of::<[f32; 3]>()
-            + self.normals.len() * size_of::<[f32; 3]>()
+        self.positions.len() * size_of::<[f32; TRIANGLE_VERTS]>()
+            + self.normals.len() * size_of::<[f32; TRIANGLE_VERTS]>()
             + self.uvs.len() * size_of::<[f32; 2]>()
             + self.indices.len() * size_of::<u32>()
     }
@@ -118,6 +120,16 @@ impl MeshData {
         const FACE_COUNT: usize = 6;
         const VERTS_PER_FACE: usize = 4;
         const INDICES_PER_FACE: usize = 6;
+
+        /// Box corner indices (unit box centered at origin).
+        const C_LDB: usize = 0; // −x −y −z
+        const C_RDB: usize = 1; // +x −y −z
+        const C_RUB: usize = 2; // +x +y −z
+        const C_LUB: usize = 3; // −x +y −z
+        const C_LDF: usize = 4; // −x −y +z
+        const C_RDF: usize = 5; // +x −y +z
+        const C_RUF: usize = 6; // +x +y +z
+        const C_LUF: usize = 7; // −x +y +z
         let p = [
             [-HALF, -HALF, -HALF],
             [HALF, -HALF, -HALF],
@@ -130,14 +142,14 @@ impl MeshData {
         ];
         #[rustfmt::skip]
         let faces: [[usize; VERTS_PER_FACE]; FACE_COUNT] = [
-            [0, 1, 2, 3], // -z
-            [5, 4, 7, 6], // +z
-            [4, 0, 3, 7], // -x
-            [1, 5, 6, 2], // +x
-            [4, 5, 1, 0], // -y
-            [3, 2, 6, 7], // +y
+            [C_LDB, C_RDB, C_RUB, C_LUB], // -z
+            [C_RDF, C_LDF, C_LUF, C_RUF], // +z
+            [C_LDF, C_LDB, C_LUB, C_LUF], // -x
+            [C_RDB, C_RDF, C_RUF, C_RUB], // +x
+            [C_LDF, C_RDF, C_RDB, C_LDB], // -y
+            [C_LUB, C_RUB, C_RUF, C_LUF], // +y
         ];
-        let normals: [[f32; 3]; FACE_COUNT] = [
+        let normals: [[f32; VEC3_COMPONENTS]; FACE_COUNT] = [
             [0.0, 0.0, -1.0],
             [0.0, 0.0, 1.0],
             [-1.0, 0.0, 0.0],

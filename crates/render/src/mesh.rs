@@ -20,6 +20,23 @@ const CYLINDER_INDICES_PER_SEGMENT: u32 = 12;
 const MIN_RADIAL_SEGMENTS: u32 = 3;
 /// Minimum sphere stacks.
 const MIN_SPHERE_STACKS: u32 = 2;
+/// Vertex attribute locations (must match the mesh shaders).
+const ATTR_LOC_POSITION: u32 = 0;
+const ATTR_LOC_NORMAL: u32 = 1;
+const ATTR_LOC_UV: u32 = 2;
+const ATTR_LOC_TANGENT: u32 = 3;
+const ATTR_LOC_JOINTS: u32 = 4;
+const ATTR_LOC_WEIGHTS: u32 = 5;
+
+/// Box corner indices (unit box centered at origin).
+const C_LDB: usize = 0; // −x −y −z
+const C_RDB: usize = 1; // +x −y −z
+const C_RUB: usize = 2; // +x +y −z
+const C_LUB: usize = 3; // −x +y −z
+const C_LDF: usize = 4; // −x −y +z
+const C_RDF: usize = 5; // +x −y +z
+const C_RUF: usize = 6; // +x +y +z
+const C_LUF: usize = 7; // −x +y +z
 
 /// Vertex + index buffers uploaded to the device, ready to draw.
 pub struct Mesh {
@@ -56,25 +73,25 @@ impl Vertex {
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 0,
+                    shader_location: ATTR_LOC_POSITION,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; VEC3_COMPONENTS]>() as wgpu::BufferAddress,
-                    shader_location: 1,
+                    shader_location: ATTR_LOC_NORMAL,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2)
                         as wgpu::BufferAddress,
-                    shader_location: 2,
+                    shader_location: ATTR_LOC_UV,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
                     offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2
                         + std::mem::size_of::<[f32; VEC2_COMPONENTS]>())
                         as wgpu::BufferAddress,
-                    shader_location: 3,
+                    shader_location: ATTR_LOC_TANGENT,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],
@@ -118,37 +135,37 @@ impl SkinnedVertex {
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 0,
+                    shader_location: ATTR_LOC_POSITION,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; VEC3_COMPONENTS]>() as wgpu::BufferAddress,
-                    shader_location: 1,
+                    shader_location: ATTR_LOC_NORMAL,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2)
                         as wgpu::BufferAddress,
-                    shader_location: 2,
+                    shader_location: ATTR_LOC_UV,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
                     offset: (std::mem::size_of::<[f32; VEC3_COMPONENTS]>() * 2
                         + std::mem::size_of::<[f32; VEC2_COMPONENTS]>())
                         as wgpu::BufferAddress,
-                    shader_location: 3,
+                    shader_location: ATTR_LOC_TANGENT,
                     format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    shader_location: 4,
+                    shader_location: ATTR_LOC_JOINTS,
                     format: wgpu::VertexFormat::Uint32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: (std::mem::size_of::<Vertex>()
                         + std::mem::size_of::<[u32; MAX_INFLUENCES]>())
                         as wgpu::BufferAddress,
-                    shader_location: 5,
+                    shader_location: ATTR_LOC_WEIGHTS,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],
@@ -254,12 +271,12 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
     ];
     #[rustfmt::skip]
     let faces: [[usize; BOX_FACE_VERTS]; BOX_FACES] = [
-        [0, 1, 2, 3], // -z
-        [5, 4, 7, 6], // +z
-        [4, 0, 3, 7], // -x
-        [1, 5, 6, 2], // +x
-        [4, 5, 1, 0], // -y
-        [3, 2, 6, 7], // +y
+        [C_LDB, C_RDB, C_RUB, C_LUB], // -z
+        [C_RDF, C_LDF, C_LUF, C_RUF], // +z
+        [C_LDF, C_LDB, C_LUB, C_LUF], // -x
+        [C_RDB, C_RDF, C_RUF, C_RUB], // +x
+        [C_LDF, C_RDF, C_RDB, C_LDB], // -y
+        [C_LUB, C_RUB, C_RUF, C_LUF], // +y
     ];
     let normals: [[f32; VEC3_COMPONENTS]; BOX_FACES] = [
         [0.0, 0.0, -1.0],
