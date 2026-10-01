@@ -73,6 +73,10 @@ pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 /// first eight entries of any kind. Excess lights are dropped and reported
 /// in [`LightUploadStats::dropped_lights`] (never silently).
 pub const MAX_LIGHTS: usize = 8;
+/// Components in an RGB / xyz triple.
+const VEC3_COMPONENTS: usize = 3;
+/// Components in an RGBA / homogeneous vector.
+const VEC4_COMPONENTS: usize = 4;
 /// Compile-time pin: the WGSL derive only accepts integer literals for
 /// array lengths, so [`LightingUniform::lights`] spells `8` literally —
 /// this assert keeps the spell and the limit in sync.
@@ -1159,10 +1163,10 @@ fn build_lighting_uniform(
         kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
         direction: [0.0, 0.0, 1.0, 0.0],
         position: [0.0, 0.0, 0.0, 1.0],
-        color: [0.0; 4],
+        color: [0.0; VEC4_COMPONENTS],
         params: [0.0, 0.0, 0.0, -1.0],
         shadow_vp: NO_SHADOW_VP,
-    }; 8];
+    }; MAX_LIGHTS];
     let mut shadow_count = 0u32;
     let mut cube_count = 0u32;
     let mut dropped_shadows = 0u32;
@@ -1306,7 +1310,7 @@ fn build_lighting_uniform(
             ],
             lights: gpu_lights,
             light_count: count as u32,
-            _pad: [0; 3],
+            _pad: [0; VEC3_COMPONENTS],
         },
         stats: LightUploadStats {
             uploaded: count as u32,
@@ -1591,9 +1595,9 @@ impl Renderer3D {
             ],
             lights: [GpuLight {
                 kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
-                direction: [0.0; 4],
-                position: [0.0; 4],
-                color: [0.0; 4],
+                direction: [0.0; VEC4_COMPONENTS],
+                position: [0.0; VEC4_COMPONENTS],
+                color: [0.0; VEC4_COMPONENTS],
                 params: [0.0, 0.0, 0.0, -1.0],
                 shadow_vp: [
                     [1.0, 0.0, 0.0, 0.0],
@@ -1601,9 +1605,9 @@ impl Renderer3D {
                     [0.0, 0.0, 1.0, 0.0],
                     [0.0, 0.0, 0.0, 1.0],
                 ],
-            }; 8],
+            }; MAX_LIGHTS],
             light_count: 0,
-            _pad: [0; 3],
+            _pad: [0; VEC3_COMPONENTS],
         };
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting buffer"),

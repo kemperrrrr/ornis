@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.2985552909568301,
+  "quality_score": 0.3034023325395374,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 736,
+  "magic_number_warnings": 715,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 104,
   "unsafe_warnings": 8,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 3148,
+  "total_findings": 3127,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -258,47 +258,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1132
+      "line": 1136
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3042
+      "line": 3046
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3245
+      "line": 3249
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3449
+      "line": 3453
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3620
+      "line": 3624
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3646
+      "line": 3650
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3728
+      "line": 3732
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3755
+      "line": 3759
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4204
+      "line": 4208
     },
     {
       "name": "RenderFrame3D::build",
@@ -1563,7 +1563,7 @@
     {
       "name": "EditableMesh::poll_exact",
       "file": "crates/mesh-editor/src/editable.rs",
-      "line": 286
+      "line": 289
     },
     {
       "name": "RefitBudget::decide",
@@ -1613,12 +1613,12 @@
     {
       "name": "parse_binding_base_ty",
       "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 92
+      "line": 109
     },
     {
       "name": "parse_binding_group",
       "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 167
+      "line": 184
     },
     {
       "name": "collect_pat_idents",

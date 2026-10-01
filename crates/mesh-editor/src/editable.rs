@@ -10,6 +10,9 @@ use std::time::Instant;
 
 use crate::mesh_data::TRIANGLE_VERTS;
 
+/// Child triangles produced per input triangle in midpoint subdivision.
+const SUBDIVIDE_CHILD_TRIS: usize = 4;
+
 /// Base mesh plus optional in-progress preview and dirty tracking.
 #[derive(Debug)]
 pub struct EditableMesh {
@@ -134,7 +137,7 @@ impl EditableMesh {
         for _ in 0..levels {
             let mesh = self.preview_or_clone();
             let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
-            let mut new_indices = Vec::with_capacity(mesh.indices.len() * 4);
+            let mut new_indices = Vec::with_capacity(mesh.indices.len() * SUBDIVIDE_CHILD_TRIS);
             let tris = mesh.triangle_count();
             for f in 0..tris {
                 let [a, b, c] = [

@@ -9,6 +9,9 @@ use manifold_rust::{manifold::Manifold, types::Error as ManifoldError};
 
 use crate::mesh_data::TRIANGLE_VERTS;
 
+/// Spatial components in a position.
+const VEC3_COMPONENTS: usize = 3;
+
 /// Kernel-side failure of a boolean operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BridgeError {
@@ -50,7 +53,8 @@ pub fn to_manifold(mesh: &crate::MeshData) -> Result<Manifold, BridgeError> {
 /// per affected region after the boolean lands.
 pub fn from_manifold(manifold: &Manifold) -> crate::MeshData {
     let gl = manifold.get_mesh_gl(-1);
-    let positions: Vec<[f32; 3]> = (0..gl.num_vert()).map(|i| gl.get_vert_pos(i)).collect();
+    let positions: Vec<[f32; VEC3_COMPONENTS]> =
+        (0..gl.num_vert()).map(|i| gl.get_vert_pos(i)).collect();
     let n = positions.len();
     crate::MeshData {
         positions,

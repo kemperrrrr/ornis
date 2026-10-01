@@ -35,6 +35,11 @@ use quote::quote;
 use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 
+/// Max components in a WGSL vector (`vec2`..=`vec4`).
+const MAX_VEC_COMPONENTS: usize = 4;
+/// Min components in a WGSL vector.
+const MIN_VEC_COMPONENTS: usize = 2;
+
 /// Per-field interface assignment parsed from `#[wgsl(...)]`.
 struct FieldAttr {
     location: Option<u32>,
@@ -133,7 +138,7 @@ fn wgsl_field_type(ty: &syn::Type) -> syn::Result<String> {
                 ));
             }
         };
-        if !(2..=4).contains(&len) {
+        if !(MIN_VEC_COMPONENTS..=MAX_VEC_COMPONENTS).contains(&len) {
             return Err(syn::Error::new(
                 arr.len.span(),
                 format!("WgslInterface: array length {len} is not supported; use 2..=4"),
