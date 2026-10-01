@@ -31,6 +31,9 @@ use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
 use ornis_core::units::PositiveF32;
 
+/// Squared length below which a direction is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+
 /// CPU-side render data read from the ECS lanes for one frame (X4
 /// Extract-free: a direct-read payload, not a scheduled snapshot —
 /// no `Mutex` round-trip).
@@ -951,7 +954,7 @@ fn apply_emission(output: &mut OpenPBRMaterial, emission: [f32; 3]) {
 fn normalized_rotation(rotation: [f32; 4]) -> Quat {
     let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
     let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         orientation.normalize()
     } else {
         Quat::IDENTITY

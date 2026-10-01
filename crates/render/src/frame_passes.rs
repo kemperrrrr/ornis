@@ -15,6 +15,11 @@ use crate::system::{
 };
 use crate::transient_pool::{SizePolicy, TextureSpec};
 use std::marker::PhantomData;
+/// Default fog tint (linear RGB).
+const DEFAULT_FOG_RGB: [f32; 3] = [0.5, 0.6, 0.7];
+/// Default fog density (1/m).
+const DEFAULT_FOG_DENSITY: f32 = 0.02;
+
 // Short alias keeps `typed_resource!` invocations under rustfmt's
 // fn_call_width (60) so they stay on one line.
 use wgpu::TextureFormat as F;
@@ -630,8 +635,8 @@ impl FogSettings {
 impl Default for FogSettings {
     fn default() -> Self {
         Self {
-            color: ornis_core::units::LinearRgb::new([0.5, 0.6, 0.7]),
-            density: FogDensity::expect_valid(0.02),
+            color: ornis_core::units::LinearRgb::new(DEFAULT_FOG_RGB),
+            density: FogDensity::expect_valid(DEFAULT_FOG_DENSITY),
         }
     }
 }

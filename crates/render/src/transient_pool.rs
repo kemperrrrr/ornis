@@ -26,6 +26,13 @@ use std::sync::Arc;
 
 use ornis_schedule::{MermaidDiagram, bitset_level_plan};
 
+/// Bytes per pixel for 32-bit formats (RGBA8 / R32 / Depth32 / …).
+const BYTES_PER_PIXEL_32: u32 = 4;
+/// Bytes per pixel for 64-bit formats (RGBA16F / RG32F).
+const BYTES_PER_PIXEL_64: u32 = 8;
+/// Bytes per pixel for 128-bit formats (RGBA32F).
+const BYTES_PER_PIXEL_128: u32 = 16;
+
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
@@ -35,9 +42,9 @@ pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
         | wgpu::TextureFormat::R32Uint
         | wgpu::TextureFormat::Rg16Float
         | wgpu::TextureFormat::Depth32Float
-        | wgpu::TextureFormat::Depth24Plus => 4,
-        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => 8,
-        wgpu::TextureFormat::Rgba32Float => 16,
+        | wgpu::TextureFormat::Depth24Plus => BYTES_PER_PIXEL_32,
+        wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rg32Float => BYTES_PER_PIXEL_64,
+        wgpu::TextureFormat::Rgba32Float => BYTES_PER_PIXEL_128,
         other => panic!("format_bytes_per_pixel: unsupported format {other:?}"),
     }
 }

@@ -36,6 +36,9 @@ use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::interface::GbufferVertexOutput as VertexOutput;
 use crate::shaders::{Resource, ResourceKind, ShaderModule, wgsl_decl};
 
+/// GPU joint-palette capacity (matches [`JointLimit::GPU`]).
+const GPU_PALETTE_SLOTS: usize = 128;
+
 /// One GPU palette joint: the final skinning matrix (`model * inverse_bind`).
 ///
 /// The WGSL `SkinJoint` declaration is generated from this layout
@@ -247,7 +250,8 @@ pub fn joint_palette_bytes(palette: &[Mat4]) -> Result<Vec<u8>, SkinError> {
             limit: limit.get(),
         });
     }
-    let mut joints: [SkinJoint; 128] = [bytemuck::Zeroable::zeroed(); 128];
+    let mut joints: [SkinJoint; GPU_PALETTE_SLOTS] =
+        [bytemuck::Zeroable::zeroed(); GPU_PALETTE_SLOTS];
     for (slot, matrix) in joints.iter_mut().zip(palette.iter()) {
         slot.matrix = matrix.to_cols_array_2d();
     }
