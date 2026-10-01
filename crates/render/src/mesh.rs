@@ -6,6 +6,8 @@ use wgpu::util::DeviceExt;
 const VEC3_COMPONENTS: usize = 3;
 /// Components in a `vec2` / UV attribute.
 const VEC2_COMPONENTS: usize = 2;
+/// Half-extent of a unit box / UV patch center.
+const HALF: f32 = 0.5;
 /// Max joint influences per skinned vertex.
 const MAX_INFLUENCES: usize = 4;
 /// Faces on a box mesh.
@@ -260,14 +262,14 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
     // Unit corners, scaled by `size` below (mirrors
     // `MeshData::unit_box`, whose winding is CCW from outside).
     let p = [
-        [-0.5, -0.5, -0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-        [-0.5, -0.5, 0.5],
-        [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [-0.5, 0.5, 0.5],
+        [-HALF, -HALF, -HALF],
+        [HALF, -HALF, -HALF],
+        [HALF, HALF, -HALF],
+        [-HALF, HALF, -HALF],
+        [-HALF, -HALF, HALF],
+        [HALF, -HALF, HALF],
+        [HALF, HALF, HALF],
+        [-HALF, HALF, HALF],
     ];
     #[rustfmt::skip]
     let faces: [[usize; BOX_FACE_VERTS]; BOX_FACES] = [
@@ -320,7 +322,7 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
 /// tangent (unit, orthogonal to the normal — same contract as
 /// [`create_sphere` on the equator).
 pub fn plane_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
-    let (hx, hz) = (size[0] * 0.5, size[1] * 0.5);
+    let (hx, hz) = (size[0] * HALF, size[1] * HALF);
     let vertices = vec![
         Vertex {
             position: [-hx, 0.0, -hz],
@@ -360,7 +362,7 @@ pub fn plane_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
 pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Vertex>, Vec<u32>) {
     let n = radial_segments.max(MIN_RADIAL_SEGMENTS);
     let step = 2.0 * std::f32::consts::PI / n as f32;
-    let half = height * 0.5;
+    let half = height * HALF;
     /// Side verts per segment (bottom+top) × (n+1 seam) + 2 caps × (n+2).
     const SIDE_RINGS: u32 = 2;
     const CAP_CENTER_AND_SEAM: u32 = 2;
@@ -402,7 +404,7 @@ pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Ver
         vertices.push(Vertex {
             position: [0.0, y, 0.0],
             normal,
-            uv: [0.5, 0.5],
+            uv: [HALF, HALF],
             tangent: [1.0, 0.0, 0.0],
         });
         for j in 0..=n {
@@ -411,7 +413,7 @@ pub fn cylinder_data(radius: f32, height: f32, radial_segments: u32) -> (Vec<Ver
             vertices.push(Vertex {
                 position: [radius * ca, y, radius * sa],
                 normal,
-                uv: [ca * 0.5 + 0.5, sa * 0.5 + 0.5],
+                uv: [ca * HALF + HALF, sa * HALF + HALF],
                 tangent: [1.0, 0.0, 0.0],
             });
         }
@@ -547,8 +549,8 @@ mod tests {
                 .iter()
                 .map(|v| v.position[axis])
                 .fold(f32::NEG_INFINITY, f32::max);
-            assert_eq!(min, -extent * 0.5, "axis {axis} min");
-            assert_eq!(max, extent * 0.5, "axis {axis} max");
+            assert_eq!(min, -extent * HALF, "axis {axis} min");
+            assert_eq!(max, extent * HALF, "axis {axis} max");
         }
         // Every triangle winds CCW from outside (face normal agrees with
         // the stored vertex normal).

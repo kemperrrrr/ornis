@@ -58,6 +58,11 @@ const BOX_MASS: f32 = 1.0;
 const BOX3D_DENSITY: f32 = BOX_MASS / 0.512;
 /// Floor half-extent on Y (top face at y = 0 when centered at -FLOOR_HALF_Y).
 const FLOOR_HALF_Y: f32 = 0.5;
+/// Tile-grid half-cell offset (centers tiles in their grid cells).
+const TILE_CENTER: f32 = 0.5;
+/// Default Coulomb friction for Rapier/Box3D colliders.
+#[cfg(any(feature = "rapier", feature = "box3d"))]
+const DEFAULT_FRICTION: f32 = 0.5;
 /// Body-grid tile half-extent on XZ.
 const TILE_HALF: f32 = 5.0;
 /// Tall-stack floor half-extents on XZ.
@@ -119,8 +124,8 @@ fn build_grid<E: PhysicsEngine>(engine: &mut E, n: u32) {
     let tiles = (span / (2.0 * TILE_HALF)).ceil() as i32;
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
+            let x = (tx as f32 - tiles as f32 / 2.0 + TILE_CENTER) * 2.0 * TILE_HALF;
+            let z = (tz as f32 - tiles as f32 / 2.0 + TILE_CENTER) * 2.0 * TILE_HALF;
             engine.add_body(RigidBody::new_box(
                 Vec3::new(x, -FLOOR_HALF_Y, z),
                 Vec3::new(TILE_HALF, FLOOR_HALF_Y, TILE_HALF),
@@ -272,7 +277,7 @@ impl NativeRapier {
         };
         let handle = self.bodies.insert(body);
         let mut collider = ColliderBuilder::cuboid(half[0], half[1], half[2])
-            .friction(0.5)
+            .friction(DEFAULT_FRICTION)
             .restitution(RAPIER_RESTITUTION);
         if mass > 0.0 {
             collider = collider.mass(mass);
@@ -330,8 +335,8 @@ fn grid_layout(n: u32) -> GridLayout {
     let mut floors = Vec::new();
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
+            let x = (tx as f32 - tiles as f32 / 2.0 + TILE_CENTER) * 2.0 * TILE_HALF;
+            let z = (tz as f32 - tiles as f32 / 2.0 + TILE_CENTER) * 2.0 * TILE_HALF;
             floors.push(([x, -FLOOR_HALF_Y, z], [TILE_HALF, FLOOR_HALF_Y, TILE_HALF]));
         }
     }
@@ -452,7 +457,7 @@ impl Box3dWorld {
             foundation
                 .shape_def_builder()
                 .density(if dynamic { BOX3D_DENSITY } else { 1.0 })
-                .friction(0.5)
+                .friction(DEFAULT_FRICTION)
                 .restitution(0.0)
                 .build(),
             "box3d shape def",

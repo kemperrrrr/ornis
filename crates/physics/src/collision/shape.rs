@@ -29,6 +29,8 @@ const SPHERE_INERTIA_FACTOR: f32 = 0.4;
 const BOX_INERTIA_DIVISOR: f32 = 12.0;
 /// Thin-disk / solid-cylinder inertia about the symmetry axis: `½ m r²`.
 const DISK_AXIS_INERTIA: f32 = 0.5;
+/// Midpoint / half-span scale used by heightfield grid math.
+const HALF: f32 = 0.5;
 /// Capsule transverse disk term: `¼ m r²`.
 const CAPSULE_DISK_TRANSVERSE: f32 = 0.25;
 /// Capsule stem coupling in the transverse inertia: `(m/3) · h · r`.
@@ -847,9 +849,9 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
     if hf.rows == 0 || hf.cols == 0 || !hf.cell.is_sign_positive() || hf.heights.is_empty() {
         return p;
     }
-    let col = ((p.x / hf.cell + (hf.cols - 1) as f32 * 0.5).floor() as isize)
+    let col = ((p.x / hf.cell + (hf.cols - 1) as f32 * HALF).floor() as isize)
         .clamp(0, hf.cols as isize - 1) as usize;
-    let row = ((p.z / hf.cell + (hf.rows - 1) as f32 * 0.5).floor() as isize)
+    let row = ((p.z / hf.cell + (hf.rows - 1) as f32 * HALF).floor() as isize)
         .clamp(0, hf.rows as isize - 1) as usize;
     let h = hf.heights[row * hf.cols + col];
     let (y_min, _) = hf.height_range();
@@ -858,8 +860,8 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
     } else {
         h - hf.cell.max(HEIGHTFIELD_MIN_CELL)
     };
-    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
-    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let x_origin = -((hf.cols - 1) as f32) * HALF * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * HALF * hf.cell;
     let c = Vec3::new(
         p.x.clamp(
             x_origin + col as f32 * hf.cell,
@@ -887,8 +889,8 @@ fn closest_heightfield_point(hf: &Heightfield, p: Vec3) -> Vec3 {
         y_low.max(h),
         z_origin + (row + 1) as f32 * hf.cell,
     );
-    let mid = (lo + hi) * 0.5;
-    let half = (hi - lo) * 0.5;
+    let mid = (lo + hi) * HALF;
+    let half = (hi - lo) * HALF;
     let q = p - mid;
     let dx = half.x - q.x.abs();
     let dy = half.y - q.y.abs();
@@ -1174,8 +1176,8 @@ impl Heightfield {
         if self.heights.len() != self.rows * self.cols || self.rows == 0 || self.cols == 0 {
             return 0.0;
         }
-        let fx = (x / self.cell + (self.cols - 1) as f32 * 0.5).clamp(0.0, (self.cols - 1) as f32);
-        let fz = (z / self.cell + (self.rows - 1) as f32 * 0.5).clamp(0.0, (self.rows - 1) as f32);
+        let fx = (x / self.cell + (self.cols - 1) as f32 * HALF).clamp(0.0, (self.cols - 1) as f32);
+        let fz = (z / self.cell + (self.rows - 1) as f32 * HALF).clamp(0.0, (self.rows - 1) as f32);
         let x0 = (fx as usize).min(self.cols - 1);
         let z0 = (fz as usize).min(self.rows - 1);
         let x1 = (x0 + 1).min(self.cols - 1);
@@ -1212,16 +1214,16 @@ impl Heightfield {
     pub fn local_extents(&self) -> Vec3 {
         let (lo, hi) = self.height_range();
         Vec3::new(
-            (self.cols.max(1) - 1) as f32 * 0.5 * self.cell,
-            ((hi - lo) * 0.5).max(0.0),
-            (self.rows.max(1) - 1) as f32 * 0.5 * self.cell,
+            (self.cols.max(1) - 1) as f32 * HALF * self.cell,
+            ((hi - lo) * HALF).max(0.0),
+            (self.rows.max(1) - 1) as f32 * HALF * self.cell,
         )
     }
 
     /// Local bounding center (x/z centered, y at mid-range).
     pub fn local_center(&self) -> Vec3 {
         let (lo, hi) = self.height_range();
-        Vec3::new(0.0, (lo + hi) * 0.5, 0.0)
+        Vec3::new(0.0, (lo + hi) * HALF, 0.0)
     }
 
     /// Typed cell-spacing entry point: same checks as [`Heightfield::new`]
@@ -1603,7 +1605,7 @@ impl TriMesh {
     /// Bounding-box inertia fallback (degenerate/empty soup).
     fn fallback_inertia(&self, mass: f32) -> Vec3 {
         Shape::Box {
-            half_extents: ((self.local_max - self.local_min) * 0.5).max(Vec3::ZERO),
+            half_extents: ((self.local_max - self.local_min) * HALF).max(Vec3::ZERO),
         }
         .inertia(mass)
     }
@@ -1644,17 +1646,20 @@ impl TriMesh {
 mod tests {
     use super::*;
 
+    /// Half-extent of the unit cube used by mesh tests.
+    const HALF: f32 = 0.5;
+
     /// Unit-cube mesh (outward wound, edge 1): shared by mesh tests.
     fn cube_mesh() -> TriMesh {
         let v = [
-            Vec3::new(-0.5, -0.5, -0.5),
-            Vec3::new(0.5, -0.5, -0.5),
-            Vec3::new(-0.5, 0.5, -0.5),
-            Vec3::new(0.5, 0.5, -0.5),
-            Vec3::new(-0.5, -0.5, 0.5),
-            Vec3::new(0.5, -0.5, 0.5),
-            Vec3::new(-0.5, 0.5, 0.5),
-            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-HALF, -HALF, -HALF),
+            Vec3::new(HALF, -HALF, -HALF),
+            Vec3::new(-HALF, HALF, -HALF),
+            Vec3::new(HALF, HALF, -HALF),
+            Vec3::new(-HALF, -HALF, HALF),
+            Vec3::new(HALF, -HALF, HALF),
+            Vec3::new(-HALF, HALF, HALF),
+            Vec3::new(HALF, HALF, HALF),
         ];
         let raw = [
             [0, 3, 1],
@@ -1681,10 +1686,10 @@ mod tests {
         assert_eq!(mesh.order.len(), 12);
         assert!(!mesh.nodes.is_empty());
         // Root bounds cover the cube.
-        assert_vec3_close(mesh.nodes[0].min, Vec3::splat(-0.5));
-        assert_vec3_close(mesh.nodes[0].max, Vec3::splat(0.5));
-        assert_vec3_close(mesh.local_min, Vec3::splat(-0.5));
-        assert_vec3_close(mesh.local_max, Vec3::splat(0.5));
+        assert_vec3_close(mesh.nodes[0].min, Vec3::splat(-HALF));
+        assert_vec3_close(mesh.nodes[0].max, Vec3::splat(HALF));
+        assert_vec3_close(mesh.local_min, Vec3::splat(-HALF));
+        assert_vec3_close(mesh.local_max, Vec3::splat(HALF));
         // Support radius = half space diagonal; min feature = edge.
         assert!(
             (mesh.bound_radius - 0.8660254).abs() < 1e-5,
@@ -1897,13 +1902,13 @@ mod tests {
     #[test]
     fn capsule_aabb_extends_along_local_y_plus_radius() {
         let shape = Shape::Capsule {
-            radius: 0.5,
+            radius: HALF,
             half_height: 2.0,
         };
         let aabb = shape.aabb(Vec3::ZERO, Quat::IDENTITY);
         // Along Y: half_height + radius. On X/Z: just the radius shell.
-        assert_vec3_close(aabb.min, Vec3::new(-0.5, -2.5, -0.5));
-        assert_vec3_close(aabb.max, Vec3::new(0.5, 2.5, 0.5));
+        assert_vec3_close(aabb.min, Vec3::new(-HALF, -2.5, -HALF));
+        assert_vec3_close(aabb.max, Vec3::new(HALF, 2.5, HALF));
     }
 
     #[test]
@@ -1914,21 +1919,21 @@ mod tests {
         // explicitly: an empty soup is an empty mesh (no contact), never a
         // fallback sphere.
         for shape in [
-            Shape::Sphere { radius: 0.5 },
+            Shape::Sphere { radius: HALF },
             Shape::Box {
-                half_extents: Vec3::splat(0.5),
+                half_extents: Vec3::splat(HALF),
             },
             Shape::Capsule {
                 radius: 0.3,
-                half_height: 0.5,
+                half_height: HALF,
             },
             Shape::Cylinder {
                 radius: 0.3,
-                half_height: 0.5,
+                half_height: HALF,
             },
             Shape::Cone {
                 radius: 0.3,
-                half_height: 0.5,
+                half_height: HALF,
             },
             Shape::ConvexHull(
                 ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z])
@@ -1956,21 +1961,21 @@ mod tests {
     #[test]
     fn pair_support_lists_supported_pairs_and_marks_undefined() {
         use super::PairSupport;
-        let sphere = Shape::Sphere { radius: 0.5 };
+        let sphere = Shape::Sphere { radius: HALF };
         let boxed = Shape::Box {
-            half_extents: Vec3::splat(0.5),
+            half_extents: Vec3::splat(HALF),
         };
         let capsule = Shape::Capsule {
             radius: 0.3,
-            half_height: 0.5,
+            half_height: HALF,
         };
         let cylinder = Shape::Cylinder {
             radius: 0.3,
-            half_height: 0.5,
+            half_height: HALF,
         };
         let cone = Shape::Cone {
             radius: 0.3,
-            half_height: 0.5,
+            half_height: HALF,
         };
         let hull = Shape::ConvexHull(
             ConvexHull::from_vertices(vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z])

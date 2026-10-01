@@ -21,6 +21,8 @@ const STACK_PITCH_Y: f32 = 0.81;
 const REST_Y: f32 = 0.4;
 /// Floor half-extent on Y (top face at y = 0 when centered at -FLOOR_HALF_Y).
 const FLOOR_HALF_Y: f32 = 0.5;
+/// Tile-grid half-cell offset (centers tiles in their grid cells).
+const TILE_CENTER: f32 = 0.5;
 /// Island-field floor half-extents on XZ.
 const GRID_FLOOR_HALF: f32 = 100.0;
 /// Tall-stack floor half-extents on XZ.
@@ -99,8 +101,8 @@ fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
     let tiles = (span / (2.0 * TILE_HALF)).ceil() as i32;
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * TILE_HALF;
+            let x = (tx as f32 - tiles as f32 / 2.0 + TILE_CENTER) * 2.0 * TILE_HALF;
+            let z = (tz as f32 - tiles as f32 / 2.0 + TILE_CENTER) * 2.0 * TILE_HALF;
             physics.add_body(RigidBody::new_box(
                 Vec3::new(x, -FLOOR_HALF_Y, z),
                 Vec3::new(TILE_HALF, FLOOR_HALF_Y, TILE_HALF),

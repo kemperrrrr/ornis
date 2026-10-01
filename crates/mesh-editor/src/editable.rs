@@ -12,6 +12,8 @@ use crate::mesh_data::TRIANGLE_VERTS;
 
 /// Child triangles produced per input triangle in midpoint subdivision.
 const SUBDIVIDE_CHILD_TRIS: usize = 4;
+/// Midpoint blend weight for edge splits.
+const HALF: f32 = 0.5;
 
 /// Base mesh plus optional in-progress preview and dirty tracking.
 #[derive(Debug)]
@@ -377,21 +379,21 @@ fn midpoint_vertex(
     let pa = mesh.positions[a as usize];
     let pb = mesh.positions[b as usize];
     mesh.positions.push([
-        (pa[0] + pb[0]) * 0.5,
-        (pa[1] + pb[1]) * 0.5,
-        (pa[2] + pb[2]) * 0.5,
+        (pa[0] + pb[0]) * HALF,
+        (pa[1] + pb[1]) * HALF,
+        (pa[2] + pb[2]) * HALF,
     ]);
     let na = mesh.normals[a as usize];
     let nb = mesh.normals[b as usize];
     mesh.normals.push([
-        (na[0] + nb[0]) * 0.5,
-        (na[1] + nb[1]) * 0.5,
-        (na[2] + nb[2]) * 0.5,
+        (na[0] + nb[0]) * HALF,
+        (na[1] + nb[1]) * HALF,
+        (na[2] + nb[2]) * HALF,
     ]);
     let ua = mesh.uvs[a as usize];
     let ub = mesh.uvs[b as usize];
     mesh.uvs
-        .push([(ua[0] + ub[0]) * 0.5, (ua[1] + ub[1]) * 0.5]);
+        .push([(ua[0] + ub[0]) * HALF, (ua[1] + ub[1]) * HALF]);
     let v = mesh.positions.len() as u32 - 1;
     cache.insert(key, v);
     v

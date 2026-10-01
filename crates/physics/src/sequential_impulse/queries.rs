@@ -37,6 +37,8 @@ const BINARY_REFINE_ITERS: usize = 10;
 const CA_FRACTION_EPS: f32 = 1e-4;
 /// Explicit BVH walk stack for mesh raycasts (same depth as distance).
 const BVH_STACK_CAP: usize = 64;
+/// Midpoint / half-span scale for CCD and heightfield grid math.
+const HALF: f32 = 0.5;
 
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
@@ -107,10 +109,10 @@ pub(crate) fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::Cone {
             radius,
             half_height,
-        } => 0.5 * radius.min(*half_height),
-        Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
-        Shape::Heightfield(hf) => 0.5 * hf.cell(),
-        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature(),
+        } => HALF * radius.min(*half_height),
+        Shape::ConvexHull(hull) => HALF * hull.min_extent(),
+        Shape::Heightfield(hf) => HALF * hf.cell(),
+        Shape::TriMesh(mesh) => HALF * mesh.min_feature(),
     }
 }
 
@@ -316,7 +318,7 @@ pub fn kinematic_cast(
             }
             return None;
         }
-        t += gap - SHAPE_TOUCH * 0.5;
+        t += gap - SHAPE_TOUCH * HALF;
         if t >= len {
             break;
         }
@@ -336,12 +338,12 @@ fn cap_spin_correction(omega: Vec3, inertia: Vec3, orientation: Quat, delta: Vec
     let wb = qb * omega;
     let db = qb * delta;
     let iw = inertia * wb;
-    let e_omega = 0.5 * iw.dot(wb);
-    let e_out = 0.5 * (inertia * (wb - db)).dot(wb - db);
+    let e_omega = HALF * iw.dot(wb);
+    let e_out = HALF * (inertia * (wb - db)).dot(wb - db);
     if e_out <= e_omega {
         return out;
     }
-    let e_d = 0.5 * (inertia * db).dot(db);
+    let e_d = HALF * (inertia * db).dot(db);
     if !e_d.is_finite() || e_d <= 0.0 {
         return omega;
     }
@@ -519,7 +521,7 @@ fn first_angular_overlap_fraction(
             let mut low = prev_f;
             let mut high = f;
             for _ in 0..BINARY_REFINE_ITERS {
-                let mid = (low + high) * 0.5;
+                let mid = (low + high) * HALF;
                 if swept_shape_overlaps(body, target, displacement, sub_dt, mid) {
                     high = mid;
                 } else {
@@ -531,7 +533,7 @@ fn first_angular_overlap_fraction(
         let d = swept_distance(body, target, displacement, sub_dt, f);
         // `d.dist` is the exact surface gap (positive = separated). Advance
         // by at most the gap over the worst-case point speed.
-        let gap = d.dist - ANGULAR_CCD_TOUCH * 0.5;
+        let gap = d.dist - ANGULAR_CCD_TOUCH * HALF;
         if gap <= 0.0 {
             // Numerically touching — treat as overlap at next fraction.
             let next = (f + CA_FRACTION_EPS).min(1.0);
@@ -1027,7 +1029,7 @@ fn ray_heightfield_hit(
         return None;
     }
     // Local grid coordinates (float cell indices).
-    let to_cell = |x: f32, n: usize| x / hf.cell + (n - 1) as f32 * 0.5;
+    let to_cell = |x: f32, n: usize| x / hf.cell + (n - 1) as f32 * HALF;
     let mut cx = to_cell(origin.x, hf.cols).floor() as isize;
     let mut cz = to_cell(origin.z, hf.rows).floor() as isize;
     let step_x = if direction.x > 0.0 {
@@ -1045,8 +1047,8 @@ fn ray_heightfield_hit(
         0
     };
     // Parametric distance to the next cell boundary per axis.
-    let x_origin = -((hf.cols - 1) as f32) * 0.5 * hf.cell;
-    let z_origin = -((hf.rows - 1) as f32) * 0.5 * hf.cell;
+    let x_origin = -((hf.cols - 1) as f32) * HALF * hf.cell;
+    let z_origin = -((hf.rows - 1) as f32) * HALF * hf.cell;
     let mut t_max_x = if step_x == 0 {
         f32::INFINITY
     } else {
