@@ -748,6 +748,39 @@ pub fn resolve_joint(
     Some(r)
 }
 
+/// Cross-solver coupling row of a joint whose ends live in different
+/// solvers under [`RoutingKind::Islands`](crate::RoutingKind) routing.
+/// Only structural point rows qualify: a ball row pins two world anchors
+/// together (3 linear equalities), a distance row pins their separation to
+/// the assembly rest length (1 linear equality along the anchor delta).
+/// Every other [`JointKind`] has no cross row — the split coupling pass
+/// leaves it unmirrored and [`Engine::cross_joint_status`](crate::Engine::cross_joint_status)
+/// reports it as unsupported instead of silently mis-solving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossRowKind {
+    /// Ball-and-socket anchor coincidence (3 positional/velocity equalities).
+    Ball,
+    /// Rigid-rod rest-length row (1 equality along the anchor delta axis).
+    Distance,
+}
+
+/// Cross-solver row of a joint spec, or `None` when the kind has no
+/// structural point row. Ball and distance couple across solvers;
+/// revolute, prismatic, fixed, wheel, gear and six-DOF return `None`
+/// explicitly — a cross joint of those kinds is never half-solved.
+pub fn cross_row_kind(kind: &JointKind) -> Option<CrossRowKind> {
+    match kind {
+        JointKind::Ball { .. } => Some(CrossRowKind::Ball),
+        JointKind::Distance { .. } => Some(CrossRowKind::Distance),
+        JointKind::Revolute { .. }
+        | JointKind::Prismatic { .. }
+        | JointKind::Fixed { .. }
+        | JointKind::Wheel { .. }
+        | JointKind::Gear { .. }
+        | JointKind::SixDof { .. } => None,
+    }
+}
+
 /// A joint plus its persistent solver state (warm-start accumulators).
 pub(crate) struct Joint {
     pub body_a: BodyHandle,

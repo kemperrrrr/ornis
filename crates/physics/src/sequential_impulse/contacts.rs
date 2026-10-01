@@ -137,12 +137,59 @@ fn compute_restitution_bias(
     bias
 }
 
+/// Minimum island manifold count for the tall-stack solver path (see
+/// [`STACK_PATH_MIN_MANIFOLDS`]): islands at or above this size solve
+/// resting contacts with full warm support and unscaled iteration budgets.
+/// Every pinned scene stays below it — the determinism snapshot (4-stack
+/// island) and `tall_stack_stands_still` (5) — so those trajectories stay
+/// bit-identical while deeper chains (whose support must propagate O(depth)
+/// levels per sweep; 6-box towers already scatter on the downscaled path)
+/// get the budget they need. The tiled 10k probe routes through the flat
+/// singleton path, never through here.
+pub(crate) const STACK_PATH_MIN_MANIFOLDS: usize = 6;
+
+/// Tall-stack path predicate: true for islands whose constraint chain is
+/// deep enough that per-island iteration downscaling starves support
+/// propagation. Kept in one place so the velocity, warm-start and position
+/// stages gate identically.
+#[inline]
+pub(crate) fn stack_path_for_island(manifold_count: usize) -> bool {
+    manifold_count >= STACK_PATH_MIN_MANIFOLDS
+}
+
+/// Tall-stack velocity budget for an island with `manifold_count` manifolds:
+/// the full base budget (never the resting downscale) plus one extra sweep
+/// per two chain levels above the gate — support propagates a few levels per
+/// Gauss-Seidel sweep, and the steady-state warm start (see
+/// [`apply_warm_start`]) already carries the bulk load, so the iterations
+/// only chase the per-substep delta. Capped at 3× base: tall islands are
+/// body-count small, and an unbounded count would let one pathological
+/// island eat the frame.
+#[inline]
+pub(crate) fn stack_velocity_iters(base_iters: u32, manifold_count: usize) -> u32 {
+    let extra = manifold_count.saturating_sub(STACK_PATH_MIN_MANIFOLDS) as u32 / 2;
+    base_iters
+        .saturating_add(extra)
+        .min(base_iters.saturating_mul(3).max(base_iters))
+}
+
 /// WarmStart stage: apply cached impulses once (Box2D pattern). Capped so the
 /// warm impulse can never push the pair APART faster than they currently
 /// approach: a stale cached impulse applied to a separating (or nearly static)
 /// contact is pure energy injection, repeated 240x/s (this was the high-spin
 /// pump).
+///
+/// `full_support` (tall-stack path only): a contact that is NOT separating
+/// (`vn_pre <= target`, i.e. resting or approaching) applies the FULL cached
+/// impulse instead of the capped one. The cap neuters steady-state support —
+/// gravity loads both bodies equally, so a resting pair's relative approach
+/// is ~0 and the cap admits ~0 every substep, forcing the solver to rebuild
+/// the whole chain load from scratch via Gauss-Seidel (O(depth) sweeps for a
+/// stack). Overshoot from a stale cache is cheap to trim (one local sweep
+/// clamps it down), while rebuild is not — so the asymmetric choice is full
+/// apply on approach, capped apply on separation (pump protection stays).
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 fn apply_warm_start(
     bodies: &mut [RigidBody],
     m: &Manifold,
@@ -151,6 +198,7 @@ fn apply_warm_start(
     n: Vec3,
     warm: &[f32; MAX_MANIFOLD_POINTS],
     target: &[f32; MAX_MANIFOLD_POINTS],
+    full_support: bool,
 ) -> [f32; MAX_MANIFOLD_POINTS] {
     let mut warm_applied = *warm;
     for k in 0..m.point_count {
@@ -166,7 +214,11 @@ fn apply_warm_start(
             let vn_pre = (point_velocity(&bodies[j], rb) - point_velocity(&bodies[i], ra)).dot(n);
             // Cap against the speculative target too: a separated point may
             // keep approaching up to its gap limit.
-            let applied = warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0));
+            let applied = if full_support && vn_pre <= target[k] {
+                warm[k]
+            } else {
+                warm[k].min(((target[k] - vn_pre) / k_eff).max(0.0))
+            };
             warm_applied[k] = applied;
             if applied > 0.0 {
                 apply_impulse(bodies, i, j, n * applied, ra, rb);
@@ -179,7 +231,9 @@ fn apply_warm_start(
 /// Build one ManifoldState for a manifold at global body indices taken from
 /// `m`. Shared preamble of the CPU island path (`solve_island_velocity`) and
 /// the GPU single-point path (`build_manifold_state`). `key` is the sorted
-/// global body-pair for warm-cache lookup.
+/// global body-pair for warm-cache lookup. `full_support` selects the
+/// tall-stack warm-start mode (see [`apply_warm_start`]); flat/GPU paths
+/// pass false.
 /// Anisotropic contact frame (ODE `fdir1`/`mu`/`mu2` parity): returns the
 /// pair tangent basis plus the per-axis Coulomb coefficients.
 ///
@@ -223,6 +277,7 @@ fn anisotropic_frame(bodies: &[RigidBody], i: usize, j: usize, n: Vec3) -> (Vec3
 }
 
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 fn prepare_manifold_state(
     bodies: &mut [RigidBody],
     m: &Manifold,
@@ -231,6 +286,7 @@ fn prepare_manifold_state(
     gate: RestitutionGate,
     sub_dt: f32,
     mi: usize,
+    full_support: bool,
 ) -> Option<ManifoldState> {
     let (i, j) = (m.body_a.index(), m.body_b.index());
     let total_inv = bodies[i].inv_mass + bodies[j].inv_mass;
@@ -262,7 +318,7 @@ fn prepare_manifold_state(
     let mu_spin = bodies[i].torsion_friction.max(bodies[j].torsion_friction);
     let target = speculative_targets(&pen0, count, sub_dt);
     let bias = compute_restitution_bias(bodies, m, &matched, &pen0, n, e, gate, sub_dt);
-    let warm_applied = apply_warm_start(bodies, m, i, j, n, &warm, &target);
+    let warm_applied = apply_warm_start(bodies, m, i, j, n, &warm, &target, full_support);
 
     Some(ManifoldState {
         mi,
@@ -308,6 +364,7 @@ impl SequentialImpulseEngine {
             ctx.gate,
             ctx.sub_dt,
             ctx.mi,
+            false,
         )
     }
 
@@ -1064,10 +1121,14 @@ fn prepare_island_states(
 ) -> Vec<ManifoldState> {
     // G2b: warm-start cache matches points by proximity, not by index —
     // manifold point order changes frame to frame (sorted by depth).
+    // Tall-stack islands apply full resting support (see `apply_warm_start`).
+    let full_support = stack_path_for_island(manifolds.len());
     let mut states: Vec<ManifoldState> = Vec::with_capacity(manifolds.len());
     for (mi, m) in manifolds.iter().enumerate() {
         let key = keys[mi];
-        if let Some(st) = prepare_manifold_state(bodies, m, key, warm_in, gate, sub_dt, mi) {
+        if let Some(st) =
+            prepare_manifold_state(bodies, m, key, warm_in, gate, sub_dt, mi, full_support)
+        {
             states.push(st);
         }
     }
@@ -1201,4 +1262,226 @@ fn tangent_effective_mass(
 /// row ([`crate::contact_math`]); kept so solver call sites stay unchanged.
 fn clamp_friction_impulse(new_t: f32, other: f32, max_friction: f32) -> f32 {
     contact_friction_clamp::eval(new_t, other, max_friction)
+}
+
+impl SequentialImpulseEngine {
+    /// Flat singleton velocity solve (parallel coarse shards): the same
+    /// per-manifold kernels as the island path
+    /// ([`prepare_manifold_state`], wide/scalar iterations, one-shot
+    /// restitution, warm persist) over coarse solve shards instead of one
+    /// island-work per manifold — no union-find, no per-manifold
+    /// Vecs/sorts/clones, no 100k-node dispatch, no tiny-map merge churn.
+    ///
+    /// Bit-identical to the island path when
+    /// [`SequentialImpulseEngine::flat_singleton_eligible`] holds:
+    /// singleton manifolds are disjoint over dynamic bodies, statics ride
+    /// each shard as read-only clones (discarded on scatter, like the
+    /// island path), and the warm cache is keyed per disjoint pair — so
+    /// cross-manifold order never affects the result (Strong Confluence).
+    /// `shards_out` persists across the substep for the position stage.
+    pub(super) fn solve_flat_velocity(
+        &mut self,
+        manifolds: &[Manifold],
+        gate: RestitutionGate,
+        sub_dt: f32,
+        dt: f32,
+        shards_out: &mut Vec<IslandWork>,
+    ) {
+        shards_out.clear();
+        let active = self.collect_active_manifolds(manifolds);
+        if active.is_empty() {
+            self.warm_impulses.clear();
+            return;
+        }
+        shards_out.extend(self.build_flat_shards(&active, manifolds));
+        let base_iters = self.velocity_iterations;
+        let path = self.wide_solver;
+        let total_manifolds: usize = shards_out.iter().map(|s| s.manifolds.len()).sum();
+        let mode = Dispatch::from(shards_out.len() >= 2 && total_manifolds >= 24);
+        let this = &*self;
+        let warm_in = &this.warm_impulses;
+        Self::dispatch_islands(shards_out, mode, |_, shard| {
+            this.solve_one_flat_shard(shard, warm_in, base_iters, gate, sub_dt, dt, path);
+        });
+        // Scatter dynamics back + merge warm caches (reserved upfront; the
+        // island path regrows its map by repeated per-island extend).
+        let mut next: WarmCache = FxHashMap::default();
+        next.reserve(active.len());
+        for shard in shards_out.iter() {
+            for (l, &g) in shard.body_idx.iter().enumerate() {
+                if self.bodies[g].body_type == BodyType::Dynamic {
+                    self.bodies[g] = shard.bodies[l].clone();
+                }
+            }
+            next.extend(shard.warm.iter().map(|(k, v)| (*k, *v)));
+        }
+        self.warm_impulses = next;
+    }
+
+    /// One flat shard's velocity solve: per-manifold adaptive iteration
+    /// counts (the same penetration-aware heuristic as the island
+    /// dispatch), stable-bucketed to amortize the step-sequence build.
+    /// States persist on the shard for the position stage.
+    #[allow(clippy::needless_range_loop)]
+    #[allow(clippy::too_many_arguments)]
+    fn solve_one_flat_shard(
+        &self,
+        shard: &mut IslandWork,
+        warm_in: &WarmCache,
+        base_iters: u32,
+        gate: RestitutionGate,
+        sub_dt: f32,
+        dt: f32,
+        path: SolvePath,
+    ) {
+        shard.states.clear();
+        shard.warm.clear();
+        shard.warm.reserve(shard.manifolds.len());
+        let mut buckets: Vec<Vec<usize>> = Vec::new();
+        buckets.resize_with(base_iters as usize + 1, Vec::new);
+        for (li, m) in shard.manifolds.iter().enumerate() {
+            let (a, b) = (m.body_a.index(), m.body_b.index());
+            let max_speed = [a, b]
+                .into_iter()
+                .filter(|&h| shard.bodies[h].body_type == BodyType::Dynamic)
+                .map(|h| {
+                    shard.bodies[h]
+                        .velocity
+                        .length()
+                        .max(shard.bodies[h].angular_velocity.length())
+                })
+                .fold(0.0f32, f32::max);
+            let max_pen = m.points[..m.point_count]
+                .iter()
+                .map(|p| p.penetration)
+                .fold(0.0f32, f32::max);
+            let iters = self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters);
+            buckets[iters as usize].push(li);
+        }
+        for (iters, bucket) in buckets.iter().enumerate() {
+            if bucket.is_empty() {
+                continue;
+            }
+            let base = shard.states.len();
+            for &li in bucket {
+                let key = shard.keys[li];
+                // Split the shard borrow: the manifold/key are read-only,
+                // the bodies are solved in place (disjoint fields).
+                let (bodies, manifolds) = (&mut shard.bodies, &shard.manifolds);
+                if let Some(st) = prepare_manifold_state(
+                    bodies,
+                    &manifolds[li],
+                    key,
+                    warm_in,
+                    gate,
+                    sub_dt,
+                    li,
+                    false,
+                ) {
+                    shard.states.push(st);
+                }
+            }
+            if shard.states.len() == base {
+                continue;
+            }
+            // Split again: states grow while manifolds stay read-only.
+            let (states, manifolds) = (&mut shard.states, &shard.manifolds);
+            let states = &mut states[base..];
+            let mut steps = build_solver_steps(&shard.bodies, manifolds, states);
+            run_velocity_iterations(
+                &mut shard.bodies,
+                manifolds,
+                states,
+                &mut steps,
+                iters as u32,
+                path,
+            );
+            if path.use_wide() {
+                for step in &steps {
+                    if let SolverStep::Wide(b) = step {
+                        b.write_back_acc(states);
+                    }
+                }
+            }
+            if gate.is_enabled() {
+                run_restitution_stage(&mut shard.bodies, manifolds, states, &mut steps, path);
+            }
+            for st in states.iter() {
+                let m = &manifolds[st.mi];
+                let mut pts = [WarmPoint {
+                    la: Vec3::ZERO,
+                    lb: Vec3::ZERO,
+                    normal: Vec3::ZERO,
+                    impulse: 0.0,
+                }; MAX_MANIFOLD_POINTS];
+                for k in 0..st.count {
+                    pts[k] = WarmPoint {
+                        la: st.la[k],
+                        lb: st.lb[k],
+                        normal: m.normal,
+                        impulse: st.acc[k],
+                    };
+                }
+                shard.warm.insert(shard.keys[st.mi], (pts, st.count));
+            }
+        }
+    }
+
+    /// Flat singleton position (NGS) solve: re-gathers the shards from the
+    /// integrated bodies (like [`SequentialImpulseEngine::solve_contacts_position`]),
+    /// then per-manifold iteration counts from the same heuristic,
+    /// dispatched in parallel and scattered back. Same disjointness
+    /// argument as [`SequentialImpulseEngine::solve_flat_velocity`].
+    pub(super) fn solve_flat_position(&mut self, shards: &mut [IslandWork], dt: f32) {
+        if shards.is_empty() {
+            return;
+        }
+        // Re-gather: integration moved the main array since the velocity
+        // stage ran (same discipline as the island position stage).
+        for shard in shards.iter_mut() {
+            for (l, &g) in shard.body_idx.iter().enumerate() {
+                shard.bodies[l] = self.bodies[g].clone();
+            }
+        }
+        let base_iters = self.position_iterations;
+        let softness = self.contact_softness;
+        let total_manifolds: usize = shards.iter().map(|s| s.manifolds.len()).sum();
+        let mode = Dispatch::from(shards.len() >= 2 && total_manifolds >= 24);
+        let this = &*self;
+        Self::dispatch_islands(shards, mode, |_, shard| {
+            for st in shard.states.iter() {
+                let m = &shard.manifolds[st.mi];
+                let max_speed = [st.i, st.j]
+                    .into_iter()
+                    .filter(|&h| shard.bodies[h].body_type == BodyType::Dynamic)
+                    .map(|h| {
+                        shard.bodies[h]
+                            .velocity
+                            .length()
+                            .max(shard.bodies[h].angular_velocity.length())
+                    })
+                    .fold(0.0f32, f32::max);
+                let max_pen = m.points[..m.point_count]
+                    .iter()
+                    .map(|p| p.penetration)
+                    .fold(0.0f32, f32::max);
+                let iters =
+                    this.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters);
+                Self::solve_island_position(
+                    &mut shard.bodies,
+                    &shard.manifolds,
+                    std::slice::from_ref(st),
+                    iters,
+                    softness,
+                );
+            }
+        });
+        for shard in shards.iter() {
+            for (l, &g) in shard.body_idx.iter().enumerate() {
+                if self.bodies[g].body_type == BodyType::Dynamic {
+                    self.bodies[g] = shard.bodies[l].clone();
+                }
+            }
+        }
+    }
 }

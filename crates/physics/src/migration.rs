@@ -313,6 +313,17 @@ pub(crate) struct SceneSnapshot {
     pub joints: Vec<JointSnapshot>,
     pub previous: Vec<crate::broadphase::PrevPose>,
     pub events: EventState,
+    /// Soft bodies in handle order (dense [`crate::soft::SoftHandle`]
+    /// order). The XPBD path owns them live; every other solver parks them
+    /// untouched — order (and therefore handles) is preserved either way.
+    pub soft_bodies: Vec<crate::soft::SoftBody>,
+    /// Live soft↔rigid `(soft, particle, body)` touch triples. Indices
+    /// survive the ordered rebuild on both registries, so the set transfers
+    /// verbatim and the XPBD target emits no manufactured begins. Empty
+    /// whenever soft bodies are parked (parked bodies do not step, so they
+    /// hold no live touch state worth keeping — the orchestrator clears it
+    /// on any structural edit instead of remapping stale indices).
+    pub soft_touch: std::collections::BTreeSet<(usize, usize, usize)>,
 }
 
 #[cfg(test)]

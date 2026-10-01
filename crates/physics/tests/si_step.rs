@@ -393,10 +393,10 @@ fn per_island_iters_scale_with_speed() {
 
 /// Tall-stack stability guard for settled-cost work: a 5-box tower
 /// stands 5 seconds without toppling or drifting (per-island minimum
-/// iterations must still correct residual penetration). Taller towers
-/// (6+ with this geometry) topple from micro-asymmetry amplification —
-/// a pre-existing solver limit, not a settled-cost regression (measured
-/// via a scratch probe: 4–5 stand, 6+ scatter; see perf_probe).
+/// iterations must still correct residual penetration). Deeper towers
+/// (6+) hold via the tall-stack island path — full resting warm support
+/// plus unscaled iteration budgets for islands with 6+ manifolds — pinned
+/// by `tall_stack_28_stands` below.
 #[test]
 fn tall_stack_stands_still() {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
@@ -427,6 +427,54 @@ fn tall_stack_stands_still() {
         assert!(
             b.position.x.abs() < 0.3 && b.position.z.abs() < 0.3,
             "box {level} drifted: {:?}",
+            b.position
+        );
+    }
+}
+
+/// Tall-stack ceiling guard (shootout geometry: 28 boxes, half 0.4, 0.81
+/// pitch, static floor): after 600 steps (10 s) the top box holds with
+/// Rapier-class drift (dy ±0.6, dxz ±0.3), at restitution 0.0 and 0.3.
+/// Deep chains converge through the tall-stack island path (full resting
+/// warm support, unscaled budgets for 6+ manifold islands); without it the
+/// support rebuild starves O(depth) propagation and the tower buckles.
+#[test]
+fn tall_stack_28_stands() {
+    for restitution in [0.0, 0.3] {
+        let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            0.0,
+        ));
+        let mut top = BodyHandle::from(0u32);
+        for level in 0..28 {
+            let mut b = RigidBody::new_box(
+                Vec3::new(0.0, 0.4 + level as f32 * 0.81, 0.0),
+                Vec3::splat(0.4),
+                1.0,
+            );
+            b.restitution = restitution;
+            top = physics.add_body(b);
+        }
+        for _ in 0..600 {
+            physics.step(1.0 / 60.0);
+        }
+        let b = physics.get_body(top).unwrap();
+        let rest_top = 0.4 + 27.0 * 0.81;
+        eprintln!(
+            "STACK28 restitution={restitution} top={:?} dy={:.4}",
+            b.position,
+            b.position.y - rest_top
+        );
+        assert!(
+            (b.position.y - rest_top).abs() < 0.6,
+            "restitution={restitution}: top sank/rose: {:?}",
+            b.position
+        );
+        assert!(
+            b.position.x.abs() < 0.3 && b.position.z.abs() < 0.3,
+            "restitution={restitution}: top drifted sideways: {:?}",
             b.position
         );
     }

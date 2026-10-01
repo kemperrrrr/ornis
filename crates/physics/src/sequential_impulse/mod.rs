@@ -98,6 +98,20 @@ pub struct SequentialImpulseEngine {
     island: Vec<u32>,
     /// Per-island sleep timers, keyed by island root handle.
     island_timers: FxHashMap<u32, f32>,
+    /// Whether each body ever exceeded the frozen speed gate since it was
+    /// added (parallel to `bodies`; see `is_body_frozen`). Monotonic until
+    /// the body is removed: an island whose members never moved qualifies
+    /// for the frozen fast track, one that did keeps the legacy timers, so
+    /// settling scenes (including the determinism snapshot) are untouched.
+    body_moved: Vec<bool>,
+    /// Post-wake grace before the frozen fast track may fire, keyed by
+    /// island root handle (see `update_sleep`). A woken island — even one
+    /// that settles back to numerical stillness immediately (zero-g
+    /// teleport overlaps) — accumulates sleep at the normal rate for a few
+    /// steps, preserving the pre-fast-track wakefulness floor the
+    /// penetration-wake tests pin. Never-woken exact-rest islands skip the
+    /// grace and sleep in ~2 steps.
+    island_grace: FxHashMap<u32, u32>,
     asleep: Vec<bool>,
     /// Step-start pose per body, parallel to `bodies`. Drivers move kinematic
     /// bodies by setting positions directly, so the velocity field alone does
@@ -162,6 +176,16 @@ pub struct SequentialImpulseEngine {
     /// Pooled narrowphase shard buffers for scheduler dispatch, taken and
     /// restored around the substep loop like the other scratch state.
     scratch_narrow_shards: NarrowShardPool,
+    /// Generation stamps for the flat singleton eligibility scan (one entry
+    /// per body; see `flat_singleton_eligible`). Reused every step, never
+    /// reallocated after the first large scene.
+    flat_marks: Vec<u32>,
+    /// Current generation for `flat_marks` (0 reserved as the cleared state).
+    flat_gen: u32,
+    /// Reused flat-path solve shards (one per worker chunk, not per
+    /// manifold), taken and restored around the substep loop like the
+    /// other scratch state.
+    scratch_flat_shards: Vec<IslandWork>,
     /// G7: optional GPU contact solver (gpu feature). When attached,
     /// single-point manifolds are solved on the GPU instead of the CPU
     /// wide path; multi-point manifolds stay on the CPU island path.
@@ -379,6 +403,8 @@ impl SequentialImpulseEngine {
             warm_impulses: FxHashMap::default(),
             island: Vec::new(),
             island_timers: FxHashMap::default(),
+            island_grace: FxHashMap::default(),
+            body_moved: Vec::new(),
             asleep: Vec::new(),
             prev_pose: Vec::new(),
             saved_driver_vel: Vec::new(),
@@ -400,6 +426,9 @@ impl SequentialImpulseEngine {
             scratch_clamped: Vec::new(),
             scratch_parent: Vec::new(),
             scratch_narrow_shards: NarrowShardPool::default(),
+            flat_marks: Vec::new(),
+            flat_gen: 0,
+            scratch_flat_shards: Vec::new(),
             narrow_cache: FxHashMap::default(),
             sat_cache: DashMap::default(),
             #[cfg(feature = "gpu")]
@@ -603,7 +632,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         self.broadphase
             .update(&self.bodies, dt, Some(&self.prev_pose));
         let broad_phase_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
+        let mut broad_active: Vec<(usize, usize)> = self.broadphase.active().to_vec();
         // Kinematic sweep BEFORE the substep loop: teleported/fast drivers
         // cast their step segment against dynamics, wake victims and
         // transfer the normal approach. Runs on final driver poses, so the
@@ -613,6 +642,8 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // Worst-case budget (deterministic): shed substeps against the known
         // pair count — never pairs. `timing.substeps` records the applied
         // count; the shed count is kept in `last_shed` for observability.
+        // The count is taken BEFORE the frozen-pair filter below, so the
+        // shedding decision never depends on sleep state.
         let (eff_substeps, shed) =
             self.apply_step_budget(eff_substeps_before_budget, broad_active.len());
         self.last_shed = shed;
@@ -731,6 +762,23 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // Scheduler narrowphase shard pool, taken once for the whole substep
         // loop and restored after (same discipline as the other scratch).
         let mut narrow_shards = std::mem::take(&mut self.scratch_narrow_shards);
+        // Flat singleton fast path (100k-tiled): when every dynamic body
+        // appears in at most one candidate pair, islands are all
+        // single-manifold by construction — solve over coarse shards with
+        // the same kernels (see `solve_flat_velocity`). Decided once per
+        // step from the broadphase pairs; snapshot/confluence scenes stay
+        // below the pair gate and keep the island path exactly.
+        // Eligibility runs on the UNFILTERED pairs (see below), so the
+        // path decision never depends on sleep state.
+        let use_flat = self.flat_singleton_eligible(&broad_active);
+        // Frozen-pair filter: both-asleep pairs are skipped by the
+        // narrowphase unconditionally (see `narrow_pair`), so dropping them
+        // here only removes per-substep rejections — the manifold stream
+        // (and its order) is bit-identical. `retain` preserves the relative
+        // order, and the budget + flat decisions above already ran on the
+        // full set, so shedding and the solve path are sleep-independent.
+        broad_active.retain(|&(a, b)| !(self.asleep[a] && self.asleep[b]));
+        let mut flat_shards = std::mem::take(&mut self.scratch_flat_shards);
         for s in 0..eff_substeps {
             // Per-step hit dedupe window opens here (see collect_active).
             if s == 0 {
@@ -781,7 +829,12 @@ impl PhysicsEngine for SequentialImpulseEngine {
             // Restitution is one-shot per step, evaluated on the first substep.
             let t0 = Instant::now();
             let gate = crate::flags::RestitutionGate::from(s == 0);
-            let mut islands = self.solve_contacts_velocity(&manifolds_buf, gate, sub_dt, dt);
+            let mut islands: Vec<IslandWork> = Vec::new();
+            if use_flat {
+                self.solve_flat_velocity(&manifolds_buf, gate, sub_dt, dt, &mut flat_shards);
+            } else {
+                islands = self.solve_contacts_velocity(&manifolds_buf, gate, sub_dt, dt);
+            }
             self.solve_joints_velocity(sub_dt);
             // Continuous pass on the solver-adjusted velocities: clamp fast
             // movers to their first impact and keep them there this substep.
@@ -792,7 +845,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
             clamped_buf.fill(false);
             self.solve_continuous(sub_dt, &mut clamped_buf);
             self.integrate_positions(sub_dt, &clamped_buf);
-            self.solve_contacts_position(&mut islands, dt);
+            if use_flat {
+                self.solve_flat_position(&mut flat_shards, dt);
+            } else {
+                self.solve_contacts_position(&mut islands, dt);
+            }
             self.solve_joints_position();
             timing.solver_ms += t0.elapsed().as_secs_f64() * 1000.0;
             // Snapshot last manifolds for island rebuild; clone only once per frame
@@ -806,6 +863,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         self.scratch_narrow_shards = narrow_shards;
         self.scratch_pairs = sorted_pairs;
         self.scratch_bucket_edges = bucket_edges;
+        self.scratch_flat_shards = flat_shards;
         // Diagnostics: contact-manifold partners per body from the last
         // substep (drives sleep/island debugging; tiny flat copy).
         self.debug_pairs.clear();
@@ -823,13 +881,18 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // Rebuild the broadphase at the completed poses so trigger events
         // describe the state visible after this whole physics step, not the
         // state from before the final substep's integration. The rebuild
-        // itself always runs (backends key their incremental baseline off
-        // it); only the overlap detect + reconcile is gated — triggerless
-        // worlds skip it instead of scanning every pair for nothing.
+        // runs only when something can observe it (a trigger body is live
+        // or a stale trigger overlap is pending): every backend keys its
+        // incremental baseline off exact swept-box equality, so skipping
+        // the rebuild on triggerless worlds only moves the baseline from
+        // the tight end-of-step boxes to the swept start-of-step boxes —
+        // unmoved bodies still compare clean (same boxes, retained pairs
+        // stay valid) and moved bodies still compare dirty. The next step's
+        // swept update emits the same pair set either way.
         let t_trigger = Instant::now();
-        self.broadphase
-            .update(&self.bodies, 0.0, Some(&self.prev_pose));
         if has_trigger || !self.trigger_pairs.is_empty() {
+            self.broadphase
+                .update(&self.bodies, 0.0, Some(&self.prev_pose));
             let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
             let previous_triggers = std::mem::take(&mut self.trigger_pairs);
             self.trigger_pairs = update_trigger_events(
@@ -920,6 +983,10 @@ impl PhysicsEngine for SequentialImpulseEngine {
         self.bodies.push(body);
         self.island.push(island_id);
         self.asleep.push(born_asleep);
+        // Born pristine: the frozen fast track (see `update_sleep`) may
+        // only fire for bodies that never moved, so the flag starts clear
+        // and is set on the first above-gate motion.
+        self.body_moved.push(false);
         handle
     }
 
@@ -953,6 +1020,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
             self.bodies.swap_remove(handle.index());
             self.island.swap_remove(handle.index());
             self.asleep.swap_remove(handle.index());
+            self.body_moved.swap_remove(handle.index());
             self.prev_pose.swap_remove(handle.index());
             // Drop joints touching the removed body (gears die with their
             // referenced joints inside the rebuild — dangling joint indices

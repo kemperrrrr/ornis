@@ -9,12 +9,20 @@
 //! Lagrange multiplier per scalar row, reset every substep (Small-Steps
 //! regime — see [`crate::xpbd`]).
 //!
-//! Builders cover the first two D1 scenes: [`SoftBody::chain`] (rope/cable)
-//! and [`SoftBody::cloth_grid`] (draping sheet). Volume preservation,
-//! deformable↔rigid coupling and render-mesh upload are later D1 steps and
-//! explicitly absent here.
+//! Builders cover the D1 scenes: [`SoftBody::chain`] (rope/cable),
+//! [`SoftBody::cloth_grid`] (draping sheet) and [`SoftBody::soft_cube`]
+//! (volume body). The global volume row, deformable↔rigid coupling and
+//! render-mesh upload ([`SoftBody::surface`] plus
+//! [`SoftBody::positions_snapshot`]) are implemented: tearing duplicates
+//! particles along the rip so the two lips separate (see
+//! [`SoftBody::apply_breakage`]), and self-collision accumulates `λ ≥ 0`
+//! across the iterations of one substep (see `crate::soft_self`).
+
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::Vec3;
+
+use crate::body::RigidBody;
 
 /// Stable index of a soft body inside [`crate::xpbd::XpbdEngine`].
 ///
@@ -281,6 +289,27 @@ pub struct SoftBody {
     /// stretched beyond this ratio are removed. E.g. `2.0` tears rows pulled
     /// past twice their rest length. Shear/bend rows never tear in D1.
     pub tear_strain: f32,
+    /// Bit identifying the collision layer this body belongs to (D1.4
+    /// coupling filter, mirroring [`RigidBody::collision_layer`]).
+    ///
+    /// Default `1`, like [`RigidBody`]: the body couples with everything,
+    /// preserving the pre-filter behavior.
+    pub collision_layer: u32,
+    /// Bit mask of rigid layers this body is allowed to couple with
+    /// (mirroring [`RigidBody::collision_mask`]).
+    ///
+    /// Default `u32::MAX` (couple with everything). A pair couples only
+    /// when both directions agree — see [`SoftBody::can_couple_with`].
+    pub collision_mask: u32,
+    /// Persistent self-collision multipliers `λ ≥ 0`, keyed by canonical
+    /// `(min, max)` particle indices.
+    ///
+    /// Live only within one substep's iterations (reset by
+    /// [`SoftBody::begin_substep`], accumulated by
+    /// `crate::soft_self::solve_self_collision`): the Small-Steps analogue
+    /// of the contact warm-start cache. Zero entries are dropped so the map
+    /// only holds active contacts.
+    pub(crate) self_collision_lambda: HashMap<(u32, u32), f32>,
 }
 
 impl SoftBody {
@@ -297,6 +326,9 @@ impl SoftBody {
             damping: 0.0,
             contact_radius: 0.0,
             tear_strain: 0.0,
+            collision_layer: 1,
+            collision_mask: u32::MAX,
+            self_collision_lambda: HashMap::new(),
         }
     }
 
@@ -364,6 +396,21 @@ impl SoftBody {
     /// Spacing-derived contact radius in meters.
     pub fn contact_radius_units(&self) -> ornis_core::units::Meters {
         ornis_core::units::Meters::new(self.contact_radius)
+    }
+
+    /// Returns whether this soft body and the rigid `body` pass their
+    /// mutual layer masks (D1.4 coupling filter, mirroring
+    /// [`RigidBody::can_collide_with`]).
+    ///
+    /// A pair couples only when both directions agree: this body's mask
+    /// contains the rigid body's layer and vice versa. Defaults
+    /// (`collision_layer = 1`, `collision_mask = u32::MAX` on both sides)
+    /// couple with everything, preserving the pre-filter behavior. The
+    /// XPBD `discover_soft_contacts` pass calls this before the exact
+    /// sphere query.
+    pub fn can_couple_with(&self, body: &RigidBody) -> bool {
+        self.collision_mask & body.collision_layer != 0
+            && body.collision_mask & self.collision_layer != 0
     }
 
     /// Cloth sheet in the local XY plane: `cols × rows` particles from
@@ -699,6 +746,7 @@ impl SoftBody {
             c.lambda = 0.0;
         }
         self.volume_lambda = 0.0;
+        self.self_collision_lambda.clear();
     }
 
     /// BDF1-style velocity update from the solved positions, with the
@@ -714,20 +762,28 @@ impl SoftBody {
         }
     }
 
-    /// Tears overstretched structural rows (separate pass, D1 leftover #2).
+    /// Tears overstretched structural rows with particle splits (separate
+    /// pass, D1 leftover #2).
     ///
     /// Removes [`DeformKind::Structural`] rows whose live stretch ratio
-    /// `dist / rest` exceeds [`SoftBody::tear_strain`], then drops every
-    /// [`SoftBody::surface`] triangle containing both endpoints of any torn
-    /// row (the sheet gets a hole). Does nothing when `tear_strain <= 0`
-    /// (unbreakable). Shear/bend rows never tear in D1, `triangles` (the
-    /// physics volume surface) is left intact, and particles — pinned or
-    /// not — are never added, removed, or unpinned.
+    /// `dist / rest` exceeds [`SoftBody::tear_strain`], then splits the
+    /// sheet along the rip: every detached non-pinned particle on a torn row is
+    /// duplicated, surviving [`SoftBody::surface`] triangles and constraint
+    /// rows on the detached side are rewired to the copies (so the two
+    /// lips no longer share vertices), and every `surface` triangle
+    /// containing both endpoints of a torn row is dropped (the open
+    /// cross-tear cells have no clean triangulation). Does nothing when
+    /// `tear_strain <= 0` (unbreakable). Shear/bend rows never tear in D1,
+    /// `triangles` (the physics volume surface) is left intact, and pinned
+    /// particles are never duplicated, removed, or unpinned.
     ///
-    /// This is holes-not-splits, without particle duplication: the two sides
-    /// of a tear keep sharing the same particles, so a tear opens as missing
-    /// triangles rather than two clean lips. The upgrade path (duplicating
-    /// particles along the tear for clean cuts) is out of scope.
+    /// Side classification walks the surviving structural rows from the
+    /// pinned anchors (particle 0 anchors when nothing is pinned): the
+    /// reachable side keeps the originals, the detached side takes the
+    /// copies. Known remainder: shear/bend rows spanning the rip still
+    /// stitch the lips mechanically (D1 never tears them) — only the
+    /// surface topology gets clean lips. Crossing shear therefore still
+    /// references both sides after the split.
     ///
     /// Call this once per step, outside the solver iterations — never inside
     /// the [`SoftBody::solve_constraints`] sweep, which would fight the XPBD
@@ -761,8 +817,92 @@ impl SoftBody {
         if torn.is_empty() {
             return;
         }
+        // Anchored side: reachable from the pins over the surviving
+        // structural rows (particle 0 anchors when nothing is pinned).
+        // Shear/bend are excluded on purpose — spanning rows must not glue
+        // the sides back together for the classification.
+        let mut anchored = vec![false; self.particles.len()];
+        let mut queue = VecDeque::new();
+        let mut seeds: Vec<usize> = self
+            .particles
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_pinned())
+            .map(|(i, _)| i)
+            .collect();
+        if seeds.is_empty() && !self.particles.is_empty() {
+            seeds.push(0);
+        }
+        for s in seeds {
+            if !anchored[s] {
+                anchored[s] = true;
+                queue.push_back(s);
+            }
+        }
+        let mut structural_adj: Vec<Vec<usize>> = vec![Vec::new(); self.particles.len()];
+        for c in &self.constraints {
+            if c.kind != DeformKind::Structural {
+                continue;
+            }
+            let (a, b) = (c.a.index(), c.b.index());
+            if a < structural_adj.len() && b < structural_adj.len() && a != b {
+                structural_adj[a].push(b);
+                structural_adj[b].push(a);
+            }
+        }
+        while let Some(i) = queue.pop_front() {
+            for &j in &structural_adj[i] {
+                if !anchored[j] {
+                    anchored[j] = true;
+                    queue.push_back(j);
+                }
+            }
+        }
+        // Duplicate the detached tear vertices (sorted for determinism):
+        // only the side losing the original needs a copy — anchored tear
+        // vertices (including every pin, which seeds the walk) keep theirs.
+        let mut tear_verts: Vec<u32> = {
+            let mut set: HashSet<u32> = HashSet::new();
+            for (a, b) in &torn {
+                set.insert(a.as_u32());
+                set.insert(b.as_u32());
+            }
+            let mut v: Vec<u32> = set.into_iter().collect();
+            v.sort_unstable();
+            v
+        };
+        tear_verts.retain(|&i| {
+            !anchored.get(i as usize).copied().unwrap_or(true)
+                && self
+                    .particles
+                    .get(i as usize)
+                    .is_some_and(|p| !p.is_pinned())
+        });
+        let mut dup_of: HashMap<u32, ParticleIdx> = HashMap::with_capacity(tear_verts.len());
+        for &i in &tear_verts {
+            let clone = self.particles[i as usize].clone();
+            self.particles.push(clone);
+            dup_of.insert(i, ParticleIdx::from(self.particles.len() - 1));
+        }
+        // Detached side takes the copies (anchored side keeps originals).
+        let rewire = |idx: ParticleIdx, anchored: &[bool], dup_of: &HashMap<u32, ParticleIdx>| {
+            if anchored.get(idx.index()).copied().unwrap_or(true) {
+                idx
+            } else {
+                dup_of.get(&idx.as_u32()).copied().unwrap_or(idx)
+            }
+        };
+        for c in &mut self.constraints {
+            c.a = rewire(c.a, &anchored, &dup_of);
+            c.b = rewire(c.b, &anchored, &dup_of);
+        }
         self.surface
             .retain(|tri| !torn.iter().any(|(a, b)| tri.contains(a) && tri.contains(b)));
+        for tri in &mut self.surface {
+            for v in tri.iter_mut() {
+                *v = rewire(*v, &anchored, &dup_of);
+            }
+        }
     }
 
     /// Global volume row (XPBD balloon model, Macklin et al. 2016 §6.5):
@@ -1018,9 +1158,10 @@ mod tests {
         assert!(chain.surface.is_empty(), "chains have no sheet");
     }
 
-    /// Overloaded strip tears structural rows and opens a surface hole.
+    /// Overloaded strip tears structural rows and splits into two lips:
+    /// tear vertices duplicate, the detached side rewires to the copies.
     #[test]
-    fn breakage_tears_overstretched_structural_and_opens_hole() {
+    fn breakage_tears_overstretched_structural_and_splits_lips() {
         let (cols, rows) = (4, 4);
         let mut body = SoftBody::cloth_grid(
             Vec3::ZERO,
@@ -1060,6 +1201,161 @@ mod tests {
                 "middle vertical structural row {c} is gone"
             );
         }
+        // Split: the detached row-2 tear vertices duplicate (anchored row 1
+        // keeps its originals).
+        assert_eq!(body.particle_count(), cols * rows + cols);
+        assert!(
+            body.surface
+                .iter()
+                .flatten()
+                .all(|i| i.index() < body.particle_count()),
+            "rewired surface indices valid"
+        );
+        // Anchored top lip keeps the row-1 originals, the detached bottom
+        // lip takes the copies: no surviving triangle touches an original
+        // row-2 vertex anymore.
+        let uses = |idx: usize| {
+            body.surface
+                .iter()
+                .any(|tri| tri.contains(&ParticleIdx::from(idx)))
+        };
+        for c in 0..cols {
+            assert!(uses(cols + c), "top lip keeps row-1 original {c}");
+            assert!(!uses(2 * cols + c), "row-2 original {c} rewired away");
+            assert!(uses(cols * rows + c), "bottom lip uses the row-2 copy {c}");
+        }
+        // No hole without lips: every torn edge still has both lips present
+        // (original on top, copy below) and no surviving triangle spans it.
+        for c in 0..cols {
+            let (a, b) = (ParticleIdx::from(cols + c), ParticleIdx::from(2 * cols + c));
+            assert!(
+                !body
+                    .surface
+                    .iter()
+                    .any(|tri| tri.contains(&a) && tri.contains(&b)),
+                "no surviving triangle spans torn edge {c}"
+            );
+        }
+        assert!(body.triangles.is_empty(), "cloth has no volume surface");
+    }
+
+    /// Tearing at the pinned edge duplicates only the free side: pinned
+    /// tear vertices are never copied, unpinned, or moved.
+    #[test]
+    fn breakage_never_duplicates_or_moves_pins() {
+        let (cols, rows) = (4, 4);
+        let mut body = SoftBody::cloth_grid(
+            Vec3::ZERO,
+            cols,
+            rows,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            ClothPin::TopRow,
+        );
+        body.tear_strain = 1.1;
+        let pinned_pos: Vec<Vec3> = body.particles[..cols].iter().map(|p| p.position).collect();
+        // Drag everything below the pinned row: only the row-0/row-1
+        // verticals stretch (rows 1–3 move rigidly together).
+        for r in 1..rows {
+            for c in 0..cols {
+                body.particles[r * cols + c].position.y -= 5.0;
+            }
+        }
+        body.apply_breakage();
+        // Only the free row-1 side duplicates; the 4 pinned vertices stay single.
+        assert_eq!(body.particle_count(), cols * rows + cols);
+        assert_eq!(
+            body.particles.iter().filter(|p| p.is_pinned()).count(),
+            cols,
+            "pin count unchanged"
+        );
+        for (p, pos) in body.particles[..cols].iter().zip(&pinned_pos) {
+            assert!(p.is_pinned(), "row 0 stays pinned");
+            assert_eq!(p.position, *pos, "pinned anchors never move");
+        }
+        for p in body.particles.iter().skip(cols * rows) {
+            assert!(!p.is_pinned(), "copies are free particles");
+        }
+    }
+
+    /// A torn chain link splits the same way: the detached span rewires to
+    /// the copy while the pinned span keeps the original.
+    #[test]
+    fn breakage_splits_chain_link_with_two_lips() {
+        let mut body = SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 5, 1.0, 1.0, 0.0);
+        body.tear_strain = 1.5;
+        for p in body.particles.iter_mut().skip(3) {
+            p.position.y -= 5.0;
+        }
+        body.apply_breakage();
+        // Link (2, 3) tore; only the detached vertex 3 duplicates (vertex 2
+        // is anchored through the pinned head).
+        assert_eq!(body.constraint_count(), 3);
+        assert_eq!(body.particle_count(), 6);
+        assert!(body.particles[0].is_pinned(), "chain head stays pinned");
+        let dup = ParticleIdx::from_raw(5);
+        assert!(
+            body.constraints
+                .iter()
+                .any(|row| (row.a == dup && row.b == ParticleIdx::from_raw(4))
+                    || (row.b == dup && row.a == ParticleIdx::from_raw(4))),
+            "detached span hangs off the copy"
+        );
+        assert!(
+            !body
+                .constraints
+                .iter()
+                .any(|row| row.kind == DeformKind::Structural
+                    && ((row.a == ParticleIdx::from_raw(2) && row.b == ParticleIdx::from_raw(3))
+                        || (row.a == ParticleIdx::from_raw(3)
+                            && row.b == ParticleIdx::from_raw(2)))),
+            "torn link is gone"
+        );
+    }
+
+    /// Coupling filter contract (`discover_soft_contacts` side): defaults
+    /// couple with everything, masks filter mutually like
+    /// [`crate::body::RigidBody::can_collide_with`].
+    #[test]
+    fn collision_filter_defaults_and_coupling() {
+        use crate::body::RigidBody;
+
+        let chain = SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 3, 0.5, 1.0, 0.0);
+        let cloth =
+            SoftBody::cloth_grid(Vec3::ZERO, 4, 4, 1.0, 1.0, 0.0, 0.0, 0.0, ClothPin::TopRow);
+        let cube = SoftBody::soft_cube(Vec3::ZERO, 1.0, 1.0, 0.0, 0.0);
+        for body in [&chain, &cloth, &cube] {
+            assert_eq!(body.collision_layer, 1, "default layer preserves coupling");
+            assert_eq!(
+                body.collision_mask,
+                u32::MAX,
+                "default mask preserves coupling"
+            );
+            assert!(
+                body.can_couple_with(&RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0)),
+                "defaults couple with everything"
+            );
+        }
+        let mut soft = SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 3, 0.5, 1.0, 0.0);
+        soft.collision_layer = 0b0001;
+        soft.collision_mask = 0b0010;
+        let friend =
+            RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0).with_collision_filter(0b0010, 0b0001);
+        assert!(soft.can_couple_with(&friend), "mutual masks agree");
+        let blocked =
+            RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0).with_collision_filter(0b0100, 0b0001);
+        assert!(!soft.can_couple_with(&blocked), "layer missed by the mask");
+        // One-sided agreement is not enough (mirrors `can_collide_with`).
+        let one_sided =
+            RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0).with_collision_filter(0b0010, 0b1111);
+        soft.collision_mask = 0b0100;
+        assert!(
+            !soft.can_couple_with(&one_sided),
+            "both directions must agree"
+        );
     }
 
     /// `tear_strain == 0` means unbreakable (also the builder default).
@@ -1079,7 +1375,8 @@ mod tests {
     }
 
     /// Breakage only removes structural rows: shear/bend rows survive even
-    /// far past the threshold, and pins/particles are untouched.
+    /// far past the threshold, pins are never duplicated or moved, and the
+    /// tear duplicates into two lips.
     #[test]
     fn breakage_preserves_pins_and_non_structural() {
         let (cols, rows) = (4, 4);
@@ -1144,7 +1441,11 @@ mod tests {
                 < structural_before,
             "some structural rows did tear"
         );
-        assert_eq!(body.particle_count(), particles_before);
+        assert_eq!(
+            body.particle_count(),
+            particles_before + cols,
+            "detached tear vertices split into the second lip"
+        );
         assert_eq!(
             body.particles.iter().filter(|p| p.is_pinned()).count(),
             pinned_before,

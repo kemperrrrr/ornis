@@ -64,8 +64,27 @@ impl SequentialImpulseEngine {
     /// whose bodies ALL stay slow for SLEEP_TIME seconds is frozen as a
     /// whole; islands are woken as a whole by contact with an awake body
     /// (see `wake_on_impact` in `engine/contacts.rs`).
+    ///
+    /// Frozen fast track: an island whose every member is numerically
+    /// stationary AND never moved since it was added (see
+    /// [`Self::is_body_frozen`] and `body_moved`) accumulates sleep six
+    /// times faster, so exact-rest scenes (tiled grids spawned at their
+    /// rest pose: solver residues ~1e-8) sleep in ~2 steps instead of ~13.
+    /// Anything that ever moved keeps the legacy timers bit-exactly —
+    /// settling scenes, including the determinism snapshot, are untouched
+    /// (a fast-settling box still drifts ~1e-4 after converging below the
+    /// frozen gate, which would move the frozen point). The fast track
+    /// also stays disarmed for [`Self::WAKE_GRACE_STEPS`] steps after any
+    /// wake, so teleport overlaps resolved in place keep the old wakefulness
+    /// floor, and still needs two steps, so step-one-active pins hold.
     pub(super) fn update_sleep(&mut self, dt: f32) {
-        let quiet = Self::collect_quiet_islands(self);
+        // Age the post-wake grace first: a wake armed during this step's
+        // substep loop still counts this step as graced.
+        for g in self.island_grace.values_mut() {
+            *g = g.saturating_sub(1);
+        }
+        self.island_grace.retain(|_, &mut g| g > 0);
+        let (quiet, frozen, disturbed) = Self::collect_sleep_flags(self);
         let island_size = Self::collect_island_sizes(self);
         let mut to_sleep: Vec<u32> = Vec::new();
         for (root, q) in quiet {
@@ -73,7 +92,14 @@ impl SequentialImpulseEngine {
                 Self::sleep_time_for_size(island_size.get(&root).copied().unwrap_or(1));
             let timer = self.island_timers.entry(root).or_insert(0.0);
             if q {
-                *timer += dt;
+                // Frozen islands converge 6x faster; the size scaling is
+                // kept (large islands still need more frozen steps). Only
+                // pristine islands (nothing ever moved) with expired grace
+                // qualify — everything else keeps the legacy rate.
+                let fast = frozen.get(&root).copied().unwrap_or(false)
+                    && !disturbed.get(&root).copied().unwrap_or(false)
+                    && !self.island_grace.contains_key(&root);
+                *timer += dt * if fast { 6.0 } else { 1.0 };
                 if *timer >= sleep_time {
                     to_sleep.push(root);
                 }
@@ -106,6 +132,12 @@ impl SequentialImpulseEngine {
     /// propagates motion through the island, so partial wake is incoherent).
     /// Non-dynamic bodies have no island (statics are asleep from birth and
     /// never wake anything) — waking them is a no-op by construction.
+    ///
+    /// Every wake also arms the post-wake grace (see [`Self::update_sleep`]):
+    /// the island accumulates sleep at the normal rate for the next
+    /// [`WAKE_GRACE_STEPS`] steps even if it is numerically frozen, so a
+    /// teleport overlap resolved in place cannot re-sleep before the old
+    /// 0.2 s floor elapses.
     pub fn wake_island(&mut self, h: usize) {
         if self.bodies[h].body_type != BodyType::Dynamic {
             return;
@@ -119,7 +151,14 @@ impl SequentialImpulseEngine {
             }
         }
         self.island_timers.insert(root, 0.0);
+        self.island_grace.insert(root, Self::WAKE_GRACE_STEPS);
     }
+
+    /// Post-wake steps during which the frozen fast track stays disarmed.
+    /// The penetration-wake tests pin 5 awake steps after a zero-velocity
+    /// teleport overlap; 8 keeps a 3-step margin while still sleeping
+    /// never-woken rest scenes in ~2.
+    const WAKE_GRACE_STEPS: u32 = 8;
 
     fn sleep_time_for_size(size: usize) -> f32 {
         (0.2 + 0.02 * size as f32).clamp(0.2, 0.6)
@@ -131,19 +170,60 @@ impl SequentialImpulseEngine {
         b.velocity.length() < LIN_SLEEP && b.angular_velocity.length() < ANG_SLEEP
     }
 
-    fn collect_quiet_islands(engine: &Self) -> FxHashMap<u32, bool> {
+    /// Numerically stationary: the solver has converged to a fixed point
+    /// (tiled-rest residues sit at ~1e-8 for both axes). The gate alone
+    /// does not protect settling scenes — a fast-settling box still drifts
+    /// ~1e-4 after converging below it, which would move the frozen point —
+    /// so the fast track additionally requires a pristine island (see
+    /// `body_moved`): anything that ever moved keeps the legacy timers
+    /// bit-exactly.
+    fn is_body_frozen(b: &RigidBody) -> bool {
+        const FROZEN_EPS: f32 = 1e-5;
+        b.velocity.length() < FROZEN_EPS && b.angular_velocity.length() < FROZEN_EPS
+    }
+
+    /// Per-island quiet, frozen and disturbed flags. `quiet`/`frozen` are
+    /// ANDs over the members (see [`Self::is_body_slow`] and
+    /// [`Self::is_body_frozen`]); `disturbed` is the OR over the monotonic
+    /// per-body `body_moved` marks, updated here on the first above-gate
+    /// motion. Single pass. A disturbed island never fast-tracks again —
+    /// the conservative direction (legacy timers), so merges, removals and
+    /// solver migrations can only miss the optimization, never break a
+    /// settled trajectory.
+    fn collect_sleep_flags(
+        engine: &mut Self,
+    ) -> (
+        FxHashMap<u32, bool>,
+        FxHashMap<u32, bool>,
+        FxHashMap<u32, bool>,
+    ) {
         let mut quiet: FxHashMap<u32, bool> = FxHashMap::default();
+        let mut frozen: FxHashMap<u32, bool> = FxHashMap::default();
+        let mut disturbed: FxHashMap<u32, bool> = FxHashMap::default();
         for h in 0..engine.bodies.len() {
             if engine.island[h] == u32::MAX || engine.asleep[h] {
                 continue;
             }
-            let slow = Self::is_body_slow(&engine.bodies[h]);
+            let still = Self::is_body_frozen(&engine.bodies[h]);
+            if !still {
+                engine.body_moved[h] = true;
+            }
+            let slow = still || Self::is_body_slow(&engine.bodies[h]);
             quiet
                 .entry(engine.island[h])
                 .and_modify(|q| *q &= slow)
                 .or_insert(slow);
+            frozen
+                .entry(engine.island[h])
+                .and_modify(|q| *q &= still)
+                .or_insert(still);
+            let moved = engine.body_moved[h];
+            disturbed
+                .entry(engine.island[h])
+                .and_modify(|q| *q |= moved)
+                .or_insert(moved);
         }
-        quiet
+        (quiet, frozen, disturbed)
     }
 
     fn collect_island_sizes(engine: &Self) -> FxHashMap<u32, usize> {
@@ -286,7 +366,10 @@ impl SequentialImpulseEngine {
         let base_iters = self.velocity_iterations;
         let path = self.wide_solver;
         // per-island adaptive iters: precompute outside the dispatched closure
-        // so we don't borrow `self` inside it (borrow checker).
+        // so we don't borrow `self` inside it (borrow checker). Tall-stack
+        // islands never scale below the full base budget (the resting
+        // downscale starves O(depth) support propagation) plus one sweep
+        // per chain level above the gate, capped — see `stack_velocity_iters`.
         let iters_per_island: Vec<u32> = islands
             .iter()
             .map(|isl| {
@@ -301,7 +384,16 @@ impl SequentialImpulseEngine {
                     .iter()
                     .flat_map(|m| m.points[..m.point_count].iter().map(|p| p.penetration))
                     .fold(0.0f32, f32::max);
-                self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters)
+                let adaptive =
+                    self.adaptive_iters_for_island_with_pen(max_speed, max_pen, dt, base_iters);
+                if super::contacts::stack_path_for_island(isl.manifolds.len()) {
+                    adaptive.max(super::contacts::stack_velocity_iters(
+                        base_iters,
+                        isl.manifolds.len(),
+                    ))
+                } else {
+                    adaptive
+                }
             })
             .collect();
         Self::dispatch_islands(islands, mode, |idx, isl| {
@@ -405,4 +497,250 @@ fn assign_canonical_islands(engine: &mut SequentialImpulseEngine, parent: &mut [
     // Drop timers of roots that no longer exist.
     let roots: FxHashSet<u32> = engine.island.iter().copied().collect();
     engine.island_timers.retain(|r, _| roots.contains(r));
+    engine.island_grace.retain(|r, _| roots.contains(r));
+}
+
+/// Minimum candidate-pair count for the flat singleton fast path
+/// ([`SequentialImpulseEngine::flat_singleton_eligible`]). Snapshot,
+/// confluence and sleep scenes are orders of magnitude smaller, so they
+/// keep the island path exactly; only visual-scale scenes route here.
+pub(super) const FLAT_MIN_PAIRS: usize = 2048;
+
+/// Shard count rule for the flat singleton path: enough coarse shards to
+/// feed every worker without the 100k-node dispatch the island path pays
+/// (same shape as the narrowphase rule, so both stages scale together).
+/// Order-preserving chunking keeps the assignment deterministic.
+fn flat_shard_count(pairs: usize) -> usize {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (threads * 4).clamp(4, 64).min(pairs.max(1))
+}
+
+impl SequentialImpulseEngine {
+    /// Flat-path eligibility: no joints, at least [`FLAT_MIN_PAIRS`]
+    /// candidates, and every dynamic body in at most one candidate pair
+    /// (statics and kinematics may repeat — they anchor islands, like in
+    /// Jolt). Then every contact island is a single manifold by
+    /// construction, and the union-find / group / clone / dispatch
+    /// scaffolding can be skipped in favor of a direct solve with the
+    /// same per-manifold kernels in an equivalent order (see
+    /// [`SequentialImpulseEngine::solve_flat_velocity`]).
+    ///
+    /// Single linear scan with generation stamps (`flat_marks`/`flat_gen`):
+    /// no hash map, no allocation after the first large scene. Decided
+    /// once per step from the broadphase pairs (a superset of every
+    /// substep's narrow-active set, so eligibility is stable for the step).
+    pub(super) fn flat_singleton_eligible(&mut self, active: &[(usize, usize)]) -> bool {
+        if active.len() < FLAT_MIN_PAIRS || !self.joint_pairs.is_empty() {
+            return false;
+        }
+        let n = self.bodies.len();
+        if self.flat_marks.len() != n {
+            self.flat_marks.resize(n, 0);
+        }
+        self.flat_gen = self.flat_gen.wrapping_add(1);
+        if self.flat_gen == 0 {
+            // Wrapped past the reserved cleared state: reset and restart.
+            self.flat_marks.fill(0);
+            self.flat_gen = 1;
+        }
+        let stamp = self.flat_gen;
+        let (bodies, marks) = (&self.bodies, &mut self.flat_marks);
+        for &(a, b) in active {
+            for h in [a, b] {
+                if bodies[h].body_type == BodyType::Dynamic {
+                    if marks[h] == stamp {
+                        return false;
+                    }
+                    marks[h] = stamp;
+                }
+            }
+        }
+        true
+    }
+
+    /// Coarsen the narrow-active manifolds into solve shards: contiguous
+    /// chunks in manifold order (deterministic), each a self-contained
+    /// [`IslandWork`] with cloned bodies and island-local manifold indices
+    /// — the same work-item shape the island dispatch solves, but `S`
+    /// shards instead of one work item per manifold. Singleton eligibility
+    /// guarantees shards are disjoint over dynamic bodies, so the parallel
+    /// solve commutes exactly (Strong Confluence).
+    pub(super) fn build_flat_shards(
+        &self,
+        active: &[usize],
+        manifolds: &[Manifold],
+    ) -> Vec<IslandWork> {
+        let count = flat_shard_count(active.len());
+        let mut shards: Vec<IslandWork> = Vec::with_capacity(count);
+        for part in active.chunks(active.len().div_ceil(count)) {
+            let mut body_idx: Vec<usize> = Vec::with_capacity(part.len() * 2);
+            for &gmi in part {
+                body_idx.push(manifolds[gmi].body_a.index());
+                body_idx.push(manifolds[gmi].body_b.index());
+            }
+            body_idx.sort_unstable();
+            body_idx.dedup();
+            let bodies: Vec<RigidBody> = body_idx.iter().map(|&g| self.bodies[g].clone()).collect();
+            let local = |g: usize| body_idx.binary_search(&g).expect("shard body");
+            let shard_manifolds: Vec<Manifold> = part
+                .iter()
+                .map(|&gmi| {
+                    let mut mc = manifolds[gmi].clone();
+                    mc.body_a = crate::body::BodyHandle::from(local(manifolds[gmi].body_a.index()));
+                    mc.body_b = crate::body::BodyHandle::from(local(manifolds[gmi].body_b.index()));
+                    mc
+                })
+                .collect();
+            let keys: Vec<(usize, usize)> = part
+                .iter()
+                .map(|&gmi| {
+                    let m = &manifolds[gmi];
+                    let (a, b) = (m.body_a.index(), m.body_b.index());
+                    (a.min(b), a.max(b))
+                })
+                .collect();
+            shards.push(IslandWork {
+                body_idx,
+                bodies,
+                manifolds: shard_manifolds,
+                keys,
+                states: Vec::new(),
+                warm: FxHashMap::default(),
+            });
+        }
+        shards
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::BodyType;
+    use crate::engine::PhysicsEngine;
+
+    /// Interior rest grid (the `settled_grid` shape, no edge overhang):
+    /// pristine frozen islands must sleep in a couple of steps, not after
+    /// the full legacy 0.2 s — while the very first step stays fully awake.
+    #[test]
+    fn pristine_rest_grid_sleeps_fast_but_first_step_stays_active() {
+        let mut physics = SequentialImpulseEngine::new(glam::Vec3::new(0.0, -9.81, 0.0));
+        for tx in -1..=1 {
+            for tz in -1..=1 {
+                physics.add_body(RigidBody::new_box(
+                    glam::Vec3::new(tx as f32 * 10.0, -0.5, tz as f32 * 10.0),
+                    glam::Vec3::new(5.0, 0.5, 5.0),
+                    0.0,
+                ));
+            }
+        }
+        let mut dynamics = Vec::new();
+        for gx in -2..=2 {
+            for gz in -2..=2 {
+                dynamics.push(physics.add_body(RigidBody::new_box(
+                    glam::Vec3::new(gx as f32 * 2.0, 0.4, gz as f32 * 2.0),
+                    glam::Vec3::splat(0.4),
+                    1.0,
+                )));
+            }
+        }
+        physics.step(1.0 / 60.0);
+        assert!(
+            dynamics.iter().all(|&h| !physics.is_asleep(h)),
+            "first step is active: nothing sleeps yet"
+        );
+        for _ in 0..3 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            dynamics.iter().all(|&h| physics.is_asleep(h)),
+            "pristine rest grid must sleep within 4 steps"
+        );
+        // Rest heights hold: the fast track froze a fixed point, not a fall.
+        for &h in &dynamics {
+            let b = physics.get_body(h).unwrap();
+            assert!(
+                (b.position.y - 0.4).abs() < 0.05,
+                "settled body rest height, got {}",
+                b.position.y
+            );
+        }
+    }
+
+    /// Anything that ever moved keeps the legacy timers: a dropped box is
+    /// still awake 6 steps after landing, even once it is numerically
+    /// frozen — only pristine islands fast-track.
+    #[test]
+    fn moved_island_keeps_legacy_sleep_latency() {
+        let mut physics = SequentialImpulseEngine::new(glam::Vec3::new(0.0, -9.81, 0.0));
+        physics.add_body(RigidBody::new_box(
+            glam::Vec3::new(0.0, -1.0, 0.0),
+            glam::Vec3::new(10.0, 1.0, 10.0),
+            0.0,
+        ));
+        let klein = physics.add_body(RigidBody::new_box(
+            glam::Vec3::new(0.0, 2.0, 0.0),
+            glam::Vec3::splat(0.5),
+            1.0,
+        ));
+        // Fall 1.5 m to the floor (~33 steps), then 6 settled steps: past
+        // the 2-step fast-track latency, well short of the legacy ~13.
+        let mut landed = false;
+        for _ in 0..120 {
+            physics.step(1.0 / 60.0);
+            if physics.get_body(klein).unwrap().position.y < 0.6 {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "box must land within 120 steps");
+        assert!(
+            physics.body_moved[klein.index()],
+            "fallen box is marked moved"
+        );
+        for _ in 0..6 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            !physics.is_asleep(klein),
+            "a box that fell 1.5 m must not fast-track: legacy latency applies"
+        );
+    }
+
+    /// Post-wake grace: a pristine sleeper woken by a zero-velocity deep
+    /// overlap is still awake 5 steps later (legacy floor), even though it
+    /// never exceeds the frozen gate.
+    #[test]
+    fn woken_pristine_sleeper_keeps_wakefulness_floor() {
+        let mut physics = SequentialImpulseEngine::new(glam::Vec3::ZERO);
+        let sleeper = physics.add_body(RigidBody::new_box(
+            glam::Vec3::new(0.0, 0.5, 0.0),
+            glam::Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..10 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(physics.is_asleep(sleeper), "box must sleep in zero-g");
+        physics.add_body(RigidBody::new_box(
+            glam::Vec3::new(0.0, 1.45, 0.0),
+            glam::Vec3::splat(0.5),
+            1.0,
+        ));
+        for _ in 0..5 {
+            physics.step(1.0 / 60.0);
+        }
+        assert!(
+            !physics.is_asleep(sleeper),
+            "deep overlap must keep the sleeper awake for 5 steps"
+        );
+        assert!(
+            physics
+                .bodies
+                .iter()
+                .any(|b| b.body_type == BodyType::Dynamic),
+            "dynamics present"
+        );
+    }
 }

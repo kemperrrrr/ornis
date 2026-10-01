@@ -18,10 +18,14 @@ wgpu = { version = "30" }
 naga = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 rustc-hash = "2.1.3"
+rapier3d = { version = "0.36.0", optional = true }
+boxddd = { version = "0.4.0", optional = true }
 
 [features]
 default = []
 gpu = ["dep:bytemuck", "dep:naga"]
+rapier = ["dep:rapier3d"]
+box3d = ["dep:boxddd"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["rayon"] }
@@ -30,6 +34,10 @@ pollster = "1.0"
 
 [[bench]]
 name = "solver_bench"
+harness = false
+
+[[bench]]
+name = "engine_shootout"
 harness = false
 
 [lints]

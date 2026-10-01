@@ -89,6 +89,20 @@ pub struct BroadPhaseStats {
 /// (settled reports zero substeps, rest heights hold) plus the
 /// `tall_stack_stands_still` / `fast_box_drop_does_not_tunnel` stability
 /// guards (5-box tower stands; 6+ topple — pre-existing solver limit).
+///
+/// Sleep-latency update 2026-09-30 (frozen fast track + triggerless
+/// rebuild gate + frozen-pair narrow filter, all trajectory-neutral):
+/// pristine exact-rest islands (never moved, solver residues ~1e-8)
+/// accumulate sleep 6x faster and rest whole in ~2–3 steps instead of
+/// ~14 — the 100k 8-step probe now reports 104096/104096 asleep with
+/// steps 3–7 on the fully-sleeping fast path (~2 ms, zero substeps), and
+/// the 10k mean steady step roughly halves. Anything that ever moved
+/// keeps the legacy 0.2–0.6 s timers bit-exactly (the determinism
+/// snapshot is unaffected); post-wake grace keeps the old wakefulness
+/// floor for teleport overlaps. The end-of-step broadphase rebuild is
+/// skipped on triggerless worlds (same pair set: backends key their
+/// incremental baseline off exact swept-box equality), which roughly
+/// halves `trigger_ms` there.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct StepTiming {
     /// Time spent rebuilding swept AABBs and candidate pairs.

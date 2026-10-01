@@ -25,39 +25,63 @@
 //!
 //! # Scope (deliberate, documented)
 //!
-//! - Discrete contacts only (no continuous collision detection): substeps
-//!   shrink the tunneling window but fast/thin bodies can still tunnel.
+//! - Rigid↔rigid contacts are discrete (no CCD): substeps shrink the
+//!   tunneling window but fast/thin rigid bodies can still tunnel.
+//!   Particles get a once-per-substep conservative-advancement clamp
+//!   through [`crate::distance::cast_shape`] (each advance bounded by the
+//!   exact current gap): a fast particle stops at the first rigid wall
+//!   instead of tunneling through it. Resting contact stays the discrete
+//!   solver's job (a sweep reports no hit from a touching start).
 //! - Contacts solve on the single `shape_distance` witness pair per body
-//!   pair; face-stable multi-point manifolds are a non-goal here.
+//!   pair; face-stable multi-point manifolds are a non-goal here. Soft
+//!   rows additionally warm-start their normal impulse `λ` from the
+//!   previous substep (exact-key persistence on `(soft, particle, body)` —
+//!   stronger than witness-proximity matching because particle identity is
+//!   stable): a resting stack inherits last step's support instead of
+//!   rebuilding it from zero, which is what keeps it still.
 //! - Joints supported structurally: ball, distance, fixed, revolute and
 //!   prismatic. Limits, motors and springs are NOT driven (accepted joints
 //!   constrain the free axes and ignore the drive). Wheel, gear and six-DOF
 //!   joints are rejected (`add_joint` returns `None`).
-//! - No sleeping, no islands, single-threaded, no trigger/contact events:
-//!   use [`crate::engine::SequentialImpulseEngine`] or
-//!   [`crate::avbd::AvbdEngine`] when gameplay events are needed.
+//! - No islands, single-threaded: bodies sleep individually (never as one
+//!   coherent island), so a jointed assembly has no group freeze — an awake
+//!   neighbour re-wakes a sleeper on impact instead. Soft↔rigid begin/end
+//!   transitions drain through [`XpbdEngine::drain_soft_contact_events`];
+//!   rigid↔rigid and trigger events are not produced here: use
+//!   [`crate::engine::SequentialImpulseEngine`] or
+//!   [`crate::avbd::AvbdEngine`] when those are needed. Full islands remain
+//!   the documented next step.
 //! - Soft bodies ([`crate::soft::SoftBody`], PLAN B2/D1): particles +
-//!   distance rows + global volume row step in the same substep loop, and
-//!   particles couple against rigid bodies as spheres (inelastic,
-//!   frictionless — the velocity passes do not know these rows).
-//!   No self-collision, no layer/mask filtering on the soft side, no
-//!   render upload yet.
-//! - Not wired into the [`crate::Engine`] orchestrator / [`crate::SolverKind`]
-//!   switch: this engine stands alone behind [`crate::engine::PhysicsEngine`].
+//!   distance rows + global volume row + self-collision + breakage step in
+//!   the same substep loop, with a render-upload surface
+//!   ([`SoftBody::surface`] / [`SoftBody::positions_snapshot`]). Particles
+//!   couple against rigid bodies as spheres with Coulomb friction (a
+//!   velocity pass over the BDF1 velocities clamped by `µ·λ/h`, position
+//!   corrections alone cannot hold at Small-Steps sizes) and mutual
+//!   layer/mask filtering ([`SoftBody::can_couple_with`]).
+//! - Wired into the [`crate::Engine`] orchestrator as
+//!   [`crate::SolverKind::Xpbd`]: a world with soft bodies migrates wholly
+//!   onto this path (rigid + soft step in the one substep loop, so
+//!   soft↔rigid coupling actually runs). Worlds without soft bodies stay on
+//!   sequential-impulse/AVBD; soft bodies parked outside the XPBD path keep
+//!   their order (and handles) but do not step.
 
 use std::collections::BTreeSet;
 
 use glam::{Quat, Vec3};
+use rustc_hash::FxHashMap;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::broadphase::PrevPose;
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::errors::{JointError, QueryError};
 use crate::joint::{JointHandle, JointKind, resolve_joint};
 use crate::math::{Ray, RaycastHit, tangent_basis};
-use crate::migration::validate_joint;
+use crate::migration::{JointReference, JointSnapshot, validate_joint};
 use crate::shape::Shape;
 use crate::soft::{SoftBody, SoftHandle};
+use crate::trigger::{CONTACT_BEGIN_SLOP, ContactEventKind};
 
 /// Structural joint model supported by [`XpbdEngine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +100,11 @@ enum XpbdJointKind {
 }
 
 /// Persistent joint state: structural kind plus assembly-time frames.
-#[derive(Debug, Clone)]
+///
+/// The original [`JointKind`] spec and its assembly [`JointReference`] ride
+/// along untouched by the solve (migration payload for the [`crate::Engine`]
+/// orchestrator — the structural rows alone cannot rebuild the spec).
+#[derive(Debug, Clone, Copy)]
 struct XpbdJoint {
     /// First body handle.
     a: usize,
@@ -84,6 +112,12 @@ struct XpbdJoint {
     b: usize,
     /// Structural model.
     kind: XpbdJointKind,
+    /// Original joint spec (migration payload: rebuilds re-resolve it).
+    spec: JointKind,
+    /// Assembly references (migration payload: preserved verbatim for
+    /// solvers that understand them, e.g. a roundtrip back to
+    /// sequential-impulse).
+    reference: JointReference,
     /// Anchor in body A's local frame.
     la: Vec3,
     /// Anchor in body B's local frame.
@@ -116,10 +150,13 @@ struct Contact {
     lambda: f32,
 }
 
-/// Particle↔rigid contact for a single substep (D1.4): the particle is
-/// side A (a bare position, no orientation), the rigid body side B with a
-/// body-local anchor. Inelastic and frictionless — the velocity passes do
-/// not know these rows; both sides derive post-solve velocities via BDF1.
+/// Particle↔rigid contact for a single substep: the particle is side A (a
+/// bare position, no orientation), the rigid body side B with a body-local
+/// anchor. The normal row is an inequality (`λ ≥ 0`, warm-started from the
+/// previous substep); Coulomb friction runs as a velocity pass clamped by
+/// the position-level normal impulse (`µ·λ/h`), mirroring the rigid
+/// [`XpbdEngine::solve_velocities`]. Both sides derive post-solve
+/// velocities via BDF1 first, then the friction pass trims them.
 #[derive(Debug, Clone)]
 struct SoftContact {
     /// Soft body handle.
@@ -140,13 +177,60 @@ struct SoftContact {
     lambda: f32,
 }
 
+/// Linear speed below which a body counts as quiet for sleep (m/s,
+/// sequential-impulse parity).
+const SLEEP_LIN: f32 = 0.15;
+/// Angular speed below which a rigid body counts as quiet (rad/s,
+/// sequential-impulse parity).
+const SLEEP_ANG: f32 = 0.15;
+/// Continuous quiet time before a body freezes (s).
+const SLEEP_TIME: f32 = 0.5;
+/// Relative normal speed at a contact that wakes a sleeper (m/s,
+/// sequential-impulse `WAKE_IMPACT_SPEED` parity): a fast impact disturbs
+/// the sleeper, slow settling does not.
+const WAKE_IMPACT_SPEED: f32 = 0.5;
+/// CCD backoff (m): a clamped particle stops this far short of the swept
+/// hit so the discrete pass sees a clean near-touch, not a zero-gap
+/// flicker (same order as the sequential-impulse TOI backoff).
+const CCD_BACKOFF: f32 = 1e-3;
+
+/// Per-soft-body sleep state, parallel to [`XpbdEngine`]'s soft registry.
+#[derive(Debug, Clone, Copy)]
+struct SoftSleep {
+    /// Whether the body is frozen (skips integration and solves).
+    asleep: bool,
+    /// Accumulated continuous quiet time (s).
+    quiet: f32,
+}
+
+/// A solid-contact transition between a soft-body particle cloud and a
+/// rigid body, drained after the step like [`crate::trigger::TriggerEvent`].
+/// Pairs are reported per `(soft body, rigid body)` — individual particle
+/// touches aggregate to their body pair — in deterministic sorted order
+/// (begins before ends).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoftContactEvent {
+    /// Soft body handle (this engine's soft registry).
+    pub soft: SoftHandle,
+    /// Rigid body handle (this engine's rigid registry).
+    pub body: BodyHandle,
+    /// What happened: begin or end. [`ContactEventKind::Hit`] is never
+    /// emitted here (no impact-speed tracking in D1) — match only on
+    /// begin/end.
+    pub kind: ContactEventKind,
+}
+
 /// XPBD rigid-body engine; see the module docs for formulation and scope.
 ///
 /// Bodies live in dense handle order (`swap_remove` on removal, like the
 /// other engines). Constraints are rebuilt from scratch every substep, so
-/// there is no cross-step warm-start state to migrate or invalidate.
+/// there is no cross-step warm-start state to migrate or invalidate — with
+/// one exception: soft normal impulses persist in a keyed cache across
+/// substeps (see the module scope docs).
 /// Soft bodies ([`crate::soft::SoftBody`]) live in a second dense registry
-/// and step in the same substep loop (D1.1: particles + distance rows only).
+/// and step in the same substep loop: particles + distance rows + global
+/// volume row + self-collision + breakage, coupled against rigid bodies
+/// with Coulomb friction and layer/mask filtering.
 #[derive(Debug)]
 pub struct XpbdEngine {
     /// Constant world-space acceleration applied to dynamic bodies.
@@ -171,11 +255,38 @@ pub struct XpbdEngine {
     restitution_threshold: f32,
     /// Soft bodies in handle order (PLAN B2/D1).
     soft_bodies: Vec<SoftBody>,
+    /// Coulomb coefficient on the soft side: each soft↔rigid pair combines
+    /// `sqrt(soft_friction · body.friction)` (geometric-mean parity with
+    /// the rigid↔rigid velocity pass).
+    soft_friction: f32,
+    /// Per-body rigid sleep flags, parallel to `bodies` (dynamics only;
+    /// statics/kinematics are never asleep).
+    rigid_asleep: Vec<bool>,
+    /// Accumulated continuous quiet time per rigid body (s), parallel to
+    /// `bodies`.
+    rigid_quiet: Vec<f32>,
+    /// Per-soft-body sleep state, parallel to `soft_bodies`.
+    soft_sleep: Vec<SoftSleep>,
+    /// Previous substep's soft normal impulses, keyed by
+    /// `(soft, particle, body)`: the cross-substep warm-start cache.
+    /// Seeded into fresh contacts at discovery, written back after the
+    /// iterations, pruned to the live touch set at step end, and cleared
+    /// by body removals (topology edits drop warm state).
+    soft_lambda_cache: FxHashMap<(usize, usize, usize), f32>,
+    /// Soft↔rigid `(soft, particle, body)` triples touching at the previous
+    /// completed step (overlap, plus a [`CONTACT_BEGIN_SLOP`] grace band so
+    /// resting jitter emits no flicker). Cleared by body removals, like the
+    /// sequential-impulse touch sets.
+    soft_touch: BTreeSet<(usize, usize, usize)>,
+    /// Queued soft↔rigid begin/end transitions, drained by
+    /// [`XpbdEngine::drain_soft_contact_events`].
+    soft_contact_events: Vec<SoftContactEvent>,
 }
 
 impl XpbdEngine {
     /// Empty engine with Small-Steps defaults: 20 substeps × 1 iteration,
-    /// rigid contacts and joints, 1 m/s restitution threshold.
+    /// rigid contacts and joints, 1 m/s restitution threshold, 0.5 soft
+    /// friction, everything awake and no cached contacts.
     pub fn new(gravity: Vec3) -> Self {
         Self {
             gravity,
@@ -188,6 +299,13 @@ impl XpbdEngine {
             joint_compliance: 0.0,
             restitution_threshold: 1.0,
             soft_bodies: Vec::new(),
+            soft_friction: 0.5,
+            rigid_asleep: Vec::new(),
+            rigid_quiet: Vec::new(),
+            soft_sleep: Vec::new(),
+            soft_lambda_cache: FxHashMap::default(),
+            soft_touch: BTreeSet::new(),
+            soft_contact_events: Vec::new(),
         }
     }
 
@@ -237,6 +355,66 @@ impl XpbdEngine {
         }
     }
 
+    /// Coulomb coefficient on the soft side (≥ 0, default 0.5): each
+    /// soft↔rigid pair uses `sqrt(soft_friction · body.friction)`, so 0
+    /// disables soft friction and 1 keeps the rigid body's value. Must be
+    /// finite; negative or non-finite values are clamped to 0.
+    pub fn set_soft_friction(&mut self, mu: f32) {
+        self.soft_friction = if mu.is_finite() { mu.max(0.0) } else { 0.0 };
+    }
+
+    /// Current soft-side Coulomb coefficient (see
+    /// [`XpbdEngine::set_soft_friction`]).
+    pub fn soft_friction(&self) -> f32 {
+        self.soft_friction
+    }
+
+    /// Whether the rigid body is currently sleeping (frozen: zeroed inverse
+    /// mass/inertia, skipped integration). Static and kinematic bodies are
+    /// never asleep; invalid handles report `false`.
+    pub fn is_asleep(&self, handle: BodyHandle) -> bool {
+        self.rigid_asleep
+            .get(handle.index())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Whether the soft body is currently sleeping (frozen: skips
+    /// integration and solves, velocities zeroed). Invalid handles report
+    /// `false`.
+    pub fn is_soft_asleep(&self, handle: SoftHandle) -> bool {
+        self.soft_sleep
+            .get(handle.index())
+            .is_some_and(|s| s.asleep)
+    }
+
+    /// Wake a sleeping soft body without moving it: velocities stay zeroed,
+    /// but the BDF1 baseline (`prev_position`) is rebased onto the live
+    /// positions, so waking after a teleport through
+    /// [`XpbdEngine::get_soft_body_mut`] emits no velocity spike. No-op for
+    /// invalid handles. Contact impacts wake bodies on their own (no
+    /// baseline change there — motion continues); call this after direct
+    /// pose edits, like the orchestrator does for rigid bodies.
+    pub fn wake_soft_body(&mut self, handle: SoftHandle) {
+        let Some(soft) = self.soft_bodies.get_mut(handle.index()) else {
+            return;
+        };
+        for p in &mut soft.particles {
+            p.prev_position = p.position;
+        }
+        if let Some(st) = self.soft_sleep.get_mut(handle.index()) {
+            st.asleep = false;
+            st.quiet = 0.0;
+        }
+    }
+
+    /// Drain soft↔rigid begin/end transitions produced by completed steps
+    /// (per `(soft body, rigid body)` pair, begins before ends, sorted).
+    /// Queued until drained; body removals clear the queue.
+    pub fn drain_soft_contact_events(&mut self) -> Vec<SoftContactEvent> {
+        std::mem::take(&mut self.soft_contact_events)
+    }
+
     /// Number of registered bodies (dense handles).
     pub fn body_count(&self) -> usize {
         self.bodies.len()
@@ -250,15 +428,25 @@ impl XpbdEngine {
     /// Register a soft body and return its handle (PLAN B2/D1).
     pub fn add_soft_body(&mut self, body: SoftBody) -> SoftHandle {
         self.soft_bodies.push(body);
+        self.soft_sleep.push(SoftSleep {
+            asleep: false,
+            quiet: 0.0,
+        });
         SoftHandle::from(self.soft_bodies.len() - 1)
     }
 
     /// Remove a soft body, swapping the last into its slot. Invalid
-    /// handles are a no-op. No joints reference particles in D1.1, so no
-    /// remap is needed beyond the swap.
+    /// handles are a no-op. No joints reference particles, so no remap is
+    /// needed beyond the swap; the warm-start cache, touch set and queued
+    /// events are cleared (indices shift, like the sequential-impulse touch
+    /// sets on removal).
     pub fn remove_soft_body(&mut self, handle: SoftHandle) {
         if handle.index() < self.soft_bodies.len() {
             self.soft_bodies.swap_remove(handle.index());
+            self.soft_sleep.swap_remove(handle.index());
+            self.soft_lambda_cache.clear();
+            self.soft_touch.clear();
+            self.soft_contact_events.clear();
         }
     }
 
@@ -278,12 +466,128 @@ impl XpbdEngine {
         self.soft_bodies.get_mut(handle.index())
     }
 
+    /// Bodies in handle order, cloned for solver migration ([`crate::Engine`]
+    /// re-registers them 1:1, so handles stay valid across the switch).
+    /// Sleepers migrate awake with their mass model restored (warm-start
+    /// state never migrates, and a zeroed inverse mass must not leak into
+    /// the new engine — AVBD parity).
+    pub(crate) fn bodies_snapshot(&self) -> Vec<RigidBody> {
+        self.bodies
+            .iter()
+            .map(|b| {
+                let mut c = b.clone();
+                c.restore_sleep_triple();
+                c
+            })
+            .collect()
+    }
+
+    /// Driver baselines for migration: XPBD derives velocities from substep
+    /// positions and keeps no cross-step driver history, so the live poses
+    /// seed the target without manufacturing motion.
+    pub(crate) fn body_baselines(&self) -> Vec<PrevPose> {
+        self.bodies
+            .iter()
+            .map(|b| PrevPose {
+                pos: b.position,
+                rot: b.orientation,
+            })
+            .collect()
+    }
+
+    /// Baseline restore after rebuilding: no-op (see
+    /// [`XpbdEngine::body_baselines`] — there is no driver history to seed).
+    pub(crate) fn restore_body_baseline(&mut self, _h: BodyHandle, _pose: PrevPose) {}
+
+    /// Completed-step rigid event baseline: XPBD tracks no rigid↔rigid
+    /// contact/trigger pairs (those stay a sequential-impulse/AVBD job —
+    /// see the module scope docs), so migration seeds nothing.
+    pub(crate) fn event_state(&self) -> crate::migration::EventState {
+        crate::migration::EventState::default()
+    }
+
+    /// Event-baseline restore after rebuilding: no-op (see
+    /// [`XpbdEngine::event_state`]).
+    pub(crate) fn restore_event_state(&mut self, _state: crate::migration::EventState) {}
+
+    /// Physical joint state in handle order: the stored spec plus the stored
+    /// assembly reference (numerical state never migrates).
+    pub(crate) fn joint_snapshots(&self) -> Vec<JointSnapshot> {
+        self.joints
+            .iter()
+            .map(|j| JointSnapshot {
+                a: BodyHandle::from(j.a),
+                b: BodyHandle::from(j.b),
+                spec: j.spec,
+                reference: j.reference,
+            })
+            .collect()
+    }
+
+    /// Restore the assembly reference after a solver migration: the stored
+    /// payload is replaced verbatim (so a later migration back out stays
+    /// lossless) and the structural rest state (distance-rod length,
+    /// fixed-joint relative rotation) follows it.
+    pub(crate) fn restore_joint_reference(&mut self, h: JointHandle, r: JointReference) {
+        let Some(j) = self.joints.get_mut(h.index()) else {
+            return;
+        };
+        j.reference = r;
+        j.rest_length = r.distance.0;
+        j.q_ref = r.rotation;
+    }
+
+    /// Soft bodies in handle order, cloned for solver migration (the
+    /// orchestrator parks them outside the XPBD path and re-registers them
+    /// 1:1 on return, so handles stay valid across the switch).
+    pub(crate) fn soft_bodies_snapshot(&self) -> Vec<SoftBody> {
+        self.soft_bodies.clone()
+    }
+    /// Live soft↔rigid touch triples for migration: indices survive the
+    /// ordered rebuild (rigid and soft registries both restore 1:1), so the
+    /// set transfers verbatim and the target emits no manufactured begins.
+    pub(crate) fn soft_touch_state(&self) -> BTreeSet<(usize, usize, usize)> {
+        self.soft_touch.clone()
+    }
+
+    /// Restore the migrated touch set (see [`XpbdEngine::soft_touch_state`]).
+    /// Triples outside the rebuilt registries are dropped, never indexed.
+    pub(crate) fn restore_soft_touch_state(&mut self, state: BTreeSet<(usize, usize, usize)>) {
+        self.soft_touch = state
+            .into_iter()
+            .filter(|&(s, p, b)| {
+                s < self.soft_bodies.len()
+                    && b < self.bodies.len()
+                    && p < self.soft_bodies[s].particles.len()
+            })
+            .collect();
+    }
+
+    /// Hand the whole soft registry to the orchestrator's park (Islands
+    /// routing): bodies in handle order plus the live touch set. Sleep,
+    /// warm-start and queued events are dropped — parking is a migration,
+    /// and sleep/warm state never migrates.
+    pub(crate) fn drain_soft_registry(
+        &mut self,
+    ) -> (Vec<SoftBody>, BTreeSet<(usize, usize, usize)>) {
+        self.soft_sleep.clear();
+        self.soft_lambda_cache.clear();
+        self.soft_contact_events.clear();
+        (
+            std::mem::take(&mut self.soft_bodies),
+            std::mem::take(&mut self.soft_touch),
+        )
+    }
+
     /// Whether the body is simulated by this engine (dynamic with mass).
     fn solvable(&self, h: usize) -> bool {
         self.bodies[h].body_type == BodyType::Dynamic && self.bodies[h].inv_mass > 0.0
     }
 
-    /// One substep of size `h`: integrate → discover → solve → velocities.
+    /// One substep of size `h`: integrate → CCD clamp → discover → solve →
+    /// velocities. Sleeping bodies skip integration (rigid sleepers via
+    /// zeroed inverse mass, soft sleepers via an explicit flag) but still
+    /// anchor contacts: corrections apply to the awake side only.
     fn substep(&mut self, h: f32) {
         let n = self.bodies.len();
         let mut prev_pos = vec![Vec3::ZERO; n];
@@ -312,11 +616,23 @@ impl XpbdEngine {
         // Time-scaled compliance: α̃ = α/h² (Macklin et al. 2016, §4).
         let alpha_c = self.contact_compliance / (h * h);
         let alpha_j = self.joint_compliance / (h * h);
-        for body in &mut self.soft_bodies {
+        for (s, body) in self.soft_bodies.iter_mut().enumerate() {
+            if self.soft_sleep[s].asleep {
+                continue;
+            }
             body.integrate(h, self.gravity);
             body.begin_substep();
         }
+        // Particle CCD, once per substep: clamp the integrated prediction
+        // before discovery so no witness can start across a wall.
+        for (s, body) in self.soft_bodies.iter_mut().enumerate() {
+            if self.soft_sleep[s].asleep {
+                continue;
+            }
+            Self::clamp_soft_ccd(&self.bodies, body);
+        }
         let mut soft_contacts = self.discover_soft_contacts();
+        self.wake_on_impact(&contacts, &soft_contacts);
         for _ in 0..self.iterations {
             for i in 0..contacts.len() {
                 self.solve_contact(i, &mut contacts, alpha_c);
@@ -324,7 +640,10 @@ impl XpbdEngine {
             for j in 0..self.joints.len() {
                 self.solve_joint(j, alpha_j);
             }
-            for body in &mut self.soft_bodies {
+            for (s, body) in self.soft_bodies.iter_mut().enumerate() {
+                if self.soft_sleep[s].asleep {
+                    continue;
+                }
                 body.solve_constraints(h);
                 body.solve_volume(h);
                 crate::soft_self::solve_self_collision(body, h);
@@ -332,10 +651,19 @@ impl XpbdEngine {
             for i in 0..soft_contacts.len() {
                 self.solve_soft_contact(i, &mut soft_contacts, alpha_c);
             }
+            // Write the normal impulses back to the warm-start cache while
+            // the witnesses are still live.
+            for c in &soft_contacts {
+                self.soft_lambda_cache
+                    .insert((c.soft, c.particle, c.body), c.lambda);
+            }
         }
         // Topology surgery outside the constraint iterations: broken rows
         // must not shift indices mid-sweep.
-        for body in &mut self.soft_bodies {
+        for (s, body) in self.soft_bodies.iter_mut().enumerate() {
+            if self.soft_sleep[s].asleep {
+                continue;
+            }
             body.apply_breakage();
         }
         for b in &mut self.bodies {
@@ -354,6 +682,7 @@ impl XpbdEngine {
             body.update_velocities(h);
         }
         self.solve_velocities(&contacts, h);
+        self.solve_soft_velocities(&soft_contacts, h);
     }
 
     /// Discrete contact discovery at the current poses: AABB prefilter plus
@@ -378,6 +707,11 @@ impl XpbdEngine {
                 }
                 // Pairs with no dynamics on either side cannot move.
                 if !self.solvable(a) && !self.solvable(b) {
+                    continue;
+                }
+                // Two sleepers are frozen relative to each other: no work,
+                // and no event flicker downstream.
+                if self.rigid_asleep[a] && self.rigid_asleep[b] {
                     continue;
                 }
                 if self.joint_pairs.contains(&(a, b)) {
@@ -418,10 +752,13 @@ impl XpbdEngine {
         out
     }
 
-    /// Particle↔rigid discovery (D1.4): every particle of a body with a
-    /// positive `contact_radius` is queried as a sphere against every
-    /// non-trigger rigid body. No layer/mask filtering in D1.4 — soft
-    /// bodies couple with everything (documented).
+    /// Particle↔rigid discovery: every particle of a body with a positive
+    /// `contact_radius` is queried as a sphere against every non-trigger
+    /// rigid body passing the mutual layer/mask filter
+    /// ([`SoftBody::can_couple_with`]). Pairs where the soft body sleeps
+    /// and the rigid side cannot move (static or asleep) are skipped — the
+    /// frozen-pair rule, mirrored from the rigid path. Fresh contacts seed
+    /// their normal impulse from the cross-substep warm-start cache.
     fn discover_soft_contacts(&self) -> Vec<SoftContact> {
         let mut out = Vec::new();
         for (s, soft) in self.soft_bodies.iter().enumerate() {
@@ -434,6 +771,14 @@ impl XpbdEngine {
             for (p, particle) in soft.particles.iter().enumerate() {
                 for (b, body) in self.bodies.iter().enumerate() {
                     if body.is_trigger {
+                        continue;
+                    }
+                    if !soft.can_couple_with(body) {
+                        continue;
+                    }
+                    if self.soft_sleep[s].asleep
+                        && (body.body_type != BodyType::Dynamic || self.rigid_asleep[b])
+                    {
                         continue;
                     }
                     let d = shape_distance(
@@ -462,7 +807,11 @@ impl XpbdEngine {
                         n: normal.normalize_or(Vec3::Y),
                         off: d.point_a - particle.position,
                         lb: body.orientation.inverse() * (d.point_b - body.position),
-                        lambda: 0.0,
+                        lambda: self
+                            .soft_lambda_cache
+                            .get(&(s, p, b))
+                            .copied()
+                            .unwrap_or(0.0),
                     });
                 }
             }
@@ -473,8 +822,15 @@ impl XpbdEngine {
     /// Position-level solve for one particle↔rigid contact (inequality,
     /// `λ ≥ 0`): the particle carries side A (`+n`), the rigid body side B
     /// (`−n` with its rotation lever). Contact compliance is shared with
-    /// the rigid path.
+    /// the rigid path. Friction is NOT positional here — at Small-Steps
+    /// sizes a positional correction is O(h²) against O(h) of sliding and
+    /// cannot hold; it runs instead as a velocity pass over the BDF1
+    /// velocities (see [`XpbdEngine::solve_soft_velocities`]).
     fn solve_soft_contact(&mut self, i: usize, contacts: &mut [SoftContact], alpha_tilde: f32) {
+        let soft_awake = self
+            .soft_sleep
+            .get(contacts[i].soft)
+            .is_none_or(|s| !s.asleep);
         let c = &mut contacts[i];
         let Some(soft) = self.soft_bodies.get_mut(c.soft) else {
             return;
@@ -507,8 +863,68 @@ impl XpbdEngine {
         let applied = next - c.lambda;
         c.lambda = next;
         if applied != 0.0 {
-            particle.position += c.n * (applied * particle.inv_mass);
+            if soft_awake {
+                particle.position += c.n * (applied * particle.inv_mass);
+            }
             apply_position_correction(body, -1.0, c.n, rb, applied);
+        }
+    }
+
+    /// Velocity-level Coulomb friction over the substep's soft contacts,
+    /// mirroring the rigid [`XpbdEngine::solve_velocities`]: runs after the
+    /// BDF1 update, kills the tangential slip velocity up to `µ·λn/h` with
+    /// `µ = sqrt(soft_friction · body.friction)`. Sleeping sides stay
+    /// frozen (rigid sleepers no-op through zero inverse mass, soft
+    /// sleepers are skipped explicitly).
+    fn solve_soft_velocities(&mut self, contacts: &[SoftContact], h: f32) {
+        for c in contacts {
+            let normal_impulse = c.lambda / h;
+            if normal_impulse <= 0.0 {
+                continue;
+            }
+            if self.soft_sleep.get(c.soft).is_some_and(|s| s.asleep) {
+                continue;
+            }
+            let (Some(soft), Some(body)) = (self.soft_bodies.get(c.soft), self.bodies.get(c.body))
+            else {
+                continue;
+            };
+            let mu = (self.soft_friction * body.friction).sqrt();
+            if mu <= 0.0 {
+                continue;
+            }
+            let Some(particle) = soft.particles.get(c.particle) else {
+                continue;
+            };
+            let rb = body.orientation * c.lb;
+            let vrel = particle.velocity - point_velocity(body, rb);
+            // Tangential slip in the contact frame (tangent_basis parity
+            // with the joint/prismatic rows: deterministic frame, slip
+            // projected onto it).
+            let (t1, t2) = tangent_basis(c.n);
+            let vt = t1 * vrel.dot(t1) + t2 * vrel.dot(t2);
+            let speed = vt.length();
+            if speed < 1e-9 {
+                continue;
+            }
+            let t = vt / speed;
+            let rt = rb.cross(t);
+            let w = particle.inv_mass
+                + body.inv_mass
+                + rt.dot(apply_inv_inertia(body.inertia, body.orientation, rt));
+            if w <= 0.0 {
+                continue;
+            }
+            let max_friction = mu * normal_impulse;
+            let jt = (-speed / w).clamp(-max_friction, max_friction);
+            if jt != 0.0 {
+                if let Some(particle) = self.soft_bodies[c.soft].particles.get_mut(c.particle) {
+                    particle.velocity += t * (jt * particle.inv_mass);
+                }
+                if let Some(body) = self.bodies.get_mut(c.body) {
+                    apply_velocity_impulse(body, -1.0, t, rb, jt);
+                }
+            }
         }
     }
 
@@ -540,8 +956,12 @@ impl XpbdEngine {
     }
 
     /// Position-level joint solve (equalities, one `λ` per scalar row).
+    /// A fully sleeping pair is frozen: no correction can move either side.
     fn solve_joint(&mut self, j: usize, alpha_tilde: f32) {
-        let joint = self.joints[j].clone();
+        let joint = self.joints[j];
+        if self.rigid_asleep[joint.a] && self.rigid_asleep[joint.b] {
+            return;
+        }
         match joint.kind {
             XpbdJointKind::Ball => {
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
@@ -808,6 +1228,258 @@ impl XpbdEngine {
         }
     }
 
+    /// Particle CCD clamp, once per substep: each awake, unpinned particle
+    /// whose integrated displacement outruns its own contact radius is cast
+    /// as a sphere from its substep-start pose along the displacement
+    /// through [`cast_shape`] (conservative advancement, linear only).
+    /// On a hit short of the path end the prediction is pulled back to the
+    /// hit (minus [`CCD_BACKOFF`]); the discrete pass then owns the resting
+    /// contact. Particles already touching report no hit (the sweep's
+    /// contract) and particles moving less than one radius per substep
+    /// cannot skip the discrete witness by construction.
+    fn clamp_soft_ccd(bodies: &[RigidBody], soft: &mut SoftBody) {
+        if soft.contact_radius <= 0.0 {
+            return;
+        }
+        let sphere = Shape::Sphere {
+            radius: soft.contact_radius,
+        };
+        // Index-based (not `iter_mut`): the per-target filter calls
+        // `soft.can_couple_with`, which needs a clean immutable borrow.
+        for pi in 0..soft.particles.len() {
+            let (prev, delta) = {
+                let p = &soft.particles[pi];
+                if p.inv_mass <= 0.0 {
+                    continue;
+                }
+                (p.prev_position, p.position - p.prev_position)
+            };
+            let len = delta.length();
+            if len <= soft.contact_radius || !len.is_finite() {
+                continue;
+            }
+            let targets = bodies.iter().enumerate().filter_map(|(b, body)| {
+                if body.is_trigger || !soft.can_couple_with(body) {
+                    return None;
+                }
+                Some((
+                    BodyHandle::from(b),
+                    ShapeRef {
+                        shape: &body.shape,
+                        pos: body.position,
+                        rot: body.orientation,
+                    },
+                ))
+            });
+            let mover = ShapeRef {
+                shape: &sphere,
+                pos: prev,
+                rot: Quat::IDENTITY,
+            };
+            if let Some(hit) = cast_shape(mover, delta, targets) {
+                let t = (hit.t - CCD_BACKOFF).clamp(0.0, len);
+                soft.particles[pi].position = prev + delta / len * t;
+            }
+        }
+    }
+
+    /// Impact wake pass over the freshly discovered contacts: a contact
+    /// whose relative normal speed clears [`WAKE_IMPACT_SPEED`] wakes the
+    /// sleeping member(s). Slow settling never wakes — that is what lets a
+    /// stack fall asleep piece by piece without chatter.
+    fn wake_on_impact(&mut self, contacts: &[Contact], soft_contacts: &[SoftContact]) {
+        for c in contacts {
+            let (ba, bb) = (&self.bodies[c.a], &self.bodies[c.b]);
+            let ra = ba.orientation * c.la;
+            let rb = bb.orientation * c.lb;
+            let vn = (point_velocity(ba, ra) - point_velocity(bb, rb)).dot(c.n);
+            if vn.abs() > WAKE_IMPACT_SPEED {
+                self.wake_rigid(c.a);
+                self.wake_rigid(c.b);
+            }
+        }
+        for c in soft_contacts {
+            let (Some(soft), Some(body)) = (self.soft_bodies.get(c.soft), self.bodies.get(c.body))
+            else {
+                continue;
+            };
+            let Some(particle) = soft.particles.get(c.particle) else {
+                continue;
+            };
+            let rb = body.orientation * c.lb;
+            let vn = (particle.velocity - point_velocity(body, rb)).dot(c.n);
+            if vn.abs() > WAKE_IMPACT_SPEED {
+                self.wake_soft(c.soft);
+                self.wake_rigid(c.body);
+            }
+        }
+    }
+
+    /// Wake one rigid body: restore its sleep-zeroed inverse mass/inertia
+    /// and reset the quiet timer. Non-dynamics and invalid indices are a
+    /// no-op (statics are never asleep, kinematics never sleep).
+    fn wake_rigid(&mut self, h: usize) {
+        let Some(asleep) = self.rigid_asleep.get_mut(h) else {
+            return;
+        };
+        if !*asleep {
+            return;
+        }
+        *asleep = false;
+        if let Some(t) = self.rigid_quiet.get_mut(h) {
+            *t = 0.0;
+        }
+        if let Some(b) = self.bodies.get_mut(h) {
+            b.wake_restore();
+        }
+    }
+
+    /// Wake one soft body on impact (no baseline change — motion continues;
+    /// explicit teleports use [`XpbdEngine::wake_soft_body`] instead).
+    fn wake_soft(&mut self, s: usize) {
+        if let Some(st) = self.soft_sleep.get_mut(s) {
+            st.asleep = false;
+            st.quiet = 0.0;
+        }
+    }
+
+    /// Per-step sleep bookkeeping (sequential-impulse parity: 0.15 m/s,
+    /// 0.5 s): a dynamic rigid body whose linear and angular speeds stay
+    /// below the gates for [`SLEEP_TIME`] freezes (Jolt semantics — zeroed
+    /// inverse mass/inertia, restored on wake); a soft body whose every
+    /// particle stays below the linear gate freezes with zeroed velocities.
+    /// Runs once per [`PhysicsEngine::step`], after the substeps.
+    fn update_sleep(&mut self, dt: f32) {
+        for (h, b) in self.bodies.iter_mut().enumerate() {
+            if b.body_type != BodyType::Dynamic {
+                self.rigid_asleep[h] = false;
+                self.rigid_quiet[h] = 0.0;
+                continue;
+            }
+            if self.rigid_asleep[h] {
+                continue;
+            }
+            let slow = b.velocity.length() < SLEEP_LIN && b.angular_velocity.length() < SLEEP_ANG;
+            if slow {
+                self.rigid_quiet[h] += dt;
+                if self.rigid_quiet[h] >= SLEEP_TIME {
+                    self.rigid_asleep[h] = true;
+                    b.sleep_staticify();
+                }
+            } else {
+                self.rigid_quiet[h] = 0.0;
+            }
+        }
+        for (s, soft) in self.soft_bodies.iter_mut().enumerate() {
+            if self.soft_sleep[s].asleep {
+                for p in &mut soft.particles {
+                    p.velocity = Vec3::ZERO;
+                }
+                continue;
+            }
+            let slow = soft
+                .particles
+                .iter()
+                .all(|p| p.velocity.length() < SLEEP_LIN);
+            if slow {
+                self.soft_sleep[s].quiet += dt;
+                if self.soft_sleep[s].quiet >= SLEEP_TIME {
+                    self.soft_sleep[s].asleep = true;
+                    for p in &mut soft.particles {
+                        p.velocity = Vec3::ZERO;
+                    }
+                }
+            } else {
+                self.soft_sleep[s].quiet = 0.0;
+            }
+        }
+    }
+
+    /// Reconcile the soft↔rigid touch set at the final poses and queue
+    /// begin/end events per `(soft body, rigid body)` pair. Touching is
+    /// overlap (`dist ≤ 0`) plus a [`CONTACT_BEGIN_SLOP`] grace band (only
+    /// previous pairs are re-checked against the band, so resting jitter
+    /// emits no flicker); frozen pairs keep their prior state (sleep emits
+    /// no transitions — sequential-impulse parity).
+    fn reconcile_soft_events(&mut self) {
+        let n_bodies = self.bodies.len();
+        let mut current = BTreeSet::new();
+        for c in self.discover_soft_contacts() {
+            current.insert((c.soft, c.particle, c.body));
+        }
+        // Grace band for previously touching triples missing from the fresh
+        // overlap set (solver residuals live here).
+        let missing: Vec<(usize, usize, usize)> =
+            self.soft_touch.difference(&current).copied().collect();
+        for (s, p, b) in missing {
+            let (Some(soft), Some(body)) = (self.soft_bodies.get(s), self.bodies.get(b)) else {
+                continue;
+            };
+            if soft.contact_radius <= 0.0 {
+                continue;
+            }
+            let Some(particle) = soft.particles.get(p) else {
+                continue;
+            };
+            let sphere = Shape::Sphere {
+                radius: soft.contact_radius,
+            };
+            let d = shape_distance(
+                ShapeRef {
+                    shape: &sphere,
+                    pos: particle.position,
+                    rot: Quat::IDENTITY,
+                },
+                ShapeRef {
+                    shape: &body.shape,
+                    pos: body.position,
+                    rot: body.orientation,
+                },
+            );
+            if d.dist.is_finite() && d.dist <= CONTACT_BEGIN_SLOP {
+                current.insert((s, p, b));
+            }
+        }
+        // Frozen pairs keep their prior state.
+        for &(s, p, b) in &self.soft_touch {
+            if s < self.soft_bodies.len()
+                && b < n_bodies
+                && p < self.soft_bodies[s].particles.len()
+                && self.soft_sleep[s].asleep
+                && (self.bodies[b].body_type != BodyType::Dynamic || self.rigid_asleep[b])
+                && !current.contains(&(s, p, b))
+            {
+                current.insert((s, p, b));
+            }
+        }
+        let previous = std::mem::replace(&mut self.soft_touch, current);
+        // The warm-start cache only holds live pairs from here on.
+        self.soft_lambda_cache
+            .retain(|k, _| self.soft_touch.contains(k));
+        let pair_set = |set: &BTreeSet<(usize, usize, usize)>| {
+            let mut pairs: Vec<(usize, usize)> = set.iter().map(|&(s, _, b)| (s, b)).collect();
+            pairs.sort_unstable();
+            pairs.dedup();
+            pairs
+        };
+        let before = pair_set(&previous);
+        let after = pair_set(&self.soft_touch);
+        for (s, b) in after.iter().filter(|k| !before.contains(k)) {
+            self.soft_contact_events.push(SoftContactEvent {
+                soft: SoftHandle::from(*s),
+                body: BodyHandle::from(*b),
+                kind: ContactEventKind::Begin,
+            });
+        }
+        for (s, b) in before.iter().filter(|k| !after.contains(k)) {
+            self.soft_contact_events.push(SoftContactEvent {
+                soft: SoftHandle::from(*s),
+                body: BodyHandle::from(*b),
+                kind: ContactEventKind::End,
+            });
+        }
+    }
+
     /// Canonical key for the no-collide joint set.
     fn pair_key(a: usize, b: usize) -> (usize, usize) {
         (a.min(b), a.max(b))
@@ -856,10 +1528,14 @@ impl PhysicsEngine for XpbdEngine {
             }
             self.substep(h);
         }
+        self.reconcile_soft_events();
+        self.update_sleep(dt);
     }
 
     fn add_body(&mut self, body: RigidBody) -> BodyHandle {
         self.bodies.push(body);
+        self.rigid_asleep.push(false);
+        self.rigid_quiet.push(0.0);
         BodyHandle::from(self.bodies.len() - 1)
     }
 
@@ -870,6 +1546,8 @@ impl PhysicsEngine for XpbdEngine {
         }
         let last = self.bodies.len() - 1;
         self.bodies.swap_remove(hi);
+        self.rigid_asleep.swap_remove(hi);
+        self.rigid_quiet.swap_remove(hi);
         let map = |h: usize| if h == last { hi } else { h };
         self.joints.retain(|j| j.a != hi && j.b != hi);
         for j in &mut self.joints {
@@ -877,6 +1555,10 @@ impl PhysicsEngine for XpbdEngine {
             j.b = map(j.b);
         }
         self.rebuild_joint_pairs();
+        // Indices shifted: soft caches keyed by body index go stale.
+        self.soft_lambda_cache.clear();
+        self.soft_touch.clear();
+        self.soft_contact_events.clear();
     }
 
     fn get_body(&self, handle: BodyHandle) -> Option<&RigidBody> {
@@ -930,6 +1612,8 @@ impl PhysicsEngine for XpbdEngine {
             a: ia,
             b: ib,
             kind: model,
+            spec: kind,
+            reference: JointReference::from(resolved),
             la: resolved.la,
             lb: resolved.lb,
             ax_a: resolved.ax_a,
@@ -938,6 +1622,10 @@ impl PhysicsEngine for XpbdEngine {
             q_ref: resolved.ref_quat,
         });
         self.rebuild_joint_pairs();
+        // A new joint changes the constraint set: wake both members so a
+        // frozen assembly cannot hold a stale pose (SI parity on edits).
+        self.wake_rigid(ia);
+        self.wake_rigid(ib);
         Ok(JointHandle::from(self.joints.len() - 1))
     }
 
@@ -987,6 +1675,50 @@ impl PhysicsEngine for XpbdEngine {
             distance: h.t,
         })
     }
+
+    fn wake_body(&mut self, handle: BodyHandle) {
+        self.wake_rigid(handle.index());
+    }
+}
+
+/// Whether the [`crate::Engine`] orchestrator can migrate this joint onto
+/// the XPBD path: ball, revolute, prismatic, fixed and distance solve
+/// structurally here (see [`XpbdEngine::add_joint`]). Wheel needs a
+/// compliant suspension spring, gear couples other joints and six-DOF needs
+/// per-axis configs — all rejected rather than silently mis-solved, so the
+/// orchestrator parks them outside the migration instead of panicking.
+pub(crate) fn xpbd_supports_joint(kind: &JointKind) -> bool {
+    matches!(
+        kind,
+        JointKind::Ball { .. }
+            | JointKind::Revolute { .. }
+            | JointKind::Prismatic { .. }
+            | JointKind::Fixed { .. }
+            | JointKind::Distance { .. }
+    )
+}
+
+/// Drop XPBD-unsupported joints from a migration snapshot, keeping the
+/// survivors in stable order with gear references remapped (same
+/// [`crate::migration::joint_remap`] discipline as body-removal cleanup).
+/// Bodies and soft bodies are untouched, so their handles never move —
+/// only joint handles past a dropped joint compact.
+pub(crate) fn retain_supported_joints(joints: &mut Vec<JointSnapshot>) {
+    let kinds: Vec<JointKind> = joints.iter().map(|j| j.spec).collect();
+    let removed: Vec<bool> = kinds.iter().map(|k| !xpbd_supports_joint(k)).collect();
+    if removed.iter().all(|&r| !r) {
+        return;
+    }
+    let remap = crate::migration::joint_remap(&kinds, removed);
+    let mut old = 0;
+    joints.retain_mut(|j| {
+        let keep = remap[old].is_some();
+        old += 1;
+        if keep {
+            crate::migration::remap_gear(&mut j.spec, &remap);
+        }
+        keep
+    });
 }
 
 /// XPBD scalar update (Macklin et al. 2016, Eq. 18):
@@ -1419,6 +2151,317 @@ mod tests {
         assert!(
             body.particles.iter().all(|p| p.position.is_finite()),
             "no NaN in landed cube"
+        );
+    }
+
+    /// Layer/mask filtering on the soft side: a soft cube whose mask
+    /// couples with nothing falls straight through the floor, while an
+    /// identical default-filter cube rests on it.
+    #[test]
+    fn soft_layer_mask_filters_coupling() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -5.0, 0.0),
+            Vec3::splat(5.0),
+            0.0,
+        ));
+        let coupled = engine.add_soft_body(SoftBody::soft_cube(
+            Vec3::new(-1.5, 2.0, -0.5),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        ));
+        let mut ghost_body = SoftBody::soft_cube(Vec3::new(0.5, 2.0, -0.5), 1.0, 1.0, 0.0, 0.0);
+        ghost_body.collision_mask = 0;
+        let ghost = engine.add_soft_body(ghost_body);
+        for h in [coupled, ghost] {
+            engine.get_soft_body_mut(h).expect("cube mut").damping = 4.0;
+        }
+        for _ in 0..240 {
+            engine.step(1.0 / 60.0);
+        }
+        let min_y = |engine: &XpbdEngine, h: SoftHandle| {
+            engine
+                .get_soft_body(h)
+                .expect("cube survives")
+                .particles
+                .iter()
+                .map(|p| p.position.y)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            (min_y(&engine, coupled) - 0.1).abs() < 0.15,
+            "coupled cube rests at ~0.1, got {}",
+            min_y(&engine, coupled)
+        );
+        assert!(
+            min_y(&engine, ghost) < -1.0,
+            "masked-out cube must fall through, got {}",
+            min_y(&engine, ghost)
+        );
+    }
+
+    /// Coulomb friction in soft↔rigid contacts: the same cube on the same
+    /// 12° incline sticks with high soft friction and slides with zero.
+    #[test]
+    fn soft_friction_holds_cube_on_incline() {
+        use crate::soft::SoftBody;
+
+        fn slide(mu: f32) -> f32 {
+            let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+            engine.set_soft_friction(mu);
+            let angle = 12.0f32.to_radians();
+            let tilt = Quat::from_rotation_z(angle);
+            let mut ramp = RigidBody::new_box(Vec3::ZERO, Vec3::new(5.0, 0.25, 5.0), 0.0);
+            ramp.orientation = tilt;
+            engine.add_body(ramp);
+            // Drop a small cube just above the tilted top face.
+            let surface = tilt * Vec3::new(0.0, 0.25, 0.0);
+            let n = tilt * Vec3::Y;
+            let cube = engine.add_soft_body(SoftBody::soft_cube(
+                surface + n * 0.6 - Vec3::new(0.25, 0.0, 0.25),
+                0.5,
+                1.0,
+                0.0,
+                0.0,
+            ));
+            engine.get_soft_body_mut(cube).expect("cube mut").damping = 4.0;
+            let com_x = |engine: &XpbdEngine| {
+                let body = engine.get_soft_body(cube).expect("cube survives");
+                body.particles.iter().map(|p| p.position.x).sum::<f32>()
+                    / body.particles.len() as f32
+            };
+            for _ in 0..60 {
+                engine.step(1.0 / 60.0);
+            }
+            let x0 = com_x(&engine);
+            for _ in 0..240 {
+                engine.step(1.0 / 60.0);
+            }
+            com_x(&engine) - x0
+        }
+        let stuck = slide(1.0);
+        let loose = slide(0.0);
+        assert!(
+            stuck.abs() < 0.2,
+            "high friction must hold the cube, slid {stuck}"
+        );
+        // Downhill is −X for a +12° Z-rotation (the +X edge rises).
+        assert!(
+            loose < -0.6,
+            "zero friction must let the cube slide downhill, slid {loose}"
+        );
+    }
+
+    /// Manifold stability through warm-started normal impulses: a rigid
+    /// slab dropped onto a settled soft cube rests on it instead of
+    /// sinking through, and the support cache stays live. (The slab spans
+    /// the whole cube: a narrow box would fit between the corner
+    /// particles — the D1 cube is a wireframe, not a solid.)
+    #[test]
+    fn soft_warm_start_keeps_stack_stable() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -5.0, 0.0),
+            Vec3::splat(5.0),
+            0.0,
+        ));
+        let cube = engine.add_soft_body(SoftBody::soft_cube(
+            Vec3::new(-0.5, 2.0, -0.5),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        ));
+        engine.get_soft_body_mut(cube).expect("cube mut").damping = 4.0;
+        for _ in 0..240 {
+            engine.step(1.0 / 60.0);
+        }
+        let top = engine
+            .get_soft_body(cube)
+            .expect("cube survives")
+            .particles
+            .iter()
+            .map(|p| p.position.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let slab = engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, top + 0.6, 0.0),
+            Vec3::new(0.6, 0.2, 0.6),
+            2.0,
+        ));
+        for _ in 0..240 {
+            engine.step(1.0 / 60.0);
+        }
+        let b = engine.get_body(slab).expect("slab survives");
+        assert!(
+            b.position.y - 0.2 > top - 0.5,
+            "slab must rest on the cube, center at {} (cube top was {top})",
+            b.position.y
+        );
+        assert!(
+            b.velocity.length() < 0.4,
+            "stack must calm, slab speed {}",
+            b.velocity.length()
+        );
+        let body = engine.get_soft_body(cube).expect("cube survives");
+        assert!(
+            body.particles.iter().all(|p| p.position.is_finite()),
+            "no NaN in loaded cube"
+        );
+        assert!(
+            !engine.soft_lambda_cache.is_empty(),
+            "warm-start cache must hold the resting support"
+        );
+    }
+
+    /// Particle CCD: a 300 m/s particle (0.25 m per substep — past both
+    /// faces of the 0.04 m wall in one jump) stops at the thin wall
+    /// instead of tunneling through it.
+    #[test]
+    fn fast_particle_ccd_stops_at_thin_wall() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::ZERO);
+        engine.add_body(RigidBody::new_box(
+            Vec3::ZERO,
+            Vec3::new(0.02, 1.0, 1.0),
+            0.0,
+        ));
+        let mut chain = SoftBody::chain(Vec3::new(1.0, 0.0, 0.0), Vec3::NEG_X, 1, 0.2, 1.0, 0.0);
+        // Single-particle body: unpin the builder's anchor (soft_self test idiom).
+        chain.particles[0].inv_mass = 1.0;
+        let h = engine.add_soft_body(chain);
+        engine.get_soft_body_mut(h).expect("particle mut").particles[0].velocity =
+            Vec3::new(-300.0, 0.0, 0.0);
+        for _ in 0..60 {
+            engine.step(1.0 / 60.0);
+        }
+        let p = &engine
+            .get_soft_body(h)
+            .expect("particle survives")
+            .particles[0];
+        assert!(p.position.is_finite(), "no NaN in swept particle");
+        // Wall faces at ±0.02, particle radius 0.04: rest at ≈ 0.06.
+        assert!(
+            p.position.x > -0.2 && p.position.x < 0.5,
+            "particle must stop at the wall, got x = {}",
+            p.position.x
+        );
+    }
+
+    /// Sleep parity (0.15 m/s + 0.5 s): settled rigid and soft bodies
+    /// freeze with zeroed velocities, and a fast impact wakes the soft
+    /// body back up.
+    #[test]
+    fn settled_bodies_sleep_and_impacts_wake() {
+        use crate::soft::SoftBody;
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -5.0, 0.0),
+            Vec3::splat(5.0),
+            0.0,
+        ));
+        let bx = engine.add_body(RigidBody::new_box(
+            Vec3::new(3.0, 2.0, 0.0),
+            Vec3::splat(0.5),
+            1.0,
+        ));
+        let cube = engine.add_soft_body(SoftBody::soft_cube(
+            Vec3::new(-0.5, 2.0, -0.5),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        ));
+        engine.get_soft_body_mut(cube).expect("cube mut").damping = 4.0;
+        for _ in 0..300 {
+            engine.step(1.0 / 60.0);
+        }
+        assert!(engine.is_asleep(bx), "settled rigid box must sleep");
+        assert!(engine.is_soft_asleep(cube), "settled soft cube must sleep");
+        assert!(
+            engine.get_body(bx).expect("box").velocity.length() < 1e-6,
+            "sleep zeroes rigid velocity"
+        );
+        // Wide slab dropped flat onto the sleeping cube (spans the whole
+        // wireframe, so the impact lands with full normal speed): it must
+        // wake the cube back up.
+        let slab = engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::new(0.6, 0.2, 0.6),
+            2.0,
+        ));
+        engine.get_body_mut(slab).expect("slab mut").velocity = Vec3::new(0.0, -10.0, 0.0);
+        for _ in 0..30 {
+            engine.step(1.0 / 60.0);
+        }
+        assert!(
+            !engine.is_soft_asleep(cube),
+            "impact must wake the soft body"
+        );
+    }
+
+    /// Soft↔rigid begin/end events: touchdown emits one Begin per pair,
+    /// resting emits no flicker, teleporting away emits the End.
+    #[test]
+    fn soft_contact_begin_end_events() {
+        use crate::soft::SoftBody;
+        use crate::trigger::ContactEventKind;
+
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        let floor = engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -5.0, 0.0),
+            Vec3::splat(5.0),
+            0.0,
+        ));
+        let cube = engine.add_soft_body(SoftBody::soft_cube(
+            Vec3::new(-0.5, 2.0, -0.5),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        ));
+        engine.get_soft_body_mut(cube).expect("cube mut").damping = 4.0;
+        let mut saw_begin = false;
+        for _ in 0..240 {
+            engine.step(1.0 / 60.0);
+            for e in engine.drain_soft_contact_events() {
+                if e.soft == cube && e.body == floor && e.kind == ContactEventKind::Begin {
+                    saw_begin = true;
+                }
+            }
+            if saw_begin {
+                break;
+            }
+        }
+        assert!(saw_begin, "touchdown must emit Begin");
+        for _ in 0..30 {
+            engine.step(1.0 / 60.0);
+        }
+        let rest = engine.drain_soft_contact_events();
+        assert!(
+            rest.is_empty(),
+            "resting contact must not flicker, got {rest:?}"
+        );
+        {
+            let body = engine.get_soft_body_mut(cube).expect("cube mut");
+            for p in &mut body.particles {
+                p.position += Vec3::new(0.0, 5.0, 0.0);
+            }
+        }
+        engine.wake_soft_body(cube);
+        engine.step(1.0 / 60.0);
+        let ends = engine.drain_soft_contact_events();
+        assert!(
+            ends.iter()
+                .any(|e| e.soft == cube && e.body == floor && e.kind == ContactEventKind::End),
+            "teleport away must emit End, got {ends:?}"
         );
     }
 }

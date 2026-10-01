@@ -8,11 +8,13 @@
 //! backend-neutral snapshot. GPU resource ownership and editor protocol
 //! details remain outside this module.
 //!
-//! Soft bodies (PLAN B2/D1.5) ride the same seam through a dedicated
-//! [`XpbdEngine`]: entities carrying a [`SoftBody`] lane component are bound
-//! to solver handles, stepped with the fixed clock, and written back as
-//! world-space [`MeshDesc::Custom`] soups (identity transform) that the
-//! existing extraction path draws unchanged.
+//! Soft bodies (PLAN B2/D1.5) ride the same seam through the [`Engine`]
+//! orchestrator on its XPBD path: entities carrying a [`SoftBody`] lane
+//! component promote the world onto [`SolverKind::Xpbd`], are bound to
+//! solver handles, stepped with the fixed clock together with the rigid
+//! bodies (so soft↔rigid coupling runs in the one substep loop), and
+//! written back as world-space [`MeshDesc::Custom`] soups (identity
+//! transform) that the existing extraction path draws unchanged.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -27,7 +29,7 @@ use ornis_core::{
 };
 use ornis_physics::soft_render::{tube_indices, tube_positions};
 use ornis_physics::{
-    BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind, XpbdEngine,
+    BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind,
 };
 #[cfg(test)]
 use ornis_render::extract_render_data;
@@ -55,15 +57,16 @@ pub struct RopeMesh {
 /// render-frame time and invokes this domain at a bounded fixed 60 Hz
 /// timestep.
 ///
-/// Soft bodies live in a second solver ([`XpbdEngine`], PLAN B2/D1) with its
-/// own entity bindings: the rigid orchestrator does not know particles, so
-/// sharing one solver would silently drop the coupling. Mesh upload reads
-/// the soft solver directly (world-space soup, identity transform).
+/// Soft bodies live in the same orchestrator ([`SolverKind::Xpbd`], PLAN
+/// B2/D1): the first [`SoftBody`] lane component promotes the world onto
+/// the XPBD path, so rigid + soft share one substep loop and soft↔rigid
+/// coupling actually runs. Mesh upload reads the orchestrator directly
+/// (world-space soup, identity transform).
 pub struct PhysicsRuntime {
     solver: ornis_physics::Engine,
     bindings: HashMap<Entity, BodyHandle>,
-    soft_solver: XpbdEngine,
     soft_bindings: HashMap<Entity, SoftHandle>,
+    gravity: Vec3,
     changed: bool,
 }
 
@@ -73,8 +76,8 @@ impl PhysicsRuntime {
         Self {
             solver: ornis_physics::Engine::new(SolverKind::SequentialImpulse, gravity),
             bindings: HashMap::new(),
-            soft_solver: XpbdEngine::new(gravity),
             soft_bindings: HashMap::new(),
+            gravity,
             changed: false,
         }
     }
@@ -182,7 +185,6 @@ impl PhysicsRuntime {
             .collect();
 
         self.solver.step(delta_seconds);
-        self.soft_solver.step(delta_seconds);
 
         self.changed |= before.iter().any(|(entity, position, orientation)| {
             let Some(&handle) = self.bindings.get(entity) else {
@@ -224,16 +226,25 @@ impl PhysicsRuntime {
         std::mem::take(&mut self.changed)
     }
 
-    /// Binds newly added [`SoftBody`] lane components into the soft solver.
-    /// Solver state is authoritative after registration (no per-step pose
-    /// sync in D1 — there is no gameplay intent for particles yet).
+    /// Binds newly added [`SoftBody`] lane components into the solver.
+    /// The first soft body promotes the world onto [`SolverKind::Xpbd`]
+    /// (one-way: the promotion rebuilds the rigid scene 1:1, handles stay
+    /// valid); solver state is authoritative after registration (no
+    /// per-step pose sync in D1 — there is no gameplay intent for
+    /// particles yet).
     fn sync_soft_in(&mut self, soft: &ComponentStore<SoftBody>) {
         self.remove_stale_soft_bindings(soft);
+        if soft.entities.is_empty() {
+            return;
+        }
+        if self.solver.kind() != SolverKind::Xpbd {
+            self.solver.set_solver_kind(SolverKind::Xpbd, self.gravity);
+        }
         for (&entity, source) in soft.entities.iter().zip(&soft.data) {
             if self.soft_bindings.contains_key(&entity) {
                 continue;
             }
-            let handle = self.soft_solver.add_soft_body(source.clone());
+            let handle = self.solver.add_soft_body(source.clone());
             self.soft_bindings.insert(entity, handle);
         }
     }
@@ -258,7 +269,7 @@ impl PhysicsRuntime {
             } else {
                 None
             };
-            self.soft_solver.remove_soft_body(handle);
+            self.solver.remove_soft_body(handle);
             self.soft_bindings.remove(&entity);
             if let Some(moved) = moved {
                 self.soft_bindings.insert(moved, handle);
@@ -281,7 +292,7 @@ impl PhysicsRuntime {
         ropes: Option<&ComponentStore<RopeMesh>>,
     ) {
         for (&entity, &handle) in &self.soft_bindings {
-            let Some(body) = self.soft_solver.get_soft_body(handle) else {
+            let Some(body) = self.solver.get_soft_body(handle) else {
                 continue;
             };
             if body.surface.is_empty() {

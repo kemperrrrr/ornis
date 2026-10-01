@@ -427,10 +427,10 @@ pub struct AvbdEngine {
     /// hosts alternate sim/skip and hitch frames catch up — wall speed is
     /// exact on average without touching the tuned single-step dynamics.
     time_debt: f32,
-    /// Opt-in GPU AVBD dispatch (rung 1, `gpu` feature): attached via
+    /// Opt-in GPU AVBD dispatch (rung 2, `gpu` feature): attached via
     /// [`AvbdEngine::set_gpu_avbd`], default off. Device execution stays
-    /// gated on the stub's `runs_on_device` (false until a real dispatch
-    /// lands), so an attached stub transparently takes the CPU fallback.
+    /// gated on the stub's `runs_on_device` (false on the CPU fallback
+    /// path), so an attached stub transparently takes the CPU fallback.
     #[cfg(feature = "gpu")]
     gpu_avbd: Option<crate::gpu::GpuAvbdStub>,
     /// Completed steps that fell back to CPU while a GPU dispatch was
@@ -679,7 +679,7 @@ impl AvbdEngine {
     }
 
     /// Attach (`Some`) or detach (`None`) the opt-in GPU AVBD dispatch
-    /// (rung 1, `gpu` feature). Default off. An attached stub still runs
+    /// (rung 2, `gpu` feature). Default off. An attached stub still runs
     /// the CPU fallback until its `runs_on_device` turns true (no adapter
     /// path yet), so attaching never changes the trajectory — only the
     /// [`AvbdEngine::gpu_fallback_steps`] counter moves. The rung-2 device
@@ -1099,8 +1099,8 @@ impl PhysicsEngine for AvbdEngine {
         if !dt.is_finite() || dt <= 0.0 {
             return;
         }
-        // Opt-in GPU dispatch (rung 1): device execution stays gated on the
-        // stub's `runs_on_device` (false until a real dispatch lands), so an
+        // Opt-in GPU dispatch (rung 2): device execution stays gated on the
+        // stub's `runs_on_device` (false on the CPU fallback path), so an
         // attached stub records the CPU fallback and the accumulator below
         // runs unchanged — attaching never changes the trajectory.
         #[cfg(feature = "gpu")]
