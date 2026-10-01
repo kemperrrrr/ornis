@@ -57,31 +57,27 @@ fn ride_clip(target: Entity) -> AnimClip {
         looping: false,
         tracks: vec![AnimTrack {
             entity: target,
-            translation: KeyTrack {
-                keys: vec![
-                    Key {
-                        time: 0.0,
-                        value: Vec3::ZERO,
-                    },
-                    Key {
-                        time: 1.0,
-                        value: Vec3::new(10.0, 0.0, 0.0),
-                    },
-                ],
-            },
-            rotation: KeyTrack {
-                keys: vec![
-                    Key {
-                        time: 0.0,
-                        value: Quat::IDENTITY,
-                    },
-                    Key {
-                        time: 1.0,
-                        value: Quat::from_rotation_y(FRAC_PI_2),
-                    },
-                ],
-            },
-            scale: KeyTrack { keys: Vec::new() },
+            translation: KeyTrack::linear(vec![
+                Key {
+                    time: 0.0,
+                    value: Vec3::ZERO,
+                },
+                Key {
+                    time: 1.0,
+                    value: Vec3::new(10.0, 0.0, 0.0),
+                },
+            ]),
+            rotation: KeyTrack::linear(vec![
+                Key {
+                    time: 0.0,
+                    value: Quat::IDENTITY,
+                },
+                Key {
+                    time: 1.0,
+                    value: Quat::from_rotation_y(FRAC_PI_2),
+                },
+            ]),
+            scale: KeyTrack::linear(Vec::new()),
         }],
     }
 }

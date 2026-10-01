@@ -58,27 +58,23 @@ fn identity_transform() -> TransformDesc {
 }
 
 fn vec_keys(value: Vec3) -> KeyTrack<Vec3> {
-    KeyTrack {
-        keys: vec![Key { time: 0.0, value }],
-    }
+    KeyTrack::linear(vec![Key { time: 0.0, value }])
 }
 
 fn quat_keys(value: Quat) -> KeyTrack<Quat> {
-    KeyTrack {
-        keys: vec![Key { time: 0.0, value }],
-    }
+    KeyTrack::linear(vec![Key { time: 0.0, value }])
 }
 
 fn no_translation() -> KeyTrack<Vec3> {
-    KeyTrack { keys: Vec::new() }
+    KeyTrack::linear(Vec::new())
 }
 
 fn no_rotation() -> KeyTrack<Quat> {
-    KeyTrack { keys: Vec::new() }
+    KeyTrack::linear(Vec::new())
 }
 
 fn no_scale() -> KeyTrack<Vec3> {
-    KeyTrack { keys: Vec::new() }
+    KeyTrack::linear(Vec::new())
 }
 
 /// Two-joint skeleton: root plus one child (bind matrices identity).

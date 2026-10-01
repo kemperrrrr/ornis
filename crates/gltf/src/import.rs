@@ -9,6 +9,7 @@ use gltf::mesh::util::{ReadIndices, ReadJoints, ReadTexCoords, ReadWeights};
 use gltf::scene::Transform;
 use gltf::{Buffer, Document, Gltf, Node, Primitive, Skin};
 
+use crate::anim::{assemble_clips, node_to_joint_map};
 use crate::base64;
 use crate::geom::{self, Mat4};
 use crate::textures::resolve_images;
@@ -135,11 +136,15 @@ fn import_gltf(
             scene.name().unwrap_or("scene")
         );
     }
-    import.stats.skipped_clips = document.animations().len() as u32;
+    let node_to_joint = node_to_joint_map(document);
+    let (skel_clips, anim_clips) =
+        assemble_clips(document, buffers, &node_to_joint, &mut import.stats);
     Ok(LoadedScene {
         name: scene.name().unwrap_or("scene").to_string(),
         entities: import.entities,
         skins: import.skins,
+        skel_clips,
+        anim_clips,
         stats: import.stats,
     })
 }
@@ -968,15 +973,128 @@ mod tests {
     }
 
     #[test]
-    fn animations_skip_with_counter() {
-        // Phase C imports skin only: two dummy clips skip honestly while
-        // the skinned primitive still imports.
+    fn joint_animation_assembles_skel_clip() {
+        // Animated joint (node 0 is the skin's only joint): two `LINEAR`
+        // translation clips assemble to skeletal clips, nothing object-side.
         let mut fixture = skinned_triangle();
         fixture.animations = 2;
         let scene = load_slice(&build_glb(&fixture)).expect("animated parses");
         assert_eq!(scene.entities.len(), 1, "skin still imports");
-        assert_eq!(scene.stats.skipped_clips, 2);
+        assert_eq!(scene.skel_clips.len(), 2);
+        assert!(scene.anim_clips.is_empty());
+        for clip in &scene.skel_clips {
+            assert_eq!(clip.duration, 1.0);
+            assert_eq!(clip.tracks.len(), 1);
+            let track = &clip.tracks[0];
+            assert_eq!(track.joint, 0);
+            assert_eq!(track.translation.keys.len(), 2);
+            assert_eq!(track.translation.keys[0].time, 0.0);
+            assert_eq!(track.translation.keys[1].time, 1.0);
+            assert_eq!(track.translation.keys[1].value, [1.0, 0.0, 0.0]);
+            assert_eq!(
+                track.translation.interpolation,
+                crate::LoadedInterpolation::Linear
+            );
+            // Untargeted joint channels stay empty (= identity, not untouched).
+            assert!(track.rotation.keys.is_empty());
+            assert!(track.scale.keys.is_empty());
+        }
+        assert_eq!(scene.stats.skipped_clips, 0);
+        assert_eq!(scene.stats.skipped_cubicspline, 0);
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn plain_node_animation_assembles_anim_clip() {
+        // Unskinned node: one `LINEAR` translation clip assembles to an
+        // object clip keyed by node index, nothing skeletal-side.
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        let scene = load_slice(&build_glb(&fixture)).expect("animated parses");
+        assert!(scene.skel_clips.is_empty());
+        assert_eq!(scene.anim_clips.len(), 1);
+        let clip = &scene.anim_clips[0];
+        assert_eq!(clip.name, "clip_0");
+        assert_eq!(clip.duration, 1.0);
+        assert!(clip.looping);
+        assert_eq!(clip.tracks.len(), 1);
+        let track = &clip.tracks[0];
+        assert_eq!(track.entity, ornis_core::Entity::new(0));
+        assert_eq!(track.translation.keys.len(), 2);
+        assert_eq!(track.translation.keys[1].value, [1.0, 0.0, 0.0]);
+        assert_eq!(
+            track.translation.interpolation,
+            crate::LoadedInterpolation::Linear
+        );
+        // Untargeted object channels stay empty (= untouched, size survives).
+        assert!(track.rotation.keys.is_empty());
+        assert!(track.scale.keys.is_empty());
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn step_interpolation_assembles_stepped_tracks() {
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        fixture.anim_interp = crate::fixtures::FixtureInterp::Step;
+        let scene = load_slice(&build_glb(&fixture)).expect("step parses");
+        assert_eq!(scene.anim_clips.len(), 1);
+        assert_eq!(
+            scene.anim_clips[0].tracks[0].translation.interpolation,
+            crate::LoadedInterpolation::Step
+        );
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn cubicspline_channels_skip_with_counter() {
+        // `CUBICSPLINE` never assembles: the channel counts, the clip has no
+        // tracks and counts as skipped too.
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        fixture.anim_interp = crate::fixtures::FixtureInterp::CubicSpline;
+        let scene = load_slice(&build_glb(&fixture)).expect("spline parses");
+        assert!(scene.skel_clips.is_empty());
+        assert!(scene.anim_clips.is_empty());
+        assert_eq!(scene.stats.skipped_cubicspline, 1);
+        assert_eq!(scene.stats.skipped_clips, 1);
         assert!(!scene.stats.is_clean());
+    }
+
+    #[test]
+    fn rotation_path_assembles_normalized_quats() {
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        fixture.anim_path = crate::fixtures::FixtureAnimPath::Rotation;
+        let scene = load_slice(&build_glb(&fixture)).expect("rotation parses");
+        assert_eq!(scene.anim_clips.len(), 1);
+        let track = &scene.anim_clips[0].tracks[0];
+        assert_eq!(track.rotation.keys.len(), 2);
+        for key in &track.rotation.keys {
+            let length_squared: f32 = key
+                .value
+                .iter()
+                .map(|component| component * component)
+                .sum();
+            assert!((length_squared - 1.0).abs() < 1e-6);
+        }
+        assert!(track.translation.keys.is_empty());
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn scale_path_on_joint_assembles_skel_scale() {
+        let mut fixture = skinned_triangle();
+        fixture.animations = 1;
+        fixture.anim_path = crate::fixtures::FixtureAnimPath::Scale;
+        let scene = load_slice(&build_glb(&fixture)).expect("scale parses");
+        assert_eq!(scene.skel_clips.len(), 1);
+        let track = &scene.skel_clips[0].tracks[0];
+        assert_eq!(track.scale.keys.len(), 2);
+        assert_eq!(track.scale.keys[0].value, [1.0, 1.0, 1.0]);
+        assert_eq!(track.scale.keys[1].value, [2.0, 2.0, 2.0]);
+        assert!(track.translation.keys.is_empty());
+        assert!(scene.stats.is_clean());
     }
 
     #[test]

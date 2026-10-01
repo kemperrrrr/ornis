@@ -111,6 +111,8 @@ mod tests {
                 },
             }],
             skins: Vec::new(),
+            skel_clips: Vec::new(),
+            anim_clips: Vec::new(),
             stats: ornis_gltf::ImportStats::default(),
         };
         let scene = scene_from_gltf(&scene);

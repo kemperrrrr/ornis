@@ -59,33 +59,72 @@ pub struct Key<T> {
 /// An empty track means "channel absent": sampling returns [`None`] and the
 /// sampler leaves the placement component untouched instead of zeroing it
 /// (so entity size survives when no scale track exists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpolation {
+    /// Blend between surrounding keys (`lerp`/`slerp`).
+    Linear,
+    /// Hold the earlier key (glTF `STEP`).
+    Step,
+}
+
+/// One sorted channel of keys (translation, rotation or scale).
+///
+/// An empty track means "channel absent": sampling returns [`None`] and the
+/// sampler leaves the placement component untouched instead of zeroing it
+/// (so entity size survives when no scale track exists).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyTrack<T> {
     /// Keys sorted by ascending `time`.
     pub keys: Vec<Key<T>>,
+    /// How to blend between keys.
+    pub interpolation: Interpolation,
+}
+
+impl<T> KeyTrack<T> {
+    /// Builds a linearly blended track.
+    pub fn linear(keys: Vec<Key<T>>) -> Self {
+        Self {
+            keys,
+            interpolation: Interpolation::Linear,
+        }
+    }
+
+    /// Builds a hold-previous track (glTF `STEP`).
+    pub fn stepped(keys: Vec<Key<T>>) -> Self {
+        Self {
+            keys,
+            interpolation: Interpolation::Step,
+        }
+    }
 }
 
 impl KeyTrack<Vec3> {
     /// Samples the translation/scale channel at clip time `t` seconds.
     ///
-    /// Linear interpolation between the surrounding keys, clamped to the
-    /// end keys outside the key range. Returns [`None`] when the track is
-    /// empty (channel absent).
+    /// Linear blends between the surrounding keys, Step holds the earlier
+    /// key; both clamp to the end keys outside the key range. Returns
+    /// [`None`] when the track is empty (channel absent).
     pub fn sample(&self, t: f32) -> Option<Vec3> {
         let (before, after, alpha) = segment(&self.keys, t)?;
-        Some(before.value.lerp(after.value, alpha))
+        match self.interpolation {
+            Interpolation::Linear => Some(before.value.lerp(after.value, alpha)),
+            Interpolation::Step => Some(before.value),
+        }
     }
 }
 
 impl KeyTrack<Quat> {
     /// Samples the rotation channel at clip time `t` seconds.
     ///
-    /// Spherical interpolation ([`Quat::slerp`]) between the surrounding
-    /// keys, clamped to the end keys outside the key range. Returns [`None`]
-    /// when the track is empty (channel absent).
+    /// Linear blends ([`Quat::slerp`]) between the surrounding keys, Step
+    /// holds the earlier key; both clamp to the end keys outside the key
+    /// range. Returns [`None`] when the track is empty (channel absent).
     pub fn sample(&self, t: f32) -> Option<Quat> {
         let (before, after, alpha) = segment(&self.keys, t)?;
-        Some(before.value.slerp(after.value, alpha))
+        match self.interpolation {
+            Interpolation::Linear => Some(before.value.slerp(after.value, alpha)),
+            Interpolation::Step => Some(before.value),
+        }
     }
 }
 
@@ -397,21 +436,35 @@ mod tests {
     use std::any::TypeId;
 
     fn vec_track(keys: &[(f32, Vec3)]) -> KeyTrack<Vec3> {
-        KeyTrack {
-            keys: keys
-                .iter()
+        KeyTrack::linear(
+            keys.iter()
                 .map(|&(time, value)| Key { time, value })
                 .collect(),
-        }
+        )
     }
 
     fn quat_track(keys: &[(f32, Quat)]) -> KeyTrack<Quat> {
-        KeyTrack {
-            keys: keys
-                .iter()
+        KeyTrack::linear(
+            keys.iter()
                 .map(|&(time, value)| Key { time, value })
                 .collect(),
-        }
+        )
+    }
+
+    fn stepped_vec_track(keys: &[(f32, Vec3)]) -> KeyTrack<Vec3> {
+        KeyTrack::stepped(
+            keys.iter()
+                .map(|&(time, value)| Key { time, value })
+                .collect(),
+        )
+    }
+
+    fn stepped_quat_track(keys: &[(f32, Quat)]) -> KeyTrack<Quat> {
+        KeyTrack::stepped(
+            keys.iter()
+                .map(|&(time, value)| Key { time, value })
+                .collect(),
+        )
     }
 
     #[test]
@@ -455,7 +508,7 @@ mod tests {
 
     #[test]
     fn empty_track_samples_nothing() {
-        let track: KeyTrack<Vec3> = KeyTrack { keys: Vec::new() };
+        let track: KeyTrack<Vec3> = KeyTrack::linear(Vec::new());
         assert_eq!(track.sample(0.5), None);
     }
 
@@ -477,6 +530,61 @@ mod tests {
             mid.angle_between(expected) < 1e-5,
             "halfway slerp must be 45°, got {mid:?}"
         );
+    }
+
+    #[test]
+    fn step_translation_holds_before_value() {
+        let track = stepped_vec_track(&[(0.0, Vec3::ZERO), (1.0, Vec3::new(10.0, 0.0, 0.0))]);
+        assert_eq!(track.sample(0.5), Some(Vec3::ZERO));
+        assert_eq!(track.sample(0.99), Some(Vec3::ZERO));
+    }
+
+    #[test]
+    fn step_rotation_holds_before_value() {
+        let from = Quat::IDENTITY;
+        let to = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let track = stepped_quat_track(&[(0.0, from), (1.0, to)]);
+        let mid = track.sample(0.5).expect("mid key");
+        assert!(
+            mid.angle_between(from) < 1e-5,
+            "step must hold the earlier key, got {mid:?}"
+        );
+    }
+
+    #[test]
+    fn step_clamps_outside_key_range() {
+        let track = stepped_vec_track(&[(1.0, Vec3::ONE), (2.0, Vec3::new(3.0, 3.0, 3.0))]);
+        assert_eq!(track.sample(0.0), Some(Vec3::ONE));
+        assert_eq!(track.sample(99.0), Some(Vec3::new(3.0, 3.0, 3.0)));
+        let quat_track =
+            stepped_quat_track(&[(1.0, Quat::IDENTITY), (2.0, Quat::from_rotation_y(1.0))]);
+        assert_eq!(quat_track.sample(0.0), Some(Quat::IDENTITY));
+    }
+
+    #[test]
+    fn step_returns_key_value_on_exact_time() {
+        let track = stepped_vec_track(&[
+            (0.0, Vec3::ZERO),
+            (1.0, Vec3::ONE),
+            (2.0, Vec3::new(3.0, 3.0, 3.0)),
+        ]);
+        assert_eq!(track.sample(1.0), Some(Vec3::ONE));
+        assert_eq!(track.sample(2.0), Some(Vec3::new(3.0, 3.0, 3.0)));
+    }
+
+    #[test]
+    fn step_empty_track_samples_nothing() {
+        let track: KeyTrack<Vec3> = KeyTrack::stepped(Vec::new());
+        assert_eq!(track.sample(0.5), None);
+        let quat_track: KeyTrack<Quat> = KeyTrack::stepped(Vec::new());
+        assert_eq!(quat_track.sample(0.5), None);
+    }
+
+    #[test]
+    fn step_single_key_track_holds_forever() {
+        let track = stepped_vec_track(&[(0.0, Vec3::new(1.0, 2.0, 3.0))]);
+        assert_eq!(track.sample(0.0), Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(track.sample(57.0), Some(Vec3::new(1.0, 2.0, 3.0)));
     }
 
     #[test]

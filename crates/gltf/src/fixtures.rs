@@ -142,6 +142,50 @@ pub(crate) struct FixtureSkin {
     /// Skeleton root node index (`None` = field absent).
     pub(crate) skeleton: Option<usize>,
 }
+/// Sampler interpolation of the dummy animation clips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixtureInterp {
+    /// `LINEAR` (assembles to a linear track).
+    Linear,
+    /// `STEP` (assembles to a stepped track).
+    Step,
+    /// `CUBICSPLINE` (skips honestly with a counter).
+    CubicSpline,
+}
+
+impl FixtureInterp {
+    /// glTF sampler `interpolation` name.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "LINEAR",
+            Self::Step => "STEP",
+            Self::CubicSpline => "CUBICSPLINE",
+        }
+    }
+}
+
+/// Target path of the dummy animation clips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixtureAnimPath {
+    /// `translation` (`VEC3` outputs).
+    Translation,
+    /// `rotation` (`VEC4` unit-quaternion outputs).
+    Rotation,
+    /// `scale` (`VEC3` outputs).
+    Scale,
+}
+
+impl FixtureAnimPath {
+    /// glTF channel `target.path` name.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Translation => "translation",
+            Self::Rotation => "rotation",
+            Self::Scale => "scale",
+        }
+    }
+}
+
 /// One primitive + node tree assembled to bytes by the builders below.
 #[derive(Debug, Clone)]
 pub(crate) struct Fixture {
@@ -159,8 +203,12 @@ pub(crate) struct Fixture {
     pub(crate) influence: Option<FixtureInfluence>,
     /// `skins` array; mesh nodes link by [`FixtureNode::skin`].
     pub(crate) skins: Vec<FixtureSkin>,
-    /// Dummy `LINEAR` animations targeting node 0 (clip-skip counter case).
+    /// Dummy animations targeting node 0 (clip-assembly cases).
     pub(crate) animations: usize,
+    /// Sampler interpolation of the dummy animation clips.
+    pub(crate) anim_interp: FixtureInterp,
+    /// Target path of the dummy animation clips.
+    pub(crate) anim_path: FixtureAnimPath,
     /// Node tree; scene roots at node `0`.
     pub(crate) nodes: Vec<FixtureNode>,
     /// Mesh `name` (`None` = unnamed).
@@ -193,6 +241,8 @@ pub(crate) fn triangle() -> Fixture {
         influence: None,
         skins: Vec::new(),
         animations: 0,
+        anim_interp: FixtureInterp::Linear,
+        anim_path: FixtureAnimPath::Translation,
         nodes: vec![FixtureNode {
             name: Some("tri-node".to_string()),
             mesh: true,
@@ -435,9 +485,11 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
         }
     }
 
-    // Animation clip data: one shared keyframe pair per dummy clip (input
-    // times + translation outputs), referenced by the `animations` JSON below.
-    let mut anim_parts: Vec<(usize, usize)> = Vec::new();
+    // Animation clip data: one input/output pair per dummy clip (input
+    // times + TRS outputs), referenced by the `animations` JSON below.
+    // `CUBICSPLINE` needs triple outputs per input (in-tangent, vertex,
+    // out-tangent); tangents are zero, vertices carry the key values.
+    let mut anim_parts: Vec<(usize, usize, usize)> = Vec::new();
     for _ in 0..fixture.animations {
         let mut raw = Vec::new();
         for time in [0.0f32, 1.0] {
@@ -445,14 +497,39 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
         }
         push(&raw, &mut bin, &mut views);
         let input_view = views.len() - 1;
+        let keys: Vec<Vec<f32>> = match (fixture.anim_path, fixture.anim_interp) {
+            (FixtureAnimPath::Rotation, FixtureInterp::CubicSpline) => vec![vec![0.0; 4]; 6],
+            (FixtureAnimPath::Rotation, _) => {
+                vec![vec![0.0, 0.0, 0.0, 1.0], vec![0.0, 0.0, 0.0, 1.0]]
+            }
+            (FixtureAnimPath::Scale, FixtureInterp::CubicSpline) => vec![
+                vec![0.0, 0.0, 0.0],
+                vec![1.0, 1.0, 1.0],
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![2.0, 2.0, 2.0],
+                vec![0.0, 0.0, 0.0],
+            ],
+            (FixtureAnimPath::Scale, _) => vec![vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0]],
+            (_, FixtureInterp::CubicSpline) => vec![
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+            ],
+            (_, _) => vec![vec![0.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]],
+        };
+        let output_len = keys.len();
         let mut raw = Vec::new();
-        for vertex in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]] {
-            for component in vertex {
+        for value in &keys {
+            for component in value {
                 raw.extend_from_slice(&component.to_le_bytes());
             }
         }
         push(&raw, &mut bin, &mut views);
-        anim_parts.push((input_view, views.len() - 1));
+        anim_parts.push((input_view, views.len() - 1, output_len));
     }
 
     // Fixture images: encoded with the same `image` crate the loader uses.
@@ -707,18 +784,24 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
             ibm_accessors.push(None);
         }
     }
-    // Dummy animation clips: one translation channel on node 0 per entry
-    // (input times + outputs from the shared `anim_parts` views above).
+    // Dummy animation clips: one channel on node 0 per entry
+    // (input times + outputs from the `anim_parts` views above).
     let mut anim_json_parts: Vec<String> = Vec::new();
-    for (clip, (input_view, output_view)) in anim_parts.iter().enumerate() {
+    for (clip, (input_view, output_view, output_len)) in anim_parts.iter().enumerate() {
         let input = accessors.len();
         accessors.push(accessor_json(*input_view, 5126, 2, "SCALAR"));
         let output = accessors.len();
-        accessors.push(accessor_json(*output_view, 5126, 2, "VEC3"));
+        let (kind, count) = match fixture.anim_path {
+            FixtureAnimPath::Rotation => ("VEC4", *output_len),
+            FixtureAnimPath::Translation | FixtureAnimPath::Scale => ("VEC3", *output_len),
+        };
+        accessors.push(accessor_json(*output_view, 5126, count, kind));
+        let path = fixture.anim_path.as_str();
+        let interp = fixture.anim_interp.as_str();
         anim_json_parts.push(format!(
             "{{\"name\":\"clip_{clip}\",\"channels\":[{{\"sampler\":0,\
-            \"target\":{{\"node\":0,\"path\":\"translation\"}}}}],\
-            \"samplers\":[{{\"input\":{input},\"interpolation\":\"LINEAR\",\
+            \"target\":{{\"node\":0,\"path\":\"{path}\"}}}}],\
+            \"samplers\":[{{\"input\":{input},\"interpolation\":\"{interp}\",\
             \"output\":{output}}}]}}"
         ));
     }

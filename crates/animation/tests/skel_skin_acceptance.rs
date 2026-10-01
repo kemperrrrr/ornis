@@ -89,19 +89,15 @@ fn two_bone_clip() -> SkelClip {
         duration: 1.0,
         tracks: vec![JointTrack {
             joint: JointId::from_raw(1),
-            translation: KeyTrack {
-                keys: vec![Key {
-                    time: 0.0,
-                    value: Vec3::new(1.0, 0.0, 0.0),
-                }],
-            },
-            rotation: KeyTrack {
-                keys: vec![Key {
-                    time: 0.0,
-                    value: Quat::from_rotation_z(FRAC_PI_2),
-                }],
-            },
-            scale: KeyTrack { keys: Vec::new() },
+            translation: KeyTrack::linear(vec![Key {
+                time: 0.0,
+                value: Vec3::new(1.0, 0.0, 0.0),
+            }]),
+            rotation: KeyTrack::linear(vec![Key {
+                time: 0.0,
+                value: Quat::from_rotation_z(FRAC_PI_2),
+            }]),
+            scale: KeyTrack::linear(Vec::new()),
         }],
     }
 }
