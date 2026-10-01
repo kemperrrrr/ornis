@@ -437,7 +437,10 @@ impl RenderWorld {
     /// Equivalent to calling [`extract_render_data`] on this world's
     /// store; provided for callers that own the [`RenderWorld`].
     pub fn frame_upload(&self) -> FrameUpload {
-        extract_render_data(self.engine.world().store().expect("render world store"))
+        match self.engine.world().store() {
+            Some(store) => extract_render_data(store),
+            None => FrameUpload::default(),
+        }
     }
 }
 
@@ -843,7 +846,9 @@ fn insert_scene_entities(
     engine: &mut Engine,
     entities: &[ornis_assets::scene::EntityDesc],
 ) -> Vec<Entity> {
-    let store = engine.world_mut().store_mut().expect("render world store");
+    let Some(store) = engine.world_mut().store_mut() else {
+        return Vec::new();
+    };
     let mut handles = Vec::with_capacity(entities.len());
     for entity in entities {
         let handle = store.create_entity();

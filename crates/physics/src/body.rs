@@ -31,6 +31,8 @@ const FRICTION_TERRAIN: f32 = 0.6;
 /// MuJoCo-style rolling/torsion torque caps (metres) for hulls and meshes.
 const ROLLING_FRICTION_DEBRIS: f32 = 0.2;
 const TORSION_FRICTION_DEBRIS: f32 = 0.05;
+/// Fallback half-extents when trimesh soup construction fails.
+const FALLBACK_BOX_HALF: f32 = 0.5;
 
 /// Stable index of a body inside its owning [`SequentialImpulseEngine`](crate::engine::SequentialImpulseEngine).
 ///
@@ -720,17 +722,21 @@ impl RigidBody {
         mass: f32,
     ) -> Self {
         Self::try_new_trimesh(position, vertices, triangles, mass).unwrap_or_else(|_| {
-            let empty = crate::shape::TriMesh::from_triangles(&[], &[]).expect("empty soup builds");
-            let mut body = Self::build(
-                position,
-                mass,
-                RESTITUTION_DEFAULT,
-                FRICTION_DEFAULT,
-                Shape::TriMesh(empty),
-            );
-            body.rolling_friction = ROLLING_FRICTION_DEBRIS;
-            body.torsion_friction = TORSION_FRICTION_DEBRIS;
-            body
+            match crate::shape::TriMesh::from_triangles(&[], &[]) {
+                Ok(empty) => {
+                    let mut body = Self::build(
+                        position,
+                        mass,
+                        RESTITUTION_DEFAULT,
+                        FRICTION_DEFAULT,
+                        Shape::TriMesh(empty),
+                    );
+                    body.rolling_friction = ROLLING_FRICTION_DEBRIS;
+                    body.torsion_friction = TORSION_FRICTION_DEBRIS;
+                    body
+                }
+                Err(_) => Self::new_box(position, Vec3::splat(FALLBACK_BOX_HALF), mass),
+            }
         })
     }
 

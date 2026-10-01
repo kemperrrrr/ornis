@@ -322,10 +322,7 @@ impl EditableMesh {
 
     /// Preview working copy, cloning the base on first edit of a session.
     fn preview_or_clone(&mut self) -> &mut crate::MeshData {
-        if self.preview.is_none() {
-            self.preview = Some(self.base.clone());
-        }
-        self.preview.as_mut().expect("preview just created")
+        self.preview.get_or_insert_with(|| self.base.clone())
     }
 
     /// Bump the preview sequence, record dirty flags and frame time.

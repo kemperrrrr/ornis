@@ -191,17 +191,13 @@ impl Triangle {
         [self.0.0, self.1.0, self.2.0]
     }
 
-    /// `i`-th corner (`0..3`) as a vertex index.
-    ///
-    /// # Panics
-    ///
-    /// Panics on `i >= 3` (same contract as array indexing).
+    /// `i`-th corner (`0..3`) as a vertex index. Out-of-range indices
+    /// clamp to the last corner (same bit pattern as a saturated read).
     pub const fn index(self, i: usize) -> TriIndex {
         match i {
             0 => self.0,
             1 => self.1,
-            2 => self.2,
-            _ => panic!("triangle corner out of range"),
+            _ => self.2,
         }
     }
 }

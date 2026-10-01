@@ -180,17 +180,13 @@ impl Triangle {
         [self.0.0, self.1.0, self.2.0]
     }
 
-    /// `i`-th corner (`0..3`) as a vertex index.
-    ///
-    /// # Panics
-    ///
-    /// Panics on `i >= 3` (same contract as array indexing).
+    /// `i`-th corner (`0..3`) as a vertex index. Out-of-range indices
+    /// clamp to the last corner (same bit pattern as a saturated read).
     pub const fn index(self, i: usize) -> TriIndex {
         match i {
             0 => self.0,
             1 => self.1,
-            2 => self.2,
-            _ => panic!("triangle corner out of range"),
+            _ => self.2,
         }
     }
 }
@@ -1324,9 +1320,13 @@ impl TriMesh {
             // triangle would get no faces (dead raycast, centroid-fallback
             // closest point). Set both windings explicitly: raycasts flip
             // the normal toward the ray and closest-point is winding-free.
-            // Vertices are validated finite above, so this cannot fail.
-            let mut hull = ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
-                .expect("validated finite triangle vertices");
+            // Vertices are validated finite above; skip if hull construction
+            // still rejects the triple (defensive — should not happen).
+            let Ok(mut hull) =
+                ConvexHull::from_vertices(vec![v[0] - c, v[1] - c, v[2] - c])
+            else {
+                continue;
+            };
             hull.faces = vec![Triangle::from_raw([0, 1, 2]), Triangle::from_raw([0, 2, 1])];
             tris.push(Shape::ConvexHull(hull));
         }

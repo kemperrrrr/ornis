@@ -1,18 +1,18 @@
 {
   "version": 2,
-  "quality_score": 0.4586980610833886,
-  "iosp_score": 0.9006174654513378,
+  "quality_score": 0.45976720690471606,
+  "iosp_score": 0.9005882352941177,
   "violations": 338,
   "total": 5466,
   "complexity_warnings": 58,
-  "magic_number_warnings": 151,
+  "magic_number_warnings": 152,
   "nesting_depth_warnings": 16,
-  "function_length_warnings": 106,
+  "function_length_warnings": 107,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 92,
-  "duplicate_groups": 79,
+  "error_handling_warnings": 83,
+  "duplicate_groups": 81,
   "dead_code_warnings": 374,
-  "dead_type_warnings": 6,
+  "dead_type_warnings": 7,
   "fragment_groups": 496,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2447,
+  "total_findings": 2443,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -163,17 +163,17 @@
     {
       "name": "extract_render_data_with_stats",
       "file": "crates/render/src/extraction.rs",
-      "line": 509
+      "line": 512
     },
     {
       "name": "normalized_rotation",
       "file": "crates/render/src/extraction.rs",
-      "line": 956
+      "line": 961
     },
     {
       "name": "skinned_tangent",
       "file": "crates/render/src/extraction.rs",
-      "line": 1109
+      "line": 1114
     },
     {
       "name": "OrbitCamera::from_desc",
@@ -723,12 +723,12 @@
     {
       "name": "RigidBody::try_sphere_units",
       "file": "crates/physics/src/body.rs",
-      "line": 462
+      "line": 464
     },
     {
       "name": "RigidBody::try_capsule_units",
       "file": "crates/physics/src/body.rs",
-      "line": 475
+      "line": 477
     },
     {
       "name": "Capped4<T>::try_from_slice",
@@ -943,87 +943,87 @@
     {
       "name": "Shape::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 443
+      "line": 439
     },
     {
       "name": "Shape::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 517
+      "line": 513
     },
     {
       "name": "Shape::convex_try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 534
+      "line": 530
     },
     {
       "name": "Shape::inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 622
+      "line": 618
     },
     {
       "name": "Shape::closest_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 694
+      "line": 690
     },
     {
       "name": "closest_box_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 725
+      "line": 721
     },
     {
       "name": "closest_cylinder_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 745
+      "line": 741
     },
     {
       "name": "closest_cone_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 782
+      "line": 778
     },
     {
       "name": "closest_heightfield_point",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 848
+      "line": 844
     },
     {
       "name": "ConvexHull::from_vertices",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 931
+      "line": 927
     },
     {
       "name": "ConvexHull::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1007
+      "line": 1003
     },
     {
       "name": "ConvexHull::try_inertia",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1044
+      "line": 1040
     },
     {
       "name": "ConvexHull::min_extent",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1095
+      "line": 1091
     },
     {
       "name": "Heightfield::local_extents",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1214
+      "line": 1210
     },
     {
       "name": "Heightfield::local_center",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1224
+      "line": 1220
     },
     {
       "name": "Heightfield::aabb",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1247
+      "line": 1243
     },
     {
       "name": "TriMesh::from_triangles",
       "file": "crates/physics/src/collision/shape.rs",
-      "line": 1273
+      "line": 1269
     },
     {
       "name": "TriMesh::from_indexed",

@@ -118,7 +118,7 @@ pub fn read_orbit_camera(engine: &Engine) -> Option<OrbitCamera> {
         .world()
         .resources()
         .get::<Mutex<OrbitCamera>>()
-        .map(|camera| camera.lock().expect("orbit camera lock").clone())
+        .map(|camera| camera.lock().unwrap_or_else(|e| e.into_inner()).clone())
 }
 
 /// Once-per-frame system that applies the backend-neutral input snapshot to
@@ -143,7 +143,10 @@ impl System for OrbitCameraSystem {
         let Some(camera) = resources.get::<Mutex<OrbitCamera>>() else {
             return;
         };
-        camera.lock().expect("orbit camera lock").apply_input(input);
+        camera
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .apply_input(input);
     }
 }
 
