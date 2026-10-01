@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.2510084164873114,
+  "quality_score": 0.2685500907866345,
   "iosp_score": 0.9006174654513378,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 947,
+  "magic_number_warnings": 870,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 104,
   "unsafe_warnings": 8,
@@ -16,7 +16,7 @@
   "fragment_groups": 522,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
-  "srp_module_warnings": 81,
+  "srp_module_warnings": 82,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 3353,
+  "total_findings": 3277,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -73,7 +73,7 @@
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
-      "line": 303
+      "line": 310
     },
     {
       "name": "install_object_animation",
@@ -83,12 +83,12 @@
     {
       "name": "PhysicsRuntime::sync_soft_in",
       "file": "crates/app/src/physics_runtime.rs",
-      "line": 235
+      "line": 238
     },
     {
       "name": "normalized_rotation",
       "file": "crates/app/src/physics_runtime.rs",
-      "line": 544
+      "line": 547
     },
     {
       "name": "check_builtin_arity",
@@ -113,22 +113,22 @@
     {
       "name": "assemble_clips",
       "file": "crates/gltf/src/anim.rs",
-      "line": 173
+      "line": 176
     },
     {
       "name": "read_channel",
       "file": "crates/gltf/src/anim.rs",
-      "line": 399
+      "line": 402
     },
     {
       "name": "make_vec_track",
       "file": "crates/gltf/src/anim.rs",
-      "line": 494
+      "line": 497
     },
     {
       "name": "make_quat_track",
       "file": "crates/gltf/src/anim.rs",
-      "line": 503
+      "line": 506
     },
     {
       "name": "import_gltf",
@@ -148,12 +148,12 @@
     {
       "name": "LightDesc::point_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 539
+      "line": 552
     },
     {
       "name": "LightDesc::spot_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 567
+      "line": 580
     },
     {
       "name": "bench_recording",
@@ -258,47 +258,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1124
+      "line": 1132
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3029
+      "line": 3042
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3232
+      "line": 3245
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3436
+      "line": 3449
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3607
+      "line": 3620
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3633
+      "line": 3646
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3715
+      "line": 3728
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3742
+      "line": 3755
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4191
+      "line": 4204
     },
     {
       "name": "RenderFrame3D::build",
@@ -1563,7 +1563,7 @@
     {
       "name": "EditableMesh::poll_exact",
       "file": "crates/mesh-editor/src/editable.rs",
-      "line": 283
+      "line": 286
     },
     {
       "name": "RefitBudget::decide",
