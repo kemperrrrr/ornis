@@ -21,13 +21,10 @@ pub const APP_HOST: &str = "app";
 /// First page loaded into the webview.
 pub const START_PAGE: &str = "index.html";
 
-/// URL the webview opens at startup.
-///
-/// # Examples
-///
-/// ```
-/// assert_eq!(ornis_shell::start_url(), "ornis://app/index.html");
-/// ```
+/// URL the webview opens at startup (`ornis://app/index.html` — covered
+/// by the `start_url_is_app_index` unit test below; not a doctest because
+/// doctest binaries bypass the mold linker flags and the wry/webkit link
+/// dies on CI resources).
 pub fn start_url() -> String {
     format!("{SCHEME}://{APP_HOST}/{START_PAGE}")
 }
@@ -175,6 +172,11 @@ pub fn content_type_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_url_is_app_index() {
+        assert_eq!(start_url(), "ornis://app/index.html");
+    }
 
     #[test]
     fn editor_dir_cli_arg_wins_over_env_and_default() {
