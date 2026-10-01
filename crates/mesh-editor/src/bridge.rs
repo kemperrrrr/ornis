@@ -7,6 +7,8 @@
 
 use manifold_rust::{manifold::Manifold, types::Error as ManifoldError};
 
+use crate::mesh_data::TRIANGLE_VERTS;
+
 /// Kernel-side failure of a boolean operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BridgeError {
@@ -28,7 +30,7 @@ pub enum BridgeError {
 pub fn to_manifold(mesh: &crate::MeshData) -> Result<Manifold, BridgeError> {
     mesh.validate().map_err(|_| BridgeError::InvalidInput)?;
     let mut gl = manifold_rust::types::MeshGL {
-        num_prop: 3,
+        num_prop: TRIANGLE_VERTS as u32,
         vert_properties: mesh
             .positions
             .iter()

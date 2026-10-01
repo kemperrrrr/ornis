@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use crate::mesh_data::TRIANGLE_VERTS;
+
 /// Recompute smooth area-weighted normals in place.
 ///
 /// With `faces == None` every normal is rebuilt. With `Some(faces)` only
@@ -24,8 +26,8 @@ pub fn recompute_normals(mesh: &mut crate::MeshData, faces: Option<&[u32]>) {
         if f >= tri_count {
             continue;
         }
-        for k in 0..3 {
-            verts.insert(mesh.indices[3 * f + k]);
+        for k in 0..TRIANGLE_VERTS {
+            verts.insert(mesh.indices[TRIANGLE_VERTS * f + k]);
         }
     }
     if verts.is_empty() {
@@ -34,7 +36,7 @@ pub fn recompute_normals(mesh: &mut crate::MeshData, faces: Option<&[u32]>) {
     // Seam: every face touching a dirty vertex contributes.
     let mut seam = Vec::new();
     for f in 0..tri_count {
-        if (0..3).any(|k| verts.contains(&mesh.indices[3 * f + k])) {
+        if (0..TRIANGLE_VERTS).any(|k| verts.contains(&mesh.indices[TRIANGLE_VERTS * f + k])) {
             seam.push(f);
         }
     }
@@ -67,7 +69,7 @@ pub fn to_physics_arrays(mesh: &crate::MeshData) -> (Vec<glam::Vec3>, Vec<[u32; 
         .collect();
     let tris = mesh
         .indices
-        .chunks_exact(3)
+        .chunks_exact(TRIANGLE_VERTS)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
     (verts, tris)
@@ -120,9 +122,9 @@ fn accumulate_all(mesh: &mut crate::MeshData, range: std::ops::Range<usize>) {
 fn accumulate_faces(mesh: &mut crate::MeshData, faces: &[usize], filter: Option<&HashSet<u32>>) {
     for &f in faces {
         let [a, b, c] = [
-            mesh.indices[3 * f],
-            mesh.indices[3 * f + 1],
-            mesh.indices[3 * f + 2],
+            mesh.indices[TRIANGLE_VERTS * f],
+            mesh.indices[TRIANGLE_VERTS * f + 1],
+            mesh.indices[TRIANGLE_VERTS * f + 2],
         ];
         let pa = mesh.positions[a as usize];
         let pb = mesh.positions[b as usize];

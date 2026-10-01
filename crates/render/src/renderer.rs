@@ -117,6 +117,12 @@ const SHADOW_FIT_FAR_PAD: f32 = 10.0;
 const SHADOW_UP_AXIS_DOT: f32 = 0.98;
 /// Floor for light range / attenuation denominators (m).
 const LIGHT_RANGE_EPS: f32 = 1e-3;
+/// Initial per-object instance buffer capacity (grows on demand).
+const INITIAL_MAX_OBJECTS: u32 = 256;
+/// Initial material buffer capacity (grows on demand).
+const INITIAL_MAX_MATERIALS: u32 = 64;
+/// Default ambient when no scene lighting has been uploaded yet.
+const DEFAULT_AMBIENT_RGB: [f32; 3] = [0.03, 0.03, 0.05];
 
 /// Depth-bias pair for the shadow pre-pass (2D layers and cube faces
 /// share it). The constant term is negligible on `Depth32Float`; the
@@ -139,6 +145,8 @@ pub const SHADOW_CUBE_SIZE: u32 = 512;
 /// Near plane shared by the cube-face renders and the analytic
 /// sampling formula — change both together.
 pub const SHADOW_CUBE_NEAR: f32 = 0.1;
+/// Faces on a cube-map shadow (must match [`CUBE_FACES`]).
+const CUBE_FACE_COUNT: usize = 6;
 /// Cube-face axes (direction from the light) with the ups that reproduce
 /// the hardware cube-sampling frame (OpenGL/Metal convention: +X: (−z,−y),
 /// −X: (+z,−y), +Y: (+x,+z), −Y: (+x,−z), +Z: (+x,−y), −Z: (−x,−y)).
@@ -147,7 +155,7 @@ pub const SHADOW_CUBE_NEAR: f32 = 0.1;
 /// NDC y+1 at texture row 0, the sampler reads v=0 from the top).
 /// Keep both together: correct depths at mirrored texels are what the
 /// sampler then misses (all-lit point shadows).
-const CUBE_FACES: [([f32; 3], [f32; 3]); 6] = [
+const CUBE_FACES: [([f32; 3], [f32; 3]); CUBE_FACE_COUNT] = [
     ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
     ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
     ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
@@ -849,9 +857,9 @@ pub struct Renderer3D {
     /// cube slot (a separate index space from the 2D layers above —
     /// the evaluator picks the pool by light kind).
     shadow_cube_maps: wgpu::Texture,
-    shadow_cube_views: [wgpu::TextureView; POINT_SHADOW_CUBES * 6],
+    shadow_cube_views: [wgpu::TextureView; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     shadow_cube_array_view: wgpu::TextureView,
-    shadow_cube_vp_buffers: [wgpu::Buffer; POINT_SHADOW_CUBES * 6],
+    shadow_cube_vp_buffers: [wgpu::Buffer; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     /// Mirrored depth-only pipeline for the cube faces (their VPs
     /// mirror NDC y — see [`point_cube_face_vp`] — so winding flips).
     shadow_cube_pipeline: wgpu::RenderPipeline,
@@ -964,7 +972,7 @@ fn spot_shadow_vp(
 /// negation is a reflection — winding flips, so cube faces render
 /// through the mirrored shadow pipeline (`front_face: Cw`).
 fn point_cube_face_vp(position: [f32; 3], range: f32, face: usize) -> [[f32; 4]; 4] {
-    let (dir, up) = CUBE_FACES[face % 6];
+    let (dir, up) = CUBE_FACES[face % CUBE_FACE_COUNT];
     let eye = glam::Vec3::from_array(position);
     let view = glam::camera::rh::view::look_at_mat4(
         eye,
@@ -1267,7 +1275,7 @@ fn build_lighting_uniform(
                     direction: norm_dir(*direction),
                     position: [position[0], position[1], position[2], 1.0],
                     color: pack_light_color(*color, *intensity, exposure),
-                    params: [range.max(1e-3), ci.max(co), co.min(ci), layer],
+                    params: [range.max(LIGHT_RANGE_EPS), ci.max(co), co.min(ci), layer],
                     shadow_vp: vp,
                 }
             }
@@ -1282,9 +1290,9 @@ fn build_lighting_uniform(
             dropped_shadows += 1;
         }
     }
-    let mut cube_face_vps = Vec::with_capacity(cube_lights.len() * 6);
+    let mut cube_face_vps = Vec::with_capacity(cube_lights.len() * CUBE_FACE_COUNT);
     for (position, range, _) in &cube_lights {
-        for face in 0..6 {
+        for face in 0..CUBE_FACE_COUNT {
             cube_face_vps.push(point_cube_face_vp(*position, *range, face));
         }
     }
@@ -1340,8 +1348,8 @@ impl Renderer3D {
         surface_config: &wgpu::SurfaceConfiguration,
         sample_count: u32,
     ) -> Self {
-        let max_objects = 256u32;
-        let max_materials = 64u32;
+        let max_objects = INITIAL_MAX_OBJECTS;
+        let max_materials = INITIAL_MAX_MATERIALS;
         let format = surface_config.format;
         let width = surface_config.width.max(1);
         let height = surface_config.height.max(1);
@@ -1575,7 +1583,12 @@ impl Renderer3D {
         });
 
         let default_lighting = LightingUniform {
-            ambient_color: [0.03, 0.03, 0.05, 1.0],
+            ambient_color: [
+                DEFAULT_AMBIENT_RGB[0],
+                DEFAULT_AMBIENT_RGB[1],
+                DEFAULT_AMBIENT_RGB[2],
+                1.0,
+            ],
             lights: [GpuLight {
                 kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
                 direction: [0.0; 4],
@@ -2318,16 +2331,16 @@ impl Renderer3D {
         device: &wgpu::Device,
     ) -> (
         wgpu::Texture,
-        [wgpu::TextureView; POINT_SHADOW_CUBES * 6],
+        [wgpu::TextureView; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
         wgpu::TextureView,
-        [wgpu::Buffer; POINT_SHADOW_CUBES * 6],
+        [wgpu::Buffer; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     ) {
         let shadow_cube_maps = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("point shadow cubes"),
             size: wgpu::Extent3d {
                 width: SHADOW_CUBE_SIZE,
                 height: SHADOW_CUBE_SIZE,
-                depth_or_array_layers: (POINT_SHADOW_CUBES * 6) as u32,
+                depth_or_array_layers: (POINT_SHADOW_CUBES * CUBE_FACE_COUNT) as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -2410,8 +2423,8 @@ impl Renderer3D {
             );
         }
         for cube in 0..cubes as usize {
-            for face in 0..6 {
-                let idx = cube * 6 + face;
+            for face in 0..CUBE_FACE_COUNT {
+                let idx = cube * CUBE_FACE_COUNT + face;
                 self.render_shadow_layer(
                     device,
                     encoder,
@@ -2530,8 +2543,8 @@ impl Renderer3D {
             );
         }
         for cube in 0..cubes as usize {
-            for face in 0..6 {
-                let idx = cube * 6 + face;
+            for face in 0..CUBE_FACE_COUNT {
+                let idx = cube * CUBE_FACE_COUNT + face;
                 self.render_skinned_shadow_layer(
                     device,
                     encoder,
@@ -3479,7 +3492,7 @@ impl Renderer3D {
             );
         }
         self.point_shadow_count.store(
-            (built.cube_face_vps.len() / 6) as u32,
+            (built.cube_face_vps.len() / CUBE_FACE_COUNT) as u32,
             std::sync::atomic::Ordering::Relaxed,
         );
         *self.last_light_stats.write().expect("light stats lock") = built.stats;

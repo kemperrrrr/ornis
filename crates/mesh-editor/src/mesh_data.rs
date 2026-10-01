@@ -9,6 +9,9 @@
 //! cheaply (lengths, bounds); closedness is reported back by the kernel
 //! via [`crate::BridgeError`].
 
+/// Indices per triangle (flat soup alignment).
+pub(crate) const TRIANGLE_VERTS: usize = 3;
+
 /// Canonical editable triangle mesh (engine source of truth).
 #[derive(Debug, Clone, Default)]
 pub struct MeshData {
@@ -67,7 +70,7 @@ impl MeshData {
     ///
     /// Returns [`MeshError`] on the first violation found.
     pub fn validate(&self) -> Result<(), MeshError> {
-        if !self.indices.len().is_multiple_of(3) {
+        if !self.indices.len().is_multiple_of(TRIANGLE_VERTS) {
             return Err(MeshError::IndexCountNotMultipleOfThree);
         }
         if self.normals.len() != self.positions.len() {
@@ -90,7 +93,7 @@ impl MeshData {
 
     /// Number of triangles (`indices.len() / 3`).
     pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
+        self.indices.len() / TRIANGLE_VERTS
     }
 
     /// Retained heap bytes of the attribute/index arrays (no header overhead).
@@ -188,7 +191,7 @@ impl MeshData {
     /// untouched by any triangle keep their current normal.
     pub fn with_computed_normals(mut self) -> Self {
         let mut acc = vec![[0.0f32; 3]; self.positions.len()];
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.chunks_exact(TRIANGLE_VERTS) {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             // `validate` guarantees in-bounds indices, but don't panic on
             // hand-built callers that skipped it.

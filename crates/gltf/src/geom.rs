@@ -5,8 +5,17 @@
 //! fallbacks stay byte-compatible with the upload path by construction
 //! (same formulas, cited per function).
 
+/// Column / row count of a homogeneous `4×4` matrix.
+const MAT4_DIM: usize = 4;
+/// Spatial / basis axis count (`vec3`, `mat3` columns).
+const VEC3_AXES: usize = 3;
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
+/// Shepperd quaternion-from-matrix scale factor (`0.25 * s`).
+const QUAT_FROM_MAT_SCALE: f32 = 0.25;
+
 /// Column-major `4×4` matrix: `m[column][row]`, as in glTF.
-pub(crate) type Mat4 = [[f32; 4]; 4];
+pub(crate) type Mat4 = [[f32; MAT4_DIM]; MAT4_DIM];
 
 /// Identity matrix.
 pub(crate) const IDENTITY: Mat4 = [
@@ -18,11 +27,11 @@ pub(crate) const IDENTITY: Mat4 = [
 
 /// Matrix product `a * b` (column-major): applies `b` first, then `a`.
 pub(crate) fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
-    let mut out = [[0.0f32; 4]; 4];
-    for col in 0..4 {
-        for row in 0..4 {
+    let mut out = [[0.0f32; MAT4_DIM]; MAT4_DIM];
+    for col in 0..MAT4_DIM {
+        for row in 0..MAT4_DIM {
             let mut sum = 0.0;
-            for k in 0..4 {
+            for k in 0..MAT4_DIM {
                 sum += a[k][row] * b[col][k];
             }
             out[col][row] = sum;
@@ -36,8 +45,8 @@ pub(crate) fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
 pub(crate) fn mat_from_trs(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> Mat4 {
     let rot = quat_to_mat3(r);
     let mut out = IDENTITY;
-    for col in 0..3 {
-        for row in 0..3 {
+    for col in 0..VEC3_AXES {
+        for row in 0..VEC3_AXES {
             out[col][row] = rot[col][row] * s[col];
         }
     }
@@ -61,8 +70,8 @@ pub(crate) fn decompose(mat: &Mat4) -> ([f32; 3], [f32; 4], [f32; 3]) {
         [mat[1][0], mat[1][1], mat[1][2]],
         [mat[2][0], mat[2][1], mat[2][2]],
     ];
-    let mut scale = [0.0f32; 3];
-    for axis in 0..3 {
+    let mut scale = [0.0f32; VEC3_AXES];
+    for axis in 0..VEC3_AXES {
         let (x, y, z) = (cols[axis][0], cols[axis][1], cols[axis][2]);
         scale[axis] = (x * x + y * y + z * z).sqrt();
     }
@@ -107,12 +116,12 @@ fn quat_from_mat3(m: &[[f32; 3]; 3]) -> [f32; 4] {
             (m[1][2] - m[2][1]) / s,
             (m[2][0] - m[0][2]) / s,
             (m[0][1] - m[1][0]) / s,
-            0.25 * s,
+            QUAT_FROM_MAT_SCALE * s,
         ]
     } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
         let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
         [
-            0.25 * s,
+            QUAT_FROM_MAT_SCALE * s,
             (m[0][1] + m[1][0]) / s,
             (m[0][2] + m[2][0]) / s,
             (m[1][2] - m[2][1]) / s,
@@ -121,7 +130,7 @@ fn quat_from_mat3(m: &[[f32; 3]; 3]) -> [f32; 4] {
         let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
         [
             (m[0][1] + m[1][0]) / s,
-            0.25 * s,
+            QUAT_FROM_MAT_SCALE * s,
             (m[1][2] + m[2][1]) / s,
             (m[2][0] - m[0][2]) / s,
         ]
@@ -130,7 +139,7 @@ fn quat_from_mat3(m: &[[f32; 3]; 3]) -> [f32; 4] {
         [
             (m[0][2] + m[2][0]) / s,
             (m[1][2] + m[2][1]) / s,
-            0.25 * s,
+            QUAT_FROM_MAT_SCALE * s,
             (m[0][1] - m[1][0]) / s,
         ]
     }
@@ -152,7 +161,7 @@ fn mat3_det(m: &[[f32; 3]; 3]) -> f32 {
 pub(crate) fn area_weighted_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut acc = vec![[0.0f32; 3]; positions.len()];
     for tri in indices
-        .chunks_exact(3)
+        .chunks_exact(TRIANGLE_VERTS)
         .map(|c| crate::Triangle::from_raw([c[0], c[1], c[2]]))
     {
         let raw = tri.as_u32();
@@ -196,10 +205,10 @@ pub(crate) fn area_weighted_normals(positions: &[[f32; 3]], indices: &[u32]) -> 
 /// bounds into `[0, 1]`; degenerate spans collapse to `0.5` so output stays
 /// finite on degenerate soups.
 pub(crate) fn box_project_uvs(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<[f32; 2]> {
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
+    let mut min = [f32::INFINITY; VEC3_AXES];
+    let mut max = [f32::NEG_INFINITY; VEC3_AXES];
     for position in positions {
-        for axis in 0..3 {
+        for axis in 0..VEC3_AXES {
             min[axis] = min[axis].min(position[axis]);
             max[axis] = max[axis].max(position[axis]);
         }

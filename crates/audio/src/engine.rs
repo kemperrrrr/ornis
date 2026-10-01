@@ -16,6 +16,9 @@ use ornis_gameplay::Position;
 use crate::backend::{AudioBackend, AudioBackendTrait};
 use crate::source::{AudioClip, AudioSource, AudioState, ClipId, MixInput, SpatialParams};
 
+/// Listener distance below which azimuth is treated as undefined (m).
+const SPATIAL_NEAR_EPS: f32 = 0.001;
+
 /// Bridges the ECS world and the audio backend.
 ///
 /// Each [`step`](AudioEngine::step) scans every entity carrying an
@@ -134,7 +137,7 @@ impl AudioEngine {
                         source_pos(entity).map(|pos| {
                             let diff = pos - self._listener_pos;
                             let distance = diff.length();
-                            let azimuth = if distance > 0.001 {
+                            let azimuth = if distance > SPATIAL_NEAR_EPS {
                                 (diff.x / distance).asin()
                             } else {
                                 0.0

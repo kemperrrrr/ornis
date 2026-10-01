@@ -30,7 +30,7 @@ const FALLBACK_TANGENT: Vec3 = Vec3::NEG_Y;
 /// (zero-length) and reuses the last valid tangent.
 const MIN_SEGMENT_LEN_SQ: f32 = crate::constants::DEGENERATE_LEN2;
 /// Minimum ring sides for a usable tube cross-section (a triangle).
-const MIN_TUBE_SIDES: u32 = 3;
+pub const MIN_TUBE_SIDES: u32 = 3;
 /// Indices per side quad (two triangles).
 const INDICES_PER_QUAD: usize = 6;
 

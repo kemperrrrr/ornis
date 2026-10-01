@@ -27,12 +27,15 @@ use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{
     ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
 };
-use ornis_physics::soft_render::{tube_indices, tube_positions};
+use ornis_physics::soft_render::{MIN_TUBE_SIDES, tube_indices, tube_positions};
 use ornis_physics::{
     BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind,
 };
 #[cfg(test)]
 use ornis_render::extract_render_data;
+
+/// Squared length below which a quaternion is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
 
 /// Render parameters for a chain/rope soft body (PLAN B2/D1 leftover #3).
 ///
@@ -300,7 +303,7 @@ impl PhysicsRuntime {
                 let Some(rope) = ropes.get(entity) else {
                     continue;
                 };
-                if !rope.radius.is_finite() || rope.radius <= 0.0 || rope.sides < 3 {
+                if !rope.radius.is_finite() || rope.radius <= 0.0 || rope.sides < MIN_TUBE_SIDES {
                     continue;
                 }
                 let count = body.particles.len();
@@ -544,7 +547,7 @@ impl System for SoftSyncOut {
 fn normalized_rotation(rotation: [f32; 4]) -> Quat {
     let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
     let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         orientation.normalize()
     } else {
         Quat::IDENTITY

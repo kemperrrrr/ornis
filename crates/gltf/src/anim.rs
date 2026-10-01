@@ -22,6 +22,9 @@ use ornis_core::Entity;
 
 use crate::ImportStats;
 
+/// Squared length below which a quaternion is treated as degenerate.
+const DEGENERATE_LEN2: f32 = 1e-12;
+
 /// How to blend between the keys of a [`LoadedKeyTrack`].
 ///
 /// Mirrors `ornis-animation` `Interpolation` field-for-field; the wiring
@@ -511,7 +514,7 @@ fn make_quat_track(keys: Vec<LoadedKey<[f32; 4]>>, stepped: bool) -> LoadedKeyTr
 /// Normalizes a raw `(x, y, z, w)` quaternion, identity on degenerate input.
 fn normalize_quat(raw: [f32; 4]) -> [f32; 4] {
     let length_squared: f32 = raw.iter().map(|component| component * component).sum();
-    if length_squared.is_finite() && length_squared > 1e-12 {
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
         let length = length_squared.sqrt();
         [
             raw[0] / length,

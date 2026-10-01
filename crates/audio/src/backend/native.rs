@@ -16,6 +16,10 @@ use crate::source::MixInput;
 
 const SAMPLE_RATE: u32 = 48000;
 const BUFFER_FRAMES: usize = 512;
+/// cpal stream callback latency hint.
+const STREAM_LATENCY_MS: u64 = 5;
+/// Microseconds in one second (mixer sleep scaling).
+const MICROS_PER_SEC: u64 = 1_000_000;
 
 enum AudioCommand {
     Play(MixInput),
@@ -136,7 +140,7 @@ fn run_audio_thread(
             }
         },
         err_fn,
-        Some(std::time::Duration::from_millis(5)),
+        Some(std::time::Duration::from_millis(STREAM_LATENCY_MS)),
     )?;
 
     stream.play()?;
@@ -173,7 +177,7 @@ fn run_audio_thread(
         }
 
         thread::sleep(std::time::Duration::from_micros(
-            (BUFFER_FRAMES as u64 * 1_000_000) / SAMPLE_RATE as u64 / 2,
+            (BUFFER_FRAMES as u64 * MICROS_PER_SEC) / SAMPLE_RATE as u64 / 2,
         ));
     }
 

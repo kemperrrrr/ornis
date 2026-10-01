@@ -299,12 +299,19 @@ pub struct EditorSession {
     scene_roots: SceneRoots,
 }
 
+/// Earth-surface gravity magnitude along −Y (m/s²).
+const DEFAULT_GRAVITY_Y: f32 = -9.81;
+/// Default procedural sphere sector count for editor placeholders.
+const DEFAULT_SPHERE_SEGMENTS: u32 = 32;
+/// Default procedural sphere stack count for editor placeholders.
+const DEFAULT_SPHERE_RINGS: u32 = 24;
+
 impl Default for EditorSession {
     fn default() -> Self {
         let mut world = GameWorld::new();
         let engine = world.engine_mut();
         let _ = engine.world_mut().insert(SceneEnvironment::default());
-        install_physics(engine, Vec3::new(0.0, -9.81, 0.0));
+        install_physics(engine, Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
         install_gameplay(engine);
         install_gameplay_physics_bridge(engine);
         // Audio mirrors the showcase runtime: real output when a device
@@ -1285,8 +1292,8 @@ fn default_transform() -> TransformDesc {
 fn default_mesh() -> MeshDesc {
     MeshDesc::Sphere {
         radius: PositiveF32::expect_valid(1.0),
-        segments: 32,
-        rings: 24,
+        segments: DEFAULT_SPHERE_SEGMENTS,
+        rings: DEFAULT_SPHERE_RINGS,
     }
 }
 

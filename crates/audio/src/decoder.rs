@@ -18,6 +18,11 @@ use symphonia::core::meta::MetadataOptions;
 
 use crate::source::AudioClip;
 
+/// Fallback sample rate when the container omits one (Hz).
+const FALLBACK_SAMPLE_RATE: u32 = 44_100;
+/// Fallback channel count when the container omits a layout.
+const FALLBACK_CHANNELS: u16 = 2;
+
 /// Failure modes of [`decode_file`] / [`decode_bytes`].
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -53,12 +58,12 @@ fn decode_inner(
         .as_ref()
         .ok_or(DecodeError::Unsupported)?;
     let audio_params = codec_params.audio().ok_or(DecodeError::Unsupported)?;
-    let sample_rate = audio_params.sample_rate.unwrap_or(44100);
+    let sample_rate = audio_params.sample_rate.unwrap_or(FALLBACK_SAMPLE_RATE);
     let channels = audio_params
         .channels
         .as_ref()
         .map(|c| c.count() as u16)
-        .unwrap_or(2);
+        .unwrap_or(FALLBACK_CHANNELS);
 
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(audio_params, &decoder_opts)

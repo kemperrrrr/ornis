@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::mesh_data::TRIANGLE_VERTS;
+
 /// Base mesh plus optional in-progress preview and dirty tracking.
 #[derive(Debug)]
 pub struct EditableMesh {
@@ -81,13 +83,13 @@ impl EditableMesh {
                 continue;
             }
             let [a, b, c] = [
-                mesh.indices[3 * f],
-                mesh.indices[3 * f + 1],
-                mesh.indices[3 * f + 2],
+                mesh.indices[TRIANGLE_VERTS * f],
+                mesh.indices[TRIANGLE_VERTS * f + 1],
+                mesh.indices[TRIANGLE_VERTS * f + 2],
             ];
             let normal = face_normal(mesh, a, b, c);
             // Duplicate the loop, shifted along the face normal.
-            let mut loop_new = [0u32; 3];
+            let mut loop_new = [0u32; TRIANGLE_VERTS];
             for (k, v) in [a, b, c].iter().enumerate() {
                 let p = mesh.positions[*v as usize];
                 mesh.positions.push([
@@ -100,14 +102,15 @@ impl EditableMesh {
                 loop_new[k] = mesh.positions.len() as u32 - 1;
             }
             // Cap becomes the shifted loop.
-            mesh.indices[3 * f..3 * f + 3].copy_from_slice(&loop_new);
+            mesh.indices[TRIANGLE_VERTS * f..TRIANGLE_VERTS * f + TRIANGLE_VERTS]
+                .copy_from_slice(&loop_new);
             // Side walls: one quad (two triangles) per loop edge.
             let old = [a, b, c];
-            for e in 0..3 {
+            for e in 0..TRIANGLE_VERTS {
                 let o0 = old[e];
-                let o1 = old[(e + 1) % 3];
+                let o1 = old[(e + 1) % TRIANGLE_VERTS];
                 let n0 = loop_new[e];
-                let n1 = loop_new[(e + 1) % 3];
+                let n1 = loop_new[(e + 1) % TRIANGLE_VERTS];
                 affected.push(mesh.triangle_count() as u32);
                 mesh.indices.extend([o0, o1, n1, o0, n1, n0]);
             }
@@ -135,9 +138,9 @@ impl EditableMesh {
             let tris = mesh.triangle_count();
             for f in 0..tris {
                 let [a, b, c] = [
-                    mesh.indices[3 * f],
-                    mesh.indices[3 * f + 1],
-                    mesh.indices[3 * f + 2],
+                    mesh.indices[TRIANGLE_VERTS * f],
+                    mesh.indices[TRIANGLE_VERTS * f + 1],
+                    mesh.indices[TRIANGLE_VERTS * f + 2],
                 ];
                 let mab = midpoint_vertex(mesh, &mut midpoints, a, b);
                 let mbc = midpoint_vertex(mesh, &mut midpoints, b, c);
