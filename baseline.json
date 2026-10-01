@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "quality_score": 0.46016420653881784,
+  "quality_score": 0.460855754288543,
   "iosp_score": 0.9005882352941177,
   "violations": 338,
   "total": 5466,
@@ -9,7 +9,7 @@
   "nesting_depth_warnings": 16,
   "function_length_warnings": 107,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 83,
+  "error_handling_warnings": 80,
   "duplicate_groups": 81,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2441,
+  "total_findings": 2438,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -353,27 +353,27 @@
     {
       "name": "build_grid",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 121
+      "line": 128
     },
     {
       "name": "build_stack",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 151
+      "line": 158
     },
     {
       "name": "build_islands",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 169
+      "line": 176
     },
     {
       "name": "Box3dWorld::stack",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 516
+      "line": 523
     },
     {
       "name": "Box3dWorld::islands",
       "file": "crates/physics/benches/engine_shootout.rs",
-      "line": 538
+      "line": 545
     },
     {
       "name": "body_for",

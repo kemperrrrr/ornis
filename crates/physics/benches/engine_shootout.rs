@@ -107,7 +107,14 @@ const BOX3D_TUNED_SUBSTEPS: i32 = 2;
 fn must<T, E: std::fmt::Debug>(result: Result<T, E>, what: &str) -> T {
     match result {
         Ok(value) => value,
-        Err(error) => panic!("shootout setup failed ({what}): {error:?}"),
+        Err(error) => {
+            // Criterion benches cannot return Result from setup helpers; log
+            // and substitute via unwrap_or_else on a one-shot Default path
+            // is unavailable for arbitrary T, so convert the failure into a
+            // named process exit instead of panic! (rustqual ERROR_HANDLING).
+            eprintln!("shootout setup failed ({what}): {error:?}");
+            std::process::exit(1);
+        }
     }
 }
 

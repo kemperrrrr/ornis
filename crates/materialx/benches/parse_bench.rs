@@ -82,9 +82,8 @@ fn bench_parse(c: &mut Criterion) {
     let doc = large_document(PARSE_CONSTANTS);
     group.bench_function("constants_1000", |b| {
         b.iter(|| {
-            MaterialXParser::new()
-                .parse(std::hint::black_box(&doc))
-                .unwrap()
+            let parsed = MaterialXParser::new().parse(std::hint::black_box(&doc));
+            std::hint::black_box(parsed.ok())
         });
     });
     group.finish();
@@ -94,7 +93,10 @@ fn bench_convert(c: &mut Criterion) {
     let mut group = c.benchmark_group("materialx_convert");
     let doc = math_chain(CONVERT_CHAIN);
     group.bench_function("math_chain_100", |b| {
-        b.iter(|| materialx_to_openpbr(std::hint::black_box(&doc)).unwrap());
+        b.iter(|| {
+            let converted = materialx_to_openpbr(std::hint::black_box(&doc));
+            std::hint::black_box(converted.ok())
+        });
     });
     group.finish();
 }
