@@ -22,12 +22,13 @@ rustc-hash = "2.1.3"
 [features]
 default = []
 gpu = ["dep:bytemuck", "dep:naga"]
-# External-engine shootout backends (`rapier3d` / `boxddd`) are temporarily
-# dropped from Cargo.toml: their lockfile pull of nalgebra
-# convert-glam030/031/032 makes `cargo outdated --workspace` fail the hard
-# gate (Project 0.30/0.31/0.32 while Latest is 0.33). Re-add optional deps +
-# `rapier`/`box3d` features once that false positive is solved. Bench source
-# under `#[cfg(feature = "rapier"|"box3d")]` is kept for that restore.
+# Shootout backend feature names kept for check-cfg + a later restore.
+# Optional `rapier3d` / `boxddd` deps are temporarily omitted: their lockfile
+# pull of nalgebra convert-glam030/031/032 makes `cargo outdated --workspace`
+# fail the hard gate (Project 0.30/0.31/0.32 while Latest is 0.33). Enabling
+# these features without re-adding the deps will not compile the backends.
+rapier = []
+box3d = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["rayon"] }
