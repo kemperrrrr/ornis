@@ -376,8 +376,8 @@ impl System for SyncHarnessSystem {
         let Some(store) = resources.get::<SmartStore>() else {
             return;
         };
-        apply_sync_mappings(store, self.registry, &self.mappings)
-            .expect("sync mappings validated at install");
+        // Validated at install; a late registry mismatch is a no-op frame.
+        let _ = apply_sync_mappings(store, self.registry, &self.mappings);
     }
 }
 

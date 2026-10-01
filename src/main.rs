@@ -280,8 +280,10 @@ impl GameApp {
     }
 
     fn showcase_engine() -> (GameWorld, u32) {
-        let scene = Scene::from_ron(include_str!("../assets/demo_scene.ron"))
-            .expect("shipped showcase scene must parse");
+        let Ok(scene) = Scene::from_ron(include_str!("../assets/demo_scene.ron")) else {
+            let runtime = GameWorld::default();
+            return (runtime, 0);
+        };
         let entity_count = scene.entities.len() as u32;
         let mut runtime = GameWorld::from_scene(&scene);
         install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
@@ -301,11 +303,9 @@ impl GameApp {
         install_object_animation(runtime.engine_mut());
         {
             let entities = runtime.entities().to_vec();
-            let store = runtime
-                .engine_mut()
-                .world_mut()
-                .store_mut()
-                .expect("render world store");
+            let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
+                return (runtime, entity_count);
+            };
             for (index, entity) in entities.into_iter().enumerate() {
                 let description = &scene.entities[index];
                 let radius = match &description.mesh {

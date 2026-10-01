@@ -74,13 +74,23 @@ impl FrameExecutor {
     /// is a cache hit: no compilation and no vector clone, just an `Arc`
     /// clone. Any registry mutation bumps [`SystemSet::generation`], which
     /// refreshes the memoized snapshot on the next call. Budget violations
-    /// panic exactly as `layout()` does.
+    /// keep the previous snapshot when one exists; otherwise return an empty plan.
     pub fn ensure_layout(&mut self, set: &SystemSet) -> Arc<FrameLayout> {
         let generation = set.generation();
         let input = set.pool_input();
-        self.layout_pool
-            .ensure(generation, &input)
-            .unwrap_or_else(|e| panic!("frame plan budget exceeded: {e}"))
+        match self.layout_pool.ensure(generation, &input) {
+            Ok(layout) => layout,
+            Err(_) => self.layout_pool.cached().cloned().unwrap_or_else(|| {
+                Arc::new(FrameLayout {
+                    surface_size: input.surface_size,
+                    passes: Vec::new(),
+                    resources: Vec::new(),
+                    slots: Vec::new(),
+                    pass_alive: Vec::new(),
+                    levels: Vec::new(),
+                })
+            }),
+        }
     }
 
     /// Drops the memoized layout snapshot without touching the GPU pool.

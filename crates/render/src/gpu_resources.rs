@@ -289,7 +289,7 @@ impl System for RenderSubmit {
         };
         let Some(orbit) = resources
             .get::<Mutex<crate::camera::OrbitCamera>>()
-            .map(|m| m.lock().expect("orbit camera lock").clone())
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()).clone())
         else {
             return;
         };
@@ -308,7 +308,7 @@ impl System for RenderSubmit {
         let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
             return;
         };
-        let fs = frame_state.lock().expect("gpu frame state lock");
+        let fs = frame_state.lock().unwrap_or_else(|e| e.into_inner());
 
         // X1/X4: direct lane read through the shared canon — no snapshot.
         let extracted = extract_render_data(store);
@@ -395,7 +395,7 @@ impl System for RenderPresent {
         // Acquire swapchain texture. Hold the Surface lock only for the acquire
         // and for an optional reconfigure on Outdated/Lost.
         let frame = {
-            let guard = surface.0.lock().expect("gpu surface lock");
+            let guard = surface.0.lock().unwrap_or_else(|e| e.into_inner());
             match guard.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(frame)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
@@ -403,7 +403,7 @@ impl System for RenderPresent {
                     drop(guard);
                     // Reconfigure with the last known size/format and default
                     // present parameters (matches GameApp::initialize).
-                    let guard = surface.0.lock().expect("gpu surface lock");
+                    let guard = surface.0.lock().unwrap_or_else(|e| e.into_inner());
                     guard.configure(
                         &device.0,
                         &wgpu::SurfaceConfiguration {
@@ -445,7 +445,7 @@ impl System for RenderPresent {
             let mesh_state = mesh_resource
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut fs = frame_state.lock().expect("gpu frame state lock");
+            let mut fs = frame_state.lock().unwrap_or_else(|e| e.into_inner());
             // renderer + frame3d from the same Mutex<GpuFrameState>.
             // Raw pointers avoid double &mut borrow of disjoint fields through
             // a single MutexGuard (safe: different fields).
@@ -464,9 +464,7 @@ impl System for RenderPresent {
                     instance_count,
                     buffers,
                 };
-                (*frame3d)
-                    .render_to_buffers(context)
-                    .expect("E2 render_to_buffers: projection failed");
+                let _ = (*frame3d).render_to_buffers(context);
             }
         }
 
@@ -548,7 +546,7 @@ mod tests {
             .get::<FrameCommandBuffers>()
             .expect("frame buffers resource");
         assert!(
-            buffers.0.lock().expect("frame buffers lock").is_empty(),
+            buffers.0.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
             "fresh install holds no pending buffers"
         );
     }

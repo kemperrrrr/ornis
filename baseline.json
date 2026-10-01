@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "quality_score": 0.45570135416791047,
+  "quality_score": 0.4573149655839368,
   "iosp_score": 0.9006174654513378,
   "violations": 338,
   "total": 5466,
@@ -9,7 +9,7 @@
   "nesting_depth_warnings": 16,
   "function_length_warnings": 106,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 105,
+  "error_handling_warnings": 98,
   "duplicate_groups": 79,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2460,
+  "total_findings": 2453,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -303,7 +303,7 @@
     {
       "name": "RenderFrame3D::build",
       "file": "crates/render/src/frame_exec.rs",
-      "line": 584
+      "line": 594
     },
     {
       "name": "run",

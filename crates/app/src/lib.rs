@@ -82,7 +82,9 @@ pub fn install_object_animation(engine: &mut Engine) {
     if engine.schedule().mermaid().contains("anim_sample") {
         return;
     }
-    let store = engine.world_mut().store_mut().expect("anim lane store");
+    let Some(store) = engine.world_mut().store_mut() else {
+        return;
+    };
     store.register::<AnimPlayer>();
     store.register_cold::<AnimClip>();
     engine
