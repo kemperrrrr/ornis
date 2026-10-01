@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.46592710445319807,
+  "quality_score": 0.4661576203697726,
   "iosp_score": 0.9005882352941177,
   "violations": 338,
   "total": 5466,
   "complexity_warnings": 58,
-  "magic_number_warnings": 152,
+  "magic_number_warnings": 151,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 107,
   "unsafe_warnings": 8,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2416,
+  "total_findings": 2415,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
