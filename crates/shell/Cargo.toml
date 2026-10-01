@@ -1,0 +1,23 @@
+[package]
+name = "ornis-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop shell for the Ornis editor: native window (wry webview) over the editor frontend, no localhost"
+
+[dependencies]
+editor-backend = { path = "../editor-backend" }
+ornis-app = { path = "../app" }
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0"
+# Minimal surface: OS webview + custom protocol + IPC only.
+# `os-webview` is mandatory (without it the crate does nothing);
+# devtools stay on the debug-build default (macOS), no release flag.
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+winit = "0.30"
+
+[lints]
+workspace = true

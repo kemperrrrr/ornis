@@ -20,6 +20,7 @@ members = [
     "crates/editor",
     "crates/mesh-editor",
     "crates/gltf",
+    "crates/shell",
     "xtask",
 ]
 # Vendored rustqual fork: standalone crate with its own lockfile, built via
