@@ -131,14 +131,10 @@ fn workspace_root() -> PathBuf {
 fn wait_for_server(port: u16) -> bool {
     let deadline = Instant::now() + Duration::from_secs(POLL_DEADLINE_SECS);
     while Instant::now() < deadline {
-        if TcpStream::connect_timeout(
-            &format!("127.0.0.1:{port}").parse().unwrap_or_else(|_| {
-                std::net::SocketAddr::from(([127, 0, 0, 1], port))
-            }),
-            Duration::from_millis(POLL_INTERVAL_MS),
-        )
-        .is_ok()
-        {
+        let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
+            continue;
+        };
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(POLL_INTERVAL_MS)).is_ok() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
@@ -149,9 +145,7 @@ fn wait_for_server(port: u16) -> bool {
 /// Minimal blocking `GET /api/scene` over TCP. Returns the response body.
 fn fetch_scene(port: u16) -> Option<Vec<u8>> {
     let addr = format!("127.0.0.1:{port}");
-    let socket = addr
-        .parse()
-        .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    let socket = addr.parse().ok()?;
     let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(2)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(SCENE_READ_TIMEOUT_SECS)))
