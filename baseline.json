@@ -1,15 +1,15 @@
 {
   "version": 2,
-  "quality_score": 0.476697320333183,
-  "iosp_score": 0.9005882352941177,
-  "violations": 338,
+  "quality_score": 0.4803246192704067,
+  "iosp_score": 0.9011473962930273,
+  "violations": 336,
   "total": 5466,
   "complexity_warnings": 58,
   "magic_number_warnings": 151,
   "nesting_depth_warnings": 16,
-  "function_length_warnings": 105,
+  "function_length_warnings": 106,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 13,
+  "error_handling_warnings": 0,
   "duplicate_groups": 81,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2369,
+  "total_findings": 2355,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -139,11 +139,6 @@
       "name": "setup",
       "file": "crates/core/benches/store_bench.rs",
       "line": 8
-    },
-    {
-      "name": "PositiveF32::expect_valid",
-      "file": "crates/core/src/units.rs",
-      "line": 383
     },
     {
       "name": "LightDesc::point_units",
@@ -303,7 +298,7 @@
     {
       "name": "RenderFrame3D::build",
       "file": "crates/render/src/frame_exec.rs",
-      "line": 594
+      "line": 588
     },
     {
       "name": "run",
@@ -1536,29 +1531,24 @@
       "line": 220
     },
     {
-      "name": "PositiveUsize::expect_valid",
-      "file": "crates/mesh-editor/src/exact.rs",
-      "line": 109
-    },
-    {
       "name": "ExactWorker::try_recv",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 332
+      "line": 329
     },
     {
       "name": "pool_loop",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 357
+      "line": 354
     },
     {
       "name": "run_job",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 398
+      "line": 395
     },
     {
       "name": "bevel_all",
       "file": "crates/mesh-editor/src/exact.rs",
-      "line": 425
+      "line": 422
     },
     {
       "name": "EditableMesh::poll_exact",

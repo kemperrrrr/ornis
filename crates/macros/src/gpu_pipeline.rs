@@ -227,7 +227,10 @@ fn parse_binding_group(kind: &str, ts: TokenStream2, binding_index: usize) -> sy
                 ty: base,
             }))
         }
-        _ => unreachable!("only storage/uniform are valid binding kinds"),
+        other => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("unsupported binding kind `{other}` (expected storage/uniform)"),
+        )),
     }
 }
 

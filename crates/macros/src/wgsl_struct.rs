@@ -235,13 +235,13 @@ fn wgsl_field_layout(
         // Array of nested structs: `[Inner; K]` ↔ `array<W, K>` where `W` is
         // `#[wgsl(to)]` if given, else the Rust type name.
         if let syn::Type::Path(tp) = arr.elem.as_ref() {
-            let inner = tp
-                .path
-                .segments
-                .last()
-                .expect("path has segments")
-                .ident
-                .clone();
+            let Some(seg) = tp.path.segments.last() else {
+                return Err(syn::Error::new(
+                    tp.path.span(),
+                    "WgslStruct: empty path in array element type",
+                ));
+            };
+            let inner = seg.ident.clone();
             let wgsl_inner = as_name
                 .map(str::to_string)
                 .unwrap_or_else(|| inner.to_string());
@@ -263,13 +263,13 @@ fn wgsl_field_layout(
     }
     // Nested struct by value: `label: Inner` ↔ `label: W` (see above).
     if let syn::Type::Path(tp) = ty {
-        let inner = tp
-            .path
-            .segments
-            .last()
-            .expect("path has segments")
-            .ident
-            .clone();
+        let Some(seg) = tp.path.segments.last() else {
+            return Err(syn::Error::new(
+                tp.path.span(),
+                "WgslStruct: empty path in nested field type",
+            ));
+        };
+        let inner = seg.ident.clone();
         let wgsl_inner = as_name
             .map(str::to_string)
             .unwrap_or_else(|| inner.to_string());
@@ -393,7 +393,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut member_idx = 0usize;
 
     for (field_index, field) in named.named.iter().enumerate() {
-        let ident = field.ident.as_ref().expect("named field");
+        let Some(ident) = field.ident.as_ref() else {
+            return syn::Error::new_spanned(field, "WgslStruct: named field required")
+                .to_compile_error()
+                .into();
+        };
         let opts = match field_opts(&field.attrs) {
             Ok(opts) => opts,
             Err(e) => return e.to_compile_error().into(),
@@ -545,10 +549,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                                 name: None,
                                 inner: naga::TypeInner::Array {
                                     base: #b,
-                                    size: naga::ArraySize::Constant(
-                                        ::core::num::NonZeroU32::new(#len_lit as u32)
-                                            .expect("array length is nonzero"),
-                                    ),
+                                    size: naga::ArraySize::Constant({
+                                        const LEN: u32 = #len_lit as u32;
+                                        match ::core::num::NonZeroU32::new(LEN) {
+                                            Some(n) => n,
+                                            // Derive rejects zero-length arrays; this is defensive.
+                                            None => ::core::num::NonZeroU32::MIN,
+                                        }
+                                    }),
                                     stride: (::core::mem::size_of::<#inner>()
                                         .div_ceil(16usize) * 16usize)
                                         as u32,

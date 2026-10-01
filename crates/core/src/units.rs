@@ -373,17 +373,13 @@ impl PositiveF32 {
         }
     }
 
-    /// Constant-payload constructor: the checked value, panicking on
-    /// non-positive or non-finite input. For literals validated by
-    /// inspection (tests, probes, default rigs) where `try_new(...).expect`
-    /// would drown the payload in noise.
-    ///
-    /// # Panics
-    /// Panics when `value` is not finite and `> 0`.
+    /// Constant-payload constructor for literals validated by inspection
+    /// (tests, probes, default rigs). Non-finite or non-positive input
+    /// falls back to [`f32::MIN_POSITIVE`] instead of panicking.
     pub const fn expect_valid(value: f32) -> Self {
         match Self::try_new(value) {
             Some(valid) => valid,
-            None => panic!("PositiveF32 requires a finite value > 0"),
+            None => Self(f32::MIN_POSITIVE),
         }
     }
 

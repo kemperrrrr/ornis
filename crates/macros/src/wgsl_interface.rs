@@ -208,7 +208,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut locations = HashSet::new();
     let mut builtins = HashSet::new();
     for field in &named.named {
-        let ident = field.ident.as_ref().expect("named field");
+        let Some(ident) = field.ident.as_ref() else {
+            return syn::Error::new_spanned(field, "WgslInterface: named field required")
+                .to_compile_error()
+                .into();
+        };
         let attr = match parse_field_attr(&field.attrs) {
             Ok(a) => a,
             Err(e) => return e.to_compile_error().into(),
@@ -289,7 +293,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let field_names: Vec<String> = named
         .named
         .iter()
-        .map(|f| f.ident.as_ref().expect("named field").to_string())
+        .filter_map(|f| f.ident.as_ref().map(|id| id.to_string()))
         .collect();
 
     let expanded = quote! {

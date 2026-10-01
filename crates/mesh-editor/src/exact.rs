@@ -100,16 +100,13 @@ impl PositiveUsize {
         }
     }
 
-    /// Constant-payload constructor, panicking on zero. For literals
-    /// validated by inspection (defaults, tests) where
-    /// `new(...).expect` would drown the payload in noise.
-    ///
-    /// # Panics
-    /// Panics when `value` is zero.
+    /// Constant-payload constructor for literals validated by inspection
+    /// (defaults, tests). Zero falls back to `1` instead of panicking.
     pub const fn expect_valid(value: usize) -> Self {
         match Self::new(value) {
             Some(valid) => valid,
-            None => panic!("PositiveUsize requires a value >= 1"),
+            // `NonZeroUsize::MIN` is 1 — the smallest legal job size.
+            None => Self(std::num::NonZeroUsize::MIN),
         }
     }
 

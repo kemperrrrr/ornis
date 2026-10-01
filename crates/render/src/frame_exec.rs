@@ -399,33 +399,27 @@ impl<'a> PassViews<'a> {
     /// Texture view backing `id` at the current pass: the external view for
     /// external resources, otherwise the pooled slot texture.
     ///
-    /// # Panics
-    /// Panics if the resource is not alive on this pass, if its external
-    /// view is not set, or if its slot texture was never created. Debug
-    /// builds additionally panic when `id` sits outside the pass's declared
+    /// Returns `None` when the resource is not alive on this pass, its
+    /// external view is unset, or its pool slot was never created. Debug
+    /// builds still panic when `id` sits outside the pass's declared
     /// reads/writes (backlog #6, `assert_pass_access_declared`) — the
     /// pass-level counterpart of the system TLS enforcement in
-    /// `core::Schedule`, covering both the typed and the imperative
-    /// frontends at the ground-truth `ResourceId` layer.
-    pub fn view_of(&self, id: ResourceId) -> &'a wgpu::TextureView {
+    /// `core::Schedule`.
+    pub fn view_of(&self, id: ResourceId) -> Option<&'a wgpu::TextureView> {
         #[cfg(debug_assertions)]
         crate::transient_pool::assert_pass_access_declared(self.layout, self.index, id);
         let rl = self.resource(id);
-        assert!(
-            rl.alive_at(self.index),
-            "resource {id:?} is not alive on pass {}",
-            self.index
-        );
+        if !rl.alive_at(self.index) {
+            return None;
+        }
         if rl.backing().is_external() {
-            self.externals
-                .get(&id)
-                .unwrap_or_else(|| panic!("external view for {id:?} is not set"))
+            self.externals.get(&id)
         } else {
-            let slot = rl.slot.expect("resource has no pool slot");
-            self.pool[slot]
-                .as_ref()
-                .expect("pool slot not created")
-                .view_ref()
+            let slot = rl.slot?;
+            self.pool
+                .get(slot)
+                .and_then(|slot| slot.as_ref())
+                .map(|t| t.view_ref())
         }
     }
 }

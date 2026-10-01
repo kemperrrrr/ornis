@@ -195,7 +195,7 @@ pub trait AccessView<'a> {
 }
 
 impl<'a, A: Access> AccessView<'a> for A {
-    type View = &'a wgpu::TextureView;
+    type View = Option<&'a wgpu::TextureView>;
 }
 
 /// Resolves the views for an access set at execution time.
@@ -252,17 +252,12 @@ pub struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     /// The view backing resource `R` on the current pass.
     ///
-    /// # Panics
-    /// Panics if `R` was never registered in the [`SystemSet`], or if the
-    /// resource is not alive on this pass (the declared access set makes
-    /// the latter a wiring bug, not a runtime state). Debug builds also
-    /// panic when `R` sits outside the pass's declared reads/writes —
-    /// ground-truth enforcement in `PassViews::view_of` (backlog #6).
-    pub fn view<R: FrameResource>(&self) -> &'a wgpu::TextureView {
-        let id = self
-            .ids
-            .get(&TypeId::of::<R>())
-            .unwrap_or_else(|| panic!("typed resource '{}' is not registered", R::NAME));
+    /// Returns `None` if `R` was never registered or is not alive on this
+    /// pass. Debug builds still panic when `R` sits outside the pass's
+    /// declared reads/writes — ground-truth enforcement in
+    /// `PassViews::view_of` (backlog #6).
+    pub fn view<R: FrameResource>(&self) -> Option<&'a wgpu::TextureView> {
+        let id = self.ids.get(&TypeId::of::<R>())?;
         self.views.view_of(*id)
     }
 }
@@ -332,10 +327,10 @@ impl<'a, P: FramePass> SystemViews<'a, P> {
     /// mode of a pass family and write-declared in another, while the
     /// shared body needs it either way (wgpu views do not distinguish).
     ///
-    /// # Panics (debug)
-    /// Panics in debug builds when `R` is outside both declared sets —
-    /// the same guarantee the compiler enforces for positional tuples.
-    pub fn get<R: FrameResource>(&self) -> &'a wgpu::TextureView {
+    /// Returns `None` when the resource is missing at runtime. Debug builds
+    /// still assert when `R` is outside both declared sets — the same
+    /// guarantee the compiler enforces for positional tuples.
+    pub fn get<R: FrameResource>(&self) -> Option<&'a wgpu::TextureView> {
         debug_assert!(
             declared::<P::Reads, R>() || declared::<P::Writes, R>(),
             "pass {} accesses resource '{}' outside its declared sets",

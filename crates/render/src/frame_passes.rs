@@ -154,7 +154,17 @@ impl FramePass for GbufferPass {
         "gbuffer"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (albedo, normal, material_id, world_position, material_params, depth) = views.writes;
+        let (
+            Some(albedo),
+            Some(normal),
+            Some(material_id),
+            Some(world_position),
+            Some(material_params),
+            Some(depth),
+        ) = views.writes
+        else {
+            return;
+        };
         let g = GbufferTargets {
             albedo,
             normal,
@@ -185,8 +195,20 @@ impl FramePass for LightingPass {
         "lighting"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (albedo, normal, material_id, world_position, material_params, depth) = views.reads;
-        let (hdr,) = views.writes;
+        let (
+            Some(albedo),
+            Some(normal),
+            Some(material_id),
+            Some(world_position),
+            Some(material_params),
+            Some(depth),
+        ) = views.reads
+        else {
+            return;
+        };
+        let (Some(hdr),) = views.writes else {
+            return;
+        };
         let g = GbufferTargets {
             albedo,
             normal,
@@ -216,8 +238,12 @@ impl FramePass for BloomDown1Pass {
         "bloom_down1"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (input,) = views.reads;
-        let (output,) = views.writes;
+        let (Some(input),) = views.reads else {
+            return;
+        };
+        let (Some(output),) = views.writes else {
+            return;
+        };
         frame.renderer.render_bloom_down(
             frame.device,
             frame.queue,
@@ -238,8 +264,12 @@ impl FramePass for BloomDown2Pass {
         "bloom_down2"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (input,) = views.reads;
-        let (output,) = views.writes;
+        let (Some(input),) = views.reads else {
+            return;
+        };
+        let (Some(output),) = views.writes else {
+            return;
+        };
         frame.renderer.render_bloom_down(
             frame.device,
             frame.queue,
@@ -260,8 +290,12 @@ impl FramePass for BloomUp1Pass {
         "bloom_up1"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (input,) = views.reads;
-        let (output,) = views.writes;
+        let (Some(input),) = views.reads else {
+            return;
+        };
+        let (Some(output),) = views.writes else {
+            return;
+        };
         frame
             .renderer
             .render_bloom_up(frame.device, frame.encoder, input, output);
@@ -277,8 +311,12 @@ impl FramePass for BloomUp0Pass {
         "bloom_up0"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (input,) = views.reads;
-        let (output,) = views.writes;
+        let (Some(input),) = views.reads else {
+            return;
+        };
+        let (Some(output),) = views.writes else {
+            return;
+        };
         frame
             .renderer
             .render_bloom_up(frame.device, frame.encoder, input, output);
@@ -363,10 +401,13 @@ impl<M: ForwardMode> FramePass for Forward<M> {
                 frame.instance_count,
             );
         }
+        let (Some(depth), Some(hdr_fwd)) = (views.get::<Depth>(), views.get::<HdrFwd>()) else {
+            return;
+        };
         frame.renderer.render_forward(
             frame.encoder,
-            views.get::<Depth>(),
-            views.get::<HdrFwd>(),
+            depth,
+            hdr_fwd,
             frame.mesh,
             frame.instance_count,
             M::DEPTH.clears_depth(),
@@ -381,14 +422,14 @@ pub trait BrightInput: Sized + 'static {
     /// The layer read by the bright pass in this mode.
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
     /// Borrows the HDR view this technique's bright pass reads.
-    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> &'a wgpu::TextureView;
+    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> Option<&'a wgpu::TextureView>;
 }
 
 /// Deferred/hybrid: `hdr`, filled by the lighting pass.
 pub struct FromDeferred;
 impl BrightInput for FromDeferred {
     type Reads = (Read<Hdr>,);
-    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> &'a wgpu::TextureView {
+    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> Option<&'a wgpu::TextureView> {
         views.get::<Hdr>()
     }
 }
@@ -397,7 +438,7 @@ impl BrightInput for FromDeferred {
 pub struct FromForward;
 impl BrightInput for FromForward {
     type Reads = (Read<HdrFwd>,);
-    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> &'a wgpu::TextureView {
+    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> Option<&'a wgpu::TextureView> {
         views.get::<HdrFwd>()
     }
 }
@@ -423,12 +464,15 @@ impl<I: BrightInput> FramePass for BloomBright<I> {
         "bloom_down0"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+        let (Some(input), Some(output)) = (I::input(&views), views.get::<Bloom0>()) else {
+            return;
+        };
         frame.renderer.render_bloom_down(
             frame.device,
             frame.queue,
             frame.encoder,
-            I::input(&views),
-            views.get::<Bloom0>(),
+            input,
+            output,
             BLOOM_BRIGHT_THRESHOLD,
         );
     }
@@ -447,7 +491,7 @@ pub trait CompositeMode: Sized + 'static {
     /// Binds the shader inputs from this mode's declared views. Dead
     /// layers (the ones this technique does not produce) are bound to a
     /// live view with zero effect — the shader picks by `TECHNIQUE`.
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a>;
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>>;
 }
 
 /// Deferred + bloom.
@@ -456,16 +500,16 @@ impl CompositeMode for CompositeDeferredBloom {
     type Reads = (Read<Hdr>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
-        let hdr = views.get::<Hdr>();
-        CompositeInputs {
-            target: views.get::<Target>(),
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+        let hdr = views.get::<Hdr>()?;
+        Some(CompositeInputs {
+            target: views.get::<Target>()?,
             hdr,
             hdr_fwd: hdr,
-            bloom: views.get::<Bloom0>(),
+            bloom: views.get::<Bloom0>()?,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
-        }
+        })
     }
 }
 
@@ -475,16 +519,16 @@ impl CompositeMode for CompositeDeferred {
     type Reads = (Read<Hdr>,);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
-        let hdr = views.get::<Hdr>();
-        CompositeInputs {
-            target: views.get::<Target>(),
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+        let hdr = views.get::<Hdr>()?;
+        Some(CompositeInputs {
+            target: views.get::<Target>()?,
             hdr,
             hdr_fwd: hdr,
             bloom: hdr,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
-        }
+        })
     }
 }
 
@@ -494,15 +538,15 @@ impl CompositeMode for CompositeHybridBloom {
     type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
-        CompositeInputs {
-            target: views.get::<Target>(),
-            hdr: views.get::<Hdr>(),
-            hdr_fwd: views.get::<HdrFwd>(),
-            bloom: views.get::<Bloom0>(),
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+        Some(CompositeInputs {
+            target: views.get::<Target>()?,
+            hdr: views.get::<Hdr>()?,
+            hdr_fwd: views.get::<HdrFwd>()?,
+            bloom: views.get::<Bloom0>()?,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
-        }
+        })
     }
 }
 
@@ -512,16 +556,16 @@ impl CompositeMode for CompositeHybrid {
     type Reads = (Read<Hdr>, Read<HdrFwd>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
-        let hdr_fwd = views.get::<HdrFwd>();
-        CompositeInputs {
-            target: views.get::<Target>(),
-            hdr: views.get::<Hdr>(),
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+        let hdr_fwd = views.get::<HdrFwd>()?;
+        Some(CompositeInputs {
+            target: views.get::<Target>()?,
+            hdr: views.get::<Hdr>()?,
             hdr_fwd,
             bloom: hdr_fwd,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
-        }
+        })
     }
 }
 
@@ -531,16 +575,16 @@ impl CompositeMode for CompositeForwardBloom {
     type Reads = (Read<HdrFwd>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
-        let hdr_fwd = views.get::<HdrFwd>();
-        CompositeInputs {
-            target: views.get::<Target>(),
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+        let hdr_fwd = views.get::<HdrFwd>()?;
+        Some(CompositeInputs {
+            target: views.get::<Target>()?,
             hdr: hdr_fwd,
             hdr_fwd,
-            bloom: views.get::<Bloom0>(),
+            bloom: views.get::<Bloom0>()?,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
-        }
+        })
     }
 }
 
@@ -550,16 +594,16 @@ impl CompositeMode for CompositeForward {
     type Reads = (Read<HdrFwd>,);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> CompositeInputs<'a> {
-        let hdr_fwd = views.get::<HdrFwd>();
-        CompositeInputs {
-            target: views.get::<Target>(),
+    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+        let hdr_fwd = views.get::<HdrFwd>()?;
+        Some(CompositeInputs {
+            target: views.get::<Target>()?,
             hdr: hdr_fwd,
             hdr_fwd,
             bloom: hdr_fwd,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
-        }
+        })
     }
 }
 
@@ -578,16 +622,11 @@ impl FogDensity {
         ornis_core::units::PositiveF32::try_new(value).map(Self)
     }
 
-    /// Constant-payload constructor, panicking on non-positive input.
-    /// For literals validated by inspection.
-    ///
-    /// # Panics
-    /// Panics when `value` is not finite and `> 0`.
+    /// Constant-payload constructor for literals validated by inspection.
+    /// Non-finite or non-positive input falls back to
+    /// [`f32::MIN_POSITIVE`] instead of panicking.
     pub const fn expect_valid(value: f32) -> Self {
-        match ornis_core::units::PositiveF32::try_new(value) {
-            Some(valid) => Self(valid),
-            None => panic!("FogDensity requires a finite value > 0"),
-        }
+        Self(ornis_core::units::PositiveF32::expect_valid(value))
     }
 
     /// Raw density in 1/m.
@@ -829,14 +868,21 @@ impl FramePass for FogPass {
             let _ = views.get::<Target>();
             return;
         };
+        let (Some(hdr), Some(depth), Some(target)) = (
+            views.get::<Hdr>(),
+            views.get::<Depth>(),
+            views.get::<Target>(),
+        ) else {
+            return;
+        };
         frame.renderer.render_fog(
             frame.device,
             frame.queue,
             frame.encoder,
             crate::renderer::FogInputs {
-                hdr: views.get::<Hdr>(),
-                depth: views.get::<Depth>(),
-                target: views.get::<Target>(),
+                hdr,
+                depth,
+                target,
                 color: settings.color.as_array(),
                 density: settings.density.get(),
             },
@@ -865,12 +911,12 @@ impl<M: CompositeMode> FramePass for Composite<M> {
         "composite"
     }
     fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        frame.renderer.render_composite(
-            frame.device,
-            frame.queue,
-            frame.encoder,
-            M::inputs(&views),
-        );
+        let Some(inputs) = M::inputs(&views) else {
+            return;
+        };
+        frame
+            .renderer
+            .render_composite(frame.device, frame.queue, frame.encoder, inputs);
     }
 }
 

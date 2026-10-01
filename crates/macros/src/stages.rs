@@ -74,7 +74,10 @@ fn parse_args(args: TokenStream) -> syn::Result<StageArgs> {
     for item in items {
         match item {
             syn::Meta::Path(p) if p.is_ident("vertex") || p.is_ident("fragment") => {
-                stage = Some(p.segments.last().expect("segment").ident.to_string());
+                let Some(seg) = p.segments.last() else {
+                    return Err(syn::Error::new_spanned(p, "stage path missing segment"));
+                };
+                stage = Some(seg.ident.to_string());
             }
             syn::Meta::NameValue(nv) if nv.path.is_ident("entry") => {
                 if let syn::Expr::Lit(l) = &nv.value
