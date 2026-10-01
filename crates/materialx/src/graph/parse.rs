@@ -6,14 +6,21 @@
 use super::{CodegenError, OutputValue};
 use std::collections::HashMap;
 
+/// Components in a MaterialX `color3` / `vector3`.
+const COLOR3_COMPONENTS: usize = 3;
+/// Components in a MaterialX `color4` / `vector4`.
+const COLOR4_COMPONENTS: usize = 4;
+/// Components in a MaterialX `vector2`.
+const VECTOR2_COMPONENTS: usize = 2;
+
 pub(crate) fn parse_constant(value: &str, ty: &str) -> Result<OutputValue, CodegenError> {
     match ty {
         "float" => parse_float_constant(value),
-        "color3" => parse_color_constant(value, 3),
-        "color4" => parse_color_constant(value, 4),
-        "vector2" => parse_vector_constant(value, 2),
-        "vector3" => parse_vector_constant(value, 3),
-        "vector4" => parse_vector_constant(value, 4),
+        "color3" => parse_color_constant(value, COLOR3_COMPONENTS),
+        "color4" => parse_color_constant(value, COLOR4_COMPONENTS),
+        "vector2" => parse_vector_constant(value, VECTOR2_COMPONENTS),
+        "vector3" => parse_vector_constant(value, COLOR3_COMPONENTS),
+        "vector4" => parse_vector_constant(value, COLOR4_COMPONENTS),
         "boolean" => parse_boolean_constant(value),
         "string" => Ok(OutputValue::String(value.to_string())),
         _ => Err(CodegenError::TypeConversion(format!(
@@ -33,15 +40,24 @@ fn parse_float_constant(value: &str) -> Result<OutputValue, CodegenError> {
 
 /// Parse `n` comma-separated floats labeled `r/g/b[/a]`.
 fn parse_color_constant(value: &str, n: usize) -> Result<OutputValue, CodegenError> {
-    let labels: &[&str] = if n == 3 {
+    let labels: &[&str] = if n == COLOR3_COMPONENTS {
         &["r", "g", "b"]
     } else {
         &["r", "g", "b", "a"]
     };
-    let c = parse_components(value, n, if n == 3 { "color3" } else { "color4" }, labels)?;
-    let mut v = [0.0_f32; 4];
+    let c = parse_components(
+        value,
+        n,
+        if n == COLOR3_COMPONENTS {
+            "color3"
+        } else {
+            "color4"
+        },
+        labels,
+    )?;
+    let mut v = [0.0_f32; COLOR4_COMPONENTS];
     v[..n].copy_from_slice(&c);
-    if n == 3 {
+    if n == COLOR3_COMPONENTS {
         Ok(OutputValue::Color3([v[0], v[1], v[2]]))
     } else {
         Ok(OutputValue::Color4([v[0], v[1], v[2], v[3]]))
@@ -51,16 +67,16 @@ fn parse_color_constant(value: &str, n: usize) -> Result<OutputValue, CodegenErr
 /// Parse `n` comma-separated floats labeled `x/y/z[/w]`.
 fn parse_vector_constant(value: &str, n: usize) -> Result<OutputValue, CodegenError> {
     let (ty, labels): (&str, &[&str]) = match n {
-        2 => ("vector2", &["x", "y"]),
-        3 => ("vector3", &["x", "y", "z"]),
+        VECTOR2_COMPONENTS => ("vector2", &["x", "y"]),
+        COLOR3_COMPONENTS => ("vector3", &["x", "y", "z"]),
         _ => ("vector4", &["x", "y", "z", "w"]),
     };
     let c = parse_components(value, n, ty, labels)?;
-    let mut v = [0.0_f32; 4];
+    let mut v = [0.0_f32; COLOR4_COMPONENTS];
     v[..n].copy_from_slice(&c);
     match n {
-        2 => Ok(OutputValue::Vector2([v[0], v[1]])),
-        3 => Ok(OutputValue::Vector3([v[0], v[1], v[2]])),
+        VECTOR2_COMPONENTS => Ok(OutputValue::Vector2([v[0], v[1]])),
+        COLOR3_COMPONENTS => Ok(OutputValue::Vector3([v[0], v[1], v[2]])),
         _ => Ok(OutputValue::Vector4([v[0], v[1], v[2], v[3]])),
     }
 }

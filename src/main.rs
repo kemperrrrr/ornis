@@ -21,6 +21,27 @@ use ornis_audio::bridge::install_gameplay_audio_bridge;
 #[cfg(not(feature = "editor-only"))]
 use ornis_gameplay::install_gameplay;
 
+/// Default editor HTTP port (loopback).
+const EDITOR_HTTP_PORT: u16 = 3420;
+/// Native window width (px).
+const WINDOW_WIDTH: u32 = 800;
+/// Native window height (px).
+const WINDOW_HEIGHT: u32 = 600;
+/// Storage buffers required by the showcase shader stage.
+const MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 8;
+/// Default procedural sphere sector count.
+const DEFAULT_SPHERE_SEGMENTS: u32 = 32;
+/// Default procedural sphere stack count.
+const DEFAULT_SPHERE_RINGS: u32 = 24;
+/// Earth-surface gravity along −Y (m/s²).
+const DEFAULT_GRAVITY_Y: f32 = -9.81;
+/// Pixel-delta → line-delta scale for mouse wheel.
+const WHEEL_PIXELS_PER_LINE: f32 = 100.0;
+/// Raw wire code for mouse Back.
+const MOUSE_BACK: u8 = 3;
+/// Raw wire code for mouse Forward.
+const MOUSE_FORWARD: u8 = 4;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // "BROWSER-ONLY EDITOR" MODE (editor-only)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -43,7 +64,7 @@ fn main() {
     ornis_app::session::run(cmd_rx, ev_tx);
 
     // The binding keeps RemoteEditor alive until main ends (Drop stops the server).
-    let _editor = RemoteEditor::start(3420, cmd_tx, ev_rx);
+    let _editor = RemoteEditor::start(EDITOR_HTTP_PORT, cmd_tx, ev_rx);
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║           Ornis Engine — Browser Editor Mode                 ║");
@@ -137,7 +158,7 @@ impl GameApp {
     ) -> Result<GameContext, String> {
         let window_attrs = WindowAttributes::default()
             .with_title("Ornis Engine")
-            .with_inner_size(PhysicalSize::new(800, 600));
+            .with_inner_size(PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
         let window = event_loop
             .create_window(window_attrs)
             .map_err(|e| format!("window creation: {e}"))?;
@@ -169,7 +190,7 @@ impl GameApp {
         .map_err(|_| "no adapter found".to_string())?;
 
         let mut limits = adapter.limits();
-        limits.max_storage_buffers_per_shader_stage = 8;
+        limits.max_storage_buffers_per_shader_stage = MAX_STORAGE_BUFFERS_PER_STAGE;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ornis device"),
             required_features: wgpu::Features::empty(),
@@ -219,7 +240,8 @@ impl GameApp {
             Technique::Hybrid,
             ornis_render::Bloom::Off,
         );
-        let sphere_mesh = create_sphere(&device, 1.0, 32, 24);
+        let sphere_mesh =
+            create_sphere(&device, 1.0, DEFAULT_SPHERE_SEGMENTS, DEFAULT_SPHERE_RINGS);
 
         let (mut runtime, entity_count) = Self::showcase_engine();
         // S7: GPU state lives as Engine resources, RenderSubmit/RenderPresent run in schedule.
@@ -242,7 +264,7 @@ impl GameApp {
                 },
                 GpuMesh {
                     mesh: sphere_mesh,
-                    params: (32, 24),
+                    params: (DEFAULT_SPHERE_SEGMENTS, DEFAULT_SPHERE_RINGS),
                 },
             );
         }
@@ -263,7 +285,7 @@ impl GameApp {
         let entity_count = scene.entities.len() as u32;
         let mut runtime = GameWorld::from_scene(&scene);
         install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
-        install_physics(runtime.engine_mut(), Vec3::new(0.0, -9.81, 0.0));
+        install_physics(runtime.engine_mut(), Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
         install_gameplay(runtime.engine_mut());
         install_gameplay_physics_bridge(runtime.engine_mut());
         // Audio steps in the same DAG (after motion); silently skipped when
@@ -461,7 +483,7 @@ impl ApplicationHandler for GameApp {
             // mode; when off, the channels simply idle (`process_remote_commands`
             // polls an empty/disconnected receiver, sends are `.ok()`-dropped).
             if remote_editor_requested() {
-                self.remote_editor = Some(RemoteEditor::start(3420, cmd_tx, ev_rx));
+                self.remote_editor = Some(RemoteEditor::start(EDITOR_HTTP_PORT, cmd_tx, ev_rx));
             }
             match Self::initialize(event_loop, cmd_rx, ev_tx) {
                 Ok(ctx) => {
@@ -581,8 +603,8 @@ impl ApplicationHandler for GameApp {
                     MouseButton::Left => 0,
                     MouseButton::Right => 1,
                     MouseButton::Middle => 2,
-                    MouseButton::Back => 3,
-                    MouseButton::Forward => 4,
+                    MouseButton::Back => MOUSE_BACK,
+                    MouseButton::Forward => MOUSE_FORWARD,
                     MouseButton::Other(code) => code.min(u16::from(u8::MAX)) as u8,
                 };
                 let pressed = matches!(state, ElementState::Pressed);
@@ -601,7 +623,9 @@ impl ApplicationHandler for GameApp {
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 100.0,
+                    MouseScrollDelta::PixelDelta(position) => {
+                        position.y as f32 / WHEEL_PIXELS_PER_LINE
+                    }
                 };
                 Self::update_input(ctx, |input| input.add_wheel_delta(amount));
             }
