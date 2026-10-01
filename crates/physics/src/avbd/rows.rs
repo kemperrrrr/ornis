@@ -732,11 +732,9 @@ impl AvbdEngine {
             }
             // Persist duals by matching material anchors (5cm window).
             if d.exists {
-                let idx = self
-                    .pairs
-                    .iter()
-                    .position(|p| p.a == ia && p.b == ib)
-                    .expect("discovery saw this pair a few microseconds ago on the same state");
+                let Some(idx) = self.pairs.iter().position(|p| p.a == ia && p.b == ib) else {
+                    continue;
+                };
                 seen[idx] = true;
                 let pair = &mut self.pairs[idx];
                 pair.n = d.normal;

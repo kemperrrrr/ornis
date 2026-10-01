@@ -426,8 +426,9 @@ impl SequentialImpulseEngine {
 
         // GPU solve single-point contacts.
         let mut gpu_warm: WarmCache = FxHashMap::default();
-        if !single_si.is_empty() {
-            let gpu = self.gpu_solver.as_mut().unwrap();
+        if !single_si.is_empty()
+            && let Some(gpu) = self.gpu_solver.as_mut()
+        {
             let (batches, num_batches) =
                 pack_single_point_batches(&self.bodies, &global_states, manifolds, &single_si);
             if num_batches > 0 {

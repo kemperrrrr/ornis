@@ -808,7 +808,9 @@ impl Engine {
         {
             self.split_ensure_built();
             let edited = std::mem::take(&mut self.wake_set);
-            let s = self.split.as_mut().expect("Islands state");
+            let Some(s) = self.split.as_mut() else {
+                break;
+            };
             s.time_debt -= f64::from(split::DT);
             if s.route(split::DT, RoutePhase::Tick, &edited) > 0 {
                 s.rebuild();

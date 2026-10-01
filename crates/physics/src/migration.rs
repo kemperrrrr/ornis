@@ -115,9 +115,10 @@ pub(crate) fn remap_gear(kind: &mut JointKind, remap: &[Option<JointHandle>]) {
     if let JointKind::Gear {
         joint_a, joint_b, ..
     } = kind
+        && let (Some(a), Some(b)) = (remap[joint_a.index()], remap[joint_b.index()])
     {
-        *joint_a = remap[joint_a.index()].expect("surviving gear has a surviving first joint");
-        *joint_b = remap[joint_b.index()].expect("surviving gear has a surviving second joint");
+        *joint_a = a;
+        *joint_b = b;
     }
 }
 

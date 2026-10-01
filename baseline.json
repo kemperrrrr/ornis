@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "quality_score": 0.460855754288543,
+  "quality_score": 0.4617778179548442,
   "iosp_score": 0.9005882352941177,
   "violations": 338,
   "total": 5466,
@@ -9,7 +9,7 @@
   "nesting_depth_warnings": 16,
   "function_length_warnings": 107,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 80,
+  "error_handling_warnings": 76,
   "duplicate_groups": 81,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2438,
+  "total_findings": 2434,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -468,12 +468,12 @@
     {
       "name": "AvbdEngine::friction_levers",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 913
+      "line": 911
     },
     {
       "name": "AvbdEngine::row_c_levers",
       "file": "crates/physics/src/avbd/rows.rs",
-      "line": 932
+      "line": 930
     },
     {
       "name": "AvbdEngine::update_gear_mem",
@@ -763,37 +763,37 @@
     {
       "name": "Engine::fracture_split",
       "file": "crates/physics/src/lib.rs",
-      "line": 829
+      "line": 831
     },
     {
       "name": "Engine::split_remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 882
+      "line": 884
     },
     {
       "name": "Engine::split_remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 915
+      "line": 917
     },
     {
       "name": "Engine::fracture_pass",
       "file": "crates/physics/src/lib.rs",
-      "line": 998
+      "line": 1000
     },
     {
       "name": "Engine::step",
       "file": "crates/physics/src/lib.rs",
-      "line": 1069
+      "line": 1071
     },
     {
       "name": "Engine::remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 1100
+      "line": 1102
     },
     {
       "name": "Engine::remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 1188
+      "line": 1190
     },
     {
       "name": "GpuSequentialImpulse::solve",
@@ -1383,77 +1383,77 @@
     {
       "name": "SequentialImpulseEngine::solve_contacts_velocity",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 491
+      "line": 492
     },
     {
       "name": "SequentialImpulseEngine::solve_contacts_position",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 532
+      "line": 533
     },
     {
       "name": "SequentialImpulseEngine::solve_island_velocity",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 718
+      "line": 719
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_velocity_step",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 777
+      "line": 778
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_restitution_step",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 829
+      "line": 830
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_friction",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 875
+      "line": 876
     },
     {
       "name": "SequentialImpulseEngine::solve_scalar_rolling",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1020
+      "line": 1021
     },
     {
       "name": "SequentialImpulseEngine::solve_island_position",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1071
+      "line": 1072
     },
     {
       "name": "prepare_island_states",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1124
+      "line": 1125
     },
     {
       "name": "run_velocity_iterations",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1151
+      "line": 1152
     },
     {
       "name": "run_restitution_stage",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1186
+      "line": 1187
     },
     {
       "name": "tangent_effective_mass",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1249
+      "line": 1250
     },
     {
       "name": "SequentialImpulseEngine::solve_flat_velocity",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1292
+      "line": 1293
     },
     {
       "name": "SequentialImpulseEngine::solve_one_flat_shard",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1338
+      "line": 1339
     },
     {
       "name": "SequentialImpulseEngine::solve_flat_position",
       "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1446
+      "line": 1447
     },
     {
       "name": "avbd_step",

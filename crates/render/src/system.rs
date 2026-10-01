@@ -791,7 +791,7 @@ impl SystemSet {
         let Some((_, entry)) = self.systems.iter().find(|(id, _)| *id == pass_id) else {
             return false;
         };
-        let mut entry = entry.lock().expect("system entry lock");
+        let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
         let resolver = Resolver { views, ids };
         (entry.run)(&resolver, frame);
         true
