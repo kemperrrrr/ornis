@@ -24,8 +24,10 @@ use ornis_physics::{
 
 /// Earth-surface gravity along −Y (m/s²).
 const GRAVITY_Y: f32 = -9.81;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 /// Floor box half-height / Y center (m).
-const FLOOR_HALF_Y: f32 = 0.5;
+const FLOOR_HALF_Y: f32 = HALF;
 /// Tiled-floor tile half-extent (m).
 const TILE_HALF: f32 = 5.0;
 /// Dynamic box half-extent (m).
@@ -69,8 +71,8 @@ fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
     let tiles = (span / (2.0 * tile_half)).ceil() as i32;
     for tx in 0..tiles {
         for tz in 0..tiles {
-            let x = (tx as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
-            let z = (tz as f32 - tiles as f32 / 2.0 + 0.5) * 2.0 * tile_half;
+            let x = (tx as f32 - tiles as f32 / 2.0 + HALF) * 2.0 * tile_half;
+            let z = (tz as f32 - tiles as f32 / 2.0 + HALF) * 2.0 * tile_half;
             physics.add_body(RigidBody::new_box(
                 Vec3::new(x, -FLOOR_HALF_Y, z),
                 Vec3::new(tile_half, FLOOR_HALF_Y, tile_half),
@@ -153,7 +155,7 @@ fn setup_islands(n: u32) -> SequentialImpulseEngine {
                 break;
             }
             physics.add_body(RigidBody::new_box(
-                Vec3::new(cx, k as f32 + 0.5, cz),
+                Vec3::new(cx, k as f32 + HALF, cz),
                 Vec3::splat(BOX_HALF),
                 1.0,
             ));

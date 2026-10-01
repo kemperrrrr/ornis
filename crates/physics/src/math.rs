@@ -77,12 +77,12 @@ impl AABB {
 
     /// Midpoint of the two corners.
     pub fn center(&self) -> Vec3 {
-        (self.min + self.max) * 0.5
+        (self.min + self.max) * HALF
     }
 
     /// Half of the full extent on each axis (`(max - min) * 0.5`).
     pub fn half_extents(&self) -> Vec3 {
-        (self.max - self.min) * 0.5
+        (self.max - self.min) * HALF
     }
 
     /// Whether the boxes intersect (touching faces count as overlapping).
@@ -147,6 +147,8 @@ pub struct RaycastHit {
 
 /// Absolute normal·axis below which X is a safe cross-product reference.
 const TANGENT_REF_AXIS_DOT: f32 = 0.9;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 
 /// Deterministic tangent frame for a unit normal: `t1` is the normal
 /// crossed with a fixed reference axis (no exact-equality branches, so
@@ -213,7 +215,7 @@ mod tests {
         assert_eq!(aabb.min, Vec3::new(-1.0, 0.0, 0.0));
         assert_eq!(aabb.max, Vec3::new(0.0, 5.0, 0.0));
         // A point already inside must not change the bounds.
-        aabb.expand(Vec3::new(-0.5, 2.0, 0.0));
+        aabb.expand(Vec3::new(-HALF, 2.0, 0.0));
         assert_eq!(aabb.min, Vec3::new(-1.0, 0.0, 0.0));
         assert_eq!(aabb.max, Vec3::new(0.0, 5.0, 0.0));
     }
@@ -277,6 +279,6 @@ mod tests {
         let ray = Ray::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0));
         assert_eq!(ray.point_at(0.0), Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(ray.point_at(1.0), Vec3::new(1.0, 2.0, 0.0));
-        assert_eq!(ray.point_at(0.5), Vec3::new(1.0, 1.0, 0.0));
+        assert_eq!(ray.point_at(HALF), Vec3::new(1.0, 1.0, 0.0));
     }
 }

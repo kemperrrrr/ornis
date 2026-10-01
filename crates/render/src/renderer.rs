@@ -75,6 +75,8 @@ pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 pub const MAX_LIGHTS: usize = 8;
 /// Components in an RGB / xyz triple.
 const VEC3_COMPONENTS: usize = 3;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 /// Indices per triangle.
 const TRIANGLE_VERTS: usize = 3;
 /// Components in an RGBA / homogeneous vector.
@@ -912,13 +914,13 @@ fn dir_shadow_vp(to_light: glam::Vec3) -> [[f32; 4]; 4] {
 /// the projection.
 pub fn shadow_fit_for_bounds(min: [f32; 3], max: [f32; 3]) -> ([f32; 3], f32) {
     let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
+        (min[0] + max[0]) * HALF,
+        (min[1] + max[1]) * HALF,
+        (min[2] + max[2]) * HALF,
     ];
-    let half = ((max[0] - min[0]) * 0.5)
-        .max((max[1] - min[1]) * 0.5)
-        .max((max[2] - min[2]) * 0.5)
+    let half = ((max[0] - min[0]) * HALF)
+        .max((max[1] - min[1]) * HALF)
+        .max((max[2] - min[2]) * HALF)
         .max(SHADOW_ORTHO_HALF);
     if center.iter().all(|v| v.is_finite()) && half.is_finite() {
         (center, half)
@@ -961,7 +963,7 @@ fn spot_shadow_vp(
     let proj = glam::camera::rh::proj::directx::perspective(
         outer_angle_deg.to_radians() * 2.0,
         1.0,
-        0.5,
+        HALF,
         range.max(1.0),
     );
     (proj * view).to_cols_array_2d()
@@ -4749,7 +4751,7 @@ mod tests {
 
         let mut red = ornis_core::OpenPBRMaterial::dielectric();
         red.base.color_rgb([0.8, 0.2, 0.2]);
-        red.specular.roughness(0.5);
+        red.specular.roughness(HALF);
         renderer.upload_materials(&device, &queue, &[red]);
         // Identity palette over one triangle: the vertex stage passes the
         // bind pose through (model is identity, like the extraction's
@@ -4765,9 +4767,9 @@ mod tests {
         let mesh = upload_skinned_mesh(
             &device,
             &[
-                row([-0.5, -0.5, 0.0]),
-                row([0.5, -0.5, 0.0]),
-                row([0.0, 0.5, 0.0]),
+                row([-HALF, -HALF, 0.0]),
+                row([HALF, -HALF, 0.0]),
+                row([0.0, HALF, 0.0]),
             ],
             &[0, 1, 2],
         )
@@ -5178,7 +5180,7 @@ mod tests {
         // non-finite is rejected.
         assert_eq!(BlendMode::from_opacity(1.0), Ok(BlendMode::Opaque));
         assert_eq!(BlendMode::from_opacity(2.0), Ok(BlendMode::Opaque));
-        assert_eq!(BlendMode::from_opacity(0.5), Ok(BlendMode::Transparent));
+        assert_eq!(BlendMode::from_opacity(HALF), Ok(BlendMode::Transparent));
         assert_eq!(BlendMode::from_opacity(0.0), Ok(BlendMode::Transparent));
         assert!(matches!(
             BlendMode::from_opacity(f32::NAN),
@@ -5216,12 +5218,12 @@ mod tests {
             "{}",
             FogUniform::WGSL_SOURCE
         );
-        let packed = FogUniform::pack([0.5, 0.6, 0.7], 0.1);
+        let packed = FogUniform::pack([HALF, 0.6, 0.7], 0.1);
         let bytes = bytemuck::bytes_of(&packed);
         assert_eq!(bytes.len(), 16);
         assert_eq!(
             &bytes[0..12],
-            bytemuck::cast_slice::<f32, u8>(&[0.5, 0.6, 0.7])
+            bytemuck::cast_slice::<f32, u8>(&[HALF, 0.6, 0.7])
         );
     }
 
@@ -5230,15 +5232,15 @@ mod tests {
         let lights = vec![LightDesc::Directional {
             direction: [1.0, 1.0, 1.0],
             intensity: 2.0,
-            color: [0.5, 0.25, 0.125],
+            color: [HALF, 0.25, 0.125],
             shadow: ShadowCast::Disabled,
         }];
-        let base = build_lighting_uniform([0.5, 0.25, 0.125], 1.0, 1.0, &lights, None);
-        assert_eq!(base.uniform.ambient_color, [0.5, 0.25, 0.125, 1.0]);
-        assert_eq!(base.uniform.lights[0].color, [0.5, 0.25, 0.125, 2.0]);
-        let scaled = build_lighting_uniform([0.5, 0.25, 0.125], 2.0, 4.0, &lights, None);
-        assert_eq!(scaled.uniform.ambient_color, [1.0, 0.5, 0.25, 1.0]);
-        assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, 0.5, 2.0]);
+        let base = build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None);
+        assert_eq!(base.uniform.ambient_color, [HALF, 0.25, 0.125, 1.0]);
+        assert_eq!(base.uniform.lights[0].color, [HALF, 0.25, 0.125, 2.0]);
+        let scaled = build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None);
+        assert_eq!(scaled.uniform.ambient_color, [1.0, HALF, 0.25, 1.0]);
+        assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, HALF, 2.0]);
     }
 
     #[test]
@@ -5471,8 +5473,8 @@ mod tests {
 
         // Reconstructed distance for texel (16, 1) under the identity
         // camera: uv = ((16+0.5)/32, (1+0.5)/2), NDC z = 1 (cleared far).
-        let u = (16.0 + 0.5) / W as f32;
-        let v = (1.0 + 0.5) / H as f32;
+        let u = (16.0 + HALF) / W as f32;
+        let v = (1.0 + HALF) / H as f32;
         let dist = ((2.0 * u - 1.0).powi(2) + (1.0 - 2.0 * v).powi(2) + 1.0).sqrt();
         let fog = crate::frame_passes::FogState::Enabled(
             crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, DENSITY)

@@ -181,15 +181,17 @@ struct SoftContact {
 /// Linear speed below which a body counts as quiet for sleep (m/s,
 /// sequential-impulse parity).
 const SLEEP_LIN: f32 = 0.15;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 /// Angular speed below which a rigid body counts as quiet (rad/s,
 /// sequential-impulse parity).
 const SLEEP_ANG: f32 = 0.15;
 /// Continuous quiet time before a body freezes (s).
-const SLEEP_TIME: f32 = 0.5;
+const SLEEP_TIME: f32 = HALF;
 /// Relative normal speed at a contact that wakes a sleeper (m/s,
 /// sequential-impulse `WAKE_IMPACT_SPEED` parity): a fast impact disturbs
 /// the sleeper, slow settling does not.
-const WAKE_IMPACT_SPEED: f32 = 0.5;
+const WAKE_IMPACT_SPEED: f32 = HALF;
 /// CCD backoff (m): a clamped particle stops this far short of the swept
 /// hit so the discrete pass sees a clean near-touch, not a zero-gap
 /// flicker (same order as the sequential-impulse TOI backoff).
@@ -300,7 +302,7 @@ impl XpbdEngine {
             joint_compliance: 0.0,
             restitution_threshold: 1.0,
             soft_bodies: Vec::new(),
-            soft_friction: 0.5,
+            soft_friction: HALF,
             rigid_asleep: Vec::new(),
             rigid_quiet: Vec::new(),
             soft_sleep: Vec::new(),
@@ -1220,7 +1222,7 @@ impl XpbdEngine {
         if w <= 0.0 {
             return;
         }
-        let e = 0.5 * (ba.restitution + bb.restitution);
+        let e = HALF * (ba.restitution + bb.restitution);
         let j = -(1.0 + e) * vn / w;
         if j != 0.0 {
             let (ba, bb) = pair_mut(&mut self.bodies, c.a, c.b);
@@ -1777,7 +1779,7 @@ fn apply_position_correction(body: &mut RigidBody, sign: f32, n: Vec3, r: Vec3, 
     body.position += impulse * body.inv_mass;
     let dtheta = apply_inv_inertia(body.inertia, body.orientation, r.cross(impulse));
     let q = body.orientation;
-    let dq = Quat::from_xyzw(dtheta.x * 0.5, dtheta.y * 0.5, dtheta.z * 0.5, 0.0) * q;
+    let dq = Quat::from_xyzw(dtheta.x * HALF, dtheta.y * HALF, dtheta.z * HALF, 0.0) * q;
     body.orientation = Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w);
 }
 
@@ -1788,7 +1790,7 @@ fn apply_angular_correction(body: &mut RigidBody, sign: f32, n: Vec3, dlambda: f
     }
     let dtheta = apply_inv_inertia(body.inertia, body.orientation, n * (sign * dlambda));
     let q = body.orientation;
-    let dq = Quat::from_xyzw(dtheta.x * 0.5, dtheta.y * 0.5, dtheta.z * 0.5, 0.0) * q;
+    let dq = Quat::from_xyzw(dtheta.x * HALF, dtheta.y * HALF, dtheta.z * HALF, 0.0) * q;
     body.orientation = Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w);
 }
 
@@ -1809,7 +1811,7 @@ fn point_velocity(body: &RigidBody, r: Vec3) -> Vec3 {
 
 /// Exact exponential-map orientation integration, renormalized.
 fn integrate_orientation(q: Quat, w: Vec3, h: f32) -> Quat {
-    let half = h * 0.5;
+    let half = h * HALF;
     let dq = Quat::from_xyzw(w.x * half, w.y * half, w.z * half, 0.0) * q;
     Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w).normalize()
 }
@@ -1860,7 +1862,7 @@ mod tests {
         ));
         let top = engine.add_body(RigidBody::new_box(
             Vec3::new(0.0, 2.0, 0.0),
-            Vec3::splat(0.5),
+            Vec3::splat(HALF),
             1.0,
         ));
         for _ in 0..180 {
@@ -1869,8 +1871,8 @@ mod tests {
         let b = engine.get_body(top).expect("box survives");
         // Floor top at y=0, box half-height 0.5: rest center ≈ 0.5.
         assert!(
-            (b.position.y - 0.5).abs() < 0.05,
-            "settled height {}, want ~0.5",
+            (b.position.y - HALF).abs() < 0.05,
+            "settled height {}, want ~HALF",
             b.position.y
         );
         assert!(
@@ -1956,8 +1958,8 @@ mod tests {
     #[test]
     fn unsupported_joints_return_none() {
         let mut engine = XpbdEngine::new(Vec3::ZERO);
-        let a = engine.add_body(RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
-        let b = engine.add_body(RigidBody::new_sphere(Vec3::X, 0.5, 1.0));
+        let a = engine.add_body(RigidBody::new_sphere(Vec3::ZERO, HALF, 1.0));
+        let b = engine.add_body(RigidBody::new_sphere(Vec3::X, HALF, 1.0));
         assert!(
             engine
                 .add_joint(
@@ -1982,7 +1984,7 @@ mod tests {
         use crate::soft::SoftBody;
 
         let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
-        let rope = engine.add_soft_body(SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 6, 0.5, 1.0, 0.0));
+        let rope = engine.add_soft_body(SoftBody::chain(Vec3::ZERO, Vec3::NEG_Y, 6, HALF, 1.0, 0.0));
         for _ in 0..180 {
             engine.step(1.0 / 60.0);
         }
@@ -2078,11 +2080,11 @@ mod tests {
             assert_eq!(body.constraints.len(), 12, "cube edges");
             assert_eq!(body.triangles.len(), 12, "cube surface");
             // Squash along Y around the center: volume halves.
-            let center = Vec3::splat(0.5);
+            let center = Vec3::splat(HALF);
             let b = engine.get_soft_body_mut(cube).expect("cube mut");
             b.damping = 8.0;
             for p in &mut b.particles {
-                p.position = center + (p.position - center) * Vec3::new(1.0, 0.5, 1.0);
+                p.position = center + (p.position - center) * Vec3::new(1.0, HALF, 1.0);
             }
         }
         for _ in 0..180 {
@@ -2126,7 +2128,7 @@ mod tests {
             0.0,
         ));
         let cube = engine.add_soft_body(SoftBody::soft_cube(
-            Vec3::new(-0.5, 2.0, -0.5),
+            Vec3::new(-HALF, 2.0, -HALF),
             1.0,
             1.0,
             0.0,
@@ -2169,13 +2171,13 @@ mod tests {
             0.0,
         ));
         let coupled = engine.add_soft_body(SoftBody::soft_cube(
-            Vec3::new(-1.5, 2.0, -0.5),
+            Vec3::new(-1.5, 2.0, -HALF),
             1.0,
             1.0,
             0.0,
             0.0,
         ));
-        let mut ghost_body = SoftBody::soft_cube(Vec3::new(0.5, 2.0, -0.5), 1.0, 1.0, 0.0, 0.0);
+        let mut ghost_body = SoftBody::soft_cube(Vec3::new(HALF, 2.0, -HALF), 1.0, 1.0, 0.0, 0.0);
         ghost_body.collision_mask = 0;
         let ghost = engine.add_soft_body(ghost_body);
         for h in [coupled, ghost] {
@@ -2224,7 +2226,7 @@ mod tests {
             let n = tilt * Vec3::Y;
             let cube = engine.add_soft_body(SoftBody::soft_cube(
                 surface + n * 0.6 - Vec3::new(0.25, 0.0, 0.25),
-                0.5,
+                HALF,
                 1.0,
                 0.0,
                 0.0,
@@ -2273,7 +2275,7 @@ mod tests {
             0.0,
         ));
         let cube = engine.add_soft_body(SoftBody::soft_cube(
-            Vec3::new(-0.5, 2.0, -0.5),
+            Vec3::new(-HALF, 2.0, -HALF),
             1.0,
             1.0,
             0.0,
@@ -2300,7 +2302,7 @@ mod tests {
         }
         let b = engine.get_body(slab).expect("slab survives");
         assert!(
-            b.position.y - 0.2 > top - 0.5,
+            b.position.y - 0.2 > top - HALF,
             "slab must rest on the cube, center at {} (cube top was {top})",
             b.position.y
         );
@@ -2349,7 +2351,7 @@ mod tests {
         assert!(p.position.is_finite(), "no NaN in swept particle");
         // Wall faces at ±0.02, particle radius 0.04: rest at ≈ 0.06.
         assert!(
-            p.position.x > -0.2 && p.position.x < 0.5,
+            p.position.x > -0.2 && p.position.x < HALF,
             "particle must stop at the wall, got x = {}",
             p.position.x
         );
@@ -2370,11 +2372,11 @@ mod tests {
         ));
         let bx = engine.add_body(RigidBody::new_box(
             Vec3::new(3.0, 2.0, 0.0),
-            Vec3::splat(0.5),
+            Vec3::splat(HALF),
             1.0,
         ));
         let cube = engine.add_soft_body(SoftBody::soft_cube(
-            Vec3::new(-0.5, 2.0, -0.5),
+            Vec3::new(-HALF, 2.0, -HALF),
             1.0,
             1.0,
             0.0,
@@ -2422,7 +2424,7 @@ mod tests {
             0.0,
         ));
         let cube = engine.add_soft_body(SoftBody::soft_cube(
-            Vec3::new(-0.5, 2.0, -0.5),
+            Vec3::new(-HALF, 2.0, -HALF),
             1.0,
             1.0,
             0.0,

@@ -21,6 +21,8 @@ use super::*;
 /// (coincident centers / zero-length normal). Distinct from the mass-domain
 /// [`crate::constants::MIN_EFFECTIVE_MASS`] even though the literal matches.
 const DEGENERATE_DIST_SQ: f32 = 1e-10;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 /// Edge-axis length floor for SAT edge-edge candidates (m).
 const EDGE_AXIS_EPS: f32 = 1e-3;
 /// Pair count above which narrowphase shards across workers.
@@ -54,7 +56,7 @@ fn sphere_vs_sphere(
     Some(Contact {
         normal,
         penetration,
-        contact_point: pos_a + normal * (radius_a - penetration * 0.5),
+        contact_point: pos_a + normal * (radius_a - penetration * HALF),
     })
 }
 
@@ -88,7 +90,7 @@ fn sphere_vs_obb(
     // phantom "half-rolling" equilibrium v = ω·r/2 with live slip, because
     // the solver saw zero slip at the half-depth point.
     let dir = delta / dist; // box frame, sphere center toward box surface
-    let contact_point = local + dir * (sphere_radius + penetration * 0.5);
+    let contact_point = local + dir * (sphere_radius + penetration * HALF);
     Some(Contact {
         normal,
         penetration,
@@ -206,7 +208,7 @@ fn box_vs_box(
     Some(Contact {
         normal,
         penetration,
-        contact_point: (pos_a + pos_b) * 0.5,
+        contact_point: (pos_a + pos_b) * HALF,
     })
 }
 
@@ -417,7 +419,7 @@ fn sphere_vs_capsule(
     // Normal points from the capsule toward the sphere.
     let n = to_sphere / d;
     let penetration = rr - d - margin;
-    let contact_point = closest + n * (cap_radius - penetration * 0.5);
+    let contact_point = closest + n * (cap_radius - penetration * HALF);
     Some(Contact {
         normal: n,
         penetration,
@@ -472,7 +474,7 @@ fn box_vs_capsule(
         normal = -normal;
     }
     let penetration = -d.dist;
-    let contact_point = (d.point_a + d.point_b) * 0.5;
+    let contact_point = (d.point_a + d.point_b) * HALF;
     Some(Contact {
         normal,
         penetration,
@@ -528,7 +530,7 @@ fn capsule_vs_capsule(a: &CapsuleShape, b: &CapsuleShape, margin: f32) -> Option
     Some(Contact {
         normal,
         penetration,
-        contact_point: (closest_a + closest_b) * 0.5,
+        contact_point: (closest_a + closest_b) * HALF,
     })
 }
 
@@ -601,7 +603,7 @@ fn distance_contact(
         Contact {
             normal,
             penetration,
-            contact_point: d.point_a - normal * (penetration * 0.5),
+            contact_point: d.point_a - normal * (penetration * HALF),
         },
     ))
 }
@@ -613,7 +615,7 @@ const SPEC_BASE: f32 = 0.05;
 /// Maximum relative linear speed (m/s) for the cached SAT/box path and the
 /// narrow-phase cache: faster pairs bypass the cache (near-zero hit rate)
 /// and run the full manifold build.
-const SAT_CACHE_MAX_REL_SPEED: f32 = 0.5;
+const SAT_CACHE_MAX_REL_SPEED: f32 = HALF;
 
 /// Squared angular-speed gate for the same cache (rad²/s²).
 ///

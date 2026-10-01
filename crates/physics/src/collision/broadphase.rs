@@ -14,6 +14,8 @@ use crate::broadphase_tree::DynamicAabbTree;
 use crate::math::AABB;
 
 pub(crate) const HALF_SPEC_MARGIN: f32 = 0.025;
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 const DEFAULT_GRID_CELL_SIZE: f32 = 2.0;
 const DEFAULT_MAX_CELLS_PER_BODY: usize = 4096;
 /// Spatial axes for SAP sort-axis rotation (X→Y→Z).
@@ -899,8 +901,8 @@ fn body_max_extent(body: &RigidBody) -> f32 {
         }
         crate::shape::Shape::TriMesh(mesh) => {
             let (lo, hi) = mesh.local_bounds();
-            let e = (hi - lo) * 0.5;
-            e.x.max(e.y).max(e.z).max(0.5) * 2.0
+            let e = (hi - lo) * HALF;
+            e.x.max(e.y).max(e.z).max(HALF) * 2.0
         }
     }
 }
@@ -1060,9 +1062,9 @@ mod tests {
     fn scene() -> Vec<RigidBody> {
         vec![
             RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0),
-            RigidBody::new_sphere(Vec3::new(0.5, 0.0, 0.0), 0.75, 1.0),
-            RigidBody::new_sphere(Vec3::new(4.0, 0.0, 0.0), 0.5, 1.0),
-            RigidBody::new_box(Vec3::new(-4.0, 0.0, 0.0), Vec3::splat(0.5), 1.0),
+            RigidBody::new_sphere(Vec3::new(HALF, 0.0, 0.0), 0.75, 1.0),
+            RigidBody::new_sphere(Vec3::new(4.0, 0.0, 0.0), HALF, 1.0),
+            RigidBody::new_box(Vec3::new(-4.0, 0.0, 0.0), Vec3::splat(HALF), 1.0),
         ]
     }
 
@@ -1072,8 +1074,8 @@ mod tests {
     /// same update reports no pair (legacy velocity-only sweep).
     #[test]
     fn kinematic_teleport_segment_pairs_mid_jump_victim() {
-        let victim = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
-        let mut wall = RigidBody::new_box(Vec3::new(3.0, 0.0, 0.0), Vec3::splat(0.5), 1.0);
+        let victim = RigidBody::new_box(Vec3::ZERO, Vec3::splat(HALF), 1.0);
+        let mut wall = RigidBody::new_box(Vec3::new(3.0, 0.0, 0.0), Vec3::splat(HALF), 1.0);
         wall.body_type = BodyType::Kinematic;
         let bodies = vec![victim, wall];
         let prev = vec![
@@ -1110,8 +1112,8 @@ mod tests {
         // (index 2) sorts first by min.x but must still pair with lower-index
         // dynamics that overlap it.
         let bodies = vec![
-            RigidBody::new_box(Vec3::new(0.0, 0.5, 0.0), Vec3::splat(0.5), 1.0),
-            RigidBody::new_box(Vec3::new(0.0, -0.5, 0.0), Vec3::splat(0.5), 1.0),
+            RigidBody::new_box(Vec3::new(0.0, HALF, 0.0), Vec3::splat(HALF), 1.0),
+            RigidBody::new_box(Vec3::new(0.0, -HALF, 0.0), Vec3::splat(HALF), 1.0),
             RigidBody::new_box(Vec3::new(0.0, -10.0, 0.0), Vec3::splat(20.0), 0.0),
         ];
         let mut sweep = SweepAndPrune::new();
@@ -1137,7 +1139,7 @@ mod tests {
     fn uniform_grid_deduplicates_bodies_spanning_multiple_cells() {
         let bodies = vec![
             RigidBody::new_box(Vec3::ZERO, Vec3::splat(4.0), 0.0),
-            RigidBody::new_sphere(Vec3::new(0.5, 0.0, 0.0), 0.75, 1.0),
+            RigidBody::new_sphere(Vec3::new(HALF, 0.0, 0.0), 0.75, 1.0),
         ];
         let mut grid = UniformGrid::new();
         grid.update(&bodies, 0.0, None);
@@ -1163,7 +1165,7 @@ mod tests {
     fn static_static_pairs_are_skipped_but_static_triggers_are_kept() {
         let ordinary = vec![
             RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0),
-            RigidBody::new_box(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0), 0.0),
+            RigidBody::new_box(Vec3::new(HALF, 0.0, 0.0), Vec3::splat(1.0), 0.0),
         ];
         let mut grid = UniformGrid::new();
         grid.update(&ordinary, 0.0, None);
@@ -1172,7 +1174,7 @@ mod tests {
 
         let trigger = vec![
             RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0).with_trigger(true),
-            RigidBody::new_box(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0), 0.0),
+            RigidBody::new_box(Vec3::new(HALF, 0.0, 0.0), Vec3::splat(1.0), 0.0),
         ];
         grid.update(&trigger, 0.0, None);
         assert_eq!(grid.active(), &[(0, 1)]);
@@ -1182,8 +1184,8 @@ mod tests {
     fn large_body_escape_path_keeps_candidate_pairs_correct() {
         let bodies = vec![
             RigidBody::new_box(Vec3::ZERO, Vec3::splat(100.0), 0.0),
-            RigidBody::new_sphere(Vec3::new(1.0, 0.0, 1.0), 0.5, 1.0),
-            RigidBody::new_sphere(Vec3::new(300.0, 0.0, 0.0), 0.5, 1.0),
+            RigidBody::new_sphere(Vec3::new(1.0, 0.0, 1.0), HALF, 1.0),
+            RigidBody::new_sphere(Vec3::new(300.0, 0.0, 0.0), HALF, 1.0),
         ];
         let mut grid = UniformGrid::new();
         grid.update(&bodies, 0.0, None);
@@ -1194,7 +1196,7 @@ mod tests {
     fn filtered_pairs_are_not_emitted_by_either_backend() {
         let bodies = vec![
             RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0).with_collision_filter(0b0001, 0b0010),
-            RigidBody::new_sphere(Vec3::new(0.5, 0.0, 0.0), 1.0, 1.0)
+            RigidBody::new_sphere(Vec3::new(HALF, 0.0, 0.0), 1.0, 1.0)
                 .with_collision_filter(0b0010, 0b0100),
         ];
         let mut sweep = SweepAndPrune::new();
@@ -1207,7 +1209,7 @@ mod tests {
 
     fn giant_floor_bodies(dynamics: u32) -> Vec<RigidBody> {
         let mut bodies = vec![RigidBody::new_box(
-            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(0.0, -HALF, 0.0),
             Vec3::splat(500.0),
             0.0,
         )];

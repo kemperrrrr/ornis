@@ -27,6 +27,9 @@
 //!   migrates scenes 1:1 and runs the cross-solver fracture pass.
 #![warn(missing_docs)]
 
+/// Midpoint / half-extent scale (tests and examples).
+const HALF: f32 = 0.5;
+
 /// Mesh/collider recipes → solver bodies (the single projection point).
 pub mod colliders;
 /// Collision detection: broadphase backends, shapes and distance queries.
@@ -328,7 +331,7 @@ impl Engine {
             soft_contact_events: Vec::new(),
             parked_soft: Vec::new(),
             parked_soft_touch: std::collections::BTreeSet::new(),
-            soft_friction: 0.5,
+            soft_friction: HALF,
             gravity,
             single_kind: kind,
             routing: RoutingKind::Single,
@@ -967,15 +970,15 @@ impl Engine {
             1
         } else {
             2
-        }] = ext * 0.5;
+        }] = ext * HALF;
         let h2 = glam::Vec3::from_array(h2);
-        let off = (parent.orientation * axis).normalize_or(axis) * (ext * 0.5);
+        let off = (parent.orientation * axis).normalize_or(axis) * (ext * HALF);
         let mut halves = [parent.clone(), parent.clone()];
         for (half, s) in halves.iter_mut().zip([-1.0, 1.0]) {
             half.shape = Shape::Box { half_extents: h2 };
             half.position = parent.position + off * s;
             half.velocity = parent.velocity + parent.angular_velocity.cross(off * s);
-            if let Some(m) = crate::invariants::PositiveF32::try_new(parent.mass * 0.5) {
+            if let Some(m) = crate::invariants::PositiveF32::try_new(parent.mass * HALF) {
                 half.set_mass_kind(crate::invariants::MassKind::Free(m));
             } else {
                 half.set_mass_kind(crate::invariants::MassKind::Fixed);

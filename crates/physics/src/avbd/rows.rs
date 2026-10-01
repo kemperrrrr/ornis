@@ -13,6 +13,8 @@ use crate::distance::box_box_signed_gap;
 use glam::Mat3;
 use std::f32::consts::TAU;
 
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 /// Anisotropic contact frame (ODE `fdir1`/`mu`/`mu2` parity, local mirror of
 /// the builtin rule): body A wins `t1` (its local dir to world, projected
 /// onto the plane ⊥ `n`); degenerate projections fall back to the default
@@ -110,7 +112,7 @@ pub(super) fn quat_integrate(q: Quat, v: Vec3) -> Quat {
     if theta < NEAR_ZERO {
         return q;
     }
-    let (s, c) = (0.5 * theta).sin_cos();
+    let (s, c) = (HALF * theta).sin_cos();
     let k = s / theta;
     let dq = quat_mul([v.x * k, v.y * k, v.z * k, c], q.to_array());
     Quat::from_xyzw(dq[0], dq[1], dq[2], dq[3]).normalize()
@@ -313,10 +315,10 @@ pub(super) fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::Cone {
             radius,
             half_height,
-        } => 0.5 * radius.min(*half_height),
-        Shape::ConvexHull(hull) => 0.5 * hull.min_extent(),
-        Shape::Heightfield(hf) => 0.5 * hf.cell(),
-        Shape::TriMesh(mesh) => 0.5 * mesh.min_feature(),
+        } => HALF * radius.min(*half_height),
+        Shape::ConvexHull(hull) => HALF * hull.min_extent(),
+        Shape::Heightfield(hf) => HALF * hf.cell(),
+        Shape::TriMesh(mesh) => HALF * mesh.min_feature(),
     }
 }
 
@@ -519,7 +521,7 @@ impl AvbdEngine {
         // 3.5m away as phantom points — 2.5m levers whose meter-scale
         // Ct torqued every spin to death.
         let patch = ra.min(rb) + MARGIN;
-        let pp = (d.point_a + d.point_b) * 0.5;
+        let pp = (d.point_a + d.point_b) * HALF;
         // Per-body patch centers: each body's own center projected onto
         // the contact plane. Centers move smoothly (the anti-flicker
         // property the shared midpoint was built for), and each stays
@@ -606,7 +608,7 @@ impl AvbdEngine {
             } else if rb < ra {
                 pb_c
             } else {
-                (pa_c + pb_c) * 0.5
+                (pa_c + pb_c) * HALF
             };
             let pa = mid + normal * (plane_a - normal.dot(mid));
             let pb = mid + normal * (plane_b - normal.dot(mid));
@@ -916,7 +918,7 @@ impl AvbdEngine {
     ) -> (Vec3, Vec3) {
         let (ra_w, rb_w) = Self::contact_levers(a, b, n, pt);
         let sep = ((a.position + ra_w) - (b.position + rb_w)).dot(n);
-        (ra_w - n * (sep * 0.5), rb_w + n * (sep * 0.5))
+        (ra_w - n * (sep * HALF), rb_w + n * (sep * HALF))
     }
 
     /// Residual with explicit world levers (drags the matching stamp

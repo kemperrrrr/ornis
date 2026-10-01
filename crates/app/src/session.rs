@@ -124,6 +124,8 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
 /// this window the loop wakes anyway so the simulation and the scene-file
 /// watcher advance at ~60 Hz even with no traffic.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// Midpoint / half-extent scale.
+const HALF: f32 = 0.5;
 
 /// Upper bound for a measured wall-clock frame delta fed to the simulation.
 ///
@@ -1299,8 +1301,8 @@ fn default_mesh() -> MeshDesc {
 
 fn default_material() -> MaterialDesc {
     MaterialDesc::Dielectric {
-        base_color: [0.5, 0.5, 0.5],
-        roughness: Clamped01::new(0.5),
+        base_color: [HALF, HALF, HALF],
+        roughness: Clamped01::new(HALF),
         emission: [0.0, 0.0, 0.0],
     }
 }
@@ -2090,7 +2092,7 @@ mod tests {
             &red_components["Material"]["Dielectric"]["base_color"],
             &[0.8, 0.2, 0.2],
         );
-        assert_f32(&red_components["Material"]["Dielectric"]["roughness"], 0.5);
+        assert_f32(&red_components["Material"]["Dielectric"]["roughness"], HALF);
 
         // Material variants survive the round trip.
         let gold = &entities[3]["components"];
@@ -2136,7 +2138,7 @@ mod tests {
         assert!(components["Mesh"]["Sphere"].is_object());
         assert_f32_seq(
             &components["Material"]["Dielectric"]["base_color"],
-            &[0.5, 0.5, 0.5],
+            &[HALF, HALF, HALF],
         );
         assert_eq!(entities[1]["components"]["Name"], "Hero");
     }
@@ -2539,7 +2541,7 @@ mod tests {
                 scale: [2.0, 2.0, 2.0],
             },
             MeshDesc::Sphere {
-                radius: PositiveF32::expect_valid(0.5),
+                radius: PositiveF32::expect_valid(HALF),
                 segments: 8,
                 rings: 4,
             },
