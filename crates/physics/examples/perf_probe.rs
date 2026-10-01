@@ -293,7 +293,9 @@ fn log_stubborn_bodies(grid: &mut SequentialImpulseEngine) {
     let mut stubborn = Vec::new();
     for h in 0..GRID_BODY_COUNT {
         if !grid.is_asleep(BodyHandle::from(h)) && stubborn.len() < STUBBORN_PRINT_CAP {
-            let b = grid.get_body(BodyHandle::from(h)).unwrap();
+            let Some(b) = grid.get_body(BodyHandle::from(h)) else {
+                continue;
+            };
             println!(
                 "awake h={h} pos=({:.3},{:.3},{:.3}) v={:.4} w={:.4} island={:?}",
                 b.position.x,
@@ -348,7 +350,9 @@ fn log_stack_diagnostics(stack: &mut SequentialImpulseEngine) {
         let mut line = format!("stack f+{f}:");
         for h in 1..BIG_STACK_BODIES {
             if !stack.is_asleep(BodyHandle::from(h)) {
-                let b = stack.get_body(BodyHandle::from(h)).unwrap();
+                let Some(b) = stack.get_body(BodyHandle::from(h)) else {
+                    continue;
+                };
                 line += &format!(
                     " {h}(i{},t{:.2},v{:.3},w{:.3})",
                     stack

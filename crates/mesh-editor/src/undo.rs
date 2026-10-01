@@ -220,7 +220,10 @@ impl UndoStack {
         let Some(op) = self.ops.pop() else {
             return Err(UndoError::Empty);
         };
-        let before = self.before.pop().expect("ops/before kept in lockstep");
+        let Some(before) = self.before.pop() else {
+            self.ops.push(op);
+            return Err(UndoError::Empty);
+        };
         self.retained_bytes = self.retained_bytes.saturating_sub(before.heap_bytes());
         self.redo_ops.push(op);
         self.redo_after.push(current.clone());
@@ -240,8 +243,13 @@ impl UndoStack {
             return Err(UndoError::RedoEmpty);
         }
         self.make_room(current.heap_bytes())?;
-        let op = self.redo_ops.pop().expect("redo checked non-empty");
-        let after = self.redo_after.pop().expect("redo stacks kept in lockstep");
+        let Some(op) = self.redo_ops.pop() else {
+            return Err(UndoError::RedoEmpty);
+        };
+        let Some(after) = self.redo_after.pop() else {
+            self.redo_ops.push(op);
+            return Err(UndoError::RedoEmpty);
+        };
         self.retained_bytes += current.heap_bytes();
         self.ops.push(op);
         self.before.push(current.clone());

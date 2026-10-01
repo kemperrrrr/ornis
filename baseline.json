@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "quality_score": 0.4573149655839368,
+  "quality_score": 0.4586980610833886,
   "iosp_score": 0.9006174654513378,
   "violations": 338,
   "total": 5466,
@@ -9,7 +9,7 @@
   "nesting_depth_warnings": 16,
   "function_length_warnings": 106,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 98,
+  "error_handling_warnings": 92,
   "duplicate_groups": 79,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2453,
+  "total_findings": 2447,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -1503,7 +1503,7 @@
     {
       "name": "main",
       "file": "crates/physics/examples/perf_probe.rs",
-      "line": 371
+      "line": 375
     },
     {
       "name": "setup_body_grid",
