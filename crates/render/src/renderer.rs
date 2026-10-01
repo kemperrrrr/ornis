@@ -75,8 +75,12 @@ pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 pub const MAX_LIGHTS: usize = 8;
 /// Components in an RGB / xyz triple.
 const VEC3_COMPONENTS: usize = 3;
+/// Indices per triangle.
+const TRIANGLE_VERTS: usize = 3;
 /// Components in an RGBA / homogeneous vector.
 const VEC4_COMPONENTS: usize = 4;
+/// Vertices in a fullscreen triangle-strip quad (`draw(0..4)`).
+const FULLSCREEN_QUAD_VERTS: u32 = 4;
 /// Compile-time pin: the WGSL derive only accepts integer literals for
 /// array lengths, so [`LightingUniform::lights`] spells `8` literally —
 /// this assert keeps the spell and the limit in sync.
@@ -1065,7 +1069,7 @@ pub fn upload_skinned_mesh(
     if vertices.is_empty() || indices.is_empty() {
         return Err(UploadError::EmptyMesh);
     }
-    if !indices.len().is_multiple_of(3) {
+    if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
         return Err(UploadError::InvalidMesh(
             MeshError::IndexCountNotMultipleOfThree,
         ));
@@ -1141,7 +1145,7 @@ fn build_lighting_uniform(
     fit: Option<([f32; 3], f32)>,
 ) -> BuiltLighting {
     /// Normalize a direction, falling back to +Z on degenerate input.
-    fn norm_dir(d: [f32; 3]) -> [f32; 4] {
+    fn norm_dir(d: [f32; VEC3_COMPONENTS]) -> [f32; VEC4_COMPONENTS] {
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         if len > 0.0 {
             [d[0] / len, d[1] / len, d[2] / len, 0.0]
@@ -1150,7 +1154,7 @@ fn build_lighting_uniform(
         }
     }
     /// Same as [`norm_dir`](norm_dir) as a [`glam::Vec3`].
-    fn norm3(d: [f32; 3]) -> glam::Vec3 {
+    fn norm3(d: [f32; VEC3_COMPONENTS]) -> glam::Vec3 {
         let v = glam::Vec3::from_array(d);
         if v.length_squared() > 0.0 {
             v.normalize()
@@ -1170,10 +1174,10 @@ fn build_lighting_uniform(
     let mut shadow_count = 0u32;
     let mut cube_count = 0u32;
     let mut dropped_shadows = 0u32;
-    let mut shadow_layer_vps: Vec<[[f32; 4]; 4]> = Vec::new();
+    let mut shadow_layer_vps: Vec<[[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS]> = Vec::new();
     // (position, range, cube slot) for shadowed point lights, in
     // assignment order; face VPs are derived below.
-    let mut cube_lights: Vec<([f32; 3], f32, usize)> = Vec::new();
+    let mut cube_lights: Vec<([f32; VEC3_COMPONENTS], f32, usize)> = Vec::new();
     /// Assign the next shadow layer, or -1.0 when `wants` is false
     /// or the array is full. Returns `(layer, clip_matrix)`.
     macro_rules! shadow_layer {
@@ -1327,7 +1331,7 @@ fn build_lighting_uniform(
 /// free layer/cube slot. No GPU access — safe to call per frame; log on
 /// scene change, not per frame.
 pub fn count_light_drops(lights: &[LightDesc]) -> LightUploadStats {
-    build_lighting_uniform([0.0; 3], 1.0, 1.0, lights, None).stats
+    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None).stats
 }
 
 /// Exact CPU staging capacity for one [`Renderer3D::upload_instances`]
@@ -3195,7 +3199,7 @@ impl Renderer3D {
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fog params buffer"),
-            contents: bytemuck::bytes_of(&FogUniform::pack([0.0; 3], 1.0)),
+            contents: bytemuck::bytes_of(&FogUniform::pack([0.0; VEC3_COMPONENTS], 1.0)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -3362,10 +3366,12 @@ impl Renderer3D {
         queue: &wgpu::Queue,
         layer: u32,
     ) -> Vec<f32> {
+        /// Bytes per Depth32Float texel.
+        const DEPTH32_BYTES: u32 = 4;
         let size = SHADOW_SIZE;
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test shadow layer readback"),
-            size: (size * size * 4) as u64,
+            size: (size * size * DEPTH32_BYTES) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -3387,7 +3393,7 @@ impl Renderer3D {
                 buffer: &buf,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(size * 4),
+                    bytes_per_row: Some(size * DEPTH32_BYTES),
                     rows_per_image: Some(size),
                 },
             },
@@ -3707,13 +3713,15 @@ impl Renderer3D {
         let mut gpu_objects: Vec<PerObjectGpu> =
             Vec::with_capacity(staging_capacity_for_instances(count));
         for inst in instances.iter().take(count) {
-            let model_arr: [[f32; 4]; 4] = inst.model_matrix.to_cols_array_2d();
-            let normal_arr: [[f32; 4]; 4] = inst.normal_matrix.to_cols_array_2d();
+            let model_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
+                inst.model_matrix.to_cols_array_2d();
+            let normal_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
+                inst.normal_matrix.to_cols_array_2d();
             gpu_objects.push(PerObjectGpu {
                 model: model_arr,
                 normal_matrix: normal_arr,
                 material_index: inst.material_index,
-                _padding: [0; 3],
+                _padding: [0; VEC3_COMPONENTS],
             });
         }
         queue.write_buffer(
@@ -4127,7 +4135,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.lighting_pass.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Record the forward pass: draws lit geometry into the HDR `output`
@@ -4383,7 +4391,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.composite_pass.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Record the opt-in distance-fog mix: `hdr` through the fog blend into
@@ -4447,7 +4455,7 @@ impl Renderer3D {
 
         rpass.set_pipeline(&self.fog.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// All-in-one legacy frame on the renderer's persistent targets:
@@ -4554,7 +4562,7 @@ impl Renderer3D {
         });
         rpass.set_pipeline(&self.bloom_pass.down_pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Upsample pass of the bloom chain: samples `src`, adds the result over
@@ -4600,7 +4608,7 @@ impl Renderer3D {
         });
         rpass.set_pipeline(&self.bloom_pass.up_pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..4, 0..1);
+        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 }
 

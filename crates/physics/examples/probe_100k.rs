@@ -57,6 +57,8 @@ const DEFAULT_BODIES: u32 = 10_000;
 const DEFAULT_STEPS: u32 = 20;
 /// Default uniform-grid cell size (m).
 const DEFAULT_CELL_SIZE: f32 = 4.0;
+/// Island clusters per XZ row when laying out the islands scene.
+const ISLAND_CLUSTER_COLS: u32 = 4;
 
 
 fn setup_body_grid(n: u32) -> SequentialImpulseEngine {
@@ -140,13 +142,12 @@ fn setup_islands(n: u32) -> SequentialImpulseEngine {
     let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, GRAVITY_Y, 0.0));
     let per = BODIES_PER_ISLAND;
     let islands = (n as f32 / per as f32).ceil() as u32;
-    let cluster_spacing = 4u32;
     for c in 0..islands {
         if c * per >= n {
             break;
         }
-        let cx = (c % cluster_spacing) as f32 * ISLAND_PITCH;
-        let cz = (c / cluster_spacing) as f32 * ISLAND_PITCH;
+        let cx = (c % ISLAND_CLUSTER_COLS) as f32 * ISLAND_PITCH;
+        let cz = (c / ISLAND_CLUSTER_COLS) as f32 * ISLAND_PITCH;
         for k in 0..per {
             if c * per + k >= n {
                 break;

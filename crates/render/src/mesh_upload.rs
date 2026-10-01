@@ -13,6 +13,9 @@ use std::hash::{Hash, Hasher};
 
 use crate::mesh::{Mesh, Vertex};
 
+/// Spatial components in a position / normal.
+const VEC3_COMPONENTS: usize = 3;
+
 /// Upload of [`ornis_mesh_editor::MeshData`] failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UploadError {
@@ -360,10 +363,10 @@ pub fn custom_vertices_cached_with_outcome(
 /// into `[0, 1]`. Degenerate spans collapse to `0.5` so output stays
 /// finite; a fully degenerate soup yields constant uvs.
 fn apply_box_project_uvs(mesh: &mut ornis_mesh_editor::MeshData) {
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
+    let mut min = [f32::INFINITY; VEC3_COMPONENTS];
+    let mut max = [f32::NEG_INFINITY; VEC3_COMPONENTS];
     for position in &mesh.positions {
-        for axis in 0..3 {
+        for axis in 0..VEC3_COMPONENTS {
             min[axis] = min[axis].min(position[axis]);
             max[axis] = max[axis].max(position[axis]);
         }

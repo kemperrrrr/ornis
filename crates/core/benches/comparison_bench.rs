@@ -177,9 +177,14 @@ fn bench_insert(c: &mut Criterion) {
     group.finish();
 }
 
+/// Criterion sample size for iterate / random-access groups.
+const ITER_SAMPLE_SIZE: usize = 100;
+/// Criterion sample size for the memory group.
+const MEMORY_SAMPLE_SIZE: usize = 50;
+
 fn bench_iterate(c: &mut Criterion) {
     let mut group = c.benchmark_group("iterate");
-    group.sample_size(100);
+    group.sample_size(ITER_SAMPLE_SIZE);
 
     let (_, hybrid) = setup_hybrid(COUNT);
     let (_, pure) = setup_pure(COUNT);
@@ -223,7 +228,7 @@ fn bench_iterate(c: &mut Criterion) {
 
 fn bench_random_access(c: &mut Criterion) {
     let mut group = c.benchmark_group("random_access");
-    group.sample_size(100);
+    group.sample_size(ITER_SAMPLE_SIZE);
 
     let (entities, hybrid) = setup_hybrid(COUNT);
     let (_, pure) = setup_pure(COUNT);
@@ -267,7 +272,7 @@ fn bench_random_access(c: &mut Criterion) {
 
 fn bench_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("memory");
-    group.sample_size(50);
+    group.sample_size(MEMORY_SAMPLE_SIZE);
 
     let count = COUNT;
 

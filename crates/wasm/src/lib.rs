@@ -35,6 +35,10 @@ type FrameCallback = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 /// Poll `/api/scene` about once per second (~60 animation frames).
 const LIVE_POLL_INTERVAL_FRAMES: u64 = 60;
+/// Heartbeat log every N rendered frames (~10 s at 60 Hz).
+const FRAME_HEARTBEAT_INTERVAL: u64 = 600;
+/// Fixed simulation timestep (s) for the WASM frame loop.
+const DT: f32 = 1.0 / 60.0;
 
 #[wasm_bindgen(start)]
 /// wasm-bindgen entry point: installs the panic hook and logs module load.
@@ -740,7 +744,7 @@ fn log_frame_milestone(frame_count: u64, config: &wgpu::SurfaceConfiguration, in
             )
             .into(),
         );
-    } else if frame_count.is_multiple_of(600) {
+    } else if frame_count.is_multiple_of(FRAME_HEARTBEAT_INTERVAL) {
         console::log_1(&format!("[ornis-wasm] frame {frame_count} rendered").into());
     }
 }
@@ -923,7 +927,7 @@ fn spawn_render_loop(
         frame.handle_resize(&canvas);
         frame.maybe_post_input(frame_count);
         frame.sync_input();
-        frame.render_world.frame(1.0 / 60.0);
+        frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
         if live_mode

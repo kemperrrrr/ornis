@@ -18,6 +18,24 @@ use ornis_render::{
 };
 
 const SIZE: u32 = 256;
+/// Sphere mesh longitude segments.
+const SPHERE_LONGITUDES: u32 = 16;
+/// Sphere mesh latitude segments.
+const SPHERE_LATITUDES: u32 = 12;
+/// Dielectric base color for the bench material.
+const BASE_COLOR: [f32; 3] = [0.8, 0.4, 0.2];
+/// Scene ambient RGB (flat grey fill).
+const AMBIENT: [f32; 3] = [0.1, 0.1, 0.1];
+/// Directional light direction (world space).
+const LIGHT_DIR: [f32; 3] = [0.3, -1.0, 0.5];
+/// Camera eye distance along +Z.
+const CAMERA_Z: f32 = 3.0;
+/// Vertical FOV in degrees.
+const FOV_DEG: f32 = 60.0;
+/// Perspective near plane.
+const NEAR: f32 = 0.1;
+/// Perspective far plane.
+const FAR: f32 = 10.0;
 
 async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -74,11 +92,11 @@ fn bench_recording(c: &mut Criterion) {
         color_space: wgpu::SurfaceColorSpace::Auto,
     };
     let renderer = Renderer3D::new(&device, &surface_config, 1);
-    let mesh = ornis_render::create_sphere(&device, 1.0, 16, 12);
+    let mesh = ornis_render::create_sphere(&device, 1.0, SPHERE_LONGITUDES, SPHERE_LATITUDES);
 
     let material = {
         let mut mat = OpenPBRMaterial::dielectric();
-        mat.base.color_rgb([0.8, 0.4, 0.2]);
+        mat.base.color_rgb(BASE_COLOR);
         mat.specular.roughness(0.5);
         mat
     };
@@ -92,18 +110,24 @@ fn bench_recording(c: &mut Criterion) {
     renderer.upload_instances(&device, &queue, &[instance]);
     renderer.set_lights(
         &queue,
-        [0.1, 0.1, 0.1],
+        AMBIENT,
         &[ornis_assets::scene::LightDesc::Directional {
-            direction: [0.3, -1.0, 0.5],
+            direction: LIGHT_DIR,
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
             shadow: ShadowCast::Disabled,
         }],
     );
-    let view = glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
-    let proj = glam::camera::rh::proj::directx::perspective(60f32.to_radians(), 1.0, 0.1, 10.0);
+    let view =
+        glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, CAMERA_Z), Vec3::ZERO, Vec3::Y);
+    let proj =
+        glam::camera::rh::proj::directx::perspective(FOV_DEG.to_radians(), 1.0, NEAR, FAR);
     let view_proj = proj * view;
-    renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), [0.0, 0.0, 3.0]);
+    renderer.set_camera(
+        &queue,
+        &view_proj.to_cols_array_2d(),
+        [0.0, 0.0, CAMERA_Z],
+    );
 
     let view_seq = target_view(&device);
     let view_par = target_view(&device);

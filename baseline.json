@@ -1,11 +1,11 @@
 {
   "version": 2,
-  "quality_score": 0.37722354521585133,
+  "quality_score": 0.3984069121328686,
   "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 405,
+  "magic_number_warnings": 319,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 105,
   "unsafe_warnings": 8,
@@ -13,7 +13,7 @@
   "duplicate_groups": 83,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
-  "fragment_groups": 512,
+  "fragment_groups": 504,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
   "srp_module_warnings": 82,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2803,
+  "total_findings": 2709,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -63,7 +63,7 @@
     {
       "name": "AutoProfiler::load_or_calibrate",
       "file": "crates/wgpu_backend/src/profiler.rs",
-      "line": 57
+      "line": 59
     },
     {
       "name": "set_rigid_field",
@@ -158,7 +158,7 @@
     {
       "name": "bench_recording",
       "file": "crates/render/benches/recording_bench.rs",
-      "line": 59
+      "line": 77
     },
     {
       "name": "extract_render_data_with_stats",
@@ -258,47 +258,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1136
+      "line": 1140
     },
     {
       "name": "Renderer3D::create_bloom_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3046
+      "line": 3050
     },
     {
       "name": "Renderer3D::resize",
       "file": "crates/render/src/renderer.rs",
-      "line": 3249
+      "line": 3253
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3453
+      "line": 3459
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3624
+      "line": 3630
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3650
+      "line": 3656
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3732
+      "line": 3740
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3759
+      "line": 3767
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4208
+      "line": 4216
     },
     {
       "name": "RenderFrame3D::build",
@@ -308,47 +308,47 @@
     {
       "name": "run",
       "file": "crates/render/examples/technique_probe.rs",
-      "line": 114
+      "line": 118
     },
     {
       "name": "build_scene_data",
       "file": "crates/render/examples/render_probe.rs",
-      "line": 168
+      "line": 180
     },
     {
       "name": "build_scene_data",
       "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 178
+      "line": 186
     },
     {
       "name": "run",
       "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 477
+      "line": 486
     },
     {
       "name": "setup_islands_grid",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 45
+      "line": 47
     },
     {
       "name": "setup_big_stack",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 71
+      "line": 73
     },
     {
       "name": "setup_body_grid",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 93
+      "line": 95
     },
     {
       "name": "settled_body_grid",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 150
+      "line": 152
     },
     {
       "name": "bench_body_scaling",
       "file": "crates/physics/benches/solver_bench.rs",
-      "line": 193
+      "line": 195
     },
     {
       "name": "build_grid",
@@ -798,7 +798,7 @@
     {
       "name": "GpuSequentialImpulse::solve",
       "file": "crates/physics/src/gpu/mod.rs",
-      "line": 580
+      "line": 586
     },
     {
       "name": "GpuBatch::fill_lane",
@@ -818,22 +818,22 @@
     {
       "name": "avbd_hessian_ang",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 242
+      "line": 252
     },
     {
       "name": "avbd_diag_solve",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 261
+      "line": 271
     },
     {
       "name": "avbd_stub_kernel",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 303
+      "line": 313
     },
     {
       "name": "avbd_row_kernel",
       "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 571
+      "line": 581
     },
     {
       "name": "body_max_extent",
@@ -1068,12 +1068,12 @@
     {
       "name": "epa",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 422
+      "line": 425
     },
     {
       "name": "convex_distance",
       "file": "crates/physics/src/collision/gjk.rs",
-      "line": 536
+      "line": 539
     },
     {
       "name": "mul_inv_inertia",
@@ -1508,32 +1508,32 @@
     {
       "name": "setup_body_grid",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 62
+      "line": 64
     },
     {
       "name": "setup_giant_floor",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 95
+      "line": 97
     },
     {
       "name": "setup_sparse",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 119
+      "line": 121
     },
     {
       "name": "setup_islands",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 139
+      "line": 141
     },
     {
       "name": "setup_heterogeneous",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 165
+      "line": 166
     },
     {
       "name": "run_probe",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 214
+      "line": 215
     },
     {
       "name": "PositiveUsize::expect_valid",

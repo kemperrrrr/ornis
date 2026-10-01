@@ -18,6 +18,14 @@ use ornis_render::{InstanceData, MaterialIdx, RenderFrame3D, Renderer3D, Techniq
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const BYTES_PER_PIXEL: u32 = 4;
+/// wgpu copy buffer row alignment (bytes).
+const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+/// Upper bound on transient pool slots for the stability check.
+const MAX_STABLE_POOL_SLOTS: usize = 9;
+/// Forward technique must stay within this many pool slots.
+const FORWARD_SLOT_CAP: usize = 4;
+/// Percent scale for the memory-savings report.
+const PCT: f64 = 100.0;
 
 /// Peak-luminance emission mapping, mirroring `extraction::apply_emission`.
 fn apply_emission(mat: &mut OpenPBRMaterial, emission: [f32; 3]) {
@@ -250,7 +258,8 @@ async fn read_target(
     label: &str,
 ) -> (Vec<u8>, u32) {
     let unpadded = WIDTH * BYTES_PER_PIXEL;
-    let padded = unpadded.div_ceil(256) * 256;
+    let padded =
+        unpadded.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (padded * HEIGHT) as u64,
@@ -520,7 +529,8 @@ async fn run(scene: &Scene) {
     let all_frames_stable = probe
         .stability_frames(&mut graph3d, &graph_view, &graph_tex, &graph_pixels)
         .await;
-    let pool_stable = slots_before == graph3d.pool_slots() && graph3d.pool_slots() < 9;
+    let pool_stable =
+        slots_before == graph3d.pool_slots() && graph3d.pool_slots() < MAX_STABLE_POOL_SLOTS;
     log_stability(graph3d.pool_slots(), all_frames_stable, pool_stable, FRAMES);
 
     // ── Bloom: the same graph plus the bloom node chain ───────────────
@@ -694,7 +704,7 @@ fn check_technique_budgets(
     fwd_lookup_active: bool,
     graph_bytes: u64,
 ) {
-    let fwd_active = forward.slots <= 4;
+    let fwd_active = forward.slots <= FORWARD_SLOT_CAP;
     let fwd_vs_legacy = forward.diff_vs_legacy;
     let def_vs_legacy = deferred.diff_vs_legacy;
     let fwd_bytes = forward.bytes;
@@ -730,7 +740,7 @@ fn check_technique_budgets(
 fn memory_report(legacy_bytes: u64, graph_bytes: u64) {
     let saved = legacy_bytes.saturating_sub(graph_bytes);
     let pct = if legacy_bytes > 0 {
-        saved as f64 * 100.0 / legacy_bytes as f64
+        saved as f64 * PCT / legacy_bytes as f64
     } else {
         0.0
     };

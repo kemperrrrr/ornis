@@ -16,6 +16,10 @@ use ornis_render::{InstanceData, MaterialIdx, RenderFrame3D, Renderer3D, Techniq
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const BYTES_PER_PIXEL: u32 = 4;
+/// wgpu copy buffer row alignment (bytes).
+const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+/// CLI argv index for the optional output path.
+const ARG_OUT_PATH: usize = 3;
 
 /// Peak-luminance emission mapping, mirroring `extraction::apply_emission`.
 fn apply_emission(mat: &mut OpenPBRMaterial, emission: [f32; 3]) {
@@ -97,7 +101,7 @@ fn main() {
         .nth(2)
         .unwrap_or_else(|| "assets/scene.ron".to_string());
     let out_path = std::env::args()
-        .nth(3)
+        .nth(ARG_OUT_PATH)
         .unwrap_or_else(|| "target/technique_probe.png".to_string());
     let technique = match technique.as_str() {
         "forward" => Technique::Forward,
@@ -248,7 +252,8 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     queue.submit(std::iter::once(encoder.finish()));
 
     let unpadded = WIDTH * BYTES_PER_PIXEL;
-    let padded = unpadded.div_ceil(256) * 256;
+    let padded =
+        unpadded.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("technique readback"),
         size: (padded * HEIGHT) as u64,

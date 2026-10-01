@@ -39,6 +39,8 @@ const BODY_SAMPLE_SIZE: usize = 10;
 const BODY_WARMUP_SECS: u64 = 1;
 /// Criterion measurement window for body-scaling group.
 const BODY_MEASURE_SECS: u64 = 6;
+/// Body counts in the broadphase scaling matrix.
+const BODY_SCALE_COUNTS: [u32; 2] = [1_000, 10_000];
 
 /// A GxG grid of independent 4-box stacks on one big static floor: many
 /// disjoint islands — the best case for per-island parallel dispatch (G7).
@@ -228,7 +230,7 @@ fn bench_body_scaling(c: &mut Criterion) {
         ),
     ];
     for (backend_name, backend, cell_size) in configurations {
-        for n in [1_000u32, 10_000] {
+        for n in BODY_SCALE_COUNTS {
             let diagnostic = settled_body_grid(n, backend, cell_size);
             print_broadphase_stats(backend_name, n, &diagnostic);
             group.bench_function(BenchmarkId::new(backend_name, n), |b| {

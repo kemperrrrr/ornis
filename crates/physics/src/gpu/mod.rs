@@ -97,6 +97,10 @@ pub const GPU_BATCH_STRIDE: u64 = std::mem::size_of::<GpuBatch>() as u64;
 /// substeps never approach this — it is a buffer-size bound, not a
 /// physics bound).
 const PARAMS_CAP: u64 = 64;
+/// Minimum power-of-two body/batch capacity for SI GPU buffers.
+const MIN_BUFFER_CAP: usize = 64;
+/// Bytes reserved for a single uniform params entry (`vec4`).
+const UNIFORM_ENTRY_BYTES: u64 = 16;
 
 /// Per-pass solver params `(iter, total, allow_rest, 0)` for a bulk
 /// dispatch: pass `k` reads entry `k`, so the shader sees the same
@@ -317,7 +321,7 @@ impl GpuSequentialImpulse {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(16),
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_ENTRY_BYTES),
                     },
                     count: None,
                 },
@@ -338,8 +342,10 @@ impl GpuSequentialImpulse {
             cache: None,
         });
 
-        let body_size = max_bodies.next_power_of_two().max(64) as u64 * GPU_BODY_STRIDE;
-        let batch_size = max_batches.next_power_of_two().max(64) as u64 * GPU_BATCH_STRIDE;
+        let body_size =
+            max_bodies.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BODY_STRIDE;
+        let batch_size =
+            max_batches.next_power_of_two().max(MIN_BUFFER_CAP) as u64 * GPU_BATCH_STRIDE;
 
         let body_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("physics_body_state"),
@@ -358,7 +364,7 @@ impl GpuSequentialImpulse {
             mapped_at_creation: false,
         });
         let align = device.limits().min_uniform_buffer_offset_alignment.max(1) as u64;
-        let param_stride = 16u64.next_multiple_of(align);
+        let param_stride = UNIFORM_ENTRY_BYTES.next_multiple_of(align);
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("physics_contact_params"),
             size: PARAMS_CAP * param_stride,

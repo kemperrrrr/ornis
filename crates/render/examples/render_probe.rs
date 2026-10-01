@@ -18,6 +18,18 @@ use ornis_render::{
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+/// wgpu copy buffer row alignment (bytes).
+const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+/// Sphere-strip sample height as a fraction of the frame.
+const SAMPLE_STRIP_Y: f32 = 0.55;
+/// Horizontal sample fractions across the sphere strip.
+const SAMPLE_X_FRACS: [f32; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
+/// Default GPU object capacity for the probe backend.
+const MAX_OBJECTS: u32 = 256;
+/// Default GPU material capacity for the probe backend.
+const MAX_MATERIALS: u32 = 64;
+/// RGBA8 bytes per pixel.
+const BYTES_PER_PIXEL: u32 = 4;
 
 /// Peak-luminance emission mapping, mirroring `extraction::apply_emission`.
 fn apply_emission(mat: &mut OpenPBRMaterial, emission: [f32; 3]) {
@@ -250,7 +262,8 @@ fn read_back_pixels(
     bytes_per_pixel: u32,
 ) -> Vec<u8> {
     let unpadded_bytes_per_row = WIDTH * bytes_per_pixel;
-    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let padded_bytes_per_row =
+        unpadded_bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("probe readback"),
         size: (padded_bytes_per_row * HEIGHT) as u64,
@@ -320,8 +333,8 @@ fn log_pixel_samples(pixels: &[u8], bytes_per_pixel: u32) {
             pixels[off + 3],
         ]
     };
-    let mid_y = (HEIGHT as f32 * 0.55) as u32;
-    for frac in [0.1f32, 0.3, 0.5, 0.7, 0.9] {
+    let mid_y = (HEIGHT as f32 * SAMPLE_STRIP_Y) as u32;
+    for frac in SAMPLE_X_FRACS {
         let x = (WIDTH as f32 * frac) as u32;
         println!("pixel({x},{mid_y}) = {:?}", sample(x, mid_y));
     }
@@ -362,8 +375,8 @@ async fn run(scene: &Scene, out_path: &str) {
         surface_config: surface_config.clone(),
         sample_count: 1,
         exposure: 1.0,
-        max_objects: 256,
-        max_materials: 64,
+        max_objects: MAX_OBJECTS,
+        max_materials: MAX_MATERIALS,
     };
     let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
 
@@ -385,7 +398,7 @@ async fn run(scene: &Scene, out_path: &str) {
     print_instance_dump(&instances);
 
     // ── Render ────────────────────────────────────────────────────────
-    let bytes_per_pixel = 4u32;
+    let bytes_per_pixel = BYTES_PER_PIXEL;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("probe encoder"),
     });

@@ -350,8 +350,11 @@ fn reduce_tetra(s: &[SVertex]) -> (Vec3, [bool; SIMPLEX_CAPACITY], [f32; SIMPLEX
     let vol = e1.dot(e2.cross(e3)).abs();
     let scale = e1.length() * e2.length() * e3.length();
     if vol <= TET_VOLUME_EPS * scale.max(COINCIDENT_LEN2) {
+        /// Degenerate-tetra face index triples (vertex order into `s`).
+        const DEG_FACES: [(usize, usize, usize); SIMPLEX_CAPACITY] =
+            [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)];
         let mut best: Option<(Vec3, f32, [f32; SIMPLEX_CAPACITY])> = None;
-        for (a, b, c) in [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)] {
+        for (a, b, c) in DEG_FACES {
             let (p, wa, wb, wc) = closest_triangle(s[a].v, s[b].v, s[c].v);
             let gap = p.length();
             if best.is_none_or(|(_, g, _)| gap < g) {
